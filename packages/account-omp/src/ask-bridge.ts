@@ -9,6 +9,10 @@ export interface PendingAskQuestion {
 
 export interface PendingAsk {
   id: string;
+  /** `ask-tool`: the agent's ask call, rendered inline; `gitspace`: asked by GitSpace itself, such as plan approval. */
+  source: 'ask-tool' | 'gitspace';
+  /** Resources to open before answering, such as the proposed plan artifact. */
+  links: Array<{ label: string; uri: string }>;
   questions: PendingAskQuestion[];
 }
 
@@ -18,7 +22,7 @@ export interface PendingAskAnswer {
   customInput: string | null;
 }
 
-interface OmpAskQuestion {
+export interface OmpAskQuestion {
   id: string;
   question: string;
   header?: string;
@@ -58,7 +62,7 @@ export class OmpAskBridge {
 
   context(): Record<string, unknown> {
     return {
-      askDialog: (questions: OmpAskQuestion[], options?: OmpDialogOptions) => this.open(questions, options),
+      askDialog: (questions: OmpAskQuestion[], options?: OmpDialogOptions) => this.ask(questions, 'ask-tool', [], options),
       select: async () => undefined,
       confirm: async () => false,
       input: async () => undefined,
@@ -100,10 +104,13 @@ export class OmpAskBridge {
     if (this.pending) this.settle(undefined);
   }
 
-  private open(questions: OmpAskQuestion[], options?: OmpDialogOptions): Promise<OmpAskResult | undefined> {
+  /** Shows questions in the session's pending-question UI; resolves undefined when dismissed or aborted. */
+  ask(questions: OmpAskQuestion[], source: PendingAsk['source'], links: PendingAsk['links'], options?: OmpDialogOptions): Promise<OmpAskResult | undefined> {
     if (this.pending) throw new Error('Another ask dialog is already pending');
     const ask: PendingAsk = {
       id: crypto.randomUUID(),
+      source,
+      links,
       questions: questions.map((question) => ({
         id: question.id,
         question: question.question,

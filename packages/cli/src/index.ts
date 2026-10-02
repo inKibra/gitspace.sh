@@ -12,19 +12,20 @@ import { installRuntime } from './bootstrap.js';
 
 const CONFIG_ROOT = process.env.GITSPACE_CONFIG_HOME ?? join(homedir(), '.config', 'gitspace');
 const CONFIG_PATH = join(CONFIG_ROOT, 'config.json');
+const HOST_READY_PATH = join(CONFIG_ROOT, 'machine', 'host-ready.json');
+const UPDATE_TRANSACTION_PATH = join(CONFIG_ROOT, 'machine', 'machine-update.json');
+/** Legacy mirror of the host pid; authoritative only on installs whose hosts predate host-ready.json. */
 const PID_PATH = join(CONFIG_ROOT, 'machine.pid');
 const LOG_PATH = join(CONFIG_ROOT, 'machine.log');
 const PAIRING_PATH = join(CONFIG_ROOT, 'pairing.json');
 interface MachineConfig {
-  version: 3;
+  version: 4;
   apiUrl: string;
   accountUrl: string;
   handle: string;
   userId: string;
   relayUrl: string;
   rootPublicKey: string;
-  brokerUrl: string;
-  brokerToken: string;
   machine: { id: string; label: string; signingPrivateKey: string; exchangePrivateKey: string; grant: SignedCredentialAuthorityGrant };
 }
 interface PendingPairing {
@@ -44,15 +45,18 @@ interface EnrolledPairing {
   rootPublicKey: string;
   machineId: string;
   grant: SignedCredentialAuthorityGrant;
-  brokerUrl: string;
-  brokerToken: string;
 }
 
 async function loadConfig(): Promise<MachineConfig | null> {
   try {
-    const config = JSON.parse(await readFile(CONFIG_PATH, 'utf8')) as MachineConfig;
-    if (config.version !== 3) throw new Error('This is a legacy enrollment. Revoke the old machine in your account before relinking it. Your local files have not been changed.');
-    return config;
+    const config = JSON.parse(await readFile(CONFIG_PATH, 'utf8')) as Omit<MachineConfig, 'version'> & { version: number };
+    if (config.version !== 3 && config.version !== 4) throw new Error('This is a legacy enrollment. Revoke the old machine in your account before relinking it. Your local files have not been changed.');
+    if (config.version === 3) {
+      const migrated: MachineConfig = { version: 4, apiUrl: config.apiUrl, accountUrl: config.accountUrl, handle: config.handle, userId: config.userId, relayUrl: config.relayUrl, rootPublicKey: config.rootPublicKey, machine: config.machine };
+      await savePrivateJson(CONFIG_PATH, migrated);
+      return migrated;
+    }
+    return config as MachineConfig;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
@@ -81,14 +85,39 @@ async function accountArtifactKey(config: MachineConfig): Promise<string> {
 function processIsRunning(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
-async function machinePid(): Promise<number | null> {
-  try {
-    const pid = Number((await readFile(PID_PATH, 'utf8')).trim());
-    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+interface RunningHost { pid: number; url: string | null }
+/**
+ * Every modern host, including detached updater/recovery successors, records itself in host-ready.json once it
+ * serves. machine.pid can be left pointing at an exited bootstrap, so it is consulted only when no record exists.
+ */
+async function runningHost(): Promise<RunningHost | null> {
+  const readyRecord = await readFile(HOST_READY_PATH, 'utf8').catch((error: unknown) => {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
     throw error;
+  });
+  if (readyRecord === null) {
+    const legacyRecord = await readFile(PID_PATH, 'utf8').catch((error: unknown) => {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
+      throw error;
+    });
+    const pid = Number(legacyRecord?.trim());
+    return Number.isSafeInteger(pid) && pid > 0 && processIsRunning(pid) ? { pid, url: null } : null;
   }
+  const ready: unknown = JSON.parse(readyRecord);
+  if (typeof ready !== 'object' || ready === null || !('pid' in ready) || !('url' in ready) || typeof ready.url !== 'string' || typeof ready.pid !== 'number' || !Number.isSafeInteger(ready.pid) || ready.pid <= 0) {
+    throw new Error(`Invalid host readiness record ${HOST_READY_PATH}; no process was signalled.`);
+  }
+  return processIsRunning(ready.pid) ? { pid: ready.pid, url: ready.url } : null;
+}
+/** A live update owner will launch the successor host even after the bootstrap that found it has exited. */
+async function updateInProgress(): Promise<boolean> {
+  const record = await readFile(UPDATE_TRANSACTION_PATH, 'utf8').catch((error: unknown) => {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (record === null) return false;
+  const transaction: unknown = JSON.parse(record);
+  return typeof transaction === 'object' && transaction !== null && 'pid' in transaction && typeof transaction.pid === 'number' && processIsRunning(transaction.pid);
 }
 async function selectedMachineRoot(runtimeRoot: string): Promise<string> {
   let source: string;
@@ -107,8 +136,8 @@ function requireSystemTools(): void {
 async function startMachine(): Promise<void> {
   const config = await requireConfig();
   requireSystemTools();
-  const currentPid = await machinePid();
-  if (currentPid && processIsRunning(currentPid)) throw new Error(`Machine is already running (pid ${currentPid})`);
+  const current = await runningHost();
+  if (current) throw new Error(`Machine is already running (pid ${current.pid})`);
   const selectionPath = join(CONFIG_ROOT, 'runtime-selection.json');
   if (!existsSync(selectionPath)) {
     console.log('Downloading the verified machine runtime...');
@@ -144,8 +173,8 @@ async function startMachine(): Promise<void> {
       GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
       GITSPACE_SERVICE_NAMESPACE: config.handle,
       GITSPACE_OMP_AGENT_DIR: join(CONFIG_ROOT, 'omp'),
-      OMP_AUTH_BROKER_URL: config.brokerUrl,
-      OMP_AUTH_BROKER_TOKEN: config.brokerToken,
+      OMP_AUTH_BROKER_URL: undefined,
+      OMP_AUTH_BROKER_TOKEN: undefined,
       GITSPACE_MANAGED_SPACE_ROOT: process.env.GITSPACE_MANAGED_SPACE_ROOT ?? join(homedir(), 'gitspace', 'spaces'),
     },
   });
@@ -158,51 +187,41 @@ async function startMachine(): Promise<void> {
   try {
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
-      const pid = await machinePid();
-      if ((!pid || !processIsRunning(pid)) && !processIsRunning(child.pid)) throw new Error(`Machine failed to start. See ${LOG_PATH}`);
+      // Sample the bootstrap first: a recovery successor becomes ready before the bootstrap that launched it exits.
+      const starting = processIsRunning(child.pid) || await updateInProgress();
+      const host = await runningHost();
       const { bytesRead } = await reader.read(bytes, 0, bytes.length, offset);
       offset += bytesRead;
       recent = (recent + bytes.toString('utf8', 0, bytesRead)).slice(-32_768);
-      if (pid && processIsRunning(pid) && recent.includes(`GitSpace host ready pid=${pid} `)) {
-        console.log(`Machine runtime ready (pid ${pid}). Check its connection in ${config.accountUrl}`);
+      // host-ready.json is written only once the host serves; legacy pid-file hosts announce readiness in the log.
+      if (host && (host.url !== null || recent.includes(`GitSpace host ready pid=${host.pid} `))) {
+        console.log(`Machine runtime ready (pid ${host.pid}). Check its connection in ${config.accountUrl}`);
         return;
       }
+      if (!host && !starting) throw new Error(`Machine failed to start. See ${LOG_PATH}`);
       await Bun.sleep(500);
     }
     throw new Error(`The machine is still starting. Check gitspace machine status and ${LOG_PATH}; no process was killed.`);
   } finally { await reader.close(); }
 }
 async function stopMachine(): Promise<void> {
-  let pid = await machinePid();
-  if (!pid || !processIsRunning(pid)) {
-    await rm(PID_PATH, { force: true });
-    console.log('Machine is stopped');
-    return;
-  }
+  let host = await runningHost();
   const deadline = Date.now() + 120_000;
   let signalled: number | null = null;
-  while (Date.now() < deadline) {
-    if (pid && processIsRunning(pid)) {
-      if (pid !== signalled) {
-        try { process.kill(pid, 'SIGTERM'); } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-        }
-        signalled = pid;
+  // Re-resolve after each wait: an updater may hand ownership to a successor host while this one drains.
+  while (host && Date.now() < deadline) {
+    if (host.pid !== signalled) {
+      try { process.kill(host.pid, 'SIGTERM'); } catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error;
       }
-    } else {
-      const replacement = await machinePid();
-      if (replacement === pid || !replacement) {
-        await rm(PID_PATH, { force: true });
-        break;
-      }
-      pid = replacement;
-      continue;
+      signalled = host.pid;
     }
     await Bun.sleep(250);
-    pid = await machinePid();
+    host = await runningHost();
   }
-  if (pid && processIsRunning(pid)) throw new Error(`Machine ${pid} has not stopped. Inspect ${LOG_PATH}; it has not been force-killed.`);
-  console.log('Machine stopped');
+  if (host) throw new Error(`Machine ${host.pid} has not stopped. Inspect ${LOG_PATH}; it has not been force-killed.`);
+  await rm(PID_PATH, { force: true });
+  console.log(signalled === null ? 'Machine is stopped' : 'Machine stopped');
 }
 
 const program = new Command().name('gitspace').description('Connect this computer to your GitSpace account').version('1.0.0');
@@ -239,7 +258,7 @@ machine.command('setup').description('Link using the pairing command from your a
       const result = await pairingRequest<EnrolledPairing | { state: 'pending' }>('poll', { userId: token.userId, pairingId: token.pairingId });
       if (result.state === 'enrolled') {
         if (result.machineId !== pending.machineId || result.userId !== token.userId || result.grant.grant.signingPublicKey !== credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey))) throw new Error('Pairing response does not match this machine');
-        await savePrivateJson(CONFIG_PATH, { version: 3, apiUrl: result.apiUrl, accountUrl: result.accountUrl, handle: result.handle, userId: result.userId, relayUrl: result.relayUrl, rootPublicKey: result.rootPublicKey, brokerUrl: result.brokerUrl, brokerToken: result.brokerToken, machine: { id: pending.machineId, label: pending.label, signingPrivateKey: pending.signingPrivateKey, exchangePrivateKey: pending.exchangePrivateKey, grant: result.grant } } satisfies MachineConfig);
+        await savePrivateJson(CONFIG_PATH, { version: 4, apiUrl: result.apiUrl, accountUrl: result.accountUrl, handle: result.handle, userId: result.userId, relayUrl: result.relayUrl, rootPublicKey: result.rootPublicKey, machine: { id: pending.machineId, label: pending.label, signingPrivateKey: pending.signingPrivateKey, exchangePrivateKey: pending.exchangePrivateKey, grant: result.grant } } satisfies MachineConfig);
         await rm(PAIRING_PATH, { force: true });
         console.log(`Linked ${pending.label} to ${result.handle}. No account recovery key was stored on this machine.`);
         await startMachine();
@@ -262,8 +281,7 @@ machine.command('recover').description('Build and activate a complete tenant mac
     let bun: string;
     let environment = { ...process.env };
     if (config) {
-      const pid = await machinePid();
-      if (!pid || !processIsRunning(pid)) throw new Error('Start the machine before source recovery so it can stage and activate the complete release.');
+      if (!await runningHost()) throw new Error('Start the machine before source recovery so it can stage and activate the complete release.');
       const installed = JSON.parse(await readFile(join(CONFIG_ROOT, 'runtime-selection.json'), 'utf8')) as { path: string };
       bun = join(installed.path, 'bin/bun');
       environment = {
@@ -291,7 +309,7 @@ machine.command('recover').description('Build and activate a complete tenant mac
   });
 machine.command('status').description('Show local runtime and relay status').action(async () => {
   const config = await requireConfig();
-  const pid = await machinePid();
+  const host = await runningHost();
   const health = async (url: URL): Promise<string> => {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
@@ -302,7 +320,7 @@ machine.command('status').description('Show local runtime and relay status').act
     health(new URL('/health', config.relayUrl)),
     health(new URL(`/tunnel/${encodeURIComponent(config.machine.id)}/health`, config.relayUrl)),
   ]);
-  console.log(`Machine: ${config.machine.label}\nDaemon: ${pid && processIsRunning(pid) ? `running (pid ${pid})` : 'stopped'}\nRelay service: ${relay}\nMachine tunnel: ${tunnel}\nAccount: ${config.accountUrl}\nLog: ${LOG_PATH}`);
+  console.log(`Machine: ${config.machine.label}\nDaemon: ${host ? `running (pid ${host.pid}${host.url ? `, rpc ${host.url}` : ''})` : 'stopped'}\nRelay service: ${relay}\nMachine tunnel: ${tunnel}\nAccount: ${config.accountUrl}\nLog: ${LOG_PATH}`);
 });
 machine.command('remove').description('Stop and revoke this computer; retain its local workspace files').action(async () => {
   const config = await requireConfig();

@@ -10,8 +10,9 @@ const hash = process.env.GITSPACE_PROBE_MACHINE_HASH;
 const manifestHash = process.env.GITSPACE_PROBE_MACHINE_MANIFEST_HASH;
 if (!hash || !manifestHash) throw new Error('Run the probe compiled into the image with its initial machine trust anchors');
 await validateExecutableArtifact(machinePath, { target: 'machine', hash, manifestHash });
-const walgit = await prepareMachineNativeRuntime(machinePath);
-console.log(JSON.stringify({ walgit: 'ready', path: walgit, machineHash: hash }));
+const native = await prepareMachineNativeRuntime(machinePath);
+if (!native.gitLfs) throw new Error('Container machine image lacks bundled Git LFS');
+console.log(JSON.stringify({ walgit: 'ready', path: native.walgit, gitLfs: native.gitLfs, machineHash: hash }));
 
 const home = await mkdtemp(join(tmpdir(), 'gitspace-image-probe-'));
 const rpc = new OmpRpcPeer<OmpChildApi, Record<string, never>>((message) => child.send(message), {});

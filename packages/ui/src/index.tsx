@@ -34,6 +34,8 @@ export { ChatMessage } from './fluid-vendor/components/ui/chat-message.js';
 export type { ChatMessageProps } from './fluid-vendor/components/ui/chat-message.js';
 export { CheckboxGroup, CheckboxItem } from './fluid-vendor/components/ui/checkbox-group.js';
 export { ColorPicker, ColorPickerPopover, ColorPickerPortalContainer, ColorSwatch, ColorTile } from './fluid-vendor/components/ui/color-picker.js';
+export { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from './fluid-vendor/components/ui/combobox.js';
+export type { ComboboxItemData, ComboboxProps } from './fluid-vendor/components/ui/combobox.js';
 export { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from './fluid-vendor/components/ui/dialog.js';
 export { Dropdown, DropdownContent, DropdownLabel, DropdownMenu, DropdownSeparator, DropdownTrigger, useDropdown, useDropdownMaybe } from './fluid-vendor/components/ui/dropdown.js';
 export type { DropdownContentProps, DropdownMenuProps, DropdownProps, DropdownTriggerProps } from './fluid-vendor/components/ui/dropdown.js';

@@ -5,7 +5,7 @@ import { watch, type FSWatcher } from 'node:fs';
 import type { GitSpaceDatabase } from '@gitspace/core';
 import {
   executionHash, loadEnvironmentBundle, parseEnvironmentBundleJson, parseLifecycleBindingsJson, resolveEnvironmentProfile,
-  resolveExecutionApproval, selectLifecycleScripts, BUILT_IN_CHECKS, LIFECYCLE_PHASES,
+  resolveExecutionApproval, selectLifecycleScripts, isInteractiveLifecycleScript, BUILT_IN_CHECKS, LIFECYCLE_PHASES,
   effectiveEnvironmentValues, assertEnvironmentExecutionReady, shouldPrepareEnvironment, environmentPreparationPhases,
   EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
   type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleMutation, type LifecycleIncident, type EnvironmentValueScope, type EnvironmentApprovalScope,
@@ -26,6 +26,7 @@ export interface EnvironmentExecutionView {
   approval: ApprovalSource | null;
   phase?: LifecyclePhase;
   fileName?: string;
+  interactive?: boolean;
 }
 export interface EnvironmentExecutionResult { id: string; hash: string; exitCode: number; stdout: string; stderr: string }
 export interface WorkspaceEnvironmentView {
@@ -46,7 +47,7 @@ export interface EnvironmentSecretMaterializer {
   materializeProjectSecrets(projectId: string, names: string[], workspaceId: string | null): Promise<Record<string, string>>;
 }
 export interface EnvironmentLifecycleRunner {
-  runLifecyclePlan(spaceId: string, phase: LifecycleRunPhase, steps: readonly WorkspaceLifecyclePlanStep[], env: Record<string, string>, options?: { runId?: string; deadlineAt?: string; redactNames?: readonly string[]; onStarted?: () => Promise<void>; onOutput?: (output: string) => Promise<void>; directory?: string }): Promise<WorkspaceLifecyclePlanResult>;
+  runLifecyclePlan(spaceId: string, phase: LifecycleRunPhase, steps: readonly WorkspaceLifecyclePlanStep[], env: Record<string, string>, options?: { runId?: string; interactive?: boolean; deadlineAt?: string; redactNames?: readonly string[]; onStarted?: () => Promise<void>; onOutput?: (output: string) => Promise<void>; directory?: string }): Promise<WorkspaceLifecyclePlanResult>;
   cancelLifecycleRun?(spaceId: string, terminalName: string, directory?: string): Promise<void>;
 }
 interface PendingLifecycleRun {
@@ -63,7 +64,7 @@ interface PendingLifecycleRun {
   completion?: Extract<LifecycleMutation, { op: 'finish' }>;
 }
 export class WorkspaceEnvironmentManager {
-  private readonly accepting = new Map<string, { phase: LifecycleRunPhase; promise: Promise<LifecycleRun> }>();
+  private readonly accepting = new Map<string, { phase: LifecycleRunPhase; interactive?: boolean; promise: Promise<LifecycleRun> }>();
   private readonly active = new Map<string, { projectId: string; spaceId: string; terminalName: string; directory?: string }>();
   constructor(
     private readonly database: GitSpaceDatabase,
@@ -133,14 +134,14 @@ export class WorkspaceEnvironmentManager {
         const command = join(directory, script.fileName);
         const content = await readFile(command, 'utf8');
         const hash = await executionHash({ kind: 'script', command: content });
-        return { id: `${phase}:${script.fileName}`, kind: 'script', label: script.fileName, command, content, hash, approval: approval(hash), phase, fileName: script.fileName };
+        return { id: `${phase}:${script.fileName}`, kind: 'script', label: script.fileName, command, content, hash, approval: approval(hash), phase, fileName: script.fileName, interactive: isInteractiveLifecycleScript(content) };
       }));
     }))).flat();
     const executions: EnvironmentExecutionView[] = available ? [...checks, ...scripts] : lifecycle.executions.map((execution) => ({
-      ...execution, phase: execution.phase ?? undefined, fileName: execution.fileName ?? undefined, approval: approval(execution.hash),
+      ...execution, phase: execution.phase ?? undefined, fileName: execution.fileName ?? undefined, approval: approval(execution.hash), ...(execution.kind === 'script' ? { interactive: isInteractiveLifecycleScript(execution.content) } : {}),
     }));
     if (available && (source !== null || executions.length > 0)) {
-      const snapshot = executions.map(({ approval: _approval, ...execution }) => ({ ...execution, phase: execution.phase ?? null, fileName: execution.fileName ?? null }));
+      const snapshot = executions.map(({ approval: _approval, interactive: _interactive, ...execution }) => ({ ...execution, phase: execution.phase ?? null, fileName: execution.fileName ?? null }));
       if (JSON.stringify(snapshot) !== JSON.stringify(lifecycle.executions)) {
         lifecycle = await this.authority.mutateLifecycleState(space.projectId, spaceId, { op: 'configure', bundleJson: JSON.stringify(bundle), executions: snapshot });
       }
@@ -187,11 +188,11 @@ export class WorkspaceEnvironmentManager {
   }
 
   async approve(_spaceId: string, _scope: EnvironmentApprovalScope, _hash: string): Promise<WorkspaceEnvironmentView> {
-    throw new EnvironmentError('PermissionDenied', 'Execution approval requires a human browser authorization through the account gateway');
+    throw new EnvironmentError('PermissionDenied', 'Execution approval requires lifecycle control authorization through the account gateway');
   }
 
   async revokeApproval(_spaceId: string, _scope: EnvironmentApprovalScope, _hash: string): Promise<WorkspaceEnvironmentView> {
-    throw new EnvironmentError('PermissionDenied', 'Execution approval changes require a human browser authorization through the account gateway');
+    throw new EnvironmentError('PermissionDenied', 'Execution approval changes require lifecycle control authorization through the account gateway');
   }
 
   /** The request ends after durable acceptance; no caller signal owns execution. */
@@ -217,7 +218,7 @@ export class WorkspaceEnvironmentManager {
       return existing;
     }
     const accepted = Promise.withResolvers<LifecycleRun>();
-    this.accepting.set(key, { phase: request.phase, promise: accepted.promise });
+    this.accepting.set(key, { phase: request.phase, interactive: request.interactive, promise: accepted.promise });
     const options = { ...request, accepted: (run: LifecycleRun) => { this.accepting.delete(key); accepted.resolve(run); } };
     const execution = request.phase === 'checks'
       ? this.runApproved(spaceId, 'checks', true, undefined, options)
@@ -243,14 +244,15 @@ export class WorkspaceEnvironmentManager {
     return this.runApproved(spaceId, 'checks', true);
   }
 
-  async runPhase(spaceId: string, phase: LifecyclePhase, rerun = false, request?: { runId: string; deadlineAt?: string; accepted: (run: LifecycleRun) => void }): Promise<readonly EnvironmentExecutionResult[]> {
+  async runPhase(spaceId: string, phase: LifecyclePhase, rerun = false, request?: { runId: string; interactive?: boolean; deadlineAt?: string; accepted: (run: LifecycleRun) => void }): Promise<readonly EnvironmentExecutionResult[]> {
     const directory = phase.startsWith('cloud/') ? await this.options.prepareRunner?.(spaceId, phase) : undefined;
     const current = await this.view(spaceId, directory !== undefined);
     try {
+      if (request?.interactive && directory !== undefined) throw new EnvironmentError('RunnerUnavailable', 'Interactive lifecycle execution requires an open workspace terminal; detached recovery cannot accept input');
       if (phase === 'cloud/provision') await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'policy', automatic: true });
       let result: readonly EnvironmentExecutionResult[] = [];
       for (const next of environmentPreparationPhases(phase, directory !== undefined)) {
-        const operation = request ? { ...request, runId: next === phase ? request.runId : `${request.runId}:${next.replace('/', '-')}`, accepted: next === phase ? request.accepted : () => undefined } : undefined;
+        const operation = request ? { ...request, interactive: next === 'checks' ? false : request.interactive, runId: next === phase ? request.runId : `${request.runId}:${next.replace('/', '-')}`, accepted: next === phase ? request.accepted : () => undefined } : undefined;
         const completed = await this.runApproved(spaceId, next, next === phase ? rerun : next === 'checks', next.startsWith('workspace/') ? undefined : directory, operation);
         if (next === phase) result = completed;
       }
@@ -328,11 +330,12 @@ export class WorkspaceEnvironmentManager {
     return this.authority.getLifecycleRunLog(space.projectId, spaceId, runId, offset);
   }
 
-  private async runApproved(spaceId: string, phase: LifecycleRunPhase, rerun: boolean, workingDirectory?: string, request?: { runId: string; deadlineAt?: string; accepted: (run: LifecycleRun) => void }): Promise<readonly EnvironmentExecutionResult[]> {
+  private async runApproved(spaceId: string, phase: LifecycleRunPhase, rerun: boolean, workingDirectory?: string, request?: { runId: string; interactive?: boolean; deadlineAt?: string; accepted: (run: LifecycleRun) => void }): Promise<readonly EnvironmentExecutionResult[]> {
     const space = this.database.getSpace(spaceId);
     if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
     const current = await this.view(spaceId, workingDirectory !== undefined);
     const planned = current.executions.filter((execution) => phase === 'checks' ? execution.kind === 'check' : execution.phase === phase);
+    if (request?.interactive && (phase === 'checks' || workingDirectory !== undefined)) throw new EnvironmentError('InvalidConfiguration', 'Interactive lifecycle execution requires a script phase in an open workspace');
     assertEnvironmentExecutionReady({
       phase, state: current.lifecycle, bundle: current.bundle, effective: current.effective, values: current.values.effective,
       configuredSecrets: current.configuredSecrets, executionCount: planned.length,
@@ -343,6 +346,7 @@ export class WorkspaceEnvironmentManager {
     const steps = await Promise.all(planned.map(async (execution): Promise<WorkspaceLifecyclePlanStep> => {
       const content = workingDirectory ? execution.content : execution.kind === 'script' ? await readFile(execution.command, 'utf8') : execution.command;
       if (await executionHash({ kind: execution.kind, command: content }) !== execution.hash) throw new EnvironmentError('ContentChanged', `Execution content changed before claim: ${execution.label}`, { executionId: execution.id });
+      if (execution.kind === 'script' && isInteractiveLifecycleScript(content) && !request?.interactive) throw new EnvironmentError('InteractionRequired', 'This lifecycle phase requires protected interactive execution', { executionId: execution.id, phase });
       const command = workingDirectory && execution.kind === 'script'
         ? join(workingDirectory, '.gitspace', 'lifecycle', execution.phase!, execution.fileName!)
         : execution.command;
@@ -360,6 +364,7 @@ export class WorkspaceEnvironmentManager {
     await writeFile(journal, JSON.stringify(pending), { mode: 0o600, flag: 'wx' });
     const state = await this.authority.mutateLifecycleState(current.projectId, spaceId, {
       op: 'claim', runId, ownershipToken: token, phase, profile: current.selectedProfile, executionHashes: planned.map((execution) => execution.hash),
+      interactive: request?.interactive ?? false,
       generation: phase.startsWith('cloud/') || workingDirectory ? null : space.generation, rerun, terminalName, ...(request?.deadlineAt ? { deadlineAt: request.deadlineAt } : {}),
     });
     const acceptedRun = state.runs.find((run) => run.id === runId);
@@ -480,6 +485,7 @@ export class WorkspaceEnvironmentManager {
       started = true;
       const execution = this.runner!.runLifecyclePlan(spaceId, phase, steps, env, {
         runId: token, deadlineAt: acceptedRun.deadlineAt, redactNames: Object.keys(secretValues), ...(workingDirectory ? { directory: workingDirectory } : {}),
+        interactive: acceptedRun.interactive ?? false,
         onStarted: async () => { launched = true; await enforceStop(); },
         onOutput: async (output) => {
           const sanitized = sanitizeLifecycleOutput(logPending + output, redactions);

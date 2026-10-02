@@ -187,4 +187,33 @@ describe('MachineRelayConnector transport recovery', () => {
     socket.receive(socket.sent[1]);
     expect(socket.readyState).toBe(1);
   });
+
+  it('logs the close frame, connection age, and aborted forwards when the relay closes the socket', async () => {
+    const aborted = Promise.withResolvers<void>();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const { promise, reject } = Promise.withResolvers<Response>();
+      init!.signal!.addEventListener('abort', () => {
+        aborted.resolve();
+        reject(new DOMException('Transport aborted', 'AbortError'));
+      }, { once: true });
+      return await promise;
+    });
+    now = 1_000;
+    connector.start();
+    const socket = Socket.instances[0]!;
+    socket.open();
+    socket.receive(socket.sent[0]);
+    request(socket, crypto.randomUUID());
+    advance(4_321);
+    socket.dispatchEvent(new CloseEvent('close', { code: 1008, reason: 'Machine authorization expired or was revoked' }));
+    await aborted.promise;
+    const closed = warn.mock.calls.map(([line]) => JSON.parse(String(line))).find((line) => line.event === 'relay_closed');
+    expect(closed).toMatchObject({
+      cause: 'close', code: 1008, reason: 'Machine authorization expired or was revoked', connectionAgeMs: 4_321, abortedRequests: 1,
+    });
+    expect(new Date(closed.at).toISOString()).toBe(closed.at);
+  });
 });

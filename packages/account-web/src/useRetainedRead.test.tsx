@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { useRetainedRead } from './useRetainedRead.js';
+import { useRetainedRead, type ReadProvenance } from './useRetainedRead.js';
 
 type Value = { name: string };
 type Query = { state: 'pending' } | { state: 'success'; value: Value; fetch?: 'fetching' | 'idle' } | { state: 'failure'; error: Error; previous?: Value };
@@ -19,8 +19,8 @@ afterEach(async () => {
   container.remove();
   vi.unstubAllGlobals();
 });
-function View({ query, identity }: { query: Query; identity: string | null }) {
-  const read = useRetainedRead(query, identity);
+function View({ query, identity, provenance }: { query: Query; identity: string | null; provenance?: ReadProvenance }) {
+  const read = useRetainedRead(query, identity, provenance);
   return <>{read.value ? <section aria-label="Known panel"><strong>{read.value.name}</strong><input defaultValue="Keep my draft" /></section> : <p>No accepted data</p>}{read.initialLoading ? <p>Initial loading</p> : null}{read.refreshing ? <p>Refreshing</p> : null}{read.stale ? <p>Stale</p> : null}{read.error ? <p role="alert">{read.error.message}</p> : null}</>;
 }
 it('keeps the mounted panel and draft during background loading and failure, then accepts recovery', async () => {
@@ -53,5 +53,59 @@ it('revokes old data on identity changes and authorization failure without letti
   expect(container.querySelector('section')).toBeNull();
   expect(container.querySelector('[role=alert]')?.textContent).toContain('Forbidden');
   await act(() => root.render(<View identity="lease-b" query={{ state: 'pending' }} />));
+  expect(container.querySelector('section')).toBeNull();
+});
+
+it('accepts a matching cached result when first enabled and after an unchanged refetch', async () => {
+  const cached = { name: 'Default catalog' };
+  const provenance = { key: 'providers:default', updatedAt: 10 };
+  await act(() => root.render(<View identity={null} provenance={provenance} query={{ state: 'success', value: cached }} />));
+  expect(container.querySelector('section')).toBeNull();
+  await act(() => root.render(<View identity={provenance.key} provenance={provenance} query={{ state: 'success', value: cached, fetch: 'fetching' }} />));
+  expect(container.querySelector('strong')?.textContent).toBe(cached.name);
+  await act(() => root.render(<View identity={provenance.key} provenance={{ ...provenance, updatedAt: 20 }} query={{ state: 'success', value: cached }} />));
+  expect(container.querySelector('strong')?.textContent).toBe(cached.name);
+});
+
+it('isolates query identities without rejecting the cached catalog when returning to a profile', async () => {
+  const first = { name: 'Private profile catalog' };
+  const second = { name: 'Other profile catalog' };
+  await act(() => root.render(<View identity="profile-a" provenance={{ key: 'profile-a', updatedAt: 10 }} query={{ state: 'success', value: first }} />));
+  await act(() => root.render(<View identity="profile-b" provenance={{ key: 'profile-a', updatedAt: 10 }} query={{ state: 'success', value: first }} />));
+  expect(container.querySelector('section')).toBeNull();
+  await act(() => root.render(<View identity="profile-b" provenance={{ key: 'profile-b', updatedAt: 5 }} query={{ state: 'success', value: second }} />));
+  expect(container.querySelector('strong')?.textContent).toBe(second.name);
+  await act(() => root.render(<View identity="profile-a" provenance={{ key: 'profile-a', updatedAt: 10 }} query={{ state: 'success', value: first }} />));
+  expect(container.querySelector('strong')?.textContent).toBe(first.name);
+});
+
+it('requires a newer successful read after null or authorization revocation, even across profiles', async () => {
+  const cached = { name: 'Private catalog' };
+  const provenance = { key: 'profile-a', updatedAt: 10 };
+  await act(() => root.render(<View identity={provenance.key} provenance={provenance} query={{ state: 'success', value: cached }} />));
+  await act(() => root.render(<View identity={null} provenance={provenance} query={{ state: 'success', value: cached }} />));
+  expect(container.querySelector('section')).toBeNull();
+  await act(() => root.render(<View identity={provenance.key} provenance={provenance} query={{ state: 'success', value: cached }} />));
+  expect(container.querySelector('section')).toBeNull();
+  const refreshed = { ...provenance, updatedAt: 20 };
+  await act(() => root.render(<View identity={provenance.key} provenance={refreshed} query={{ state: 'success', value: cached }} />));
+  expect(container.querySelector('strong')?.textContent).toBe(cached.name);
+  await act(() => root.render(<View identity={provenance.key} provenance={refreshed} query={{ state: 'failure', error: new Error('Forbidden'), previous: cached }} />));
+  expect(container.querySelector('section')).toBeNull();
+  await act(() => root.render(<View identity="profile-b" provenance={{ key: 'profile-b', updatedAt: 30 }} query={{ state: 'success', value: { name: 'Other catalog' } }} />));
+  await act(() => root.render(<View identity={provenance.key} provenance={refreshed} query={{ state: 'failure', error: new Error('Connection interrupted'), previous: cached }} />));
+  expect(container.querySelector('section')).toBeNull();
+  await act(() => root.render(<View identity={provenance.key} provenance={refreshed} query={{ state: 'success', value: cached }} />));
+  expect(container.querySelector('section')).toBeNull();
+  await act(() => root.render(<View identity={provenance.key} provenance={{ ...provenance, updatedAt: 40 }} query={{ state: 'success', value: cached }} />));
+  expect(container.querySelector('strong')?.textContent).toBe(cached.name);
+});
+
+it('does not treat a generic lease key as proof that a fixed query result belongs to the new lease', async () => {
+  const cached = { name: 'Previous owner workspace' };
+  await act(() => root.render(<View identity="lease-a" query={{ state: 'success', value: cached }} />));
+  await act(() => root.render(<View identity="lease-b" query={{ state: 'success', value: cached }} />));
+  expect(container.querySelector('section')).toBeNull();
+  await act(() => root.render(<View identity="lease-b" query={{ state: 'failure', error: new Error('Connection interrupted'), previous: cached }} />));
   expect(container.querySelector('section')).toBeNull();
 });

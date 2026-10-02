@@ -2,6 +2,7 @@
   "name": "@gitspace/account-machine",
   "version": "0.0.0",
   "private": true,
+  "gitspace": { "inferenceVersion": 1 },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -21,10 +22,11 @@
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
     "@gitspace/protocol-sync": "workspace:*",
-    "@oh-my-pi/omptype": "18.1.10",
-    "@oh-my-pi/pi-ai": "18.1.10",
-    "@oh-my-pi/pi-coding-agent": "18.1.10",
-    "@oh-my-pi/pi-utils": "18.1.10",
+    "@oh-my-pi/omptype": "18.2.11",
+    "@oh-my-pi/pi-ai": "18.2.11",
+    "@oh-my-pi/pi-coding-agent": "18.2.11",
+    "@oh-my-pi/pi-tui": "18.2.11",
+    "@oh-my-pi/pi-utils": "18.2.11",
     "aws4fetch": "1.0.20",
     "better-result": "3.0.1",
     "devalue": "5.8.2",

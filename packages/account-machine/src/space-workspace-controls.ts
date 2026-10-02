@@ -32,7 +32,7 @@ export function createSpaceWorkspaceControls(options: {
     instructionsChanged: (projectId, spaceId) => sessions.instructionsChanged(projectId, spaceId),
     refreshArtifacts: (projectId, spaceId) => sessions.refreshArtifacts(projectId, spaceId),
     async environment(method, projectId, spaceId, input) {
-      if (method === 'runPhase') assertLifecycleCommandAuthorized(LifecyclePhaseSchema.parse(input.phase), { human: false });
+      if (method === 'runPhase') assertLifecycleCommandAuthorized(LifecyclePhaseSchema.parse(input.phase), { lifecycleControl: false });
       const parsed = spaceEnvironmentSchemas[method].parse(input);
       const local = database.getSpace(spaceId);
       if (local && local.projectId !== projectId) throw new Error('Workspace project membership changed');

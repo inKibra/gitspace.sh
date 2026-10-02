@@ -109,7 +109,7 @@ interface WaiverRow extends Record<string, SqlStorageValue> {
   waiver_id: string;
   reason: string;
   actor_id: string;
-  actor_kind: 'human';
+  actor_kind: 'human' | 'client';
   created_at: string;
 }
 interface JudgmentRow extends Record<string, SqlStorageValue> {
@@ -620,8 +620,8 @@ export class SpaceContextDO extends DurableObject<Env> {
       );
     `);
     const version = this.ctx.storage.sql.exec<{ version: number }>('SELECT COALESCE(MAX(version), 0) AS version FROM _inspector_schema_migrations').one().version;
-    if (version >= 1) return;
-    this.ctx.storage.sql.exec(`
+    if (version >= 2) return;
+    if (version < 1) this.ctx.storage.sql.exec(`
       CREATE TABLE inspector_meta (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         project_id TEXT NOT NULL,
@@ -706,6 +706,19 @@ export class SpaceContextDO extends DurableObject<Env> {
       CREATE INDEX inspector_messages_by_thread ON inspector_review_messages (thread_id, sequence);
       INSERT INTO _inspector_schema_migrations (version, applied_at) VALUES (1, datetime('now'));
     `);
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE inspector_workflow_gate_waivers_v2 (
+          waiver_id TEXT PRIMARY KEY, gate_id TEXT NOT NULL, reason TEXT NOT NULL, actor_id TEXT NOT NULL,
+          actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'client')), created_at TEXT NOT NULL
+        );
+        INSERT INTO inspector_workflow_gate_waivers_v2 SELECT waiver_id, gate_id, reason, actor_id, actor_kind, created_at FROM inspector_workflow_gate_waivers;
+        DROP TABLE inspector_workflow_gate_waivers;
+        ALTER TABLE inspector_workflow_gate_waivers_v2 RENAME TO inspector_workflow_gate_waivers;
+        CREATE INDEX inspector_gate_waivers_by_gate ON inspector_workflow_gate_waivers (gate_id, created_at);
+        INSERT INTO _inspector_schema_migrations (version, applied_at) VALUES (2, datetime('now'));
+      `);
+    });
   }
 
   private meta(): MetaRow | undefined {

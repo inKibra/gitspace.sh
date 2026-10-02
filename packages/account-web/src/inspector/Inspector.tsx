@@ -82,12 +82,17 @@ import {
 } from '@untitledui/icons';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { glyph } from '../glyph.js';
+import { rpcErrorMessage } from '../rpc-error-message.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
+import { artifactImageUrl, markdownImageSources } from '../markdown-artifact-images.js';
 import { EmptyState, StatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
 import { OverviewView, type OverviewViewProps } from './OverviewView.js';
 import { UsageView, type UsageStatus } from './UsageView.js';
 import { AgentSetupView, type InspectorAgentSetupState } from './AgentSetupView.js';
 import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
+import { ArtifactUploadButton, ArtifactUploadList, useArtifactUploads, type ArtifactUploads } from './ArtifactUploads.js';
+import type { ArtifactUploadClient } from './artifact-upload.js';
+import { syncRepositoryTreePaths } from './repository-tree-paths.js';
 import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
 
 export type InspectorPermanentView = 'overview' | 'environment' | 'goal' | 'agents' | 'subagents' | 'files' | 'artifacts' | 'services' | 'usage' | 'guide' | 'journal';
@@ -103,6 +108,7 @@ export interface InspectorArtifactContent {
   source: string | null;
   previewUrl: string;
   mediaType: string | null;
+  dispose?(): void;
 }
 export interface CreateInspectorThread {
   anchor: ReviewAnchor;
@@ -116,6 +122,11 @@ export interface InspectorUsageState {
   error?: string;
   load(): void;
   refresh(): void;
+}
+export interface InspectorSectionError {
+  message: string;
+  retained: boolean;
+  retry(): void;
 }
 function selectOptions(options: readonly { value: string; label: ReactNode }[]): ReactNode {
   return <SelectContent>{options.map((option, index) => <SelectItem value={option.value} index={index} key={option.value}>{option.label}</SelectItem>)}</SelectContent>;
@@ -140,14 +151,17 @@ export interface InspectorProps {
   subagents: readonly (ExecutionBlock | SideAgentBlock)[];
   usage: InspectorUsageState;
   agentSetup: InspectorAgentSetupState;
-  onRequestArtifact(reference: Extract<EvidenceReference, { kind: 'artifact' }>): Promise<InspectorArtifactContent>;
+  onRequestArtifact(reference: Extract<EvidenceReference, { kind: 'artifact' }>, signal?: AbortSignal): Promise<InspectorArtifactContent>;
   artifactReferences?: readonly Extract<EvidenceReference, { kind: 'artifact' }>[];
   resourceRequest?: ResourceRequest;
-  onRequestResource?(uri: string): Promise<InspectorArtifactContent>;
+  onRequestResource?(uri: string, signal?: AbortSignal): Promise<InspectorArtifactContent>;
   artifactActions?: ArtifactActionsHandlers;
+  /** Present when the viewer may upload files into the workspace's `uploads/` artifact folder. */
+  artifactUpload?: ArtifactUploadClient;
   reviewerId: string;
   loading?: boolean;
   error?: string | null;
+  sectionErrors?: Partial<Record<InspectorPermanentView, InspectorSectionError>>;
   initialView?: InspectorPermanentView;
   /** False for cloud inspection without an open workspace on an online machine. */
   runtimeAvailable?: boolean;
@@ -360,7 +374,7 @@ function WorkflowDocument({ workflow }: { workflow: WorkflowView }) {
     <SurfaceHeader kicker={`Workflow · revision ${workflow.revision}`} title={workflow.title} detail={workflow.description} />
     {/* FLUID-GAP: node graph canvas — @xyflow/react renders the workflow; its node chrome is the library's own. */}
     <div className="min-h-80 flex-1 bg-surface-1"><ReactFlow nodes={nodes} edges={edges} fitView minZoom={0.4} maxZoom={1.5} nodesDraggable={false} nodesConnectable={false} elementsSelectable onNodeClick={(_, node) => setSelectedId(node.id)}><Background gap={20} size={1} color="var(--border)" /><Controls showInteractive={false} /></ReactFlow></div>
-    {selected ? <section className="max-h-44 overflow-auto border-t border-border px-4 py-3"><strong className="text-body font-medium text-foreground">{selected.label}</strong><p className="text-caption text-muted-foreground">{selected.kind === 'gate' ? `${selected.requirementIds.length} requirements. ${selected.waivers.length} human waiver records.` : selected.kind === 'phase' ? `${selected.reads.length} inputs and ${selected.writes.length} outputs.` : selected.evidence ? evidenceLabel(selected.evidence) : 'Evidence is not available yet.'}</p></section> : null}
+    {selected ? <section className="max-h-44 overflow-auto border-t border-border px-4 py-3"><strong className="text-body font-medium text-foreground">{selected.label}</strong><p className="text-caption text-muted-foreground">{selected.kind === 'gate' ? `${selected.requirementIds.length} requirements. ${selected.waivers.length} authorized waiver records.` : selected.kind === 'phase' ? `${selected.reads.length} inputs and ${selected.writes.length} outputs.` : selected.evidence ? evidenceLabel(selected.evidence) : 'Evidence is not available yet.'}</p></section> : null}
   </div>;
 }
 
@@ -387,7 +401,7 @@ function RubricDocument({ rubric, onOpenEvidence, onSubmit }: { rubric: RubricVi
         <footer className="flex justify-end gap-2"><Button variant="secondary" size="compact" type="button" disabled={!summary.trim()} onClick={() => { settle(onSubmit(selected.id, 'fail', summary.trim())); setSummary(''); }}>Needs changes</Button><Button variant="primary" size="compact" type="button" disabled={!summary.trim()} onClick={() => { settle(onSubmit(selected.id, 'pass', summary.trim())); setSummary(''); }}>Pass</Button></footer>
       </section> : null}
       {selected.judgments.length ? <CardGroup border="outlined">{selected.judgments.map((judgment) => <Card key={judgment.id}>
-        <CardHeader><CardTitle>{judgment.kind}</CardTitle><CardDescription className="tabular-nums">{formatDate(judgment.createdAt)}</CardDescription><CardAction><Tone value={judgment.verdict} /></CardAction></CardHeader>
+        <CardHeader><CardTitle>{judgment.actorKind === 'client' ? `Client-submitted ${judgment.kind} judgment` : judgment.kind}</CardTitle><CardDescription className="tabular-nums">{formatDate(judgment.createdAt)}</CardDescription><CardAction><Tone value={judgment.verdict} /></CardAction></CardHeader>
         <CardContent className="flex flex-col gap-2"><p className="text-body text-muted-foreground">{judgment.summary}</p><EvidenceList evidence={judgment.evidence} onOpen={onOpenEvidence} prefix={judgment.id} /></CardContent>
       </Card>)}</CardGroup> : null}
     </section>
@@ -422,7 +436,8 @@ function RepositoryTree({ entries, changedOnly, onOpen }: { entries: readonly Re
   const entriesRef = useRef(shown); entriesRef.current = shown;
   const openRef = useRef(onOpen); openRef.current = onOpen;
   const { model } = useFileTree({ paths, gitStatus: status, initialExpandedPaths: [...new Set(paths.map((path) => path.split('/')[0]!).filter(Boolean))], density: 'compact', onSelectionChange: (selected) => { const entry = entriesRef.current.find((candidate) => selected.includes(candidate.path)); if (entry) openRef.current(entry); } });
-  useEffect(() => { model.resetPaths(paths, { initialExpandedPaths: [...new Set(paths.map((path) => path.split('/')[0]!).filter(Boolean))] }); }, [model, paths]);
+  const loadedPaths = useRef(paths);
+  useEffect(() => { syncRepositoryTreePaths(model, loadedPaths.current, paths); loadedPaths.current = paths; }, [model, paths]);
   useEffect(() => { model.setGitStatus(status); }, [model, status]);
   // FLUID-GAP: file tree — @pierre/trees renders the repository tree with its own theme.
   return <FileTree model={model} className="h-full" />;
@@ -456,7 +471,7 @@ function ThreadPanel({ thread, selection, onClose, onCreate, onReply, onResolve 
       await operation();
       if (clearDraft) setDraft('');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(rpcErrorMessage(cause, 'Update review thread'));
     } finally {
       pendingRef.current = false;
       setPending(false);
@@ -487,8 +502,26 @@ function ThreadPanel({ thread, selection, onClose, onCreate, onReply, onResolve 
   </Elevated>;
 }
 
-function MarkdownArtifact({ source }: { source: string }) {
-  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><article className="mx-auto w-full max-w-3xl px-6 py-6"><GitSpaceMarkdown>{source}</GitSpaceMarkdown></article></ScrollArea>;
+/** Images naming other artifacts load through the Inspector's artifact reads and render from their object URLs. */
+function MarkdownArtifact({ source, documentUrl, artifactReferences, artifactContent, onRequest }: {
+  source: string;
+  documentUrl: string;
+  artifactReferences: readonly ArtifactReference[];
+  artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
+  onRequest(reference: ArtifactReference): Promise<void>;
+}) {
+  const findImage = (src: string): ArtifactReference | undefined => {
+    const url = artifactImageUrl(src, documentUrl);
+    return url ? artifactReferences.find((reference) => reference.url === url) : undefined;
+  };
+  const images = markdownImageSources(source).flatMap((src) => findImage(src) ?? []);
+  const imageKey = images.map(artifactId).join('\n');
+  useEffect(() => { for (const image of images) void onRequest(image); }, [imageKey]);
+  const resolveImage = (src: string): string | null => {
+    const image = findImage(src);
+    return image ? artifactContent[artifactId(image)]?.previewUrl ?? null : null;
+  };
+  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><article className="mx-auto w-full max-w-3xl px-6 py-6"><GitSpaceMarkdown resolveImage={resolveImage}>{source}</GitSpaceMarkdown></article></ScrollArea>;
 }
 function SourceArtifact({ source }: { source: string }) {
   // FLUID-GAP: code viewer — the registry has no read-only code block; plain <pre> on Fluid tokens.
@@ -521,13 +554,13 @@ function MiniAppArtifact({ source, dataReferences, content, onLoad }: {
   </div>;
 }
 
-function ArtifactDocument({ reference, content, status, error, mode, dataReferences, artifactContent, onRequest }: {
+function ArtifactDocument({ reference, content, status, error, mode, artifactReferences, artifactContent, onRequest }: {
   reference: ArtifactReference;
   content: InspectorArtifactContent | null;
   status: LoadStatus;
   error: string | undefined;
   mode: 'preview' | 'source';
-  dataReferences: readonly ArtifactReference[];
+  artifactReferences: readonly ArtifactReference[];
   artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
   onRequest(reference: ArtifactReference): Promise<void>;
 }) {
@@ -535,14 +568,14 @@ function ArtifactDocument({ reference, content, status, error, mode, dataReferen
   if (status === 'loading' || status === undefined) return <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label={`Loading ${reference.label}…`} /></div>;
   if (status === 'error') return <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Artifact could not load" description={error ?? 'The artifact read failed.'} action={<Button variant="secondary" size="compact" type="button" onClick={() => void onRequest(reference)}>Retry</Button>} /></Padded>;
   if (!content) return <Padded><EmptyState icon={ic(Archive, 22)} title="Artifact bytes are unavailable" description="The authority returned no readable content." /></Padded>;
-  return <ArtifactPreview reference={reference} content={content} mode={mode} dataReferences={dataReferences} artifactContent={artifactContent} onRequest={onRequest} />;
+  return <ArtifactPreview reference={reference} content={content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequest} />;
 }
 
-function ArtifactPreview({ reference, content, mode, dataReferences, artifactContent, onRequest }: {
+function ArtifactPreview({ reference, content, mode, artifactReferences, artifactContent, onRequest }: {
   reference: Pick<ArtifactReference, 'url' | 'label' | 'mediaType'>;
   content: InspectorArtifactContent;
   mode: 'preview' | 'source';
-  dataReferences: readonly ArtifactReference[];
+  artifactReferences: readonly ArtifactReference[];
   artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
   onRequest(reference: ArtifactReference): Promise<void>;
 }) {
@@ -550,7 +583,7 @@ function ArtifactPreview({ reference, content, mode, dataReferences, artifactCon
   if (mode === 'source') return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(File02, 22)} title="Source is unavailable" description="This binary artifact has no text source." /></Padded>;
   const mediaType = content.mediaType ?? reference.mediaType;
   if (mediaType?.startsWith('image/')) return <PreviewFrame><img src={content.previewUrl} alt={reference.label} className={`${shape.container} max-h-full max-w-full bg-surface-3 object-contain shadow-surface-1`} /></PreviewFrame>;
-  if ((reference.url.endsWith('.gssh.html') || mediaType === 'text/html') && content.source !== null) return <MiniAppArtifact source={content.source} dataReferences={dataReferences} content={artifactContent} onLoad={onRequest} />;
+  if ((reference.url.endsWith('.gssh.html') || mediaType === 'text/html') && content.source !== null) return <MiniAppArtifact source={content.source} dataReferences={artifactReferences.filter((candidate) => candidate.url.endsWith('.data.json'))} content={artifactContent} onLoad={onRequest} />;
   if (mediaType === 'application/pdf') return <PreviewFrame><iframe src={content.previewUrl} title={reference.label} className={`${shape.container} h-full min-h-90 w-full bg-surface-3 shadow-surface-1`} /></PreviewFrame>;
   if (mediaType?.startsWith('audio/')) return <PreviewFrame><audio controls src={content.previewUrl} /></PreviewFrame>;
   if (mediaType?.startsWith('video/')) return <PreviewFrame><video controls src={content.previewUrl} className="max-h-full max-w-full" /></PreviewFrame>;
@@ -559,15 +592,15 @@ function ArtifactPreview({ reference, content, mode, dataReferences, artifactCon
     try { pretty = JSON.stringify(JSON.parse(content.source), null, 2); } catch { /* Render original text. */ }
     return <SourceArtifact source={pretty} />;
   }
-  if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source !== null) return <MarkdownArtifact source={content.source} />;
+  if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source !== null) return <MarkdownArtifact source={content.source} documentUrl={reference.url} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequest} />;
   return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." /></Padded>;
 }
 
-function ResourceDocument({ uri, mode, onRequest, dataReferences, artifactContent, onRequestArtifact }: {
+function ResourceDocument({ uri, mode, onRequest, artifactReferences, artifactContent, onRequestArtifact }: {
   uri: string;
   mode: 'preview' | 'source';
   onRequest: InspectorProps['onRequestResource'];
-  dataReferences: readonly ArtifactReference[];
+  artifactReferences: readonly ArtifactReference[];
   artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
   onRequestArtifact(reference: ArtifactReference): Promise<void>;
 }) {
@@ -575,39 +608,61 @@ function ResourceDocument({ uri, mode, onRequest, dataReferences, artifactConten
   const [result, setResult] = useState<{ content: InspectorArtifactContent } | { error: string } | null>(null);
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    let loaded: InspectorArtifactContent | undefined;
     setResult(null);
     void (async () => {
       try {
         if (!onRequest) throw new Error('Resource reads are unavailable for this workspace.');
-        const content = await onRequest(uri);
-        if (!cancelled) setResult({ content });
+        const content = await onRequest(uri, controller.signal);
+        if (cancelled) content.dispose?.();
+        else { loaded = content; setResult({ content }); }
       } catch (error) {
-        if (!cancelled) setResult({ error: error instanceof Error ? error.message : String(error) });
+        if (!cancelled) setResult({ error: rpcErrorMessage(error, 'Read workspace resource') });
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); loaded?.dispose?.(); };
   }, [uri, attempt]);
   if (!result) return <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label={`Loading ${uri}…`} /></div>;
   if ('error' in result) return <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Resource could not load" description={`${uri}: ${result.error}`} action={<Button variant="secondary" size="compact" type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</Button>} /></Padded>;
-  return <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} dataReferences={dataReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} />;
+  return <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} />;
 }
 
-function ArtifactsSurface({ references, onOpen, actions }: { references: readonly ArtifactReference[]; onOpen: (reference: EvidenceReference) => void; actions?: ArtifactActionsHandlers }) {
+function ArtifactsSurface({ references, onOpen, actions, uploads }: { references: readonly ArtifactReference[]; onOpen: (reference: EvidenceReference) => void; actions?: ArtifactActionsHandlers; uploads: ArtifactUploads | null }) {
   const [selected, setSelected] = useState<string[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const runtimeAvailable = useContext(RuntimeAvailability);
+  const list = useRef<HTMLDivElement>(null);
+  const latestUpload = uploads?.highlighted.at(-1);
+  useEffect(() => {
+    if (latestUpload) list.current?.querySelector(`[data-artifact-url="${CSS.escape(latestUpload)}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [latestUpload, references]);
   const selection = references.filter((reference) => selected.includes(reference.url));
-  if (!references.length) return <Padded><EmptyState icon={ic(Archive, 22)} title="No artifacts" description="Published workspace and project files appear here, whether or not they are attached as evidence." /></Padded>;
-  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="flex flex-col gap-3 p-4">
-    {actions ? <><p className="text-caption text-muted-foreground">Select one or more published workspace files to copy. Select one project or workspace file to share.</p><ArtifactActions selected={selection} actions={actions} /></> : null}
-    <CardGroup orientation="inline" border="outlined">{references.map((reference) => <Card key={artifactId(reference)}>
-      <CardMedia icon={reference.mediaType?.startsWith('image/') ? ImageGlyph : FileGlyph} />
-      <CardHeader><CardTitle className="truncate">{reference.label}</CardTitle><CardDescription className="truncate font-mono">{reference.url}</CardDescription></CardHeader>
-      <CardFooter className="flex-wrap gap-2">
-        {actions ? <Button variant={selected.includes(reference.url) ? 'secondary' : 'ghost'} size="compact" className="min-h-10" aria-pressed={selected.includes(reference.url)} onClick={() => setSelected((current) => current.includes(reference.url) ? current.filter((url) => url !== reference.url) : [...current, reference.url])}>{selected.includes(reference.url) ? 'Selected' : 'Select'}<span className="sr-only"> {reference.label}</span></Button> : null}
-        <Button variant="ghost" size="compact" className="min-h-10" onClick={() => onOpen(reference)}>Open<span className="sr-only"> {reference.label}</span></Button>
-        <span className="text-caption text-muted-foreground tabular-nums">generation {reference.generation}</span>
-      </CardFooter>
-    </Card>)}</CardGroup>
-  </div></ScrollArea>;
+  const dropTarget = uploads && runtimeAvailable ? uploads : null;
+  return <div
+    className={`flex min-h-0 flex-1 flex-col ${dragging ? 'ring-1 ring-inset ring-[color:var(--focus-ring,#6B97FF)]' : ''}`}
+    onDragOver={dropTarget ? (event) => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); setDragging(true); } : undefined}
+    onDragLeave={dropTarget ? (event) => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setDragging(false); } : undefined}
+    onDrop={dropTarget ? (event) => { event.preventDefault(); setDragging(false); dropTarget.add([...event.dataTransfer.files]); } : undefined}
+  ><ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div ref={list} className="flex flex-col gap-3 p-4">
+    {uploads ? <div className="flex flex-wrap items-center gap-2">
+      <ArtifactUploadButton onFiles={uploads.add} disabledReason={runtimeAvailable ? null : openWorkspaceFirst} />
+      <p className="text-caption text-muted-foreground">Files are saved to <span className="font-mono">uploads/</span> in this workspace, up to 1 GiB each. You can also drop files here.</p>
+    </div> : null}
+    {uploads ? <ArtifactUploadList uploads={uploads} /> : null}
+    {!references.length ? <EmptyState icon={ic(Archive, 22)} title="No artifacts" description="Published workspace and project files appear here, whether or not they are attached as evidence." /> : <>
+      {actions ? <><p className="text-caption text-muted-foreground">Select one or more published workspace files to copy. Select one project or workspace file to share.</p><ArtifactActions selected={selection} actions={actions} /></> : null}
+      <CardGroup orientation="inline" border="outlined">{references.map((reference) => <Card key={artifactId(reference)} data-artifact-url={reference.url} selected={uploads?.highlighted.includes(reference.url) ?? false}>
+        <CardMedia icon={reference.mediaType?.startsWith('image/') ? ImageGlyph : FileGlyph} />
+        <CardHeader><CardTitle className="truncate">{reference.label}</CardTitle><CardDescription className="truncate font-mono">{reference.url}</CardDescription></CardHeader>
+        <CardFooter className="flex-wrap gap-2">
+          {actions ? <Button variant={selected.includes(reference.url) ? 'secondary' : 'ghost'} size="compact" className="min-h-10" aria-pressed={selected.includes(reference.url)} onClick={() => setSelected((current) => current.includes(reference.url) ? current.filter((url) => url !== reference.url) : [...current, reference.url])}>{selected.includes(reference.url) ? 'Selected' : 'Select'}<span className="sr-only"> {reference.label}</span></Button> : null}
+          <Button variant="ghost" size="compact" className="min-h-10" onClick={() => onOpen(reference)}>Open<span className="sr-only"> {reference.label}</span></Button>
+          <span className="text-caption text-muted-foreground tabular-nums">generation {reference.generation}</span>
+        </CardFooter>
+      </Card>)}</CardGroup>
+    </>}
+  </div></ScrollArea></div>;
 }
 
 function SubagentsSurface({ subagents }: { subagents: readonly (ExecutionBlock | SideAgentBlock)[] }) {
@@ -697,7 +752,7 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpene
       if (!active) return;
       if (loaded.path !== path || loaded.mode !== 'base') throw new Error('The diff response does not match this guide exhibit.');
       setDiff(loaded);
-    }).catch((cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); });
+    }).catch((cause: unknown) => { if (active) setError(rpcErrorMessage(cause, 'inspector.repository.diff')); });
     return () => { active = false; };
   }, [requested, path, baseRef, runtimeAvailable]);
   useEffect(() => {
@@ -926,8 +981,26 @@ export function Inspector(props: InspectorProps) {
   const [artifactContent, setArtifactContent] = useState<Record<string, InspectorArtifactContent>>({});
   const [artifactLoad, setArtifactLoad] = useState<Record<string, 'loading' | 'loaded' | 'error'>>({});
   const [artifactErrors, setArtifactErrors] = useState<Record<string, string>>({});
+  const artifactCache = useRef(new Map<string, InspectorArtifactContent>());
+  const artifactRequests = useRef(new Map<string, AbortController>());
+  const uploads = useArtifactUploads(props.artifactUpload);
+  useEffect(() => {
+    setArtifactContent({});
+    setArtifactLoad({});
+    setArtifactErrors({});
+    return () => {
+      for (const controller of artifactRequests.current.values()) controller.abort();
+      artifactRequests.current.clear();
+      for (const content of artifactCache.current.values()) content.dispose?.();
+      artifactCache.current.clear();
+    };
+  }, [props.overview.spaceId]);
   const evidence = useMemo(() => collectEvidence(props.overview, props.journalEntries), [props.journalEntries, props.overview]);
-  const artifacts = useMemo(() => props.artifactReferences ?? evidence.filter((reference): reference is ArtifactReference => reference.kind === 'artifact'), [evidence, props.artifactReferences]);
+  const artifacts = useMemo(() => {
+    const listed = props.artifactReferences ?? evidence.filter((reference): reference is ArtifactReference => reference.kind === 'artifact');
+    // Committed uploads show immediately; the catalog lists them once background publication finishes.
+    return [...listed, ...uploads.uploaded.filter((upload) => !listed.some((reference) => reference.url === upload.url))];
+  }, [evidence, props.artifactReferences, uploads.uploaded]);
   const activeDocument = documents.find((document) => document.id === activeDocumentId) ?? null;
   const activeMode = activeDocument ? fileModes[activeDocument.id] ?? 'current' : 'current';
   const displayedFile = activeDocument?.kind === 'file' && activeMode === 'current' && props.repositoryFile?.path === activeDocument.target && props.repositoryFile.mode === activeMode ? props.repositoryFile : null;
@@ -943,18 +1016,26 @@ export function Inspector(props: InspectorProps) {
   useEffect(() => { if (runtimeAvailable && view === 'agents') props.agentSetup.load(); }, [view, runtimeAvailable, props.agentSetup.sessionId]);
   const loadArtifact = async (reference: ArtifactReference): Promise<void> => {
     const key = artifactId(reference);
-    if (artifactLoad[key] === 'loading' || artifactLoad[key] === 'loaded') return;
+    if (artifactRequests.current.has(key) || artifactCache.current.has(key)) return;
+    const controller = new AbortController();
+    artifactRequests.current.set(key, controller);
     setArtifactLoad((current) => ({ ...current, [key]: 'loading' }));
     try {
-      const content = await props.onRequestArtifact(reference);
+      const content = await props.onRequestArtifact(reference, controller.signal);
+      if (controller.signal.aborted) { content.dispose?.(); return; }
+      artifactCache.current.get(key)?.dispose?.();
+      artifactCache.current.set(key, content);
       setArtifactContent((current) => ({ ...current, [key]: content }));
       setArtifactLoad((current) => ({ ...current, [key]: 'loaded' }));
     } catch (error) {
-      setArtifactErrors((current) => ({ ...current, [key]: error instanceof Error ? error.message : String(error) }));
+      if (controller.signal.aborted) return;
+      setArtifactErrors((current) => ({ ...current, [key]: rpcErrorMessage(error, 'inspector.artifacts.read') }));
       setArtifactLoad((current) => ({ ...current, [key]: 'error' }));
+    } finally {
+      if (artifactRequests.current.get(key) === controller) artifactRequests.current.delete(key);
     }
   };
-  useEffect(() => { if (activeArtifact) void loadArtifact(activeArtifact); }, [activeArtifact ? artifactId(activeArtifact) : null]);
+  useEffect(() => { if (activeArtifact) void loadArtifact(activeArtifact); }, [props.overview.spaceId, activeArtifact ? artifactId(activeArtifact) : null]);
   const selectSurface = (next: InspectorPermanentView): void => { setView(next); setActiveDocumentId(null); setActiveThread(null); setThreadSelection(null); };
   const openDocument = (document: InspectorOpenDocument): void => { setDocuments((current) => current.some((item) => item.id === document.id) ? current : [...current, document]); setActiveDocumentId(document.id); setView('document'); setActiveThread(null); setThreadSelection(null); };
   const openProduct = (kind: 'goal' | 'workflow' | 'rubric'): void => { const record = kind === 'goal' ? props.overview.goal : kind === 'workflow' ? props.overview.workflow : props.overview.rubric; if (record) openDocument({ id: `${kind}:${record.id}`, kind, label: record.title, target: record.id }); };
@@ -997,6 +1078,7 @@ export function Inspector(props: InspectorProps) {
     setThreadSelection(null);
   };
   const counts: Partial<Record<InspectorPermanentView, number>> = { subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.services.length };
+  for (const tab of permanentTabs) if (props.sectionErrors?.[tab.id] && !props.sectionErrors[tab.id]!.retained) delete counts[tab.id];
   const threadOpen = !!(activeThread || threadSelection);
   const closeThread = (): void => { setActiveThread(null); setThreadSelection(null); };
   const threadPanel = threadOpen ? <ThreadPanel
@@ -1011,7 +1093,7 @@ export function Inspector(props: InspectorProps) {
   if (activeDocument?.kind === 'goal' && props.overview.goal) documentBody = <ProductGoal goal={props.overview.goal} onOpenEvidence={openEvidence} />;
   else if (activeDocument?.kind === 'workflow' && props.overview.workflow) documentBody = <WorkflowDocument workflow={props.overview.workflow} />;
   else if (activeDocument?.kind === 'rubric' && props.overview.rubric) documentBody = <RubricDocument rubric={props.overview.rubric} onOpenEvidence={openEvidence} onSubmit={props.onSubmitHumanJudgment} />;
-  else if (activeDocument?.kind === 'resource') documentBody = <ResourceDocument key={activeDocument.target} uri={activeDocument.target} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} dataReferences={artifacts.filter((reference) => reference.url.endsWith('.data.json'))} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
+  else if (activeDocument?.kind === 'resource') documentBody = <ResourceDocument key={`${props.overview.spaceId}:${activeDocument.target}`} uri={activeDocument.target} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} artifactReferences={artifacts} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
   else if (activeDocument?.kind === 'artifact' && activeArtifact) {
     documentBody = <ArtifactDocument
       reference={activeArtifact}
@@ -1019,7 +1101,7 @@ export function Inspector(props: InspectorProps) {
       status={artifactLoad[artifactId(activeArtifact)]}
       error={artifactErrors[artifactId(activeArtifact)]}
       mode={artifactModeById[artifactId(activeArtifact)] ?? 'preview'}
-      dataReferences={artifacts.filter((reference) => reference.url.endsWith('.data.json'))}
+      artifactReferences={artifacts}
       artifactContent={artifactContent}
       onRequest={loadArtifact}
     />;
@@ -1042,6 +1124,11 @@ export function Inspector(props: InspectorProps) {
   </div> : <Padded><EmptyState icon={ic(File02, 22)} title="Document is no longer available" description="Close this tab or reopen its canonical record from the permanent Inspector surfaces." /></Padded>;
   const renderSurface = (id: InspectorPermanentView): ReactNode => {
     if (!runtimeAvailable && runtimeViews[id]) return <Padded><EmptyState title="Live workspace unavailable" description={openWorkspaceFirst} /></Padded>;
+    const failure = props.sectionErrors?.[id];
+    if (failure && !failure.retained) {
+      const label = permanentTabs.find((tab) => tab.id === id)!.label;
+      return <Padded><div role="alert"><EmptyState icon={ic(AlertCircle, 22)} title={`${label} could not load`} description={failure.message} action={<Button variant="ghost" type="button" onClick={failure.retry}>Retry {label}</Button>} /></div></Padded>;
+    }
     switch (id) {
       case 'overview': return props.scope ? <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} /> : null;
       case 'environment': return props.environment ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
@@ -1053,7 +1140,7 @@ export function Inspector(props: InspectorProps) {
         if (reference.kind !== 'artifact') return;
         openDocument({ id: `artifact-current:${reference.url}`, kind: 'artifact', label: reference.label, target: `current:${reference.url}` });
         void loadArtifact(reference);
-      }} actions={props.artifactActions} />;
+      }} actions={props.artifactActions} uploads={props.artifactUpload ? uploads : null} />;
       case 'services': return <ServicesSurface services={props.services} onOpenTerminal={(name) => props.onOpenServiceTerminal?.(name)} onStart={props.onStartService} onStop={props.onStopService} />;
       case 'usage': return <UsageView sessionId={props.usage.sessionId} report={props.usage.report} status={props.usage.status} error={props.usage.error} onLoad={props.usage.load} onRefresh={props.usage.refresh} />;
       case 'guide': return <><ChangeGuideSurface
@@ -1075,7 +1162,14 @@ export function Inspector(props: InspectorProps) {
   if (props.loading) body = <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label="Loading Inspector authority state…" /></div>;
   else if (props.error) body = <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Inspector could not load" description={props.error} /></Padded>;
   else if (view === 'document') body = document;
-  else body = permanentTabs.map((tab, index) => tab.id === 'agents' ? null : <TabsSubtlePanel idPrefix="inspectorTabs" index={index} selectedIndex={tabIndex} className="flex min-h-0 flex-1 flex-col" key={tab.id}>{renderSurface(tab.id)}</TabsSubtlePanel>);
+  else body = permanentTabs.map((tab, index) => {
+    if (tab.id === 'agents') return null;
+    const failure = props.sectionErrors?.[tab.id];
+    return <TabsSubtlePanel idPrefix="inspectorTabs" index={index} selectedIndex={tabIndex} className="flex min-h-0 flex-1 flex-col" key={tab.id}>
+      {failure?.retained ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{tab.label} refresh failed; showing the last accepted state. {failure.message}<Button variant="ghost" size="compact" onClick={failure.retry}>Retry {tab.label}</Button></p> : null}
+      {renderSurface(tab.id)}
+    </TabsSubtlePanel>;
+  });
   return <ResourceNavigation.Provider value={openResource}><RuntimeAvailability.Provider value={runtimeAvailable}><div className="flex h-full min-h-0 flex-col bg-surface-2" aria-label="Workspace Inspector">
     {!runtimeAvailable ? <p className="px-4 pt-3 text-caption text-muted-foreground">Cloud Inspector · Saved records. Live files, processes, terminals, and services are unavailable.</p> : null}
     <div className="flex shrink-0 items-center gap-1 px-2 pb-1 pt-2">

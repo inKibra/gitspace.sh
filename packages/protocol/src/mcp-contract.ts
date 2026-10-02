@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { wire, type InputOf } from 'result-rpc';
+import { type InputOf } from 'result-rpc'; import { wire, richObjectJsonSchema } from './json-wire.js';
 
 const identifierSchema = z.string().min(1).max(160);
 const labelSchema = z.string().trim().min(1).max(120);
@@ -67,11 +67,23 @@ export const mcpCustomTransportSchema = z.discriminatedUnion('type', [
   mcpSseTransportSchema,
 ]);
 export type McpCustomTransport = z.infer<typeof mcpCustomTransportSchema>;
+const uniqueToolSlugs = z.array(identifierSchema).max(512).refine((tools) => new Set(tools).size === tools.length, 'Composio tool exceptions must be unique');
+/** Tool groups follow Composio's hints; a tool flagged destructive is destructive even when also read-only. */
+export const composioToolGroupSchema = z.enum(['readOnly', 'write', 'destructive']);
+export type ComposioToolGroup = z.infer<typeof composioToolGroupSchema>;
+/** Group settings decide every tool, including tools Composio adds later; `allow`/`deny` are per-tool exceptions. */
+export const composioToolPolicySchema = z.object({
+  groups: z.object({ readOnly: z.boolean(), write: z.boolean(), destructive: z.boolean() }).strict(),
+  allow: uniqueToolSlugs,
+  deny: uniqueToolSlugs,
+}).strict().refine((policy) => !policy.allow.some((slug) => policy.deny.includes(slug)), 'A Composio tool cannot be both allowed and denied');
+export type ComposioToolPolicy = z.infer<typeof composioToolPolicySchema>;
+export const DEFAULT_COMPOSIO_TOOL_POLICY: ComposioToolPolicy = { groups: { readOnly: true, write: true, destructive: true }, allow: [], deny: [] };
 export const mcpComposioTransportSchema = z.object({
   type: z.literal('composio'),
   toolkit: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,159}$/u),
   connectedAccountId: identifierSchema,
-  allowedTools: z.array(identifierSchema).max(512).refine((tools) => new Set(tools).size === tools.length, 'Composio tool grants must be unique'),
+  toolPolicy: composioToolPolicySchema,
 });
 export type McpComposioTransport = z.infer<typeof mcpComposioTransportSchema>;
 export const mcpTransportSchema = z.union([mcpCustomTransportSchema, mcpComposioTransportSchema]);
@@ -144,6 +156,17 @@ export const composioPluginToolSchema = z.object({
   destructive: z.boolean(),
 });
 export type ComposioPluginTool = z.infer<typeof composioPluginToolSchema>;
+
+export function composioToolGroup(tool: Pick<ComposioPluginTool, 'readOnly' | 'destructive'>): ComposioToolGroup {
+  if (tool.destructive) return 'destructive';
+  return tool.readOnly ? 'readOnly' : 'write';
+}
+
+export function composioToolAllowed(policy: ComposioToolPolicy, tool: Pick<ComposioPluginTool, 'slug' | 'readOnly' | 'destructive'>): boolean {
+  if (policy.deny.includes(tool.slug)) return false;
+  if (policy.allow.includes(tool.slug)) return true;
+  return policy.groups[composioToolGroup(tool)];
+}
 
 export const composioPluginCatalogSchema = z.object({
   configured: z.boolean(),
@@ -252,11 +275,16 @@ const McpCustomTransportCodec = wire.union([
   wire.object({ type: wire.literal('http'), url: wire.string, headers: wire.array(HeaderBindingCodec) }),
   wire.object({ type: wire.literal('sse'), url: wire.string, headers: wire.array(HeaderBindingCodec) }),
 ]);
+export const ComposioToolPolicyCodec = wire.object({
+  groups: wire.object({ readOnly: wire.boolean, write: wire.boolean, destructive: wire.boolean }),
+  allow: wire.array(wire.string),
+  deny: wire.array(wire.string),
+});
 export const McpTransportCodec = wire.union([
   wire.object({ type: wire.literal('stdio'), command: wire.string, args: wire.array(wire.string), cwd: wire.nullable(wire.string), environment: wire.array(EnvironmentBindingCodec) }),
   wire.object({ type: wire.literal('http'), url: wire.string, headers: wire.array(HeaderBindingCodec) }),
   wire.object({ type: wire.literal('sse'), url: wire.string, headers: wire.array(HeaderBindingCodec) }),
-  wire.object({ type: wire.literal('composio'), toolkit: wire.string, connectedAccountId: wire.string, allowedTools: wire.array(wire.string) }),
+  wire.object({ type: wire.literal('composio'), toolkit: wire.string, connectedAccountId: wire.string, toolPolicy: ComposioToolPolicyCodec }),
 ]);
 export const McpConnectionDraftCodec = wire.object({
   id: wire.string,
@@ -294,10 +322,7 @@ export const ProjectMcpGrantViewCodec = wire.object({
   createdAt: wire.date,
   updatedAt: wire.date,
 });
-const JsonObjectCodec = wire.serializable(
-  (value): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value),
-  { id: 'gitspace/mcp-json-object/v1' },
-);
+const JsonObjectCodec = wire.serializable((value): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value), { id: 'gitspace/mcp-json-object/v1', jsonSchema: richObjectJsonSchema });
 export const DiscoveredMcpToolViewCodec = wire.object({
   connectionId: wire.string,
   connectionLabel: wire.string,

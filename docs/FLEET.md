@@ -453,6 +453,14 @@ before execution; there is no silent legacy alias.
   comparison, not an assumed HEAD blob. Comments on other or unverified content
   remain available separately. Failed writes retain the draft and show an
   error; replies and resolution use the current thread revision.
+- Inspector artifact and session-resource reads stream metadata followed by
+  chunks of at most 48 KiB decoded bytes. The browser accepts a preview only
+  after the stream completes and the declared byte count matches. Audio,
+  video, images, and PDFs use Blob URLs, released when their preview owner is
+  disposed. Resources are limited to 16 MiB; UTF-8 text previews remain limited
+  to 128 KiB after line selection. Binary media does not use the text-preview
+  limit. Published artifact reads also work from saved cloud artifacts while
+  a workspace is closed.
 - `packages/blocks` owns a stable reducer and schema: first-class turns,
   messages, thinking, tool calls/groups, distinct ask and permission blocks,
   todos, nested side agents/reports, interruptions, coalesced transport state,
@@ -567,6 +575,15 @@ before execution; there is no silent legacy alias.
   Application requests and agent recovery wait until the update commits.
   The machine stops event producers before flushing its cloud outbox, so active
   sessions cannot keep the shutdown queue growing.
+- Retirement for a same-machine replacement never waits on canonical session
+  uploads. Local session state is already durable, so queued publications go to
+  `canonical-session-outbox.json` in the environment root. After recovery, the
+  successor republishes them from local state in the background, together with
+  recovered sessions; admission does not wait. An entry leaves the outbox only
+  after its publication succeeds. Failures retry with backoff and on the next
+  start. Close, move, and release still wait for the cloud, and first publish
+  that workspace's outbox entries. Machine requests rejected with
+  `REQUEST_EXPIRED` are re-signed and sent exactly once more.
 - `machine-update.json` records the handoff and checkpoint boundary;
   `host-selection.json` selects the complete application for the next start.
   Bootstrap resumes an interrupted update. Failed activation stops the candidate
@@ -1090,6 +1107,22 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     from the client snapshot. Live deployment, scoped incarnation bearer grants,
     remaining providers, SSE snapshot streaming, and uncertain-refresh recovery
     remain.
+    Provider quota lookup is machine-owned, including Anthropic and Codex:
+    the maintained OMP patch leaves aggregate usage, per-account ranking, and
+    response-header quota updates on AuthStorage's local provider/cache path.
+    The broker owns credentials and coordinated OAuth refresh, not provider
+    quota polling; the account Worker does not expose `/v1/usage`. Successful
+    local reports use OMP's five-minute cache with jitter and per-process
+    in-flight coalescing. This cutover requires the patched OMP runtime together
+    with the account Worker change; an old runtime still calls the removed route.
+    Cloud credential writes bypass the machine's provider coordinator. Provider,
+    model, and usage reads therefore revalidate its AuthStorage against the
+    backing store; concurrent reads share that refresh. A changed credential
+    generation is propagated through the existing OMP auth-reload path before
+    returning the refreshed view. Failed propagation is not acknowledged, so
+    the next read retries it even if the machine cache is already current.
+    Adding, replacing, or removing a vault key does not require restarting
+    live sessions to refresh their credentials.
 20. DONE “Portable space checkpoint substrate” — one versioned manifest and one
     hierarchical key builder keep repository state at `projects/<project>/repo`
     and agent/artifact/checkpoint state under its owning space. The machine uses

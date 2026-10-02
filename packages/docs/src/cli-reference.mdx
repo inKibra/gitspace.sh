@@ -43,7 +43,7 @@ These commands do not create browser invitations. Use **Account > Connections > 
 | `gitspace --help` | Show the command tree. |
 | `gitspace --version` | Show the installed client version. |
 
-Git and the OpenSSH client are system prerequisites. Bun and walgit come with the prebuilt machine runtime. GitSpace installs the pinned OMP SDK when it first activates an OMP recipe, then reuses its local cache. That first install needs access to the package registry. You do not need a source checkout or local build tools.
+Git and the OpenSSH client are system prerequisites. Bun and walgit come with the prebuilt machine runtime, and so does Git LFS: the machine puts its pinned copy first on the `PATH` it gives to Git, terminals and agent sessions. GitSpace does not change your Git configuration; repositories that track files with LFS need the usual `filter.lfs` settings, such as those `git lfs install` writes. GitSpace installs the pinned OMP SDK when it first activates an OMP recipe, then reuses its local cache. That first install needs access to the package registry. You do not need a source checkout or local build tools.
 
 ## Software releases
 

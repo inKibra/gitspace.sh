@@ -15,6 +15,7 @@ import {
 } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
 import type { FleetCatalogDO } from './fleet-catalog.js';
+import type { CredentialVaultDO } from './application.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
 
@@ -111,11 +112,19 @@ export class TenantReleasesDO extends DurableObject<Env> {
   }
 
 
-  stage(inputValue: StageReleaseInput, builtBy: string): ReleaseRecord {
+  async stage(inputValue: StageReleaseInput, builtBy: string): Promise<ReleaseRecord> {
+    const cutover = await this.inferenceCutover();
     const input = stageReleaseInputSchema.parse(inputValue);
     const previous = this.findRelease(input.sha);
+    // A partial rebuild cannot certify legacy sibling artifacts it retained.
+    const retainsArtifacts = previous && (['worker', 'machine', 'omp', 'frontend'] as const)
+      .some((target) => input.artifacts[target] === null && previous.artifacts[target] !== null);
+    // The running Worker's own sha fingerprints the whole source tree that contains this check.
+    const inferenceVersion = input.sha === WORKER_VERSION || (input.inferenceVersion === 1 && (!retainsArtifacts || previous?.inferenceVersion === 1)) ? 1 : undefined;
+    this.requireInferenceCompatibility(inferenceVersion, input.sha, cutover);
     const record = releaseRecordSchema.parse({
       ...input,
+      inferenceVersion,
       label: previous?.label ?? input.label,
       workspaceId: previous ? previous.workspaceId : input.workspaceId,
       // Targets are independently staged; null must not erase a serving sibling.
@@ -140,10 +149,12 @@ export class TenantReleasesDO extends DurableObject<Env> {
   }
 
   /** Updates only the named target selections; all other targets retain their release. */
-  launch(inputValue: LaunchReleaseInput): LaunchResult | null {
+  async launch(inputValue: LaunchReleaseInput): Promise<LaunchResult | null> {
+    const cutover = await this.inferenceCutover();
     const input = launchReleaseInputSchema.parse(inputValue);
     const record = this.findRelease(input.sha);
     if (!record) return null;
+    this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
     const targets: ReleaseTarget[] = [...new Set(input.targets)];
     for (const target of targets) {
       if (record.artifacts[target] === null || (target === 'worker' && record.worker === null) || (target === 'omp' && record.omp === null)) {
@@ -163,19 +174,23 @@ export class TenantReleasesDO extends DurableObject<Env> {
     return { record, desired };
   }
 
-  setWorkerStatus(sha: string, status: ReleaseStatus, error: string | null): ReleaseRecord | null {
+  async setWorkerStatus(sha: string, status: ReleaseStatus, error: string | null): Promise<ReleaseRecord | null> {
+    const cutover = status === 'applied' && await this.inferenceCutover();
     const record = this.findRelease(sha);
     if (!record) return null;
+    this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
     record.status.worker = releaseStatusSchema.parse(status);
     record.error = error;
     this.saveRecord(record);
     return record;
   }
 
-  machineApplied(machineId: string, inputValue: MachineAppliedInput): ReleaseRecord | null {
+  async machineApplied(machineId: string, inputValue: MachineAppliedInput): Promise<ReleaseRecord | null> {
     const input = machineAppliedInputSchema.parse(inputValue);
+    const cutover = input.status === 'applied' && await this.inferenceCutover();
     const record = this.findRelease(input.sha);
     if (!record) return null;
+    this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
     const statuses = input.target === 'omp' ? record.status.omps : record.status.machines;
     statuses[machineId] = input.status;
     if (input.status === 'failed') {
@@ -196,8 +211,9 @@ export class TenantReleasesDO extends DurableObject<Env> {
   }
 
   /** Actual healthy channel activation, acknowledged by the enrolled machine after draining. */
-  machineChannelApplied(machineId: string, inputValue: MachineChannelAppliedInput): void {
+  async machineChannelApplied(machineId: string, inputValue: MachineChannelAppliedInput): Promise<void> {
     const input = machineChannelAppliedInputSchema.parse(inputValue);
+    await this.assertChannelCompatible();
     this.ctx.storage.sql.exec(
       input.target === 'omp'
         ? 'INSERT INTO machines(machine_id, sha, omp_sha, generation, updated_at) VALUES (?, NULL, NULL, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET omp_sha = NULL, generation = excluded.generation, updated_at = excluded.updated_at'
@@ -206,10 +222,40 @@ export class TenantReleasesDO extends DurableObject<Env> {
     );
   }
 
-  revert(): TenantDesired {
+  /** Admission trusts acknowledged binaries, never merely the desired selection. */
+  machineInferenceCompatible(machineId: string): boolean {
+    const current = this.ctx.storage.sql.exec<Pick<MachineRow, 'sha' | 'omp_sha'>>(
+      'SELECT sha, omp_sha FROM machines WHERE machine_id=?', machineId,
+    ).toArray()[0];
+    if (!current?.sha || !current.omp_sha) return false;
+    const machine = this.findRelease(current.sha);
+    if (machine?.inferenceVersion !== 1 || machine.artifacts.machine === null) return false;
+    const omp = current.omp_sha === current.sha ? machine : this.findRelease(current.omp_sha);
+    return omp?.inferenceVersion === 1 && omp.artifacts.omp !== null && omp.omp !== null;
+  }
+
+  async revert(): Promise<TenantDesired> {
+    await this.assertChannelCompatible();
     const desired: TenantDesired = { worker: null, machine: null, omp: null, frontend: null, updatedAt: new Date().toISOString() };
     this.saveDesired(desired);
     return desired;
+  }
+
+  /** Call before any external platform rollback, not only before saving selection. */
+  async assertChannelCompatible(): Promise<void> {
+    if (await this.inferenceCutover()) {
+      throw new Error('Channel inference-profile compatibility cannot be verified after account cutover. Select a source release advertising inferenceVersion 1 instead.');
+    }
+  }
+
+  private inferenceCutover(): Promise<boolean> {
+    return (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID).inferenceCutover();
+  }
+
+  private requireInferenceCompatibility(version: number | undefined, sha: string, cutover: boolean): void {
+    if (cutover && version !== 1) {
+      throw new Error(`Release ${sha} does not support inference profiles. Build and select a release advertising inferenceVersion 1; account-wide credential rollback is disabled.`);
+    }
   }
 
 
@@ -217,6 +263,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
   async status(userId: string, worker: WorkerVersion): Promise<DeploymentStatus> {
     const catalog = this.env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>;
     const fleet = await catalog.get(catalog.idFromName(userId)).listMachines();
+    const cutover = await this.inferenceCutover();
     const currentIds = new Set<string>();
     for (const machine of fleet) {
       if (machine.desiredState !== 'removed') currentIds.add(machine.id);
@@ -225,7 +272,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
     // Self-update may interrupt the acknowledgement after the platform activated it.
     if (worker.sha !== null && worker.sha === desired.worker) {
       const record = this.findRelease(worker.sha);
-      if (record?.status.worker === 'pending') {
+      if (record?.status.worker === 'pending' && (!cutover || record.inferenceVersion === 1)) {
         record.status.worker = 'applied';
         this.saveRecord(record);
       }
@@ -262,9 +309,20 @@ export class TenantReleasesDO extends DurableObject<Env> {
     );
   }
 
+  /**
+   * A release staged by a launcher that predates capability stamps (every first cutover deploy) is
+   * certified once this Worker runs as that release: its sha fingerprints the complete source tree,
+   * so all of that release's artifacts were built from source containing this code.
+   */
   private findRelease(sha: string): ReleaseRecord | null {
     const row = this.ctx.storage.sql.exec<ReleaseRow>('SELECT record_json FROM releases WHERE sha = ?', sha).toArray()[0];
-    return row ? releaseRecordSchema.parse(JSON.parse(row.record_json)) : null;
+    if (!row) return null;
+    const record = releaseRecordSchema.parse(JSON.parse(row.record_json));
+    if (sha === WORKER_VERSION && record.inferenceVersion !== 1) {
+      record.inferenceVersion = 1;
+      this.saveRecord(record);
+    }
+    return record;
   }
 
   private saveRecord(record: ReleaseRecord): void {

@@ -1,10 +1,11 @@
-import type { SkillView } from '@gitspace/protocol';
+import type { InferenceExecutionContext, SkillView } from '@gitspace/protocol';
 import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import type { CustomTool } from '@oh-my-pi/pi-coding-agent';
 import type { MCPPrompt, MCPResource, MCPResourceTemplate, MCPResourceReadResult, MCPGetPromptResult } from '@oh-my-pi/pi-coding-agent/mcp';
-import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpTranscriptEvent } from './contracts.js';
+import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpTranscriptEvent, WorkspacePhase } from './contracts.js';
+import type { WorkspaceInstructions } from './workspace-instructions.js';
 
-export const OMP_IPC_VERSION = 2;
+export const OMP_IPC_VERSION = 5;
 export type OmpToolDescriptor = Pick<CustomTool, 'name' | 'label' | 'description' | 'parameters' | 'strict' | 'hidden' | 'loadMode' | 'deferrable' | 'approval' | 'mcpServerName' | 'mcpToolName'>;
 export type OmpSessionInput = Parameters<OmpRuntime['create']>[0] & { sessionFile?: string };
 export interface OmpMcpCatalog {
@@ -14,6 +15,7 @@ export interface OmpMcpCatalog {
   resources: Record<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>;
 }
 export interface OmpChildInit {
+  inference: InferenceExecutionContext;
   agentDir: string;
   sessionRoot: string;
   skills: readonly SkillView[];
@@ -24,18 +26,25 @@ export interface OmpChildInit {
   mcpCatalog: OmpMcpCatalog;
   namespaces: { space?: string; mcp?: string };
 }
-export type SessionMethod = Exclude<keyof OmpRuntimeSession, 'id' | 'sessionFile' | 'isAvailable' | 'subscribe' | 'subscribeActivity' | 'activity' | 'reloadSettings' | 'instructionsChanged'>;
+export type SessionMethod = Exclude<keyof OmpRuntimeSession, 'id' | 'sessionFile' | 'isAvailable' | 'subscribe' | 'subscribeActivity' | 'activity' | 'reloadSettings' | 'instructionsChanged' | 'inferenceChanged'>;
 export type OmpChildApi = Pick<OmpRuntimeSession, SessionMethod> & {
   health(): Promise<{ protocolVersion: number; platform: string; arch: string; bunVersion: string; pid: number }>;
   initialize(input: OmpChildInit): Promise<{ id: string; sessionFile: string; activity: SessionActivity; failure: AgentFailure | null }>;
   reloadSettings(): Promise<void>;
   reloadAuth(): Promise<void>;
+  /** Same credential scope only: apply a new profile revision or shared Advanced generation without reopening. */
+  applyInference(context: InferenceExecutionContext): Promise<void>;
   instructionsChanged(): Promise<void>;
   refreshMcp(tools: OmpToolDescriptor[], catalog: OmpMcpCatalog): Promise<void>;
   transcript(input: { sessionFile: string } | { bytes: Uint8Array }): Promise<OmpTranscriptEvent[]>;
 };
 export interface OmpMachineApi {
+  /** Agent-written eval code only; its methods and results are dynamic. Host code uses the typed methods below. */
   namespace(input: { namespace: 'space' | 'mcp'; method: string; args: unknown }, signal?: AbortSignal): Promise<unknown>;
+  /** The session workspace's current Goal, Workflow, and Rubric. */
+  workspaceInstructions(): Promise<WorkspaceInstructions>;
+  /** Moves the session's workspace to `phase` at its current definition revision. */
+  setWorkspacePhase(phase: WorkspacePhase): Promise<void>;
   executeTool(input: { name: string; callId: string; args: unknown }, signal?: AbortSignal): Promise<unknown>;
   mcpResources(server: string): Promise<{ resources: MCPResource[]; templates: MCPResourceTemplate[] } | undefined>;
   mcpReadResource(server: string, uri: string): Promise<MCPResourceReadResult | undefined>;

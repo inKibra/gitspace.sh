@@ -1,32 +1,41 @@
-import { signedControlRequestSchema, type SignedControlRequest } from '@gitspace/protocol';
+import { SIGNED_REQUEST_MAX_AGE_MS, signedControlRequestSchema, type SignedControlRequest } from '@gitspace/protocol';
 import { tenantPlatformJson } from './tenant-platform.js';
 import type { AccountStateDO, AccountRecord } from './account-state.js';
 import type { CredentialVaultDO, CredentialVaultResult } from './application.js';
-/** The bearer is bound to one account, machine, and enrollment generation. */
-export async function machineBrokerToken(secret: string, userId: string, machineId: string, generation: number): Promise<string> {
-  if (!secret || !userId || !machineId || machineId.length > 160 || !Number.isSafeInteger(generation) || generation < 1) throw new Error('Broker identity is invalid');
-  const machine = btoa(String.fromCharCode(...new TextEncoder().encode(machineId))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
-  const payload = `gsb2.${machine}.${generation}`;
+
+export interface ProfileBrokerIdentity {
+  profileId: string;
+  machineId: string;
+  generation: number;
+  capability: 'inference' | 'manage';
+}
+
+/** Distinct purpose/version: legacy enrollment bearers cannot authorize profile access. */
+export async function profileBrokerToken(secret: string, userId: string, identity: ProfileBrokerIdentity): Promise<string> {
+  if (!secret || !userId || typeof identity.profileId !== 'string' || !/^[A-Za-z0-9._-]{1,160}$/u.test(identity.profileId)
+    || !identity.machineId || identity.machineId.length > 160
+    || !Number.isSafeInteger(identity.generation) || identity.generation < 1
+    || !['inference', 'manage'].includes(identity.capability)) throw new Error('Broker identity is invalid');
+  const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(identity)))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+  const payload = `gsip1.${encoded}`;
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${userId}\n${payload}`)));
   return `${payload}.${btoa(String.fromCharCode(...signature)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')}`;
 }
 
-export async function verifyMachineBrokerToken(secret: string, userId: string, authorization: string | null): Promise<{ machineId: string; generation: number } | null> {
-  const token = /^Bearer (gsb2\.([A-Za-z0-9_-]{1,856})\.([1-9][0-9]{0,15}))\.([A-Za-z0-9_-]{43})$/u.exec(authorization ?? '');
+export async function verifyProfileBrokerToken(secret: string, userId: string, authorization: string | null): Promise<ProfileBrokerIdentity | null> {
+  const token = /^Bearer (gsip1\.([A-Za-z0-9_-]{1,2048}))\.([A-Za-z0-9_-]{43})$/u.exec(authorization ?? '');
   if (!secret || !token) return null;
   try {
-    const generation = Number(token[3]);
-    if (!Number.isSafeInteger(generation)) return null;
-    const machineId = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(token[2]!.replaceAll('-', '+').replaceAll('_', '/')), character => character.charCodeAt(0)));
-    if (!machineId || machineId.length > 160) return null;
-    const signature = Uint8Array.from(atob(token[4]!.replaceAll('-', '+').replaceAll('_', '/')), character => character.charCodeAt(0));
+    const identity = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(token[2]!.replaceAll('-', '+').replaceAll('_', '/')), character => character.charCodeAt(0)))) as ProfileBrokerIdentity;
+    if (!identity || typeof identity.profileId !== 'string' || !/^[A-Za-z0-9._-]{1,160}$/u.test(identity.profileId)
+      || typeof identity.machineId !== 'string' || !identity.machineId || identity.machineId.length > 160
+      || !Number.isSafeInteger(identity.generation) || identity.generation < 1
+      || !['inference', 'manage'].includes(identity.capability)) return null;
     const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
-    return await crypto.subtle.verify('HMAC', key, signature, new TextEncoder().encode(`${userId}\n${token[1]}`))
-      ? { machineId, generation } : null;
-  } catch {
-    return null;
-  }
+    const signature = Uint8Array.from(atob(token[3]!.replaceAll('-', '+').replaceAll('_', '/')), character => character.charCodeAt(0));
+    return await crypto.subtle.verify('HMAC', key, signature, new TextEncoder().encode(`${userId}\n${token[1]}`)) ? identity : null;
+  } catch { return null; }
 }
 
 
@@ -50,9 +59,9 @@ export function accountAccessResponse(result: CredentialVaultResult<unknown>): R
     : null;
 }
 
-export async function authorizeControl(env: Env, request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access' | 'credential.manage'): Promise<CredentialVaultResult<{ authorized: true }>> {
+export async function authorizeControl(env: Env, request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access' | 'credential.manage', maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): Promise<CredentialVaultResult<{ authorized: true }>> {
   const vaults = env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>;
-  const authorized = await vaults.get(vaults.idFromName(request.userId)).authorizeControl(request, capability);
+  const authorized = await vaults.get(vaults.idFromName(request.userId)).authorizeControl(request, capability, maxAgeMs);
   if (authorized.status === 'error') return authorized;
   const account = await activeAccount(env, request.userId);
   return account.status === 'error' ? account : authorized;

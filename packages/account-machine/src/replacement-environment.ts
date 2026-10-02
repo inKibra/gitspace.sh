@@ -17,10 +17,13 @@ import {
   type MachineReplacementHost,
 } from '@gitspace/deployment';
 import { z } from 'zod';
-import { prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
+import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
 import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
 import { atomicJson, readJson, requestMachineUpdate } from './machine-update.js';
 import type { MachineSelection } from './machine-update.js';
+
+/** Forwarded RPCs slower than this are logged even when they succeed. */
+const HOST_PROXY_SLOW_MS = 5_000;
 
 const machineSelectionSchema = z.object({
   version: z.literal(1),
@@ -251,7 +254,7 @@ class MachineHost implements MachineReplacementHost {
       hostname: options.rpcHost ?? '127.0.0.1',
       port: options.rpcPort,
       idleTimeout: 0,
-      fetch: (request) => {
+      fetch: async (request) => {
         if (new URL(request.url).pathname !== '/health' && existsSync(join(options.root, 'machine-update.json'))) {
           return new Response('Complete machine update is not committed', { status: 503 });
         }
@@ -260,7 +263,25 @@ class MachineHost implements MachineReplacementHost {
         }
         const source = new URL(request.url);
         const target = new URL(`${source.pathname}${source.search}`, this.activeUrl);
-        return fetch(new Request(target, request));
+        const at = new Date().toISOString();
+        const started = performance.now();
+        const procedures = source.searchParams.get('p');
+        const path = procedures === null ? source.pathname : `${source.pathname}?p=${procedures.slice(0, 512)}`;
+        try {
+          const response = await fetch(new Request(target, request));
+          const durationMs = Math.round(performance.now() - started);
+          if (response.status >= 500 || durationMs > HOST_PROXY_SLOW_MS) {
+            console.warn(JSON.stringify({ event: 'host_proxy', at, method: request.method, path, status: response.status, durationMs }));
+          }
+          return response;
+        } catch (error) {
+          console.error(JSON.stringify({
+            event: 'host_proxy', at, method: request.method, path,
+            error: { name: error instanceof Error ? error.name : 'UnknownError', message: error instanceof Error ? error.message : String(error) },
+            durationMs: Math.round(performance.now() - started),
+          }));
+          throw error;
+        }
       },
     });
     options.rpcPort = this.proxy.port!;
@@ -415,13 +436,15 @@ class MachineHost implements MachineReplacementHost {
     const existing = this.running.get(pointer.socketPath);
     if (existing) return existing;
     if (await hashArtifactPath(pointer.artifactPath) !== pointer.hash) throw new Error('Machine generation integrity mismatch before start');
-    await prepareMachineNativeRuntime(pointer.artifactPath);
+    const native = await prepareMachineNativeRuntime(pointer.artifactPath);
     const bootstrap = this.options.bootstrap;
     const releaseSha = this.releaseShas.get(pointer.socketPath) ?? null;
     const process = Bun.spawn([globalThis.process.execPath, join(pointer.artifactPath, 'machine.js')], {
       cwd: this.options.repositoryRoot,
       env: processEnvironment({
         ...this.options.environment,
+        // Machine git and agent children resolve the generation's bundled git-lfs first.
+        ...machineToolEnvironment({ ...globalThis.process.env, ...this.options.environment }, native),
         GITSPACE_ENVIRONMENT_ID: this.options.id,
         GITSPACE_ENVIRONMENT_ROOT: this.options.root,
         GITSPACE_MACHINE_ID: this.options.machineId,

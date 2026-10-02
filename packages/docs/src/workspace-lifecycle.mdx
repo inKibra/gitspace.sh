@@ -49,6 +49,8 @@ If the original machine is gone, choose another authorized online runner in the 
 
 Before local removal, GitSpace drains services and runs dematerialization. It must save the checkpoint successfully before deleting the managed checkout. A failed dematerialization or checkpoint blocks deletion, not your access to the workspace. Fix the failure while the local files remain available.
 
+Failures in another workspace's session sync or another project's event sync do not fail your checkpoint. Your workspace's required session updates and your project's event log must still reach the cloud before GitSpace releases local files.
+
 A fresh arrival recreates local state. Do not rely on files left behind on the previous machine, even when you return to it.
 
 | State | What to expect after close or move |
@@ -67,9 +69,21 @@ A checkpoint is not a disk backup. If you keep a database only in an ignored loc
 
 After an unexpected interruption, the last completed checkpoint remains the recovery limit for local work. An interrupted cloud command may have taken effect without reporting success. Inspect the provider and recorded bindings before authorizing recovery. GitSpace must not retry an uncertain cloud effect in the background.
 
+## Interactive authentication
+
+Prefer setup that runs unattended. When a provider requires human authentication, choose **Run interactively** for the approved phase in Environment. A dedicated **Environment** terminal appears for the script's prompts. The confirmation explains that a person must remain available and that terminal output will not be saved.
+
+Scripts can declare this requirement with `# gitspace: interactive` in their leading comment header. Automatic preparation stops before launching a phase that requires interaction. Review and approve changed script content before starting it. See the [interactive script reference](/lifecycle-reference#interactive-scripts).
+
+The terminal lists scripts in execution order, with each step's status and exit code. Fast steps remain visible as completed. When the run succeeds or fails, input stops but the visible output stays in the open pane so you can read the final error.
+
+The runner still owns the deadline, cancellation, and result. Closing the pane or reloading discards its private output but does not stop a running script. Reopening reconnects to that same process without replay. A broken connection also clears private output. The terminal never leaves a shell with the script's injected secrets.
+
+Input echo is disabled, and raw terminal input and output stay out of persistent logs and replay. Recorded results contain safe execution metadata, not the authentication conversation. Approved scripts may write credentials into protected, ignored local files. Those files are not checkpointed: expect to authenticate again after a move or session expiry. This feature does not share sessions across projects or machines.
+
 ## Recover a failed setup
 
-Open Environment and read the phase's recorded result and logs. Preparation failure does not gate the workspace page. Use the agent or terminal when its own prerequisites are available.
+Open Environment and read the phase's recorded result and logs. For interactive runs, read private error output in the still-open terminal; saved history contains only safe execution metadata. Preparation failure does not gate the workspace page. Use the agent or terminal when its own prerequisites are available.
 
 **View log** opens one script's output and exit status at a time. Scroll down to load more, or use **Copy selected script** to load and copy that script's complete recorded output. Running scripts copy output recorded so far. A later script failure does not change an earlier script's successful result; a script without a recorded exit is not reported as a confirmed failure. Older unframed logs may offer only a clearly labeled saved preview, not a complete-copy action.
 

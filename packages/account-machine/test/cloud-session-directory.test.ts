@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentSession } from '@gitspace/core';
 import type { CanonicalSession } from '@gitspace/protocol';
-import { CloudCanonicalSessionWriter, type CanonicalSessionAuthority } from '../src/cloud-session-directory.js';
+import { CanonicalSessionOutbox, CloudCanonicalSessionWriter, type CanonicalSessionAuthority } from '../src/cloud-session-directory.js';
 import { EncryptedCheckpointBlobStore } from '../src/portable-space-lifecycle.js';
 
 const checkpointKey = new Uint8Array(32).fill(7);
@@ -77,6 +77,29 @@ const unusedBlobs = {
   put: async (): Promise<`sha256:${string}`> => { throw new Error('Unexpected checkpoint upload'); },
 };
 
+function outbox(): CanonicalSessionOutbox {
+  const root = mkdtempSync(join(tmpdir(), 'gitspace-canonical-outbox-'));
+  roots.push(root);
+  return new CanonicalSessionOutbox(join(root, 'canonical-session-outbox.json'));
+}
+
+function memoryAuthority(): CanonicalSessionAuthority & { records: Map<string, CanonicalSession> } {
+  const records = new Map<string, CanonicalSession>();
+  return {
+    records,
+    getCanonicalSession: async (projectId, sessionId) => records.get(JSON.stringify([projectId, sessionId])) ?? null,
+    putCanonicalSession: async (projectId, input) => {
+      const now = new Date().toISOString();
+      const record = { ...input, revision: input.expectedRevision + 1, createdAt: now, updatedAt: now };
+      records.set(JSON.stringify([projectId, input.id]), record);
+      return record;
+    },
+  };
+}
+
+const storedHash = async (_key: string, bytes: Uint8Array): Promise<`sha256:${string}`> =>
+  `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`;
+
 describe('CloudCanonicalSessionWriter', () => {
   it('moves one canonical OMP session between two machine projections', async () => {
     let canonical: CanonicalSession | null = null;
@@ -116,13 +139,13 @@ describe('CloudCanonicalSessionWriter', () => {
       updatedAt: new Date().toISOString(),
     };
     const errors: unknown[] = [];
-    const machineA = new CloudCanonicalSessionWriter(authority, blobs, (error) => errors.push(error));
+    const machineA = new CloudCanonicalSessionWriter(authority, blobs, (error) => errors.push(error), outbox());
     machineA.put('project-a', 'machine-a', base, true);
     await machineA.flush();
     expect(canonical).toMatchObject({ machineId: 'machine-a', revision: 1, sessionObjectHash: expect.stringMatching(/^sha256:/u) });
     expect(await blobs.get(canonical!.sessionObjectKey!, canonical!.sessionObjectHash!)).toEqual(new Uint8Array(Buffer.from('{"type":"session","id":"omp-a"}\n')));
 
-    const machineB = new CloudCanonicalSessionWriter(authority, blobs, (error) => errors.push(error));
+    const machineB = new CloudCanonicalSessionWriter(authority, blobs, (error) => errors.push(error), outbox());
     machineB.put('project-a', 'machine-b', { ...base, state: 'closed' });
     await machineB.flush();
     expect(canonical).toMatchObject({ machineId: 'machine-b', state: 'closed', revision: 2 });
@@ -132,7 +155,7 @@ describe('CloudCanonicalSessionWriter', () => {
   it('coalesces a deferred status burst to the latest state with revision fencing', async () => {
     const authority = new DeferredAuthority();
     const errors: unknown[] = [];
-    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, (error) => errors.push(error));
+    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, (error) => errors.push(error), outbox());
     const session = sessionFixture();
     writer.put('project-a', 'machine-a', session);
     const first = await authority.call(0);
@@ -169,7 +192,7 @@ describe('CloudCanonicalSessionWriter', () => {
         return `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`;
       },
     }, checkpointKey);
-    const writer = new CloudCanonicalSessionWriter(authority, blobs, (error) => errors.push(error));
+    const writer = new CloudCanonicalSessionWriter(authority, blobs, (error) => errors.push(error), outbox());
     const firstCheckpoint = sessionFixture(1);
     const secondCheckpoint = sessionFixture(3);
     writer.put('project-a', 'machine-a', sessionFixture());
@@ -208,7 +231,7 @@ describe('CloudCanonicalSessionWriter', () => {
 
   it('seals the status observed by flush without waiting for a later status', async () => {
     const authority = new DeferredAuthority();
-    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, () => {});
+    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, () => {}, outbox());
     const session = sessionFixture();
     writer.put('project-a', 'machine-a', session);
     const initial = await authority.call(0);
@@ -231,7 +254,7 @@ describe('CloudCanonicalSessionWriter', () => {
   it('rejects overlapping flushes for an earlier failure even when their latest state succeeds', async () => {
     const authority = new DeferredAuthority();
     const errors: unknown[] = [];
-    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, (error) => errors.push(error));
+    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, (error) => errors.push(error), outbox());
     const session = sessionFixture();
     writer.put('project-a', 'machine-a', session);
     const initial = await authority.call(0);
@@ -253,9 +276,80 @@ describe('CloudCanonicalSessionWriter', () => {
     await writer.flush();
   });
 
+  it('isolates historical failures by publication project and workspace without acknowledging other scopes', async () => {
+    const authority = new DeferredAuthority();
+    const failed = Promise.withResolvers<void>();
+    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, () => failed.resolve(), outbox());
+    const session = sessionFixture();
+    const failure = new Error('Historical authority failure');
+    writer.put('project-old', 'machine-a', session);
+    (await authority.call(0)).fail(failure);
+    await failed.promise;
+
+    // The same workspace ID under another actual publication project is unrelated.
+    writer.put('project-a', 'machine-a', session);
+    const healthy = writer.flush({ projectId: 'project-a', spaceId: session.spaceId });
+    (await authority.call(1)).succeed();
+    await healthy;
+    await writer.flush({ projectId: 'project-old', spaceId: 'workspace-other' });
+    await expect(writer.flush()).rejects.toBe(failure);
+    await writer.flush();
+  });
+
+  it('finishes a scoped barrier while unrelated publications remain in flight and ignores their failures', async () => {
+    const authority = new DeferredAuthority();
+    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, () => {}, outbox());
+    const session = sessionFixture();
+    writer.put('project-a', 'machine-a', { ...session, id: 'unrelated-failing', spaceId: 'workspace-other' });
+    writer.put('project-a', 'machine-a', { ...session, id: 'unrelated-stalled', spaceId: 'workspace-other' });
+    writer.put('project-a', 'machine-a', session);
+    const scoped = writer.flush({ projectId: 'project-a', spaceId: session.spaceId });
+    const failure = new Error('Unrelated in-flight failure');
+    (await authority.call(0)).fail(failure);
+    (await authority.call(2)).succeed();
+    await scoped;
+    const full = writer.flush().catch((error: unknown) => error);
+    (await authority.call(1)).succeed();
+    expect(await full).toBe(failure);
+    await writer.flush();
+  });
+
+  it('retains each workspace failure when another scoped barrier acknowledges its own failure', async () => {
+    const authority = new DeferredAuthority();
+    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, () => {}, outbox());
+    const session = sessionFixture();
+    writer.put('project-a', 'machine-a', session);
+    writer.put('project-a', 'machine-a', { ...session, id: 'session-b', spaceId: 'workspace-b' });
+    const ownFailure = new Error('Own failure');
+    const otherFailure = new Error('Other failure');
+    const scoped = writer.flush({ projectId: 'project-a', spaceId: session.spaceId }).catch((error: unknown) => error);
+    (await authority.call(1)).fail(otherFailure);
+    (await authority.call(0)).fail(ownFailure);
+    expect(await scoped).toBe(ownFailure);
+    await expect(writer.flush()).rejects.toBe(otherFailure);
+    await writer.flush();
+  });
+
+  it('rejects a workspace barrier for an earlier unacknowledged checkpoint upload failure', async () => {
+    const authority = new DeferredAuthority();
+    const failed = Promise.withResolvers<void>();
+    const failure = new Error('Checkpoint upload failed');
+    const writer = new CloudCanonicalSessionWriter(authority, {
+      put: async () => { throw failure; },
+    }, () => failed.resolve(), outbox());
+    const session = sessionFixture();
+    writer.put('project-a', 'machine-a', session, true);
+    await failed.promise;
+    writer.put('project-a', 'machine-a', { ...session, state: 'closed' });
+    const scoped = writer.flush({ projectId: 'project-a', spaceId: session.spaceId }).catch((error: unknown) => error);
+    (await authority.call(0)).succeed();
+    expect(await scoped).toBe(failure);
+    await writer.flush();
+  });
+
   it('bounds concurrent authority work without conflating sessions from different projects', async () => {
     const authority = new DeferredAuthority();
-    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, () => {});
+    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, () => {}, outbox());
     const session = sessionFixture();
     for (let index = 0; index < 12; index++) {
       writer.put(`project-${index % 2}`, 'machine-a', { ...session, id: `session-${Math.floor(index / 2)}` });
@@ -281,7 +375,7 @@ describe('CloudCanonicalSessionWriter', () => {
       },
       get: async (key) => objects.get(key) ?? null,
     }, checkpointKey);
-    const writer = new CloudCanonicalSessionWriter(authority, blobs, () => {});
+    const writer = new CloudCanonicalSessionWriter(authority, blobs, () => {}, outbox());
     writer.put('project-a', 'machine-a', session, true);
     const flushed = writer.flush();
     const checkpoint = await authority.call(0);
@@ -296,5 +390,106 @@ describe('CloudCanonicalSessionWriter', () => {
     const chunk = [...objects.keys()].find((key) => key.includes('.chunks/'))!;
     objects.delete(chunk);
     await expect(blobs.get(saved!.sessionObjectKey!, saved!.sessionObjectHash!)).rejects.toThrow();
+  });
+});
+
+describe('canonical session outbox', () => {
+  it('hands a same-machine successor every queued checkpoint without waiting for a stalled upload', async () => {
+    const handoff = outbox();
+    const uploading = Promise.withResolvers<void>();
+    const writer = new CloudCanonicalSessionWriter(new DeferredAuthority(), {
+      put: () => {
+        uploading.resolve();
+        return new Promise<never>(() => {});
+      },
+    }, () => {}, handoff);
+    const queued = { ...sessionFixture(), id: 'session-b', ompSessionId: 'omp-b' };
+    writer.put('project-a', 'machine-a', sessionFixture(), true);
+    writer.put('project-b', 'machine-a', queued);
+    writer.put('project-b', 'machine-a', queued, true);
+    await uploading.promise;
+    await writer.settle('replace');
+    expect(await handoff.entries()).toEqual([
+      { projectId: 'project-a', sessionId: 'session-a', checkpoint: true, token: expect.any(String) },
+      { projectId: 'project-b', sessionId: 'session-b', checkpoint: true, token: expect.any(String) },
+    ]);
+  });
+
+  it('still waits for the cloud and surfaces its failure when the machine releases its spaces', async () => {
+    const handoff = outbox();
+    const uploading = Promise.withResolvers<void>();
+    const upload = Promise.withResolvers<`sha256:${string}`>();
+    const writer = new CloudCanonicalSessionWriter(new DeferredAuthority(), {
+      put: () => {
+        uploading.resolve();
+        return upload.promise;
+      },
+    }, () => {}, handoff);
+    writer.put('project-a', 'machine-a', sessionFixture(), true);
+    const stopping = writer.settle('release');
+    await uploading.promise;
+    const failure = new Error('upload failed');
+    upload.reject(failure);
+    await expect(stopping).rejects.toBe(failure);
+    expect(await handoff.entries()).toEqual([]);
+  });
+
+  it('replays a predecessor outbox, retaining only entries whose publication failed', async () => {
+    const handoff = outbox();
+    await handoff.record([
+      { projectId: 'project-a', sessionId: 'session-a', checkpoint: true },
+      { projectId: 'project-a', sessionId: 'session-b', checkpoint: true },
+      { projectId: 'project-a', sessionId: 'session-gone', checkpoint: true },
+    ]);
+    const local: Record<string, AgentSession> = {
+      'session-a': sessionFixture(1),
+      'session-b': { ...sessionFixture(2), id: 'session-b', ompSessionId: 'omp-b' },
+    };
+    const authority = memoryAuthority();
+    const failure = new Error('upload failed');
+    const errors: unknown[] = [];
+    const successor = new CloudCanonicalSessionWriter(authority, {
+      put: async (key, bytes) => {
+        if (key.includes('/session-b/')) throw failure;
+        return storedHash(key, bytes);
+      },
+    }, (error) => errors.push(error), handoff);
+    await expect(successor.replay('machine-a', (sessionId) => local[sessionId] ?? null)).rejects.toBe(failure);
+    expect(authority.records.get(JSON.stringify(['project-a', 'session-a']))).toMatchObject({
+      machineId: 'machine-a', sessionFormatVersion: 'omp-checkpoint-1', health: { revision: 1 },
+    });
+    expect(authority.records.has(JSON.stringify(['project-a', 'session-b']))).toBe(false);
+    expect((await handoff.entries()).map((entry) => entry.sessionId)).toEqual(['session-b']);
+    expect(errors).toEqual([failure]);
+
+    const nextStartup = new CloudCanonicalSessionWriter(authority, { put: storedHash }, () => {}, handoff);
+    await nextStartup.replay('machine-a', (sessionId) => local[sessionId] ?? null);
+    expect(authority.records.get(JSON.stringify(['project-a', 'session-b']))).toMatchObject({ sessionFormatVersion: 'omp-checkpoint-1' });
+    expect(await handoff.entries()).toEqual([]);
+  });
+
+  it('drains only the requested sessions and keeps a handoff recorded while its older entry was replaying', async () => {
+    const handoff = outbox();
+    await handoff.record([
+      { projectId: 'project-a', sessionId: 'session-a', checkpoint: false },
+      { projectId: 'project-a', sessionId: 'session-b', checkpoint: true },
+    ]);
+    const local: Record<string, AgentSession> = {
+      'session-a': sessionFixture(),
+      'session-b': { ...sessionFixture(), id: 'session-b', ompSessionId: 'omp-b' },
+    };
+    const authority = new DeferredAuthority();
+    const writer = new CloudCanonicalSessionWriter(authority, unusedBlobs, () => {}, handoff);
+    const draining = writer.replay('machine-a', (sessionId) => local[sessionId] ?? null, ['session-a']);
+    const publication = await authority.call(0);
+    expect(publication.input.id).toBe('session-a');
+    await handoff.record([{ projectId: 'project-a', sessionId: 'session-a', checkpoint: true }]);
+    publication.succeed();
+    await draining;
+    expect(authority.calls).toHaveLength(1);
+    expect(await handoff.entries()).toEqual([
+      { projectId: 'project-a', sessionId: 'session-a', checkpoint: true, token: expect.any(String) },
+      { projectId: 'project-a', sessionId: 'session-b', checkpoint: true, token: expect.any(String) },
+    ]);
   });
 });

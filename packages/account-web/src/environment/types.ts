@@ -69,6 +69,7 @@ export interface LifecycleScript {
   phase: LifecyclePhase;
   path: string;
   command: string;
+  interactive?: boolean;
   profiles?: readonly string[];
   trust: TrustState;
   lastRun: LifecycleRun;
@@ -155,5 +156,5 @@ export interface EnvironmentViewProps {
   onOpenLifecycleFile?(scriptId: string): void;
   onOpenLifecycleOutput?(scriptId: string): void;
   onRunChecks(): void;
-  onRunLifecycle(phase: LifecyclePhase, options?: { rerun?: boolean; retire?: boolean }): void;
+  onRunLifecycle(phase: LifecyclePhase, options?: { rerun?: boolean; retire?: boolean; interactive?: boolean }): void;
 }

@@ -2,6 +2,7 @@
   "name": "@gitspace/account-web",
   "version": "0.0.0",
   "private": true,
+  "gitspace": { "inferenceVersion": 1 },
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -158,7 +158,9 @@ export interface CoordinatorPortableArtifactSnapshot {
 export interface CanonicalSessionWriter {
   get(projectId: string, sessionId: string): Promise<CanonicalSession | null>;
   put(projectId: string, machineId: string, session: AgentSession, checkpoint?: boolean): void;
-  flush?(): Promise<void>;
+  flush?(scope?: { projectId: string; spaceId: string }): Promise<void>;
+  /** Publishes durable outbox entries for these sessions, removing each only after it succeeds. */
+  replay?(machineId: string, sessions: (sessionId: string) => AgentSession | null, sessionIds?: readonly string[]): Promise<void>;
 }
 
 export interface ArtifactManifestAuthority {
@@ -189,7 +191,7 @@ export class MachineSessionCoordinator {
     private readonly omp: OmpRuntime,
     private readonly machineId: string,
     private readonly runtimeRoot: string,
-    private readonly events?: ProjectEventWriter & { flush?(): Promise<void> },
+    private readonly events?: ProjectEventWriter & { flush?(projectId?: string): Promise<void> },
     private readonly managedSpaceRoot: string = dirname(runtimeRoot),
     private readonly canonicalSessions?: CanonicalSessionWriter,
     private readonly artifactManifests?: ArtifactManifestAuthority,
@@ -965,8 +967,10 @@ export class MachineSessionCoordinator {
     const scope = this.database.orm.select().from(artifactScopes).where(eq(artifactScopes.spaceId, spaceId)).get();
     if (!scope || scope.dirty || scope.generation !== generation || (generation > 0 && !scope.manifestHash)) throw runtimeError('checkpoint artifacts', new Error('Durable artifact scope is missing'), session.id);
     const verified = await this.artifacts.verifyScope(scope);
-    await this.canonicalSessions?.flush?.();
-    await this.events?.flush?.();
+    // A predecessor's handed-over checkpoint must reach the cloud before this disk copy can be released.
+    await this.canonicalSessions?.replay?.(this.machineId, (sessionId) => this.get(sessionId), [session.id]);
+    await this.canonicalSessions?.flush?.({ projectId: space.projectId, spaceId });
+    await this.events?.flush?.(space.projectId);
     if (verified.status === 'error') throw runtimeError('checkpoint artifacts', verified.error, session.id);
     return {
       agent: {
@@ -1238,7 +1242,7 @@ export class MachineSessionCoordinator {
     const next = (live.artifactSync ?? Promise.resolve(0)).catch(() => 0).then(async () => {
       await this.refreshCanonicalArtifacts(live);
       await this.refreshArtifactMount(live, live.capability.kind === 'workspace' ? 'workspace' : 'base', true);
-      if (live.capability.kind === 'workspace') await this.refreshArtifactMount(live, 'base', false);
+      if (live.capability.kind === 'workspace' && this.database.getSpace(live.capability.projectId)) await this.refreshArtifactMount(live, 'base', false);
       return 0;
     });
     live.artifactSync = next;
@@ -1356,6 +1360,11 @@ export class MachineSessionCoordinator {
       if (metadata && !metadata.isDirectory()) throw new Error(`Retained artifact mount ${root} is not a directory`);
       if (!metadata && savedBaseline && mount === writable && artifactBaseline.size > 0) {
         throw new Error(`Retained artifact mount ${root} is missing; refusing to infer deletions`);
+      }
+      // A base released from this machine has no local scope; its read-only mount stays empty until it returns.
+      if (mount !== writable && !this.database.getSpace(capability.projectId)) {
+        await mkdir(root, { recursive: true });
+        continue;
       }
       const listed = this.artifacts.list(capability, `local://${mount}/`);
       if (listed.status === 'error') throw listed.error;
@@ -1478,9 +1487,16 @@ export class MachineSessionCoordinator {
       observe('execution', failure);
     }
     const nextActivity = disconnected ? disconnectedAgentActivity(current.activity) : activity;
-    if (health === current.health && JSON.stringify(current.activity) === JSON.stringify(nextActivity) && (!disconnected || current.state === 'failed')) return;
+    // A worker that reconnects on its own clears a failure that only its disconnect caused. Recovery
+    // failures, an interrupted turn awaiting resume, and opening/closing flows keep their own state.
+    const reconnected = !disconnected && current.state === 'failed' && live?.runtime === runtime && !current.resumePending
+      && !this.recoveringSessions.has(sessionId) && !this.quiesced.has(sessionId) && currentAgentFailure(health, 'recovery') === null;
+    if (health === current.health && JSON.stringify(current.activity) === JSON.stringify(nextActivity) && !reconnected && (!disconnected || current.state === 'failed')) return;
     if (health.revision <= current.health.revision) health = { ...health, revision: current.health.revision + 1 };
-    this.commitAgentState(current, { activity: nextActivity, health, ...(disconnected ? { state: 'failed', resumePending: current.resumePending || hasExecutingTurn(current.activity) } : {}) }, changes);
+    this.commitAgentState(current, {
+      activity: nextActivity, health,
+      ...(disconnected ? { state: 'failed', resumePending: current.resumePending || hasExecutingTurn(current.activity) } : reconnected ? { state: 'active' } : {}),
+    }, changes);
   }
 
   private appendEvent(sessionId: string, event: OmpRuntimeEvent): void {
@@ -1594,6 +1610,8 @@ export class MachineSessionCoordinator {
     const writableSpace = live.capability.kind === 'workspace' ? live.capability.workspaceId : live.capability.projectId;
     for (const scope of scopes) {
       if (scope.workspaceId !== writableSpace && scope.workspaceId !== live.capability.projectId) continue;
+      // A released base's canonical scope is restored when the base itself returns to this machine.
+      if (scope.workspaceId !== writableSpace && !this.database.getSpace(scope.workspaceId)) continue;
       const local = this.database.orm.select().from(artifactScopes).where(eq(artifactScopes.spaceId, scope.workspaceId)).get();
       if (local && this.artifactPublicationBases.has(local.spaceId) && !local.dirty
         && local.manifestHash !== scope.manifestHash && scope.generation >= local.generation) {
@@ -1660,7 +1678,7 @@ export class MachineSessionCoordinator {
     if (committed.status === 'error') throw committed.error;
     const published = await this.publishArtifactScope(live.capability.projectId, committed.value);
     await this.refreshArtifactMount(live, artifactScope, true);
-    if (live.capability.kind === 'workspace') await this.refreshArtifactMount(live, 'base', false);
+    if (live.capability.kind === 'workspace' && this.database.getSpace(live.capability.projectId)) await this.refreshArtifactMount(live, 'base', false);
     await this.persistArtifactBaseline(live);
     this.events?.append({
       projectId: live.capability.projectId, scope: 'artifact', entity: 'artifact', entityId: artifactUrl,

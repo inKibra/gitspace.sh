@@ -1,55 +1,85 @@
 import type { SpacePlacementView } from '@gitspace/protocol';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
-import type { BootstrapViewCodec } from '@gitspace/protocol/rpc-contract';
+import type { SpaceViewCodec } from '@gitspace/protocol/rpc-contract';
 import type { InputOf } from 'result-rpc';
-import { createContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { SidebarProject, SidebarSpaceSummary, SidebarWorkspace } from './AppSidebar.js';
 import type { ProjectLifecycleView, WorkspaceView } from './GitSpaceShell.js';
-import { createGitSpaceBrowserClient, rpcClient } from './rpc-client.js';
+import { rpcClient } from './rpc-client.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 import { ACCOUNT_DIRECTORY_CHANGED } from './routes.js';
 import { useSynchronizationOwner } from './SynchronizationProvider.js';
 import { accountDirectorySource } from './account-directory-transport.js';
 import type { SynchronizationSource } from './synchronization.js';
 
 export type Directory = Record<string, Pick<SidebarProject, 'workspaces' | 'baseSummary' | 'error'>>;
-export interface DirectoryClient {
-  bootstrap(input: { projectId: string; workspaceId: string | null }, options: { signal: AbortSignal; endpoint: string }): Promise<{ status: 'ok'; value: Pick<InputOf<typeof BootstrapViewCodec>, 'baseSpace' | 'workspaces'> } | { status: 'error'; error: Error }>;
+export interface WorkspaceProjection {
+  directory: Directory;
+  acceptRuntime: (projectId: string, spaceId: string, summary: SidebarSpaceSummary) => (() => void) | undefined;
 }
-const runtimeClients = new Map<string, Pick<typeof rpcClient, 'bootstrap'>>();
-const directoryClient: DirectoryClient = {
-  bootstrap(input, { signal, endpoint }) {
-    let client = runtimeClients.get(endpoint);
-    if (!client) { client = createGitSpaceBrowserClient({ url: endpoint }); runtimeClients.set(endpoint, client); }
-    return client.bootstrap(input, { signal });
-  },
-};
+export interface DirectoryClient {
+  spaceView(input: { projectId: string; workspaceId: string | null }, options: { signal: AbortSignal }): Promise<{ status: 'ok'; value: Pick<InputOf<typeof SpaceViewCodec>, 'baseSpace' | 'workspaces'> } | { status: 'error'; error: Error }>;
+}
+/** The account forwards each read to the space's current holder. */
+const directoryClient: DirectoryClient = { spaceView: (input, { signal }) => rpcClient.space.view(input, { signal }) };
 export const AccountDirectoryContext = createContext<{
   projects: readonly ProjectLifecycleView[];
   directory: Directory;
   loading: boolean;
   refresh: () => void;
+  acceptRuntime?: WorkspaceProjection['acceptRuntime'];
 } | null>(null);
 type ReadResult<T> = { value: T; error: null } | { value: null; error: string };
 
 async function readResult<T>(request: Promise<{ status: 'ok'; value: T } | { status: 'error'; error: Error }>): Promise<ReadResult<T>> {
   try {
     const result = await request;
-    return result.status === 'ok' ? { value: result.value, error: null } : { value: null, error: result.error.message };
+    return result.status === 'ok' ? { value: result.value, error: null } : { value: null, error: rpcErrorMessage(result.error, 'space.view') };
   } catch (error) {
-    return { value: null, error: error instanceof Error ? error.message : String(error) };
+    return { value: null, error: rpcErrorMessage(error, 'space.view') };
   }
 }
 
 /** One account projection owns cloud lifecycle; native reads only enrich current holders. */
-export function useAccountDirectory(projects: readonly Pick<ProjectLifecycleView, 'id' | 'lifecycle'>[], client: DirectoryClient = directoryClient, source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource): Directory {
+export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleView, 'id' | 'lifecycle'>[], client: DirectoryClient = directoryClient, source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource): WorkspaceProjection {
   const owner = useSynchronizationOwner();
   const accepted = useRef<Directory>({});
   const [directory, setDirectory] = useState<Directory>(accepted.current);
+  const observations = useRef(new Map<string, { revision: number; summary: SidebarSpaceSummary; active: boolean }>());
+  const observationRevision = useRef(0);
+  const acceptRuntime = useCallback((projectId: string, spaceId: string, summary: SidebarSpaceSummary) => {
+    const authority = owner.channel('account-directory', source).snapshot();
+    const placement = authority.value?.placements.find((item) => item.projectId === projectId && item.spaceId === spaceId);
+    const definition = authority.value?.workspaces.find((item) => item.projectId === projectId && item.id === spaceId);
+    const machine = authority.value?.machines.find((item) => item.id === placement?.holderId);
+    const current = accepted.current[projectId];
+    if (!current || !definition || definition.archivedAt || definition.lifecycle === 'deleting' || authority.resync || authority.transportError
+      || machine?.state !== 'online' || machine.desiredState !== 'online' || !placement?.endpoint
+      || placement.state !== 'open' || summary.closedAt || summary.holder.kind !== 'held'
+      || summary.holder.machineId !== placement.holderId || summary.generation !== placement.generation) return;
+    const key = JSON.stringify([projectId, spaceId]);
+    const observation = { revision: ++observationRevision.current, summary, active: true };
+    observations.current.set(key, observation);
+    const previous = spaceId === projectId ? current.baseSummary : current.workspaces.find((space) => space.id === spaceId)?.summary;
+    if (!previous || previous.status !== summary.status || previous.generation !== summary.generation || previous.closedAt !== summary.closedAt
+      || previous.freshness !== summary.freshness || previous.detail !== summary.detail || previous.refreshing !== summary.refreshing
+      || previous.creation !== summary.creation || previous.holder.kind !== 'held'
+      || previous.holder.machineId !== summary.holder.machineId || previous.holder.label !== summary.holder.label) {
+      accepted.current = { ...accepted.current, [projectId]: spaceId === projectId
+        ? { ...current, baseSummary: summary }
+        : { ...current, workspaces: current.workspaces.map((space) => space.id === spaceId ? { ...space, summary } : space) } };
+      setDirectory(accepted.current);
+    }
+    return () => { observation.active = false; };
+  }, [owner, source]);
   const scope = useRef(projects);
   scope.current = projects;
   const reconcileScope = useRef(() => {});
   const projectKey = JSON.stringify(projects.map(({ id, lifecycle }) => ({ id, lifecycle })));
   useEffect(() => {
+    accepted.current = {};
+    observations.current.clear();
+    setDirectory(accepted.current);
     const controller = new AbortController();
     const channel = owner.channel('account-directory', source);
     type ProjectWork = { key: string; revision: number; reading: boolean; pending: (() => Promise<void>) | null; directoryFailed: boolean; holderKeys: Map<string, string>; holderErrors: Map<string, string> };
@@ -62,6 +92,15 @@ export function useAccountDirectory(projects: readonly Pick<ProjectLifecycleView
       const entries = scope.current.filter((project) => project.lifecycle !== 'cloud-only' && project.lifecycle !== 'deleting' && (!value || projectIds.has(project.id)));
       const ids = new Set(entries.map((project) => project.id));
       for (const [id, state] of work) if (!ids.has(id)) { state.revision++; state.pending = null; work.delete(id); }
+      for (const key of observations.current.keys()) {
+        const [projectId, spaceId] = JSON.parse(key) as [string, string];
+        const observation = observations.current.get(key)!;
+        const placement = value?.placements.find((item) => item.projectId === projectId && item.spaceId === spaceId);
+        const definition = value?.workspaces.find((item) => item.projectId === projectId && item.id === spaceId);
+        if (!ids.has(projectId) || !definition || definition.archivedAt || definition.lifecycle === 'deleting' || placement?.state !== 'open'
+          || placement.generation !== observation.summary.generation || observation.summary.holder.kind !== 'held'
+          || placement.holderId !== observation.summary.holder.machineId) observations.current.delete(key);
+      }
       if (Object.keys(accepted.current).some((id) => !ids.has(id))) {
         accepted.current = Object.fromEntries(Object.entries(accepted.current).filter(([id]) => ids.has(id)));
         setDirectory(accepted.current);
@@ -146,6 +185,12 @@ export function useAccountDirectory(projects: readonly Pick<ProjectLifecycleView
         if (base || (!value && prior?.baseSummary)) summaries.set(project.id, summarize(project.id, base ? base.archivedAt ? new Date(base.archivedAt) : null : prior?.baseSummary?.closedAt ?? null, prior?.baseSummary));
         for (const space of workspaces) {
           const previous = previousWorkspaces.get(space.id);
+          const lifecycle = space.definition?.lifecycle;
+          // An unfinished or failed creation has no placement or runtime to read yet.
+          if (lifecycle === 'provisioning' || lifecycle === 'failed') {
+            summaries.set(space.id, { closedAt: space.closedAt, holder: { kind: 'unknown' }, freshness: 'fresh', refreshing: false, creation: lifecycle });
+            continue;
+          }
           const summary = summarize(space.id, space.closedAt, previous?.summary);
           summaries.set(space.id, summary);
           const runtime = previous?.runtime;
@@ -153,6 +198,16 @@ export function useAccountDirectory(projects: readonly Pick<ProjectLifecycleView
         }
         const publish = (error: string | null) => {
           if (!current()) return;
+          for (const [id, summary] of summaries) {
+            const observation = observations.current.get(JSON.stringify([project.id, id]));
+            if (observation && summary.holder.kind === 'held' && observation.summary.holder.kind === 'held'
+              && summary.holder.machineId === observation.summary.holder.machineId && summary.generation === observation.summary.generation
+              && !summary.closedAt && placements.get(id)?.state === 'open') {
+              // Reconciliation owns availability; the accepted activity cannot regress to an older read.
+              summaries.set(id, { ...summary, status: observation.summary.status,
+                ...(directoryError || summary.detail ? {} : { freshness: observation.summary.freshness, detail: observation.summary.detail }) });
+            }
+          }
           accepted.current = { ...accepted.current, [project.id]: {
             baseSummary: summaries.get(project.id),
             workspaces: workspaces.map((space) => ({ ...space, summary: summaries.get(space.id), runtime: runtimes.get(space.id) })), error,
@@ -164,7 +219,8 @@ export function useAccountDirectory(projects: readonly Pick<ProjectLifecycleView
         currentWork.pending = async () => {
           if (!current()) return;
           await Promise.all([...holders].map(async ([holderId, placement]) => {
-            const runtime = await readResult(client.bootstrap({ projectId: project.id, workspaceId: placement.spaceId === project.id ? null : placement.spaceId }, { signal: controller.signal, endpoint: placement.endpoint! }));
+            const observedRevision = observationRevision.current;
+            const runtime = await readResult(client.spaceView({ projectId: project.id, workspaceId: placement.spaceId === project.id ? null : placement.spaceId }, { signal: controller.signal }));
             if (!current()) return;
             if (runtime.value) {
               for (const space of [runtime.value.baseSpace, ...runtime.value.workspaces]) {
@@ -176,6 +232,13 @@ export function useAccountDirectory(projects: readonly Pick<ProjectLifecycleView
                     runtimes.delete(space.id);
                     summaries.set(space.id, { ...summary, status: undefined });
                     continue;
+                  }
+                  const key = JSON.stringify([project.id, space.id]);
+                  const observation = observations.current.get(key);
+                  if (observation && observation.revision <= observedRevision) {
+                    // A directory read updates activity, not an open pane's connection/control readiness.
+                    if (observation.active) observation.summary = { ...observation.summary, status: space.status };
+                    else observations.current.delete(key);
                   }
                   summaries.set(space.id, { ...summary, status: space.status, freshness: 'fresh', refreshing: false, detail: null });
                   if ('phase' in space) runtimes.set(space.id, {
@@ -221,5 +284,5 @@ export function useAccountDirectory(projects: readonly Pick<ProjectLifecycleView
     return () => { controller.abort(); stop(); reconcileScope.current = () => {}; window.removeEventListener(ACCOUNT_DIRECTORY_CHANGED, changed); };
   }, [client, owner, source]);
   useEffect(() => { reconcileScope.current(); }, [projectKey]);
-  return directory;
+  return { directory, acceptRuntime };
 }

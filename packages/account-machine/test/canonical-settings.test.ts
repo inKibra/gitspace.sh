@@ -57,7 +57,7 @@ describe('canonical OMP settings synchronization', () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-settings-'));
     roots.push(root);
     const agentDir = join(root, '.pi');
-    const cloud = new FakeCloud('cycleOrder:\n  - default\n');
+    const cloud = new FakeCloud('theme: titanium\n');
     let reloads = 0;
     const coordinator = new CanonicalSettingsCoordinator(cloud, 'machine-a', agentDir, root, async () => { reloads += 1; });
     await coordinator.start();
@@ -65,12 +65,12 @@ describe('canonical OMP settings synchronization', () => {
     const unsubscribe = coordinator.subscribe((event) => observed.push(event.ompGeneration));
     expect(readFileSync(join(agentDir, 'config.yml'), 'utf8')).toBe(cloud.document.content);
 
-    const localEdit = 'cycleOrder:\n  - slow\n';
+    const localEdit = 'theme: light\n';
     writeFileSync(join(agentDir, 'config.yml'), localEdit);
     await waitFor(() => cloud.document.content === localEdit);
     expect(cloud.document.generation).toBe(2);
 
-    const remoteEdit = 'cycleOrder:\n  - smol\n';
+    const remoteEdit = 'theme: dark\n';
     cloud.document = { generation: 3, content: remoteEdit, checksum: hash(remoteEdit), updatedAt: new Date().toISOString(), updatedBy: 'machine-b' };
     cloud.publish();
     await waitFor(() => readFileSync(join(agentDir, 'config.yml'), 'utf8') === remoteEdit);
@@ -85,7 +85,7 @@ describe('canonical OMP settings synchronization', () => {
     roots.push(root);
     const agentDir = join(root, '.pi');
     mkdirSync(agentDir, { recursive: true });
-    const content = 'cycleOrder:\n  - slow\n';
+    const content = 'theme: titanium\n';
     writeFileSync(join(agentDir, 'config.yml'), content);
     const cloud = new FakeCloud('');
     cloud.getOmpConfig = async () => { throw new Error('offline'); };
@@ -94,5 +94,42 @@ describe('canonical OMP settings synchronization', () => {
     expect(readFileSync(join(agentDir, 'config.yml'), 'utf8')).toBe(content);
     expect((await coordinator.getOmpSettings()).document).toMatchObject({ generation: 0, content });
     await coordinator.stop();
+  });
+
+  it('shows GitSpace managed defaults in Advanced until the account configures the setting', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-settings-managed-'));
+    roots.push(root);
+    const agentDir = join(root, '.pi');
+    mkdirSync(agentDir, { recursive: true });
+    const cloud = new FakeCloud('');
+    cloud.getOmpConfig = async () => { throw new Error('offline'); };
+    const coordinator = new CanonicalSettingsCoordinator(cloud, 'machine-a', agentDir, root, async () => undefined);
+    await coordinator.start();
+    const imageSetting = async () => (await coordinator.getOmpSettings()).schema.find((item) => item.path === 'generate_image.enabled');
+    expect(await imageSetting()).toMatchObject({ value: true, defaultJson: 'true' });
+    await coordinator.setOmpSetting('generate_image.enabled', false);
+    expect(await imageSetting()).toMatchObject({ value: false, defaultJson: 'true' });
+    await coordinator.stop();
+  });
+
+  it('rejects shared inference edits and never exposes an unsafe offline raw-credential replica', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-settings-scope-'));
+    roots.push(root);
+    const agentDir = join(root, '.pi');
+    const cloud = new FakeCloud('theme: titanium\n');
+    const coordinator = new CanonicalSettingsCoordinator(cloud, 'machine-a', agentDir, root, async () => undefined);
+    await coordinator.start();
+    try {
+      await expect(coordinator.setOmpSetting('cycleOrder', ['client'])).rejects.toThrow('Inference');
+      await expect(coordinator.setOmpSetting('auth.broker.token', 'private-token')).rejects.toThrow('Providers');
+      expect(cloud.document.content).toBe('theme: titanium\n');
+    } finally { await coordinator.stop(); }
+    resetSettingsForTest();
+    writeFileSync(join(agentDir, 'config.yml'), 'auth:\n  broker:\n    token: private-token\n');
+    cloud.getOmpConfig = async () => { throw new Error('offline'); };
+    const offline = new CanonicalSettingsCoordinator(cloud, 'machine-a', agentDir, root, async () => undefined);
+    await offline.start();
+    try { await expect(offline.getOmpSettings()).rejects.toThrow('raw credentials'); }
+    finally { await offline.stop(); }
   });
 });

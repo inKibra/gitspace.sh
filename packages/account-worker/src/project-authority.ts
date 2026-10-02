@@ -817,7 +817,21 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return result;
   }
 
-  bootstrap(input: {
+  async bootstrap(input: {
+    id: string;
+    name: string;
+    repositoryReference: string | null;
+    baseBranch: string;
+    createdBy: string;
+  }): Promise<CloudProjectSummary> {
+    const project = this.bootstrapProject(input);
+    await (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID).ensureProjectInference(project.id);
+    const current = this.requireProject();
+    if (current.lifecycle === 'archived' || current.lifecycle === 'deleting') throw new Error(`Cannot bootstrap ${current.lifecycle} project`);
+    return current;
+  }
+
+  private bootstrapProject(input: {
     id: string;
     name: string;
     repositoryReference: string | null;
@@ -826,6 +840,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }): CloudProjectSummary {
     return this.commit('project', input.id, () => {
     const current = this.getProject();
+    if (current && current.id !== input.id) throw new Error('Project identity mismatch');
     if (current?.lifecycle === 'archived' || current?.lifecycle === 'deleting') {
       throw new Error(`Cannot bootstrap ${current.lifecycle} project`);
     }
@@ -846,13 +861,14 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  ensureGitSpaceProject(input: CloudProjectSummary): CloudProjectSummary {
-    return this.commit('project', input.id, () => {
+  async ensureGitSpaceProject(input: CloudProjectSummary): Promise<CloudProjectSummary> {
+    const project = this.commit('project', input.id, () => {
     if (input.role !== GITSPACE_SOURCE_PROJECT_ROLE || !isGitSpaceSourceRepository(input.repositoryReference)) throw new Error('Invalid built-in GitSpace project identity');
     const current = this.getProject();
     if (current && current.id !== input.id) throw new Error('Project identity mismatch');
+    if (current?.lifecycle === 'deleting') throw new Error('Deleted project identity cannot be restored');
     if (!current) {
-      this.bootstrap({ ...input, createdBy: 'account' });
+      this.bootstrapProject({ ...input, createdBy: 'account' });
     } else if (current.role === GITSPACE_SOURCE_PROJECT_ROLE && current.revision >= input.revision) {
       return current;
     }
@@ -864,6 +880,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     );
     return this.requireProject();
     });
+    await (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID).ensureProjectInference(project.id);
+    return this.requireProject();
   }
 
   activateSourceProject(expectedRevision: number, baseBranch: string): CloudProjectSummary {
@@ -874,6 +892,18 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid source branch');
     this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,source_json=?,lifecycle=?,revision=revision+1,updated_at=?',
       baseBranch, JSON.stringify({ ...current.source, branch: baseBranch }), 'active', new Date().toISOString());
+    return this.requireProject();
+    });
+  }
+
+  setBaseBranch(expectedRevision: number, baseBranch: string): CloudProjectSummary {
+    return this.commit('project', null, () => {
+    const current = this.requireProject();
+    if (current.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
+    if (current.lifecycle !== 'active') throw new Error(`Project must be active to change its base branch; it is ${current.lifecycle}`);
+    if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
+    if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid base branch');
+    this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,revision=revision+1,updated_at=?', baseBranch, new Date().toISOString());
     return this.requireProject();
     });
   }
@@ -921,7 +951,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     this.requireLifecycleWorkspace(spaceId);
     return this.environment.runLog(spaceId, runId, offset);
   }
-  setProjectLifecycle(expectedRevision: number, lifecycle: ProjectLifecycle): CloudProjectSummary {
+  async setProjectLifecycle(expectedRevision: number, lifecycle: ProjectLifecycle): Promise<CloudProjectSummary> {
+    if (lifecycle === 'deleting') return this.deleteProject(expectedRevision);
     return this.commit('project', null, () => {
     const current = this.requireProject();
     if (current.lifecycle === 'deleting') throw new Error('Deleted project identity cannot be restored');
@@ -1032,14 +1063,16 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  deleteProject(expectedRevision: number): CloudProjectSummary {
-    return this.commit('project', null, () => {
+  async deleteProject(expectedRevision: number): Promise<CloudProjectSummary> {
+    const deleted = this.commit('project', null, () => {
     const project = this.requireProject();
     if (project.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be deleted. Close its workspaces instead.');
+    // A retry must finish vault cleanup even when the original caller never received
+    // the revision produced by the durable deletion tombstone.
+    if (project.lifecycle === 'deleting') return project;
     if (project.revision !== expectedRevision) {
       throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
     }
-    if (project.lifecycle === 'deleting') return project;
     for (const workspace of this.listWorkspaces()) this.environment.assertRetired(project.id, workspace.id);
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions');
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes');
@@ -1048,8 +1081,16 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec('DELETE FROM hosted_routes');
     this.ctx.storage.sql.exec('DELETE FROM workspaces');
     this.ctx.storage.sql.exec('DELETE FROM project_mcp_grants');
-    return this.setProjectLifecycle(expectedRevision, 'deleting');
+    this.ctx.storage.sql.exec(
+      'UPDATE project SET lifecycle=?,revision=revision+1,archived_at=NULL,updated_at=?',
+      'deleting', new Date().toISOString(),
+    );
+    return this.requireProject();
     });
+    // Revoke canonical authority first: interrupted cleanup can only retain an
+    // assignment that blocks profile deletion, never authorize a deleted project.
+    await (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID).removeProjectInference(deleted.id);
+    return deleted;
   }
 
   createOperation(input: {

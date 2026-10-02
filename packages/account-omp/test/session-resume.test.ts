@@ -63,7 +63,7 @@ await writeFile(join(agentDir, 'config.yml'), JSON.stringify({
 }));
 const auth = await AuthStorage.create(join(root, 'auth.sqlite'));
 const runtime = new EmbeddedOmpRuntime({ agentDir, sessionRoot: join(root, 'sessions'), authStorage: async () => auth,
-  spaceNamespace: { declaration: '{}', call: async () => instructions },
+  workspaceControls: { instructions: async () => instructions, setPhase: async () => undefined },
 });
 let session;
 let instructionNotices = 0;
@@ -106,7 +106,8 @@ try {
       goalsForRequests: ['initial', 'initial', 'latest'],
       uninterruptedAfterEdit: true,
       instructionNotices: 1,
-      failureAfterInterrupt: interrupt === 'handoff' ? null : 'AGENT_EXECUTION_FAILED',
+      // A user Stop and a machine handoff are deliberate interrupts, not execution failures.
+      failureAfterInterrupt: null,
     });
   } finally {
     child.kill('SIGKILL');

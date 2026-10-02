@@ -7,6 +7,8 @@ import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSe
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
 import { serveArtifactShare } from './account-inspector-data.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
+import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
+import { mcpAccessStatusRequestSchema, mcpAccessChangeRequestSchema, mcpAccessEnableRequestSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
 import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
@@ -14,6 +16,8 @@ import {
   ompConfigUpdateSchema,
   sealCredentialForMachine,
   signedControlRequestSchema,
+  SIGNED_REQUEST_MAX_AGE_MS,
+  SIGNED_UPLOAD_MAX_AGE_MS,
   userSettingsUpdateSchema,
   verifyCredentialAccessRequest,
   skillUpdateSchema,
@@ -37,15 +41,20 @@ import {
   decodeSignedRpcHeader,
   verifyRpcSignature,
   RPC_DEVICE_HEADER,
-  RPC_SIGNATURE_MAX_SKEW_MS,
   MACHINE_PAIRING_TTL_MS,
   credentialAuthorityGrantPayload,
   type CredentialAuthorityGrant,
   type DeviceCapability,
+  type VerifiedDevice,
 } from '@gitspace/protocol';
+import {
+  DEFAULT_INFERENCE_PROFILE_ID, inferenceCreateInputSchema, inferenceUpdateInputSchema,
+  inferenceDeleteInputSchema, inferenceAssignInputSchema,
+  type InferenceProfile, type InferenceState, type InferenceExecutionContext,
+} from '@gitspace/protocol/inference';
 import { LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, type LifecycleState } from '@gitspace/protocol-environment';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
-import { consumeDurableStream } from './durable-stream.js';
+import { consumeDurableStream, DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import {
   platformDeployResponseSchema,
   stageReleaseInputSchema,
@@ -55,7 +64,6 @@ import {
 } from '@gitspace/protocol/deployment';
 import { refreshCredential, ProviderRefreshError, type StoredOAuthCredential } from './providers.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
-import { fetchUsageReports, type OmpUsageResponse } from './omp-usage.js';
 import { ProjectSecretsDO } from './project-secrets.js';
 import {
   ProjectCronAlreadyRunningError,
@@ -103,12 +111,13 @@ import { AccountStateDO } from './account-state.js';
 import type { SpaceAuthorityResult } from '@gitspace/protocol-workspace';
 import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
-import { accountAccessResponse, machineBrokerToken, verifyMachineBrokerToken, activeAccount, authorizeControl } from './account-access.js';
+import { accountAccessResponse, profileBrokerToken, verifyProfileBrokerToken, activeAccount, authorizeControl, type ProfileBrokerIdentity } from './account-access.js';
 import { machineProviderFor } from './machine-providers.js';
 import {
   McpConnectionNotFoundError,
   McpConnectionRevisionConflictError,
   McpConnectionValidationError,
+  validateComposioToolPolicy,
   UserMcpConnectionsDO,
 } from './local-mcp.js';
 import {
@@ -121,7 +130,14 @@ import {
   type LaunchResult,
 } from './tenant-releases.js';
 
-const REQUEST_MAX_SKEW_MS = 60_000;
+/** `request_nonces` accepts `data.put` for the upload window, the longest it admits. */
+const REQUEST_NONCE_RETENTION_MS = SIGNED_UPLOAD_MAX_AGE_MS;
+/**
+ * Tolerated clock skew for persisted enrollment material (invite `issuedAt`, binding
+ * `boundAt`). Not a request-signature window: it bounds pre-dating inside the
+ * five-minute invitation lifetime, which a wider window would make vacuous.
+ */
+const ENROLLMENT_CLOCK_SKEW_MS = 60_000;
 const REQUEST_MAX_BYTES = 512 * 1024;
 const DATA_OBJECT_MAX_BYTES = 64 * 1024 * 1024;
 const DATA_REQUEST_HEADER_MAX_BYTES = 8 * 1024;
@@ -154,7 +170,7 @@ interface BrowserInvitationValue {
   status: BrowserInvitationRow['status'];
   deviceId: string | null;
 }
-// OMP 18.1.10's write contract, without importing its Bun-only auth-storage runtime.
+// OMP 18.2.11's write contract, without importing its Bun-only auth-storage runtime.
 const brokerUploadSchema = z.strictObject({
   provider: z.string().trim().min(1).max(160),
   credential: z.discriminatedUnion('type', [
@@ -198,7 +214,7 @@ type MachinePairingValue =
   | { pairingId: string; state: PairingRow['state'] }
   | { pairingId: string; state: PairingRow['state']; expiresAt: number; machine: z.infer<typeof pairingMachineSchema> | null; grant: CredentialAuthorityGrant | null; issuerChain: DeviceGrantRecord[] }
   | { state: 'pending' }
-  | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; apiUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant; brokerUrl: string; brokerToken: string; artifactKey: string };
+  | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; apiUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant; artifactKey: string };
 const PAIRING_CAPABILITIES: DeviceCapability[] = ['devices.manage', 'fleet.control', 'rpc.write', 'session.prompt', 'deployment.control'];
 
 function brokerCredentialIdentity(credential: StoredVaultCredential): string | null {
@@ -233,9 +249,6 @@ async function accountIdForRootPublicKey(rootPublicKey: string): Promise<string 
   }
 }
 
-
-const OMP_USAGE_CACHE_MS = 30_000;
-
 export type CredentialVaultResult<T> =
   | { status: 'ok'; value: T }
   | { status: 'error'; error: { code: string; message: string; retryAfterMs?: number } };
@@ -256,6 +269,16 @@ interface CredentialRow extends Record<string, SqlStorageValue> {
   expires_at: number;
   state: string;
 }
+
+interface InferenceProfileRow extends Record<string, SqlStorageValue> {
+  profile_id: string;
+  profile_json: string;
+  deleted_at: string | null;
+  credential_generation: number;
+}
+export type InferenceWriteResult =
+  | { status: 'ok'; value: InferenceState }
+  | { status: 'conflict'; resource: 'inference-profile' | 'inference-assignment'; expected: number; actual: number };
 
 interface OmpCredentialRow extends CredentialRow {
   row_id: number;
@@ -329,11 +352,11 @@ function publicError(code: string, message: string, retryAfterMs?: number): Cred
 }
 
 export class CredentialVaultDO extends DurableObject<Env> {
-  /** Aggregated usage reports, cached in-memory for OMP_USAGE_CACHE_MS so widget polls don't hammer provider endpoints. */
-  private usageCache: { expiresAt: number; value: OmpUsageResponse } | undefined;
-
+  private inferenceMigration: Promise<InferenceState> | null = null;
+  private readonly inferenceChanges: DurableChangeLog;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.inferenceChanges = new DurableChangeLog(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS vault_config (
@@ -392,6 +415,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
           revision INTEGER NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mcp_access (
+          id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL,
+          device_id TEXT, sealed_key TEXT, token_hash TEXT, updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS request_nonces (
           nonce TEXT PRIMARY KEY,
           used_at INTEGER NOT NULL
@@ -406,11 +433,237 @@ export class CredentialVaultDO extends DurableObject<Env> {
           id INTEGER PRIMARY KEY CHECK (id = 1),
           generation INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS inference_profiles (
+          profile_id TEXT PRIMARY KEY, profile_json TEXT NOT NULL,
+          deleted_at TEXT, credential_generation INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS inference_assignments (
+          project_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS inference_deleted_projects (project_id TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS inference_migration (
+          id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL,
+          revision INTEGER NOT NULL, settings_generation INTEGER
+        );
+        INSERT OR IGNORE INTO inference_migration(id, version, revision) VALUES (1, 0, 0);
       `);
       this.ctx.storage.sql.exec('INSERT OR IGNORE INTO credential_snapshot(id, generation) VALUES (1, ?)', Date.now());
       const columns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(credential_devices)').toArray();
       if (!columns.some((column) => column.name === 'grant_json')) this.ctx.storage.sql.exec('ALTER TABLE credential_devices ADD COLUMN grant_json TEXT');
+      const legacyColumns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(oauth_credentials)').toArray();
+      if (!legacyColumns.some(column => column.name === 'profile_id')) this.ctx.storage.sql.exec("ALTER TABLE oauth_credentials ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default'");
     });
+  }
+
+  /** Local lifecycle hook; never calls a project authority and cannot deadlock registration. */
+  ensureProjectInference(projectId: string): void {
+    if (!projectId) throw new Error('Project identity is required');
+    this.ctx.storage.transactionSync(() => {
+      if (this.ctx.storage.sql.exec('SELECT project_id FROM inference_deleted_projects WHERE project_id = ?', projectId).toArray().length) return;
+      this.ensureDefaultProfile();
+      if (this.ctx.storage.sql.exec('INSERT OR IGNORE INTO inference_assignments(project_id, profile_id, revision) VALUES (?, ?, 0)', projectId, DEFAULT_INFERENCE_PROFILE_ID).rowsWritten) this.inferenceChanged();
+    });
+  }
+
+  removeProjectInference(projectId: string): void {
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('INSERT OR IGNORE INTO inference_deleted_projects(project_id) VALUES (?)', projectId);
+      if (this.ctx.storage.sql.exec('DELETE FROM inference_assignments WHERE project_id = ?', projectId).rowsWritten) this.inferenceChanged();
+    });
+  }
+
+  inferenceCutover(): boolean {
+    const row = this.ctx.storage.sql.exec<{ version: number; settings_generation: number | null }>('SELECT version, settings_generation FROM inference_migration WHERE id = 1').one();
+    return row.version === 1 || row.settings_generation !== null;
+  }
+
+  private legacyCredentialConflict(): boolean {
+    return this.inferenceCutover()
+      && this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'oauth_credentials'").toArray().length > 0
+      && this.ctx.storage.sql.exec('SELECT id FROM oauth_credentials LIMIT 1').toArray().length > 0;
+  }
+
+  private ensureDefaultProfile(): void {
+    const now = new Date().toISOString();
+    const profile: InferenceProfile = { version: 1, id: DEFAULT_INFERENCE_PROFILE_ID, name: 'Default', revision: 0, settings: {}, createdAt: now, updatedAt: now };
+    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO inference_profiles(profile_id, profile_json, credential_generation) VALUES (?, ?, ?)',
+      profile.id, JSON.stringify(profile), this.ctx.storage.sql.exec<{ generation: number }>('SELECT generation FROM credential_snapshot WHERE id = 1').one().generation);
+  }
+
+  /** Retryable two-authority migration; no public state is returned before both halves agree. */
+  async ensureInference(): Promise<InferenceState> {
+    if (this.legacyCredentialConflict()) throw new Error('Legacy credentials were written after inference cutover; protected forward repair is required');
+    if (this.ctx.storage.sql.exec<{ version: number }>('SELECT version FROM inference_migration WHERE id = 1').one().version === 1) return this.inferenceState();
+    if (this.inferenceMigration) return this.inferenceMigration;
+    this.inferenceMigration = this.migrateInference();
+    try { return await this.inferenceMigration; } finally { this.inferenceMigration = null; }
+  }
+
+  private async migrateInference(): Promise<InferenceState> {
+    const config = this.config();
+    if (!config) throw new Error('Account credential vault is unavailable');
+    const platform = await tenantPlatformJson<{ deployment: { active: string | null } }>(this.env, '/state');
+    if (!WORKER_VERSION || platform.deployment?.active !== WORKER_VERSION) throw new Error('Inference activation requires a committed profile-compatible Worker release; wait for deployment health verification');
+    const settings = (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id);
+    const prepared = await settings.prepareInferenceMigration();
+    const projects = await (this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(config.user_id).list();
+    this.ctx.storage.transactionSync(() => {
+      const scoped = this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inference_credentials'").toArray().length > 0;
+      if (!scoped) {
+        // Irreversible isolation only after the platform committed this healthy Worker.
+        // Renaming preserves rowids, encrypted AAD and every existing refresh lease.
+        this.ctx.storage.sql.exec('ALTER TABLE oauth_credentials RENAME TO inference_credentials');
+        this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS credentials_profile ON inference_credentials(profile_id, provider, state)');
+      } else if (this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'oauth_credentials'").toArray().length
+        && this.ctx.storage.sql.exec('SELECT id FROM oauth_credentials LIMIT 1').toArray().length) {
+        throw new Error('Legacy credentials were written after inference cutover; protected forward repair is required');
+      }
+      this.ensureDefaultProfile();
+      const migration = this.ctx.storage.sql.exec<{ settings_generation: number | null }>('SELECT settings_generation FROM inference_migration WHERE id = 1').one();
+      if (migration.settings_generation === null) {
+        const profile = this.requireInferenceProfile(DEFAULT_INFERENCE_PROFILE_ID);
+        profile.settings = prepared.settings;
+        this.ctx.storage.sql.exec('UPDATE inference_profiles SET profile_json = ? WHERE profile_id = ?', JSON.stringify(profile), profile.id);
+        this.ctx.storage.sql.exec('UPDATE inference_migration SET settings_generation = ? WHERE id = 1', prepared.generation);
+      } else if (migration.settings_generation !== prepared.generation) throw new Error('Inference migration settings changed; forward repair is required');
+      for (const project of projects) if (project.lifecycle !== 'deleting') this.ensureProjectInference(project.id);
+    });
+    await settings.finishInferenceMigration(prepared.generation);
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('UPDATE inference_migration SET version = 1 WHERE id = 1');
+      this.inferenceChanged();
+    });
+    return this.inferenceState();
+  }
+
+  private inferenceState(): InferenceState {
+    return {
+      version: 1,
+      revision: this.ctx.storage.sql.exec<{ revision: number }>('SELECT revision FROM inference_migration WHERE id = 1').one().revision,
+      profiles: this.ctx.storage.sql.exec<InferenceProfileRow>('SELECT * FROM inference_profiles WHERE deleted_at IS NULL ORDER BY rowid').toArray().map(row => JSON.parse(row.profile_json) as InferenceProfile),
+      assignments: this.ctx.storage.sql.exec<{ project_id: string; profile_id: string; revision: number }>('SELECT project_id, profile_id, revision FROM inference_assignments ORDER BY project_id').toArray()
+        .map(row => ({ projectId: row.project_id, profileId: row.profile_id, revision: row.revision })),
+    };
+  }
+
+  private requireInferenceProfile(profileId: string): InferenceProfile {
+    const row = this.ctx.storage.sql.exec<InferenceProfileRow>('SELECT * FROM inference_profiles WHERE profile_id = ? AND deleted_at IS NULL', profileId).toArray()[0];
+    if (!row) throw new Error('Inference profile is unavailable');
+    return JSON.parse(row.profile_json) as InferenceProfile;
+  }
+
+  async watchInference(after: number | null): Promise<DurableStreamSubscription> {
+    await this.ensureInference();
+    return this.inferenceChanges.watch('inference', after, () => this.inferenceState());
+  }
+
+  private inferenceChanged(): void {
+    this.ctx.storage.sql.exec('UPDATE inference_migration SET revision = revision + 1 WHERE id = 1');
+    if (this.ctx.storage.sql.exec<{ version: number }>('SELECT version FROM inference_migration WHERE id = 1').one().version === 1) {
+      this.inferenceChanges.append('inference', this.inferenceState());
+      this.ctx.waitUntil(Promise.resolve().then(() => this.inferenceChanges.wake()));
+    }
+    const config = this.config();
+    if (config) {
+      const revision = this.ctx.storage.sql.exec<{ revision: number }>('SELECT revision FROM inference_migration WHERE id = 1').one().revision;
+      this.ctx.waitUntil((this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id).inferenceChanged(revision));
+    }
+  }
+
+  async createInferenceProfile(input: z.infer<typeof inferenceCreateInputSchema>): Promise<InferenceState> {
+    const parsed = inferenceCreateInputSchema.parse(input);
+    await this.ensureInference();
+    return this.ctx.storage.transactionSync(() => {
+      const source = this.requireInferenceProfile(parsed.sourceProfileId ?? DEFAULT_INFERENCE_PROFILE_ID);
+      const now = new Date().toISOString();
+      const profile: InferenceProfile = { ...source, id: crypto.randomUUID(), name: parsed.name, revision: 0, createdAt: now, updatedAt: now };
+      this.ctx.storage.sql.exec('INSERT INTO inference_profiles(profile_id, profile_json, credential_generation) VALUES (?, ?, 0)', profile.id, JSON.stringify(profile));
+      this.inferenceChanged();
+      return this.inferenceState();
+    });
+  }
+
+  async updateInferenceProfile(input: z.infer<typeof inferenceUpdateInputSchema>): Promise<InferenceWriteResult> {
+    const validated = inferenceUpdateInputSchema.safeParse(input);
+    if (!validated.success) throw new Error('Inference settings are invalid; keep credentials in the profile provider vault');
+    const parsed = validated.data;
+    await this.ensureInference();
+    return this.ctx.storage.transactionSync(() => {
+      const profile = this.requireInferenceProfile(parsed.profileId);
+      if (profile.revision !== parsed.expectedRevision) return { status: 'conflict', resource: 'inference-profile', expected: parsed.expectedRevision, actual: profile.revision };
+      const next: InferenceProfile = { ...profile, name: parsed.name, settings: parsed.settings, revision: profile.revision + 1, updatedAt: new Date().toISOString() };
+      this.ctx.storage.sql.exec('UPDATE inference_profiles SET profile_json = ? WHERE profile_id = ?', JSON.stringify(next), profile.id);
+      this.inferenceChanged();
+      return { status: 'ok', value: this.inferenceState() };
+    });
+  }
+
+  async deleteInferenceProfile(input: z.infer<typeof inferenceDeleteInputSchema>): Promise<InferenceWriteResult> {
+    const parsed = inferenceDeleteInputSchema.parse(input);
+    await this.ensureInference();
+    return this.ctx.storage.transactionSync(() => {
+      const profile = this.requireInferenceProfile(parsed.profileId);
+      if (profile.revision !== parsed.expectedRevision) return { status: 'conflict', resource: 'inference-profile', expected: parsed.expectedRevision, actual: profile.revision };
+      if (profile.id === DEFAULT_INFERENCE_PROFILE_ID) throw new Error('Default inference profile cannot be deleted');
+      if (this.ctx.storage.sql.exec('SELECT project_id FROM inference_assignments WHERE profile_id = ? LIMIT 1', profile.id).toArray().length) throw new Error('Reassign this profile’s projects before deleting it');
+      this.ctx.storage.sql.exec('UPDATE inference_profiles SET deleted_at = ?, credential_generation = credential_generation + 1 WHERE profile_id = ?', new Date().toISOString(), profile.id);
+      this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'disabled' WHERE profile_id = ?", profile.id);
+      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id IN (SELECT id FROM inference_credentials WHERE profile_id = ?)', profile.id);
+      this.inferenceChanged();
+      return { status: 'ok', value: this.inferenceState() };
+    });
+  }
+
+  async assignInferenceProfile(input: z.infer<typeof inferenceAssignInputSchema>): Promise<InferenceWriteResult> {
+    const parsed = inferenceAssignInputSchema.parse(input);
+    await this.ensureInference();
+    await this.requireInferenceProject(parsed.projectId);
+    return this.ctx.storage.transactionSync(() => {
+      this.requireInferenceProfile(parsed.profileId);
+      if (this.ctx.storage.sql.exec('SELECT project_id FROM inference_deleted_projects WHERE project_id = ?', parsed.projectId).toArray().length) throw new Error('Project has been deleted');
+      const current = this.ctx.storage.sql.exec<{ revision: number }>('SELECT revision FROM inference_assignments WHERE project_id = ?', parsed.projectId).toArray()[0];
+      if (!current) throw new Error('Project inference assignment is unavailable');
+      if (current.revision !== parsed.expectedRevision) return { status: 'conflict', resource: 'inference-assignment', expected: parsed.expectedRevision, actual: current.revision };
+      this.ctx.storage.sql.exec('UPDATE inference_assignments SET profile_id = ?, revision = revision + 1 WHERE project_id = ?', parsed.profileId, parsed.projectId);
+      this.inferenceChanged();
+      return { status: 'ok', value: this.inferenceState() };
+    });
+  }
+
+  private async requireInferenceProject(projectId: string): Promise<void> {
+    const config = this.config();
+    if (!config) throw new Error('Account credential vault is unavailable');
+    const authority = await requireConfigurationProject(this.env, config.user_id, projectId);
+    const project = await authority.getProject();
+    if (!project || project.id !== projectId || project.lifecycle === 'deleting') throw new Error('Project is unavailable');
+  }
+
+  async resolveInference(machineId: string, projectId: string | null, profileId?: string): Promise<InferenceExecutionContext> {
+    await this.ensureInference();
+    if (projectId !== null) await this.requireInferenceProject(projectId);
+    const config = this.config()!;
+    if (!await tenantReleases(this.env, config.user_id).machineInferenceCompatible(machineId)) throw new Error('Upgrade this machine and OMP to a committed inference-profile-compatible release');
+    const advanced = await (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id).getOmp();
+    const assignment = projectId === null ? null : this.ctx.storage.sql.exec<{ profile_id: string; revision: number }>('SELECT profile_id, revision FROM inference_assignments WHERE project_id = ?', projectId).toArray()[0];
+    if (projectId !== null && !assignment) throw new Error('Project inference assignment is unavailable');
+    const profile = this.requireInferenceProfile(assignment?.profile_id ?? profileId ?? '');
+    const device = this.device(machineId);
+    const capability = projectId === null ? 'manage' : 'inference';
+    if (!device || !this.authorizeBroker(machineId, device.generation, capability === 'manage' ? 'credential.manage' : 'credential.access')) throw new Error('Inference broker access is not authorized');
+    if (!this.env.GITSPACE_OMP_BROKER_TOKEN) throw new Error('Inference broker is unavailable');
+    const token = await profileBrokerToken(this.env.GITSPACE_OMP_BROKER_TOKEN, config.user_id, { profileId: profile.id, machineId, generation: device.generation, capability });
+    // Recheck after signing: a deleted scope must never be disclosed by an in-flight resolver.
+    if (!this.authorizeProfileBroker({ profileId: profile.id, machineId, generation: device.generation, capability })) throw new Error('Inference broker access ended');
+    return { version: 1, projectId, assignmentRevision: assignment?.revision ?? null, profile, advanced,
+      broker: { url: `${this.env.ACCOUNT_URL.replace(/\/+$/u, '')}/omp/users/${encodeURIComponent(config.user_id)}/profiles/${encodeURIComponent(profile.id)}`, token } };
+  }
+
+  authorizeProfileBroker(identity: ProfileBrokerIdentity): boolean {
+    return this.inferenceCutover()
+      && this.ctx.storage.sql.exec<{ version: number }>('SELECT version FROM inference_migration WHERE id = 1').one().version === 1
+      && !this.legacyCredentialConflict()
+      && this.ctx.storage.sql.exec('SELECT profile_id FROM inference_profiles WHERE profile_id = ? AND deleted_at IS NULL', identity.profileId).toArray().length === 1
+      && this.authorizeBroker(identity.machineId, identity.generation, identity.capability === 'manage' ? 'credential.manage' : 'credential.access');
   }
 
   bootstrap(input: { userId: string; rootPublicKey: string; vaultKey: string }): CredentialVaultResult<{ userId: string }> {
@@ -530,7 +783,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       header,
       signingPublicKey: config.root_public_key,
       target,
-      maxSkewMs: REQUEST_MAX_SKEW_MS,
+      maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS,
     });
     if (verified.status === 'error') return publicError('ROOT_UNAUTHORIZED', verified.error.message);
     return this.consumeRequestNonce(verified.value.nonce, verified.value.timestamp);
@@ -541,6 +794,121 @@ export class CredentialVaultDO extends DurableObject<Env> {
 
   authorizeAccountDeviceRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
     return this.authorizeRpcRequest(input, false);
+  }
+
+  /** Current tenant-local authority, including issuer revocation and expiration. */
+  currentDeviceGrant(deviceId: string): VerifiedDevice | null {
+    const config = this.config();
+    if (!config || config.user_id !== this.env.ACCOUNT_ID || config.root_public_key !== this.env.AUTH_PUBLIC_KEY) return null;
+    const resolve = (id: string) => {
+      const record = this.deviceGrant(id);
+      return record?.invite.invite.userId === config.user_id ? record : null;
+    };
+    const record = resolve(deviceId);
+    return record ? verifyDeviceGrantRecord(record, credentialProtocolBase64.decode(config.root_public_key), Date.now(), resolve) : null;
+  }
+  private mcpAccessRow() {
+    return this.ctx.storage.sql.exec<{ revision: number; device_id: string | null; sealed_key: string | null; token_hash: string | null; updated_at: string }>(
+      'SELECT revision, device_id, sealed_key, token_hash, updated_at FROM mcp_access WHERE id = 1',
+    ).toArray()[0];
+  }
+
+  private mcpAccessView(): McpAccessView {
+    const row = this.mcpAccessRow();
+    const record = row?.device_id ? this.deviceGrant(row.device_id) : null;
+    return {
+      revision: row?.revision ?? 0, enabled: !!row?.token_hash,
+      active: !!row?.token_hash && !!row.device_id && !!this.currentDeviceGrant(row.device_id),
+      endpoint: new URL('/mcp', this.env.ACCOUNT_URL).href, deviceId: row?.device_id ?? null,
+      scope: record?.invite.invite.scope ?? null, capabilities: record?.invite.invite.capabilities ?? [],
+      expiresAt: record ? deviceGrantExpiresAt(record) : null, updatedAt: row?.updated_at ?? null,
+    };
+  }
+
+  private async mcpTokenHash(token: string): Promise<string> {
+    return credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))));
+  }
+
+  /** Browser-only setup; no signing material is ever returned to the caller. */
+  async mcpAccessRequest(input: { operation: McpAccessOperation; header: string | null; target: string; body: Uint8Array }): Promise<McpAccessResult> {
+    const schema = input.operation === 'enable' ? mcpAccessEnableRequestSchema : input.operation === 'status' ? mcpAccessStatusRequestSchema : mcpAccessChangeRequestSchema;
+    const parsed = schema.safeParse(JSON.parse(new TextDecoder().decode(input.body)));
+    const config = this.config();
+    if (!parsed.success || !config || parsed.data.userId !== config.user_id || config.user_id !== this.env.ACCOUNT_ID || config.root_public_key !== this.env.AUTH_PUBLIC_KEY) {
+      return publicError('INVALID_MCP_ACCESS', 'MCP setup belongs to another account or is invalid');
+    }
+    const authorized = this.authorizeBrowserRequest({ ...input, capabilities: ['devices.manage'] });
+    if (authorized.status === 'error') return authorized;
+    if (input.operation === 'status') return { status: 'ok', value: this.mcpAccessView() };
+    const change = mcpAccessChangeRequestSchema.parse({ userId: parsed.data.userId, expectedRevision: 'expectedRevision' in parsed.data ? parsed.data.expectedRevision : undefined });
+    const revision = this.mcpAccessRow()?.revision ?? 0;
+    if (revision !== change.expectedRevision) return publicError('MCP_ACCESS_CONFLICT', 'MCP access changed; reload before trying again');
+    let binding: DeviceBinding | undefined;
+    let invite: SignedDeviceInvite | undefined;
+    let sealedKey: string | undefined;
+    let token: string | undefined;
+    let tokenHash: string | undefined;
+    if (input.operation === 'enable') {
+      if (this.mcpAccessRow()?.token_hash) return publicError('MCP_ALREADY_ENABLED', 'Disable existing MCP access before enabling a new grant');
+      invite = mcpAccessEnableRequestSchema.parse(parsed.data).invite;
+      const issuer = this.currentDeviceGrant(authorized.value.deviceId);
+      if (!issuer?.canDelegate || invite.issuer.kind !== 'device' || invite.issuer.deviceId !== issuer.deviceId
+        || invite.invite.userId !== config.user_id || invite.invite.kind !== 'client' || invite.invite.canDelegate) {
+        return publicError('RPC_FORBIDDEN', 'MCP requires a non-delegating client invitation from this browser');
+      }
+      const privateKey = ed25519.utils.randomSecretKey();
+      binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(),
+        signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey)),
+        label: 'GitSpace MCP', boundAt: Date.now(), signingPrivateKey: privateKey });
+      const key = encodeApiKey({ version: 2, userId: config.user_id, deviceId: binding.deviceId,
+        signingPrivateKey: credentialProtocolBase64.encode(privateKey),
+        rpcUrl: new URL('/rpc', this.env.ACCOUNT_URL).href, enrollUrl: new URL('/v1/devices/enroll', this.env.ACCOUNT_URL).href });
+      sealedKey = await sealVaultText(key, credentialProtocolBase64.decode(config.vault_key), `mcp:${binding.deviceId}`);
+    }
+    if (input.operation !== 'disable') {
+      token = credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '');
+      tokenHash = await this.mcpTokenHash(token);
+    }
+    // Crypto yields: revalidate authority and revision immediately before the synchronous transaction.
+    const revalidated = this.authorizeRpcRequest({ ...input, capabilities: ['devices.manage'] }, true, true);
+    if (revalidated.status === 'error') return revalidated;
+    if ((this.mcpAccessRow()?.revision ?? 0) !== revision) return publicError('MCP_ACCESS_CONFLICT', 'MCP access changed; reload before trying again');
+    const row = this.mcpAccessRow();
+    if (input.operation === 'rotate' && (!row?.token_hash || !row.device_id || !this.currentDeviceGrant(row.device_id))) {
+      return publicError('MCP_NOT_ACTIVE', 'Enable an active MCP grant before rotating its token');
+    }
+    return this.ctx.storage.transactionSync(() => {
+      if (invite && binding) {
+        const enrolled = this.enrollDevice({ invite, binding });
+        if (enrolled.status === 'error') return enrolled;
+      }
+      if (input.operation === 'disable' && row?.device_id) this.revokeDeviceGrant(row.device_id);
+      this.ctx.storage.sql.exec(`
+        INSERT INTO mcp_access(id, revision, device_id, sealed_key, token_hash, updated_at) VALUES (1, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,device_id=excluded.device_id,sealed_key=excluded.sealed_key,token_hash=excluded.token_hash,updated_at=excluded.updated_at
+      `, revision + 1, binding?.deviceId ?? row?.device_id ?? null,
+      input.operation === 'disable' ? null : sealedKey ?? row?.sealed_key ?? null,
+      tokenHash ?? null, new Date().toISOString());
+      return { status: 'ok', value: { ...this.mcpAccessView(), ...(token ? { token } : {}) } };
+    });
+  }
+
+  /** Internal DO RPC only. Authenticate the bearer before decrypting signing material. */
+  async resolveMcpAccess(token: string): Promise<{ key: string; device: VerifiedDevice } | null> {
+    if (!/^[A-Za-z0-9_-]{43}$/u.test(token)) return null;
+    const hash = await this.mcpTokenHash(token);
+    const row = this.mcpAccessRow();
+    if (!row?.token_hash || !row.device_id || !row.sealed_key || hash.length !== row.token_hash.length) return null;
+    let difference = 0;
+    for (let index = 0; index < hash.length; index++) difference |= hash.charCodeAt(index) ^ row.token_hash.charCodeAt(index);
+    if (difference) return null;
+    const config = this.config();
+    if (!config || !this.currentDeviceGrant(row.device_id)) return null;
+    const key = await openVaultText(row.sealed_key, credentialProtocolBase64.decode(config.vault_key), `mcp:${row.device_id}`);
+    const current = this.mcpAccessRow();
+    const device = this.currentDeviceGrant(row.device_id);
+    if (current?.revision !== row.revision || !device || device.kind !== 'client') return null;
+    return { key, device };
   }
 
   /** Revalidate the original GET proof on wake without re-consuming its handshake nonce. */
@@ -556,7 +924,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const config = this.config();
     const header = input.header ? decodeSignedRpcHeader(input.header) : null;
     const now = Date.now();
-    if (!config || !header || input.body.byteLength > REQUEST_MAX_BYTES || (!revalidate && Math.abs(now - header.timestamp) > RPC_SIGNATURE_MAX_SKEW_MS)) {
+    if (!config || !header || input.body.byteLength > REQUEST_MAX_BYTES || (!revalidate && Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS)) {
       return publicError('RPC_UNAUTHORIZED', 'Device signature is missing, invalid or expired');
     }
     const record = this.deviceGrant(header.deviceId);
@@ -603,7 +971,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         return publicError('INVALID_DEVICE_INVITE', 'Browser invitation is invalid or exceeds its issuer authority');
       }
       if (invite.expiresAt <= now) return publicError('DEVICE_INVITE_EXPIRED', 'Browser invitation has expired');
-      if (invite.issuedAt > now + REQUEST_MAX_SKEW_MS || invite.expiresAt <= invite.issuedAt
+      if (invite.issuedAt > now + ENROLLMENT_CLOCK_SKEW_MS || invite.expiresAt <= invite.issuedAt
         || invite.expiresAt - invite.issuedAt > BROWSER_INVITATION_TTL_MS || invite.expiresAt > now + BROWSER_INVITATION_TTL_MS) {
         return publicError('INVALID_DEVICE_INVITE', 'Browser invitation lifetime must not exceed five minutes');
       }
@@ -679,7 +1047,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         const claimant = input.operation === 'claim' ? pairingMachineSchema.parse({
           machineId: body.machineId, label: body.label, signingPublicKey: body.signingPublicKey, exchangePublicKey: body.exchangePublicKey,
         }) : machine;
-        if (!claimant || !header || header.deviceId !== pairingId || Math.abs(now - header.timestamp) > RPC_SIGNATURE_MAX_SKEW_MS) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof is missing or expired');
+        if (!claimant || !header || header.deviceId !== pairingId || Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof is missing or expired');
         let signingPublicKey: Uint8Array;
         try {
           signingPublicKey = credentialProtocolBase64.decode(claimant.signingPublicKey);
@@ -751,9 +1119,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
         id: machine.machineId, label: machine.label, state: 'offline', rpcEndpoint: `${relayUrl}/tunnel/${encodeURIComponent(machine.machineId)}/rpc`,
         kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: signed.grant.generation, operationId: null, error: null,
       });
-      const brokerSecret = this.env.GITSPACE_OMP_BROKER_TOKEN;
-      if (!brokerSecret) return publicError('BROKER_UNAVAILABLE', 'The account credential broker is not configured');
-      const brokerToken = await machineBrokerToken(brokerSecret, config.user_id, machine.machineId, signed.grant.generation);
       const artifactKey = await this.artifactKey(config.user_id);
       // Retrieval is retryable for the same proof-bound key until the original
       // short expiry; a lost HTTP response never strands a newly enrolled CLI.
@@ -764,7 +1129,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       return { status: 'ok', value: {
         state: 'enrolled', userId: config.user_id, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl,
         apiUrl: input.apiUrl, rootPublicKey: config.root_public_key, machineId: machine.machineId, grant: signed,
-        brokerUrl: `${input.apiUrl}/omp/users/${encodeURIComponent(config.user_id)}`, brokerToken, artifactKey,
+        artifactKey,
       } };
     });
   }
@@ -779,7 +1144,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       header,
       signingPublicKey: device.signing_public_key,
       target,
-      maxSkewMs: REQUEST_MAX_SKEW_MS,
+      maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS,
     });
     if (verified.status === 'error') return publicError('DEVICE_UNAUTHORIZED', verified.error.message);
     return this.consumeRequestNonce(verified.value.nonce, verified.value.timestamp);
@@ -803,7 +1168,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (invite.userId !== config.user_id) return publicError('INVALID_DEVICE_INVITE', 'Device invite is invalid');
     if (invite.expiresAt <= now) return publicError('DEVICE_INVITE_EXPIRED', 'Device invite has expired');
     if (!verifyDeviceBinding(input.binding) || input.binding.inviteId !== invite.inviteId) return publicError('INVALID_DEVICE_BINDING', 'Device binding is invalid');
-    if (Math.abs(input.binding.boundAt - now) > REQUEST_MAX_SKEW_MS) return publicError('INVALID_DEVICE_BINDING', 'Device binding clock is out of range');
+    if (Math.abs(input.binding.boundAt - now) > ENROLLMENT_CLOCK_SKEW_MS) return publicError('INVALID_DEVICE_BINDING', 'Device binding clock is out of range');
     const record: DeviceGrantRecord = { invite: input.invite, binding: input.binding, generation: 1, revokedAt: null };
     // The whole chain is checked here exactly as machines check it later: root
     // signature, or a delegating issuer that is itself valid and holds what it hands out.
@@ -889,6 +1254,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
   }
 
   async putCredential(input: { id: string; credential: StoredOAuthCredential }): Promise<CredentialVaultResult<{ id: string; revision: number }>> {
+    if (this.inferenceCutover()) return publicError('INFERENCE_SCOPE_REQUIRED', 'Use profile-scoped credential management');
     if (!this.config() || !input.id || !brokerUploadSchema.safeParse({ provider: input.credential.provider, credential: { ...input.credential, type: 'oauth' } }).success) {
       return publicError('INVALID_CREDENTIAL', 'Credential input is invalid');
     }
@@ -898,52 +1264,60 @@ export class CredentialVaultDO extends DurableObject<Env> {
     });
   }
 
-  private async storeCredential(id: string, credential: StoredVaultCredential): Promise<number> {
+  private async storeCredential(id: string, credential: StoredVaultCredential, profileId = DEFAULT_INFERENCE_PROFILE_ID): Promise<number> {
     const config = this.config();
     if (!config) throw new Error('Vault is not configured');
-    const revision = (this.credential(id)?.revision ?? 0) + 1;
+    const scoped = this.inferenceCutover();
+    const table = scoped ? 'inference_credentials' : 'oauth_credentials';
+    const revision = (this.credential(id, profileId)?.revision ?? 0) + 1;
     const sealed = await sealVaultCredential(credential, credentialProtocolBase64.decode(config.vault_key), id, revision);
     this.ctx.storage.transactionSync(() => {
+      if (scoped !== this.inferenceCutover()) throw new Error('Credential scope migrated; retry through profile management');
       this.ctx.storage.sql.exec(`
-        INSERT INTO oauth_credentials(id, provider, sealed_json, revision, expires_at, state, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'active', ?)
+        INSERT INTO ${table}(id, provider, sealed_json, revision, expires_at, state, updated_at, profile_id)
+        VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           provider = excluded.provider, sealed_json = excluded.sealed_json, revision = excluded.revision,
           expires_at = excluded.expires_at, state = 'active', updated_at = excluded.updated_at
-      `, id, credential.provider, sealed, revision, credential.type === 'api_key' ? 0 : credential.expires, new Date().toISOString());
+          WHERE ${table}.profile_id = excluded.profile_id
+      `, id, credential.provider, sealed, revision, credential.type === 'api_key' ? 0 : credential.expires, new Date().toISOString(), profileId);
       this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ?', id);
-      this.credentialsChanged();
+      this.credentialsChanged(profileId);
     });
     return revision;
   }
 
-  async ompUpload(input: unknown, machineId: string, generation: number): Promise<CredentialUploadResponse | null> {
+  async ompUpload(input: unknown, identity: ProfileBrokerIdentity): Promise<CredentialUploadResponse | null> {
     return this.ctx.blockConcurrencyWhile(async () => {
-      if (!this.authorizeBroker(machineId, generation, 'credential.manage')) return null;
-      return this.uploadCredential(input);
+      if (identity.capability !== 'manage' || !this.authorizeProfileBroker(identity)) return null;
+      return this.uploadCredential(identity.profileId, input);
     });
   }
 
-  async putBrowserApiKey(provider: string, key: string): Promise<void> {
-    await this.ctx.blockConcurrencyWhile(() => this.uploadCredential({ provider, credential: { type: 'api_key', key } }));
+  async putBrowserApiKey(profileId: string, provider: string, key: string): Promise<void> {
+    await this.ensureInference();
+    await this.ctx.blockConcurrencyWhile(() => this.uploadCredential(profileId, { provider, credential: { type: 'api_key', key } }));
   }
 
-  disableBrowserCredentials(provider: string, credentialId: string | null): void {
+  async disableBrowserCredentials(profileId: string, provider: string, credentialId: string | null): Promise<void> {
+    await this.ensureInference();
+    this.requireInferenceProfile(profileId);
     const rows = credentialId === null
-      ? this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM oauth_credentials WHERE provider = ? AND state = 'active'", provider).toArray()
-      : this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM oauth_credentials WHERE provider = ? AND rowid = ? AND state = 'active'", provider, Number(credentialId)).toArray();
+      ? this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM inference_credentials WHERE profile_id = ? AND provider = ? AND state = 'active'", profileId, provider).toArray()
+      : this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM inference_credentials WHERE profile_id = ? AND provider = ? AND rowid = ? AND state = 'active'", profileId, provider, Number(credentialId)).toArray();
     this.ctx.storage.transactionSync(() => {
-      for (const row of rows) this.disableCredentialRow(row.row_id);
+      for (const row of rows) this.disableCredentialRow(profileId, row.row_id);
     });
   }
 
-  private async uploadCredential(input: unknown): Promise<CredentialUploadResponse> {
+  private async uploadCredential(profileId: string, input: unknown): Promise<CredentialUploadResponse> {
+      this.requireInferenceProfile(profileId);
       const parsed = brokerUploadSchema.parse(input);
       const credential = { ...parsed.credential, provider: parsed.provider } as StoredVaultCredential;
       const config = this.config();
       if (!config) throw new Error('Vault is not configured');
       const rows = this.ctx.storage.sql.exec<OmpCredentialRow>(
-        "SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM oauth_credentials WHERE provider = ? AND state = 'active' ORDER BY rowid", parsed.provider,
+        "SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND provider = ? AND state = 'active' ORDER BY rowid", profileId, parsed.provider,
       ).toArray();
       const existing = await Promise.all(rows.map(async (row) => ({ row, credential: await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key)) })));
       const identity = brokerCredentialIdentity(credential);
@@ -953,66 +1327,52 @@ export class CredentialVaultDO extends DurableObject<Env> {
       const target = matches[0]?.row;
       // Retain row ids on an identity upsert, but never reuse a disabled row: a delayed
       // logout from another client must not disable a subsequently uploaded key.
-      await this.storeCredential(target?.id ?? crypto.randomUUID(), credential);
+      await this.storeCredential(target?.id ?? crypto.randomUUID(), credential, profileId);
       for (const { row, credential: current } of existing) {
         if (row.id !== target?.id && (matches.some((match) => match.row.id === row.id) || (credential.type !== 'api_key' && current.type === 'api_key'))) {
-          this.disableCredentialRow(row.row_id);
+          this.disableCredentialRow(profileId, row.row_id);
         }
       }
-      const snapshot = await this.ompSnapshot();
+      const snapshot = await this.ompSnapshot(profileId);
       return { entries: snapshot.credentials.filter((entry) => entry.provider === parsed.provider).map(({ rotatesInMs: _rotates, ...entry }) => entry) };
   }
 
-  ompDisable(rowId: number, machineId: string, generation: number): boolean | null {
-    if (!this.authorizeBroker(machineId, generation, 'credential.manage')) return null;
-    return this.disableCredentialRow(rowId);
+  ompDisable(rowId: number, identity: ProfileBrokerIdentity): boolean | null {
+    if (identity.capability !== 'manage' || !this.authorizeProfileBroker(identity)) return null;
+    return this.disableCredentialRow(identity.profileId, rowId);
   }
 
-  private disableCredentialRow(rowId: number): boolean {
+  private disableCredentialRow(profileId: string, rowId: number): boolean {
     if (!Number.isSafeInteger(rowId) || rowId <= 0) return false;
     return this.ctx.storage.transactionSync(() => {
-      const changed = this.ctx.storage.sql.exec("UPDATE oauth_credentials SET state = 'disabled', updated_at = ? WHERE rowid = ? AND state != 'disabled'", new Date().toISOString(), rowId).rowsWritten;
+      this.requireInferenceProfile(profileId);
+      const changed = this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'disabled', updated_at = ? WHERE profile_id = ? AND rowid = ? AND state != 'disabled'", new Date().toISOString(), profileId, rowId).rowsWritten;
       if (changed === 0) return false;
-      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = (SELECT id FROM oauth_credentials WHERE rowid = ?)', rowId);
-      this.credentialsChanged();
+      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = (SELECT id FROM inference_credentials WHERE rowid = ?)', rowId);
+      this.credentialsChanged(profileId);
       return true;
     });
   }
 
-  private credentialGeneration(): number {
-    return this.ctx.storage.sql.exec<{ generation: number }>('SELECT generation FROM credential_snapshot WHERE id = 1').one().generation;
+  private credentialGeneration(profileId: string): number {
+    return this.ctx.storage.sql.exec<{ credential_generation: number }>('SELECT credential_generation FROM inference_profiles WHERE profile_id = ? AND deleted_at IS NULL', profileId).one().credential_generation;
   }
 
-  private credentialsChanged(): void {
-    this.ctx.storage.sql.exec('UPDATE credential_snapshot SET generation = MAX(generation + 1, ?) WHERE id = 1', Date.now());
-    this.usageCache = undefined;
+  private credentialsChanged(profileId = DEFAULT_INFERENCE_PROFILE_ID): void {
+    this.ctx.storage.sql.exec('UPDATE inference_profiles SET credential_generation = MAX(credential_generation + 1, ?) WHERE profile_id = ?', Date.now(), profileId);
+    if (profileId === DEFAULT_INFERENCE_PROFILE_ID) this.ctx.storage.sql.exec('UPDATE credential_snapshot SET generation = MAX(generation + 1, ?) WHERE id = 1', Date.now());
   }
 
-  async ompUsage(): Promise<OmpUsageResponse> {
+  async ompSnapshot(profileId: string, identity?: ProfileBrokerIdentity): Promise<SnapshotResponse> {
+    await this.ensureInference();
+    this.assertBrokerProfile(profileId, identity);
     const config = this.config();
     if (!config) throw new Error('Vault is not configured');
     const now = Date.now();
-    if (this.usageCache && this.usageCache.expiresAt > now) return this.usageCache.value;
-    const generation = this.credentialGeneration();
-    const vaultKey = credentialProtocolBase64.decode(config.vault_key);
-    const rows = this.ctx.storage.sql.exec<CredentialRow>(
-      "SELECT id, provider, sealed_json, revision, expires_at, state FROM oauth_credentials WHERE state = 'active' ORDER BY rowid",
-    ).toArray();
-    const credentials = await Promise.all(rows.map((row) => openVaultCredential(row, vaultKey)));
-    const value = { generatedAt: now, reports: await fetchUsageReports(credentials.filter((credential): credential is StoredVaultOAuthCredential => credential.type !== 'api_key')) };
-    if (generation === this.credentialGeneration()) this.usageCache = { expiresAt: now + OMP_USAGE_CACHE_MS, value };
-    return value;
-  }
-
-
-  async ompSnapshot(): Promise<SnapshotResponse> {
-    const config = this.config();
-    if (!config) throw new Error('Vault is not configured');
-    const now = Date.now();
-    const generation = this.credentialGeneration();
+    const generation = this.credentialGeneration(profileId);
     const vaultKey = credentialProtocolBase64.decode(config.vault_key);
     const rows = this.ctx.storage.sql.exec<OmpCredentialRow>(
-      "SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM oauth_credentials WHERE state = 'active' ORDER BY rowid",
+      "SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND state = 'active' ORDER BY rowid", profileId,
     ).toArray();
     const credentials = await Promise.all(rows.map(async (row) => {
       const credential = await openVaultCredential(row, vaultKey);
@@ -1021,6 +1381,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         rotatesInMs: credential.type === 'api_key' ? null : Math.max(0, credential.expires - now),
       };
     }));
+    this.assertBrokerProfile(profileId, identity);
     return {
       generation,
       generatedAt: now,
@@ -1034,17 +1395,25 @@ export class CredentialVaultDO extends DurableObject<Env> {
       credentials,
     };
   }
-  async ompRefresh(rowId: number): Promise<CredentialRefreshResponse> {
+  private assertBrokerProfile(profileId: string, identity?: ProfileBrokerIdentity): void {
+    if (this.legacyCredentialConflict()) throw new Error('Legacy credentials were written after inference cutover; protected forward repair is required');
+    this.requireInferenceProfile(profileId);
+    if (identity && (identity.profileId !== profileId || !this.authorizeProfileBroker(identity))) throw new Error('Inference broker access ended');
+  }
+
+  async ompRefresh(rowId: number, identity: ProfileBrokerIdentity): Promise<CredentialRefreshResponse> {
+    const profileId = identity.profileId;
+    this.assertBrokerProfile(profileId, identity);
     const config = this.config();
     if (!config || !Number.isSafeInteger(rowId) || rowId <= 0) throw new Error('Credential is unavailable');
     const row = this.ctx.storage.sql.exec<OmpCredentialRow>(
-      'SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM oauth_credentials WHERE rowid = ? AND state = ?',
-      rowId,
-      'active',
+      'SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND rowid = ? AND state = ?',
+      profileId, rowId, 'active',
     ).toArray()[0];
     if (!row) throw new Error('Credential is unavailable');
     const vaultKey = credentialProtocolBase64.decode(config.vault_key);
     const credential = await openVaultCredential(row, vaultKey);
+    this.assertBrokerProfile(profileId, identity);
     if (credential.type === 'api_key') return { entry: brokerCredentialEntry(rowId, credential) };
     const owner = crypto.randomUUID();
     if (!this.acquireRefreshLease(row, owner)) throw new Error('Credential refresh is already in progress');
@@ -1059,28 +1428,33 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const sealed = await sealVaultCredential(refreshed, vaultKey, row.id, revision);
     const committed = this.ctx.storage.transactionSync(() => {
       const changed = this.ctx.storage.sql.exec(
-        "UPDATE oauth_credentials SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ? WHERE rowid = ? AND revision = ? AND state = 'active' AND EXISTS (SELECT 1 FROM refresh_leases WHERE credential_id = ? AND owner = ? AND revision = ? AND expires_at > ?)",
-        sealed, revision, refreshed.expires, new Date().toISOString(), rowId, row.revision, row.id, owner, row.revision, Date.now(),
+        "UPDATE inference_credentials SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ? WHERE profile_id = ? AND rowid = ? AND revision = ? AND state = 'active' AND EXISTS (SELECT 1 FROM refresh_leases WHERE credential_id = ? AND owner = ? AND revision = ? AND expires_at > ?)",
+        sealed, revision, refreshed.expires, new Date().toISOString(), profileId, rowId, row.revision, row.id, owner, row.revision, Date.now(),
       ).rowsWritten;
       this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ? AND owner = ?', row.id, owner);
       const uncertain = changed === 0 && this.ctx.storage.sql.exec(
-        "UPDATE oauth_credentials SET state = 'refresh-uncertain', updated_at = ? WHERE id = ? AND revision = ? AND state = 'active'",
-        new Date().toISOString(), row.id, row.revision,
+        "UPDATE inference_credentials SET state = 'refresh-uncertain', updated_at = ? WHERE profile_id = ? AND id = ? AND revision = ? AND state = 'active'",
+        new Date().toISOString(), profileId, row.id, row.revision,
       ).rowsWritten === 1;
-      if (changed === 1 || uncertain) this.credentialsChanged();
+      if (changed === 1 || uncertain) this.credentialsChanged(profileId);
       return changed === 1;
     });
     if (!committed) throw new Error('Credential changed during refresh');
+    this.assertBrokerProfile(profileId, identity);
     return { entry: brokerCredentialEntry(rowId, refreshed) };
   }
 
 
-  authorizeControl(request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access' | 'credential.manage'): CredentialVaultResult<{ authorized: true }> {
+  /**
+   * `maxAgeMs` is the signature window: `SIGNED_UPLOAD_MAX_AGE_MS` only for `data.put`,
+   * whose body may be buffered by the edge long after signing.
+   */
+  authorizeControl(request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access' | 'credential.manage', maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): CredentialVaultResult<{ authorized: true }> {
     const config = this.config();
     if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
     const parsed = signedControlRequestSchema.safeParse(request);
-    if (!parsed.success || parsed.data.userId !== config.user_id || Math.abs(Date.now() - parsed.data.timestamp) > REQUEST_MAX_SKEW_MS) {
-      return publicError('INVALID_REQUEST', 'Control request is invalid or expired');
+    if (!parsed.success || parsed.data.userId !== config.user_id) {
+      return publicError('INVALID_REQUEST', 'Control request is invalid');
     }
     const device = this.device(parsed.data.machineId);
     if (!device || !verifySignedControlRequest(parsed.data, credentialProtocolBase64.decode(device.signing_public_key))) {
@@ -1090,10 +1464,12 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (!Array.isArray(capabilities) || !capabilities.includes(capability)) {
       return publicError('ACCESS_DENIED', `Device lacks ${capability}`);
     }
+    const now = Date.now();
+    if (Math.abs(now - parsed.data.timestamp) > maxAgeMs) return publicError('REQUEST_EXPIRED', 'Signed request expired');
     const inserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - RPC_SIGNATURE_MAX_SKEW_MS);
+      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', now - REQUEST_NONCE_RETENTION_MS);
       try {
-        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', parsed.data.nonce, Date.now());
+        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', parsed.data.nonce, Math.max(now, parsed.data.timestamp));
         return true;
       } catch {
         return false;
@@ -1122,11 +1498,12 @@ export class CredentialVaultDO extends DurableObject<Env> {
     revision: number;
     envelope: Awaited<ReturnType<typeof sealCredentialForMachine>>;
   }>> {
+    if (this.inferenceCutover()) return publicError('INFERENCE_SCOPE_REQUIRED', 'Upgrade to the profile-scoped credential broker');
     const config = this.config();
     if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
     const parsed = credentialAccessRequestSchema.safeParse(request);
-    if (!parsed.success || parsed.data.userId !== config.user_id || Math.abs(Date.now() - parsed.data.timestamp) > REQUEST_MAX_SKEW_MS) {
-      return publicError('INVALID_REQUEST', 'Credential request is invalid or expired');
+    if (!parsed.success || parsed.data.userId !== config.user_id) {
+      return publicError('INVALID_REQUEST', 'Credential request is invalid');
     }
     const device = this.device(parsed.data.machineId);
     if (!device || !verifyCredentialAccessRequest(parsed.data, credentialProtocolBase64.decode(device.signing_public_key))) {
@@ -1136,10 +1513,12 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (!Array.isArray(capabilities) || !capabilities.includes('credential.access')) {
       return publicError('ACCESS_DENIED', 'Device cannot access credentials');
     }
+    const now = Date.now();
+    if (Math.abs(now - parsed.data.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError('REQUEST_EXPIRED', 'Signed request expired');
     const nonceInserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - RPC_SIGNATURE_MAX_SKEW_MS);
+      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', now - REQUEST_NONCE_RETENTION_MS);
       try {
-        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', parsed.data.nonce, Date.now());
+        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', parsed.data.nonce, Math.max(now, parsed.data.timestamp));
         return true;
       } catch {
         return false;
@@ -1152,6 +1531,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (row.state === 'refresh-uncertain') return publicError('REFRESH_UNCERTAIN', 'Credential refresh outcome is uncertain; interactive recovery is required');
     const vaultKey = credentialProtocolBase64.decode(config.vault_key);
     const stored = await openVaultCredential(row, vaultKey);
+    if (this.inferenceCutover()) return publicError('INFERENCE_SCOPE_REQUIRED', 'Upgrade to the profile-scoped credential broker');
     if (stored.type === 'api_key') return publicError('INVALID_CREDENTIAL_TYPE', 'Use the OMP broker snapshot for API keys');
     let credential: StoredVaultOAuthCredential = stored;
     if (Date.now() + ACCESS_REFRESH_SKEW_MS >= credential.expires) {
@@ -1164,10 +1544,11 @@ export class CredentialVaultDO extends DurableObject<Env> {
         const nextRevision = refreshRow.revision + 1;
         const sealed = await sealVaultCredential(credential, vaultKey, refreshRow.id, nextRevision);
         const committed = this.ctx.storage.transactionSync(() => {
+          const table = this.inferenceCutover() ? 'inference_credentials' : 'oauth_credentials';
           const changed = this.ctx.storage.sql.exec(`
-            UPDATE oauth_credentials
+            UPDATE ${table}
             SET sealed_json = ?, revision = ?, expires_at = ?, state = 'active', updated_at = ?
-            WHERE id = ? AND revision = ? AND state = 'active' AND EXISTS (
+            WHERE profile_id = 'default' AND id = ? AND revision = ? AND state = 'active' AND EXISTS (
               SELECT 1 FROM refresh_leases WHERE credential_id = ? AND owner = ? AND revision = ? AND expires_at > ?
             )
           `, sealed, nextRevision, credential.expires, new Date().toISOString(), refreshRow.id, refreshRow.revision, refreshRow.id, parsed.data.nonce, refreshRow.revision, Date.now()).rowsWritten;
@@ -1176,7 +1557,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
           return changed === 1;
         });
         if (!committed) {
-          const changed = this.ctx.storage.sql.exec("UPDATE oauth_credentials SET state = 'refresh-uncertain', updated_at = ? WHERE id = ? AND revision = ? AND state = 'active'", new Date().toISOString(), refreshRow.id, refreshRow.revision).rowsWritten;
+          const table = this.inferenceCutover() ? 'inference_credentials' : 'oauth_credentials';
+          const changed = this.ctx.storage.sql.exec(`UPDATE ${table} SET state = 'refresh-uncertain', updated_at = ? WHERE profile_id = 'default' AND id = ? AND revision = ? AND state = 'active'`, new Date().toISOString(), refreshRow.id, refreshRow.revision).rowsWritten;
           if (changed === 1) this.credentialsChanged();
           return publicError('REFRESH_UNCERTAIN', 'Provider refreshed the credential but the vault commit was not confirmed');
         }
@@ -1207,6 +1589,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       machineExchangePublicKey: credentialProtocolBase64.decode(device.exchange_public_key),
       context,
     });
+    if (this.inferenceCutover()) return publicError('INFERENCE_SCOPE_REQUIRED', 'Upgrade to the profile-scoped credential broker');
     return { status: 'ok', value: { credentialId: row.id, provider: credential.provider, expiresAt: credential.expires, revision: row.revision, envelope } };
   }
 
@@ -1230,7 +1613,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
 
   private consumeRequestNonce(nonce: string, timestamp: number): CredentialVaultResult<{ authorized: true }> {
     const inserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - RPC_SIGNATURE_MAX_SKEW_MS);
+      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - REQUEST_NONCE_RETENTION_MS);
       try {
         this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', nonce, Math.max(Date.now(), timestamp));
         return true;
@@ -1261,10 +1644,11 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return row;
   }
 
-  private credential(id: string): CredentialRow | undefined {
+  private credential(id: string, profileId = DEFAULT_INFERENCE_PROFILE_ID): CredentialRow | undefined {
+    const table = this.inferenceCutover() ? 'inference_credentials' : 'oauth_credentials';
     return this.ctx.storage.sql.exec<CredentialRow>(
-      'SELECT id, provider, sealed_json, revision, expires_at, state FROM oauth_credentials WHERE id = ?',
-      id,
+      `SELECT id, provider, sealed_json, revision, expires_at, state FROM ${table} WHERE id = ? AND profile_id = ?`,
+      id, profileId,
     ).toArray()[0];
   }
 
@@ -1641,7 +2025,7 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   const operation = expectedDataOperation(request.method);
   if (signed.operation !== operation || signed.payload.key !== keyFromPath) throw new Error('Signed data request does not match the request');
   if (diagnostics) diagnostics.stage = 'authorize';
-  const authorized = await authorizeControl(env, signed, 'storage.access');
+  const authorized = await authorizeControl(env, signed, 'storage.access', operation === 'data.put' ? SIGNED_UPLOAD_MAX_AGE_MS : SIGNED_REQUEST_MAX_AGE_MS);
   if (authorized.status === 'error') return accountAccessResponse(authorized)!;
   if (diagnostics) diagnostics.stage = 'validate';
   const objectKey = dataObjectKey(signed.userId, signed.payload.key);
@@ -1717,21 +2101,21 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   return new Response(object.body, { headers });
 }
 
-async function ompBrokerResponse(request: Request, env: Env, userId: string, operation: string): Promise<Response> {
-  if (operation === 'healthz') return Response.json({ ok: true, version: 'gitspace-omp-broker-v1' });
+async function ompBrokerResponse(request: Request, env: Env, userId: string, profileId: string, operation: string): Promise<Response> {
   const identity = env.GITSPACE_OMP_BROKER_TOKEN
-    ? await verifyMachineBrokerToken(env.GITSPACE_OMP_BROKER_TOKEN, userId, request.headers.get('authorization'))
+    ? await verifyProfileBrokerToken(env.GITSPACE_OMP_BROKER_TOKEN, userId, request.headers.get('authorization'))
     : null;
-  if (!identity || !await credentialVault(env, userId).authorizeBroker(identity.machineId, identity.generation)) {
+  if (!identity || identity.profileId !== profileId || !await credentialVault(env, userId).authorizeProfileBroker(identity)) {
     return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'cache-control': 'private, no-store' } });
   }
   const denied = accountAccessResponse(await activeAccount(env, userId));
   if (denied) return denied;
   const vault = credentialVault(env, userId);
+  if (operation === 'healthz') return Response.json({ ok: true, version: 'gitspace-inference-broker-v1' }, { headers: { 'cache-control': 'private, no-store' } });
   const disableMatch = /^credential\/(\d+)\/disable$/u.exec(operation);
   if (request.method === 'POST' && (operation === 'credential' || disableMatch)) {
     const headers = { 'cache-control': 'private, no-store' };
-    if (!await vault.authorizeBroker(identity.machineId, identity.generation, 'credential.manage')) {
+    if (identity.capability !== 'manage') {
       return Response.json({ error: 'credential management is not authorized' }, { status: 403, headers });
     }
     let body: unknown;
@@ -1743,29 +2127,22 @@ async function ompBrokerResponse(request: Request, env: Env, userId: string, ope
     if (operation === 'credential') {
       const parsed = brokerUploadSchema.safeParse(body);
       if (!parsed.success) return Response.json({ error: 'Invalid credential request' }, { status: 400, headers });
-      const result = await vault.ompUpload(parsed.data, identity.machineId, identity.generation);
+      const result = await vault.ompUpload(parsed.data, identity);
       return result ? Response.json(result, { headers }) : Response.json({ error: 'credential management is not authorized' }, { status: 403, headers });
     }
     if (!brokerDisableSchema.safeParse(body).success) return Response.json({ error: 'Invalid credential request' }, { status: 400, headers });
-    const result = await vault.ompDisable(Number(disableMatch![1]), identity.machineId, identity.generation);
+    const result = await vault.ompDisable(Number(disableMatch![1]), identity);
     return result === null
       ? Response.json({ error: 'credential management is not authorized' }, { status: 403, headers })
       : Response.json(result ? { ok: true } : { error: 'Credential is unavailable' }, { status: result ? 200 : 404, headers });
   }
   const refreshMatch = /^credential\/(\d+)\/refresh$/u.exec(operation);
   if (refreshMatch && request.method === 'POST') {
-    return Response.json(await vault.ompRefresh(Number(refreshMatch[1]!)), { headers: { 'cache-control': 'private, no-store' } });
-  }
-  if (operation === 'usage' && request.method === 'GET') {
-    try {
-      return Response.json(await vault.ompUsage(), { headers: { 'cache-control': 'private, no-store' } });
-    } catch (error) {
-      return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502, headers: { 'cache-control': 'private, no-store' } });
-    }
+    return Response.json(await vault.ompRefresh(Number(refreshMatch[1]!), identity), { headers: { 'cache-control': 'private, no-store' } });
   }
   if (operation === 'snapshot/stream') return new Response('Not found', { status: 404 });
   if (operation !== 'snapshot' || request.method !== 'GET') return new Response('Not found', { status: 404 });
-  const snapshot = await vault.ompSnapshot();
+  const snapshot = await vault.ompSnapshot(profileId, identity);
   const etag = `\"${snapshot.generation}\"`;
   if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers: { etag } });
   return Response.json(snapshot, { headers: { etag, 'cache-control': 'private, no-store' } });
@@ -1984,8 +2361,6 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
       GITSPACE_MACHINE_ID: machineId,
       GITSPACE_MACHINE_LABEL: `Cloudflare ${machineId.slice('sandbox-'.length)}`,
       GITSPACE_CONTROL_URL: controlUrl,
-      OMP_AUTH_BROKER_URL: `${controlUrl.replace(/\/+$/u, '')}/omp/users/${encodeURIComponent(userId)}`,
-      OMP_AUTH_BROKER_TOKEN: await machineBrokerToken(env.GITSPACE_OMP_BROKER_TOKEN, userId, machineId, registered.value.generation),
       GITSPACE_USER_ID: userId,
       // Worker provisioning pins the same root that installed the machine key.
       GITSPACE_ROOT_PUBLIC_KEY: rootPublicKey,
@@ -2006,6 +2381,9 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
 
 /** Forward once: a transport error cannot prove that the signed operation did not run. */
 export async function proxyAccountMachineRpc(request: Request, env: Env, userId: string, machine: FleetMachineDefinition): Promise<Response> {
+  if (await credentialVault(env, userId).inferenceCutover() && !await tenantReleases(env, userId).machineInferenceCompatible(machine.id)) {
+    return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP to a committed inference-profile-compatible release before admitting work'), { status: 409, headers: { 'cache-control': 'private, no-store' } });
+  }
   if (machine.provider === 'cloudflare-sandbox' && (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).cloudImage(machine.id))?.operation?.barrier) {
     return Response.json(publicError('CLOUD_IMAGE_IN_PROGRESS', 'This cloud machine is checkpointing or recovering'), { status: 503, headers: { 'cache-control': 'private, no-store' } });
   }
@@ -2031,28 +2409,58 @@ export async function proxyAccountMachineRpc(request: Request, env: Env, userId:
   return tunnel ? forwardTunnelRequest(upstream, env, tunnel) : fetch(upstream);
 }
 
-async function accountRpcResponse(request: Request, env: Env): Promise<Response> {
+interface RoutedAccountRpc {
+  response: Response;
+  procedures?: readonly string[];
+  /** `cloud` when the account router answered; otherwise the machine it was forwarded to. */
+  target?: string;
+}
+
+async function routeAccountRpc(request: Request, env: Env): Promise<RoutedAccountRpc> {
   const userId = request.headers.get('x-gitspace-user');
   if (!userId || !/^u-[a-f0-9]{32}$/u.test(userId)) {
-    return Response.json(publicError('ACCOUNT_REQUIRED', 'Account identity is missing'), { status: 401 });
+    return { response: Response.json(publicError('ACCOUNT_REQUIRED', 'Account identity is missing'), { status: 401 }) };
   }
   const account = await activeAccount(env, userId);
   const denied = accountAccessResponse(account);
-  if (denied) return denied;
+  if (denied) return { response: denied };
   const settings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId).get('account-router');
   const handle = settings.profile.handle;
   const hostname = new URL(request.url).hostname.toLowerCase();
   if (!handle || hostname !== `${handle}.gitspace.sh`) {
-    return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403 });
+    return { response: Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403 }) };
   }
-  const cloud = await handleAccountCloudRpc(request, env, userId);
-  if (cloud) return cloud;
-  const machines = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines();
-  const machine = machines.find((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
+  const route = await handleAccountCloudRpc(request, env, userId);
+  if (route.kind === 'response') return route;
+  // Work that names no live holder keeps its historical home: the first online machine.
+  const machine = route.holder ?? (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines())
+    .find((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
   if (!machine) {
-    return Response.json(publicError('FLEET_OFFLINE', 'No account machine is available'), { status: 503 });
+    return { response: Response.json(publicError('FLEET_OFFLINE', 'No account machine is available'), { status: 503 }), procedures: route.procedures };
   }
-  return proxyAccountMachineRpc(request, env, userId, machine);
+  return { response: await proxyAccountMachineRpc(request, env, userId, machine), procedures: route.procedures, target: machine.id };
+}
+
+const SLOW_RPC_BATCH_MS = 5_000;
+const rpcErrorBodySchema = z.object({ error: z.object({ code: z.string() }) });
+
+/** Workers observability records only the path (no query, headers or bodies):
+ * name failed and slow batches. Proxied streams are timed to their response headers. */
+async function accountRpcResponse(request: Request, env: Env): Promise<Response> {
+  const started = Date.now();
+  const { response, procedures, target } = await routeAccountRpc(request, env);
+  const durationMs = Date.now() - started;
+  if (response.status < 400 && durationMs <= SLOW_RPC_BATCH_MS) return response;
+  let code: string | undefined;
+  if (response.status >= 400 && response.headers.get('content-type')?.includes('application/json')) {
+    code = rpcErrorBodySchema.safeParse(await response.clone().json().catch(() => null)).data?.error.code;
+  }
+  console.log(JSON.stringify({
+    event: 'rpc_batch',
+    procedures: procedures ?? new URL(request.url).searchParams.get('p')?.split(',') ?? [],
+    status: response.status, code, durationMs, target,
+  }));
+  return response;
 }
 
 const worker = {
@@ -2063,6 +2471,55 @@ const worker = {
     }
     if (url.pathname.startsWith('/shared-artifacts/')) return serveArtifactShare(request, env);
 
+    const mcpAccessRoute = /^\/v1\/mcp-access\/(status|enable|rotate|disable)$/u.exec(url.pathname);
+    if (mcpAccessRoute) {
+      const headers = {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'POST, OPTIONS',
+        'access-control-allow-headers': `content-type, ${RPC_DEVICE_HEADER}, x-gitspace-user`,
+        'cache-control': 'private, no-store',
+      };
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers });
+      if (url.origin !== new URL(env.ACCOUNT_URL).origin) {
+        return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'MCP setup belongs to this account origin'), { status: 403, headers });
+      }
+      try {
+        const reader = request.body?.getReader();
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        if (reader) {
+          try {
+            for (;;) {
+              const chunk = await reader.read();
+              if (chunk.done) break;
+              length += chunk.value.byteLength;
+              if (length > REQUEST_MAX_BYTES) { await reader.cancel(); return new Response('Request too large', { status: 413, headers }); }
+              chunks.push(chunk.value);
+            }
+          } finally { reader.releaseLock(); }
+        }
+        const body = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+        const parsed = JSON.parse(new TextDecoder().decode(body)) as { userId?: unknown };
+        if (parsed.userId !== env.ACCOUNT_ID || request.headers.get('x-gitspace-user') !== env.ACCOUNT_ID) {
+          return Response.json(publicError('RPC_FORBIDDEN', 'Account identity is invalid'), { status: 403, headers });
+        }
+        const account = await activeAccount(env, env.ACCOUNT_ID);
+        const denied = accountAccessResponse(account);
+        if (denied) return denied;
+        if (account.status !== 'ok' || url.hostname !== `${account.value.handle}.gitspace.sh`) {
+          return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'MCP setup belongs to the current account hostname'), { status: 403, headers });
+        }
+        const result = await credentialVault(env, env.ACCOUNT_ID).mcpAccessRequest({
+          operation: mcpAccessRoute[1] as McpAccessOperation, header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body,
+        });
+        return Response.json(result, { status: result.status === 'ok' ? 200 : result.error.code === 'MCP_ACCESS_CONFLICT' ? 409 : 403, headers });
+      } catch {
+        return Response.json(publicError('INVALID_MCP_ACCESS', 'MCP access request is invalid'), { status: 400, headers });
+      }
+    }
     const browserInvitationRoute = /^\/v1\/devices\/browser-invitations\/(create|status|cancel)$/u.exec(url.pathname);
     if (browserInvitationRoute) {
       const cors = {
@@ -2147,6 +2604,9 @@ const worker = {
       }
       const denied = accountAccessResponse(await activeAccount(env, userId));
       if (denied) return new Response(denied.body, { status: denied.status, headers: { ...Object.fromEntries(denied.headers), ...cors } });
+      if (await credentialVault(env, userId).inferenceCutover() && !await tenantReleases(env, userId).machineInferenceCompatible(machineId)) {
+        return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP before admitting profile-managed work'), { status: 409, headers: cors });
+      }
       if ((await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).cloudImage(machineId))?.operation?.barrier) {
         return Response.json(publicError('CLOUD_IMAGE_IN_PROGRESS', 'This cloud machine is checkpointing or recovering'), { status: 503, headers: cors });
       }
@@ -2175,6 +2635,11 @@ const worker = {
         const account = await activeAccount(env, grant.grant.userId);
         if (account.status === 'error') return Response.json(account, { status: account.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' ? 503 : 401 });
         const result = await credentialVault(env, grant.grant.userId).authorizeRelayGrant(grant, body.capability);
+        if (result.status === 'ok' && body.capability === 'space.control'
+          && await credentialVault(env, grant.grant.userId).inferenceCutover()
+          && !await tenantReleases(env, grant.grant.userId).machineInferenceCompatible(grant.grant.machineId)) {
+          return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP before admitting profile-managed work'), { status: 409, headers: { 'cache-control': 'no-store' } });
+        }
         return Response.json(result, { status: result.status === 'ok' ? 200 : 401, headers: { 'cache-control': 'no-store' } });
       } catch {
         return Response.json(publicError('DEVICE_UNAUTHORIZED', 'Invalid relay authorization'), { status: 401 });
@@ -2217,7 +2682,7 @@ const worker = {
       try {
         const body = await readBoundedJson(request) as { rootPublicKey?: unknown; vaultKey?: unknown; handle?: unknown };
         if (body.rootPublicKey !== env.AUTH_PUBLIC_KEY || body.handle !== env.TENANT_ID || typeof body.vaultKey !== 'string') return Response.json(publicError('TENANT_MISMATCH', 'Bootstrap identity does not own this tenant'), { status: 403 });
-        const proof = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: env.AUTH_PUBLIC_KEY, target: url.pathname + url.search, maxSkewMs: REQUEST_MAX_SKEW_MS });
+        const proof = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: env.AUTH_PUBLIC_KEY, target: url.pathname + url.search, maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS });
         if (proof.status === 'error') return Response.json(proof, { status: 401 });
         const userId = env.ACCOUNT_ID;
         const vault = credentialVault(env, userId);
@@ -2301,10 +2766,13 @@ const worker = {
         return Response.json(publicError('INVALID_MACHINE', error instanceof Error ? error.message : 'Machine revocation failed'), { status: 400 });
       }
     }
-    const ompBrokerMatch = /^\/omp\/users\/([^/]+)\/v1\/(healthz|snapshot|snapshot\/stream|usage|credential|credential\/\d+\/(?:refresh|disable))$/u.exec(url.pathname);
+    if (/^\/omp\/users\/[^/]+\/v1\//u.test(url.pathname)) {
+      return Response.json({ error: 'Profile-scoped broker required; upgrade this client' }, { status: 401, headers: { 'cache-control': 'private, no-store' } });
+    }
+    const ompBrokerMatch = /^\/omp\/users\/([^/]+)\/profiles\/([^/]+)\/v1\/(healthz|snapshot|snapshot\/stream|credential|credential\/\d+\/(?:refresh|disable))$/u.exec(url.pathname);
     if (ompBrokerMatch) {
       try {
-        return await ompBrokerResponse(request, env, decodeURIComponent(ompBrokerMatch[1]!), ompBrokerMatch[2]!);
+        return await ompBrokerResponse(request, env, decodeURIComponent(ompBrokerMatch[1]!), decodeURIComponent(ompBrokerMatch[2]!), ompBrokerMatch[3]!);
       } catch {
         return Response.json({ error: 'broker unavailable' }, { status: 503 });
       }
@@ -2457,7 +2925,9 @@ const worker = {
         if (diagnostics) diagnostics.stage = 'parse';
         const body = signedControlRequestSchema.parse(await readBoundedJson(request));
         recordSyncRequestParsed(diagnostics, body);
-        const capability = body.operation === 'secrets.materialize' || body.operation === 'mcp.composio.materialize' ? 'credential.access'
+        const capability = body.operation === 'inference.resolve' ? 'credential.access'
+          : body.operation.startsWith('inference.') && body.operation !== 'inference.list' ? 'credential.manage'
+          : body.operation === 'secrets.materialize' || body.operation === 'mcp.composio.materialize' ? 'credential.access'
           : body.operation === 'secrets.put' || body.operation === 'secrets.delete'
             || body.operation === 'secrets.account.put' || body.operation === 'secrets.account.delete'
             || body.operation === 'secrets.account.grant' || body.operation === 'secrets.account.revoke' ? 'credential.manage'
@@ -2477,6 +2947,11 @@ const worker = {
         if (diagnostics) diagnostics.stage = 'authorize';
         const authorized = await authorizeControl(env, body, capability);
         if (authorized.status === 'error') return accountAccessResponse(authorized)!;
+        if (['space.bootstrap', 'space.beginOpen', 'crons.claimNext', 'inference.resolve', 'inference.providers'].includes(body.operation)
+          && await credentialVault(env, body.userId).inferenceCutover()
+          && !await tenantReleases(env, body.userId).machineInferenceCompatible(body.machineId)) {
+          return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP to a committed inference-profile-compatible release before admitting work'), { status: 409, headers: { 'cache-control': 'private, no-store' } });
+        }
         if (diagnostics) diagnostics.stage = 'rollout';
         if (body.operation === 'space.bootstrap' || body.operation === 'space.beginOpen') {
           const spaceId = String(body.payload.spaceId ?? '');
@@ -2489,6 +2964,27 @@ const worker = {
           }
         }
         if (diagnostics) diagnostics.stage = 'processing';
+        if (body.operation.startsWith('inference.')) {
+          const vault = credentialVault(env, body.userId);
+          let value: unknown;
+          let mutation: InferenceWriteResult | null = null;
+          switch (body.operation) {
+            case 'inference.list': value = await vault.ensureInference(); break;
+            case 'inference.create': value = await vault.createInferenceProfile(inferenceCreateInputSchema.parse(body.payload)); break;
+            case 'inference.update': mutation = await vault.updateInferenceProfile(inferenceUpdateInputSchema.parse(body.payload)); break;
+            case 'inference.delete': mutation = await vault.deleteInferenceProfile(inferenceDeleteInputSchema.parse(body.payload)); break;
+            case 'inference.assign': mutation = await vault.assignInferenceProfile(inferenceAssignInputSchema.parse(body.payload)); break;
+            case 'inference.resolve':
+              value = await vault.resolveInference(body.machineId, z.strictObject({ projectId: z.string().min(1) }).parse(body.payload).projectId);
+              break;
+            case 'inference.providers':
+              value = await vault.resolveInference(body.machineId, null, z.strictObject({ profileId: z.string().min(1) }).parse(body.payload).profileId);
+              break;
+            default: throw new Error('Unsupported inference operation');
+          }
+          if (mutation?.status === 'conflict') return Response.json({ status: 'error', error: { code: 'SETTINGS_CONFLICT', message: 'Inference revision changed', resource: mutation.resource, expected: mutation.expected, actual: mutation.actual } }, { status: 409, headers: { 'cache-control': 'private, no-store' } });
+          return Response.json({ status: 'ok', value: mutation?.value ?? value }, { headers: { 'cache-control': 'private, no-store' } });
+        }
         if (body.operation === 'artifacts.key.get') {
           if (Object.keys(body.payload).length !== 0) throw new Error('Artifact key request must have an empty payload');
           const key = await credentialVault(env, body.userId).artifactKey(body.userId);
@@ -2508,6 +3004,7 @@ const worker = {
               value = await releases.status(body.userId, await tenantWorkerVersion(env, body.userId));
               break;
             case 'deploy.revert': {
+              await releases.assertChannelCompatible();
               const currentWorker = await tenantWorkerVersion(env, body.userId);
               if (currentWorker.sha !== null) {
                 const outcome = await platformCall(await platformConfig(env, body.userId), 'revert', { to: 'channel' });
@@ -2663,11 +3160,8 @@ const worker = {
               const current = await connections.get(body.userId, connectionId);
               if (!current) throw new McpConnectionNotFoundError(connectionId);
               if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
-              const requested = Array.isArray(body.payload.allowedTools) ? body.payload.allowedTools.map(String) : [];
-              const available = new Set((await composio.tools(current.transport.toolkit)).map((tool) => tool.slug));
-              const invalid = requested.find((tool) => !available.has(tool));
-              if (invalid) throw new McpConnectionValidationError('allowedTools', `Composio tool ${invalid} is unavailable`);
-              value = await connections.updateComposioTools(body.userId, connectionId, Number(body.payload.expectedRevision ?? -1), requested);
+              const toolPolicy = validateComposioToolPolicy(body.payload.toolPolicy, await composio.tools(current.transport.toolkit));
+              value = await connections.updateComposioTools(body.userId, connectionId, Number(body.payload.expectedRevision ?? -1), toolPolicy);
               break;
             }
             case 'mcp.composio.disconnect': {
@@ -3024,7 +3518,7 @@ const worker = {
                 });
                 if (input.op === 'value' && input.scope === 'global') await projects.setEnvironmentValue(input.name, input.value);
                 else {
-                  const result = await authority.mutateLifecycleState(spaceId, input, { machineId: body.machineId, actorId: body.machineId, human: false });
+                  const result = await authority.mutateLifecycleState(spaceId, input, { machineId: body.machineId, actorId: body.machineId, kind: 'machine', lifecycleControl: false });
                   if (result.status === 'error') return Response.json({ status: 'error', error: result.failure }, { status: 409 });
                   state = result.state;
                 }
@@ -3066,11 +3560,20 @@ const worker = {
                 body.payload.lifecycle as Parameters<ProjectAuthorityDO['setProjectLifecycle']>[1],
               );
               const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-              value = await namespace.get(namespace.idFromName(body.userId)).put(project);
+              if (project.lifecycle === 'deleting') {
+                await namespace.get(namespace.idFromName(body.userId)).remove(projectId);
+                value = project;
+              } else value = await namespace.get(namespace.idFromName(body.userId)).put(project);
               break;
             }
             case 'project.activateSource': {
               const project = await authority.activateSourceProject(Number(body.payload.expectedRevision ?? -1), String(body.payload.baseBranch ?? ''));
+              const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
+              value = await namespace.get(namespace.idFromName(body.userId)).put(project);
+              break;
+            }
+            case 'project.setBaseBranch': {
+              const project = await authority.setBaseBranch(Number(body.payload.expectedRevision ?? -1), String(body.payload.baseBranch ?? ''));
               const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
               value = await namespace.get(namespace.idFromName(body.userId)).put(project);
               break;
@@ -3251,9 +3754,10 @@ const worker = {
           const projectAuthority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${body.userId}:${common.projectId}`);
           const project = await projectAuthority.getProject();
           const workspace = (await projectAuthority.listWorkspaces()).find((candidate) => candidate.id === spaceId);
-          if (!project || project.lifecycle === 'archived' || project.lifecycle === 'deleting'
-            || !workspace || workspace.lifecycle !== 'active') {
-            return Response.json(publicError('WORKSPACE_UNAVAILABLE', 'Only an active canonical workspace can be opened'), { status: 409 });
+          // Creation records the first placement and reopens from its first checkpoint while provisioning.
+          const admitted = workspace?.lifecycle === 'active' || workspace?.lifecycle === 'provisioning';
+          if (!project || project.lifecycle === 'archived' || project.lifecycle === 'deleting' || !admitted) {
+            return Response.json(publicError('WORKSPACE_UNAVAILABLE', 'Only an active or provisioning workspace can be placed or opened'), { status: 409 });
           }
         }
         let result: SpaceAuthorityResult<unknown>;
@@ -3344,7 +3848,7 @@ const worker = {
       const denied = accountAccessResponse(await activeAccount(env, body.userId));
       if (denied) return denied;
       const result = await credentialVault(env, body.userId).getAccess(body);
-      const status = result.status === 'ok' ? 200 : result.error.code === 'REFRESH_BUSY' ? 409 : result.error.code.includes('UNAUTHORIZED') ? 401 : 400;
+      const status = result.status === 'ok' ? 200 : result.error.code === 'REFRESH_BUSY' ? 409 : result.error.code.includes('UNAUTHORIZED') || result.error.code === 'REQUEST_EXPIRED' || result.error.code === 'INFERENCE_SCOPE_REQUIRED' ? 401 : 400;
       return Response.json(result, { status, headers: { 'cache-control': 'no-store' } });
     } catch {
       return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: 'Credential request is invalid' } }, { status: 400 });

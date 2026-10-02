@@ -207,6 +207,7 @@ export async function buildDistribution(options: { release: string; output: stri
       sourceLock: await digest(join(ROOT, 'bun.lock')),
       ompRecipe: JSON.parse(await readFile(join(runtime, 'omp/omp-runtime.json'), 'utf8')) as unknown,
       native: JSON.parse(await readFile(join(runtime, 'machine/machine-native.json'), 'utf8')) as unknown,
+      gitLfs: JSON.parse(await readFile(join(runtime, 'machine/native/git-lfs.json'), 'utf8')) as unknown,
       machine: { treeHash: initial.machine.hash, manifestHash: initial.machine.manifestHash },
       omp: { treeHash: initial.omp.hash, manifestHash: initial.omp.manifestHash, metadata: initial.omp.metadata },
     };

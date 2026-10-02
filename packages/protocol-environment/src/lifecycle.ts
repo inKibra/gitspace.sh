@@ -17,7 +17,8 @@ export const DEFAULT_LIFECYCLE_TIMEOUT_MS = 30 * 60_000;
 export interface LifecycleActor {
   machineId: string;
   actorId: string;
-  human: boolean;
+  kind: 'browser' | 'client' | 'machine';
+  lifecycleControl: boolean;
   destroyedMachineId?: string;
 }
 export interface LifecycleRunRecord { run: LifecycleRun; token: string | null; scope: string; lock: string }
@@ -30,19 +31,29 @@ export interface LifecycleTransitionFacts {
   token: string;
 }
 
-export function assertLifecycleCommandAuthorized(phase: LifecycleRunPhase, actor: { human: boolean }): void {
-  if (phase === 'cloud/destroy' && !actor.human) throw new EnvironmentError('PermissionDenied', 'Resource destruction requires explicit human browser authorization');
+export function assertLifecycleCommandAuthorized(phase: LifecycleRunPhase, actor: { lifecycleControl: boolean }): void {
+  if (phase === 'cloud/destroy' && !actor.lifecycleControl) throw new EnvironmentError('PermissionDenied', 'Resource destruction requires lifecycle control authorization');
 }
 
-export function assertLifecycleRequestIdentity(request: LifecycleRunRequest, accepted: Pick<LifecycleRun, 'phase'>): void {
-  if (request.phase !== accepted.phase) throw new EnvironmentError('RunConflict', 'Run identity already belongs to a different operation', { runId: request.runId });
+export function assertLifecycleRequestIdentity(request: LifecycleRunRequest, accepted: Pick<LifecycleRun, 'phase' | 'interactive'>): void {
+  if (request.phase !== accepted.phase || Boolean(request.interactive) !== Boolean(accepted.interactive)) throw new EnvironmentError('RunConflict', 'Run identity already belongs to a different operation', { runId: request.runId });
+}
+
+/** Only the leading shell header can declare interactive execution. */
+export function isInteractiveLifecycleScript(content: string): boolean {
+  for (const line of content.split(/\r?\n/u)) {
+    if (line === '# gitspace: interactive') return true;
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith('#')) return false;
+  }
+  return false;
 }
 
 export function authorizeLifecycleMachineMutation(input: LifecycleMutation, facts: {
   machineId: string; projectId: string; machineOnline: boolean;
   placement: { projectId: string; machineId: string | null; generation: number; state: string } | null;
 }): void {
-  if (input.op === 'approval' || input.op === 'abandon') throw new EnvironmentError('PermissionDenied', 'Execution approval and destruction-confirmed recovery require an authenticated human browser');
+  if (input.op === 'approval' || input.op === 'abandon') throw new EnvironmentError('PermissionDenied', 'Execution approval and destruction-confirmed recovery require account lifecycle control');
   if (input.op !== 'claim') return;
   if (!facts.machineOnline) throw new EnvironmentError('RunnerUnavailable', 'Lifecycle execution requires an online authorized machine', { machineId: facts.machineId });
   const detachedPreparation = input.generation === null && (input.phase === 'machine/prepare' || input.phase === 'checks');
@@ -106,12 +117,12 @@ export function lifecycleSummary(state: Pick<LifecycleState, 'runs' | 'destroyed
   if (state.destroyedAt) return { label: 'Resources retired', attention: false };
   return { label: state.policy.automatic ? 'Environment' : 'Environment not initialized', attention: false };
 }
-export function lifecycleActions(state: LifecycleState, phase: LifecycleRunPhase, facts: { runtimeAvailable: boolean; cloudRunnerAvailable: boolean; human: boolean }): { run: boolean; rerun: boolean; cancel: readonly string[]; reason: string | null } {
+export function lifecycleActions(state: LifecycleState, phase: LifecycleRunPhase, facts: { runtimeAvailable: boolean; cloudRunnerAvailable: boolean; lifecycleControl: boolean }): { run: boolean; rerun: boolean; cancel: readonly string[]; reason: string | null } {
   const active = state.runs.filter(isLifecycleRunActive);
   const executions = state.executions.filter((entry) => phase === 'checks' ? entry.kind === 'check' : entry.phase === phase);
   const reason = active.length ? 'A lifecycle run still owns this workspace'
     : !(phase === 'cloud/destroy' ? facts.cloudRunnerAvailable : facts.runtimeAvailable) ? 'An authorized runner is unavailable'
-      : phase === 'cloud/destroy' && !facts.human ? 'Resource retirement requires an authenticated human'
+      : phase === 'cloud/destroy' && !facts.lifecycleControl ? 'Resource retirement requires lifecycle control authorization'
         : executions.some((entry) => !state.approvals.some((approval) => approval.executionHash === entry.hash)) ? 'Awaiting human approval for execution content'
           : state.destroyedAt && phase !== 'cloud/provision' && phase !== 'cloud/destroy' ? 'Workspace resources were explicitly retired' : null;
   return { run: reason === null, rerun: reason === null, cancel: active.filter((run) => run.status !== 'cancelling').map((run) => run.id), reason };
@@ -155,6 +166,7 @@ export function projectEnvironmentState(lifecycle: LifecycleState) {
     values: { ...lifecycle.values, effective: effectiveEnvironmentValues(bundle, effective, lifecycle.values) },
     executions: lifecycle.executions.map((execution) => ({
       ...execution,
+      ...(execution.kind === 'script' ? { interactive: isInteractiveLifecycleScript(execution.content) } : {}),
       approval: lifecycle.approvals.find((entry) => entry.executionHash === execution.hash && entry.scope === 'project')?.scope
         ?? lifecycle.approvals.find((entry) => entry.executionHash === execution.hash && entry.scope === 'workspace')?.scope ?? null,
     })),
@@ -244,7 +256,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       break;
     }
     case 'approval': {
-      if (!actor.human) throw new EnvironmentError('PermissionDenied', 'Execution approval requires an authenticated human browser');
+      if (!actor.lifecycleControl) throw new EnvironmentError('PermissionDenied', 'Execution approval requires lifecycle control authorization');
       if (input.approved && !state.executions.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review execution content before approving');
       state.approvals = state.approvals.filter((entry) => entry.scope !== input.scope || entry.executionHash !== input.executionHash);
       if (input.approved) state.approvals.push({ scope: input.scope, executionHash: input.executionHash, approvedAt: now, approvedBy: actor.actorId });
@@ -256,7 +268,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       const existing = facts.runs.find((entry) => entry.run.id === input.runId);
       if (existing) {
         const run = existing.run;
-        if (run.spaceId !== state.spaceId || run.phase !== input.phase || run.profile !== input.profile || run.generation !== input.generation || !sameHashes(run.executionHashes, input.executionHashes)) throw new EnvironmentError('RunConflict', 'Run identity already belongs to a different operation', { runId: input.runId });
+        if (run.spaceId !== state.spaceId || run.phase !== input.phase || Boolean(run.interactive) !== Boolean(input.interactive) || run.profile !== input.profile || run.generation !== input.generation || !sameHashes(run.executionHashes, input.executionHashes)) throw new EnvironmentError('RunConflict', 'Run identity already belongs to a different operation', { runId: input.runId });
         return { state: { ...state, claim: { runId: run.id, status: 'existing', reason: null, token: null } }, changed: false, sharedChanged: false };
       }
       const scope = lifecycleRunScope(input, actor.machineId, state.spaceId);
@@ -266,11 +278,14 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       if (input.phase.startsWith('cloud/') && !input.rerun && facts.runs.some((entry) => entry.scope === scope && entry.run.phase === input.phase && !isLifecycleRunActive(entry.run) && entry.run.status !== 'succeeded')) throw new EnvironmentError('RecoveryRequired', 'Previous cloud effects require inspection and an explicit rerun');
       if (input.phase === 'cloud/provision' && !state.policy.automatic) throw new EnvironmentError('PreconditionFailed', 'Explicit workspace setup must enable lifecycle policy first');
       if (input.executionHashes.some((hash) => !state.approvals.some((approval) => approval.executionHash === hash))) throw new EnvironmentError('ApprovalRequired', 'Awaiting human approval for execution content');
+      if (input.phase === 'checks' && input.interactive) throw new EnvironmentError('InvalidConfiguration', 'Environment checks cannot run interactively');
+      if (!input.interactive && state.executions.some((execution) => execution.kind === 'script' && input.executionHashes.includes(execution.hash) && isInteractiveLifecycleScript(execution.content))) throw new EnvironmentError('InteractionRequired', 'This lifecycle phase requires protected interactive execution');
       const deadlineAt = new Date(input.deadlineAt === undefined ? Date.parse(now) + DEFAULT_LIFECYCLE_TIMEOUT_MS : Date.parse(input.deadlineAt)).toISOString();
       if (deadlineAt <= now) throw new EnvironmentError('DeadlineExceeded', 'Lifecycle deadline has already elapsed', { deadlineAt });
       const skipped = !input.rerun && (input.phase === 'cloud/provision' && state.provisioned !== null || input.phase === 'cloud/destroy' && state.destroyedAt !== null || !input.phase.startsWith('cloud/') && input.phase !== 'checks' && facts.runs.some((entry) => entry.scope === scope && entry.run.status === 'succeeded'));
       const run: LifecycleRun = { id: input.runId, projectId: state.projectId, spaceId: state.spaceId, phase: input.phase,
         status: skipped ? 'succeeded' : 'accepted', profile: input.profile, machineId: actor.machineId, generation: input.generation,
+        interactive: input.interactive ?? false,
         executionHashes: input.executionHashes, terminalName: input.terminalName ?? null, results: [], output: '',
         exitCode: skipped ? 0 : null, startedAt: now, finishedAt: skipped ? now : null, deadlineAt, cancelRequestedAt: null, failure: null, incidents: [] };
       record = { run, scope, lock, token: skipped ? null : input.ownershipToken ?? facts.token };
@@ -287,7 +302,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
     case 'cancel': {
       record = owned(input.runId);
-      if (!actor.human && actor.machineId !== record.run.machineId) throw new EnvironmentError('PermissionDenied', 'Only an authenticated human or the owning runner may cancel this run');
+      if (!actor.lifecycleControl && (actor.kind !== 'machine' || actor.machineId !== record.run.machineId)) throw new EnvironmentError('PermissionDenied', 'Only lifecycle controllers or the owning runner may cancel this run');
       if (!isLifecycleRunActive(record.run) || record.run.cancelRequestedAt) return { state, changed: false, sharedChanged: false };
       record.run.status = 'cancelling';
       record.run.cancelRequestedAt = now;
@@ -295,7 +310,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
     case 'incidents': {
       record = owned(input.runId);
-      if (!actor.human && actor.machineId !== record.run.machineId) throw new EnvironmentError('PermissionDenied', 'Only the owning runner or an authenticated human may synchronize run incidents');
+      if (!actor.lifecycleControl && (actor.kind !== 'machine' || actor.machineId !== record.run.machineId)) throw new EnvironmentError('PermissionDenied', 'Only lifecycle controllers or the owning runner may synchronize run incidents');
       const additions = input.incidents.filter((incident) => !record!.run.incidents.some((entry) => entry.id === incident.id));
       if (!additions.length) return { state, changed: false, sharedChanged: false };
       record.run.incidents = [...record.run.incidents, ...additions];
@@ -335,7 +350,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
     case 'abandon': {
       record = owned(input.runId);
-      if (!actor.human || actor.destroyedMachineId !== record.run.machineId) throw new EnvironmentError('PermissionDenied', 'Recovery requires an authenticated human and confirmed destruction of the owning machine');
+      if (!actor.lifecycleControl || actor.destroyedMachineId !== record.run.machineId) throw new EnvironmentError('PermissionDenied', 'Recovery requires lifecycle control and confirmed destruction of the owning machine');
       if (!isLifecycleRunActive(record.run)) throw new EnvironmentError('PreconditionFailed', 'Only an unresolved lifecycle claim can be recovered');
       record.run = { ...record.run, status: 'interrupted', finishedAt: now, exitCode: 1, failure: { code: 'Interrupted', message: 'Owning machine was destroyed before run completion; inspect effects before retrying', context: { runId: input.runId } } };
       record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:interrupted`, kind: 'domain', occurredAt: now, message: record.run.failure!.message, failure: record.run.failure }];

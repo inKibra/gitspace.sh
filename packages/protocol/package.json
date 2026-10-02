@@ -9,6 +9,7 @@
     "./account-directory": "./src/account-directory.ts",
     "./cloud-image": "./src/cloud-image.ts",
     "./credential-vault": "./src/credential-vault.ts",
+    "./inference": "./src/inference.ts",
     "./device-grant": "./src/device-grant.ts",
     "./machine-pairing": "./src/machine-pairing.ts",
     "./client": "./src/client.ts",
@@ -18,16 +19,23 @@
     "./cron-contract": "./src/cron-contract.ts",
     "./inspector-contract": "./src/inspector-contract.ts",
     "./mcp-contract": "./src/mcp-contract.ts",
+    "./mcp-access": "./src/mcp-access.ts",
     "./skills-contract": "./src/skills-contract.ts",
     "./project-authority": "./src/project-authority.ts",
     "./rpc-contract": "./src/rpc-contract.ts",
     "./resource-uri": "./src/resource-uri.ts",
+    "./json-representation": "./src/json-representation.ts",
+    "./default-skills": "./src/default-skills.ts",
+    "./snapshot-page": "./src/snapshot-page.ts",
     "./transcript": "./src/transcript.ts",
     "./rpc-crypto": "./src/rpc-crypto.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "test": "bun ../../scripts/test-isolated.ts test"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1"
   },
   "dependencies": {
     "@gitspace/blocks": "workspace:*",

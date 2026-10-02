@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -238,5 +238,45 @@ describe('Inspector Git reads', () => {
     expect(symlink.content).not.toContain('secret that must not be followed');
     symlinkSync('..', join(context.repositoryPath, 'parent-link'));
     await expect(readRepositoryFile({ ...context, mode: 'current', path: 'parent-link/outside-secret.txt' })).rejects.toThrow('symlink parent');
+  });
+});
+
+describe('Inspector Git reads without git-lfs', () => {
+  const path = process.env.PATH;
+  afterEach(() => {
+    process.env.PATH = path;
+  });
+
+  it('reads LFS pointer checkouts whose required filter is not installed', async () => {
+    const context = fixture();
+    const repositoryPath = context.repositoryPath;
+    const pointer = 'version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n';
+    writeFileSync(join(repositoryPath, '.gitattributes'), '*.pdf filter=lfs diff=lfs merge=lfs -text\n');
+    writeFileSync(join(repositoryPath, 'doc.pdf'), pointer);
+    writeFileSync(join(repositoryPath, 'edited.pdf'), pointer);
+    git(repositoryPath, 'add', '.gitattributes', 'doc.pdf', 'edited.pdf');
+    git(repositoryPath, 'commit', '-m', 'lfs pointers');
+    git(repositoryPath, 'config', 'filter.lfs.required', 'true');
+    git(repositoryPath, 'config', 'filter.lfs.process', 'git-lfs filter-process');
+    // Stat-dirty pointers force Git to run the clean filter while computing status.
+    utimesSync(join(repositoryPath, 'doc.pdf'), new Date('2020-01-01'), new Date('2020-01-01'));
+    writeFileSync(join(repositoryPath, 'edited.pdf'), `${pointer}edited\n`);
+    const bin = join(context.root, 'bin');
+    mkdirSync(bin);
+    symlinkSync(Bun.which('git')!, join(bin, 'git'));
+    process.env.PATH = bin;
+    const plain = Bun.spawnSync(['git', 'status', '--porcelain=v1'], { cwd: repositoryPath, env: { ...process.env } });
+    expect(plain.exitCode).not.toBe(0);
+    expect(plain.stderr.toString()).toContain('git-lfs');
+
+    const tree = await readRepositoryTree({ ...context, mode: 'current' });
+    expect(tree).toContainEqual(expect.objectContaining({ path: 'doc.pdf', status: 'clean' }));
+    expect(tree).toContainEqual(expect.objectContaining({ path: 'edited.pdf', status: 'modified' }));
+    expect(tree).toContainEqual(expect.objectContaining({ path: 'untracked.txt', status: 'untracked' }));
+    const status = await readRepositoryStatus({ ...context, mode: 'working' });
+    expect(status.map((entry) => entry.path)).not.toContain('doc.pdf');
+    const diff = await readRepositoryDiff({ ...context, mode: 'working', path: 'edited.pdf' });
+    expect(diff.patch).toContain('+edited\n');
+    expect(await readRepositoryFile({ ...context, mode: 'staged', path: 'doc.pdf' })).toMatchObject({ content: pointer });
   });
 });

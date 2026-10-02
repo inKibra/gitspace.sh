@@ -1,14 +1,17 @@
 import {
   decodeSignedRpcHeader,
   inputWithinScope,
+  deviceCanAdminister,
+  requiredAdministrativeCapability,
   requiredCapability,
   requiresImageSelectionControl,
   RPC_DEVICE_HEADER,
-  RPC_SIGNATURE_MAX_SKEW_MS,
+  SIGNED_REQUEST_MAX_AGE_MS,
   verifyRpcSignature,
   type GitSpaceRpcCaller,
   type VerifiedDevice,
 } from '@gitspace/protocol';
+import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { parse as parseDevalue } from 'devalue';
 import { z } from 'zod';
 
@@ -20,6 +23,8 @@ export interface SignedRpcHandlerOptions {
   procedureKind(path: string): 'query' | 'mutation' | 'subscription' | null;
   /** Project owning a workspace, for scoped grants naming a workspace only. */
   workspaceProject(workspaceId: string): string | null;
+  /** Canonical local session target; caller-supplied project/workspace hints are not authority. */
+  sessionTarget?(sessionId: string): { projectId: string; workspaceId: string } | null;
 }
 
 const callers = new WeakMap<Request, GitSpaceRpcCaller>();
@@ -65,7 +70,7 @@ export function createSignedRpcHandler(options: SignedRpcHandlerOptions) {
     const header = decodeSignedRpcHeader(encodedHeader);
     if (!header) return transportError(401, 'RPC_DEVICE_INVALID', 'Device signature header is malformed');
     const now = Date.now();
-    if (Math.abs(now - header.timestamp) > RPC_SIGNATURE_MAX_SKEW_MS) return transportError(401, 'RPC_SIGNATURE_EXPIRED', 'Device signature timestamp is out of range');
+    if (Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return transportError(401, 'RPC_SIGNATURE_EXPIRED', 'Device signature timestamp is out of range');
     const device = await options.lookupDevice(header.deviceId);
     if (!device) return transportError(401, 'RPC_DEVICE_UNKNOWN', 'Device is not enrolled or has been revoked');
     const body = new Uint8Array(await request.arrayBuffer());
@@ -77,12 +82,13 @@ export function createSignedRpcHandler(options: SignedRpcHandlerOptions) {
     if (!verifyRpcSignature(header, { method: request.method, path: signedPath, body }, device.signingPublicKey)) {
       return transportError(401, 'RPC_SIGNATURE_INVALID', 'Device signature does not match the request');
     }
-    if (now - lastSweep > RPC_SIGNATURE_MAX_SKEW_MS) {
+    if (now - lastSweep > SIGNED_REQUEST_MAX_AGE_MS) {
       lastSweep = now;
-      for (const [nonce, seenAt] of Object.entries(nonces)) if (now - seenAt > RPC_SIGNATURE_MAX_SKEW_MS) delete nonces[nonce];
+      for (const [nonce, seenAt] of Object.entries(nonces)) if (now - seenAt > SIGNED_REQUEST_MAX_AGE_MS) delete nonces[nonce];
     }
     if (nonces[header.nonce] !== undefined) return transportError(409, 'RPC_REPLAY', 'Device request was already consumed');
-    nonces[header.nonce] = now;
+    // A future-dated signature stays valid until timestamp + window, so retention is anchored there.
+    nonces[header.nonce] = Math.max(now, header.timestamp);
 
     const items = envelopeItems(new TextDecoder().decode(body));
     if (!items) return transportError(400, 'RPC_ENVELOPE_INVALID', 'Request envelope could not be read');
@@ -92,7 +98,14 @@ export function createSignedRpcHandler(options: SignedRpcHandlerOptions) {
       const capability = requiredCapability(item.path, kind);
       if (!device.capabilities.includes(capability)) return transportError(403, 'RPC_FORBIDDEN', `${item.path} requires ${capability}`);
       if (requiresImageSelectionControl(item.path, item.input) && !device.capabilities.includes('deployment.control')) return transportError(403, 'RPC_FORBIDDEN', `${item.path} requires deployment.control`);
-      if (!inputWithinScope(device.scope, item.input, options.workspaceProject)) return transportError(403, 'RPC_OUT_OF_SCOPE', `${item.path} is outside this device's scope`);
+      const administration = requiredAdministrativeCapability(item.path, item.input);
+      if (administration && !deviceCanAdminister(device, administration)) return transportError(403, 'RPC_FORBIDDEN', `${item.path} requires account-scoped ${administration}`);
+      if (device.scope.kind !== 'user') {
+        const procedure = gitspaceContract.procedures.get(item.path);
+        const decoded = procedure?._def.input.decode(item.input);
+        if (!decoded?.ok) return transportError(403, 'RPC_OUT_OF_SCOPE', 'Scoped requests require a valid, known procedure target');
+        if (!inputWithinScope(device.scope, decoded.value, options.workspaceProject, options.sessionTarget)) return transportError(403, 'RPC_OUT_OF_SCOPE', `${item.path} is outside this device's scope`);
+      }
       if (item.path.startsWith('environment.') && item.input && typeof item.input === 'object') {
         const input = item.input as Record<string, unknown>;
         if (input.scope === 'global' && device.scope.kind !== 'user') {

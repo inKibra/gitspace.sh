@@ -227,7 +227,7 @@ describe('space relations persistence', () => {
     expect(database.setSpaceRelations('b', { dependsOn: [], relatedTo: ['c'], stackedOn: 'a' }).status).toBe('ok');
     expect(database.setSpaceRelations('c', { dependsOn: ['b'], relatedTo: [], stackedOn: null }).status).toBe('ok');
 
-    const bootstrap = handlers.bootstrap({ projectId: 'p1', workspaceId: null });
+    const bootstrap = handlers.spaceView({ projectId: 'p1', workspaceId: null });
     expect(bootstrap.status).toBe('ok');
     if (bootstrap.status === 'error') throw new Error('bootstrap failed');
     const views = Object.fromEntries(bootstrap.value.workspaces.map((workspace) => [workspace.id, workspace]));

@@ -5,7 +5,9 @@ import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type R
 import { glyph } from './glyph.js';
 import { EmptyState } from './GitSpaceShell.js';
 import type { StreamEvent } from '@gitspace/protocol-sync';
+import type { ProtectedTerminalEvent, ProtectedTerminalStep } from '@gitspace/protocol/rpc-contract';
 import { useSynchronizedResource } from './SynchronizationProvider.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 
 export type WorkspaceTerminalKind = 'user' | 'agent' | 'lifecycle' | 'service';
 export type WorkspaceTerminalState = 'starting' | 'running' | 'ready' | 'restarting' | 'stopping' | 'exited' | 'failed';
@@ -22,6 +24,7 @@ export interface WorkspaceTerminalView {
   cwd: string;
   createdAt: Date;
   exitCode: number | null;
+  protected?: boolean;
 }
 
 export interface WorkspaceTerminalOutput {
@@ -35,6 +38,8 @@ export interface WorkspaceTerminalOutput {
 export interface WorkspaceTerminalsProps {
   spaceId: string;
   events(name: string | null, after: number | null, signal: AbortSignal): AsyncIterable<{ status: 'ok'; value: StreamEvent<{ terminals: readonly WorkspaceTerminalView[]; output: WorkspaceTerminalOutput | null }> } | { status: 'error'; error: Error }>;
+  live(name: string, signal: AbortSignal): AsyncIterable<{ status: 'ok'; value: ProtectedTerminalEvent } | { status: 'error'; error: Error }>;
+  requestedName?: string | null;
   create(): Promise<WorkspaceTerminalView>;
   send(name: string, data: string): Promise<void>;
   onClose?: () => void;
@@ -82,6 +87,8 @@ const MAX_TERMINAL_DRAIN_BYTES = 64 * 1_024;
 const MAX_TERMINAL_DRAIN_MS = 8;
 const MIN_TERMINAL_WRITE_BYTES = 512;
 const terminalEncoder = new TextEncoder();
+// Clear both screens and scrollback. Ghostty.reset() alone can retain old cells.
+const ERASE_PROTECTED_TERMINAL = '\x1b[?1049h\x1b[3J\x1b[2J\x1b[H\x1b[?1049l\x1b[3J\x1b[2J\x1b[H';
 
 function findUtf8SafeEnd(chunk: Uint8Array, offset: number, maxEnd: number): number {
   let end = maxEnd;
@@ -93,7 +100,7 @@ function findUtf8SafeEnd(chunk: Uint8Array, offset: number, maxEnd: number): num
   return end;
 }
 
-function writeTerminalSlice(terminal: GhosttyTerminalType, slice: Uint8Array): boolean {
+function writeTerminalSlice(terminal: GhosttyTerminalType, slice: Uint8Array, protectedOutput = false): boolean {
   try {
     terminal.write(slice);
     return true;
@@ -101,11 +108,11 @@ function writeTerminalSlice(terminal: GhosttyTerminalType, slice: Uint8Array): b
     if (slice.byteLength > MIN_TERMINAL_WRITE_BYTES) {
       const midpoint = findUtf8SafeEnd(slice, 0, Math.floor(slice.byteLength / 2));
       if (midpoint > 0 && midpoint < slice.byteLength) {
-        return writeTerminalSlice(terminal, slice.subarray(0, midpoint))
-          && writeTerminalSlice(terminal, slice.subarray(midpoint));
+        return writeTerminalSlice(terminal, slice.subarray(0, midpoint), protectedOutput)
+          && writeTerminalSlice(terminal, slice.subarray(midpoint), protectedOutput);
       }
     }
-    console.error('[workspace-terminal] dropping failed Ghostty write slice', {
+    if (!protectedOutput) console.error('[workspace-terminal] dropping failed Ghostty write slice', {
       bytes: slice.byteLength,
       cols: terminal.cols,
       rows: terminal.rows,
@@ -121,7 +128,7 @@ interface TerminalWritePump {
   dispose(): void;
 }
 
-function createTerminalWritePump(terminal: GhosttyTerminalType, onFatal: (error: Error) => void): TerminalWritePump {
+function createTerminalWritePump(terminal: GhosttyTerminalType, onFatal: (error: Error) => void, bounded = false): TerminalWritePump {
   const queue: Uint8Array[] = [];
   let queuedBytes = 0;
   let frame: number | null = null;
@@ -136,6 +143,7 @@ function createTerminalWritePump(terminal: GhosttyTerminalType, onFatal: (error:
     if (disposed) return;
     if (resetPending) {
       terminal.reset();
+      if (bounded) terminal.write(ERASE_PROTECTED_TERMINAL);
       resetPending = false;
     }
     const startedAt = performance.now();
@@ -148,7 +156,7 @@ function createTerminalWritePump(terminal: GhosttyTerminalType, onFatal: (error:
         const maxEnd = Math.min(offset + MAX_TERMINAL_WRITE_BYTES, offset + remaining, chunk.length);
         const end = Math.max(offset + 1, findUtf8SafeEnd(chunk, offset, maxEnd));
         const slice = chunk.subarray(offset, end);
-        if (!writeTerminalSlice(terminal, slice)) {
+        if (!writeTerminalSlice(terminal, slice, bounded)) {
           disposed = true;
           queue.length = 0;
           queuedBytes = 0;
@@ -176,6 +184,12 @@ function createTerminalWritePump(terminal: GhosttyTerminalType, onFatal: (error:
   return {
     enqueue(data: Uint8Array) {
       if (disposed || data.byteLength === 0) return;
+      if (bounded && queuedBytes + data.byteLength > 512 * 1_024) {
+        queue.length = 0;
+        queuedBytes = 0;
+        resetPending = true;
+        data = data.subarray(Math.max(0, data.byteLength - 512 * 1_024));
+      }
       queue.push(new Uint8Array(data));
       queuedBytes += data.byteLength;
       schedule();
@@ -201,11 +215,13 @@ function createTerminalWritePump(terminal: GhosttyTerminalType, onFatal: (error:
   };
 }
 
-function HubGhosttyTerminal({ data, disabled, onData, onError }: { data: string; disabled: boolean; onData: (data: string) => void; onError: (error: Error) => void }) {
+function HubGhosttyTerminal({ data, disabled, onData, onError, protected: protectedOutput = false }: { data: string; disabled: boolean; onData: (data: string) => void; onError: (error: Error) => void; protected?: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<GhosttyTerminalType | null>(null);
   const pumpRef = useRef<TerminalWritePump | null>(null);
   const renderedRef = useRef('');
+  const dataRef = useRef(data);
+  dataRef.current = data;
   const disabledRef = useRef(disabled);
   const onDataRef = useRef(onData);
   const onErrorRef = useRef(onError);
@@ -219,9 +235,9 @@ function HubGhosttyTerminal({ data, disabled, onData, onError }: { data: string;
     else pump.replace(terminalEncoder.encode(data));
     renderedRef.current = data;
   }, [data]);
-  useEffect(() => { disabledRef.current = disabled; }, [disabled]);
-  useEffect(() => { onDataRef.current = onData; }, [onData]);
-  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  disabledRef.current = disabled;
+  onDataRef.current = onData;
+  onErrorRef.current = onError;
   useEffect(() => {
     let disposed = false;
     let terminal: GhosttyTerminalType | null = null;
@@ -233,7 +249,7 @@ function HubGhosttyTerminal({ data, disabled, onData, onError }: { data: string;
       terminal = new GhosttyTerminal({
         cols: 120,
         rows: 40,
-        scrollback: 10_000,
+        scrollback: protectedOutput ? 1_000 : 10_000,
         fontSize: 13,
         fontFamily: color('--terminal-font', 'ui-monospace, SFMono-Regular, Menlo, monospace'),
         cursorBlink: true,
@@ -261,7 +277,17 @@ function HubGhosttyTerminal({ data, disabled, onData, onError }: { data: string;
           brightWhite: color('--terminal-bright-white', '#f0f6fc'),
         },
       });
-      terminal.open(container);
+      if (protectedOutput) {
+        // Ghostty.open calls focus internally, including a deferred focus. Suppress
+        // that call rather than restoring focus after it has interrupted typing.
+        const focus = terminal.focus;
+        terminal.focus = () => {};
+        try { terminal.open(container); } finally { terminal.focus = focus; }
+        terminal.write(ERASE_PROTECTED_TERMINAL);
+        container.setAttribute('autocorrect', 'off');
+        container.setAttribute('autocapitalize', 'none');
+        container.spellcheck = false;
+      } else terminal.open(container);
       terminal.onData((value) => { if (!disabledRef.current) onDataRef.current(value); });
       terminalRef.current = terminal;
 
@@ -337,7 +363,13 @@ function HubGhosttyTerminal({ data, disabled, onData, onError }: { data: string;
       container.addEventListener('touchmove', handleTouchMove, { passive: false });
       container.addEventListener('touchend', handleTouchEnd, { passive: true });
 
-      const helper = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+      const helper = container.querySelector('textarea') as HTMLTextAreaElement | null;
+      if (helper && protectedOutput) {
+        helper.autocomplete = 'off';
+        helper.setAttribute('autocorrect', 'off');
+        helper.autocapitalize = 'none';
+        helper.spellcheck = false;
+      }
       const ios = /iPad|iPhone|iPod/u.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
       let composing = false;
       const handleCompositionStart = (): void => { composing = true; };
@@ -350,23 +382,23 @@ function HubGhosttyTerminal({ data, disabled, onData, onError }: { data: string;
         helper.value = '';
       };
       if (helper && ios) {
-        helper.autocorrect = true;
-        helper.autocomplete = 'on';
+        helper.autocorrect = !protectedOutput;
+        helper.autocomplete = protectedOutput ? 'off' : 'on';
         helper.autocapitalize = 'none';
         helper.inputMode = 'text';
         helper.enterKeyHint = 'enter';
-        helper.spellcheck = true;
+        helper.spellcheck = !protectedOutput;
         helper.addEventListener('compositionstart', handleCompositionStart);
         helper.addEventListener('compositionend', handleCompositionEnd);
         helper.addEventListener('input', handleInput);
       }
 
-      const writePump = createTerminalWritePump(terminal, (error) => onErrorRef.current(error));
+      const writePump = createTerminalWritePump(terminal, (error) => onErrorRef.current(error), protectedOutput);
       pumpRef.current = writePump;
-      writePump.replace(terminalEncoder.encode(data));
-      renderedRef.current = data;
+      writePump.replace(terminalEncoder.encode(dataRef.current));
+      renderedRef.current = dataRef.current;
 
-      terminal.focus();
+      if (!protectedOutput) terminal.focus();
 
       const previousCleanup = () => {
         scrollDisposable.dispose();
@@ -389,7 +421,10 @@ function HubGhosttyTerminal({ data, disabled, onData, onError }: { data: string;
       pumpRef.current = null;
       const current = terminal;
       terminalRef.current = null;
-      if (current) requestAnimationFrame(() => current.dispose());
+      if (current && protectedOutput) {
+        current.write(ERASE_PROTECTED_TERMINAL);
+        current.dispose();
+      } else if (current) requestAnimationFrame(() => current.dispose());
     };
   }, []);
   return <div className="min-h-0 flex-1 overflow-auto" ref={containerRef} />;
@@ -404,29 +439,112 @@ class TerminalErrorBoundary extends Component<{ children: ReactNode; resetKey: s
   }
   render() {
     return this.state.error
-      ? <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="Terminal renderer failed" description={this.state.error.message} /></div>
+      ? <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="Terminal renderer failed" description="Close and reopen the terminal pane to reconnect." /></div>
       : this.props.children;
   }
 }
 
 
+function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect }: { name: string; running: boolean; live: WorkspaceTerminalsProps['live']; onData(data: string): void; onError(error: Error): void; onDisconnect(): void }) {
+  const [frame, setFrame] = useState<{ data: string; epoch: number; connected: boolean; steps: readonly ProtectedTerminalStep[]; exitCode: number | null; disconnected: boolean }>({ data: '', epoch: 0, connected: false, steps: [], exitCode: null, disconnected: false });
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const runningRef = useRef(running);
+  runningRef.current = running;
+  const inputEnabledRef = useRef(false);
+  const disconnectRef = useRef(onDisconnect);
+  disconnectRef.current = onDisconnect;
+  useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    let retry: number | undefined;
+    let completed = false;
+    const attach = async (): Promise<void> => {
+      try {
+        for await (const result of liveRef.current(name, signal)) {
+          if (signal.aborted) return;
+          if (result.status === 'error') break;
+          const event = result.value;
+          if (event.type === 'state') {
+            inputEnabledRef.current = true;
+            setFrame((previous) => ({ ...previous, steps: event.steps, connected: true, disconnected: false }));
+          } else if (event.type === 'output') {
+            setFrame((previous) => {
+              const data = previous.data + event.data;
+              return data.length > 128 * 1_024
+                ? { ...previous, data: data.slice(-128 * 1_024), epoch: previous.epoch + 1 }
+                : { ...previous, data };
+            });
+          } else {
+            completed = true;
+            inputEnabledRef.current = false;
+            disconnectRef.current();
+            setFrame((previous) => ({ ...previous, connected: false, exitCode: event.exitCode }));
+            return;
+          }
+        }
+      } catch {
+        // Transport errors may contain payloads; protected delivery only shows a generic notice.
+      }
+      if (signal.aborted || completed) return;
+      inputEnabledRef.current = false;
+      disconnectRef.current();
+      setFrame((previous) => ({ ...previous, data: '', epoch: previous.epoch + 1, connected: false, disconnected: true }));
+      if (runningRef.current) retry = window.setTimeout(() => {
+        if (runningRef.current) void attach();
+      }, 1_000);
+    };
+    // Attempt attachment once; only retry while status still reports an active run.
+    // Status delivery can overtake private output: only unmount aborts this stream.
+    void attach();
+    return () => {
+      controller.abort();
+      window.clearTimeout(retry);
+      inputEnabledRef.current = false;
+      disconnectRef.current();
+    };
+  }, [name]);
+  const completed = frame.exitCode !== null;
+  return <>
+    <p role="status" className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground">{completed ? `Environment run ended (exit ${frame.exitCode}). Visible output is retained until this pane is closed or reloaded.` : frame.disconnected ? `Protected live output disconnected; previous output was cleared.${running ? ' Reconnecting to the same run without replay.' : ' The Environment run has ended.'}` : frame.connected ? running ? 'Protected live output · input is not echoed · history is cleared on disconnect or close.' : 'Environment run ended. Receiving its final live output; input is disabled.' : 'Connecting to the same Environment run. Previous output is not replayed; input is paused until connected.'}</p>
+    {frame.steps.length > 0 ? <ol aria-label="Environment scripts" className="max-h-40 shrink-0 overflow-auto border-b border-border px-3 py-1 text-caption">
+      {frame.steps.map((step) => <li key={step.id} className="flex items-baseline gap-3 py-0.5">
+        <code className="min-w-0 flex-1 break-all font-mono text-foreground">{step.id}</code>
+        <span className={`shrink-0 tabular-nums ${step.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>{completed && step.status === 'pending' ? 'not run' : step.status}{step.exitCode !== null ? ` · exit ${step.exitCode}` : ''}</span>
+      </li>)}
+    </ol> : null}
+    <HubGhosttyTerminal key={`${name}:${frame.epoch}`} protected data={frame.data} disabled={!running || !frame.connected || completed} onData={(data) => { if (runningRef.current && inputEnabledRef.current) onData(data); }} onError={onError} />
+  </>;
+}
+
 export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
   const { spaceId, events, create: createTerminal, send, stop: stopTerminal } = props;
   const [terminals, setTerminals] = useState<readonly WorkspaceTerminalView[]>([]);
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [selectedName, setSelectedName] = useState<string | null>(props.requestedName ?? null);
   const synchronized = useSynchronizedResource(`terminals:${spaceId}:${selectedName ?? ''}`, (after, signal) => events(selectedName, after, signal));
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const pendingInput = useRef<Array<{ name: string; chunks: string[]; send: WorkspaceTerminalsProps['send'] }>>([]);
   const sendingInput = useRef(false);
-  const selected = useMemo(() => terminals.find((terminal) => terminal.name === selectedName) ?? terminals[0] ?? null, [terminals, selectedName]);
+  const selected = useMemo(() => terminals.find((terminal) => terminal.name === selectedName) ?? (selectedName ? null : terminals[0] ?? null), [terminals, selectedName]);
   const output = synchronized.value?.output && synchronized.value.output.name === selected?.name ? synchronized.value.output : null;
+  const selectionRef = useRef(selected);
+  selectionRef.current = selected;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; pendingInput.current.length = 0; };
+  }, []);
+  useEffect(() => { pendingInput.current.length = 0; }, [selected?.id, selected?.state]);
+  useEffect(() => {
+    if (props.requestedName) setSelectedName(props.requestedName);
+  }, [props.requestedName]);
 
   useEffect(() => {
     const next = synchronized.value?.terminals;
     if (!next) return;
     setTerminals(next);
-    setSelectedName((current) => current && next.some((terminal) => terminal.name === current) ? current : next[0]?.name ?? null);
+    setSelectedName((current) => current && (current === props.requestedName || next.some((terminal) => terminal.name === current)) ? current : next[0]?.name ?? null);
   }, [synchronized.cursor]);
 
   const create = async (): Promise<void> => {
@@ -437,14 +555,19 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
       setSelectedName(terminal.name);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(rpcErrorMessage(cause, 'Create terminal'));
     } finally {
       setCreating(false);
     }
   };
 
   const sendInput = (data: string): void => {
-    if (!selected || !isRunning(selected.state)) return;
+    if (!selected || selectionRef.current?.id !== selected.id || !isRunning(selected.state)) return;
+    if (selected.protected && pendingInput.current.reduce((length, batch) => length + batch.chunks.reduce((size, chunk) => size + chunk.length, 0), data.length) > 64 * 1_024) {
+      pendingInput.current.length = 0;
+      setError('Input is arriving too quickly. Pending protected input was discarded.');
+      return;
+    }
     const tail = pendingInput.current.at(-1);
     if (tail?.name === selected.name && tail.send === send) tail.chunks.push(data);
     else pendingInput.current.push({ name: selected.name, chunks: [data], send });
@@ -454,12 +577,13 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
       try {
         while (pendingInput.current.length > 0) {
           const next = pendingInput.current.shift()!;
+          if (!mountedRef.current || selectionRef.current?.name !== next.name || !isRunning(selectionRef.current.state)) continue;
           await next.send(next.name, next.chunks.join(''));
         }
         setError(null);
       } catch (cause) {
         pendingInput.current.length = 0;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        if (mountedRef.current) setError(selected.protected || selectionRef.current?.protected ? 'Protected input could not be delivered. It was not retried.' : rpcErrorMessage(cause, 'Send terminal input'));
       } finally {
         sendingInput.current = false;
       }
@@ -471,10 +595,11 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
     if (!selected || !isRunning(selected.state)) return;
     try {
       await stopTerminal(selected.name);
-      setTerminals((current) => current.filter((terminal) => terminal.name !== selected.name));
+      if (selected.kind !== 'lifecycle') setTerminals((current) => current.filter((terminal) => terminal.name !== selected.name));
+      if (selected.kind !== 'lifecycle') setSelectedName(null);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(rpcErrorMessage(cause, 'Stop terminal'));
     }
   };
 
@@ -490,7 +615,7 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
       </span>
       {terminals.length > 0
         ? <TabsSubtle size="compact" idPrefix="terminals" selectedIndex={selectedIndex} onSelect={(index) => setSelectedName(terminals[index]?.name ?? null)} className="min-w-0 flex-1">
-            {terminals.map((terminal, index) => <TabsSubtleItem key={terminal.name} index={index} label={terminal.name} icon={KIND[terminal.kind].icon} />)}
+            {terminals.map((terminal, index) => <TabsSubtleItem key={terminal.name} index={index} label={terminal.protected && terminal.kind === 'lifecycle' ? 'Environment' : terminal.name} icon={KIND[terminal.kind].icon} />)}
           </TabsSubtle>
         : <span className="flex-1" />}
       {newTerminal}
@@ -504,9 +629,9 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
         <code className="min-w-0 truncate font-mono text-foreground">{selected.command}</code>
         <span className="ml-auto shrink-0">Machine <span className="font-mono text-foreground">{selected.machineId}</span></span>
       </div>
-      <TerminalErrorBoundary resetKey={selected.name} onError={(cause) => setError(cause.message)}><HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} /></TerminalErrorBoundary>
+      <TerminalErrorBoundary resetKey={selected.id} onError={() => setError('Terminal display unavailable. Close and reopen to reconnect.')}><div className="flex min-h-0 flex-1 flex-col" key={selected.id}>{selected.protected ? <ProtectedTerminal name={selected.name} running={isRunning(selected.state)} live={props.live} onData={sendInput} onDisconnect={() => { pendingInput.current.length = 0; }} onError={() => setError('Protected terminal display unavailable. Close and reopen to reconnect.')} /> : <HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} />}</div></TerminalErrorBoundary>
     </> : <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="No terminals" description="Open a terminal in this workspace to start an OMP Hub PTY." action={newTerminal} /></div>}
     {error ? <div className="shrink-0 bg-destructive-light px-3 py-1.5 text-caption text-destructive" role="alert">{error}</div> : null}
-    {synchronized.transportError ? <div className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground" role="status">Terminal delivery disconnected. Last received output is retained; reconnecting.</div> : null}
+    {synchronized.transportError ? <div className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground" role="status">{selected?.protected ? 'Terminal status disconnected; reconnecting.' : 'Terminal delivery disconnected. Last received output is retained; reconnecting.'}</div> : null}
   </section>;
 }

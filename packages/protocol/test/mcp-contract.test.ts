@@ -52,7 +52,7 @@ describe('MCP protocol records', () => {
       label: 'Work GitHub',
       enabled: true,
       target: { kind: 'cloud' },
-      transport: { type: 'composio', toolkit: 'github', connectedAccountId: 'ca_test', allowedTools: ['GITHUB_SEARCH_ISSUES'] },
+      transport: { type: 'composio', toolkit: 'github', connectedAccountId: 'ca_test', toolPolicy: { groups: { readOnly: false, write: false, destructive: false }, allow: ['GITHUB_SEARCH_ISSUES'], deny: [] } },
       timeoutMs: 30_000,
       status: 'ready',
       statusMessage: null,

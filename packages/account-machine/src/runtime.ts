@@ -18,14 +18,15 @@ import {
   MachinePortableSpaceController,
   MachineSessionCoordinator,
   MachineMcpCoordinator,
-  ProviderAuthCoordinator,
+  ProfileProviderAuthCoordinator,
   SharedGitIdentityCoordinator,
   PortableSpaceLifecycle,
   WalgitSupervisor,
   WorkspaceHubTerminalCoordinator,
   createGitSpaceRpcHandler,
-  runNextProjectCron,
-  sharedAuthStorage,
+  drainProjectCronQueues,
+  PROJECT_CRON_FAILURE_RETRY_MS,
+  type ProjectCronDrainFailure,
   startGitSpaceRpcHttpServer,
   type WalgitProjectBinding,
 } from './index.js';
@@ -40,18 +41,19 @@ import { CloudProjectEventWriter } from './cloud-project-events.js';
 import { DeviceRegistry } from './device-registry.js';
 import { createSignedRpcHandler } from './signed-rpc.js';
 import { ProjectLifecycleManager } from './project-lifecycle.js';
-import { CloudCanonicalSessionWriter } from './cloud-session-directory.js';
+import { CanonicalSessionOutbox, CloudCanonicalSessionWriter, type CanonicalPublicationIntent } from './cloud-session-directory.js';
 import { DeploymentLauncher } from './deployment-launcher.js';
 import { ReleaseFollower } from './release-follower.js';
 import { ompGenerationSelectionSchema } from './omp-runtime.js';
 import { atomicJson } from './machine-update.js';
 import { CloudArtifactObjectStore } from './cloud-artifact-object-store.js';
+import { ArtifactUploads } from './artifact-uploads.js';
 import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
 import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import { createPublishedSpaceHeadResolver } from './inspector-base.js';
 import type { SpaceWorkspaceControls } from './space-eval-sdk.js';
-import { prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
-import { sourceWalgit } from '../../deployment/src/native-build.js';
+import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
+import { pinnedGitLfs, sourceWalgit } from '../../deployment/src/native-build.js';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -183,10 +185,13 @@ async function listActiveCloudSpaces(authority: CloudSpaceCheckpointAuthority) {
 export async function startMachineRuntime() {
   const nativeRoot = process.env.GITSPACE_MACHINE_RUNTIME_PATH ?? import.meta.dir;
   const packaged = Boolean(process.env.GITSPACE_MACHINE_RUNTIME_PATH) || await Bun.file(join(nativeRoot, 'machine-native.json')).exists();
-  const walgitBinary = packaged
+  const native = packaged
     ? await prepareMachineNativeRuntime(nativeRoot)
-    : await sourceWalgit(resolve(import.meta.dir, '../../..'));
+    : { walgit: await sourceWalgit(resolve(import.meta.dir, '../../..')), gitLfs: (await pinnedGitLfs()).path };
   if (packaged) process.env.GITSPACE_MACHINE_RUNTIME_PATH = nativeRoot;
+  // Hosts already start this process with the tool directory; this also covers source runs and older hosts
+  // for children spawned from process.env (OMP sessions, terminals, lifecycle scripts).
+  Object.assign(process.env, machineToolEnvironment(process.env, native));
   const environmentRoot = requiredEnvironment('GITSPACE_ENVIRONMENT_ROOT');
   const machineId = requiredEnvironment('GITSPACE_MACHINE_ID');
   const database = new GitSpaceDatabase(join(environmentRoot, 'gitspace.db'), {
@@ -254,9 +259,10 @@ export async function startMachineRuntime() {
   const projectEventWriter = new CloudProjectEventWriter(authority, database, (error) => {
     console.error('[gitspace-project-events]', error);
   });
+  const canonicalSessionOutbox = new CanonicalSessionOutbox(join(environmentRoot, 'canonical-session-outbox.json'));
   const canonicalSessionWriter = new CloudCanonicalSessionWriter(authority, canonicalSessionBlobs, (error) => {
     console.error('[gitspace-canonical-sessions]', error);
-  });
+  }, canonicalSessionOutbox);
   const gitIdentity = new SharedGitIdentityCoordinator(
     authority,
     environmentRoot,
@@ -276,7 +282,6 @@ export async function startMachineRuntime() {
   const ompAgentDir = requiredEnvironment('GITSPACE_OMP_AGENT_DIR');
   await installDefaultGitSpaceSkills(ompAgentDir);
   const mcp = new MachineMcpCoordinator(authority, machineId);
-  const authStorage = sharedAuthStorage(ompAgentDir);
   const workspaceControls = Promise.withResolvers<SpaceWorkspaceControls>();
   const omp = new ProcessOmpRuntime({
     environmentRoot,
@@ -310,7 +315,12 @@ export async function startMachineRuntime() {
     onError: (error) => console.error('[gitspace-deploy]', error),
   });
   await omp.initialize(await releases.initialOmpSelection());
-  const providers = new ProviderAuthCoordinator({ authStorage, onChanged: () => omp.reloadAuthStorage() });
+  const providers = new ProfileProviderAuthCoordinator({
+    agentDir: ompAgentDir,
+    cwd: environmentRoot,
+    resolve: (profileId) => authority.providerInference(profileId),
+    onChanged: (profileId) => omp.reloadAuthStorage(profileId),
+  });
   const managedSpaceRoot = requiredEnvironment('GITSPACE_MANAGED_SPACE_ROOT');
   const sessions = new MachineSessionCoordinator(
     database,
@@ -323,6 +333,18 @@ export async function startMachineRuntime() {
     canonicalSessionWriter,
     authority,
   );
+  const artifactUploads = new ArtifactUploads({
+    artifacts,
+    root: join(environmentRoot, 'artifact-uploads'),
+    publish: (spaceId) => sessions.publishArtifacts(spaceId),
+    onError: (error) => console.error('[gitspace-artifact-uploads]', error),
+  });
+  // Only a space's current holder may publish its canonical session; a fenced or moved space's record belongs elsewhere.
+  const heldSession = (sessionId: string) => {
+    const session = sessions.get(sessionId);
+    const space = session ? database.getSpace(session.spaceId) : null;
+    return space?.holderId === machineId && space.placementState !== 'closed' ? session : null;
+  };
   const settings = new CanonicalSettingsCoordinator(
     authority,
     machineId,
@@ -335,6 +357,7 @@ export async function startMachineRuntime() {
   const browserRelay = new BrowserRelaySupervisor({
     environmentRoot,
     agentDir: ompAgentDir,
+    command: async () => [process.execPath, await omp.commandEntrypoint()],
     onError: (error) => console.error('[gitspace-browser-relay]', error),
   });
   if (!process.env.GITSPACE_UPDATE_OWNER && (await browserRelay.status()).installed) {
@@ -381,7 +404,7 @@ export async function startMachineRuntime() {
     region: gitStorage.region,
   });
   const walgit = new WalgitSupervisor({
-    binaryPath: walgitBinary,
+    binaryPath: native.walgit,
     runtimeRoot: join(environmentRoot, 'runtime'),
     credentials: async (binding) => localGitEndpoint
       ? {
@@ -528,6 +551,7 @@ export async function startMachineRuntime() {
     }
   }
   await environments.recoverInterruptedRuns();
+  const recoveredPublications: CanonicalPublicationIntent[] = [];
   const localScopes = new Map(database.orm.select().from(artifactScopes).all().map((scope) => [scope.spaceId, scope]));
   for (const project of database.listProjects()) {
     const projectSpaces = database.listSpaces(project.id);
@@ -590,22 +614,45 @@ export async function startMachineRuntime() {
         continue;
       }
       await authority.bootstrapInspector({ projectId: project.id, spaceId: space.id });
-      for (const session of sessions.list(space.id)) canonicalSessionWriter.put(project.id, machineId, session, true);
+      for (const session of sessions.list(space.id)) recoveredPublications.push({ projectId: project.id, sessionId: session.id, checkpoint: true });
     }
   }
-  await canonicalSessionWriter.flush().catch((error) => console.error('[gitspace-recovery] canonical publication failed', error));
+  // Recovered checkpoints and any a same-machine predecessor handed over publish after admission:
+  // large uploads must not hold recovery, and a failure stays in the outbox for a later drain.
+  await canonicalSessionOutbox.record(recoveredPublications)
+    .catch((error: unknown) => console.error('[gitspace-recovery] canonical publication failed', error));
+  canonicalSessionWriter.replayInBackground(machineId, heldSession);
   await gitIdentity.apply(await settings.getUserSettings());
   };
-  if (startupCommitted) await recoverMachineWork();
+  if (startupCommitted) {
+    // Canonical inference checks the committed release acknowledgements, not just
+    // the bytes currently running. Publish those before any recovery admission.
+    await releases.start();
+    await recoverMachineWork();
+  }
+  /** Publishes a new workspace's first checkpoint by releasing and reopening it. A retry after the
+   * release committed only reopens from that published checkpoint. */
   const checkpointSpace = async (spaceId: string): Promise<void> => {
     const space = database.getSpace(spaceId);
-    if (!space || space.holderId !== machineId || space.placementState !== 'open') throw new Error(`Space ${spaceId} is not held here`);
-    await gitIdentity.apply(await settings.getUserSettings(), [space.rootPath]);
-    const opened = await sessions.openSpace(spaceId);
-    if (opened.status === 'error') throw opened.error;
-    await spaces.release(space, space.generation);
-    await spaces.open(space.id, space.generation + 1, { resumeOnMachineRestart: true });
-    await canonicalSessionWriter.flush();
+    const projectId = space?.projectId ?? (await authority.getSpaceDefinition(spaceId))?.projectId;
+    if (!projectId) throw new Error(`Space ${spaceId} is not held here`);
+    let generation: number;
+    if (space?.holderId === machineId && space.placementState === 'open') {
+      await gitIdentity.apply(await settings.getUserSettings(), [space.rootPath]);
+      const opened = await sessions.openSpace(spaceId);
+      if (opened.status === 'error') throw opened.error;
+      await spaces.release(space, space.generation);
+      generation = space.generation + 1;
+    } else {
+      // The committed release removed the local record; the cloud definition names the project.
+      const placement = await authority.getSpace(projectId, spaceId);
+      if (!placement || placement.state !== 'closed' || placement.machineId !== null || placement.publishedRevision === 0) {
+        throw new Error(`Space ${spaceId} is not held here`);
+      }
+      generation = placement.generation;
+    }
+    await spaces.open(spaceId, generation, { resumeOnMachineRestart: true });
+    await canonicalSessionWriter.flush({ projectId, spaceId });
   };
   const resolvePublishedHead = createPublishedSpaceHeadResolver({ authority, blobs: encryptedCheckpointBlobs, gitRemote: walgit, binding: gitBinding });
   const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl), resolvePublishedHead);
@@ -638,6 +685,7 @@ export async function startMachineRuntime() {
     database,
     handlers,
     artifacts,
+    artifactUploads,
     sessions,
     machineId,
     spaces,
@@ -685,6 +733,7 @@ export async function startMachineRuntime() {
     controlMachine: (action, targetMachineId) => action === 'sleep' ? authority.sleepMachine(targetMachineId) : authority.resumeMachine(targetMachineId),
     destroyMachine: (targetMachineId) => authority.destroyMachine(targetMachineId),
     settings,
+    inference: authority,
     providers,
     devices,
     gitIdentity,
@@ -776,6 +825,11 @@ export async function startMachineRuntime() {
     lookupDevice: (deviceId) => devices.lookup(deviceId),
     procedureKind: rpc.procedureKind,
     workspaceProject: (workspaceId) => database.getSpace(workspaceId)?.projectId ?? null,
+    sessionTarget: (sessionId) => {
+      const session = sessions.get(sessionId);
+      const space = session ? database.getSpace(session.spaceId) : null;
+      return space ? { projectId: space.projectId, workspaceId: space.id } : null;
+    },
   });
   // A bare stop checkpoints and removes local state; the next start restores cloud restart intent.
   // a replacement successor retires this generation first so possession carries over untouched.
@@ -889,22 +943,28 @@ export async function startMachineRuntime() {
       resolvedGeneration: number | null;
     }) => authority.completeProjectCronRun(input),
   };
+  const cronFailures = new Map<string, ProjectCronDrainFailure>();
   const drainProjectCrons = async (): Promise<void> => {
     if (cronDrainActive || preparingReplacement) return;
     cronDrainActive = true;
     try {
-      for (const project of database.listProjects()) {
-        await authority.processDueProjectCrons(project.id);
-        while (!preparingReplacement && await runNextProjectCron(project.id, machineId, cronAdapter)) {
-          // Drain the durable authority queue serially so canonical sessions are never prompted concurrently.
-        }
-      }
+      await drainProjectCronQueues({
+        projectIds: database.listProjects().map((project) => project.id),
+        claimedBy: machineId,
+        adapter: cronAdapter,
+        processDue: (projectId) => authority.processDueProjectCrons(projectId),
+        failures: cronFailures,
+        shouldStop: () => preparingReplacement,
+        report: (projectId, error) => console.error(`[gitspace-crons] project ${projectId} failed; retrying every ${PROJECT_CRON_FAILURE_RETRY_MS / 60_000} minutes`, error),
+      });
     } finally {
       cronDrainActive = false;
     }
   };
   const cronDrainTimer = setInterval(() => {
     void drainProjectCrons().catch((error: unknown) => console.error('[gitspace-crons]', error));
+    // The same tick retries canonical publications whose replay failed; the writer bounds how often.
+    if (startupCommitted && !preparingReplacement) canonicalSessionWriter.replayInBackground(machineId, heldSession);
   }, 5_000);
 
   const existingMachine = (await authority.listMachineDefinitions()).find((machine) => machine.id === machineId);
@@ -928,6 +988,7 @@ export async function startMachineRuntime() {
     stopping = true;
     preparingReplacement = true;
     clearInterval(cronDrainTimer);
+    artifactUploads.close();
     if (bootstrapProjectId) {
       await authority.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: bootstrapProjectId,
       scope: 'code',
@@ -970,10 +1031,11 @@ export async function startMachineRuntime() {
     }
     await sessions.stopForRestart();
     await omp.dispose();
+    await providers.close();
     await settings.stop();
     await walgit.dispose();
     await http.stop();
-    await canonicalSessionWriter.flush();
+    await canonicalSessionWriter.settle(stopMode);
     // Stop event producers before waiting for the durable outbox to empty.
     await projectEventWriter.flush();
     database.close();
@@ -1008,6 +1070,7 @@ export async function startMachineRuntime() {
       await Bun.sleep(100);
     }
     if (stopping) return { environmentRoot, database, artifacts, sessions, settings, handlers, http, stop };
+    await releases.start();
     await recoverMachineWork();
     await serviceManager.rehydrate();
     if ((await browserRelay.status()).installed) {
@@ -1018,7 +1081,6 @@ export async function startMachineRuntime() {
     preparingReplacement = false;
     void drainProjectCrons().catch((error: unknown) => console.error('[gitspace-crons]', error));
   }
-  await releases.start();
   return { environmentRoot, database, artifacts, sessions, settings, handlers, http, stop };
 }
 

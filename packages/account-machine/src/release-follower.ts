@@ -92,6 +92,22 @@ export function releaseObjectKeys(sha: string): ReleaseObjectKeys {
   };
 }
 
+/** Frontend trees are hundreds of small lazily loaded chunks; each transfer is a signed round trip. */
+export const FRONTEND_TRANSFER_CONCURRENCY = 16;
+
+/** Runs `task` over every item with bounded concurrency; after any failure no new task starts. */
+export async function forEachConcurrent<T>(items: readonly T[], limit: number, task: (item: T, index: number) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failed = false;
+  const worker = async (): Promise<void> => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try { await task(items[index]!, index); } catch (error) { failed = true; throw error; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 function containedPath(root: string, relativePath: string): string {
   const candidate = resolve(root, relativePath);
   if (!candidate.startsWith(`${resolve(root)}${sep}`)) throw new Error(`Release file path ${relativePath} escapes its tree`);
@@ -305,13 +321,13 @@ export class ReleaseFollower {
     const manifestBytes = await this.options.blobs.get(keys.frontendManifest);
     if (!manifestBytes) throw new Error(`Release ${record.sha} frontend manifest is missing`);
     const manifest = frontendManifestSchema.parse(JSON.parse(new TextDecoder().decode(manifestBytes)));
-    for (const file of manifest.files) {
+    await forEachConcurrent(manifest.files, FRONTEND_TRANSFER_CONCURRENCY, async (file) => {
       const bytes = await this.options.blobs.get(`${artifact.key}/${file.path}`, file.hash);
       if (!bytes) throw new Error(`Release ${record.sha} frontend file ${file.path} is missing`);
       const target = containedPath(candidate, file.path);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, bytes);
-    }
+    });
     const hash = await hashArtifactPath(candidate);
     if (hash !== artifact.hash) throw new Error(`Release ${record.sha} frontend tree hashed ${hash}, expected ${artifact.hash}`);
     await this.launch(record.sha, 'frontend', { entrypoint: 'frontend', target: 'frontend', applies: ['frontend'], path: candidate, hash, sha: record.sha });

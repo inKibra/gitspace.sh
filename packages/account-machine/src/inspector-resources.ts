@@ -2,7 +2,7 @@ import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join, relative, isAbsolute } from 'node:path';
 import type { ArtifactCapability, LocalArtifactResolver } from '@gitspace/core';
-import { canonicalLocalResourceUrl, createResourcePreview, parseResourceUri } from '@gitspace/protocol/resource-uri';
+import { canonicalLocalResourceUrl, createResourcePreview, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 
 const MAX_RESOURCE_BYTES = 16 * 1024 * 1024;
 
@@ -13,7 +13,7 @@ export async function readInspectorResource(input: {
   localArtifactsDir: string | null;
   capability: ArtifactCapability;
   artifacts: Pick<LocalArtifactResolver, 'read'>;
-}): Promise<{ url: string; mediaType: string | null; base64: string; text: string | null }> {
+}): Promise<Generator<ResourcePreviewFrame>> {
   const resource = parseResourceUri(input.url);
   if (!resource) throw new Error('Unsupported or unsafe resource URI');
   const sessionRoot = input.sessionFile?.endsWith('.jsonl') ? input.sessionFile.slice(0, -6) : null;

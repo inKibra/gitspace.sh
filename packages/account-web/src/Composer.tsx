@@ -4,8 +4,11 @@ import { Attachment01, CpuChip01, DotsHorizontal, Zap } from '@untitledui/icons'
 import { useMemo, useState, type ReactNode } from 'react';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 import { SessionTreeExplorer } from './SessionTreeExplorer.js';
+import { ModelCombobox, modelOptions } from './ModelCombobox.js';
 import { navigateProductUrl, setProductRoute } from './routes.js';
+import { useInference } from './InferenceContext.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -58,12 +61,12 @@ function CommandPalette({ draft, commands, onPick }: { draft: string; commands: 
   </Dropdown>;
 }
 
-/** Shown above the input when the selected model's provider has no credentials on this machine. */
-function ProviderNotice({ provider }: { provider: ProviderAuthView }) {
+/** Credentials and connection actions always refer to the canonical profile for the next execution. */
+function ProviderNotice({ provider, profileId }: { provider: ProviderAuthView; profileId?: string }) {
   const shape = useShape();
   return <div role="status" className={`${shape.container} flex items-center justify-between gap-3 bg-surface-3 px-3 py-2 text-caption shadow-surface-1`}>
-    <span className="min-w-0 truncate text-foreground">{provider.name} isn’t connected on this machine</span>
-    <Button variant="tertiary" size="compact" asChild><a href="/settings?section=omp-providers" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = setProductRoute(new URL(window.location.href), 'settings'); url.searchParams.set('section', 'omp-providers'); navigateProductUrl(url); }}>Connect</a></Button>
+    <span className="min-w-0 truncate text-foreground">{provider.name} isn’t connected in this inference profile</span>
+    <Button variant="tertiary" size="compact" asChild><a href={`/inference?section=providers${profileId ? `&profile=${encodeURIComponent(profileId)}` : ''}`} onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = setProductRoute(new URL(window.location.href), 'inference'); url.searchParams.set('section', 'providers'); if (profileId) url.searchParams.set('profile', profileId); navigateProductUrl(url); }}>Connect</a></Button>
   </div>;
 }
 
@@ -81,13 +84,19 @@ export interface ComposerProps {
 
 export function Composer({ workspace, controls, providers, skills = [], running, onSend, pending, recovering = false, error }: ComposerProps) {
   const icons = useIcons();
+  const inference = useInference();
+  const assignment = inference?.state?.assignments.find((entry) => entry.projectId === workspace.projectId);
+  const profile = inference?.state?.profiles.find((entry) => entry.id === assignment?.profileId);
+  const inferenceUnavailable = inference !== null && !profile;
+  const selectedModelKey = `${controls?.value.provider ?? ''}/${controls?.value.model ?? ''}`;
+  const invalidModel = !!controls?.value.model && !controls.value.models.some((model) => `${model.provider}/${model.id}` === selectedModelKey);
   const [message, setMessage] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
     const text = draft.trim();
-    if (!text || !onSend || pending || recovering) return false;
+    if (!text || !onSend || pending || recovering || inferenceUnavailable || invalidModel) return false;
     setSubmitError(null);
     try {
       const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
@@ -101,13 +110,13 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       setAttachments([]);
       return true;
     } catch (failure) {
-      setSubmitError(failure instanceof Error ? failure.message : String(failure));
+      setSubmitError(rpcErrorMessage(failure, 'Send message'));
       return false;
     }
   };
   const runControl = (operation: Promise<void>): void => {
     setSubmitError(null);
-    void operation.catch((failure) => setSubmitError(failure instanceof Error ? failure.message : String(failure)));
+    void operation.catch((failure) => setSubmitError(rpcErrorMessage(failure, 'Session control operation')));
   };
 
   // OMP owns the queue. Fluid owns the row interactions and reports their
@@ -137,7 +146,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       const added = next.find((item) => !known.has(item.id));
       if (added) return submit(added.text, added.files, 'followUp');
     } catch (failure) {
-      setSubmitError(failure instanceof Error ? failure.message : String(failure));
+      setSubmitError(rpcErrorMessage(failure, 'Update message queue'));
       return false;
     }
   };
@@ -169,17 +178,21 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const selectedProvider = controls?.value.provider ? providers?.find((provider) => provider.id === controls.value.provider) : undefined;
 
   return <div className="pointer-events-none mx-auto flex w-full max-w-xl flex-col gap-2 [&>*]:pointer-events-auto">
+    {inference && !profile ? <div className="flex flex-wrap items-center justify-between gap-2 text-caption">
+      <span role="alert" className="text-destructive">{inference.loading ? 'Loading inference profile…' : inference.error ?? 'The project’s inference assignment is unavailable. Refresh before sending.'}<Button variant="ghost" size="compact" disabled={inference.loading} onClick={() => void inference.refresh()}>Refresh profiles</Button></span>
+    </div> : null}
+    {invalidModel ? <p role="alert" className="text-caption text-destructive">The selected model {selectedModelKey} is unavailable in this session’s profile. Connect its provider in Inference or choose an available model before sending.</p> : null}
     {controls ? <PlanSteps controls={controls} /> : null}
     {controls?.onReadHistory && showHistory ? <SessionTreeExplorer key={controls.value.sessionId} historyAnchorId={controls.value.historyAnchorId} onReadHistory={controls.onReadHistory} onNavigate={controls.onNavigateTree} onClose={() => setShowHistory(false)} /> : null}
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}
-    {selectedProvider && !selectedProvider.hasAuth ? <ProviderNotice provider={selectedProvider} /> : null}
+    {selectedProvider && !selectedProvider.hasAuth ? <ProviderNotice provider={selectedProvider} profileId={profile?.id} /> : null}
     <InputMessage
       data-slot="input-message"
       value={message}
       onValueChange={setMessage}
       onSend={(text, files, meta) => { if (meta?.queuedId) return; void submit(text, files); }}
       placeholder={recovering ? 'Recovering agent…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
-      disabled={!onSend || pending || recovering}
+      disabled={!onSend || pending || recovering || inferenceUnavailable || invalidModel}
       files={attachments}
       onFilesChange={setAttachments}
       accept="image/png,image/jpeg,image/webp,text/*,application/pdf"
@@ -195,10 +208,9 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       leftSlot={({ openFilePicker }) => <>
         <Button variant="ghost" size="icon-compact" type="button" aria-label="Attach files" onClick={() => openFilePicker()}><Attachment01 width={16} height={16} strokeWidth={1.5} /></Button>
         {controls ? <>
-          <Select size="compact" value={`${controls.value.provider ?? ''}/${controls.value.model ?? ''}`} onValueChange={(value) => { const selected = controls.value.models.find((model) => `${model.provider}/${model.id}` === value); if (selected) void controls.onSetModel(selected.provider, selected.id); }}>
-            <SelectTrigger variant="borderless" aria-label="Model" icon={glyph(CpuChip01)} />
-            {options(controls.value.models.map((model) => ({ value: `${model.provider}/${model.id}`, label: model.name || model.id })))}
-          </Select>
+          <ModelCombobox size="compact" variant="borderless" side="top" icon={glyph(CpuChip01)} ariaLabel="Model" value={selectedModelKey}
+            options={[...(invalidModel ? [{ value: selectedModelKey, label: `${selectedModelKey} · unavailable` }] : []), ...modelOptions(controls.value.models)]}
+            onValueChange={(value) => { const selected = controls.value.models.find((model) => `${model.provider}/${model.id}` === value); if (selected) runControl(controls.onSetModel(selected.provider, selected.id)); }} />
           <Select size="compact" value={controls.value.thinking ?? 'auto'} onValueChange={(value) => void controls.onSetThinking(value === 'auto' ? null : value)}>
             <SelectTrigger variant="borderless" aria-label="Thinking level" className="max-md:hidden" />
             {options(thinkingLevels.map((level) => ({ value: level, label: level })))}

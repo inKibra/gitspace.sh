@@ -29,9 +29,10 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { EmptyState } from './GitSpaceShell.js';
 import { glyph } from './glyph.js';
 import { formatProjectCronTime } from './ProjectCronsPage.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 
 export type ProvidersUsageStatus = 'idle' | 'loading' | 'ready' | 'error';
-export interface ProviderLoginFlow { flowId: string; providerId: string; events: readonly ProviderLoginEvent[] }
+export interface ProviderLoginFlow { flowId: string; profileId: string; providerId: string; events: readonly ProviderLoginEvent[] }
 export interface ProviderLoginProps {
   flow: ProviderLoginFlow | null;
   respond(promptId: string, value: string): Promise<void>;
@@ -40,6 +41,7 @@ export interface ProviderLoginProps {
 }
 export interface ProvidersSectionProps {
   providers: readonly ProviderView[];
+  loading?: boolean;
   /** The provider list itself failed to load; shown instead of the rows. */
   error?: string;
   usage: ProviderUsage | null;
@@ -59,7 +61,7 @@ const COMPACT_NUMBER = new Intl.NumberFormat('en-US', { notation: 'compact', max
 const UNIT_SUFFIX: Readonly<Record<string, string>> = { tokens: ' tokens', requests: ' requests', minutes: ' min', bytes: ' bytes' };
 
 function icon(Icon: typeof XClose): ReactNode { return <Icon width={16} height={16} strokeWidth={1.5} />; }
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function errorMessage(error: unknown): string { return rpcErrorMessage(error, 'Provider account operation'); }
 
 function formatAmount(value: number, unit: string): string {
   if (unit === 'usd') return `$${value.toFixed(2)}`;
@@ -272,7 +274,7 @@ export function SignInFlowView({ flow, providerName, login, onRetry }: { flow: P
   </>;
 }
 
-export function ProvidersSection({ providers, error, usage, usageStatus, usageError, onShow, onRefreshUsage, onSignIn, onSignOut, onSetApiKey, login }: ProvidersSectionProps) {
+export function ProvidersSection({ providers, loading = false, error, usage, usageStatus, usageError, onShow, onRefreshUsage, onSignIn, onSignOut, onSetApiKey, login }: ProvidersSectionProps) {
   const [pending, setPending] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [apiKeyFor, setApiKeyFor] = useState<ProviderView | null>(null);
@@ -334,6 +336,7 @@ export function ProvidersSection({ providers, error, usage, usageStatus, usageEr
     </div>
     {error
       ? <EmptyState icon={icon(CpuChip01)} title="Providers are unavailable" description={error} action={<Button variant="ghost" type="button" onClick={() => void onRefreshUsage()}>Retry</Button>} />
+      : loading ? <EmptyState icon={<ThinkingIndicator />} title="Loading this profile’s providers…" />
       : visible.length === 0
         ? <EmptyState icon={icon(CpuChip01)} title="No providers on this machine" description="The machine’s OMP install reports no loginable or configured model providers." />
         : <CardGroup orientation="inline" border="outlined" separated proximityHover={false}>
@@ -356,7 +359,7 @@ export function ProvidersSection({ providers, error, usage, usageStatus, usageEr
           />)}
         </CardGroup>}
     {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
-    <p className="text-caption text-muted-foreground">Managed cloud machines use your encrypted account credential vault. Other machines use their configured OMP credential store.</p>
+    <p className="text-caption text-muted-foreground">Credentials are encrypted in this inference profile’s vault. Other profiles cannot use them. Removing credentials may interrupt active work, but does not recall requests already sent to a provider.</p>
     <ApiKeyDialog provider={apiKeyFor} onOpenChange={(open) => { if (!open) setApiKeyFor(null); }} onSubmit={onSetApiKey} />
     <Dialog open={login.flow !== null} onOpenChange={(open) => { if (!open) void login.cancel(); }}>
       {login.flow ? <DialogContent><SignInFlowView key={login.flow.flowId} flow={login.flow} providerName={loginProvider?.name ?? login.flow.providerId} login={login} onRetry={() => { const providerId = login.flow?.providerId; if (providerId) void run(`login:${providerId}`, () => onSignIn(providerId)); }} /></DialogContent> : null}

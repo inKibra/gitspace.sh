@@ -1,150 +1,104 @@
-import { batchFetchTransport, createBrowserClient, fetchTransport, type ClientTransport } from 'result-rpc/client';
-import { gitspaceContract, type SpacePlacementView } from './rpc-contract.js';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
+import { deserialize } from 'result-rpc';
+import { batchFetchTransport, fetchTransport, type ClientTransport } from 'result-rpc/client';
+import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
 
 /**
- * One client, every machine. Calls naming a space go to the machine that
- * holds it; calls that name a session are located first. Account operations go
- * to the home endpoint, which may be an account Worker or a machine. Separate
- * batch queues keep cloud authority work independent of machine availability
- * without rewriting a signed request.
+ * One client, every machine. Every call goes to the account endpoint, which
+ * forwards machine work to the machine holding the space or session it names.
+ * A signed batch cannot be split or rewritten, so separate batch queues keep
+ * cloud authority work, runtime metadata, and each machine target apart.
  */
 export interface RoutedTransportOptions {
-  /** RPC URL of the machine the caller can always reach; the routing table is read from it. */
+  /** Account RPC URL; it serves account work and forwards machine work to the current holder. */
   homeUrl: string;
-  /** Signed fetch shared by every destination. */
+  /** Signed fetch shared by every queue. */
   fetch: typeof globalThis.fetch;
   maxItems?: number;
-  placementsTtlMs?: number;
 }
 
-interface RouteTable {
-  at: number;
-  homeMachineId: string;
-  bySpace: Record<string, SpacePlacementView>;
-}
+const MAX_PROCEDURE_TAG_LENGTH = 512;
 
-export interface RoutedTransport extends ClientTransport {
-  /** Current placements as last read; refreshes on demand. */
-  placements(): Promise<RouteTable['bySpace']>;
-  /** Forget cached routes; the next call re-reads the table. */
-  invalidate(): void;
-}
-
-const PLACEMENTS_TTL_MS = 5_000;
-
-function spaceIdOf(path: string, input: unknown): string | null {
-  if (!input || typeof input !== 'object') return null;
-  const record = input as Record<string, unknown>;
-  const candidate = [record.spaceId, record.workspaceId].find((value): value is string => typeof value === 'string');
-  if (candidate) return candidate;
-  if (path === 'bootstrap' || path === 'transcript' || path === 'transcriptPage' || path === 'transcriptContent' || path === 'workspace.create' || path === 'session.createProject' || path === 'events') {
-    return typeof record.projectId === 'string' ? record.projectId : null;
+function procedurePaths(envelope: unknown): string[] {
+  if (!envelope || typeof envelope !== 'object') return [];
+  const items: unknown[] = 'batch' in envelope && Array.isArray(envelope.batch) ? envelope.batch : [envelope];
+  const paths = new Set<string>();
+  for (const item of items) {
+    if (item && typeof item === 'object' && 'path' in item && typeof item.path === 'string') paths.add(encodeURIComponent(item.path));
   }
-  return null;
+  return [...paths];
 }
 
-function sessionIdOf(input: unknown): string | null {
-  if (!input || typeof input !== 'object') return null;
-  const value = (input as Record<string, unknown>).sessionId;
-  return typeof value === 'string' ? value : null;
+function procedureTag(paths: readonly string[]): string {
+  const all = paths.join(',');
+  if (all.length <= MAX_PROCEDURE_TAG_LENGTH) return all;
+  let tag = '';
+  let kept = 0;
+  for (const path of paths) {
+    const next = kept ? `${tag},${path}` : path;
+    if (next.length + `,${paths.length - kept - 1}-more`.length > MAX_PROCEDURE_TAG_LENGTH) break;
+    tag = next;
+    kept++;
+  }
+  return `${tag}${kept ? ',' : ''}${paths.length - kept}-more`;
 }
 
-export function createRoutedTransport(options: RoutedTransportOptions): RoutedTransport {
-  const transports: Record<string, ClientTransport> = {};
-  const transportFor = (url: string): ClientTransport => {
-    transports[url] ??= batchFetchTransport({ url, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
-    return transports[url];
+/**
+ * Names a request's procedures in its URL (`?p=space.view,session.control`) so
+ * request logs identify the work. Wrap the fetch before signing: the signature
+ * covers the tagged target, and servers otherwise ignore the query.
+ */
+export function tagRpcProcedures(fetch: typeof globalThis.fetch): typeof globalThis.fetch {
+  const tagged = (input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]): Promise<Response> => {
+    if (typeof input !== 'string' || typeof init?.body !== 'string') return fetch(input, init);
+    const decoded = deserialize(init.body);
+    const tag = decoded.ok ? procedureTag(procedurePaths(decoded.value)) : '';
+    return fetch(tag ? `${input}${input.includes('?') ? '&' : '?'}p=${tag}` : input, init);
   };
-  const home = transportFor(options.homeUrl);
-  const account = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
+  // Bun's fetch type carries `preconnect`; the wrapper is only ever called.
+  return tagged as typeof globalThis.fetch;
+}
+
+export function createRoutedTransport(options: RoutedTransportOptions): ClientTransport {
+  const fetch = tagRpcProcedures(options.fetch);
+  const batch = () => batchFetchTransport({ url: options.homeUrl, fetch, maxItems: options.maxItems ?? 32 });
+  const home = batch();
+  const account = batch();
   // Repository provisioning and image startup can outlast ordinary queries.
   // Keep those calls out of their batch and timeout budget.
-  const provisioning = fetchTransport({ url: options.homeUrl, fetch: options.fetch, timeoutMs: 300_000 });
+  const provisioning = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 });
   // Runtime schemas/provider capabilities come from a machine when online,
   // with canonical cloud views when offline. Keep that choice independently signed.
-  const runtimeMetadata = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
-  const inspectorContext = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
-  // Let the account authority choose cloud versus the existing live-machine path
-  // before any provider proxy can wake a stopped machine. Never mix spaces.
-  const inspectorTransports: Record<string, ClientTransport> = {};
-  const homeClient = createBrowserClient({ contract: gitspaceContract, transport: account });
-  const sessionSpaces: Record<string, string> = {};
-  let table: RouteTable | null = null;
-  let loading: Promise<RouteTable | null> | null = null;
-  let routeGeneration = 0;
-
-  const readTable = (): Promise<RouteTable | null> => {
-    if (table && Date.now() - table.at < (options.placementsTtlMs ?? PLACEMENTS_TTL_MS)) return Promise.resolve(table);
-    loading ??= (async () => {
-      const generation = routeGeneration;
-      try {
-        const result = await homeClient.placements({});
-        if (generation !== routeGeneration) return readTable();
-        if (result.status !== 'ok') return table;
-        const bySpace: Record<string, SpacePlacementView> = {};
-        for (const space of result.value.spaces) bySpace[space.spaceId] = space;
-        table = { at: Date.now(), homeMachineId: result.value.machineId, bySpace };
-        return table;
-      } catch {
-        if (generation !== routeGeneration) return readTable();
-        return table;
-      } finally {
-        if (generation === routeGeneration) loading = null;
-      }
-    })();
-    return loading;
+  const runtimeMetadata = batch();
+  const inspectorContext = batch();
+  // The account Worker forwards a batch whole to one holder, and lets the
+  // account authority choose cloud versus the live machine for workspace reads
+  // before any provider proxy can wake a stopped machine. Never mix targets.
+  const targets = new Map<string, ClientTransport>();
+  const queue = (key: string): ClientTransport => {
+    let transport = targets.get(key);
+    if (!transport) { transport = batch(); targets.set(key, transport); }
+    return transport;
   };
 
-  const urlForSpace = async (spaceId: string): Promise<string> => {
-    const current = await readTable();
-    const placement = current?.bySpace[spaceId];
-    if (!current || !placement) return options.homeUrl;
-    // The home machine's catalog endpoint may be loopback or a relay hop; the
-    // URL the caller already reaches it on is always right for it.
-    if (placement.holderId === current.homeMachineId || !placement.endpoint) return options.homeUrl;
-    return placement.endpoint;
-  };
-
-  const urlForSession = async (sessionId: string): Promise<string> => {
-    const known = sessionSpaces[sessionId];
-    if (known) return urlForSpace(known);
-    try {
-      const located = await homeClient.session.locate({ sessionId });
-      if (located.status === 'ok' && located.value) {
-        sessionSpaces[sessionId] = located.value.spaceId;
-        return urlForSpace(located.value.spaceId);
-      }
-    } catch { /* fall through to home */ }
-    return options.homeUrl;
-  };
-
-  const resolve = async (path: string, input: unknown): Promise<ClientTransport> => {
+  const resolve = (path: string, input: unknown): ClientTransport => {
     if (path === 'project.create' || path === 'machine.createSandbox' ||
         path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' ||
         (path.startsWith('machine.image.') && path !== 'machine.image.list' && path !== 'machine.image.events')) return provisioning;
-    if (path === 'inspector.bootstrap' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
+    if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
     if (Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, path)) return runtimeMetadata;
     if (Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path)) return account;
-    if (isSpaceCloudRpcPath(path)) {
-      const spaceId = spaceCloudRpcSpaceId(input) ?? '';
-      return inspectorTransports[spaceId] ??= batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
-    }
-    const spaceId = spaceIdOf(path, input);
-    if (spaceId) return transportFor(await urlForSpace(spaceId));
-    const sessionId = sessionIdOf(input);
-    if (sessionId) return transportFor(await urlForSession(sessionId));
-    return home;
+    if (isSpaceCloudRpcPath(path)) return queue(`inspector:${spaceCloudRpcSpaceId(input) ?? ''}`);
+    const target = rpcCallTarget(path, input);
+    if (!target) return home;
+    return queue(target.kind === 'space' ? `space:${target.spaceId}` : `session:${target.sessionId}`);
   };
 
   return {
-    request: async (envelope, requestOptions) => (await resolve(envelope.path, envelope.input)).request(envelope, requestOptions),
+    request: (envelope, requestOptions) => resolve(envelope.path, envelope.input).request(envelope, requestOptions),
     stream: async (envelope, requestOptions) => {
-      const transport = await resolve(envelope.path, envelope.input);
+      const transport = resolve(envelope.path, envelope.input);
       if (!transport.stream) throw new TypeError('Transport does not support streams');
       return transport.stream(envelope, requestOptions);
     },
-    placements: async () => (await readTable())?.bySpace ?? {},
-    invalidate: () => { routeGeneration++; table = null; loading = null; },
   };
 }

@@ -2,7 +2,7 @@ import { posix } from 'node:path';
 import {
   artifactManifestSchema, credentialProtocolBase64, decryptArtifactBytes, deriveArtifactScopeKey, encryptArtifactBytes,
   type ArtifactCopyRecord, type ArtifactManifest, type ArtifactShareRecord, type CanonicalArtifactScope, type CloudProjectSummary, type CloudWorkspaceDefinition,
-  type InspectorBootstrapView, type InspectorIdentity,
+  type InspectorView, type InspectorIdentity,
 } from '@gitspace/protocol';
 import type { TranscriptEvent } from '@gitspace/protocol/transcript';
 import { createResourcePreview, parseResourceUri } from '@gitspace/protocol/resource-uri';
@@ -114,7 +114,7 @@ export class InspectorCloudArtifacts {
     return { scope, path };
   }
 
-  async list(): Promise<InspectorBootstrapView['artifacts']> {
+  async list(): Promise<InspectorView['artifacts']> {
     const scopes = await this.source.authority.listArtifactScopes();
     const selected = scopes.filter((scope) => scope.workspaceId === this.source.workspace.id || scope.workspaceId === this.source.project.id);
     const groups = await Promise.all(selected.map(async (scope) => {
@@ -317,13 +317,13 @@ interface SavedInspectorTranscriptSource {
   key: Uint8Array | null;
 }
 
-type SavedInspectorMetadata = Pick<InspectorBootstrapView, 'checkpoint' | 'savedTranscript'>;
+type SavedInspectorMetadata = Pick<InspectorView, 'checkpoint' | 'savedTranscript'>;
 
 /** Discovers a saved snapshot without downloading or projecting its conversation. */
 async function savedInspectorSource(env: Env, userId: string, source: InspectorCloudContext): Promise<SavedInspectorMetadata & { snapshot: SavedInspectorTranscriptSource | null }> {
   const sessions = await source.authority.listCanonicalSessions();
   const canonical = sessions.find((session) => session.workspaceId === source.workspace.id);
-  let checkpoint: InspectorBootstrapView['checkpoint'] = null;
+  let checkpoint: InspectorView['checkpoint'] = null;
   const placement = source.placement;
   if (!canonical && !placement?.manifestKey) return { checkpoint, savedTranscript: { status: 'none', reason: 'No saved session has been published for this workspace.' }, snapshot: null };
   try {

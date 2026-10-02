@@ -1,7 +1,7 @@
 import { describe, expect, it, spyOn } from 'bun:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createServer } from 'node:http';
-import { signedControlRequestSchema, verifySignedControlRequest, type DeploymentStatus } from '@gitspace/protocol';
+import { signedControlRequestSchema, verifySignedControlRequest, type DeploymentStatus, type SignedControlRequest } from '@gitspace/protocol';
 import { CloudDataCheckpointBlobStore, CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
 
 it('signs each space authority operation with the enrolled machine key', async () => {
@@ -563,5 +563,75 @@ describe('cloud application data store', () => {
     });
     await expect(store.put('objects/canceled', new Uint8Array([1]))).rejects.toBe(failure);
     expect(requests).toBe(1);
+  });
+});
+
+describe('expired signed requests', () => {
+  const privateKey = new Uint8Array(32).fill(5);
+  const expired = { status: 'error', error: { code: 'REQUEST_EXPIRED', message: 'Signed request expired' } };
+  const invalid = { status: 'error', error: { code: 'INVALID_REQUEST', message: 'Control request is invalid or expired' } };
+  const cases = [
+    ['succeeds after one re-signed retry', [expired], 2, null],
+    ['fails on a second expiry', [expired, expired], 2, 'REQUEST_EXPIRED'],
+    ['never retries another rejection', [invalid], 1, 'INVALID_REQUEST'],
+  ] as const;
+  const headerRequest = (init: RequestInit | undefined): SignedControlRequest => signedControlRequestSchema.parse(
+    JSON.parse(Buffer.from(new Headers(init?.headers).get('x-gitspace-control')!, 'base64url').toString()),
+  );
+  const expectFreshSignatures = (signed: SignedControlRequest[], attempts: number): void => {
+    expect(signed).toHaveLength(attempts);
+    expect(new Set(signed.map((request) => request.nonce)).size).toBe(attempts);
+    for (const request of signed) expect(verifySignedControlRequest(request, ed25519.getPublicKey(privateKey))).toBe(true);
+  };
+
+  it.each(cases)('upload %s', async (_name, rejections, attempts, failure) => {
+    const signed: SignedControlRequest[] = [];
+    const store = new CloudDataCheckpointBlobStore({
+      baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a', signingPrivateKey: privateKey,
+      fetcher: (async (_input, init) => {
+        if (init?.method === 'HEAD') return new Response(null, { status: 404 });
+        signed.push(headerRequest(init));
+        const rejection = rejections[signed.length - 1];
+        return rejection ? Response.json(rejection, { status: 401 }) : new Response(null, { status: 201 });
+      }) as typeof fetch,
+    });
+    const upload = store.put('objects/slow-upload', new Uint8Array([1, 2, 3]));
+    if (failure) await expect(upload).rejects.toMatchObject({ code: 'DATA_PUT_FAILED', details: { status: 401, code: failure } });
+    else expect(await upload).toMatch(/^sha256:/u);
+    expectFreshSignatures(signed, attempts);
+  });
+
+  it.each(cases)('download %s', async (_name, rejections, attempts, failure) => {
+    const signed: SignedControlRequest[] = [];
+    const store = new CloudDataCheckpointBlobStore({
+      baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a', signingPrivateKey: privateKey,
+      fetcher: (async (_input, init) => {
+        signed.push(headerRequest(init));
+        const rejection = rejections[signed.length - 1];
+        return rejection ? Response.json(rejection, { status: 401 }) : new Response(new Uint8Array([7]));
+      }) as typeof fetch,
+    });
+    const download = store.get('objects/checkpoint');
+    if (failure) await expect(download).rejects.toMatchObject({ code: 'DATA_GET_FAILED', details: { status: 401, code: failure } });
+    else expect(await download).toEqual(new Uint8Array([7]));
+    expectFreshSignatures(signed, attempts);
+  });
+
+  it.each(cases)('control operation %s', async (_name, rejections, attempts, failure) => {
+    const signed: SignedControlRequest[] = [];
+    const authority = new CloudSpaceCheckpointAuthority({
+      baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a', signingPrivateKey: privateKey,
+      fetcher: (async (_input, init) => {
+        signed.push(signedControlRequestSchema.parse(JSON.parse(String(init?.body))));
+        const rejection = rejections[signed.length - 1];
+        return rejection
+          ? Response.json(rejection, { status: 401 })
+          : Response.json({ status: 'ok', value: { revision: 2, previousRevision: 1 } });
+      }) as typeof fetch,
+    });
+    const closing = authority.beginClose({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 3 });
+    if (failure) await expect(closing).rejects.toMatchObject({ code: failure });
+    else expect(await closing).toEqual({ revision: 2, previousRevision: 1 });
+    expectFreshSignatures(signed, attempts);
   });
 });

@@ -26,9 +26,9 @@ export class TerminalSnapshotJournal {
   commit(resource: string, value: TerminalSnapshot): void {
     const body = JSON.stringify(value);
     const changed = this.database.orm.transaction((tx) => {
-      const prior = tx.get<{ cursor: number; body: string }>(sql`SELECT cursor,body FROM terminal_stream_heads WHERE resource=${resource}`);
+      const prior = tx.all<{ cursor: number; body: string }>(sql`SELECT cursor,body FROM terminal_stream_heads WHERE resource=${resource}`)[0];
       if (prior?.body === body) return false;
-      const row = tx.get<{ cursor: number }>(sql`INSERT INTO terminal_stream_changes(resource,previous,body) VALUES(${resource},${prior?.cursor ?? 0},${body}) RETURNING cursor`);
+      const row = tx.all<{ cursor: number }>(sql`INSERT INTO terminal_stream_changes(resource,previous,body) VALUES(${resource},${prior?.cursor ?? 0},${body}) RETURNING cursor`)[0];
       if (!row) throw new Error('Terminal snapshot commit did not allocate a revision');
       streamCursorSchema.parse(row.cursor);
       tx.run(sql`INSERT INTO terminal_stream_heads(resource,cursor,body) VALUES(${resource},${row.cursor},${body}) ON CONFLICT(resource) DO UPDATE SET cursor=excluded.cursor,body=excluded.body`);
@@ -38,7 +38,7 @@ export class TerminalSnapshotJournal {
     if (changed) for (const listener of this.listeners) listener(resource);
   }
   replay(resource: string, after: number | null, initial: boolean): StreamEvent<TerminalSnapshot>[] {
-    const head = this.database.orm.get<{ cursor: number; body: string }>(sql`SELECT cursor,body FROM terminal_stream_heads WHERE resource=${resource}`);
+    const head = this.database.orm.all<{ cursor: number; body: string }>(sql`SELECT cursor,body FROM terminal_stream_heads WHERE resource=${resource}`)[0];
     if (!head) return [];
     const snapshot = (): StreamEvent<TerminalSnapshot> => ({ type: 'snapshot', resource, cursor: head.cursor, revision: head.cursor, previous: null, value: decode(head.body) });
     if (after === null) return [snapshot()];

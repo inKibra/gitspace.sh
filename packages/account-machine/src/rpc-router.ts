@@ -1,5 +1,12 @@
+import { inspectorReadArtifactPageContract, inspectorReadResourcePageContract, inspectorRepositoryTreePageContract } from '@gitspace/protocol/rpc-contract';
+import { snapshotPage } from '@gitspace/protocol/snapshot-page';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import {
+  inferenceListContract,
+  inferenceCreateContract,
+  inferenceUpdateContract,
+  inferenceDeleteContract,
+  inferenceAssignContract,
   listAccountSecretsContract,
   putAccountSecretContract,
   deleteAccountSecretContract,
@@ -8,7 +15,7 @@ import {
   getConfigurationValuesContract,
   putConfigurationValueContract,
   deleteConfigurationValueContract,
-  bootstrapContract,
+  spaceViewContract,
   transcriptContract,
   transcriptPageContract,
   transcriptContentContract,
@@ -19,6 +26,7 @@ import {
   createProjectContract,
   openProjectContract,
   createWorkspaceContract,
+  retryCreateWorkspaceContract,
   createSandboxMachineContract,
   createSessionContract,
   getBrowserRelayStatusContract,
@@ -59,6 +67,7 @@ import {
   refreshComposioPluginContract,
   reopenSpaceContract,
   restoreProjectContract,
+  setProjectBaseBranchContract,
   resumeMachineContract,
   sleepMachineContract,
   ompSettingValueSchema,
@@ -112,6 +121,7 @@ import {
   sendWorkspaceTerminalContract,
   stopWorkspaceTerminalContract,
   terminalEventsContract,
+  terminalLiveContract,
   setOmpSettingContract,
   subagentTranscriptContract,
   subagentTranscriptEventsContract,
@@ -160,6 +170,10 @@ import {
   inspectorSetGuideApprovalContract,
   inspectorSubmitChangeGuideContract,
   inspectorWriteArtifactContract,
+  inspectorBeginArtifactUploadContract,
+  inspectorUploadArtifactChunkContract,
+  inspectorCommitArtifactUploadContract,
+  inspectorAbortArtifactUploadContract,
   startWorkspaceServiceContract,
   stopWorkspaceServiceContract,
   updateSkillContract,
@@ -177,6 +191,7 @@ import {
   type ComposioPluginAuthorization,
   type ComposioPluginCatalog,
   type ComposioPluginTool,
+  type ComposioToolPolicy,
   type ComposioSetup,
   type BrowserRelayStatus,
   type DiscoveredMcpTool,
@@ -227,7 +242,9 @@ import { callerFor } from './signed-rpc.js';
 import { computeStackStatus } from './stack-status.js';
 import { agentFailure, currentAgentExecutionFailure, determineAgentState, SessionProjectUnavailable, SessionWorkspaceUnavailable } from '@gitspace/protocol-agent';
 import { assertLifecycleCommandAuthorized, environmentFailure, EnvironmentError, parseEnvironmentBundleJson } from '@gitspace/protocol-environment';
+import { deviceCanAdminister, requireDeviceAdministration } from '@gitspace/protocol/device-grant';
 import type { MachineSessionCoordinator } from './session-coordinator.js';
+import type { ArtifactUploads, ArtifactUploadSpace } from './artifact-uploads.js';
 import type { SpaceLifecycleController } from './portable-space-controller.js';
 import type { ArchiveWorkspaceInput } from './project-lifecycle.js';
 import type { ClosedSpaceCheckpointMetadata, ClosedSpaceTranscript } from './checkpoint-transcript.js';
@@ -239,7 +256,7 @@ import {
 import { WorkspaceEnvironmentManager, type WorkspaceEnvironmentView } from './workspace-environment.js';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import { CanonicalSettingsConflict, type CanonicalSettingsCoordinator } from './canonical-settings.js';
-import { ProviderAuthError, type ProviderAuthCoordinator } from './provider-auth.js';
+import { ProviderAuthError, type ProviderAuthCoordinator, type ProfileProviderAuthCoordinator } from './provider-auth.js';
 import type { SharedGitIdentityCoordinator } from './shared-git-identity.js';
 import { CloudSpaceAuthorityError } from './cloud-space-authority.js';
 import {
@@ -256,6 +273,7 @@ import { emptyTotals } from './session-usage-report.js';
 import { readInspectorResource } from './inspector-resources.js';
 import type { TranscriptPage, TranscriptPageRequest, TranscriptContentPage, TranscriptContentRequest } from '@gitspace/blocks';
 import { boundSessionControl } from '@gitspace/protocol-agent';
+import type { OmpSessionControlView } from './omp-runtime.js';
 
 export interface FleetMachineRpcView {
   id: string;
@@ -291,7 +309,7 @@ export interface MachineMcpRpc {
   authorizeComposio(toolkit: string, label: string): Promise<ComposioPluginAuthorization>;
   refreshComposio(connectionId: string): Promise<McpConnection>;
   listComposioTools(connectionId: string): Promise<ComposioPluginTool[]>;
-  updateComposioTools(connectionId: string, expectedRevision: number, allowedTools: string[]): Promise<McpConnection>;
+  updateComposioTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<McpConnection>;
   disconnectComposio(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }>;
   listGrants(projectId: string): Promise<ProjectMcpGrant[]>;
   putGrant(projectId: string, connectionId: string, enabled: boolean, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<ProjectMcpGrant>;
@@ -352,9 +370,11 @@ export interface ProjectLifecycleRpc {
   createProject(input: { name: string; baseBranch: string | null; repositoryUrl: string | null }): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation }>;
   openProject(projectId: string): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation | null }>;
   createWorkspace(input: { projectId: string; name: string; branch: string; phase?: 'plan' | 'code' | 'review' | 'ship'; sourceKind: 'base' | 'branch' | 'workspace' | 'pull-request' | 'tag' | 'commit'; sourceRef: string; dependsOn?: readonly string[] }): Promise<{ workspace: { id: string }; operation: CloudProjectOperation }>;
+  retryCreateWorkspace(workspaceId: string): Promise<{ workspace: { id: string; projectId: string }; operation: CloudProjectOperation }>;
   archiveWorkspace(input: ArchiveWorkspaceInput, close: (space: MaterializedSpace, expectedGeneration: number) => Promise<unknown>): Promise<CloudWorkspaceDefinition>;
   archiveProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
   restoreProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
+  setBaseBranch(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary>;
   deleteProject(projectId: string, expectedRevision: number): Promise<boolean>;
   deleteWorkspace(projectId: string, workspaceId: string, expectedRevision?: number): Promise<boolean>;
   setWorkspaceLifecycle(projectId: string, workspaceId: string, lifecycle: 'active' | 'archived', expectedRevision?: number): Promise<unknown>;
@@ -389,6 +409,7 @@ export interface GitSpaceRpcRouterOptions {
   terminals: WorkspaceHubTerminalCoordinator;
   environments?: WorkspaceEnvironmentManager;
   artifacts: LocalArtifactResolver;
+  artifactUploads?: ArtifactUploads;
   secrets: ProjectSecretsRpc;
   configuration?: Pick<CloudSpaceCheckpointAuthority, 'listAccountSecrets' | 'putAccountSecret' | 'deleteAccountSecret' | 'grantAccountSecret' | 'revokeAccountSecret' | 'getConfigurationValues' | 'putConfigurationValue' | 'deleteConfigurationValue'>;
   mcp?: MachineMcpRpc;
@@ -415,12 +436,24 @@ export interface GitSpaceRpcRouterOptions {
   controlMachine?(action: 'sleep' | 'resume', machineId: string): Promise<FleetMachineRpcView>;
   destroyMachine?(machineId: string): Promise<{ machineId: string; removed: boolean }>;
   settings?: CanonicalSettingsCoordinator;
-  providers?: ProviderAuthCoordinator;
+  providers?: ProfileProviderAuthCoordinator;
+  inference?: Pick<CloudSpaceCheckpointAuthority, 'listInferenceProfiles' | 'createInferenceProfile' | 'updateInferenceProfile' | 'deleteInferenceProfile' | 'assignInferenceProfile'>;
   devices?: DeviceRegistry;
   deployment?: DeploymentRpc;
   gitIdentity?: SharedGitIdentityCoordinator;
   machineId: string;
   onInternalError?: (input: { incidentId: string; phase: string; cause: unknown; procedurePath?: string }) => void;
+}
+
+function agentStatus(session: AgentSession) {
+  return {
+    activity: session.activity,
+    renderState: determineAgentState(
+      session.activity,
+      session.state === 'closed' ? { closedAt: session.updatedAt } : {},
+      currentAgentExecutionFailure(session.health),
+    ),
+  };
 }
 
 function sessionView(session: AgentSession, database: GitSpaceDatabase, sessions: MachineSessionCoordinator) {
@@ -437,12 +470,7 @@ function sessionView(session: AgentSession, database: GitSpaceDatabase, sessions
     lastEventOffset: session.lastEventOffset,
     resumePending: session.resumePending,
     createdAt: new Date(session.createdAt),
-    activity: session.activity,
-    renderState: determineAgentState(
-      session.activity,
-      session.state === 'closed' ? { closedAt: session.updatedAt } : {},
-      currentAgentExecutionFailure(session.health),
-    ),
+    ...agentStatus(session),
     health: session.health,
     updatedAt: new Date(session.updatedAt),
   };
@@ -595,9 +623,9 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     if (!options.settings) throw new Error('Canonical settings are unavailable');
     return options.settings;
   };
-  const providersCoordinator = (): ProviderAuthCoordinator => {
+  const providersCoordinator = (profileId: string): Promise<ProviderAuthCoordinator> => {
     if (!options.providers) throw new Error('Provider sign-in is unavailable');
-    return options.providers;
+    return options.providers.forProfile(profileId);
   };
   const cronsAuthority = (): ProjectCronsRpc => {
     if (!options.crons) throw new Error('Project cron authority is unavailable');
@@ -631,32 +659,32 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     return options.mcp;
   };
 
-  const bootstrap = server.implement(bootstrapContract).handler(async ({ input, errors }) => {
+  const spaceView = server.implement(spaceViewContract).handler(async ({ input, errors }) => {
     const project = options.database.getProject(input.projectId);
     if (!project) return err(errors.ProjectNotFound({ projectId: input.projectId }));
     const selected = input.workspaceId === null
       ? options.database.getBaseSpace(project.id)
       : options.database.getWorkspace(input.workspaceId);
-    if (!selected || selected.projectId !== project.id) {
-      return input.workspaceId === null
-        ? err(errors.OperationFailed({ operation: 'load base space', message: 'Unable to load base space' }))
-        : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+    if (input.workspaceId !== null && (!selected || selected.projectId !== project.id)) {
+      return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
     }
     // Capture the local log boundary before projection or asynchronous checkpoint reads.
     const eventOffset = options.factEvents.latestOffset(input.projectId);
-    const projection = options.handlers.bootstrap(input);
+    const projection = options.handlers.spaceView(input);
     if (projection.status === 'error') return projection;
-    const space = options.database.getSpace(selected.id);
+    // A base released from this machine has no local row; it is read like any closed space.
+    const space = selected ? options.database.getSpace(selected.id) : null;
+    const closed = !space || space.placementState === 'closed';
     let checkpoint: ClosedSpaceCheckpointMetadata | null = null;
-    if (space?.placementState === 'closed' && options.checkpointMetadata) {
+    if (closed && options.checkpointMetadata) {
       try {
-        checkpoint = await options.checkpointMetadata(space.projectId, space.id);
+        checkpoint = await options.checkpointMetadata(project.id, space?.id ?? project.id);
       } catch (error) {
         if (error instanceof WorkspaceDomainError) return err(errors.WorkspaceFailure(error.toJSON()));
         return err(errors.OperationFailed({ operation: 'read checkpoint metadata', message: error instanceof Error ? error.message : 'Unable to read the space checkpoint' }));
       }
     }
-    const session = space?.placementState === 'closed' ? null : options.sessions.list(selected.id)[0];
+    const session = closed || !selected ? null : options.sessions.list(selected.id)[0];
     return ok({
       ...projection.value,
       mainAgent: session ? sessionView(session, options.database, options.sessions) : null,
@@ -874,7 +902,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const updateComposioPluginTools = server.implement(updateComposioPluginToolsContract).handler(async ({ input, errors }) => {
     try {
-      return ok(mcpConnectionView(await mcpAuthority().updateComposioTools(input.connectionId, input.expectedRevision, [...input.allowedTools])));
+      return ok(mcpConnectionView(await mcpAuthority().updateComposioTools(input.connectionId, input.expectedRevision, { groups: { ...input.toolPolicy.groups }, allow: [...input.toolPolicy.allow], deny: [...input.toolPolicy.deny] })));
     } catch (error) {
       if (error instanceof CloudSpaceAuthorityError && error.code === 'MCP_CONNECTION_NOT_FOUND') {
         return err(errors.McpNotFound({ resource: 'connection', id: input.connectionId }));
@@ -883,7 +911,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
         return err(errors.McpRevisionConflict({ resource: String(error.details.resource ?? `connection:${input.connectionId}`), expected: Number(error.details.expected ?? input.expectedRevision), actual: Number(error.details.actual ?? -1) }));
       }
       if (error instanceof CloudSpaceAuthorityError && error.code === 'MCP_INVALID') {
-        return err(errors.McpInvalid({ field: String(error.details.field ?? 'allowedTools'), message: error.message }));
+        return err(errors.McpInvalid({ field: String(error.details.field ?? 'toolPolicy'), message: error.message }));
       }
       return err(errors.OperationFailed({ operation: 'update Composio plugin tools', message: error instanceof Error ? error.message : 'Unable to update Composio plugin tools' }));
     }
@@ -1023,6 +1051,15 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'restore project', message: error instanceof Error ? error.message : 'Unable to restore project' }));
     }
   });
+  const setProjectBaseBranch = server.implement(setProjectBaseBranchContract).handler(async ({ input, errors }) => {
+    try {
+      const current = await options.projects.list('all');
+      if (!current.some((project) => project.id === input.projectId)) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      return ok(projectLifecycleView(await options.projects.setBaseBranch(input.projectId, input.expectedRevision, input.baseBranch)));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'set project base branch', message: error instanceof Error ? error.message : 'Unable to change the project base branch' }));
+    }
+  });
   const deleteProject = server.implement(deleteProjectContract).handler(async ({ input, errors }) => {
     try {
       const session = options.sessions.list(input.projectId)[0];
@@ -1043,13 +1080,31 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       const created = await options.projects.createWorkspace(input);
       const session = await options.sessions.create(created.workspace.id);
       if (session.status === 'error') throw session.error;
-      const projection = options.handlers.bootstrap({ projectId: input.projectId, workspaceId: created.workspace.id });
+      const projection = options.handlers.spaceView({ projectId: input.projectId, workspaceId: created.workspace.id });
       if (projection.status === 'error') return err(errors.OperationFailed({ operation: 'project workspace', message: projection.error.message }));
       const workspace = projection.value.workspaces.find((candidate) => candidate.id === created.workspace.id);
       if (!workspace) return err(errors.OperationFailed({ operation: 'project workspace', message: 'Workspace projection is missing' }));
       return ok({ workspace, operation: projectOperationView(created.operation) });
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'create workspace', message: error instanceof Error ? error.message : 'Unable to create workspace' }));
+    }
+  });
+  const retryCreateWorkspace = server.implement(retryCreateWorkspaceContract).handler(async ({ input, errors }) => {
+    try {
+      if (!await options.projects.findWorkspace(input.workspaceId)) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+      const created = await options.projects.retryCreateWorkspace(input.workspaceId);
+      // A retry after the agent step resumes the existing canonical agent instead of creating another.
+      const session = options.sessions.list(created.workspace.id).length > 0
+        ? await options.sessions.openSpace(created.workspace.id)
+        : await options.sessions.create(created.workspace.id);
+      if (session.status === 'error') throw session.error;
+      const projection = options.handlers.spaceView({ projectId: created.workspace.projectId, workspaceId: created.workspace.id });
+      if (projection.status === 'error') return err(errors.OperationFailed({ operation: 'project workspace', message: projection.error.message }));
+      const workspace = projection.value.workspaces.find((candidate) => candidate.id === created.workspace.id);
+      if (!workspace) return err(errors.OperationFailed({ operation: 'project workspace', message: 'Workspace projection is missing' }));
+      return ok({ workspace, operation: projectOperationView(created.operation) });
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'retry workspace creation', message: error instanceof Error ? error.message : 'Unable to retry workspace creation' }));
     }
   });
   const deleteWorkspace = server.implement(deleteWorkspaceContract).handler(async ({ input, errors }) => {
@@ -1283,9 +1338,15 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       : err(errors.SessionBusy({ sessionId: input.sessionId }));
   });
 
+  /** Live controls carry the same agent status as the space view's `mainAgent`. */
+  const controlView = (sessionId: string, control: OmpSessionControlView) => {
+    const session = options.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} does not exist`);
+    return { ...boundSessionControl(control), ...agentStatus(session) };
+  };
   const getSessionControl = server.implement(getSessionControlContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.control(input.sessionId))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.control(input.sessionId))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'read session controls', sessionId: input.sessionId }))); }
   });
   const sessionHistory = server.implement(sessionHistoryPageContract).handler(async ({ input, errors }) => {
@@ -1313,34 +1374,37 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const cycleSessionRole = server.implement(cycleSessionRoleContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.cycleRole(input.sessionId, input.direction))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.cycleRole(input.sessionId, input.direction))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'cycle session role', sessionId: input.sessionId }))); }
   });
   const setSessionThinking = server.implement(setSessionThinkingContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.setThinking(input.sessionId, input.thinking))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.setThinking(input.sessionId, input.thinking))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'set session thinking', sessionId: input.sessionId }))); }
   });
   const setSessionFast = server.implement(setSessionFastContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.setFast(input.sessionId, input.enabled))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.setFast(input.sessionId, input.enabled))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'set Fast mode', sessionId: input.sessionId }))); }
   });
   const setSessionModel = server.implement(setSessionModelContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.setModel(input.sessionId, input.provider, input.model))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.setModel(input.sessionId, input.provider, input.model))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'set session model', sessionId: input.sessionId }))); }
   });
-  const setSessionApproval = server.implement(setSessionApprovalContract).handler(async ({ input, errors }) => {
+  const setSessionApproval = server.implement(setSessionApprovalContract).handler(async ({ input, errors, context }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.setApproval(input.sessionId, input.approvalMode))); }
+    try {
+      requireDeviceAdministration(context.caller);
+      return ok(controlView(input.sessionId, await options.sessions.setApproval(input.sessionId, input.approvalMode)));
+    }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'set session approval', sessionId: input.sessionId }))); }
   });
   const setSessionGoal = server.implement(setSessionGoalContract).handler(async ({ input, errors }) => {
     const session = options.sessions.get(input.sessionId);
     if (!session) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
     try {
-      if (!input.enabled) return ok(boundSessionControl(await options.sessions.setGoal(input.sessionId, { enabled: false })));
+      if (!input.enabled) return ok(controlView(input.sessionId, await options.sessions.setGoal(input.sessionId, { enabled: false })));
       const space = options.database.getSpace(session.spaceId);
       if (!space) throw new Error('Goal session space does not exist');
       const identity = { projectId: space.projectId, spaceId: space.id };
@@ -1357,39 +1421,39 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
         'Use the GitSpace Goal, Workflow, Journal, Rubric, and evidence tools whenever this typed authority may have changed.',
         input.objective?.trim() ?? '',
       ].filter(Boolean).join('\n\n');
-      return ok(boundSessionControl(await options.sessions.setGoal(input.sessionId, { enabled: true, objective })));
+      return ok(controlView(input.sessionId, await options.sessions.setGoal(input.sessionId, { enabled: true, objective })));
     } catch (error) {
       return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'set GitSpace Goal mode', sessionId: input.sessionId })));
     }
   });
   const compactSession = server.implement(compactSessionContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.compact(input.sessionId, input.instructions ?? undefined))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.compact(input.sessionId, input.instructions ?? undefined))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'compact session', sessionId: input.sessionId }))); }
   });
   const clearSessionQueue = server.implement(clearSessionQueueContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.clearQueue(input.sessionId))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.clearQueue(input.sessionId))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'clear session queue', sessionId: input.sessionId }))); }
   });
   const removeSessionQueuedMessage = server.implement(removeSessionQueuedMessageContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.removeQueuedMessage(input.sessionId, input.kind, input.index))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.removeQueuedMessage(input.sessionId, input.kind, input.index))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'remove queued message', sessionId: input.sessionId }))); }
   });
   const promoteSessionQueuedMessage = server.implement(promoteSessionQueuedMessageContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.promoteQueuedMessage(input.sessionId, input.index))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.promoteQueuedMessage(input.sessionId, input.index))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'steer queued message', sessionId: input.sessionId }))); }
   });
   const answerSessionAsk = server.implement(answerSessionAskContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.answerAsk(input.sessionId, input.id, input.answers))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.answerAsk(input.sessionId, input.id, input.answers))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'answer ask request', sessionId: input.sessionId }))); }
   });
   const stopSessionTurn = server.implement(stopSessionTurnContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.stop(input.sessionId))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.stop(input.sessionId))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'stop session turn', sessionId: input.sessionId }))); }
   });
   const setWorkspacePhase = server.implement(setWorkspacePhaseContract).handler(async ({ input, errors }) => {
@@ -1405,7 +1469,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       if (!workspace) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
       options.handlers.events.committed?.();
       await options.sessions.workspacePhaseChanged(workspace.projectId, workspace.id);
-      const projected = options.handlers.bootstrap({ projectId: workspace.projectId, workspaceId: workspace.id });
+      const projected = options.handlers.spaceView({ projectId: workspace.projectId, workspaceId: workspace.id });
       if (projected.status === 'error') return err(errors.OperationFailed({ operation: 'set workspace phase', message: projected.error.message }));
       return ok(projected.value.workspaces.find((candidate) => candidate.id === workspace.id)!);
     } catch (error) {
@@ -1419,7 +1483,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     const updated = options.database.setSpaceRelations(workspace.id, { dependsOn: input.dependsOn, relatedTo: input.relatedTo, stackedOn: input.stackedOn });
     if (updated.status === 'error') return err(errors.WorkspaceFailure(updated.error.toJSON()));
     options.handlers.events.committed?.();
-    const projected = options.handlers.bootstrap({ projectId: workspace.projectId, workspaceId: workspace.id });
+    const projected = options.handlers.spaceView({ projectId: workspace.projectId, workspaceId: workspace.id });
     if (projected.status === 'error') return err(errors.OperationFailed({ operation: 'set workspace relations', message: projected.error.message }));
     return ok(projected.value.workspaces.find((candidate) => candidate.id === workspace.id)!);
   });
@@ -1441,7 +1505,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const navigateSessionTree = server.implement(navigateSessionTreeContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) return err(errors.SessionNotFound({ sessionId: input.sessionId }));
-    try { return ok(boundSessionControl(await options.sessions.navigateTree(input.sessionId, input.entryId))); }
+    try { return ok(controlView(input.sessionId, await options.sessions.navigateTree(input.sessionId, input.entryId))); }
     catch (error) { return err(errors.AgentFailure(agentFailure(error, 'AGENT_RUNTIME_FAILED', { operation: 'navigate session tree', sessionId: input.sessionId }))); }
   });
 
@@ -1495,6 +1559,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
         description: item.description ?? null,
         kind: item.kind,
         valueJson: JSON.stringify(item.value),
+        defaultJson: item.defaultJson ?? 'null',
         options: item.options ?? [],
         credential: item.credential,
       })),
@@ -1519,20 +1584,69 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'set OMP setting', message: error instanceof Error ? error.message : 'Unable to update OMP setting' }));
     }
   });
+  const inferenceAuthority = () => {
+    if (!options.inference) throw new Error('Canonical inference authority is unavailable; reconnect this machine before managing inference');
+    return options.inference;
+  };
+  const inferenceConflict = (error: unknown) => {
+    if (!(error instanceof CloudSpaceAuthorityError) || error.code !== 'SETTINGS_CONFLICT') return null;
+    const { resource, expected, actual } = error.details;
+    if (typeof expected !== 'number' || typeof actual !== 'number') return null;
+    switch (resource) {
+      case 'user-settings': case 'omp-config': case 'inference-profile': case 'inference-assignment': return { resource, expected, actual } as const;
+      default: return null;
+    }
+  };
+  const listInference = server.implement(inferenceListContract).handler(async ({ errors }) => {
+    try { return ok(await inferenceAuthority().listInferenceProfiles()); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'list inference profiles', message: error instanceof Error ? error.message : 'Inference authority is unavailable' })); }
+  });
+  const createInference = server.implement(inferenceCreateContract).handler(async ({ input, errors }) => {
+    try { return ok(await inferenceAuthority().createInferenceProfile(input)); }
+    catch (error) {
+      const conflict = inferenceConflict(error);
+      if (conflict) return err(errors.SettingsConflict(conflict));
+      return err(errors.OperationFailed({ operation: 'create inference profile', message: error instanceof Error ? error.message : 'Unable to create inference profile' }));
+    }
+  });
+  const updateInference = server.implement(inferenceUpdateContract).handler(async ({ input, errors }) => {
+    try { return ok(await inferenceAuthority().updateInferenceProfile(input)); }
+    catch (error) {
+      const conflict = inferenceConflict(error);
+      if (conflict) return err(errors.SettingsConflict(conflict));
+      return err(errors.OperationFailed({ operation: 'update inference profile', message: error instanceof Error ? error.message : 'Unable to update inference profile' }));
+    }
+  });
+  const deleteInference = server.implement(inferenceDeleteContract).handler(async ({ input, errors }) => {
+    try { return ok(await inferenceAuthority().deleteInferenceProfile(input)); }
+    catch (error) {
+      const conflict = inferenceConflict(error);
+      if (conflict) return err(errors.SettingsConflict(conflict));
+      return err(errors.OperationFailed({ operation: 'delete inference profile', message: error instanceof Error ? error.message : 'Unable to delete inference profile' }));
+    }
+  });
+  const assignInference = server.implement(inferenceAssignContract).handler(async ({ input, errors }) => {
+    try { return ok(await inferenceAuthority().assignInferenceProfile(input)); }
+    catch (error) {
+      const conflict = inferenceConflict(error);
+      if (conflict) return err(errors.SettingsConflict(conflict));
+      return err(errors.OperationFailed({ operation: 'assign inference profile', message: error instanceof Error ? error.message : 'Unable to assign inference profile' }));
+    }
+  });
   const providerFailure = (operation: string, fallback: string, error: unknown) =>
     error instanceof ProviderAuthError
       ? { operation: error.operation, message: error.message }
       : { operation, message: error instanceof Error ? error.message : fallback };
-  const listProviders = server.implement(listProvidersContract).handler(async ({ errors }) => {
+  const listProviders = server.implement(listProvidersContract).handler(async ({ input, errors }) => {
     try {
-      return ok({ providers: await providersCoordinator().list() });
+      return ok({ providers: await (await providersCoordinator(input.profileId)).list() });
     } catch (error) {
       return err(errors.OperationFailed(providerFailure('list providers', 'Unable to list providers', error)));
     }
   });
   const startProviderLogin = server.implement(startProviderLoginContract).handler(async ({ input, errors }) => {
     try {
-      return ok({ flowId: await providersCoordinator().startLogin(input.providerId) });
+      return ok({ flowId: await (await providersCoordinator(input.profileId)).startLogin(input.providerId) });
     } catch (error) {
       return err(errors.OperationFailed(providerFailure('start provider login', 'Unable to start provider sign-in', error)));
     }
@@ -1540,7 +1654,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   const providerLoginEvents = server.implement(providerLoginEventsContract).stream(async function* ({ input, errors, signal }) {
     let stream: AsyncIterable<ProviderLoginEvent>;
     try {
-      stream = providersCoordinator().events(input.flowId, signal);
+      stream = (await providersCoordinator(input.profileId)).events(input.flowId, signal);
     } catch (error) {
       yield err(errors.OperationFailed(providerFailure('subscribe to provider login', 'Unable to follow provider sign-in', error)));
       return;
@@ -1549,7 +1663,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const respondProviderLogin = server.implement(respondProviderLoginContract).handler(async ({ input, errors }) => {
     try {
-      await providersCoordinator().respond(input.flowId, input.promptId, input.value);
+      await (await providersCoordinator(input.profileId)).respond(input.flowId, input.promptId, input.value);
       return ok({});
     } catch (error) {
       return err(errors.OperationFailed(providerFailure('respond to provider login', 'Unable to answer provider sign-in prompt', error)));
@@ -1557,7 +1671,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const cancelProviderLogin = server.implement(cancelProviderLoginContract).handler(async ({ input, errors }) => {
     try {
-      await providersCoordinator().cancel(input.flowId);
+      await (await providersCoordinator(input.profileId)).cancel(input.flowId);
       return ok({});
     } catch (error) {
       return err(errors.OperationFailed(providerFailure('cancel provider login', 'Unable to cancel provider sign-in', error)));
@@ -1565,21 +1679,21 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const logoutProvider = server.implement(logoutProviderContract).handler(async ({ input, errors }) => {
     try {
-      return ok({ provider: await providersCoordinator().logout(input.providerId, input.credentialId) });
+      return ok({ provider: await (await providersCoordinator(input.profileId)).logout(input.providerId, input.credentialId) });
     } catch (error) {
       return err(errors.OperationFailed(providerFailure('sign out provider', 'Unable to sign out of provider', error)));
     }
   });
   const setProviderApiKey = server.implement(setProviderApiKeyContract).handler(async ({ input, errors }) => {
     try {
-      return ok({ provider: await providersCoordinator().setApiKey(input.providerId, input.key) });
+      return ok({ provider: await (await providersCoordinator(input.profileId)).setApiKey(input.providerId, input.key) });
     } catch (error) {
       return err(errors.OperationFailed(providerFailure('set provider API key', 'Unable to store provider API key', error)));
     }
   });
   const providerUsage = server.implement(providerUsageContract).handler(async ({ input, errors }) => {
     try {
-      return ok(await providersCoordinator().usage(input.providerId, input.refresh));
+      return ok(await (await providersCoordinator(input.profileId)).usage(input.providerId, input.refresh));
     } catch (error) {
       return err(errors.OperationFailed(providerFailure('fetch provider usage', 'Unable to fetch provider usage', error)));
     }
@@ -1653,9 +1767,9 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'revert release', message: error instanceof Error ? error.message : 'Unable to revert release' }));
     }
   });
-  const listAvailableModels = server.implement(listAvailableModelsContract).handler(async ({ errors }) => {
+  const listAvailableModels = server.implement(listAvailableModelsContract).handler(async ({ input, errors }) => {
     try {
-      return ok({ models: await providersCoordinator().models() });
+      return ok({ models: await (await providersCoordinator(input.profileId)).models() });
     } catch (error) {
       return err(errors.OperationFailed(providerFailure('list models', 'Unable to list available models', error)));
     }
@@ -1726,6 +1840,14 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       for await (const event of options.terminals.events(input.spaceId, input.name, input.after, signal)) yield ok(event);
     } catch (error) {
       if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'follow workspace terminals', message: error instanceof Error ? error.message : 'Unable to follow workspace terminals' }));
+    }
+  });
+  const terminalLive = server.implement(terminalLiveContract).stream(async function* ({ input, errors, signal, context }) {
+    try {
+      if (context.caller?.kind !== 'browser') throw new Error('Protected terminal output requires a browser session');
+      for await (const output of options.terminals.live(input.spaceId, input.name, signal)) yield ok(output);
+    } catch (error) {
+      if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'follow protected workspace terminal', message: error instanceof Error ? error.message : 'Unable to follow protected workspace terminal' }));
     }
   });
   const listAccountSecrets = server.implement(listAccountSecretsContract).handler(async ({ errors, context }) => {
@@ -1899,8 +2021,8 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const runEnvironmentPhase = server.implement(runWorkspaceEnvironmentPhaseContract).handler(async ({ input, errors, context }) => {
     try {
-      assertLifecycleCommandAuthorized(input.phase, { human: context.caller?.kind === 'browser' });
-      return ok(await environment().acceptRun(input.spaceId, { runId: input.runId, phase: input.phase, rerun: input.rerun ?? false, deadlineAt: input.deadlineAt }));
+      assertLifecycleCommandAuthorized(input.phase, { lifecycleControl: deviceCanAdminister(context.caller, 'lifecycle.control') });
+      return ok(await environment().acceptRun(input.spaceId, { runId: input.runId, phase: input.phase, rerun: input.rerun ?? false, interactive: input.interactive, deadlineAt: input.deadlineAt }));
     } catch (error) {
       const failure = environmentFailure(error);
       if (failure) return err(errors.EnvironmentFailure(failure));
@@ -1976,8 +2098,10 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'read workspace terminal', message: error instanceof Error ? error.message : 'Unable to read terminal' }));
     }
   });
-  const sendTerminal = server.implement(sendWorkspaceTerminalContract).handler(async ({ input, errors }) => {
+  const sendTerminal = server.implement(sendWorkspaceTerminalContract).handler(async ({ input, errors, context }) => {
     try {
+      const terminal = (await options.terminals.list(input.spaceId)).find((entry) => entry.name === input.name);
+      if (terminal?.protected && context.caller?.kind !== 'browser') throw new Error('Protected terminal input requires a browser session');
       return ok(await options.terminals.send(input.spaceId, input.name, input.data));
     } catch (error) {
       if (error instanceof WorkspaceHubSpaceUnavailable) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
@@ -1985,8 +2109,17 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'write workspace terminal', message: error instanceof Error ? error.message : 'Unable to write terminal' }));
     }
   });
-  const stopTerminal = server.implement(stopWorkspaceTerminalContract).handler(async ({ input, errors }) => {
+  const stopTerminal = server.implement(stopWorkspaceTerminalContract).handler(async ({ input, errors, context }) => {
     try {
+      const terminal = (await options.terminals.list(input.spaceId)).find((entry) => entry.name === input.name);
+      if (terminal?.kind === 'lifecycle') {
+        if (!deviceCanAdminister(context.caller, 'lifecycle.control')) throw new Error('Lifecycle terminal cancellation requires lifecycle-control authority');
+        const view = await environment().view(input.spaceId);
+        const run = view.runs.find((entry) => entry.terminalName === input.name);
+        if (!run) throw new Error('Lifecycle terminal has no durable run identity');
+        await environment().cancelRun(input.spaceId, run.id);
+        return ok((await options.terminals.list(input.spaceId)).find((entry) => entry.name === input.name) ?? terminal);
+      }
       return ok(await options.terminals.stop(input.spaceId, input.name));
     } catch (error) {
       if (error instanceof WorkspaceHubSpaceUnavailable) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
@@ -2181,17 +2314,47 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'stop workspace service', message: error instanceof Error ? error.message : 'Unable to stop workspace service' }));
     }
   });
-  const inspectorRepositoryTree = server.implement(inspectorRepositoryTreeContract).handler(async ({ input, errors }) => {
+  const inspectorRepositoryTree = server.implement(inspectorRepositoryTreeContract).stream(async function* ({ input, errors, signal }) {
+    const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
+    if (resolved.status === 'missing') {
+      yield err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
+      return;
+    }
+    if (resolved.status === 'generation-conflict') {
+      yield err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
+      return;
+    }
+    if (resolved.space.placementState === 'closed' || resolved.space.holderId !== options.machineId) {
+      yield err(errors.OperationFailed({ operation: 'read Inspector repository tree', message: 'Space repository is not materialized on this machine' }));
+      return;
+    }
+    try {
+      const entries = await readRepositoryTree({ ...await inspectorRepository(resolved, input.mode), ...(input.path === null ? {} : { path: input.path }) });
+      // Six-byte JSON escaping of both 4,096-character paths and the name
+      // still keeps sixteen entries below the 1 MiB frame limit.
+      if (entries.length === 0 && !signal.aborted) yield ok([]);
+      for (let offset = 0; offset < entries.length && !signal.aborted; offset += 16) {
+        yield ok(entries.slice(offset, offset + 16));
+      }
+    } catch (error) {
+      yield err(errors.OperationFailed({ operation: 'read Inspector repository tree', message: error instanceof Error ? error.message : 'Unable to read repository tree' }));
+    }
+  });
+  const inspectorRepositoryTreePage = server.implement(inspectorRepositoryTreePageContract).handler(async ({ input, errors }) => {
     const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
     if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
     if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
     if (resolved.space.placementState === 'closed' || resolved.space.holderId !== options.machineId) {
-      return err(errors.OperationFailed({ operation: 'read Inspector repository tree', message: 'Space repository is not materialized on this machine' }));
+      return err(errors.OperationFailed({ operation: 'read Inspector repository tree page', message: 'Space repository is not materialized on this machine' }));
     }
     try {
-      return ok(await readRepositoryTree({ ...await inspectorRepository(resolved, input.mode), ...(input.path === null ? {} : { path: input.path }) }));
+      const entries = await readRepositoryTree({ ...await inspectorRepository(resolved, input.mode), ...(input.path === null ? {} : { path: input.path }) });
+      const frames = [];
+      for (let offset = 0; offset < entries.length; offset += 16) frames.push(entries.slice(offset, offset + 16));
+      const { cursor, limit, ...identity } = input;
+      return ok(await snapshotPage(frames, { identity, cursor, limit }));
     } catch (error) {
-      return err(errors.OperationFailed({ operation: 'read Inspector repository tree', message: error instanceof Error ? error.message : 'Unable to read repository tree' }));
+      return err(errors.OperationFailed({ operation: 'read Inspector repository tree page', message: error instanceof Error ? error.message : 'Unable to read repository tree' }));
     }
   });
   const inspectorRepositoryStatus = server.implement(inspectorRepositoryStatusContract).handler(async ({ input, errors }) => {
@@ -2282,12 +2445,13 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'update Inspector workflow', message: failure.message }));
     }
   });
-  const waiveInspectorGate = server.implement(inspectorWaiveWorkflowGateContract).handler(async ({ input, errors }) => {
+  const waiveInspectorGate = server.implement(inspectorWaiveWorkflowGateContract).handler(async ({ input, errors, context }) => {
     const resolved = resolveInspectorSpace(options.database, input.input.spaceId, input.expectedGeneration);
     if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
     if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
     try {
-      const value = await inspectorAuthority().waiveInspectorWorkflowGate({ ...input.input, ...resolved.identity });
+      const caller = requireDeviceAdministration(context.caller);
+      const value = await inspectorAuthority().waiveInspectorWorkflowGate({ ...input.input, ...resolved.identity, actorId: caller.deviceId, actorKind: caller.kind === 'browser' ? 'human' : 'client' });
       await options.projectEvents.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: resolved.identity.projectId, scope: 'workspace', entity: 'workflow', entityId: value.id, revision: value.revision, operation: 'updated', payload: { spaceId: resolved.identity.spaceId, gateId: input.input.gateId } });
       await options.sessions.instructionsChanged(resolved.identity.projectId, resolved.identity.spaceId);
       return ok(value);
@@ -2314,12 +2478,13 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'update Inspector rubric', message: failure.message }));
     }
   });
-  const appendInspectorJudgment = server.implement(inspectorAppendRubricJudgmentContract).handler(async ({ input, errors }) => {
+  const appendInspectorJudgment = server.implement(inspectorAppendRubricJudgmentContract).handler(async ({ input, errors, context }) => {
     const resolved = resolveInspectorSpace(options.database, input.input.spaceId, input.expectedGeneration);
     if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
     if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
     try {
-      const value = await inspectorAuthority().appendInspectorRubricJudgment({ ...input.input, ...resolved.identity });
+      const caller = requireDeviceAdministration(context.caller);
+      const value = await inspectorAuthority().appendInspectorRubricJudgment({ ...input.input, ...resolved.identity, judgment: { ...input.input.judgment, actorId: caller.deviceId, actorKind: caller.kind === 'browser' ? 'human' : 'client', createdAt: new Date().toISOString() } });
       await options.projectEvents.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: resolved.identity.projectId, scope: 'workspace', entity: 'rubric', entityId: value.id, revision: value.revision, operation: 'append', payload: { spaceId: resolved.identity.spaceId, criterionId: input.input.criterionId } });
       await options.sessions.instructionsChanged(resolved.identity.projectId, resolved.identity.spaceId);
       return ok(value);
@@ -2451,7 +2616,38 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'submit Change Guide', message: error instanceof Error ? error.message : authorityFailureMessage(failure) }));
     }
   });
-  const readSessionResource = server.implement(inspectorReadResourceContract).handler(async ({ input, errors }) => {
+  const readSessionResource = server.implement(inspectorReadResourceContract).stream(async function* ({ input, errors, signal }) {
+    const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
+    if (resolved.status === 'missing') {
+      yield err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
+      return;
+    }
+    if (resolved.status === 'generation-conflict') {
+      yield err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
+      return;
+    }
+    const context = input.sessionId === null ? null : options.sessions.getResourceContext(input.sessionId);
+    if (input.sessionId !== null && (!context || context.spaceId !== resolved.space.id)) {
+      yield err(errors.InspectorState({ resource: 'session resource', message: 'The originating session is not available for this workspace.' }));
+      return;
+    }
+    const capability: ArtifactCapability = resolved.space.kind === 'base'
+      ? { kind: 'project', projectId: resolved.space.projectId }
+      : { kind: 'workspace', projectId: resolved.space.projectId, workspaceId: resolved.space.id };
+    try {
+      const frames = await readInspectorResource({
+        url: input.url, sessionFile: context?.sessionFile ?? null, localArtifactsDir: context?.localArtifactsDir ?? null,
+        capability, artifacts: options.artifacts,
+      });
+      for (const frame of frames) {
+        if (signal.aborted) return;
+        yield ok(frame);
+      }
+    } catch (error) {
+      if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'read session resource', message: error instanceof Error ? error.message : 'Unable to read the linked resource' }));
+    }
+  });
+  const readSessionResourcePage = server.implement(inspectorReadResourcePageContract).handler(async ({ input, errors }) => {
     const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
     if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
     if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
@@ -2463,15 +2659,43 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       ? { kind: 'project', projectId: resolved.space.projectId }
       : { kind: 'workspace', projectId: resolved.space.projectId, workspaceId: resolved.space.id };
     try {
-      return ok(await readInspectorResource({
+      const frames = await readInspectorResource({
         url: input.url, sessionFile: context?.sessionFile ?? null, localArtifactsDir: context?.localArtifactsDir ?? null,
         capability, artifacts: options.artifacts,
-      }));
+      });
+      const { cursor, limit, ...identity } = input;
+      return ok(await snapshotPage(frames, { identity, cursor, limit }));
     } catch (error) {
-      return err(errors.OperationFailed({ operation: 'read session resource', message: error instanceof Error ? error.message : 'Unable to read the linked resource' }));
+      return err(errors.OperationFailed({ operation: 'read session resource page', message: error instanceof Error ? error.message : 'Unable to read linked resource' }));
     }
   });
-  const readInspectorArtifact = server.implement(inspectorReadArtifactContract).handler(async ({ input, errors }) => {
+  const readInspectorArtifact = server.implement(inspectorReadArtifactContract).stream(async function* ({ input, errors, signal }) {
+    const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
+    if (resolved.status === 'missing') {
+      yield err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
+      return;
+    }
+    if (resolved.status === 'generation-conflict') {
+      yield err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
+      return;
+    }
+    try {
+      const capability: ArtifactCapability = resolved.space.kind === 'base'
+        ? { kind: 'project', projectId: resolved.space.projectId }
+        : { kind: 'workspace', projectId: resolved.space.projectId, workspaceId: resolved.space.id };
+      const resource = parseResourceUri(input.url);
+      if (!resource || resource.kind !== 'local' || !resource.mount) throw new Error('Expected a canonical local artifact URI');
+      const value = await options.artifacts.read(capability, resource.url, input.hash);
+      if (value.status === 'error') throw value.error;
+      for (const frame of createResourcePreview(input.url, value.value)) {
+        if (signal.aborted) return;
+        yield ok(frame);
+      }
+    } catch (error) {
+      if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'read Inspector artifact', message: error instanceof Error ? error.message : 'Unable to read Inspector artifact' }));
+    }
+  });
+  const readInspectorArtifactPage = server.implement(inspectorReadArtifactPageContract).handler(async ({ input, errors }) => {
     const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
     if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
     if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
@@ -2483,9 +2707,10 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       if (!resource || resource.kind !== 'local' || !resource.mount) throw new Error('Expected a canonical local artifact URI');
       const value = await options.artifacts.read(capability, resource.url, input.hash);
       if (value.status === 'error') throw value.error;
-      return ok(createResourcePreview(input.url, value.value));
+      const { cursor, limit, ...identity } = input;
+      return ok(await snapshotPage(createResourcePreview(input.url, value.value), { identity, cursor, limit }));
     } catch (error) {
-      return err(errors.OperationFailed({ operation: 'read Inspector artifact', message: error instanceof Error ? error.message : 'Unable to read Inspector artifact' }));
+      return err(errors.OperationFailed({ operation: 'read Inspector artifact page', message: error instanceof Error ? error.message : 'Unable to read Inspector artifact' }));
     }
   });
   const writeInspectorArtifact = server.implement(inspectorWriteArtifactContract).handler(async ({ input, errors }) => {
@@ -2506,12 +2731,62 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'write Inspector artifact', message: error instanceof Error ? error.message : 'Unable to write Inspector artifact' }));
     }
   });
-  const markInspectorGuideRead = server.implement(inspectorMarkGuideSectionReadContract).handler(async ({ input, errors }) => {
+  const artifactUploadSpace = (space: MaterializedSpace): ArtifactUploadSpace => ({
+    spaceId: space.id,
+    generation: space.generation,
+    capability: space.kind === 'base' ? { kind: 'project', projectId: space.projectId } : { kind: 'workspace', projectId: space.projectId, workspaceId: space.id },
+  });
+  const beginArtifactUpload = server.implement(inspectorBeginArtifactUploadContract).handler(async ({ input, errors }) => {
+    const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
+    if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
+    if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
+    if (!options.artifactUploads) return err(errors.InspectorState({ resource: 'upload', message: 'This machine does not accept artifact uploads' }));
+    const value = await options.artifactUploads.begin({ ...artifactUploadSpace(resolved.space), fileName: input.fileName, size: input.size, mediaType: input.mediaType });
+    if (value.status === 'ok') return ok(value.value);
+    if (value.error.kind === 'conflict') return err(errors.InspectorConflict({ resource: 'upload', expected: value.error.expected, actual: value.error.actual }));
+    if (value.error.kind === 'state') return err(errors.InspectorState({ resource: 'upload', message: value.error.message }));
+    return err(errors.OperationFailed({ operation: 'begin artifact upload', message: value.error.message }));
+  });
+  const uploadArtifactChunk = server.implement(inspectorUploadArtifactChunkContract).handler(async ({ input, errors }) => {
+    const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
+    if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
+    if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
+    if (!options.artifactUploads) return err(errors.InspectorState({ resource: 'upload', message: 'This machine does not accept artifact uploads' }));
+    const value = await options.artifactUploads.chunk({ ...artifactUploadSpace(resolved.space), uploadId: input.uploadId, offset: input.offset, sha256: input.sha256, data: input.data });
+    if (value.status === 'ok') return ok(value.value);
+    if (value.error.kind === 'conflict') return err(errors.InspectorConflict({ resource: 'upload', expected: value.error.expected, actual: value.error.actual }));
+    if (value.error.kind === 'state') return err(errors.InspectorState({ resource: 'upload', message: value.error.message }));
+    return err(errors.OperationFailed({ operation: 'store artifact upload chunk', message: value.error.message }));
+  });
+  const commitArtifactUpload = server.implement(inspectorCommitArtifactUploadContract).handler(async ({ input, errors }) => {
+    const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
+    if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
+    if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
+    if (!options.artifactUploads) return err(errors.InspectorState({ resource: 'upload', message: 'This machine does not accept artifact uploads' }));
+    const value = await options.artifactUploads.commit({ ...artifactUploadSpace(resolved.space), uploadId: input.uploadId });
+    if (value.status === 'ok') return ok(value.value);
+    if (value.error.kind === 'conflict') return err(errors.InspectorConflict({ resource: 'upload', expected: value.error.expected, actual: value.error.actual }));
+    if (value.error.kind === 'state') return err(errors.InspectorState({ resource: 'upload', message: value.error.message }));
+    return err(errors.OperationFailed({ operation: 'commit artifact upload', message: value.error.message }));
+  });
+  const abortArtifactUpload = server.implement(inspectorAbortArtifactUploadContract).handler(async ({ input, errors }) => {
+    const resolved = resolveInspectorSpace(options.database, input.spaceId, input.expectedGeneration);
+    if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
+    if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
+    if (!options.artifactUploads) return ok({ aborted: false });
+    const value = await options.artifactUploads.abort({ ...artifactUploadSpace(resolved.space), uploadId: input.uploadId });
+    if (value.status === 'ok') return ok(value.value);
+    if (value.error.kind === 'conflict') return err(errors.InspectorConflict({ resource: 'upload', expected: value.error.expected, actual: value.error.actual }));
+    if (value.error.kind === 'state') return err(errors.InspectorState({ resource: 'upload', message: value.error.message }));
+    return err(errors.OperationFailed({ operation: 'abort artifact upload', message: value.error.message }));
+  });
+  const markInspectorGuideRead = server.implement(inspectorMarkGuideSectionReadContract).handler(async ({ input, errors, context }) => {
     const resolved = resolveInspectorSpace(options.database, input.input.spaceId, input.expectedGeneration);
     if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
     if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
     try {
-      const value = await inspectorAuthority().markInspectorGuideSectionRead({ ...input.input, ...resolved.identity });
+      if (!context.caller) throw new Error('An authenticated reviewer is required');
+      const value = await inspectorAuthority().markInspectorGuideSectionRead({ ...input.input, ...resolved.identity, reviewerId: context.caller.deviceId });
       await options.projectEvents.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: resolved.identity.projectId, scope: 'workspace', entity: 'change-guide', entityId: resolved.identity.spaceId, revision: value.revision, operation: 'updated', payload: { spaceId: resolved.identity.spaceId, sectionId: input.input.sectionId } });
       return ok(value);
     } catch (error) {
@@ -2521,12 +2796,13 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'mark Inspector guide section read', message: failure.message }));
     }
   });
-  const setInspectorApproval = server.implement(inspectorSetGuideApprovalContract).handler(async ({ input, errors }) => {
+  const setInspectorApproval = server.implement(inspectorSetGuideApprovalContract).handler(async ({ input, errors, context }) => {
     const resolved = resolveInspectorSpace(options.database, input.input.spaceId, input.expectedGeneration);
     if (resolved.status === 'missing') return err(errors.WorkspaceNotFound({ workspaceId: resolved.spaceId }));
     if (resolved.status === 'generation-conflict') return err(errors.SpaceGenerationConflict({ spaceId: resolved.spaceId, expected: resolved.expected, actual: resolved.actual }));
     try {
-      const value = await inspectorAuthority().setInspectorGuideApproval({ ...input.input, ...resolved.identity });
+      const caller = requireDeviceAdministration(context.caller);
+      const value = await inspectorAuthority().setInspectorGuideApproval({ ...input.input, ...resolved.identity, reviewerId: caller.deviceId });
       await options.projectEvents.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: resolved.identity.projectId, scope: 'workspace', entity: 'change-guide', entityId: resolved.identity.spaceId, revision: value.revision, operation: 'updated', payload: { spaceId: resolved.identity.spaceId, decision: input.input.decision } });
       return ok(value);
     } catch (error) {
@@ -2592,7 +2868,6 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
 
   return server.router({
-    bootstrap,
     transcript,
     transcriptPage,
     transcriptContent,
@@ -2605,6 +2880,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       reserveHandle,
       omp: { get: getOmpSettings, set: setOmpSetting },
     },
+    inference: { list: listInference, create: createInference, update: updateInference, delete: deleteInference, assign: assignInference },
     providers: {
       list: listProviders,
       login: { start: startProviderLogin, events: providerLoginEvents, respond: respondProviderLogin, cancel: cancelProviderLogin },
@@ -2613,7 +2889,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       usage: providerUsage,
       models: listAvailableModels,
     },
-    space: { close: closeSpace, reopen: reopenSpace },
+    space: { view: spaceView, close: closeSpace, reopen: reopenSpace },
     devices: { list: listDevices, revoke: revokeDevice },
     deployment: { status: deploymentStatus, launch: deploymentLaunch, revert: deploymentRevert },
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret, account: { list: listAccountSecrets, put: putAccountSecret, delete: deleteAccountSecret, grant: grantAccountSecret, revoke: revokeAccountSecret } },
@@ -2670,13 +2946,16 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       journal: { list: inspectorJournal, startPhase: startInspectorJournal, endPhase: endInspectorJournal, append: appendInspectorJournal },
       guide: { put: putInspectorGuide, analyze: analyzeInspectorGuide, submit: submitInspectorGuide, markSectionRead: markInspectorGuideRead, setApproval: setInspectorApproval },
       review: { list: inspectorThreads, create: createInspectorThread, reply: replyInspectorThread, resolve: resolveInspectorThread },
-      repository: { tree: inspectorRepositoryTree, status: inspectorRepositoryStatus, file: inspectorRepositoryFile, diff: inspectorRepositoryDiff },
+      repository: { tree: inspectorRepositoryTree, treePage: inspectorRepositoryTreePage, status: inspectorRepositoryStatus, file: inspectorRepositoryFile, diff: inspectorRepositoryDiff },
       services: { list: inspectorServices, start: startInspectorService, stop: stopInspectorService },
-      resources: { read: readSessionResource },
-      artifacts: { read: readInspectorArtifact, write: writeInspectorArtifact },
+      resources: { read: readSessionResource, readPage: readSessionResourcePage },
+      artifacts: {
+        read: readInspectorArtifact, readPage: readInspectorArtifactPage, write: writeInspectorArtifact,
+        uploadBegin: beginArtifactUpload, uploadChunk: uploadArtifactChunk, uploadCommit: commitArtifactUpload, uploadAbort: abortArtifactUpload,
+      },
     },
-    project: { list: listProjects, create: createProject, open: openProject, archive: archiveProject, restore: restoreProject, delete: deleteProject },
-    workspace: { create: createWorkspace, archive: archiveWorkspace, restore: restoreWorkspace, delete: deleteWorkspace, setPhase: setWorkspacePhase, setRelations: setWorkspaceRelations, stackStatus },
+    project: { list: listProjects, create: createProject, open: openProject, archive: archiveProject, restore: restoreProject, setBaseBranch: setProjectBaseBranch, delete: deleteProject },
+    workspace: { create: createWorkspace, retryCreate: retryCreateWorkspace, archive: archiveWorkspace, restore: restoreWorkspace, delete: deleteWorkspace, setPhase: setWorkspacePhase, setRelations: setWorkspaceRelations, stackStatus },
     placements,
     browserRelay: {
       status: getBrowserRelayStatus,
@@ -2710,7 +2989,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       stop: stopSessionTurn,
     },
     subagents: { transcript: subagentTranscript, events: subagentEvents, page: subagentPage, content: subagentContent },
-    terminals: { events: terminalEvents, list: listTerminals, create: createTerminal, read: readTerminal, send: sendTerminal, stop: stopTerminal },
+    terminals: { events: terminalEvents, live: terminalLive, list: listTerminals, create: createTerminal, read: readTerminal, send: sendTerminal, stop: stopTerminal },
     events,
   });
 }

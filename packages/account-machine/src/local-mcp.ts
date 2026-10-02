@@ -8,6 +8,7 @@ import {
   type ComposioPluginAuthorization,
   type ComposioPluginCatalog,
   type ComposioPluginTool,
+  type ComposioToolPolicy,
   type ComposioSetup,
   type DiscoveredMcpTool,
   type EffectiveSecretMetadata,
@@ -39,7 +40,7 @@ export interface MachineMcpAuthority {
   authorizeComposioPlugin(toolkit: string, label: string): Promise<ComposioPluginAuthorization>;
   refreshComposioPlugin(connectionId: string): Promise<McpConnection>;
   listComposioPluginTools(connectionId: string): Promise<ComposioPluginTool[]>;
-  updateComposioPluginTools(connectionId: string, expectedRevision: number, allowedTools: string[]): Promise<McpConnection>;
+  updateComposioPluginTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<McpConnection>;
   disconnectComposioPlugin(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }>;
   materializeComposioPlugin(projectId: string, workspaceId: string | null, connectionId: string): Promise<ComposioMcpMaterialization>;
   listProjectMcpGrants(projectId: string): Promise<ProjectMcpGrant[]>;
@@ -583,8 +584,8 @@ export class MachineMcpCoordinator {
     return this.authority.listComposioPluginTools(connectionId);
   }
 
-  async updateComposioTools(connectionId: string, expectedRevision: number, allowedTools: string[]): Promise<McpConnection> {
-    const connection = await this.authority.updateComposioPluginTools(connectionId, expectedRevision, allowedTools);
+  async updateComposioTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<McpConnection> {
+    const connection = await this.authority.updateComposioPluginTools(connectionId, expectedRevision, toolPolicy);
     await this.reloadAll();
     return connection;
   }

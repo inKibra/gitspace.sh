@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -180,6 +180,40 @@ describe('LocalArtifactResolver', () => {
     if (removed.status === 'error') throw removed.error;
     expect(removed.value.generation).toBe(2);
     expect((await resolver.read(workspaceA, 'local://workspace/stable.txt')).status).toBe('error');
+    database.close();
+  });
+
+  it('moves a staged file larger than one cloud object into bounded sealed parts and restores it', async () => {
+    const { database, resolver, store, root } = fixture();
+    const size = 32 * 1024 * 1024 + 5;
+    const bytes = new Uint8Array(size);
+    for (let index = 0; index < size; index++) bytes[index] = (index * 31 + 7) % 251;
+    const staged = join(root, 'staged.bin');
+    writeFileSync(staged, bytes);
+    const written = await resolver.writeFile(workspaceA, 'local://workspace/uploads/big.bin', staged, 'application/octet-stream');
+    if (written.status === 'error') throw written.error;
+    expect(written.value).toMatchObject({ url: 'local://workspace/uploads/big.bin', size, mediaType: 'application/octet-stream' });
+    expect(existsSync(staged)).toBe(false);
+
+    const committed = await resolver.commit(workspaceA, 'local://workspace/');
+    if (committed.status === 'error') throw committed.error;
+    // Two sealed parts, their sealed inventory (the blob), and the scope manifest.
+    expect(store.objects.size).toBe(4);
+    for (const sealed of store.objects.values()) expect(sealed.byteLength).toBeLessThan(64 * 1024 * 1024);
+    expect((await resolver.verifyScope(committed.value)).status).toBe('ok');
+
+    await resolver.evictCachedBytes();
+    const restored = await resolver.read(workspaceA, 'local://workspace/uploads/big.bin');
+    if (restored.status === 'error') throw restored.error;
+    expect(restored.value.byteLength).toBe(size);
+    expect(Buffer.from(restored.value).equals(Buffer.from(bytes))).toBe(true);
+
+    const part = [...store.objects.keys()].find((hash) => hash !== written.value.hash && hash !== committed.value.manifestHash
+      && store.objects.get(hash)!.byteLength > 1024 * 1024)!;
+    store.objects.delete(part);
+    expect((await resolver.verifyScope(committed.value)).status).toBe('error');
+    await resolver.evictCachedBytes();
+    expect((await resolver.read(workspaceA, 'local://workspace/uploads/big.bin')).status).toBe('error');
     database.close();
   });
 });

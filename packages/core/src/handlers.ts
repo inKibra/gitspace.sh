@@ -40,31 +40,27 @@ export class GitSpaceHandlers {
     readonly events: ProjectEventWriter,
   ) {}
 
-  bootstrap(input: { projectId: string; workspaceId: string | null }) {
+  /** A base released from this machine has no local row; the view still serves its workspaces and reports the base as not held here. */
+  spaceView(input: { projectId: string; workspaceId: string | null }) {
     const project = this.database.getProject(input.projectId);
     if (!project) return err(rpcErrors.projectNotFound({ projectId: input.projectId }));
     const baseSpace = this.database.getBaseSpace(project.id);
-    if (!baseSpace) return err(operationFailed('load base space'));
     const workspaces = this.database.listWorkspaces(project.id);
     const stack = this.stackContext(project.id, workspaces);
     const selected = input.workspaceId === null
       ? baseSpace
       : workspaces.find((workspace) => workspace.id === input.workspaceId) ?? null;
-    if (!selected) {
-      return input.workspaceId === null
-        ? err(operationFailed('load base space'))
-        : err(rpcErrors.workspaceNotFound({ workspaceId: input.workspaceId }));
-    }
-    const mainAgent = this.database.orm.select().from(agentSessions)
-      .where(eq(agentSessions.spaceId, selected.id)).get() ?? null;
+    if (input.workspaceId !== null && !selected) return err(rpcErrors.workspaceNotFound({ workspaceId: input.workspaceId }));
+    const mainAgent = selected ? this.database.orm.select().from(agentSessions)
+      .where(eq(agentSessions.spaceId, selected.id)).get() ?? null : null;
     const capability: Extract<ArtifactCapability, { kind: 'project' }> = {
       kind: 'project',
       projectId: project.id,
-      ...(selected.kind === 'worktree' ? { currentWorkspaceId: selected.id } : {}),
+      ...(selected?.kind === 'worktree' ? { currentWorkspaceId: selected.id } : {}),
     };
-    const baseArtifacts = this.artifacts.list(capability, 'local://base/');
+    const baseArtifacts = baseSpace ? this.artifacts.list(capability, 'local://base/') : ok([] as LocalArtifactEntry[]);
     if (baseArtifacts.status === 'error') return err(operationFailed('load base artifacts'));
-    const workspaceArtifacts = selected.kind === 'worktree'
+    const workspaceArtifacts = selected?.kind === 'worktree'
       ? this.artifacts.list(capability, 'local://workspace/')
       : ok([] as LocalArtifactEntry[]);
     if (workspaceArtifacts.status === 'error') return err(operationFailed('load workspace artifacts'));
@@ -72,13 +68,16 @@ export class GitSpaceHandlers {
       project: {
         id: project.id,
         name: project.name,
-        repositoryPath: this.database.getBaseSpace(project.id)!.rootPath,
         baseBranch: project.baseBranch,
-        connected: true,
+        connected: baseSpace !== null,
       },
       workspaces: workspaces.map((workspace) => this.workspaceView(workspace, stack)),
-      baseSpace: this.baseSpaceView(baseSpace),
-      mainAgent: mainAgent ? {
+      // The cloud directory reports a released base's real holder and closure.
+      baseSpace: baseSpace ? this.baseSpaceView(baseSpace) : {
+        id: project.id, projectId: project.id, kind: 'base' as const, name: project.name, branch: project.baseBranch,
+        closedAt: null, possessedBy: null, spaceGeneration: 0, status: deriveWorkspaceStatusSummary({ agents: [] }),
+      },
+      mainAgent: mainAgent && selected ? {
         id: mainAgent.id,
         projectId: selected.projectId,
         workspaceId: selected.kind === 'worktree' ? selected.id : null,

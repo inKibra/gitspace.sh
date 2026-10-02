@@ -1,4 +1,14 @@
 import { z } from 'zod';
+import {
+  inferenceExecutionContextSchema,
+  inferenceStateSchema,
+  type InferenceExecutionContext,
+  type InferenceState,
+  type InferenceCreateInput,
+  type InferenceUpdateInput,
+  type InferenceDeleteInput,
+  type InferenceAssignInput,
+} from '@gitspace/protocol';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import {
@@ -16,6 +26,7 @@ import {
   type ComposioPluginAuthorization,
   type ComposioPluginCatalog,
   type ComposioPluginTool,
+  type ComposioToolPolicy,
   type ComposioSetup,
   type CloudProjectOperation,
   type CloudProjectSummary,
@@ -170,6 +181,11 @@ function retryableUploadError(error: unknown): boolean {
   return false;
 }
 
+/** The Worker checks signature age before acting, so an expired request changed nothing and may be re-signed. */
+function requestExpired(error: unknown): boolean {
+  return error instanceof CloudSpaceAuthorityError && error.details.code === 'REQUEST_EXPIRED';
+}
+
 const controlErrorMaxBytes = 8 * 1024;
 const controlErrorResponseSchema = z.object({
   status: z.literal('error'),
@@ -219,6 +235,7 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
     // Snapshot once so every attempt verifies and uploads the same immutable content.
     const body = ownedBuffer(bytes);
     const uploadId = crypto.randomUUID();
+    let resigned = false;
     for (let attempt = 0; ; attempt += 1) {
       const uploadDiagnostics = {
         uploadId,
@@ -294,7 +311,13 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
           return hash;
         }, uploadDiagnostics);
       } catch (error) {
-        if (attempt + 1 >= uploadMaxAttempts || !retryableUploadError(error)) throw error;
+        // A slow upload can outlive its signature; one fresh signature is enough, a second expiry is not transient.
+        const expired = !resigned && requestExpired(error);
+        if (attempt + 1 >= uploadMaxAttempts || !(expired || retryableUploadError(error))) throw error;
+        if (expired) {
+          resigned = true;
+          continue;
+        }
         // Bound retries and preserve the last transport or HTTP error.
         await Bun.sleep(Math.min(250 * 2 ** attempt, 5_000));
       }
@@ -302,31 +325,37 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
   }
 
   async get(key: string, expectedHash?: string): Promise<Uint8Array | null> {
-    const request = signedRequest(this.options, 'data.get', { key, ...(expectedHash ? { hash: expectedHash } : {}) });
-    return withCloudRequestDiagnostics(request, async (diagnostics) => {
-      const response = await (this.options.fetcher ?? fetch)(objectUrl(this.options.baseUrl, key), {
-        headers: { 'x-gitspace-control': encodedRequest(request), ...diagnostics.headers },
-      });
-      diagnostics.response = response;
-      diagnostics.stage = 'http';
-      if (response.status === 404) return null;
-      if (!response.ok) {
-        const serverError = await readControlError(response);
-        const cfRay = cloudResponseRay(response);
-        // Carry safe correlation in the Error message too: release reports retain only that string.
-        throw new CloudSpaceAuthorityError(
-          'DATA_GET_FAILED',
-          `Application object download ${key} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`
-            + ` (machine=${request.machineId} operation=${request.operation} request=${request.nonce}${cfRay ? ` cf-ray=${cfRay}` : ''})`,
-          { ...serverError, key, status: response.status, machineId: request.machineId, operation: request.operation, requestId: request.nonce, ...(cfRay ? { cfRay } : {}) },
-        );
+    for (let resigned = false; ; resigned = true) {
+      const request = signedRequest(this.options, 'data.get', { key, ...(expectedHash ? { hash: expectedHash } : {}) });
+      try {
+        return await withCloudRequestDiagnostics(request, async (diagnostics) => {
+          const response = await (this.options.fetcher ?? fetch)(objectUrl(this.options.baseUrl, key), {
+            headers: { 'x-gitspace-control': encodedRequest(request), ...diagnostics.headers },
+          });
+          diagnostics.response = response;
+          diagnostics.stage = 'http';
+          if (response.status === 404) return null;
+          if (!response.ok) {
+            const serverError = await readControlError(response);
+            const cfRay = cloudResponseRay(response);
+            // Carry safe correlation in the Error message too: release reports retain only that string.
+            throw new CloudSpaceAuthorityError(
+              'DATA_GET_FAILED',
+              `Application object download ${key} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`
+                + ` (machine=${request.machineId} operation=${request.operation} request=${request.nonce}${cfRay ? ` cf-ray=${cfRay}` : ''})`,
+              { ...serverError, key, status: response.status, machineId: request.machineId, operation: request.operation, requestId: request.nonce, ...(cfRay ? { cfRay } : {}) },
+            );
+          }
+          diagnostics.stage = 'response-body';
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          diagnostics.stage = 'integrity';
+          if (expectedHash && hashBytes(bytes) !== expectedHash) throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} failed integrity verification`);
+          return bytes;
+        });
+      } catch (error) {
+        if (resigned || !requestExpired(error)) throw error;
       }
-      diagnostics.stage = 'response-body';
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      diagnostics.stage = 'integrity';
-      if (expectedHash && hashBytes(bytes) !== expectedHash) throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} failed integrity verification`);
-      return bytes;
-    });
+    }
   }
 }
 
@@ -489,6 +518,10 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
   }
   activateSourceProject(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary> {
     return this.call('project.activateSource', { projectId, expectedRevision, baseBranch });
+  }
+
+  setProjectBaseBranch(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary> {
+    return this.call('project.setBaseBranch', { projectId, expectedRevision, baseBranch });
   }
 
   listProjectWorkspaces(projectId: string): Promise<CloudWorkspaceDefinition[]> {
@@ -802,6 +835,42 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
   updateOmpConfig(input: OmpConfigUpdate): Promise<OmpConfigDocument> {
     return this.call('settings.omp.update', { ...input });
   }
+
+  async listInferenceProfiles(): Promise<InferenceState> {
+    return inferenceStateSchema.parse(await this.call('inference.list', {}));
+  }
+
+  async createInferenceProfile(input: InferenceCreateInput): Promise<InferenceState> {
+    return inferenceStateSchema.parse(await this.call('inference.create', { ...input }));
+  }
+
+  async updateInferenceProfile(input: InferenceUpdateInput): Promise<InferenceState> {
+    return inferenceStateSchema.parse(await this.call('inference.update', { ...input }));
+  }
+
+  async deleteInferenceProfile(input: InferenceDeleteInput): Promise<InferenceState> {
+    return inferenceStateSchema.parse(await this.call('inference.delete', { ...input }));
+  }
+
+  async assignInferenceProfile(input: InferenceAssignInput): Promise<InferenceState> {
+    return inferenceStateSchema.parse(await this.call('inference.assign', { ...input }));
+  }
+
+  async resolveInference(projectId: string): Promise<InferenceExecutionContext> {
+    const context = inferenceExecutionContextSchema.parse(await this.call('inference.resolve', { projectId }));
+    if (context.projectId !== projectId || context.assignmentRevision === null) {
+      throw new CloudSpaceAuthorityError('INFERENCE_SCOPE_MISMATCH', 'Canonical inference context does not match the requested project');
+    }
+    return context;
+  }
+
+  async providerInference(profileId: string): Promise<InferenceExecutionContext> {
+    const context = inferenceExecutionContextSchema.parse(await this.call('inference.providers', { profileId }));
+    if (context.profile.id !== profileId || context.projectId !== null || context.assignmentRevision !== null) {
+      throw new CloudSpaceAuthorityError('INFERENCE_SCOPE_MISMATCH', 'Canonical provider context does not match the requested profile');
+    }
+    return context;
+  }
   getGitIdentity(): Promise<GitIdentityDocument | null> {
     return this.call('settings.git.get', {});
   }
@@ -897,8 +966,8 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('mcp.composio.tools', { connectionId });
   }
 
-  updateComposioPluginTools(connectionId: string, expectedRevision: number, allowedTools: string[]): Promise<McpConnection> {
-    return this.call('mcp.composio.updateTools', { connectionId, expectedRevision, allowedTools });
+  updateComposioPluginTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<McpConnection> {
+    return this.call('mcp.composio.updateTools', { connectionId, expectedRevision, toolPolicy });
   }
 
   disconnectComposioPlugin(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }> {
@@ -1193,29 +1262,36 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
   }
 
   private async call<T = unknown>(operation: ControlOperation, payload: Record<string, unknown>): Promise<T> {
-    const request = signedRequest(this.options, operation, payload);
-    return withCloudRequestDiagnostics(request, async (diagnostics) => {
-      const response = await (this.options.fetcher ?? fetch)(new URL('/v1/control', this.options.baseUrl), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...diagnostics.headers },
-        body: JSON.stringify(request),
-      });
-      diagnostics.response = response;
-      diagnostics.stage = 'response-body';
-      const body = await response.json() as { status?: unknown; value?: unknown; error?: { code?: unknown; message?: unknown; [key: string]: unknown } };
-      diagnostics.stage = response.ok ? 'application' : 'http';
-      if (!response.ok || body.status !== 'ok') {
-        const environment = EnvironmentFailureSchema.safeParse(body.error);
-        if (environment.success) throw new EnvironmentError(environment.data.code, environment.data.message, environment.data.context);
-        const domainFailure = WorkspaceFailureSchema.safeParse(body.error);
-        if (domainFailure.success) throw new WorkspaceDomainError(domainFailure.data);
-        throw new CloudSpaceAuthorityError(
-          typeof body.error?.code === 'string' ? body.error.code : 'CONTROL_FAILED',
-          typeof body.error?.message === 'string' ? body.error.message : `Control operation failed with ${response.status}`,
-          body.error ?? {},
-        );
+    for (let resigned = false; ; resigned = true) {
+      const request = signedRequest(this.options, operation, payload);
+      try {
+        return await withCloudRequestDiagnostics(request, async (diagnostics) => {
+          const response = await (this.options.fetcher ?? fetch)(new URL('/v1/control', this.options.baseUrl), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...diagnostics.headers },
+            body: JSON.stringify(request),
+          });
+          diagnostics.response = response;
+          diagnostics.stage = 'response-body';
+          const body = await response.json() as { status?: unknown; value?: unknown; error?: { code?: unknown; message?: unknown; [key: string]: unknown } };
+          diagnostics.stage = response.ok ? 'application' : 'http';
+          if (!response.ok || body.status !== 'ok') {
+            const environment = EnvironmentFailureSchema.safeParse(body.error);
+            if (environment.success) throw new EnvironmentError(environment.data.code, environment.data.message, environment.data.context);
+            const domainFailure = WorkspaceFailureSchema.safeParse(body.error);
+            if (domainFailure.success) throw new WorkspaceDomainError(domainFailure.data);
+            throw new CloudSpaceAuthorityError(
+              typeof body.error?.code === 'string' ? body.error.code : 'CONTROL_FAILED',
+              typeof body.error?.message === 'string' ? body.error.message : `Control operation failed with ${response.status}`,
+              body.error ?? {},
+            );
+          }
+          return body.value as T;
+        });
+      } catch (error) {
+        // Rejected before the operation ran, so a freshly signed repeat cannot apply it twice.
+        if (resigned || !requestExpired(error)) throw error;
       }
-      return body.value as T;
-    });
+    }
   }
 }

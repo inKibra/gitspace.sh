@@ -2,6 +2,7 @@ import { Button, Elevated, InputField, InputGroup, ScrollArea, TabsSubtle, TabsS
 import { XClose } from '@untitledui/icons';
 import { useEffect, useRef, useState } from 'react';
 import type { SessionHistoryEntry, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
+import { rpcErrorMessage } from './rpc-error-message.js';
 
 export interface SessionTreeExplorerProps {
   historyAnchorId: string | null;
@@ -68,7 +69,7 @@ export function SessionTreeExplorer({ historyAnchorId, onNavigate, onClose, onRe
         const value = await read(request, controller.signal);
         if (!controller.signal.aborted) setPage({ request, value, error: null });
       } catch (cause) {
-        if (!controller.signal.aborted) setPage({ request, value: null, error: cause instanceof Error ? cause.message : 'Unable to read session history' });
+        if (!controller.signal.aborted) setPage({ request, value: null, error: rpcErrorMessage(cause, 'Read session history') });
       }
     })();
     return () => controller.abort();
@@ -110,7 +111,7 @@ export function SessionTreeExplorer({ historyAnchorId, onNavigate, onClose, onRe
       await onNavigate(selected.id);
       if (mounted.current) onClose();
     } catch (cause) {
-      if (mounted.current) setNavigationError(cause instanceof Error ? cause.message : 'Unable to resume from this entry');
+      if (mounted.current) setNavigationError(rpcErrorMessage(cause, 'Resume session from history'));
     } finally {
       if (mounted.current) setResuming(false);
     }

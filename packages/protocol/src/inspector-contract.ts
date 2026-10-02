@@ -1,4 +1,4 @@
-import { wire } from 'result-rpc';
+import { wire } from './json-wire.js'
 import { z } from 'zod';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
 
@@ -110,7 +110,7 @@ export const workflowGateWaiverSchema = z.object({
   id: idSchema,
   reason: textSchema,
   actorId: idSchema,
-  actorKind: z.literal('human'),
+  actorKind: z.enum(['human', 'client']),
   createdAt: isoDateSchema,
 }).strict();
 export type WorkflowGateWaiver = z.infer<typeof workflowGateWaiverSchema>;
@@ -217,6 +217,8 @@ const judgmentBaseSchema = z.object({
   verdict: z.enum(['pass', 'fail']),
   summary: textSchema,
   actorId: idSchema,
+  /** Authenticated submitting principal; absent only on older persisted judgments. */
+  actorKind: z.enum(['human', 'client', 'agent']).optional(),
   evidence: z.array(evidenceReferenceSchema).max(INSPECTOR_EVIDENCE_HISTORY_LIMIT),
   createdAt: isoDateSchema,
 }).strict();
@@ -549,7 +551,7 @@ export const attachRequirementEvidenceInputSchema = inspectorIdentitySchema.exte
 }).strict();
 export const putWorkflowInputSchema = inspectorIdentitySchema.extend({ expectedRevision: z.number().int().nonnegative(), workflow: workflowDraftSchema }).strict();
 export const waiveWorkflowGateInputSchema = inspectorIdentitySchema.extend({
-  expectedRevision: revisionSchema, gateId: idSchema, waiverId: idSchema, reason: textSchema, actorId: idSchema, actorKind: z.literal('human'),
+  expectedRevision: revisionSchema, gateId: idSchema, waiverId: idSchema, reason: textSchema, actorId: idSchema, actorKind: z.enum(['human', 'client']),
 }).strict();
 export const putRubricInputSchema = inspectorIdentitySchema.extend({ expectedRevision: z.number().int().nonnegative(), rubric: rubricDraftSchema }).strict();
 export const appendRubricJudgmentInputSchema = inspectorIdentitySchema.extend({ expectedRevision: revisionSchema, criterionId: idSchema, judgment: rubricJudgmentSchema }).strict();
@@ -616,18 +618,15 @@ export type AppendReviewMessageInput = z.infer<typeof appendReviewMessageInputSc
 export type ResolveReviewThreadInput = z.infer<typeof resolveReviewThreadInputSchema>;
 export type RepositoryReadRequest = z.infer<typeof repositoryReadRequestSchema>;
 
-const asWireCodec = <T>(schema: z.ZodType<T>, id: string) => wire.serializable(
-  (value): value is T => schema.safeParse(value).success,
-  { id },
-);
+const asWireCodec = <T>(schema: z.ZodType<T>, id: string) => wire.serializable((value): value is T => schema.safeParse(value).success, { id, jsonSchema: schema });
 
-export const InspectorOverviewCodec = asWireCodec(inspectorOverviewSchema, 'gitspace/inspector-overview/v1');
+export const InspectorOverviewCodec = asWireCodec(inspectorOverviewSchema, 'gitspace/inspector-overview/v2');
 export const InspectorProjectCodec = asWireCodec(cloudProjectSummarySchema, 'gitspace/inspector-project/v1');
 export const InspectorWorkspaceCodec = asWireCodec(cloudWorkspaceDefinitionSchema, 'gitspace/inspector-workspace/v1');
 export const InspectorIdentityCodec = asWireCodec(inspectorIdentitySchema, 'gitspace/inspector-identity/v1');
 export const GoalRecordViewCodec = asWireCodec(goalRecordViewSchema, 'gitspace/goal-record-view/v1');
-export const WorkflowViewCodec = asWireCodec(workflowViewSchema, 'gitspace/workflow-view/v1');
-export const RubricViewCodec = asWireCodec(rubricViewSchema, 'gitspace/rubric-view/v1');
+export const WorkflowViewCodec = asWireCodec(workflowViewSchema, 'gitspace/workflow-view/v2');
+export const RubricViewCodec = asWireCodec(rubricViewSchema, 'gitspace/rubric-view/v2');
 export const JournalEntryViewCodec = asWireCodec(journalEntryViewSchema, 'gitspace/journal-entry-view/v1');
 export const ChangeGuideViewCodec = asWireCodec(changeGuideViewSchema, 'gitspace/change-guide-view/v1');
 export const RepositoryTreeEntryCodec = asWireCodec(repositoryTreeEntrySchema, 'gitspace/repository-tree-entry/v1');
@@ -640,9 +639,9 @@ export const ChangeGuideWorksheetCodec = asWireCodec(changeGuideWorksheetSchema,
 export const PutGoalInputCodec = asWireCodec(putGoalInputSchema, 'gitspace/put-goal-input/v1');
 export const AttachRequirementEvidenceInputCodec = asWireCodec(attachRequirementEvidenceInputSchema, 'gitspace/attach-requirement-evidence-input/v1');
 export const PutWorkflowInputCodec = asWireCodec(putWorkflowInputSchema, 'gitspace/put-workflow-input/v1');
-export const WaiveWorkflowGateInputCodec = asWireCodec(waiveWorkflowGateInputSchema, 'gitspace/waive-workflow-gate-input/v1');
+export const WaiveWorkflowGateInputCodec = asWireCodec(waiveWorkflowGateInputSchema, 'gitspace/waive-workflow-gate-input/v2');
 export const PutRubricInputCodec = asWireCodec(putRubricInputSchema, 'gitspace/put-rubric-input/v1');
-export const AppendRubricJudgmentInputCodec = asWireCodec(appendRubricJudgmentInputSchema, 'gitspace/append-rubric-judgment-input/v1');
+export const AppendRubricJudgmentInputCodec = asWireCodec(appendRubricJudgmentInputSchema, 'gitspace/append-rubric-judgment-input/v2');
 export const StartJournalPhaseInputCodec = asWireCodec(startJournalPhaseInputSchema, 'gitspace/start-journal-phase-input/v1');
 export const EndJournalPhaseInputCodec = asWireCodec(endJournalPhaseInputSchema, 'gitspace/end-journal-phase-input/v1');
 export const AppendJournalEntryInputCodec = asWireCodec(appendJournalEntryInputSchema, 'gitspace/append-journal-entry-input/v1');

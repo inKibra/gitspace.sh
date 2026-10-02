@@ -27,6 +27,7 @@ const HASH = `sha256:${'ab'.repeat(32)}`;
 function stageInput(sha: string): StageReleaseInput {
   return {
     sha,
+    inferenceVersion: 1,
     label: `workspace build ${sha}`,
     workspaceId: 'workspace-a',
     artifacts: {
@@ -53,7 +54,7 @@ function stageInput(sha: string): StageReleaseInput {
         { name: 'PLATFORM_TOKEN', source: 'provider-token' },
         { name: 'GITSPACE_OMP_BROKER_TOKEN', source: 'provider-token' },
         { name: 'ASSETS', source: 'public-assets' },
-        { name: 'AUTH_MAX_SKEW_MS', source: 'literal', value: '60000' },
+        { name: 'AUTH_MAX_SKEW_MS', source: 'literal', value: '300000' },
         { name: 'TUNNEL_HEADER_TIMEOUT_MS', source: 'literal', value: '300000' },
         { name: 'TUNNEL_IDLE_TIMEOUT_MS', source: 'literal', value: '300000' },
         { name: 'STORAGE_BUCKET', source: 'object-storage-name' },
@@ -102,6 +103,132 @@ async function tenant() {
 }
 
 describe('tenant releases', () => {
+  it('admits only actual compatible machine and OMP releases, independently of desired selections and failed upgrades', async () => {
+    const { userId } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    await releases.stage(stageInput('compatible-machine'), 'machine-a');
+    await releases.stage(stageInput('compatible-omp'), 'machine-a');
+    await releases.stage({ ...stageInput('legacy-runtime'), inferenceVersion: undefined }, 'machine-a');
+    await releases.launch({ sha: 'compatible-machine', targets: ['machine'] });
+    await releases.launch({ sha: 'compatible-omp', targets: ['omp'] });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
+
+    await releases.machineApplied('machine-a', { sha: 'legacy-runtime', target: 'machine', generation: 'old-machine', status: 'applied' });
+    await releases.machineApplied('machine-a', { sha: 'legacy-runtime', target: 'omp', generation: 'old-omp', status: 'applied' });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
+    await releases.machineApplied('machine-a', { sha: 'compatible-machine', target: 'machine', generation: 'new-machine', status: 'applied' });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
+    await releases.machineApplied('machine-a', { sha: 'compatible-omp', target: 'omp', generation: 'new-omp', status: 'applied' });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(true);
+    expect(await releases.machineInferenceCompatible('unacknowledged-machine')).toBe(false);
+
+    await releases.launch({ sha: 'legacy-runtime', targets: ['machine', 'omp'] });
+    await releases.machineApplied('machine-a', { sha: 'legacy-runtime', target: 'machine', generation: 'failed-update', status: 'failed' });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(true);
+    await releases.machineChannelApplied('machine-a', { target: 'omp', generation: 'channel-omp' });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
+    await releases.machineApplied('machine-a', { sha: 'compatible-omp', target: 'omp', generation: 'repaired-omp', status: 'applied' });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(true);
+    await releases.machineChannelApplied('machine-a', { target: 'machine', generation: 'channel-machine' });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
+  });
+
+  it('rejects legacy source selection and applied acknowledgements after inference cutover without changing the active release', async () => {
+    const { userId } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    await releases.stage({ ...stageInput('legacy'), inferenceVersion: undefined }, 'machine-a');
+    await releases.launch({ sha: 'legacy', targets: ['worker'] });
+    await releases.stage(stageInput('scoped'), 'machine-a');
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
+    await env.CREDENTIALS.getByName(userId).ensureInference();
+    const unverifiedWorker = await releases.status(userId, { sha: 'legacy', version: 'legacy' });
+    expect(unverifiedWorker.releases.find((record) => record.sha === 'legacy')?.status.worker).toBe('pending');
+    const launched = await releases.launch({ sha: 'scoped', targets: ['worker', 'machine', 'omp', 'frontend'] });
+    await releases.machineApplied('machine-a', { sha: 'scoped', target: 'machine', generation: 'scoped-machine', status: 'applied' });
+    await releases.machineApplied('machine-a', { sha: 'scoped', target: 'omp', generation: 'scoped-omp', status: 'applied' });
+    await releases.setWorkerStatus('scoped', 'applied', null);
+    const before = await releases.status(userId, { sha: 'scoped', version: 'scoped' });
+
+    await expect(releases.launch({ sha: 'legacy', targets: ['worker', 'machine', 'omp', 'frontend'] })).rejects.toThrow();
+    await expect(releases.stage({ ...stageInput('unstamped'), inferenceVersion: undefined }, 'machine-a')).rejects.toThrow();
+    await expect(releases.machineApplied('machine-a', { sha: 'legacy', target: 'machine', generation: 'legacy-machine', status: 'applied' })).rejects.toThrow();
+    await expect(releases.machineApplied('machine-a', { sha: 'legacy', target: 'omp', generation: 'legacy-omp', status: 'applied' })).rejects.toThrow();
+    await expect(releases.setWorkerStatus('legacy', 'applied', null)).rejects.toThrow();
+    const after = await releases.status(userId, { sha: 'scoped', version: 'scoped' });
+    expect(after).toEqual(before);
+    expect(after.desired).toEqual(launched!.desired);
+    expect(after.current.machines).toEqual({ 'machine-a': { sha: 'scoped', ompSha: 'scoped', generation: 'scoped-omp' } });
+  });
+
+  it('lets the first cutover deploy, staged unstamped by a pre-profile launcher, activate once this Worker runs as that release', async () => {
+    const { userId } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    // The pre-profile launcher and Worker stage without a capability stamp; this test Worker is built as 'test-inference-worker'.
+    await releases.stage({ ...stageInput('test-inference-worker'), inferenceVersion: undefined }, 'machine-a');
+    await releases.stage({ ...stageInput('other-legacy'), inferenceVersion: undefined }, 'machine-a');
+    await releases.launch({ sha: 'test-inference-worker', targets: ['worker', 'machine', 'omp', 'frontend'] });
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
+    await env.CREDENTIALS.getByName(userId).ensureInference();
+
+    await releases.machineApplied('machine-a', { sha: 'test-inference-worker', target: 'machine', generation: 'first-machine', status: 'applied' });
+    await releases.machineApplied('machine-a', { sha: 'test-inference-worker', target: 'omp', generation: 'first-omp', status: 'applied' });
+    expect(await releases.machineInferenceCompatible('machine-a')).toBe(true);
+    const status = await releases.status(userId, { sha: 'test-inference-worker', version: 'test-inference-worker' });
+    expect(status.releases.find((record) => record.sha === 'test-inference-worker')).toMatchObject({ inferenceVersion: 1, status: { worker: 'applied' } });
+    await expect(releases.machineApplied('machine-b', { sha: 'other-legacy', target: 'machine', generation: 'legacy', status: 'applied' })).rejects.toThrow();
+  });
+
+  it('does not let a compatible machine-only rebuild certify retained legacy Worker and frontend artifacts', async () => {
+    const { userId } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    const input = stageInput('mixed-capabilities');
+    await releases.stage({ ...input, inferenceVersion: undefined }, 'machine-a');
+    await releases.stage({
+      ...input, artifacts: { worker: null, frontend: null, omp: null, machine: input.artifacts.machine }, worker: null, omp: null,
+    }, 'machine-a');
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
+    await env.CREDENTIALS.getByName(userId).ensureInference();
+    await expect(releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] })).rejects.toThrow();
+    const rejected = await releases.status(userId, { sha: null, version: null });
+    expect(rejected.desired).toMatchObject({ worker: null, machine: null, omp: null, frontend: null });
+
+    // Replacing every legacy target with a compatible build permits forward repair.
+    await releases.stage(input, 'machine-a');
+    await releases.stage({
+      ...input, artifacts: { worker: null, frontend: null, omp: null, machine: input.artifacts.machine }, worker: null, omp: null,
+    }, 'machine-a');
+    const launched = await releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] });
+    expect(launched!.desired).toMatchObject({ worker: input.sha, frontend: input.sha });
+  });
+
+  it('blocks unverified channel rollback before invoking the platform or accepting channel acknowledgements', async () => {
+    const { userId, control } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    let platformReverts = 0;
+    let activeWorker = 'test-inference-worker';
+    network.use(
+      http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: activeWorker } })),
+      http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/revert`, () => {
+        platformReverts++;
+        return HttpResponse.json({ sha: 'channel:legacy', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+      }),
+    );
+    await releases.stage(stageInput('scoped-channel-guard'), 'machine-a');
+    await releases.launch({ sha: 'scoped-channel-guard', targets: ['worker', 'machine', 'omp', 'frontend'] });
+    await releases.machineApplied('machine-a', { sha: 'scoped-channel-guard', target: 'machine', generation: 'scoped', status: 'applied' });
+    await releases.machineApplied('machine-a', { sha: 'scoped-channel-guard', target: 'omp', generation: 'scoped', status: 'applied' });
+    await env.CREDENTIALS.getByName(userId).ensureInference();
+    activeWorker = 'scoped-channel-guard';
+    const before = await releases.status(userId, { sha: 'scoped-channel-guard', version: 'scoped-channel-guard' });
+
+    await expect(control('deploy.revert', {})).rejects.toThrow();
+    await expect(releases.revert()).rejects.toThrow();
+    await expect(control('deploy.machineChannelApplied', { target: 'machine', generation: 'legacy-channel' })).rejects.toThrow();
+    await expect(control('deploy.machineChannelApplied', { target: 'omp', generation: 'legacy-channel' })).rejects.toThrow();
+    expect(platformReverts).toBe(0);
+    expect(await releases.status(userId, { sha: 'scoped-channel-guard', version: 'scoped-channel-guard' })).toEqual(before);
+  });
+
   it('recovers a pending Worker acknowledgement from the active generation without clearing machine failures', async () => {
     const { userId, control } = await tenant();
     const releases = env.TENANT_RELEASES.getByName(userId);

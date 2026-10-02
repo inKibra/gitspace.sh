@@ -2,6 +2,7 @@ import type { ArtifactShareView } from '@gitspace/protocol/rpc-contract';
 import type { EvidenceReference } from '@gitspace/protocol';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputCopy, InputField, InputGroup, Select, SelectContent, SelectItem, SelectTrigger, Switch, ThinkingIndicator } from '@gitspace/ui';
 import { useEffect, useId, useState } from 'react';
+import { rpcErrorMessage } from '../rpc-error-message.js';
 
 type ArtifactReference = Extract<EvidenceReference, { kind: 'artifact' }>;
 export interface ArtifactActionsHandlers {
@@ -37,7 +38,7 @@ export function ArtifactActions({ selected, actions }: { selected: readonly Arti
     if (!sharing) return;
     let cancelled = false;
     setLinks(null);
-    void actions.listShares(sharing.url).then((value) => { if (!cancelled) setLinks(value); }).catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)); });
+    void actions.listShares(sharing.url).then((value) => { if (!cancelled) setLinks(value); }).catch((cause: unknown) => { if (!cancelled) setError(rpcErrorMessage(cause, 'List artifact shares')); });
     return () => { cancelled = true; };
   }, [sharing?.url]);
   const copy = async (): Promise<void> => {
@@ -48,7 +49,7 @@ export function ArtifactActions({ selected, actions }: { selected: readonly Arti
       await actions.copy(copying.map((reference, index) => ({ url: reference.url, hash: reference.hash, destinationPath: destinations[index]!, expectedDestinationHash: replacements[index]?.hash ?? null })));
       setNotice(`Copied ${copying.length} ${copying.length === 1 ? 'artifact' : 'artifacts'} to the project.`);
       setCopying(null);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    } catch (cause) { setError(rpcErrorMessage(cause, 'Copy artifacts to project')); }
     finally { setPending(false); }
   };
   const create = async (): Promise<void> => {
@@ -59,7 +60,7 @@ export function ArtifactActions({ selected, actions }: { selected: readonly Arti
       const expiresAt = expiry === 'never' ? null : new Date(Date.now() + Number(expiry)).toISOString();
       const created = await actions.createShare(sharing, expiresAt);
       setLinks((current) => [...current ?? [], created]);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    } catch (cause) { setError(rpcErrorMessage(cause, 'Create artifact share')); }
     finally { setPending(false); }
   };
   const revoke = async (id: string): Promise<void> => {
@@ -67,7 +68,7 @@ export function ArtifactActions({ selected, actions }: { selected: readonly Arti
     setPending(true);
     setError(null);
     try { await actions.revokeShare(id); setLinks((current) => current?.filter((link) => link.id !== id) ?? []); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    catch (cause) { setError(rpcErrorMessage(cause, 'Revoke artifact share')); }
     finally { setPending(false); }
   };
   return <div className="flex flex-wrap items-center gap-2">

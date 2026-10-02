@@ -49,7 +49,7 @@ describe('PluginsPage', () => {
       projects={[{ id: 'project-a', name: 'GitSpace' }]}
       connections={[{
         principalId: 'principal-a', id: 'composio-github-a', label: 'Work GitHub', enabled: true,
-        target: { kind: 'cloud' }, transport: { type: 'composio', toolkit: 'github', connectedAccountId: 'ca_test', allowedTools: ['GITHUB_SEARCH_ISSUES'] }, timeoutMs: 30_000,
+        target: { kind: 'cloud' }, transport: { type: 'composio', toolkit: 'github', connectedAccountId: 'ca_test', toolPolicy: { groups: { readOnly: false, write: false, destructive: false }, allow: ['GITHUB_SEARCH_ISSUES'], deny: [] } }, timeoutMs: 30_000,
         status: 'ready', statusMessage: null, statusCheckedAt: now, serverFingerprint: null, serverVersion: null, revision: 2, createdAt: now, updatedAt: now,
       }]}
       grants={[]}
@@ -61,7 +61,7 @@ describe('PluginsPage', () => {
       onRefresh={noop}
     />);
     expect(html).toContain('Work GitHub');
-    expect(html).toContain('1 allowed tool');
+    expect(html).toContain('All tools denied · 1 exception');
     expect(html).toContain('Manage plugin');
     expect(html).toContain('GitHub');
     expect(html).not.toContain('Integration');

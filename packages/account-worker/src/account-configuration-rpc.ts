@@ -39,7 +39,7 @@ import { serverRpc } from 'result-rpc/server';
 import { ProjectAuthorityDO, UserProjectIndexDO, ProjectMcpGrantNotFoundError, ProjectMcpGrantRevisionConflictError } from './project-authority.js';
 import { ProjectSecretsDO } from './project-secrets.js';
 import { UserSkillsDO, SkillRevisionConflict } from './user-skills.js';
-import { UserMcpConnectionsDO, McpConnectionNotFoundError, McpConnectionRevisionConflictError, McpConnectionValidationError } from './local-mcp.js';
+import { UserMcpConnectionsDO, McpConnectionNotFoundError, McpConnectionRevisionConflictError, McpConnectionValidationError, validateComposioToolPolicy } from './local-mcp.js';
 import { ProjectCronsDO, ProjectCronValidationError, ProjectCronNotFoundError, ProjectCronRevisionConflictError, ProjectCronAlreadyRunningError } from './project-crons.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import { signComposioState, type CredentialVaultDO } from './application.js';
@@ -282,9 +282,8 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
   const updateTools = server.implement(updateComposioPluginToolsContract).handler(async ({ input, errors }) => {
     try {
       const current = await composioConnection(input.connectionId);
-      const available = new Set((await (await gateway()).tools(current.transport.toolkit)).map(tool => tool.slug));
-      if (input.allowedTools.some(tool => !available.has(tool))) throw new McpConnectionValidationError('allowedTools', 'Selected plugin tool is unavailable');
-      return ok(mcpConnectionView(await connections.updateComposioTools(userId, input.connectionId, input.expectedRevision, [...input.allowedTools])));
+      const toolPolicy = validateComposioToolPolicy(input.toolPolicy, await (await gateway()).tools(current.transport.toolkit));
+      return ok(mcpConnectionView(await connections.updateComposioTools(userId, input.connectionId, input.expectedRevision, toolPolicy)));
     } catch (error) {
       if (error instanceof McpConnectionNotFoundError || error instanceof ProjectMcpGrantNotFoundError) return err(errors.McpNotFound({ resource: error instanceof ProjectMcpGrantNotFoundError ? 'grant' : 'connection', id: error.connectionId }));
       if (error instanceof McpConnectionRevisionConflictError || error instanceof ProjectMcpGrantRevisionConflictError) return err(errors.McpRevisionConflict({ resource: error.connectionId, expected: error.expected, actual: error.actual }));

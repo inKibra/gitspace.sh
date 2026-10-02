@@ -81,6 +81,8 @@ export type NativeAbi = z.infer<typeof nativeAbiSchema>;
 export const executableArtifactManifestSchema = z.object({
   version: z.literal(1),
   target: z.enum(['machine', 'omp']),
+  /** Absent on legacy artifacts, which cannot execute profile-managed inference. */
+  inferenceVersion: z.literal(1).optional(),
   entrypoint: z.enum(['machine.js', 'omp.js']),
   compatibility: z.object({
     platform: z.enum(['linux', 'darwin', 'win32']),
@@ -144,6 +146,8 @@ export const releaseRecordSchema = z.object({
   workspaceId: idSchema.nullable(),
   builtBy: idSchema,
   createdAt: z.string().datetime(),
+  /** Capability of every included target, not inferred from a tenant's current selection. */
+  inferenceVersion: z.literal(1).optional(),
   artifacts: z.object({
     worker: releaseArtifactSchema.nullable(),
     machine: releaseArtifactSchema.nullable(),
@@ -162,7 +166,7 @@ export const releaseRecordSchema = z.object({
 });
 export type ReleaseRecord = z.infer<typeof releaseRecordSchema>;
 
-export const stageReleaseInputSchema = releaseRecordSchema.pick({ sha: true, label: true, workspaceId: true, artifacts: true, worker: true, omp: true });
+export const stageReleaseInputSchema = releaseRecordSchema.pick({ sha: true, label: true, workspaceId: true, artifacts: true, worker: true, omp: true, inferenceVersion: true });
 export type StageReleaseInput = z.infer<typeof stageReleaseInputSchema>;
 
 /** Independently selected release for each target; null follows that target's channel build. */

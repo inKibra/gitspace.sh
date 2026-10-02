@@ -956,6 +956,40 @@ describe('MachineSessionCoordinator', () => {
     } finally { database.close(); }
   });
 
+  it('returns a worker that reconnects on its own to active, but keeps an interrupted turn failed for Recover', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    let connected = true;
+    class FlappingRuntime extends FakeOmpRuntime {
+      override async create(input: { workingDirectory: string; sessionKey: string; artifactsDir: string }) {
+        return { ...await super.create(input), isAvailable: () => connected };
+      }
+    }
+    const runtime = new FlappingRuntime();
+    const coordinator = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    try {
+      const opened = await coordinator.openSpace('workspace-a');
+      if (opened.status === 'error') throw opened.error;
+      const id = opened.value.id;
+      connected = false;
+      runtime.emitActivity({ active: false, reasons: [] });
+      expect(coordinator.get(id)).toMatchObject({ state: 'failed', resumePending: false });
+      connected = true;
+      runtime.emitActivity({ active: false, reasons: [] });
+      expect(coordinator.get(id)?.state).toBe('active');
+      expect(coordinator.get(id)?.health.issues.connection?.failure).toBeNull();
+      expect(coordinator.controlsAvailable(id)).toBe(true);
+
+      runtime.emitActivity({ active: true, reasons: [{ kind: 'turn' }] });
+      connected = false;
+      runtime.emitActivity({ active: true, reasons: [{ kind: 'turn' }] });
+      connected = true;
+      runtime.emitActivity({ active: false, reasons: [] });
+      expect(coordinator.get(id)).toMatchObject({ state: 'failed', resumePending: true });
+      await coordinator.stopForRestart();
+    } finally { database.close(); }
+  });
+
   it('requires possession, records OMP events, syncs local artifacts, and recovers after restart', async () => {
     const { root, databasePath, cacheRoot, database, artifacts, store } = fixture();
     const baseCapability = { kind: 'project' as const, projectId: 'project-a' };

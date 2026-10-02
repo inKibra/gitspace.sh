@@ -2,6 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes, signDeviceInvite, type ArtifactManifest } from '@gitspace/protocol';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
+import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { createBrowserClient } from 'result-rpc/client';
 import { describe, expect, it } from 'vitest';
@@ -54,17 +55,33 @@ async function fixture() {
   return { client, authority, projectId, workspaceId, publish, origin };
 }
 
+async function readBytes(stream: AsyncIterable<{ status: 'ok'; value: ResourcePreviewFrame } | { status: 'error'; error: unknown }>): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const result of stream) {
+    if (result.status === 'error') throw result.error;
+    if (result.value.type === 'chunk') chunks.push(Buffer.from(result.value.base64, 'base64'));
+  }
+  return Buffer.concat(chunks);
+}
+
 describe('user artifact flows', () => {
   it('keeps oversized previews inside the RPC error contract and reads selected canonical text ranges', async () => {
     const { client, workspaceId, publish } = await fixture();
     await publish(workspaceId, 1, [{ path: 'output.txt', content: `selected line\n${'remaining output\n'.repeat(20_000)}` }]);
     const request = { spaceId: workspaceId, expectedGeneration: 0, hash: null };
-    const full = await client.inspector.artifacts.read({ ...request, url: 'local://workspace/output.txt' });
-    expect(full.status).toBe('error');
-    const selected = await client.inspector.artifacts.read({ ...request, url: 'local://workspace/output.txt:raw:1-1' });
-    if (selected.status === 'error') throw selected.error;
-    expect(selected.value.text).toBe('selected line');
-    expect(Buffer.from(selected.value.base64, 'base64').toString()).toBe('selected line');
+    const full = [];
+    for await (const frame of client.inspector.artifacts.read({ ...request, url: 'local://workspace/output.txt' })) full.push(frame);
+    expect(full).toMatchObject([{ status: 'error' }]);
+    const selected = await readBytes(client.inspector.artifacts.read({ ...request, url: 'local://workspace/output.txt:raw:1-1' }));
+    expect(selected.toString()).toBe('selected line');
+  });
+
+  it('streams encrypted published audio beyond a single RPC reply without changing bytes', async () => {
+    const { client, workspaceId, publish } = await fixture();
+    const content = '\0'.repeat(1024 * 1024 + 17);
+    const entries = await publish(workspaceId, 1, [{ path: 'capture.wav', content, mediaType: 'audio/wav' }]);
+    const bytes = await readBytes(client.inspector.artifacts.read({ spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/capture.wav', hash: entries[0]!.blobHash }));
+    expect(bytes).toEqual(Buffer.from(content));
   });
 
   it('rejects a conflicting batch atomically and keeps re-encrypted project copies independent of later workspace edits', async () => {
@@ -82,9 +99,8 @@ describe('user artifact flows', () => {
     if (copied.status === 'error') throw copied.error;
     await publish(workspaceId, 2, [{ path: 'a.txt', content: 'changed A' }]);
     for (const [index, expected] of ['original A', 'original B'].entries()) {
-      const value = await client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: `local://base/copied/${index}.txt`, hash: null });
-      if (value.status === 'error') throw value.error;
-      expect(value.value.text).toBe(expected);
+      const value = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: `local://base/copied/${index}.txt`, hash: null }));
+      expect(value.toString()).toBe(expected);
     }
     expect((await authority.listArtifactCopies()).sort((left, right) => left.sourcePath.localeCompare(right.sourcePath))).toMatchObject(source.map((entry, index) => ({ sourceHash: entry.blobHash, sourcePath: entry.path, destinationPath: `copied/${index}.txt`, sourceGeneration: 1, destinationGeneration: 2 })));
     expect((await client.inspector.artifacts.copyToProject({ ...request, files: [{ url: 'local://workspace/a.txt', hash: source[0]!.blobHash, destinationPath: 'stale.txt', expectedDestinationHash: null }] })).status).toBe('error');
@@ -99,18 +115,15 @@ describe('user artifact flows', () => {
     const request = { spaceId: workspaceId, expectedGeneration: 0, expectedProjectGeneration: 2 };
     // Even with a refreshed manifest generation, consent to the earlier file version is stale.
     expect((await client.inspector.artifacts.copyToProject({ ...request, files: [file] })).status).toBe('error');
-    const preserved = await client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: null });
-    if (preserved.status === 'error') throw preserved.error;
-    expect(preserved.value.text).toBe('concurrent project edit');
+    const preserved = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: null }));
+    expect(preserved.toString()).toBe('concurrent project edit');
     const replaced = await client.inspector.artifacts.copyToProject({ ...request, files: [{ ...file, expectedDestinationHash: current[0]!.blobHash }] });
     if (replaced.status === 'error') throw replaced.error;
-    const copied = await client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: null });
-    if (copied.status === 'error') throw copied.error;
-    expect(copied.value.text).toBe('selected workspace report');
+    const copied = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: null }));
+    expect(copied.toString()).toBe('selected workspace report');
     // Replacement changes the path, not previously published immutable versions.
-    const priorVersion = await client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: current[0]!.blobHash });
-    if (priorVersion.status === 'error') throw priorVersion.error;
-    expect(priorVersion.value.text).toBe('concurrent project edit');
+    const priorVersion = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: current[0]!.blobHash }));
+    expect(priorVersion.toString()).toBe('concurrent project edit');
     const scopeGeneration = replaced.value.scopes.find((scope) => scope.workspaceId === projectId)!.generation;
     const copiedHash = replaced.value.artifacts.find((artifact) => artifact.url === 'local://base/report.txt')!.hash;
     expect((await client.inspector.artifacts.copyToProject({ ...request, expectedProjectGeneration: scopeGeneration, files: [{ ...file, destinationPath: 'report.txt/child.txt', expectedDestinationHash: copiedHash }] })).status).toBe('error');

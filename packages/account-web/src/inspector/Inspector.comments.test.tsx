@@ -19,7 +19,7 @@ let animationDescriptor: PropertyDescriptor | undefined;
 const unavailable = async (): Promise<never> => { throw new Error('Unexpected action'); };
 async function render() { await act(async () => root.render(<Inspector {...props} />)); }
 async function click(label: string) {
-  const button = [...container.querySelectorAll('button')].find((node) => node.textContent === label);
+  const button = [...container.querySelectorAll('button')].find((node) => node.textContent === label || (node.getAttribute('role') === 'tab' && node.textContent?.includes(label)));
   expect(button).toBeDefined();
   await act(async () => button!.click());
 }
@@ -80,5 +80,41 @@ describe('Inspector review comments', () => {
     expect(container.textContent).not.toContain('Select old line');
     props = { ...props, repositoryDiff: { ...diff, mode: 'working' } }; await render();
     expect(container.textContent).toContain('Select old line');
+  });
+});
+
+describe('Inspector independent reads', () => {
+  it('keeps Environment usable when Files fails and retries the failed section', async () => {
+    const retry = vi.fn(() => {
+      props = { ...props, sectionErrors: {}, repositoryEntries: [{ spaceId: 'space', generation: 7, mode: 'current', path: 'file.ts', name: 'file.ts', kind: 'file', status: 'clean', oldPath: null, blobId: null, size: null }] };
+      root.render(<Inspector {...props} />);
+    });
+    props = { ...props, initialView: 'environment', environment: <button>Configure environment</button>, sectionErrors: { files: { message: 'Repository read failed (incident repo-123)', retained: false, retry } } };
+    await render();
+    await click('Configure environment');
+    expect(container.textContent).not.toContain('Inspector could not load');
+    await click('Files');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Repository read failed (incident repo-123)');
+    expect(container.textContent).not.toContain('Repository unavailable');
+    await click('Retry Files');
+    expect(retry).toHaveBeenCalledTimes(1);
+    await click('Open file.ts');
+    await click('Environment');
+    await click('Configure environment');
+  });
+
+  it('keeps accepted repository data available during a failed refresh', async () => {
+    const retry = vi.fn();
+    props = {
+      ...props, initialView: 'files',
+      repositoryEntries: [{ spaceId: 'space', generation: 7, mode: 'current', path: 'file.ts', name: 'file.ts', kind: 'file', status: 'clean', oldPath: null, blobId: null, size: null }],
+      sectionErrors: { files: { message: 'Repository refresh unavailable', retained: true, retry } },
+    };
+    await render();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Repository refresh unavailable');
+    await click('Retry Files');
+    expect(retry).toHaveBeenCalledTimes(1);
+    await click('Open file.ts');
+    expect(container.textContent).toContain('Loading repository view');
   });
 });

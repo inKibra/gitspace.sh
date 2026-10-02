@@ -1,4 +1,4 @@
-import { deserialize, serialize, wire, type InputOf } from 'result-rpc';
+import { deserialize, serialize, type InputOf } from 'result-rpc'; import { wire, richObjectJsonSchema } from './json-wire.js';
 import { transcriptPageSchema, transcriptContentPageSchema, type TranscriptPage, type TranscriptContentPage } from '@gitspace/blocks';
 
 export {
@@ -18,23 +18,14 @@ export const TranscriptContentRequestFields = {
   rowId: wire.string,
   offset: wire.number,
 };
-export const TranscriptPageCodec = wire.serializable(
-  (value): value is TranscriptPage => transcriptPageSchema.safeParse(value).success,
-  { id: 'gitspace/transcript-page/v1' },
-);
-export const TranscriptContentPageCodec = wire.serializable(
-  (value): value is TranscriptContentPage => transcriptContentPageSchema.safeParse(value).success,
-  { id: 'gitspace/transcript-content-page/v1' },
-);
+export const TranscriptPageCodec = wire.serializable((value): value is TranscriptPage => transcriptPageSchema.safeParse(value).success, { id: 'gitspace/transcript-page/v1', jsonSchema: transcriptPageSchema });
+export const TranscriptContentPageCodec = wire.serializable((value): value is TranscriptContentPage => transcriptContentPageSchema.safeParse(value).success, { id: 'gitspace/transcript-content-page/v1', jsonSchema: transcriptContentPageSchema });
 
 export const TranscriptEventCodec = wire.object({
   sessionId: wire.string,
   ordinal: wire.number,
   kind: wire.string,
-  payload: wire.serializable(
-    (value): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value),
-    { id: 'gitspace/transcript-payload/v1' },
-  ),
+  payload: wire.serializable((value): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value), { id: 'gitspace/transcript-payload/v1', jsonSchema: richObjectJsonSchema }),
   createdAt: wire.date,
 });
 export type TranscriptEvent = InputOf<typeof TranscriptEventCodec>;

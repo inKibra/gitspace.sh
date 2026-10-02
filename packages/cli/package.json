@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "bun ../deployment/src/release.ts client --out dist/gitspace",
-    "typecheck": "tsgo --noEmit -p tsconfig.json"
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "bun ../../scripts/test-isolated.ts test"
   },
   "dependencies": {
     "@gitspace/deployment": "workspace:*",

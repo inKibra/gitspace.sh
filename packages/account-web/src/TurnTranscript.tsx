@@ -4,6 +4,7 @@ import { AskUserQuestions, Badge, Button, ChatMessage, Dialog, DialogContent, Di
 import { AlertCircle, ChevronDown, ChevronRight, GitBranch01, Link03, ShieldTick, Terminal, Users01 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { ResourceLink } from './ResourceNavigation.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 import { glyph } from './glyph.js';
 import { useState, type ReactNode } from 'react';
 
@@ -209,7 +210,7 @@ function askAnswer(answer: AskBlock['questions'][number]['answer']): string {
   return answer?.trim() || 'Skipped';
 }
 
-function AskBlockView({ item, onAnswer, state, onStateChange }: { item: AskBlock; onAnswer?: TurnTranscriptProps['onAnswer'] } & ItemInteractionProps) {
+export function AskBlockView({ item, onAnswer, state, onStateChange }: { item: AskBlock; onAnswer?: TurnTranscriptProps['onAnswer'] } & ItemInteractionProps) {
   const [local, setLocal] = useState<TranscriptItemState>({});
   const interaction = state ?? local;
   const { submitting = false, error = null } = interaction;
@@ -234,7 +235,7 @@ function AskBlockView({ item, onAnswer, state, onStateChange }: { item: AskBlock
       selectedOptions: answers[question.id]?.selectedIds ?? [],
       customInput: answers[question.id]?.otherText ?? null,
     }))).catch((failure) => {
-      update({ submitting: false, error: failure instanceof Error ? failure.message : String(failure) });
+      update({ submitting: false, error: rpcErrorMessage(failure, 'Answer agent questions') });
     });
   };
   return <div className={submitting ? 'pointer-events-none opacity-60' : undefined} aria-busy={submitting || undefined}>

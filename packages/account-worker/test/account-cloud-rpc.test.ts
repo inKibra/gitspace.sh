@@ -10,7 +10,7 @@ import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
 import { createBrowserClient, type BrowserClientOf } from 'result-rpc/client';
 import { parse, stringify } from 'devalue';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { HttpResponse, http } from 'msw';
@@ -38,7 +38,7 @@ async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.writ
 
 const single = (path: string, input: unknown = {}) => ({ v: 1, path, input });
 
-describe('cloud lifecycle inspection and human authorization', () => {
+describe('cloud lifecycle inspection and explicit authorization', () => {
   it('streams committed environment changes and replays changes missed while disconnected', async () => {
     const fixture = await account();
     const { spaceId, authority } = await inspectorWorkspace(fixture.userId);
@@ -50,7 +50,7 @@ describe('cloud lifecycle inspection and human authorization', () => {
       const initial = await stream.next();
       expect(initial).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'snapshot', resource: `environment:${spaceId}`, value: { policy: { automatic: false } } } } });
       const pending = stream.next();
-      expect(await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, { machineId: 'machine', actorId: 'human', human: true })).toMatchObject({ status: 'ok' });
+      expect(await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true })).toMatchObject({ status: 'ok' });
       const changed = await pending;
       expect(changed).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'change', value: { policy: { automatic: true } } } } });
       if (changed.done || changed.value.status === 'error') throw new Error('Expected a committed environment change');
@@ -59,7 +59,7 @@ describe('cloud lifecycle inspection and human authorization', () => {
       controller.abort();
       await stream.return?.();
     }
-    expect(await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: false }, { machineId: 'machine', actorId: 'human', human: true })).toMatchObject({ status: 'ok' });
+    expect(await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: false }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true })).toMatchObject({ status: 'ok' });
     const resumedController = new AbortController();
     const resumed = client.environment.events({ spaceId, after: cursor }, { signal: resumedController.signal })[Symbol.asyncIterator]();
     try {
@@ -73,8 +73,8 @@ describe('cloud lifecycle inspection and human authorization', () => {
     }
   });
 
-  it('reads closed workspace history without a machine and grants only reviewed browser content', async () => {
-    const fixture = await account();
+  it.each(['browser', 'client'] as const)('allows authorized %s lifecycle control while preserving content review', async (kind) => {
+    const fixture = await account(['rpc.read', 'rpc.write', ...(kind === 'client' ? ['lifecycle.control' as const] : [])], kind);
     const projectId = 'lifecycle-project';
     const spaceId = 'lifecycle-space';
     const authority = env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projectId}`);
@@ -83,13 +83,14 @@ describe('cloud lifecycle inspection and human authorization', () => {
     await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(spaceId, projectId);
     const content = 'echo provision';
     const hash = await executionHash({ kind: 'script', command: content });
-    const actor = { machineId: 'removed-machine', actorId: 'removed-machine', human: false };
+    const actor = { machineId: 'removed-machine', actorId: 'removed-machine', kind: 'machine' as const, lifecycleControl: false };
     const configure = { op: 'configure' as const, bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'provision', kind: 'script' as const, label: 'Provision', command: 'bash provision.sh', content, hash, phase: 'cloud/provision' as const, fileName: '10-provision.sh' }] };
     const configured = await authority.mutateLifecycleState(spaceId, configure, actor);
     if (configured.status === 'error') throw new Error(configured.failure.message);
     const approved = await SELF.fetch(fixture.request(single('environment.approve', { spaceId, executionHash: hash, scope: 'workspace' })));
     expect(approved.status, await approved.clone().text()).toBe(200);
     expect(parse(await approved.text())).toMatchObject({ status: 'ok', value: { executions: [{ content, approval: 'workspace' }] } });
+    expect((await authority.getLifecycleState(spaceId)).approvals[0]?.approvedBy).toBe(fixture.deviceId);
     const policy = await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, actor);
     if (policy.status === 'error') throw new Error(policy.failure.message);
     const running = await authority.mutateLifecycleState(spaceId, { op: 'claim', runId: 'provision', phase: 'cloud/provision', profile: 'base', executionHashes: [hash], generation: null, rerun: false }, actor);
@@ -117,6 +118,32 @@ describe('cloud lifecycle inspection and human authorization', () => {
   });
 });
 
+describe('Inspector administrative authority', () => {
+  it('rejects ordinary client approvals and records a delegated client rather than its claimed reviewer', async () => {
+    const owner = await account(['rpc.read', 'rpc.write', 'account.admin'], 'client');
+    const ordinary = await account(['rpc.read', 'rpc.write'], 'client');
+    const { projectId, spaceId } = await inspectorWorkspace(owner.userId);
+    const invoke = async (actor: typeof owner, path: string, input: unknown) => parse(await (await SELF.fetch(actor.request(single(path, { expectedGeneration: 0, input })))).text());
+    const identity = { projectId, spaceId };
+    expect(await invoke(owner, 'inspector.workflow.put', { ...identity, expectedRevision: 0, workflow: {
+      id: 'workflow', title: 'Review', description: '', updatedBy: 'author',
+      nodes: [{ id: 'gate', kind: 'gate', label: 'Review', position: { x: 0, y: 0 }, requirementIds: [] }], edges: [],
+    } })).toMatchObject({ status: 'ok' });
+    const waiver = { ...identity, expectedRevision: 1, gateId: 'gate', waiverId: 'waiver', reason: 'Owner delegated this review', actorId: 'forged-browser', actorKind: 'human' };
+    expect(await invoke(ordinary, 'inspector.workflow.waiveGate', waiver)).toMatchObject({ status: 'error' });
+    expect(await invoke(owner, 'inspector.workflow.waiveGate', waiver)).toMatchObject({ status: 'ok', value: { nodes: [{ waivers: [{ actorId: owner.deviceId, actorKind: 'client' }] }] } });
+    const headCommit = 'a'.repeat(40);
+    expect(await invoke(owner, 'inspector.guide.put', { ...identity, expectedRevision: 0, guide: {
+      headCommit, baseRef: 'main', title: 'Review', createdBy: 'author',
+      sections: [{ id: 'section', title: 'Change', kind: 'risk', explanation: 'Changed behavior', why: 'Permission boundary', exhibits: [], requirementIds: [] }],
+    } })).toMatchObject({ status: 'ok' });
+    const review = { ...identity, revision: 1, headCommit, reviewerId: 'forged-browser' };
+    expect(await invoke(owner, 'inspector.guide.markSectionRead', { ...review, sectionId: 'section' })).toMatchObject({ status: 'ok', value: { reviewerStates: [{ reviewerId: owner.deviceId }] } });
+    expect(await invoke(ordinary, 'inspector.guide.setApproval', { ...review, decision: 'approved', note: null })).toMatchObject({ status: 'error' });
+    expect(await invoke(owner, 'inspector.guide.setApproval', { ...review, decision: 'approved', note: null })).toMatchObject({ status: 'ok', value: { reviewerStates: [{ reviewerId: owner.deviceId, decision: 'approved' }] } });
+  });
+});
+
 describe('account cloud RPC without machines', () => {
   it('manages shared secrets and values without machines and enforces effective grants', async () => {
     const fixture = await account();
@@ -124,7 +151,7 @@ describe('account cloud RPC without machines', () => {
     const configured = await authority.mutateLifecycleState(spaceId, {
       op: 'configure',
       bundleJson: JSON.stringify({ version: 1, profiles: { base: { values: ['REGION'] } }, values: { REGION: {} } }),
-    }, { machineId: 'removed-machine', actorId: 'removed-machine', human: false });
+    }, { machineId: 'removed-machine', actorId: 'removed-machine', kind: 'machine', lifecycleControl: false });
     if (configured.status === 'error') throw new Error(configured.failure.message);
     const secrets = env.PROJECT_SECRETS.getByName(fixture.userId);
     await secrets.bootstrap({ userId: fixture.userId, vaultKey: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))) });
@@ -353,16 +380,16 @@ describe('account cloud RPC without machines', () => {
   it('stores provider keys in the canonical broker but never discloses them in RPC views', async () => {
     const fixture = await account();
     const key = 'sk-account-rpc-secret-key';
-    const saved = await SELF.fetch(fixture.request(single('providers.apiKey.set', { providerId: 'openai', key })));
+    const saved = await SELF.fetch(fixture.request(single('providers.apiKey.set', { profileId: 'default', providerId: 'openai', key })));
     const savedBody = await saved.text();
     expect(saved.status, savedBody).toBe(200);
     expect(savedBody).not.toContain(key);
     expect(parse(savedBody)).toMatchObject({ status: 'ok', value: { provider: { id: 'openai', hasAuth: true } } });
-    const snapshot = await fixture.vault.ompSnapshot();
+    const snapshot = await fixture.vault.ompSnapshot('default');
     expect(snapshot.credentials).toMatchObject([{ provider: 'openai', credential: { type: 'api_key', key } }]);
-    const logout = await SELF.fetch(fixture.request(single('providers.logout', { providerId: 'openai', credentialId: String(snapshot.credentials[0]!.id) })));
+    const logout = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai', credentialId: String(snapshot.credentials[0]!.id) })));
     expect(parse(await logout.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: false, accounts: [] } } });
-    expect((await fixture.vault.ompSnapshot()).credentials).toEqual([]);
+    expect((await fixture.vault.ompSnapshot('default')).credentials).toEqual([]);
   });
 
   it('identifies Codex sign-in aliases as one credential store without merging organization accounts', async () => {
@@ -373,7 +400,7 @@ describe('account cloud RPC without machines', () => {
         credential: { provider: 'openai-codex', email: 'same@example.com', orgId, refresh: `refresh-${orgId}`, access: `access-${orgId}`, expires: Date.now() + 60_000 },
       });
     }
-    const response = await SELF.fetch(fixture.request(single('providers.list')));
+    const response = await SELF.fetch(fixture.request(single('providers.list', { profileId: 'default' })));
     const body = await response.text();
     expect(response.status, body).toBe(200);
     const result = parse(body) as { status: 'ok'; value: { providers: ProviderView[] } };
@@ -386,6 +413,70 @@ describe('account cloud RPC without machines', () => {
     expect(device.accounts).toEqual(codex.accounts);
     expect(body).not.toContain('refresh-personal');
     expect(body).not.toContain('access-personal');
+  });
+
+  it('manages inference profiles with typed conflicts and refuses account API clients provider/profile writes', async () => {
+    const fixture = await account();
+    const client = inspectorClient(fixture);
+    const created = await client.inference.create({ name: 'Client', sourceProfileId: null });
+    if (created.status !== 'ok') throw new Error('Expected a new profile');
+    const profile = created.value.profiles.find(candidate => candidate.id !== 'default')!;
+    expect(await client.inference.update({ profileId: profile.id, expectedRevision: 0, name: 'Renamed', settings: { modelRoles: { default: 'openai/gpt-4.1' } } })).toMatchObject({ status: 'ok' });
+    const stale = await client.inference.update({ profileId: profile.id, expectedRevision: 0, name: 'Lost update', settings: {} });
+    expect(stale.status === 'error' && rpcErrors.settingsConflict.is(stale.error)).toBe(true);
+    expect(await client.inference.assign({ projectId: 'foreign-project', profileId: profile.id, expectedRevision: 0 })).toMatchObject({ status: 'error' });
+    const api = await account(['rpc.read', 'rpc.write'], 'client');
+    for (const [path, input] of [
+      ['inference.create', { name: 'Unauthorized', sourceProfileId: null }],
+      ['inference.update', { profileId: profile.id, expectedRevision: 1, name: 'Unauthorized', settings: {} }],
+      ['inference.delete', { profileId: profile.id, expectedRevision: 1 }],
+      ['providers.apiKey.set', { profileId: profile.id, providerId: 'openai', key: 'not-stored' }],
+      ['providers.logout', { profileId: profile.id, providerId: 'openai', credentialId: null }],
+    ] as const) {
+      expect(parse(await (await SELF.fetch(api.request(single(path, input)))).text())).toMatchObject({ status: 'error' });
+    }
+    expect((await fixture.vault.ensureInference()).profiles.map(candidate => candidate.name)).toEqual(['Default', 'Renamed']);
+    expect((await fixture.vault.ompSnapshot(profile.id)).credentials).toEqual([]);
+  });
+
+  it('keeps profile provider views scoped and rejects missing profile identity before mutation', async () => {
+    const fixture = await account();
+    const state = await fixture.vault.createInferenceProfile({ name: 'Empty', sourceProfileId: null });
+    const profileId = state.profiles.find(profile => profile.id !== 'default')!.id;
+    await fixture.vault.putBrowserApiKey('default', 'openai', 'default-private-key');
+    const response = await SELF.fetch(fixture.request(single('providers.list', { profileId })));
+    const text = await response.text();
+    const result = parse(text) as { status: 'ok'; value: { providers: ProviderView[] } };
+    expect(result.value.providers.find(provider => provider.id === 'openai')).toMatchObject({ hasAuth: false, accounts: [] });
+    expect(text).not.toContain('default-private-key');
+    const missing = await SELF.fetch(fixture.request(single('providers.apiKey.set', { providerId: 'openai', key: 'unscoped-key' })));
+    expect(parse(await missing.text())).toMatchObject({ status: 'error' });
+    expect((await fixture.vault.ompSnapshot('default')).credentials[0]!.credential).toMatchObject({ key: 'default-private-key' });
+  });
+
+  it('streams committed profile invalidations without broker credentials and replays after reconnect', async () => {
+    const fixture = await account();
+    const client = inspectorClient(fixture);
+    const controller = new AbortController();
+    const stream = client.inference.events({ after: null }, { signal: controller.signal })[Symbol.asyncIterator]();
+    let cursor: number;
+    try {
+      const initial = await stream.next();
+      if (initial.done || initial.value.status !== 'ok') throw new Error('Expected inference snapshot');
+      cursor = initial.value.value.cursor;
+      await fixture.vault.putBrowserApiKey('default', 'openai', 'never-in-events');
+      const pending = stream.next();
+      await fixture.vault.createInferenceProfile({ name: 'Streamed', sourceProfileId: null });
+      const changed = await pending;
+      expect(changed).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'change', previous: cursor, value: { profiles: [{ id: 'default' }, { name: 'Streamed' }] } } } });
+      expect(JSON.stringify(changed)).not.toContain('never-in-events');
+      expect(JSON.stringify(changed)).not.toContain('broker');
+    } finally { controller.abort(); await stream.return?.(); }
+    const replayController = new AbortController();
+    const replay = client.inference.events({ after: cursor }, { signal: replayController.signal })[Symbol.asyncIterator]();
+    try {
+      expect(await replay.next()).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'change', previous: cursor } } });
+    } finally { replayController.abort(); await replay.return?.(); }
   });
 
   it('authorizes every batch item before any mutation and rejects replay, tampering and revocation', async () => {
@@ -407,6 +498,79 @@ describe('account cloud RPC without machines', () => {
     expect((await SELF.fetch(tampered)).status).toBe(401);
     await fixture.vault.revokeDeviceGrant(fixture.deviceId);
     expect((await SELF.fetch(fixture.request(single('settings.get')))).status).toBe(401);
+  });
+
+  it('authorizes a procedure-tagged target and refuses one retagged after signing', async () => {
+    const fixture = await account(['rpc.read']);
+    const urls: string[] = [];
+    const client = inspectorClient(fixture, (request) => { urls.push(request.url); return SELF.fetch(request); });
+    expect(await client.settings.get({})).toMatchObject({ status: 'ok' });
+    expect(urls).toEqual([`https://${fixture.handle}.gitspace.sh/rpc?p=settings.get`]);
+    const retagged = inspectorClient(fixture, (request) => SELF.fetch(new Request(request.url.replace('p=settings.get', 'p=devices.list'), request)));
+    expect(await retagged.settings.get({})).toMatchObject({ status: 'error', error: { _tag: 'client/http-failure', data: { status: 401 } } });
+  });
+});
+
+describe('account routing of machine work', () => {
+  const machine = (id: string) => ({ id, label: id, kind: 'physical' as const, provider: 'physical' as const, state: 'online' as const, desiredState: 'online' as const,
+    rpcEndpoint: `https://${id}.test/rpc`, notes: '', lifecycleRevision: 1, operationId: null, error: null });
+
+  /** Machine A is the first online machine. The project's worktree and its
+   * session are open on machine B; the base space on machine C. */
+  async function fleet() {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const held = await inspectorWorkspace(fixture.userId);
+    const { sessionId } = await publishInspectorSession(fixture, held, []);
+    const catalog = env.FLEET_CATALOG.getByName(fixture.userId);
+    const machines = ['machine-a', 'machine-b', 'machine-c'];
+    for (const id of machines) await catalog.putMachine(machine(id));
+    await held.placement.bootstrap({ projectId: held.projectId, spaceId: held.spaceId, machineId: 'machine-b' });
+    await env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${held.projectId}`).bootstrap({ projectId: held.projectId, spaceId: held.projectId, machineId: 'machine-c' });
+    const reached: Array<{ machine: string; signedTarget: string | null }> = [];
+    network.use(...machines.map((id) => http.post(`https://${id}.test/rpc`, ({ request }) => {
+      reached.push({ machine: id, signedTarget: request.headers.get('x-gitspace-signed-target') });
+      return HttpResponse.json({ machine: id });
+    })));
+    return { fixture, catalog, held, sessionId, reached };
+  }
+
+  it('forwards space and session work to the machine holding the space, not the first online machine', async () => {
+    const { fixture, held, sessionId, reached } = await fleet();
+    const view = await SELF.fetch(fixture.request(single('space.view', { projectId: held.projectId, workspaceId: held.spaceId })));
+    expect(await view.json()).toEqual({ machine: 'machine-b' });
+    const control = await SELF.fetch(fixture.request(single('session.control', { sessionId })));
+    expect(await control.json()).toEqual({ machine: 'machine-b' });
+    await inspectorClient(fixture).space.view({ projectId: held.projectId, workspaceId: held.spaceId });
+    expect(reached).toEqual([
+      { machine: 'machine-b', signedTarget: '/rpc' },
+      { machine: 'machine-b', signedTarget: '/rpc' },
+      { machine: 'machine-b', signedTarget: '/rpc?p=space.view' },
+    ]);
+  });
+
+  it('rejects one signed batch naming spaces held by different machines', async () => {
+    const { fixture, held, reached } = await fleet();
+    const logs = vi.spyOn(console, 'log');
+    try {
+      const response = await SELF.fetch(fixture.request({ v: 1, batch: [
+        { ...single('space.view', { projectId: held.projectId, workspaceId: held.spaceId }), id: 'held' },
+        { ...single('space.view', { projectId: held.projectId, workspaceId: null }), id: 'base' },
+      ] }));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: 'RPC_MIXED_HOLDER_BATCH' } });
+      expect(reached).toEqual([]);
+      const batches = logs.mock.calls.flatMap(([line]): unknown[] => typeof line === 'string' && line.includes('"rpc_batch"') ? [JSON.parse(line)] : []);
+      expect(batches).toEqual([expect.objectContaining({ event: 'rpc_batch', procedures: ['space.view'], status: 400, code: 'RPC_MIXED_HOLDER_BATCH' })]);
+    } finally { logs.mockRestore(); }
+  });
+
+  it('sends work without a live holder to the first online machine', async () => {
+    const { fixture, catalog, held, reached } = await fleet();
+    await SELF.fetch(fixture.request(single('project.open', { projectId: held.projectId })));
+    await SELF.fetch(fixture.request(single('space.reopen', { spaceId: 'never-placed', expectedGeneration: 1 })));
+    await catalog.putMachine({ ...machine('machine-b'), state: 'offline', lifecycleRevision: 2 });
+    await SELF.fetch(fixture.request(single('space.view', { projectId: held.projectId, workspaceId: held.spaceId })));
+    expect(reached.map((entry) => entry.machine)).toEqual(['machine-a', 'machine-a', 'machine-a']);
   });
 });
 
@@ -579,7 +743,7 @@ describe('bounded saved Inspector transcripts', () => {
         return env.DATA.get(key);
       },
     } } as unknown as Env;
-    const bootstrap = await worker.fetch(fixture.request(single('inspector.bootstrap', { projectId: space.projectId, workspaceId: space.spaceId })), metadataEnv);
+    const bootstrap = await worker.fetch(fixture.request(single('inspector.view', { projectId: space.projectId, workspaceId: space.spaceId })), metadataEnv);
     const bootstrapWire = await bootstrap.text();
     const metadata = parse(bootstrapWire);
     expect(metadata).toMatchObject({ status: 'ok', value: { identity: { spaceId: space.spaceId }, savedTranscript: { status: 'available' } } });
@@ -606,13 +770,13 @@ describe('bounded saved Inspector transcripts', () => {
     const space = await inspectorWorkspace(fixture.userId);
     const client = inspectorClient(fixture);
     const input = { projectId: space.projectId, workspaceId: space.spaceId };
-    expect(await client.inspector.bootstrap(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'none' } } });
+    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'none' } } });
     expect(await collectInspectorTranscript(client, space.projectId, space.spaceId)).toEqual([]);
     const published = await publishInspectorSession(fixture, space, []);
-    expect(await client.inspector.bootstrap(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'available' } } });
+    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'available' } } });
     expect(await collectInspectorTranscript(client, space.projectId, space.spaceId)).toEqual([]);
     await env.DATA.delete(`users/${fixture.userId}/${published.snapshotKey}`);
-    expect(await client.inspector.bootstrap(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'unavailable' } } });
+    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'unavailable' } } });
     const error = await collectInspectorTranscript(client, space.projectId, space.spaceId).then(() => null, (error: unknown) => error);
     expect(rpcErrors.operationFailed.is(error)).toBe(true);
   });
@@ -642,7 +806,7 @@ describe('bounded saved Inspector transcripts', () => {
     ]);
     const client = inspectorClient(fixture);
     const input = { projectId: space.projectId, workspaceId: space.spaceId };
-    expect(await client.inspector.bootstrap(input)).toMatchObject({ status: 'ok', value: { overview: { spaceId: space.spaceId }, savedTranscript: { status: 'available' } } });
+    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { overview: { spaceId: space.spaceId }, savedTranscript: { status: 'available' } } });
     const results = [];
     for await (const result of client.inspector.transcript(input)) results.push(result);
     expect(results).toHaveLength(1);
@@ -717,7 +881,7 @@ describe('machine-independent Inspector', () => {
     const cloudEnv = env;
     const availability = await worker.fetch(fixture.request(single('inspector.availability', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
     expect(parse(await availability.text())).toMatchObject({ status: 'ok', value: { runtimeAvailable: false } });
-    const opened = await worker.fetch(fixture.request(single('inspector.bootstrap', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
+    const opened = await worker.fetch(fixture.request(single('inspector.view', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
     expect(parse(await opened.text())).toMatchObject({ status: 'ok', value: { identity: { projectId: space.projectId, spaceId: space.spaceId }, placement: null, savedTranscript: { status: 'none' } } });
     const saved = await worker.fetch(fixture.request(single('inspector.goal.put', { expectedGeneration: 0, input: {
       projectId: space.projectId, spaceId: space.spaceId, expectedRevision: 0,
@@ -734,7 +898,7 @@ describe('machine-independent Inspector', () => {
     const snapshotKey = `projects/${space.projectId}/sessions/canonical/${snapshotHash.slice(7)}.jsonl`;
     await env.DATA.put(`users/${fixture.userId}/${snapshotKey}`, snapshot, { customMetadata: { sha256: snapshotHash } });
     await space.authority.putCanonicalSession({ id: 'canonical', workspaceId: space.spaceId, ompSessionId: 'canonical-omp', machineId: null, state: 'closed', sessionObjectKey: snapshotKey, sessionObjectHash: snapshotHash, sessionFormatVersion: 'omp-jsonl-1', activity: { active: false, reasons: [] }, health: { revision: 0, issues: {} }, expectedRevision: 0 });
-    const published = await worker.fetch(fixture.request(single('inspector.bootstrap', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
+    const published = await worker.fetch(fixture.request(single('inspector.view', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
     expect(parse(await published.text())).toMatchObject({ status: 'ok', value: { checkpoint: null, savedTranscript: { status: 'available' } } });
     const transcript = await collectInspectorTranscript(inspectorClient(fixture, (request) => worker.fetch(request, cloudEnv)), space.projectId, space.spaceId);
     expect(transcript).toMatchObject([{ sessionId: 'canonical', ordinal: 1, payload: { message: { content: 'Published canonical conversation' } } }]);
@@ -805,7 +969,7 @@ describe('machine-independent Inspector', () => {
     if (closed.status === 'error') throw new Error(closed.failure.message);
     await space.authority.putCanonicalSession({ id: sessionId, workspaceId: space.spaceId, ompSessionId, machineId, state: 'closed', sessionObjectKey: null, sessionObjectHash: null, sessionFormatVersion: null, activity: { active: false, reasons: [] }, health: { revision: 0, issues: {} }, expectedRevision: 0 });
     const before = await space.placement.get();
-    const boot = await worker.fetch(fixture.request(single('inspector.bootstrap', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
+    const boot = await worker.fetch(fixture.request(single('inspector.view', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
     expect(parse(await boot.text())).toMatchObject({ status: 'ok', value: {
       checkpoint: { sessionId, generation: 2, revision: 1, lastMachineId: machineId },
       savedTranscript: { status: 'available' },
@@ -829,10 +993,24 @@ describe('machine-independent Inspector', () => {
     const artifact = { spaceId: space.spaceId, expectedGeneration: 2, url: 'local://workspace/review.txt' };
     const written = await worker.fetch(fixture.request(single('inspector.artifacts.write', { ...artifact, mediaType: 'text/plain', base64: btoa('Cloud review evidence') })), cloudEnv);
     expect(parse(await written.text())).toMatchObject({ status: 'error' });
-    const read = await worker.fetch(fixture.request(single('inspector.artifacts.read', { ...artifact, hash: artifactHash })), cloudEnv);
-    expect(parse(await read.text())).toMatchObject({ status: 'ok', value: { text: 'Cloud review evidence', mediaType: 'text/plain' } });
-    const repository = await worker.fetch(fixture.request(single('inspector.repository.tree', { spaceId: space.spaceId, expectedGeneration: 2, mode: 'working', path: null })), cloudEnv);
-    expect(parse(await repository.text())).toMatchObject({ status: 'error' });
+    const artifactChunks: Uint8Array[] = [];
+    for await (const result of savedClient.inspector.artifacts.read({ ...artifact, hash: artifactHash })) {
+      if (result.status === 'error') throw result.error;
+      if (result.value.type === 'chunk') artifactChunks.push(credentialProtocolBase64.decode(result.value.base64));
+    }
+    expect(await new Blob(artifactChunks).text()).toBe('Cloud review evidence');
+    const metadataPage = await savedClient.inspector.artifacts.readPage({ ...artifact, hash: artifactHash, cursor: null, limit: 1 });
+    if (metadataPage.status !== 'ok') throw new Error('Expected saved artifact metadata page');
+    expect(metadataPage.value.items).toMatchObject([{ type: 'metadata' }]);
+    const contentPage = await savedClient.inspector.artifacts.readPage({ ...artifact, hash: artifactHash, cursor: metadataPage.value.nextCursor, limit: 1 });
+    if (contentPage.status !== 'ok') throw new Error('Expected saved artifact content page');
+    expect(contentPage.value.nextCursor).toBeNull();
+    expect(contentPage.value.items).toEqual([{ type: 'chunk', base64: btoa('Cloud review evidence') }]);
+    const repository = [];
+    for await (const result of savedClient.inspector.repository.tree({ spaceId: space.spaceId, expectedGeneration: 2, mode: 'working', path: null })) {
+      repository.push(result);
+    }
+    expect(repository).toMatchObject([{ status: 'error', error: { _tag: 'gitspace/inspector-state', data: { resource: 'runtime' } } }]);
     expect(await space.placement.get()).toEqual(before);
     expect(await catalog.getMachine(machineId)).toMatchObject({ state: 'offline', desiredState: 'online', lifecycleRevision: 3 });
     expect(providerCalls).toEqual([]);

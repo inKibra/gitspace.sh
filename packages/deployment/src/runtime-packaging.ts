@@ -166,6 +166,7 @@ export async function packageOmpRuntimeRecipe(root: string, outDir: string): Pro
     }
     await writeFile(join(outDir, 'omp-runtime.json'), `${JSON.stringify({
       version: 1,
+      inferenceVersion: 1,
       upstreamVersion: metadata.upstreamVersion,
       bunVersion: metadata.bunVersion,
       platform: process.platform,

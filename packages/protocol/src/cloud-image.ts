@@ -1,4 +1,4 @@
-import { wire } from 'result-rpc';
+import { wire } from './json-wire.js'
 import { z } from 'zod';
 
 /** Registry-qualified OCI reference. Tags and unqualified Docker names are not immutable choices. */
@@ -39,9 +39,9 @@ export const cloudImageProviderStatusSchema = z.object({
   runtimeStarted: z.boolean().nullable(),
 });
 export const cloudImagePreparedSchema = z.object({ image: cloudImageReferenceSchema, deploymentId: z.string().min(1) });
-export const CloudImageSelectionCodec = wire.serializable((value): value is CloudImageSelection => cloudImageSelectionSchema.safeParse(value).success, { id: 'gitspace/cloud-image-selection/v1' });
-export const CloudImageChoiceCodec = wire.serializable((value): value is CloudImageChoice => cloudImageChoiceSchema.safeParse(value).success, { id: 'gitspace/cloud-image-choice/v1' });
-export const CloudImageStateCodec = wire.serializable((value): value is CloudImageState => cloudImageStateSchema.safeParse(value).success, { id: 'gitspace/cloud-image-state/v1' });
+export const CloudImageSelectionCodec = wire.serializable((value): value is CloudImageSelection => cloudImageSelectionSchema.safeParse(value).success, { id: 'gitspace/cloud-image-selection/v1', jsonSchema: cloudImageSelectionSchema });
+export const CloudImageChoiceCodec = wire.serializable((value): value is CloudImageChoice => cloudImageChoiceSchema.safeParse(value).success, { id: 'gitspace/cloud-image-choice/v1', jsonSchema: cloudImageChoiceSchema });
+export const CloudImageStateCodec = wire.serializable((value): value is CloudImageState => cloudImageStateSchema.safeParse(value).success, { id: 'gitspace/cloud-image-state/v1', jsonSchema: cloudImageStateSchema });
 export function cloudImageOperationActive(state: CloudImageState | null | undefined): boolean {
   return !!state?.operation && state.operation.phase !== 'complete' && state.operation.phase !== 'cancelled';
 }

@@ -2,13 +2,13 @@ import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { executableArtifactManifestSchema, executableManifestPath, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
 import { prepareOmpRuntimeArtifact } from '@gitspace/account-omp/runtime-recipe';
-import type { SkillView } from '@gitspace/protocol';
-import { AgentDomainError, type AgentFailure, type SessionActivity } from '@gitspace/protocol-agent';
+import { sameInferenceScope, type InferenceExecutionContext, type SkillView } from '@gitspace/protocol';
+import { AgentDomainError, agentFailure, type AgentFailure, type SessionActivity } from '@gitspace/protocol-agent';
 import { OMP_IPC_VERSION, OmpRpcPeer, type OmpChildApi, type OmpMachineApi, type OmpNotification, type OmpSessionInput, type OmpToolDescriptor, type OmpMcpCatalog, type SessionMethod } from '../../account-omp/src/ipc.js';
 import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpTranscriptEvent } from '../../account-omp/src/contracts.js';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { MachineMcpCoordinator, ProjectedMcpSession } from './local-mcp.js';
-import { createSpaceEvalNamespace, type OmpEvalNamespace, type SpaceWorkspaceControls } from './space-eval-sdk.js';
+import { createSpaceEvalNamespace, createSpaceHostControls, type OmpEvalNamespace, type SpaceWorkspaceControls } from './space-eval-sdk.js';
 import { z } from 'zod';
 import { untilAborted } from '@oh-my-pi/pi-utils';
 
@@ -20,6 +20,15 @@ export const ompGenerationSelectionSchema = z.object({
   manifestHash: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
 });
 export type OmpGenerationSelection = z.infer<typeof ompGenerationSelectionSchema>;
+
+/** OMP CLI entrypoint for a selection; commands such as the browser relay run the same bytes as agent children. */
+export async function ompCommandEntrypoint(selection: OmpGenerationSelection): Promise<string> {
+  await validateExecutableArtifact(selection.path, { target: 'omp', hash: selection.hash, manifestHash: selection.manifestHash });
+  const prepared = await prepareOmpRuntimeArtifact(selection.path);
+  return prepared === join(selection.path, 'omp.js')
+    ? join(selection.path, 'omp-worker.js')
+    : join(dirname(Bun.resolveSync('@oh-my-pi/pi-coding-agent', dirname(prepared))), 'cli.ts');
+}
 export interface OmpGenerationStatus { sha: string | null; hash: string; draining: number; pendingMachineCommit?: true; failure?: { sha: string; error: string } }
 export interface ProcessOmpRuntimeOptions {
   environmentRoot: string;
@@ -30,6 +39,7 @@ export interface ProcessOmpRuntimeOptions {
   mcp?: MachineMcpCoordinator;
   skills?: () => Promise<readonly SkillView[]>;
   spaceAuthority?: CloudSpaceCheckpointAuthority;
+  resolveInference?: (projectId: string) => Promise<InferenceExecutionContext>;
   workspaceControls?: () => SpaceWorkspaceControls;
   onError?: (error: unknown) => void;
 }
@@ -41,10 +51,28 @@ interface OmpChild {
 }
 interface HostedSession {
   generation: OmpGenerationSelection;
+  inference: InferenceExecutionContext;
   child: OmpChild;
-  migrate(): Promise<void>;
+  migrate(inference?: InferenceExecutionContext): Promise<void>;
   reloadAuth(): Promise<void>;
   dispose(): Promise<void>;
+}
+
+/** No daemon bearer, provider key, cloud identity or ambient broker enters an OMP child. */
+export function ompChildEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const environment: Record<string, string> = { GITSPACE_MANAGED_INFERENCE: '1' };
+  for (const name of ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'TZ', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'BUN_INSTALL_CACHE_DIR']) {
+    const value = source[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  return environment;
+}
+
+function sameInferenceBinding(left: InferenceExecutionContext, right: InferenceExecutionContext): boolean {
+  return left.projectId === right.projectId && left.assignmentRevision === right.assignmentRevision
+    && left.profile.id === right.profile.id && left.profile.revision === right.profile.revision
+    && left.advanced.generation === right.advanced.generation
+    && left.broker.url === right.broker.url && left.broker.token === right.broker.token;
 }
 
 function spawnChild(
@@ -59,6 +87,7 @@ function spawnChild(
   const rpc = new OmpRpcPeer<OmpChildApi, OmpMachineApi>((message) => child.send(message), handlers, notify);
   child = Bun.spawn([process.execPath, entrypoint], {
     stdin: 'ignore', stdout: 'inherit', stderr: 'inherit',
+    env: ompChildEnvironment(),
     serialization: 'advanced',
     ipc: (message) => rpc.receive(message),
     onDisconnect: () => {
@@ -93,6 +122,8 @@ async function health(child: OmpChild, signal?: AbortSignal): Promise<void> {
 }
 const noCallbacks = {
   namespace: async () => { throw new Error('No session namespace in OMP health/transcript process'); },
+  workspaceInstructions: async () => { throw new Error('No session workspace in OMP health/transcript process'); },
+  setWorkspacePhase: async () => { throw new Error('No session workspace in OMP health/transcript process'); },
   executeTool: async () => { throw new Error('No session tools in OMP health/transcript process'); },
   mcpResources: async () => { throw new Error('No session MCP in OMP health/transcript process'); },
   mcpReadResource: async () => { throw new Error('No session MCP in OMP health/transcript process'); },
@@ -207,6 +238,12 @@ export class ProcessOmpRuntime implements OmpRuntime {
     const entrypoint = this.preparedEntrypoints.get(JSON.stringify([selection.path, selection.manifestHash]));
     if (!entrypoint) throw new Error('OMP generation has not been verified');
     return entrypoint;
+  }
+
+  /** OMP CLI entrypoint of the currently selected generation. */
+  async commandEntrypoint(): Promise<string> {
+    if (!this.selected) throw new Error('OMP runtime has not initialized');
+    return ompCommandEntrypoint(this.selected);
   }
 
   status(): OmpGenerationStatus {
@@ -325,12 +362,23 @@ export class ProcessOmpRuntime implements OmpRuntime {
   }
 
 
-  async reloadAuthStorage(): Promise<void> {
-    await Promise.all([...this.sessions].map((session) => session.reloadAuth()));
+  async reloadAuthStorage(profileId: string): Promise<void> {
+    await Promise.all([...this.sessions].filter((session) => session.inference.profile.id === profileId).map((session) => session.reloadAuth()));
+  }
+
+  private async resolveInference(projectId: string): Promise<InferenceExecutionContext> {
+    const resolve = this.options.resolveInference ?? this.options.spaceAuthority?.resolveInference.bind(this.options.spaceAuthority);
+    if (!resolve) throw new Error('Canonical inference authority is required; enroll this machine before starting inference');
+    const context = await resolve(projectId);
+    if (context.projectId !== projectId || context.assignmentRevision === null) throw new Error('Canonical inference context does not match this project; refresh its profile assignment');
+    // Own the snapshot: neither authority mocks nor later caches may mutate an admitted binding.
+    return structuredClone(context);
   }
   private async boot(input: OmpSessionInput, signal?: AbortSignal): Promise<OmpRuntimeSession> {
     signal?.throwIfAborted();
     if (!this.selected) throw new Error('OMP runtime has not initialized');
+    const initialInference = await this.resolveInference(input.projectId);
+    signal?.throwIfAborted();
     const events = new Set<(event: OmpRuntimeEvent) => void>();
     const activities = new Set<(activity: SessionActivity, failure: AgentFailure | null) => void>();
     let executionFailure = input.executionFailure ?? null;
@@ -339,7 +387,12 @@ export class ProcessOmpRuntime implements OmpRuntime {
     let sessionId = '';
     let sessionFile = input.sessionFile;
     let operations = 0;
+    const idleOperations = new Set<() => void>();
     let migration: Promise<void> | null = null;
+    let admitting = false;
+    let queueBlocked = false;
+    let admissionEpoch = 0;
+    const queued: Array<{ text: string; options: Parameters<OmpRuntimeSession['prompt']>[1]; kind: 'steering' | 'followUp' }> = [];
     let disposed = false;
     let disposal: Promise<void> | null = null;
     const lifetime = new AbortController();
@@ -353,6 +406,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
       getLocalMounts: (): Record<string, 'read' | 'write'> => input.workspaceId === null ? { base: 'write' } : { base: 'read', workspace: 'write' },
     };
     if (this.options.spaceAuthority) namespaces.space = createSpaceEvalNamespace(this.options.spaceAuthority, input.projectId, input.workspaceId, this.options.workspaceControls?.());
+    const hostControls = this.options.spaceAuthority ? createSpaceHostControls(this.options.spaceAuthority, input.projectId, input.workspaceId, this.options.workspaceControls?.()) : null;
     if (this.options.mcp) {
       const projectedSession = await untilAborted(openingSignal, this.options.mcp.createSession({ projectId: input.projectId, workspaceId: input.workspaceId, workspacePath: input.workingDirectory }).then(async (session) => {
         if (openingSignal.aborted) {
@@ -397,10 +451,11 @@ export class ProcessOmpRuntime implements OmpRuntime {
         activity = { activity: notification.activity, failure: notification.failure };
         if (notification.failure?.code !== 'AGENT_DISCONNECTED') executionFailure = notification.failure;
         for (const handler of activities) handler(activity.activity, activity.failure);
+        drainQueue();
         migrateWhenIdle();
       }
     };
-    const start = async (generation: OmpGenerationSelection): Promise<OmpChild> => {
+    const start = async (generation: OmpGenerationSelection, inference: InferenceExecutionContext): Promise<OmpChild> => {
       openingSignal.throwIfAborted();
       const startSignal = openingSignal;
       const child = spawnChild(this.verifiedEntrypoint(generation), {
@@ -408,6 +463,14 @@ export class ProcessOmpRuntime implements OmpRuntime {
           const namespace = namespaces[request.namespace];
           if (!namespace) throw new Error(`Namespace ${request.namespace} is unavailable`);
           return namespace.call(request.method, request.args, signal);
+        },
+        workspaceInstructions: async () => {
+          if (!hostControls) throw new Error('Workspace controls are unavailable for this session');
+          return hostControls.instructions();
+        },
+        setWorkspacePhase: async ([phase]) => {
+          if (!hostControls) throw new Error('Workspace controls are unavailable for this session');
+          await hostControls.setPhase(phase);
         },
         executeTool: async ([request], signal) => {
           const tool = projected?.tools().find((candidate) => candidate.name === request.name);
@@ -428,6 +491,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
         await health(child, startSignal);
         const opened = await child.rpc.call('initialize', [{
           agentDir: this.options.agentDir, sessionRoot: this.options.sessionRoot,
+          inference,
           skills: await untilAborted(startSignal, Promise.resolve(this.options.skills?.() ?? [])), liveSkills: true,
           input: { ...input, executionFailure, ...(sessionFile ? { sessionFile } : {}) }, tools: descriptors(), mcpCatalog: catalog(),
           namespaces: { ...(namespaces.space ? { space: namespaces.space.declaration } : {}), ...(namespaces.mcp ? { mcp: namespaces.mcp.declaration } : {}) },
@@ -451,13 +515,16 @@ export class ProcessOmpRuntime implements OmpRuntime {
       if (migration) await migration;
       if (disposed) throw new Error('OMP session has been disposed');
       if (hosted.child.alive()) return;
-      migration = start(hosted.generation).then((child) => { hosted.child = child; });
+      migration = this.resolveInference(input.projectId).then(async (inference) => {
+        hosted.child = await start(hosted.generation, inference);
+        hosted.inference = inference;
+      });
       try { await migration; } finally { migration = null; }
     };
     let initial: OmpChild;
     const initialGeneration = this.selected;
     try {
-      initial = await start(initialGeneration);
+      initial = await start(initialGeneration, initialInference);
       signal?.throwIfAborted();
     }
     catch (error) {
@@ -471,14 +538,29 @@ export class ProcessOmpRuntime implements OmpRuntime {
     openingSignal = lifetime.signal;
     hosted = {
       generation: initialGeneration,
+      inference: initialInference,
       child: initial,
-      migrate: async () => {
-        if (migration) return migration;
-        if (disposed || operations > 0 || activity.activity.active || hosted.generation.hash === this.selected?.hash) return;
+      migrate: async (inference) => {
+        if (migration) await migration;
+        if (disposed || operations > 0 || activity.activity.active) return;
+        const sameGeneration = hosted.generation.hash === this.selected?.hash;
+        if (sameGeneration && (!inference || sameInferenceBinding(hosted.inference, inference))) return;
+        if (sameGeneration && inference && hosted.child.alive() && sameInferenceScope(hosted.inference, inference)) {
+          // Same credential scope: a new profile revision, assignment revision or Advanced
+          // generation applies inside the running worker. Only a new scope or code reopens it.
+          migration = (async () => {
+            await hosted.child.rpc.call('applyInference', [inference], AbortSignal.any([lifetime.signal, AbortSignal.timeout(30_000)]));
+            hosted.inference = inference;
+          })();
+          try { await migration; }
+          finally { migration = null; }
+          return;
+        }
         const target = this.selected!;
         migration = (async () => {
           const migrationSignal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(30_000)]);
           const old = hosted.generation;
+          const nextInference = inference ?? await this.resolveInference(input.projectId);
           const controls = hosted.child.alive() ? await hosted.child.rpc.call('control', [], migrationSignal) : null;
           if (hosted.child.alive()) {
             await hosted.child.rpc.call('persist', [], migrationSignal);
@@ -489,18 +571,21 @@ export class ProcessOmpRuntime implements OmpRuntime {
           const checkpoint = `${sessionFile!}.generation-${crypto.randomUUID()}`;
           await cp(sessionFile!, checkpoint);
           try {
-            hosted.child = await start(target);
+            hosted.child = await start(target, nextInference);
             if (controls) {
               await hosted.child.rpc.call('setThinking', [controls.thinking]);
               await hosted.child.rpc.call('setFast', [controls.fastMode]);
               await hosted.child.rpc.call('setApproval', [controls.approvalMode]);
             }
             hosted.generation = target;
+            hosted.inference = nextInference;
           } catch (error) {
             await hosted.child.close();
             lifetime.signal.throwIfAborted();
             await rename(checkpoint, sessionFile!);
-            hosted.child = await start(old);
+            // A failed scope cutover must never reopen the obsolete credential binding.
+            hosted.child = await start(old, nextInference);
+            hosted.inference = nextInference;
             if (controls) {
               await hosted.child.rpc.call('setThinking', [controls.thinking]);
               await hosted.child.rpc.call('setFast', [controls.fastMode]);
@@ -516,6 +601,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
       dispose: () => {
         if (disposal) return disposal;
         disposed = true;
+        queued.length = 0;
         lifetime.abort(new Error('OMP session has been disposed'));
         disposal = (async () => {
           try {
@@ -541,10 +627,11 @@ export class ProcessOmpRuntime implements OmpRuntime {
     const unsubscribeNotifications = projected?.manager.addNotificationListener((server, method, params) => hosted.child.rpc.publish({ type: 'mcpNotification', server, method, params }));
     const unsubscribeCatalog = projected?.manager.addCatalogChangeListener(() => { void refreshMcp().catch((error) => this.options.onError?.(error)); });
     projected?.attach({ refresh: refreshMcp });
-    const invoke = async <K extends SessionMethod | 'reloadSettings' | 'instructionsChanged'>(method: K, args: Parameters<OmpChildApi[K]>): Promise<Awaited<ReturnType<OmpChildApi[K]>>> => {
+    const invoke = async <K extends SessionMethod | 'reloadSettings' | 'instructionsChanged'>(method: K, args: Parameters<OmpChildApi[K]>, expectedAdmission?: number): Promise<Awaited<ReturnType<OmpChildApi[K]>>> => {
       if (disposed) throw new Error('OMP session has been disposed');
       await hosted.migrate();
       if (disposed) throw new Error('OMP session has been disposed');
+      if (expectedAdmission !== undefined && expectedAdmission !== admissionEpoch) throw new Error('Inference admission was cancelled');
       if (!hosted.child.alive()) throw new AgentDomainError({ domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP worker is disconnected; retry the agent to reopen its persisted session', context: { sessionId, stage: method } });
       operations += 1;
       try {
@@ -554,30 +641,140 @@ export class ProcessOmpRuntime implements OmpRuntime {
       catch (cause) { throw new Error(`OMP ${method} failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause }); }
       finally {
         operations -= 1;
+        if (operations === 0) {
+          for (const wake of idleOperations) wake();
+          idleOperations.clear();
+        }
         migrateWhenIdle();
+        drainQueue();
       }
+    };
+    const invokeAdmission = async <K extends 'prompt' | 'resume' | 'compact' | 'setGoal'>(method: K, args: Parameters<OmpChildApi[K]>, onAdmitted?: () => void): Promise<Awaited<ReturnType<OmpChildApi[K]>>> => {
+      if (admitting || operations > 0 || activity.activity.active) throw new Error('The current turn and its descendant work must settle before starting another inference admission');
+      admitting = true;
+      const expectedAdmission = admissionEpoch;
+      try {
+        const inference = await this.resolveInference(input.projectId);
+        if (expectedAdmission !== admissionEpoch) throw new Error('Inference admission was cancelled');
+        while (operations > 0) {
+          const idle = Promise.withResolvers<void>();
+          idleOperations.add(idle.resolve);
+          try { await untilAborted(lifetime.signal, idle.promise); }
+          finally { idleOperations.delete(idle.resolve); }
+        }
+        const worker = hosted.child;
+        await hosted.migrate(inference);
+        if (!sameInferenceBinding(hosted.inference, inference)) throw new Error('Inference context changed while work was active; retry after the current turn settles');
+        // Canonical readiness does not authorize cached credentials while the broker is unavailable.
+        // A reopened worker fetched a fresh broker snapshot; a retained one revalidates.
+        if (hosted.child === worker) await hosted.child.rpc.call('reloadAuth', [], AbortSignal.any([lifetime.signal, AbortSignal.timeout(30_000)]));
+        onAdmitted?.();
+        return await invoke(method, args, expectedAdmission);
+      } catch (error) {
+        queueBlocked = true;
+        throw error;
+      } finally {
+        admitting = false;
+        drainQueue();
+      }
+    };
+    const queueChanged = (): void => {
+      for (const handler of events) handler({ type: 'queue_changed' });
+    };
+    function drainQueue(): void {
+      if (!hosted || disposed || admitting || migration || operations > 0 || activity.activity.active || queueBlocked || queued.length === 0) return;
+      const index = queued.findIndex((entry) => entry.kind === 'steering');
+      const queuedEpoch = admissionEpoch;
+      let admitted = false;
+      const [entry] = queued.splice(index === -1 ? 0 : index, 1);
+      queueChanged();
+      void invokeAdmission('prompt', [entry!.text, entry!.options], () => { admitted = true; }).catch((error) => {
+        // Only an unadmitted input is retryable; replaying a failed accepted turn could duplicate work.
+        if (queuedEpoch !== admissionEpoch) return;
+        if (!admitted) queued.unshift(entry!);
+        queueBlocked = true;
+        executionFailure = agentFailure(error, 'AGENT_RUNTIME_FAILED', { sessionId, stage: 'inference-admission' });
+        activity = { activity: activity.activity, failure: executionFailure };
+        for (const handler of activities) handler(activity.activity, activity.failure);
+        queueChanged();
+      });
+    }
+    const controls = async () => {
+      const control = await invoke('control', []);
+      return { ...control, queue: {
+        steering: [...(control.queue?.steering ?? []), ...queued.filter((entry) => entry.kind === 'steering').map((entry) => entry.text)],
+        followUp: [...(control.queue?.followUp ?? []), ...queued.filter((entry) => entry.kind === 'followUp').map((entry) => entry.text)],
+      } };
     };
     return {
       id: sessionId, sessionFile: sessionFile!,
-      isAvailable: () => !disposed && hosted.child.alive(),
-      prompt: (text, options) => invoke('prompt', [text, options]),
+      // A planned worker swap is not a disconnect: the replacement reports before it is installed.
+      isAvailable: () => !disposed && (hosted.child.alive() || migration !== null),
+      prompt: (text, options) => {
+        if (disposed) return Promise.reject(new Error('OMP session has been disposed'));
+        if (admitting || operations > 0 || activity.activity.active || queued.length > 0) {
+          queued.push({ text, options, kind: options?.streamingBehavior === 'steer' ? 'steering' : 'followUp' });
+          queueBlocked = false;
+          queueChanged();
+          drainQueue();
+          return Promise.resolve(true);
+        }
+        return invokeAdmission('prompt', [text, options]);
+      },
       subscribe: (handler) => { events.add(handler); return () => events.delete(handler); },
       subscribeActivity: (handler) => { activities.add(handler); handler(activity.activity, activity.failure); return () => activities.delete(handler); },
       activity: () => activity,
-      persist: () => invoke('persist', []), handoff: () => invoke('handoff', []), resume: () => invoke('resume', []),
-      reloadSettings: () => invoke('reloadSettings', []), dispose: () => hosted.dispose(),
+      persist: () => invoke('persist', []),
+      handoff: () => { admissionEpoch += 1; queueBlocked = true; return invoke('handoff', []); },
+      resume: () => invokeAdmission('resume', []),
+      reloadSettings: async () => {
+        if (admitting || operations > 0 || activity.activity.active) return;
+        await hosted.migrate(await this.resolveInference(input.projectId));
+      },
+      dispose: () => hosted.dispose(),
       instructionsChanged: () => invoke('instructionsChanged', []),
       setWorkspacePhase: (phase) => invoke('setWorkspacePhase', [phase]),
-      control: () => invoke('control', []), cycleRole: (direction) => invoke('cycleRole', [direction]),
+      control: controls, cycleRole: (direction) => invoke('cycleRole', [direction]),
       agentSetup: () => invoke('agentSetup', []),
       saveAgentDefinition: (input) => invoke('saveAgentDefinition', [input]),
       historyAnchorId: () => invoke('historyAnchorId', []),
       setModel: (provider, model) => invoke('setModel', [provider, model]), setThinking: (thinking) => invoke('setThinking', [thinking]),
       setFast: (enabled) => invoke('setFast', [enabled]), setApproval: (approval) => invoke('setApproval', [approval]),
-      setGoal: (goal) => invoke('setGoal', [goal]), compact: (instructions) => invoke('compact', [instructions]),
-      clearQueue: () => invoke('clearQueue', []), removeQueuedMessage: (kind, index) => invoke('removeQueuedMessage', [kind, index]),
-      promoteQueuedMessage: (index) => invoke('promoteQueuedMessage', [index]), answerAsk: (id, answers) => invoke('answerAsk', [id, answers]),
-      stop: () => invoke('stop', []), navigateTree: (id) => invoke('navigateTree', [id]), messages: () => invoke('messages', []),
+      setGoal: (goal) => goal.enabled ? invokeAdmission('setGoal', [goal]) : invoke('setGoal', [goal]),
+      compact: (instructions) => invokeAdmission('compact', [instructions]),
+      clearQueue: async () => {
+        queued.length = 0;
+        queueBlocked = false;
+        await invoke('clearQueue', []);
+        queueChanged();
+        return controls();
+      },
+      removeQueuedMessage: async (kind, index) => {
+        const entry = queued.filter((entry) => entry.kind === kind)[index];
+        if (!entry) throw new Error('Queued message is no longer available');
+        queued.splice(queued.indexOf(entry), 1);
+        queueChanged();
+        return controls();
+      },
+      promoteQueuedMessage: async (index) => {
+        const entry = queued.filter((entry) => entry.kind === 'followUp')[index];
+        if (!entry) throw new Error('Queued message is no longer available');
+        entry.kind = 'steering';
+        queueBlocked = false;
+        queueChanged();
+        drainQueue();
+        return controls();
+      },
+      answerAsk: (id, answers) => invoke('answerAsk', [id, answers]),
+      stop: async () => {
+        admissionEpoch += 1;
+        queued.length = 0;
+        queueBlocked = false;
+        await invoke('stop', []);
+        queueChanged();
+        return controls();
+      },
+      navigateTree: (id) => invoke('navigateTree', [id]), messages: () => invoke('messages', []),
     };
   }
 }

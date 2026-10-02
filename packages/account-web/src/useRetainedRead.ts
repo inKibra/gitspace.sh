@@ -3,6 +3,15 @@ import { isTaggedError } from 'result-rpc';
 
 type ReadQuery<Value> = ({ state: 'success'; value: Value } | { state: 'pending' } | { state: 'failure'; error: Error; previous?: Value }) & { fetch?: 'fetching' | 'idle' | 'paused' };
 
+/**
+ * The actual result-rpc cache key and successful-data timestamp, not a UI lease key.
+ * Only opt in when the query observer is bound to this key in the same render.
+ */
+export interface ReadProvenance {
+  key: string;
+  updatedAt: number;
+}
+
 /** Authority failures invalidate data, unlike a failed background transport read. */
 export function invalidatesRead(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -14,9 +23,12 @@ export function invalidatesRead(error: unknown): boolean {
 }
 
 /** A view projection only: result-rpc remains the request/cache owner. Null keys revoke the read. */
-export function useRetainedRead<Value>(query: ReadQuery<Value>, key: string | null) {
-  const retained = useRef<{ key: string | null; value: Value | undefined; observed: Value | undefined; blocked: Value | undefined }>({ key, value: undefined, observed: undefined, blocked: undefined });
-  const current = retained.current;
+export function useRetainedRead<Value>(query: ReadQuery<Value>, key: string | null, provenance?: ReadProvenance) {
+  const retained = useRef<{ key: string | null; value: Value | undefined; observed: Value | undefined; blocked: Value | undefined; updatedAt: number; revoked: Map<string, number> } | null>(null);
+  const current = retained.current ??= { key, value: undefined, observed: undefined, blocked: undefined, updatedAt: 0, revoked: new Map() };
+  if (provenance && key === null && current.key !== null && current.value !== undefined) {
+    current.revoked.set(current.key, current.updatedAt);
+  }
   if (current.key !== key) {
     current.key = key;
     current.value = undefined;
@@ -24,7 +36,26 @@ export function useRetainedRead<Value>(query: ReadQuery<Value>, key: string | nu
     current.blocked = current.observed;
   }
   const error = query.state === 'failure' ? query.error : null;
-  if (key === null || (error && invalidatesRead(error))) {
+  if (provenance) {
+    // Structural sharing preserves value identity across successful refetches.
+    // Provenance permits cached reads; timestamps fence explicitly revoked data.
+    const matches = key !== null && key === provenance.key;
+    if (matches && error && invalidatesRead(error)) {
+      current.revoked.set(key, Math.max(provenance.updatedAt, current.revoked.get(key) ?? 0));
+    }
+    const revokedAt = current.revoked.get(provenance.key);
+    const accepted = matches && (revokedAt === undefined || provenance.updatedAt > revokedAt);
+    if (!accepted || (error && invalidatesRead(error))) {
+      current.value = undefined;
+    } else if (query.state === 'success') {
+      current.value = query.value;
+      current.updatedAt = provenance.updatedAt;
+      current.revoked.delete(provenance.key);
+    } else if (query.state === 'failure' && current.value === undefined) {
+      current.value = query.previous;
+      current.updatedAt = provenance.updatedAt;
+    }
+  } else if (key === null || (error && invalidatesRead(error))) {
     current.value = undefined;
     current.blocked = current.observed;
   } else if (query.state === 'success' && query.value !== current.blocked) {
@@ -37,6 +68,6 @@ export function useRetainedRead<Value>(query: ReadQuery<Value>, key: string | nu
   return { value: current.value, initialLoading: key !== null && current.value === undefined && refreshing, refreshing: current.value !== undefined && refreshing, stale: current.value !== undefined && error !== null, error };
 }
 
-export function useRetainedQueryValue<Value>(query: ReadQuery<Value>, key: string | null): Value | undefined {
-  return useRetainedRead(query, key).value;
+export function useRetainedQueryValue<Value>(query: ReadQuery<Value>, key: string | null, provenance?: ReadProvenance): Value | undefined {
+  return useRetainedRead(query, key, provenance).value;
 }

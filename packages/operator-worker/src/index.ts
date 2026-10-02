@@ -1,4 +1,4 @@
-import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
+import { credentialProtocolBase64, SIGNED_REQUEST_MAX_AGE_MS } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
 import { tenantIdSchema } from '@gitspace/protocol/deployment';
 import { AccountRegistryDO, type OperatorAccountRecord } from './account-registry.js';
@@ -6,7 +6,6 @@ import { InviteRegistryDO } from './invite-registry.js';
 import { operatorIdentity } from './access-auth.js';
 export { AccountRegistryDO } from './account-registry.js';
 export { InviteRegistryDO } from './invite-registry.js';
-const REQUEST_MAX_SKEW_MS = 60_000;
 const REQUEST_MAX_BYTES = 512 * 1024;
 const ACCOUNT_ID_BYTES = 16;
 function publicError(code: string, message: string) { return { status: 'error' as const, error: { code, message } }; }
@@ -212,7 +211,7 @@ const operatorWorker = {
       if (handle.length > 30 || !tenantIdSchema.safeParse(handle).success) return Response.json(publicError('INVALID_HANDLE', 'Handle is invalid or reserved'), { status: 400 });
       const userId = await accountIdForRootPublicKey(payload.rootPublicKey);
       if (!userId) return Response.json(publicError('INVALID_ROOT', 'Root key is invalid'), { status: 400 });
-      const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: payload.rootPublicKey, target: url.pathname + url.search, maxSkewMs: REQUEST_MAX_SKEW_MS });
+      const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: payload.rootPublicKey, target: url.pathname + url.search, maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS });
       if (verified.status === 'error') return Response.json(verified, { status: 401 });
       const invites = inviteRegistry(env);
       const reserved = await invites.reserve({ token: payload.invite.trim(), userId, handle });
@@ -239,7 +238,7 @@ const operatorWorker = {
     const body = await readBoundedJson(request) as { rootPublicKey?: unknown; handle?: unknown };
     if (typeof body.rootPublicKey !== 'string' || typeof body.handle !== 'string') return Response.json(publicError('INVALID_RECOVERY', 'Root key and handle are required'), { status: 400 });
     const userId = await accountIdForRootPublicKey(body.rootPublicKey);
-    const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: body.rootPublicKey, target: url.pathname + url.search, maxSkewMs: REQUEST_MAX_SKEW_MS });
+    const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: body.rootPublicKey, target: url.pathname + url.search, maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS });
     if (!userId || verified.status === 'error') return Response.json(publicError('ROOT_UNAUTHORIZED', 'Recovery signature is invalid'), { status: 401 });
     const account = await accountRegistry(env).get(userId);
     if (!account || account.handle !== body.handle || account.status !== 'active') return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is unavailable'), { status: 403 });

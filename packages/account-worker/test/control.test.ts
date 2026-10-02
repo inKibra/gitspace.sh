@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { env, SELF } from 'cloudflare:test';
+import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
   createSignedControlRequest,
@@ -347,5 +347,90 @@ describe('signed control transport', () => {
     await vault.removeManagedDevice(machineId);
     const revokedRequest = createSignedControlRequest({ userId, machineId, operation: 'settings.get', payload: {}, signingPrivateKey: machineBSigningPrivateKey });
     expect(await vault.authorizeControl(revokedRequest, 'storage.access')).toMatchObject({ status: 'error' });
+  });
+});
+
+describe('signed request windows', () => {
+  const minutes = 60_000;
+  async function enroll() {
+    const userId = env.ACCOUNT_ID;
+    const vault = env.CREDENTIALS.getByName(userId);
+    await vault.bootstrap({
+      userId,
+      rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey)),
+      vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(7)),
+    });
+    await vault.registerDevice(signCredentialAuthorityGrant({
+      version: 1,
+      userId,
+      machineId: 'machine-a',
+      signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineSigningPrivateKey)),
+      exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(machineExchangePrivateKey)),
+      capabilities: ['storage.access'],
+      generation: 1,
+    }, rootPrivateKey));
+    return { userId, vault };
+  }
+  async function signedUpload(userId: string, key: string, signedAgoMs: number) {
+    const bytes = new TextEncoder().encode(`checkpoint:${key}`);
+    const request = createSignedControlRequest({
+      userId,
+      machineId: 'machine-a',
+      operation: 'data.put',
+      payload: { key, hash: await sha256(bytes), size: bytes.byteLength },
+      signingPrivateKey: machineSigningPrivateKey,
+      timestamp: Date.now() - signedAgoMs,
+    });
+    return () => SELF.fetch(`https://auth.test/v1/data/${key}`, {
+      method: 'PUT',
+      headers: { 'content-length': String(bytes.byteLength), 'x-gitspace-control': signedHeader(request) },
+      body: bytes,
+    });
+  }
+
+  it('accepts a data.put whose body arrives long after signing, up to the upload window', async () => {
+    const { userId } = await enroll();
+    expect((await (await signedUpload(userId, 'projects/p/spaces/s/buffered.bin', 10 * minutes))()).status).toBe(201);
+    const expired = await (await signedUpload(userId, 'projects/p/spaces/s/expired.bin', 31 * minutes))();
+    expect(expired.status).toBe(401);
+    expect(await expired.json()).toMatchObject({ status: 'error', error: { code: 'REQUEST_EXPIRED', message: 'Signed request expired' } });
+    expect(await env.DATA.head(`users/${userId}/projects/p/spaces/s/expired.bin`)).toBeNull();
+  });
+
+  it('keeps the upload window to data.put and reports age separately from invalid requests', async () => {
+    const { userId, vault } = await enroll();
+    const signed = (signedAgoMs: number) => createSignedControlRequest({
+      userId, machineId: 'machine-a', operation: 'settings.get', payload: {},
+      signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - signedAgoMs,
+    });
+    const control = (signedAgoMs: number) => SELF.fetch('https://auth.test/v1/control', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(signed(signedAgoMs)),
+    });
+    expect((await control(4 * minutes)).status).toBe(200);
+    const expired = await control(6 * minutes);
+    expect(expired.status).toBe(401);
+    expect(await expired.json()).toMatchObject({ error: { code: 'REQUEST_EXPIRED' } });
+    expect(await vault.authorizeControl({ ...signed(6 * minutes), userId: 'another-user' }, 'storage.access')).toMatchObject({ error: { code: 'INVALID_REQUEST' } });
+    const read = createSignedControlRequest({
+      userId, machineId: 'machine-a', operation: 'data.head', payload: { key: 'projects/p/spaces/s/missing.bin', hash: await sha256(new Uint8Array([1])) },
+      signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - 6 * minutes,
+    });
+    const staleRead = await SELF.fetch('https://auth.test/v1/data/projects/p/spaces/s/missing.bin', { method: 'HEAD', headers: { 'x-gitspace-control': signedHeader(read) } });
+    expect(staleRead.status).toBe(401);
+  });
+
+  it('rejects a replayed data.put for as long as its signature is accepted', async () => {
+    const { userId, vault } = await enroll();
+    const upload = await signedUpload(userId, 'projects/p/spaces/s/replayed.bin', 20 * minutes);
+    expect((await upload()).status).toBe(201);
+    // Nine minutes later the signature is 29 minutes old and still inside the upload window.
+    await runInDurableObject(vault, (_instance, state) => {
+      state.storage.sql.exec('UPDATE request_nonces SET used_at = used_at - ?', 9 * minutes);
+    });
+    const replay = await upload();
+    expect(replay.status).toBe(401);
+    expect(await replay.json()).toMatchObject({ error: { code: 'REQUEST_REPLAY' } });
   });
 });

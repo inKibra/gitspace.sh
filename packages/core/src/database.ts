@@ -163,6 +163,18 @@ export class GitSpaceDatabase {
     return this.orm.select().from(projects).orderBy(projects.createdAt, projects.id).all();
   }
 
+  /** Keeps the project and its base space row on one branch. */
+  setProjectBaseBranch(projectId: string, baseBranch: string): Project | null {
+    const branch = branchSchema.parse(baseBranch);
+    const now = new Date().toISOString();
+    return this.orm.transaction((tx) => {
+      const updated = tx.update(projects).set({ baseBranch: branch, updatedAt: now }).where(eq(projects.id, projectId)).returning().get();
+      if (!updated) return null;
+      tx.update(spaces).set({ branch, updatedAt: now }).where(and(eq(spaces.projectId, projectId), eq(spaces.kind, 'base'))).run();
+      return updated;
+    });
+  }
+
   createWorkspace(input: {
     id?: string;
     projectId: string;

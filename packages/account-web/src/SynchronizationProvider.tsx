@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { SynchronizationOwner, type SynchronizationSource, type SynchronizedValue } from './synchronization.js';
-import { rpcClient, routedTransport } from './rpc-client.js';
+import { rpcClient } from './rpc-client.js';
 import { flushIncidentOutbox } from './incident-outbox.js';
 import { accountDirectorySource } from './account-directory-transport.js';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
@@ -58,6 +58,10 @@ export function useAccountOmpConfiguration() {
   const snapshot = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
   return readSnapshot(snapshot, (value) => value.omp);
 }
+export function useAccountInference() {
+  const snapshot = useSynchronizedResource('inference', (after, signal) => rpcClient.inference.events({ after }, { signal }));
+  return readSnapshot(snapshot, (value) => value);
+}
 export function useAccountMachines() {
   const snapshot = useAccountDirectorySnapshot();
   return readSnapshot(snapshot, (value) => value.machines);
@@ -97,11 +101,8 @@ export function useEventRefresh(cursor: number | null, refresh: () => Promise<un
 
 function AccountSynchronization() {
   const settings = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
-  const directory = useAccountDirectorySnapshot();
-  const routes = directory.value && JSON.stringify([directory.value.placements, directory.value.machines.map(({ id, rpcEndpoint, state, desiredState }) => [id, rpcEndpoint, state, desiredState])]);
-  useEffect(() => {
-    if (routes) routedTransport.invalidate();
-  }, [routes]);
+  // The account directory stays connected for the app's lifetime; pages read its retained snapshot.
+  useAccountDirectorySnapshot();
   useEffect(() => {
     const flush = () => { void flushIncidentOutbox(); };
     window.addEventListener('online', flush);

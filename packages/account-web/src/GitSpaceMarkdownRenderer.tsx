@@ -5,6 +5,7 @@ import 'streamdown/styles.css';
 import { useEffect, useState } from 'react';
 import type { GitSpaceMarkdownProps } from './GitSpaceMarkdown.js';
 import { MarkdownResourceLink, rehypeResourceAnchors, rehypeResourceLinks } from './ResourceNavigation.js';
+import { rehypeArtifactImageMarkers, rehypeArtifactImageSources } from './markdown-artifact-images.js';
 
 const RESOURCE_COMPONENTS = { 'gitspace-resource': MarkdownResourceLink } satisfies Components;
 
@@ -13,7 +14,7 @@ const RESOURCE_COMPONENTS = { 'gitspace-resource': MarkdownResourceLink } satisf
 // already styles inline `code`.
 const PROSE = 'min-w-0 max-w-full text-body text-foreground [overflow-wrap:anywhere] [&_:is(h1,h2,h3,h4,h5,h6)]:font-semibold [&_:is(h1,h2,h3,h4,h5,h6)]:tracking-tight [&_h1]:text-display [&_h2]:text-title [&_h3]:text-subtitle [&_a]:underline [&_a]:underline-offset-2 [&_code]:font-mono [&_pre]:bg-surface-2 [&_pre]:whitespace-pre [&_pre]:[overflow-wrap:normal] [&_[data-streamdown=code-block]]:min-w-0 [&_[data-streamdown=code-block]]:max-w-full [&_[data-streamdown=code-block-body]]:min-w-0 [&_[data-streamdown=code-block-body]]:max-w-full [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:text-muted-foreground [&_hr]:border-border [&_[data-streamdown=table-wrapper]]:min-w-0 [&_[data-streamdown=table-wrapper]]:max-w-full [&_table]:[overflow-wrap:normal] [&_table]:text-caption [&_th]:font-semibold [&_img]:max-w-full';
 
-export function GitSpaceMarkdownRenderer({ children, streaming = false, className }: GitSpaceMarkdownProps) {
+export function GitSpaceMarkdownRenderer({ children, streaming = false, className, resolveImage }: GitSpaceMarkdownProps) {
   const needsCode = /(?:```|~~~)[^\n]*\n/u.test(children);
   const needsMermaid = /(?:```|~~~)mermaid(?:\s|\n)/u.test(children);
   const needsMath = /\$\$|\\\(|\\\[/u.test(children);
@@ -52,6 +53,7 @@ export function GitSpaceMarkdownRenderer({ children, streaming = false, classNam
     rehypePlugins={[
       defaultRehypePlugins.raw,
       rehypeResourceLinks,
+      ...(resolveImage ? [rehypeArtifactImageMarkers(resolveImage)] : []),
       defaultRehypePlugins.sanitize,
       [harden, {
         defaultOrigin: origin,
@@ -60,6 +62,7 @@ export function GitSpaceMarkdownRenderer({ children, streaming = false, classNam
         allowedImagePrefixes: [origin],
         allowDataImages: false,
       }],
+      ...(resolveImage ? [rehypeArtifactImageSources(resolveImage, origin)] : []),
       rehypeResourceAnchors,
     ]}
   >{children}</Streamdown>;

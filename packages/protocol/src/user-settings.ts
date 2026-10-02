@@ -72,8 +72,14 @@ export const gitIdentityUpdateSchema = z.object({
 export type GitIdentityUpdate = z.infer<typeof gitIdentityUpdateSchema>;
 
 
-export const ompSettingValueSchema = z.json();
-export type OmpSettingValue = z.infer<typeof ompSettingValueSchema>;
+/**
+ * Named interfaces keep recursion lazy: Durable Object stub typing expands anonymous
+ * recursive aliases (zod's JSONType) until TS2589.
+ */
+export type OmpSettingValue = string | number | boolean | null | OmpSettingArray | OmpSettingObject;
+export interface OmpSettingArray extends Array<OmpSettingValue> {}
+export interface OmpSettingObject { [key: string]: OmpSettingValue }
+export const ompSettingValueSchema: z.ZodType<OmpSettingValue> = z.json();
 
 export const ompSettingSchemaItemSchema = z.object({
   path: z.string().min(1),
@@ -82,6 +88,8 @@ export const ompSettingSchemaItemSchema = z.object({
   description: z.string().optional(),
   kind: z.enum(['boolean', 'enum', 'number', 'string', 'array', 'record', 'other']),
   value: ompSettingValueSchema,
+  /** Schema default, not another profile's effective value. */
+  defaultJson: z.string().optional(),
   options: z.array(z.string()).optional(),
   credential: z.boolean(),
 });

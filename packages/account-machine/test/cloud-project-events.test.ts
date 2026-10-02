@@ -87,14 +87,103 @@ function advance(ms: number): void {
   now = until;
 }
 
-function append(writer: CloudProjectEventWriter, revision: number): void {
+function append(writer: CloudProjectEventWriter, revision: number, projectId = 'project-a'): void {
   writer.append({
-    projectId: 'project-a', scope: 'session', entity: 'message', entityId: 'session-a',
+    projectId, scope: 'session', entity: 'message', entityId: 'session-a',
     revision, operation: 'append', payload: { text: `Message ${revision}` },
   });
 }
 
 describe('CloudProjectEventWriter', () => {
+  it('flushes a healthy project while another project retains failed facts and backoff', async () => {
+    expect(database.createProject({ id: 'project-b', name: 'Healthy', repositoryPath: root }).status).toBe('ok');
+    const authority = new DeferredAuthority();
+    const writer = new CloudProjectEventWriter(authority, database, () => {});
+    append(writer, 1);
+    const failed = await authority.call(0);
+    const overload = new Error('Project A overloaded');
+    const ownFlush = writer.flush('project-a').catch((error: unknown) => error);
+    failed.fail(overload);
+    expect(await ownFlush).toBe(overload);
+
+    append(writer, 2);
+    append(writer, 1, 'project-b');
+    const healthy = await authority.call(1);
+    expect(healthy.input.projectId).toBe('project-b');
+    const healthyFlush = writer.flush('project-b');
+    healthy.succeed();
+    await healthyFlush;
+    await expect(writer.flush('project-a')).rejects.toBe(overload);
+    await expect(writer.flush()).rejects.toBe(overload);
+    expect(authority.calls.map((call) => call.input.projectId)).toEqual(['project-a', 'project-b']);
+    expect(database.orm.select().from(factEvents).orderBy(asc(factEvents.offset)).all().map((event) => event.cloudSynced)).toEqual([false, false, true]);
+
+    advance(1000);
+    const retry = await authority.call(2);
+    expect(retry.input.eventId).toBe(failed.input.eventId);
+    retry.succeed();
+    const next = await authority.call(3);
+    expect(next.input.revision).toBe(2);
+    next.succeed();
+    await writer.flush();
+    expect(database.orm.select().from(factEvents).all().every((event) => event.cloudSynced)).toBe(true);
+  });
+
+  it('flushes a project independently of three hung projects without duplicating delivery', async () => {
+    const authority = new DeferredAuthority();
+    const writer = new CloudProjectEventWriter(authority, database, () => {});
+    const projects = ['project-a', 'project-b', 'project-c', 'project-d'];
+    for (const projectId of projects) {
+      if (projectId !== 'project-a') {
+        expect(database.createProject({ id: projectId, name: projectId, repositoryPath: root }).status).toBe('ok');
+      }
+      append(writer, 1, projectId);
+    }
+    await authority.call(3);
+    expect(authority.calls).toHaveLength(4);
+    let globallySettled = false;
+    const globalFlush = writer.flush().then(() => { globallySettled = true; });
+    const scopedFlush = writer.flush('project-d');
+    const duplicateFlush = writer.flush('project-d');
+    const healthy = await authority.call(3);
+    expect(healthy.input.projectId).toBe('project-d');
+    healthy.succeed();
+    await Promise.all([scopedFlush, duplicateFlush]);
+    expect(authority.calls).toHaveLength(4);
+    expect(globallySettled).toBe(false);
+    expect(database.orm.select().from(factEvents).orderBy(asc(factEvents.offset)).all().map((event) => event.cloudSynced)).toEqual([false, false, false, true]);
+
+    for (const call of authority.calls.slice(0, 3)) call.succeed();
+    await globalFlush;
+    expect(globallySettled).toBe(true);
+    expect(database.orm.select().from(factEvents).all().every((event) => event.cloudSynced)).toBe(true);
+  });
+
+  it('keeps scoped requests within capacity and ignores unrelated failure while waiting for a slot', async () => {
+    const authority = new DeferredAuthority();
+    const writer = new CloudProjectEventWriter(authority, database, () => {});
+    for (const projectId of ['project-a', 'project-b', 'project-c', 'project-d', 'project-e']) {
+      if (projectId !== 'project-a') {
+        expect(database.createProject({ id: projectId, name: projectId, repositoryPath: root }).status).toBe('ok');
+      }
+      append(writer, 1, projectId);
+    }
+    await authority.call(3);
+    const scopedFlush = writer.flush('project-e');
+    const sameProjectFlush = writer.flush('project-e');
+    await Promise.resolve();
+    expect(authority.calls).toHaveLength(4);
+    authority.calls[0]!.fail(new Error('Unrelated failure'));
+    const healthy = await authority.call(4);
+    expect(healthy.input.projectId).toBe('project-e');
+    healthy.succeed();
+    await Promise.all([scopedFlush, sameProjectFlush]);
+    expect(authority.calls).toHaveLength(5);
+    for (const call of authority.calls.slice(1, 4)) call.succeed();
+    await Promise.all(['project-b', 'project-c', 'project-d'].map((projectId) => writer.flush(projectId)));
+    expect(database.orm.select().from(factEvents).orderBy(asc(factEvents.offset)).all().map((event) => event.cloudSynced)).toEqual([false, true, true, true, true]);
+  });
+
   it('keeps new facts and flushes behind backoff, resetting the delay only after successful delivery', async () => {
     const authority = new DeferredAuthority();
     const errors: unknown[] = [];

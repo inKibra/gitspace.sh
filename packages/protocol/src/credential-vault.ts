@@ -89,6 +89,7 @@ export const controlOperationSchema = z.enum([
   'project.environment.runLog',
   'project.setLifecycle',
   'project.activateSource',
+  'project.setBaseBranch',
   'project.workspaces.list',
   'project.delete',
   'project.workspaces.put',
@@ -145,6 +146,14 @@ export const controlOperationSchema = z.enum([
   'settings.git.get',
   'settings.git.update',
   'settings.subscribe',
+  'inference.list',
+  'inference.create',
+  'inference.update',
+  'inference.delete',
+  'inference.assign',
+  'inference.resolve',
+  'inference.providers',
+  'inference.subscribe',
   'space.beginClose',
   'space.commitClosed',
   'space.abortClose',
@@ -198,6 +207,17 @@ export const signedControlRequestSchema = z.object({
   signature: z.string().min(64).max(128),
 });
 export type SignedControlRequest = z.infer<typeof signedControlRequestSchema>;
+/**
+ * Maximum age of every signed control, credential, relay, RPC and root request.
+ * Replay tables must retain nonces at least as long as the longest window they accept.
+ */
+export const SIGNED_REQUEST_MAX_AGE_MS = 5 * 60_000;
+/**
+ * Maximum age of a signed `data.put`. Edges buffer whole bodies before the Worker
+ * runs, so large uploads arrive long after signing. The signature binds key, hash,
+ * size and a single-use nonce, so a replay can only rewrite identical bytes.
+ */
+export const SIGNED_UPLOAD_MAX_AGE_MS = 30 * 60_000;
 
 export const sealedMachineCredentialSchema = z.object({
   version: z.literal(1),

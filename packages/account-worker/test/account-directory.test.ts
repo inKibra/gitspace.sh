@@ -177,7 +177,7 @@ describe('account directory projection', () => {
       const unavailable = { ...env, USER_PROJECTS: { getByName: () => ({ publishDirectory: async () => { throw new Error('Directory unavailable'); } }) } } as unknown as Env;
       const authority = new ProjectAuthorityDO(state, unavailable);
       await state.blockConcurrencyWhile(async () => {});
-      authority.bootstrap({ ...project, createdBy: machine.id });
+      await authority.bootstrap({ ...project, createdBy: machine.id });
       authority.putWorkspace({ ...workspace, expectedRevision: 0 });
       await authority.alarm();
       expect(await state.storage.getAlarm()).not.toBeNull();

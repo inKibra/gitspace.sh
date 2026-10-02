@@ -1,11 +1,11 @@
 import { authPolicyFor, authProviders } from '@oh-my-pi/pi-catalog/compat/auth';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
+import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
 import { consumeDurableStream } from './durable-stream.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import type { LifecycleState } from '@gitspace/protocol-environment';
 import type { CloudImageState } from '@gitspace/protocol/cloud-image';
 import {
-  credentialProtocolBase64, requiredCapability, requiresImageSelectionControl, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
+  credentialProtocolBase64, deviceCanAdminister, requiredCapability, requiresImageSelectionControl, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
   type DeviceCapability, type GitSpaceRpcContext, type ProviderView, type CloudProjectSummary,
 } from '@gitspace/protocol';
 import {
@@ -21,13 +21,15 @@ import {
   ensureGitSpaceProjectContract, placementsContract, locateSessionContract, type SpacePlacementView,
   projectEventsContract, projectDirectoryEventsContract, environmentEventsContract, spaceEventsContract, recordIncidentContract,
 } from '@gitspace/protocol/rpc-contract';
+import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract, inferenceEventsContract } from '@gitspace/protocol/rpc-contract';
+import type { InferenceState } from '@gitspace/protocol/inference';
 import { parse } from 'devalue';
 import { contractDigest, err, ok } from 'result-rpc';
 import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js';
-import { controlFleetMachine, provisionManagedSandbox, proxyAccountMachineRpc, reconcileFleetMachines, type CredentialVaultDO } from './application.js';
+import { controlFleetMachine, provisionManagedSandbox, reconcileFleetMachines, type CredentialVaultDO } from './application.js';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { UserSettingsDO, SettingsSnapshot } from './user-settings.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
@@ -72,6 +74,33 @@ async function readBody(request: Pick<Request, 'body'>): Promise<Uint8Array | nu
   return body;
 }
 
+/** The canonical workspace of a session, from whichever account project owns it. */
+async function sessionSpaceId(env: Env, userId: string, sessionId: string): Promise<string | null> {
+  const projects = await env.USER_PROJECTS.getByName(userId).list();
+  const sessions = await Promise.all(projects.map((project) => env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`).getCanonicalSession(sessionId)));
+  return sessions.find((session) => session !== null)?.workspaceId ?? null;
+}
+
+/** Machines currently holding the spaces and sessions a batch names. A target
+ * without a live holder can run on any machine, so it never selects one. */
+async function liveHolders(env: Env, userId: string, items: readonly { path: string; input: unknown }[]): Promise<FleetMachineDefinition[]> {
+  const spaceIds = new Set<string>();
+  const sessionIds = new Set<string>();
+  for (const item of items) {
+    const target = rpcCallTarget(item.path, item.input);
+    if (target?.kind === 'space') spaceIds.add(target.spaceId);
+    else if (target) sessionIds.add(target.sessionId);
+  }
+  for (const spaceId of await Promise.all([...sessionIds].map((sessionId) => sessionSpaceId(env, userId, sessionId)))) {
+    if (spaceId) spaceIds.add(spaceId);
+  }
+  const placements = await Promise.all([...spaceIds].map((spaceId) => env.SPACE_AUTHORITY.getByName(`${userId}:${spaceId}`).get()));
+  const machineIds = new Set(placements.flatMap((placement) => placement?.state === 'open' && placement.machineId ? [placement.machineId] : []));
+  if (machineIds.size === 0) return [];
+  const catalog = env.FLEET_CATALOG.getByName(userId);
+  const machines = await Promise.all([...machineIds].map((machineId) => catalog.getMachine(machineId)));
+  return machines.flatMap((machine) => machine?.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint ? [machine] : []);
+}
 
 function accountRouter(env: Env, userId: string, deviceId: string, origin: string) {
   const server = serverRpc.context<GitSpaceRpcContext>();
@@ -86,11 +115,10 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     const now = Date.now();
     return records.map((record) => ({ record, verified: verifyDeviceGrantRecord(record, rootKey, now, (id) => byId[id] ?? null) }));
   };
-  const requireHuman = async () => {
-    const device = (await deviceRecords()).find(({ record }) => record.binding.deviceId === deviceId)?.verified;
-    if (!device || device.kind !== 'browser' || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.write')) {
-      throw new Error('Lifecycle approval and recovery require an authenticated human browser');
-    }
+  const requireAdministration = async (capability: 'account.admin' | 'lifecycle.control' = 'account.admin') => {
+    const device = await vault.currentDeviceGrant(deviceId);
+    if (!deviceCanAdminister(device, capability)) throw new Error(`Account scope, rpc.write and ${capability} authorization are required`);
+    return device!;
   };
   // Account dispatch authorizes the tenant once. Long-lived delivery checks the
   // tenant-local grant chain and revocation, not a shared application policy.
@@ -130,16 +158,12 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   });
   const locateSession = server.implement(locateSessionContract).handler(async ({ input, errors }) => {
     try {
-      const { spaces, projects } = await readDirectory();
-      for (const project of projects) {
-        const session = await (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${userId}:${project.id}`).getCanonicalSession(input.sessionId);
-        if (session) return ok(spaces.find((space) => space.spaceId === session.workspaceId) ?? null);
-      }
-      return ok(null);
+      const spaceId = await sessionSpaceId(env, userId, input.sessionId);
+      return ok(spaceId ? (await readDirectory()).spaces.find((space) => space.spaceId === spaceId) ?? null : null);
     } catch (error) { return err(errors.OperationFailed({ operation: 'locate session', message: message(error) })); }
   });
-  const providers = async (): Promise<ProviderView[]> => {
-    const [snapshot, machines] = await Promise.all([vault.ompSnapshot(), catalog.listMachines()]);
+  const providers = async (profileId: string): Promise<ProviderView[]> => {
+    const [snapshot, machines] = await Promise.all([vault.ompSnapshot(profileId), catalog.listMachines()]);
     const online = machines.some((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
     return authProviders().map((policy) => {
       const credentialProvider = policy.storeAs ?? policy.id;
@@ -165,8 +189,8 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       };
     });
   };
-  const provider = async (id: string) => {
-    const value = (await providers()).find((item) => item.id === id);
+  const provider = async (profileId: string, id: string) => {
+    const value = (await providers(profileId)).find((item) => item.id === id);
     if (!value) throw new Error(`Unknown provider: ${id}`);
     return value;
   };
@@ -397,24 +421,26 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return ok({ deviceId: result.value.deviceId, revokedAt: new Date(result.value.revokedAt).toISOString() });
     } catch (error) { return err(errors.OperationFailed({ operation: 'revoke device', message: message(error) })); }
   });
-  const listProviders = server.implement(listProvidersContract).handler(async ({ errors }) => {
-    try { return ok({ providers: await providers() }); }
+  const listProviders = server.implement(listProvidersContract).handler(async ({ input, errors }) => {
+    try { return ok({ providers: await providers(input.profileId) }); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list providers', message: message(error) })); }
   });
   const setApiKey = server.implement(setProviderApiKeyContract).handler(async ({ input, errors }) => {
     try {
+      await requireAdministration();
       const policy = authPolicyFor(input.providerId);
       if (!policy || policy.apiKeyFormat !== 'bearer' || (policy.login && policy.login.kind !== 'api-key' && !policy.env)) throw new Error('This provider requires machine-based sign-in');
-      await vault.putBrowserApiKey(policy.storeAs ?? policy.id, input.key);
-      return ok({ provider: await provider(input.providerId) });
+      await vault.putBrowserApiKey(input.profileId, policy.storeAs ?? policy.id, input.key);
+      return ok({ provider: await provider(input.profileId, input.providerId) });
     } catch (error) { return err(errors.OperationFailed({ operation: 'set provider API key', message: message(error) })); }
   });
   const logout = server.implement(logoutProviderContract).handler(async ({ input, errors }) => {
     try {
+      await requireAdministration();
       const policy = authPolicyFor(input.providerId);
       if (!policy) throw new Error(`Unknown provider: ${input.providerId}`);
-      await vault.disableBrowserCredentials(policy.storeAs ?? policy.id, input.credentialId);
-      return ok({ provider: await provider(input.providerId) });
+      await vault.disableBrowserCredentials(input.profileId, policy.storeAs ?? policy.id, input.credentialId);
+      return ok({ provider: await provider(input.profileId, input.providerId) });
     } catch (error) { return err(errors.OperationFailed({ operation: 'sign out provider', message: message(error) })); }
   });
   const getComposio = server.implement(getComposioSetupContract).handler(async ({ errors }) => {
@@ -432,61 +458,121 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     try { await vault.deleteProviderSecret('composio'); return ok(await composioSetup()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'delete Composio setup', message: message(error) })); }
   });
+  const inferenceList = server.implement(inferenceListContract).handler(async ({ errors }) => {
+    try { return ok(await vault.ensureInference()); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'list inference profiles', message: message(error) })); }
+  });
+  const inferenceCreate = server.implement(inferenceCreateContract).handler(async ({ input, errors }) => {
+    try { await requireAdministration(); return ok(await vault.createInferenceProfile(input)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'create inference profile', message: message(error) })); }
+  });
+  const inferenceUpdate = server.implement(inferenceUpdateContract).handler(async ({ input, errors }) => {
+    try {
+      await requireAdministration();
+      const result = await vault.updateInferenceProfile(input);
+      if (result.status === 'conflict') return err(errors.SettingsConflict({ resource: result.resource, expected: result.expected, actual: result.actual }));
+      return ok(result.value);
+    } catch (error) { return err(errors.OperationFailed({ operation: 'update inference profile', message: message(error) })); }
+  });
+  const inferenceDelete = server.implement(inferenceDeleteContract).handler(async ({ input, errors }) => {
+    try {
+      await requireAdministration();
+      const result = await vault.deleteInferenceProfile(input);
+      if (result.status === 'conflict') return err(errors.SettingsConflict({ resource: result.resource, expected: result.expected, actual: result.actual }));
+      return ok(result.value);
+    } catch (error) { return err(errors.OperationFailed({ operation: 'delete inference profile', message: message(error) })); }
+  });
+  const inferenceAssign = server.implement(inferenceAssignContract).handler(async ({ input, errors }) => {
+    try {
+      await requireAdministration();
+      const result = await vault.assignInferenceProfile(input);
+      if (result.status === 'conflict') return err(errors.SettingsConflict({ resource: result.resource, expected: result.expected, actual: result.actual }));
+      return ok(result.value);
+    } catch (error) { return err(errors.OperationFailed({ operation: 'assign inference profile', message: message(error) })); }
+  });
+  const inferenceEvents = server.implement(inferenceEventsContract).stream(async function* ({ input, signal, errors }) {
+    try {
+      await requireSubscription();
+      for await (const event of consumeDurableStream<InferenceState>(await vault.watchInference(input.after), signal)) {
+        await requireSubscription();
+        yield ok(event);
+      }
+    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to inference profiles', message: message(error) })); }
+  });
   const configuration = configurationCloudProcedures(env, userId, deviceId, origin);
   return server.router({
     placements, session: { locate: locateSession },
+    inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign, events: inferenceEvents },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, omp: { get: getOmp }, events: settingsEvents },
     machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, ensureGitSpace, events: projectEvents, directoryEvents },
     space: { events: spaceEvents }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, providers: { list: listProviders, apiKey: { set: setApiKey }, logout },
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
-    inspector: inspectorCloudProcedures(env, userId, requireSubscription),
-    environment: { ...environmentCloudProcedures(env, userId, deviceId, requireHuman), events: environmentEvents },
+    inspector: inspectorCloudProcedures(env, userId, requireSubscription, async () => {
+      const device = await vault.currentDeviceGrant(deviceId);
+      if (!device) throw new Error('Device authority has expired or been revoked');
+      return device;
+    }),
+    environment: { ...environmentCloudProcedures(env, userId, deviceId, () => requireAdministration('lifecycle.control')), events: environmentEvents },
   });
 }
 
-/** Called after the account's active-state and tenant-hostname checks.
- * Null leaves an untouched request for the existing machine proxy. */
-export async function handleAccountCloudRpc(request: Request, env: Env, userId: string): Promise<Response | null> {
-  if (request.method !== 'POST') return transportError(405, 'RPC_METHOD_INVALID', 'RPC requests must use POST');
+/** Where the account sends a `/rpc` request: answered here (`target: 'cloud'`
+ * when the account router served it), or forwarded untouched to one machine,
+ * any online machine when `holder` is null. A signed batch is never split. */
+export type AccountRpcRoute =
+  | { kind: 'response'; response: Response; procedures?: readonly string[]; target?: 'cloud' }
+  | { kind: 'machine'; procedures: readonly string[]; holder: FleetMachineDefinition | null };
+
+/** Called after the account's active-state and tenant-hostname checks. */
+export async function handleAccountCloudRpc(request: Request, env: Env, userId: string): Promise<AccountRpcRoute> {
+  if (request.method !== 'POST') return { kind: 'response', response: transportError(405, 'RPC_METHOD_INVALID', 'RPC requests must use POST') };
   const copy = request.clone();
   const body = await readBody(copy);
   if (!body) {
     // A tee branch's cancellation waits for its sibling; cancel both together.
     await Promise.all([copy.body?.cancel(), request.body?.cancel()]);
-    return transportError(413, 'RPC_REQUEST_TOO_LARGE', 'RPC request exceeds the account limit');
+    return { kind: 'response', response: transportError(413, 'RPC_REQUEST_TOO_LARGE', 'RPC request exceeds the account limit') };
   }
   let items: z.infer<typeof envelopeSchema>;
   try { items = envelopeSchema.parse(parse(new TextDecoder().decode(body))); }
-  catch { return transportError(400, 'RPC_ENVELOPE_INVALID', 'RPC request envelope is invalid'); }
+  catch { return { kind: 'response', response: transportError(400, 'RPC_ENVELOPE_INVALID', 'RPC request envelope is invalid') }; }
+  const procedures = [...new Set(items.map((item) => item.path))];
+  const reject = (status: number, code: string, text: string): AccountRpcRoute => ({ kind: 'response', response: transportError(status, code, text), procedures });
   const spaceReads = items.filter((item) => isSpaceCloudRpcPath(item.path));
   if (spaceReads.length > 0) {
-    if (spaceReads.length !== items.length) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads and other operations require separate signed batches');
+    if (spaceReads.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads and other operations require separate signed batches');
     const spaceId = spaceCloudRpcSpaceId(spaceReads[0]!.input);
-    if (spaceReads.some((item) => spaceCloudRpcSpaceId(item.input) !== spaceId)) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads require separate signed batches');
+    if (spaceReads.some((item) => spaceCloudRpcSpaceId(item.input) !== spaceId)) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads require separate signed batches');
     if (spaceId) {
       const placement = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${spaceId}`).get();
       if (placement?.state === 'open' && placement.machineId) {
         const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).getMachine(placement.machineId);
         if (machine?.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint) {
-          return proxyAccountMachineRpc(request, env, userId, machine);
+          return { kind: 'machine', procedures, holder: machine };
         }
       }
     }
   }
   const cloud = items.filter((item) => Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, item.path) || isSpaceCloudRpcPath(item.path));
-  if (cloud.length === 0) return null;
-  if (cloud.length !== items.length) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Cloud and machine operations must use separate signed batches');
-  if (items.some((item) => Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, item.path))) {
-    if (items.some((item) => !Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, item.path))) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Runtime metadata requires a separate signed batch');
-    const machines = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines();
-    if (machines.some((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint)) return null;
+  if (cloud.length === 0) {
+    const holders = await liveHolders(env, userId, items);
+    if (holders.length > 1) return reject(400, 'RPC_MIXED_HOLDER_BATCH', `This batch names spaces held by different machines (${holders.map((machine) => machine.id).join(', ')}); send calls for each space or session in a separate signed batch`);
+    return { kind: 'machine', procedures, holder: holders[0] ?? null };
   }
+  if (cloud.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Cloud and machine operations must use separate signed batches');
+  if (items.some((item) => Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, item.path))) {
+    if (items.some((item) => !Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, item.path))) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Runtime metadata requires a separate signed batch');
+    const machines = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines();
+    if (machines.some((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint)) return { kind: 'machine', procedures, holder: null };
+  }
+  // A CPU-limit kill leaves no later log line; joining this line by request ID names the batch.
+  console.log(JSON.stringify({ event: 'rpc_start', procedures, items: items.length, requestBytes: body.byteLength }));
   const capabilities: DeviceCapability[] = [];
   for (const item of items) {
     const procedure = gitspaceContract.procedures.get(item.path);
-    if (!procedure) return transportError(404, 'RPC_PROCEDURE_UNKNOWN', `Unknown procedure ${item.path}`);
+    if (!procedure) return reject(404, 'RPC_PROCEDURE_UNKNOWN', `Unknown procedure ${item.path}`);
     const capability = requiredCapability(item.path, procedure._def.kind);
     if (!capabilities.includes(capability)) capabilities.push(capability);
     if (requiresImageSelectionControl(item.path, item.input) && !capabilities.includes('deployment.control')) capabilities.push('deployment.control');
@@ -494,9 +580,9 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   const url = new URL(request.url);
   const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId);
   const authorized = await vault.authorizeAccountDeviceRequest({ header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body, capabilities });
-  if (authorized.status === 'error') return transportError(authorized.error.code === 'REQUEST_REPLAY' ? 409 : authorized.error.code === 'RPC_FORBIDDEN' ? 403 : 401, authorized.error.code, authorized.error.message);
+  if (authorized.status === 'error') return reject(authorized.error.code === 'REQUEST_REPLAY' ? 409 : authorized.error.code === 'RPC_FORBIDDEN' ? 403 : 401, authorized.error.code, authorized.error.message);
   const handler = createFetchHandler({ router: accountRouter(env, userId, authorized.value.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: CONTRACT_VERSION, createContext: () => ({}) });
   const response = await handler(request);
   response.headers.set('cache-control', 'private, no-store');
-  return response;
+  return { kind: 'response', response, procedures, target: 'cloud' };
 }

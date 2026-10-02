@@ -70,6 +70,10 @@ describe('CredentialVaultDO', () => {
     });
     const replay = await vault.getAccess(request);
     expect(replay).toMatchObject({ status: 'error', error: { code: 'REQUEST_REPLAY' } });
+    const stale = { userId: 'user-a', machineId: 'machine-a', credentialId: 'openai-primary', signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - 6 * 60_000 };
+    // Age alone is distinguishable so a signer can re-sign; any other defect stays invalid.
+    expect(await vault.getAccess(createCredentialAccessRequest(stale))).toMatchObject({ status: 'error', error: { code: 'REQUEST_EXPIRED', message: 'Signed request expired' } });
+    expect(await vault.getAccess(createCredentialAccessRequest({ ...stale, userId: 'user-b' }))).toMatchObject({ status: 'error', error: { code: 'INVALID_REQUEST' } });
   });
 
   it('refreshes an expired rotating token inside the Worker and atomically advances revision', async () => {

@@ -1,7 +1,9 @@
-import type { TransportBlock, TurnBlock } from '@gitspace/blocks';
+import { rpcErrorMessage } from './rpc-error-message.js';
+import type { AskBlock, TransportBlock, TurnBlock } from '@gitspace/blocks';
 import type { PendingAskAnswer, SessionControlView } from '@gitspace/protocol';
 import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import type { WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
 import {
   Badge,
   Button,
@@ -29,15 +31,18 @@ import { Archive, GitBranch01, LayoutRight, RefreshCcw01, Terminal, XClose } fro
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject, type SidebarSpaceSummary } from './AppSidebar.js';
 import { Composer, type SendBehavior } from './Composer.js';
+import { useInference } from './InferenceContext.js';
+import { AccountDirectoryContext } from './useAccountDirectory.js';
 import type { AppView } from './routes.js';
 import type { SkillView } from '@gitspace/protocol/skills-contract';
-import { TurnTranscript } from './TurnTranscript.js';
+import type { InferenceProfile } from '@gitspace/protocol/inference';
+import { AskBlockView, TurnTranscript } from './TurnTranscript.js';
 import { VirtualTranscript } from './VirtualTranscript.js';
 import type { TranscriptHistory } from './useTranscriptHistory.js';
 import { WorkspaceTerminals, type WorkspaceTerminalsProps } from './WorkspaceTerminals.js';
 import { WorkspacePicker, type WorkspacePickerItem } from './WorkspacePicker.js';
 import { glyph } from './glyph.js';
-import { ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
+import { ResourceLink, ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
 
 /** Where a space lives right now, from the account-wide placement table: held by a machine, released to the cloud, or not yet known. */
 export type SpaceHolderView =
@@ -171,7 +176,7 @@ export interface GitSpaceShellProps {
   onNavigateView?: (view: AppView) => void;
   skills?: readonly SkillView[];
   renderInspector?: (onClose: () => void, initialView?: 'environment', resource?: ResourceRequest) => ReactNode;
-  renderEnvironmentStatus?: (onInspect: () => void) => ReactNode;
+  renderEnvironmentStatus?: (onInspect: () => void, onRevealTerminal: (name: string) => void) => ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
   /** Machine-local model provider auth state; drives the composer's not-connected notice. */
@@ -193,10 +198,18 @@ function selectOptions(options: readonly { value: string; label: ReactNode; disa
   return <SelectContent>{options.map((option, index) => <SelectItem value={option.value} index={index} disabled={option.disabled} key={option.value}>{option.label}</SelectItem>)}</SelectContent>;
 }
 
-type SpaceStatusView = Pick<AgentScopeView, 'closedAt' | 'holder'> & { status?: AgentScopeView['status']; freshness?: 'fresh' | 'stale' | 'unknown' };
+/** A worktree whose creation has not finished; its lifecycle outranks placement and runtime status. */
+export type WorkspaceCreationState = Extract<WorkspaceLifecycle, 'provisioning' | 'failed'>;
+const CREATION_STATUS: Record<WorkspaceCreationState, { label: string; color: WorkspaceStatusColor }> = {
+  provisioning: { label: 'Creating…', color: 'orange' },
+  failed: { label: 'Creation failed', color: 'red' },
+};
+
+type SpaceStatusView = Pick<AgentScopeView, 'closedAt' | 'holder'> & { status?: AgentScopeView['status']; freshness?: 'fresh' | 'stale' | 'unknown'; creation?: WorkspaceCreationState };
 
 export function workspaceStatusColor(space: SpaceStatusView): WorkspaceStatusColor {
   if (space.closedAt || space.holder.kind === 'released') return 'dim';
+  if (space.creation) return CREATION_STATUS[space.creation].color;
   if (space.status?.agents.red) return 'red';
   if (space.holder.kind === 'unknown' || space.freshness === 'stale' || space.freshness === 'unknown' || !space.status || space.status.primaryColor === 'dim') return 'orange';
   return space.status.primaryColor;
@@ -204,6 +217,7 @@ export function workspaceStatusColor(space: SpaceStatusView): WorkspaceStatusCol
 
 export function workspaceStatusLabel(space: SpaceStatusView): string {
   if (space.closedAt) return 'Archived';
+  if (space.creation) return CREATION_STATUS[space.creation].label;
   if (space.holder.kind === 'released') return 'Closed';
   if (space.status?.agents.red) return 'Failed';
   if (space.freshness === 'stale') return 'Status unavailable · last known status';
@@ -218,6 +232,19 @@ export function workspaceStatusLabel(space: SpaceStatusView): string {
     case 'dim': return 'Agent unavailable';
     default: return 'Status unknown';
   }
+}
+
+/**
+ * Header suffix while this session's admitted profile differs from the project's current assignment.
+ * Running work keeps its admitted profile; the next turn is admitted with the assignment.
+ */
+export function pendingProfileChange(
+  admitted: Pick<NonNullable<SessionControlView['inference']>, 'profileId' | 'profileRevision'> | undefined,
+  next: Pick<InferenceProfile, 'id' | 'name' | 'revision'> | undefined,
+): string | null {
+  if (!admitted || !next) return null;
+  if (admitted.profileId !== next.id) return `Next turn uses ${next.name}`;
+  return admitted.profileRevision === next.revision ? null : `Next turn uses updated ${next.name}`;
 }
 
 /** Row suffix: the machine holding the space, or `released` when it is closed in the cloud but not archived. */
@@ -296,6 +323,21 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   const shape = useShape();
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
   const pendingAsk = sessionControls?.value.pendingAsk ?? null;
+  const answerInline = pendingAsk?.source === 'ask-tool' && sessionControls ? (answers: PendingAskAnswer[]) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined;
+  // GitSpace's own questions (plan approval) have no ask call in the transcript to attach to.
+  const standaloneAsk: AskBlock | null = pendingAsk?.source === 'gitspace' ? {
+    id: pendingAsk.id, type: 'ask', toolCallId: pendingAsk.id, status: 'pending',
+    questions: pendingAsk.questions.map((question) => ({
+      id: question.id, prompt: question.question, multiple: question.multi,
+      ...(question.header ? { header: question.header } : {}),
+      ...(question.recommended === null ? {} : { recommended: question.recommended }),
+      options: question.options.map((option) => ({
+        id: option.label, title: option.label,
+        ...(option.description ? { description: option.description } : {}),
+        ...(option.preview ? { preview: option.preview } : {}),
+      })),
+    })),
+  } : null;
   // Released: closed in the cloud with its files kept somewhere; the transcript above is the checkpoint, read-only.
   const released = !workspace.closedAt && workspace.holder.kind === 'released';
   const inactive = mainAgent?.controlsAvailable === false;
@@ -314,7 +356,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
       else if (released && claimMachineId) await onClaimWorkspace?.(workspace.id, claimMachineId);
       else if (onRetryAgent) await onRetryAgent();
       else await onReopenSpace?.(workspace.id);
-    } catch (failure) { setOpenError(failure instanceof Error ? failure.message : String(failure)); }
+    } catch (failure) { setOpenError(rpcErrorMessage(failure, 'Open workspace agent')); }
     finally { openingRef.current = false; setOpening(false); }
   };
   const claimMachineId = [chosenMachineId, defaultMachineId, homeMachineId, claimMachines[0]?.id ?? null]
@@ -386,12 +428,22 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
     {workspace.status.compaction && mainAgent?.state === 'running' ? <p role="status" className="flex shrink-0 items-center gap-2 px-4 py-2 text-caption text-muted-foreground"><ThinkingIndicator />Compacting context{workspace.status.compaction.detail ? ` · ${workspace.status.compaction.detail}` : ''}</p> : null}
     <ScrollArea ref={bindTranscriptViewport} onTouchStartCapture={transcript ? undefined : onTranscriptTouchStart} onTouchEndCapture={transcript ? undefined : onTranscriptTouchEnd} onTouchCancelCapture={transcript ? undefined : onTranscriptTouchEnd} className="min-h-0 flex-1" viewportClassName="h-full">
       {transcript
-        ? <VirtualTranscript history={transcript} transport={transport} onAnswer={pendingAsk && sessionControls ? (answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined} />
-        : <TurnTranscript turns={turns} transport={transport} onAnswer={pendingAsk && sessionControls ? (answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined} />}
+        ? <VirtualTranscript history={transcript} transport={transport} onAnswer={answerInline} />
+        : <TurnTranscript turns={turns} transport={transport} onAnswer={answerInline} />}
     </ScrollArea>
     {banner ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-3"><div className="pointer-events-auto">{banner}</div></div> : null}
     <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-4">
       <div className="w-full max-w-xl">
+        {standaloneAsk && pendingAsk && sessionControls
+          ? <div className={`${shape.container} pointer-events-auto mb-2 flex max-h-[50dvh] flex-col gap-2 overflow-y-auto bg-surface-3 p-3 shadow-surface-3`}>
+              {pendingAsk.links.length
+                ? <nav aria-label="Review before answering" className="flex flex-wrap gap-3 text-caption">
+                    {pendingAsk.links.map((link) => <ResourceLink key={link.uri} href={link.uri} className="text-foreground underline underline-offset-2">{link.label}</ResourceLink>)}
+                  </nav>
+                : null}
+              <AskBlockView key={standaloneAsk.id} item={standaloneAsk} onAnswer={(answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers)} />
+            </div>
+          : null}
         {idle
           ? <div className={`${shape.container} pointer-events-auto flex items-center gap-3 bg-surface-3 p-3 shadow-surface-3`}>
               <span className="text-muted-foreground">{workspace.closedAt || released ? <Archive width={16} height={16} strokeWidth={1.5} /> : <StatusDot color="orange" />}</span>
@@ -534,6 +586,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 // ── Shell ──
 export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, machines = [], onSend, sessionControls, controlsError, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
+  const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorSection, setInspectorSection] = useState<'environment' | undefined>();
   const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
@@ -543,6 +596,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     return Number.isFinite(stored) && stored > 0 ? Math.min(1200, Math.max(300, stored)) : 440;
   });
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [requestedTerminal, setRequestedTerminal] = useState<{ spaceId: string; name: string } | null>(null);
   const [terminalHeight, setTerminalHeight] = useState(300);
   const [newWorkspaceFor, setNewWorkspaceFor] = useState<{ projectId: string; phase: WorkspaceView['phase'] } | null>(null);
   const [newProject, setNewProject] = useState(false);
@@ -561,7 +615,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     try {
       if (restore) await onClaimWorkspace?.(spaceId, null);
       else await onReopenSpace?.(spaceId);
-    } catch (cause) { setCloseError(cause instanceof Error ? cause.message : String(cause)); }
+    } catch (cause) { setCloseError(rpcErrorMessage(cause, restore ? 'Restore workspace' : 'Open workspace')); }
     finally { openPendingRef.current = false; setOpenPendingSpaceId(null); }
   };
   const restoreHome = onClaimWorkspace ? (spaceId: string) => requestOpen(spaceId, true) : undefined;
@@ -572,7 +626,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     try {
       await onCloseSpace(spaceId);
     } catch (failure) {
-      setCloseError(failure instanceof Error ? failure.message : String(failure));
+      setCloseError(rpcErrorMessage(failure, 'Close workspace'));
     } finally {
       setClosePendingSpaceId(null);
     }
@@ -587,7 +641,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     onNavigateView?.(nextView);
     if (nextView !== 'agent') { setInspectorOpen(false); setTerminalOpen(false); }
   };
-  const selectedSummary = useMemo<SidebarSpaceSummary>(() => ({
+  const fallbackSummary = useMemo<SidebarSpaceSummary>(() => ({
     holder: workspace.holder,
     closedAt: workspace.closedAt,
     generation: workspace.generation,
@@ -595,7 +649,13 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     freshness: !project.connected ? 'stale' : !mainAgent || mainAgent.controlsAvailable === false ? 'unknown' : 'fresh',
     detail: !project.connected ? 'Connection unavailable' : mainAgent?.recovering ? 'Agent is recovering' : !mainAgent || mainAgent.controlsAvailable === false ? 'Agent unavailable' : null,
   }), [workspace, project.connected, mainAgent]);
+  const directoryProject = accountDirectory?.directory[workspace.projectId];
+  const selectedSummary = accountDirectory
+    ? (workspace.kind === 'project' ? directoryProject?.baseSummary : directoryProject?.workspaces.find((space) => space.id === workspace.id)?.summary)
+      ?? { holder: { kind: 'unknown' as const }, closedAt: null, freshness: 'unknown' as const }
+    : fallbackSummary;
   const sidebarProjects = useMemo<SidebarProject[]>(() => {
+    if (accountSidebar) return [];
     const byProject = new Map<string, SidebarProject>((projects ?? []).map((item) => [item.id, { id: item.id, name: item.name, lifecycle: item.lifecycle, workspaces: [] }]));
     byProject.set(baseSpace.projectId, { ...byProject.get(baseSpace.projectId), id: baseSpace.projectId, name: baseSpace.projectName, base: baseSpace, ...(workspace.id === baseSpace.id ? { baseSummary: selectedSummary } : {}), workspaces: [] });
     for (const item of workspaces) {
@@ -604,10 +664,13 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       byProject.set(item.projectId, entry);
     }
     return [...byProject.values()];
-  }, [projects, baseSpace, workspaces, workspace.id, selectedSummary]);
+  }, [accountSidebar, projects, baseSpace, workspaces, workspace.id, selectedSummary]);
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
   const statusColor = workspaceStatusColor(selectedSummary);
-  const recovering = mainAgent?.recovering === true;
+  const recovering = selectedSummary.detail === 'Agent is recovering';
+  const inferenceState = useInference()?.state;
+  const assignedProfileId = inferenceState?.assignments.find((entry) => entry.projectId === workspace.projectId)?.profileId;
+  const profileChange = pendingProfileChange(sessionControls?.value.inference, inferenceState?.profiles.find((entry) => entry.id === assignedProfileId));
 
   const sidebar: AppSidebarProps = {
     view: 'agent',
@@ -639,8 +702,8 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
           {workspace.kind === 'workspace' ? <><span className="text-muted-foreground max-md:hidden">·</span><span className="truncate font-semibold text-foreground">{workspace.name}</span></> : null}
         </nav>
         <div className="flex items-center gap-1">
-            {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); })}
-            <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><StatusDot color={statusColor} pulse={statusColor === 'green'} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)}</span></span>
+            {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); }, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
+            <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><StatusDot color={statusColor} pulse={statusColor === 'green'} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)}{profileChange ? ` · ${profileChange}` : ''}</span></span>
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
             {!workspace.closedAt && workspace.holder.kind === 'released' && onReopenSpace ? <Button variant="secondary" size="compact" loading={openPendingSpaceId === workspace.id} disabled={openPendingSpaceId !== null} onClick={() => void requestOpen(workspace.id)} leadingIcon={glyph(RefreshCcw01)}>{openPendingSpaceId === workspace.id ? 'Opening…' : 'Reopen'}</Button> : null}
             {!workspace.closedAt && workspace.holder.kind !== 'released' && onCloseSpace ? <Button variant="ghost" size="compact" loading={closePendingSpaceId === workspace.id} disabled={closePendingSpaceId !== null} onClick={() => void requestClose(workspace.id)} leadingIcon={glyph(XClose)}>{closePendingSpaceId === workspace.id ? running ? 'Stopping agent…' : 'Closing…' : running ? 'Stop and close' : 'Close'}</Button> : null}
@@ -660,7 +723,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined)}</aside> : null}
             </div>
-            {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals {...terminals} onClose={() => setTerminalOpen(false)} /></section></> : null}
+            {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
     </div>
     {onCreateProject ? <CreateProjectDialog open={newProject} onOpenChange={(open) => { setNewProject(open); if (!open) setCreateError(null); }} pending={createPending} error={newProject ? createError : null} onSubmit={async (input) => {
@@ -668,14 +731,14 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       createPendingRef.current = true;
       setCreatePending(true);
       setCreateError(null);
-      try { await onCreateProject(input); setNewProject(false); } catch (failure) { setCreateError(failure instanceof Error ? failure.message : String(failure)); } finally { createPendingRef.current = false; setCreatePending(false); }
+      try { await onCreateProject(input); setNewProject(false); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create project')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
     {onCreateWorkspace ? <CreateWorkspaceDialog key={newWorkspaceFor ? `${newWorkspaceFor.projectId}:${newWorkspaceFor.phase}` : 'closed'} projectId={newWorkspaceFor?.projectId ?? null} initialPhase={newWorkspaceFor?.phase} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setNewWorkspaceFor(null); setCreateError(null); } }} pending={createPending} error={createError} onSubmit={async (input) => {
       if (createPendingRef.current) return;
       createPendingRef.current = true;
       setCreatePending(true);
       setCreateError(null);
-      try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(failure instanceof Error ? failure.message : String(failure)); } finally { createPendingRef.current = false; setCreatePending(false); }
+      try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create workspace')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
   </ResourceNavigation.Provider>;
   return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false}><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
