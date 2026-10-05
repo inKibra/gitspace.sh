@@ -13,22 +13,17 @@ import {
   CloudSpaceCheckpointAuthority,
   BrowserRelaySupervisor,
   CanonicalSettingsCoordinator,
-  ProcessOmpRuntime,
   EncryptedCheckpointBlobStore,
   MachinePortableSpaceController,
   MachineSessionCoordinator,
   MachineMcpCoordinator,
-  ProfileProviderAuthCoordinator,
   SharedGitIdentityCoordinator,
   PortableSpaceLifecycle,
-  WalgitSupervisor,
+  ArtifactsGitRemote,
   WorkspaceHubTerminalCoordinator,
   createGitSpaceRpcHandler,
-  drainProjectCronQueues,
-  PROJECT_CRON_FAILURE_RETRY_MS,
-  type ProjectCronDrainFailure,
   startGitSpaceRpcHttpServer,
-  type WalgitProjectBinding,
+  type ArtifactsRepositoryBinding,
 } from './index.js';
 import { installDefaultGitSpaceSkills } from './default-skills.js';
 import { WorkspaceServiceManager } from './workspace-services.js';
@@ -36,7 +31,6 @@ import { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import { credentialProtocolBase64, type CloudProjectSummary, type CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import { appendFileSync, existsSync } from 'node:fs';
-import { postmortem } from '@oh-my-pi/pi-utils';
 import { CloudProjectEventWriter } from './cloud-project-events.js';
 import { DeviceRegistry } from './device-registry.js';
 import { createSignedRpcHandler } from './signed-rpc.js';
@@ -44,16 +38,22 @@ import { ProjectLifecycleManager } from './project-lifecycle.js';
 import { CanonicalSessionOutbox, CloudCanonicalSessionWriter, type CanonicalPublicationIntent } from './cloud-session-directory.js';
 import { DeploymentLauncher } from './deployment-launcher.js';
 import { ReleaseFollower } from './release-follower.js';
-import { ompGenerationSelectionSchema } from './omp-runtime.js';
+import { CloudAgentRuntime } from './cloud-agent-runtime.js';
+import { readLegacyTranscriptBytes } from './legacy-transcript.js';
 import { atomicJson } from './machine-update.js';
 import { CloudArtifactObjectStore } from './cloud-artifact-object-store.js';
 import { ArtifactUploads } from './artifact-uploads.js';
 import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
 import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import { createPublishedSpaceHeadResolver } from './inspector-base.js';
-import type { SpaceWorkspaceControls } from './space-eval-sdk.js';
+import type { SpaceWorkspaceControls } from './space-workspace-controls.js';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
-import { pinnedGitLfs, sourceWalgit } from '../../deployment/src/native-build.js';
+import { pinnedGitLfs } from '../../deployment/src/native-build.js';
+import { CloudRuntimeClient } from './cloud-runtime-client.js';
+import { z } from 'zod';
+import { createMachineExecutor, type MachineExecutorRuntime } from './runtime-executor.js';
+import { machineOperationalTools } from './runtime-operations.js';
+import { RuntimeActionResultSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -185,9 +185,10 @@ async function listActiveCloudSpaces(authority: CloudSpaceCheckpointAuthority) {
 export async function startMachineRuntime() {
   const nativeRoot = process.env.GITSPACE_MACHINE_RUNTIME_PATH ?? import.meta.dir;
   const packaged = Boolean(process.env.GITSPACE_MACHINE_RUNTIME_PATH) || await Bun.file(join(nativeRoot, 'machine-native.json')).exists();
+  process.env.GITSPACE_SUPERVISOR_WORKER_ENTRY = packaged ? join(nativeRoot, 'machine-worker.js') : join(import.meta.dir, 'terminal-worker.ts');
   const native = packaged
     ? await prepareMachineNativeRuntime(nativeRoot)
-    : { walgit: await sourceWalgit(resolve(import.meta.dir, '../../..')), gitLfs: (await pinnedGitLfs()).path };
+    : { gitLfs: (await pinnedGitLfs()).path };
   if (packaged) process.env.GITSPACE_MACHINE_RUNTIME_PATH = nativeRoot;
   // Hosts already start this process with the tool directory; this also covers source runs and older hosts
   // for children spawned from process.env (OMP sessions, terminals, lifecycle scripts).
@@ -206,6 +207,8 @@ export async function startMachineRuntime() {
   };
   const authority = new CloudSpaceCheckpointAuthority(controlOptions);
   const checkpointBlobs = new CloudDataCheckpointBlobStore(controlOptions);
+  const cloudRuntime = new CloudRuntimeClient(controlOptions);
+  let executorRuntime: MachineExecutorRuntime | null = null;
   for (const job of database.listSpaceCleanupJobs()) {
     if (job.state !== 'prepared') continue;
     reconcilePreparedSpaceCleanup(database, machineId, job, await authority.getSpace(job.projectId, job.spaceId));
@@ -279,28 +282,11 @@ export async function startMachineRuntime() {
     },
   );
   await gitIdentity.start();
-  const ompAgentDir = requiredEnvironment('GITSPACE_OMP_AGENT_DIR');
-  await installDefaultGitSpaceSkills(ompAgentDir);
+  const agentDir = join(environmentRoot, 'agent');
+  await installDefaultGitSpaceSkills(agentDir);
   const mcp = new MachineMcpCoordinator(authority, machineId);
   const workspaceControls = Promise.withResolvers<SpaceWorkspaceControls>();
-  const omp = new ProcessOmpRuntime({
-    environmentRoot,
-    entrypoint: requiredEnvironment('GITSPACE_OMP_RUNTIME_PATH'),
-    manifestHash: requiredEnvironment('GITSPACE_OMP_MANIFEST_HASH'),
-    agentDir: ompAgentDir,
-    sessionRoot: join(environmentRoot, 'omp-sessions'),
-    mcp,
-    skills: () => authority.listSkills(),
-    spaceAuthority: authority,
-    workspaceControls: () => ({
-      create: async (input) => (await workspaceControls.promise).create(input),
-      manage: async (method, workspace, input) => (await workspaceControls.promise).manage(method, workspace, input),
-      instructionsChanged: async (projectId, spaceId) => (await workspaceControls.promise).instructionsChanged(projectId, spaceId),
-      refreshArtifacts: async (projectId, spaceId) => (await workspaceControls.promise).refreshArtifacts(projectId, spaceId),
-      environment: async (method, projectId, spaceId, input) => (await workspaceControls.promise).environment(method, projectId, spaceId, input),
-    }),
-    onError: (error) => console.error('[gitspace-omp]', error),
-  });
+  const agentRuntime = new CloudAgentRuntime(cloudRuntime);
   const machineReleaseSha = process.env.GITSPACE_MACHINE_RELEASE_SHA || null;
   const releases = new ReleaseFollower({
     authority,
@@ -310,22 +296,14 @@ export async function startMachineRuntime() {
     hostUrl: process.env.GITSPACE_HOST_URL ?? null,
     controlToken: process.env.GITSPACE_CONTROL_TOKEN ?? null,
     runningMachineSha: machineReleaseSha,
-    omp,
     generation: process.env.GITSPACE_GENERATION_HASH ?? null,
     onError: (error) => console.error('[gitspace-deploy]', error),
-  });
-  await omp.initialize(await releases.initialOmpSelection());
-  const providers = new ProfileProviderAuthCoordinator({
-    agentDir: ompAgentDir,
-    cwd: environmentRoot,
-    resolve: (profileId) => authority.providerInference(profileId),
-    onChanged: (profileId) => omp.reloadAuthStorage(profileId),
   });
   const managedSpaceRoot = requiredEnvironment('GITSPACE_MANAGED_SPACE_ROOT');
   const sessions = new MachineSessionCoordinator(
     database,
     artifacts,
-    omp,
+    agentRuntime,
     machineId,
     join(environmentRoot, 'runtime'),
     projectEventWriter,
@@ -347,20 +325,16 @@ export async function startMachineRuntime() {
   };
   const settings = new CanonicalSettingsCoordinator(
     authority,
-    machineId,
-    ompAgentDir,
-    environmentRoot,
-    () => sessions.reloadOmpSettings(),
     (userSettings) => gitIdentity.apply(userSettings),
   );
   await settings.start();
+  const existingMachine = (await authority.listMachineDefinitions()).find((machine) => machine.id === machineId);
+  const browserEnabled = existingMachine?.kind === 'physical' && existingMachine.provider === 'physical';
   const browserRelay = new BrowserRelaySupervisor({
-    environmentRoot,
-    agentDir: ompAgentDir,
-    command: async () => [process.execPath, await omp.commandEntrypoint()],
+    environmentRoot, machineId, enabled: browserEnabled,
     onError: (error) => console.error('[gitspace-browser-relay]', error),
   });
-  if (!process.env.GITSPACE_UPDATE_OWNER && (await browserRelay.status()).installed) {
+  if (browserEnabled && !process.env.GITSPACE_UPDATE_OWNER && (await browserRelay.status()).installed) {
     void browserRelay.start().catch((error) => console.error('[gitspace-browser-relay]', error));
   }
 
@@ -389,35 +363,20 @@ export async function startMachineRuntime() {
       for (const space of database.listSpaces(project.id)) reconcileOpenSpaceProjection(database, space.id, machineId, null);
     }
   }
-  const localGitEndpoint = process.env.GITSPACE_GIT_ENDPOINT;
-  const gitStorage = localGitEndpoint
-    ? {
-        endpoint: localGitEndpoint,
-        bucket: requiredEnvironment('GITSPACE_GIT_BUCKET'),
-        region: process.env.GITSPACE_GIT_REGION ?? 'us-east-1',
-      }
-    : await authority.gitStorageBinding();
-  const gitBinding = (projectId: string): WalgitProjectBinding => ({
-    projectId,
-    endpoint: gitStorage.endpoint,
-    bucket: gitStorage.bucket,
-    region: gitStorage.region,
-  });
-  const walgit = new WalgitSupervisor({
-    binaryPath: native.walgit,
-    runtimeRoot: join(environmentRoot, 'runtime'),
-    credentials: async (binding) => localGitEndpoint
-      ? {
-          accessKeyId: requiredEnvironment('GITSPACE_GIT_ACCESS_KEY_ID'),
-          secretAccessKey: requiredEnvironment('GITSPACE_GIT_SECRET_ACCESS_KEY'),
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1_000),
-        }
-      : authority.projectRepositoryCredentials(binding.projectId),
-    port: (binding) => projectPort(binding.projectId),
+  const gitBinding = (projectId: string, workspaceId: string): ArtifactsRepositoryBinding => ({ projectId, repository: `workspace-${workspaceId}` });
+  const repositoryCredentialsSchema = z.object({ remote: z.url(), plaintext: z.string().min(1), expiresAt: z.iso.datetime() });
+  const gitRemote = new ArtifactsGitRemote({
+    credentials: (binding, scope) => cloudRuntime.call('runtime.repository.credentials', { ...binding, scope }, repositoryCredentialsSchema),
+    lfsEnvironment: async (repositoryPath) => {
+      const origin = Bun.spawn(['git', 'remote', 'get-url', 'origin'], { cwd: repositoryPath, stdout: 'pipe', stderr: 'pipe' });
+      const [code, url, error] = await Promise.all([origin.exited, new Response(origin.stdout).text(), new Response(origin.stderr).text()]);
+      if (code !== 0) throw new Error(`LFS origin is unavailable: ${error}`);
+      return gitIdentity.gitEnvironment(url.trim());
+    },
   });
   const encryptedCheckpointBlobs = new EncryptedCheckpointBlobStore(checkpointBlobs, encryptionKey);
-  const lifecycle = new PortableSpaceLifecycle(authority, encryptedCheckpointBlobs, walgit);
-  const closedSpaceTranscripts = new ClosedSpaceTranscriptReader(authority, encryptedCheckpointBlobs, (bytes) => omp.checkpointTranscript(bytes), join(environmentRoot, 'runtime', 'transcript-checkpoints'));
+  const lifecycle = new PortableSpaceLifecycle(authority, encryptedCheckpointBlobs, gitRemote);
+  const closedSpaceTranscripts = new ClosedSpaceTranscriptReader(authority, encryptedCheckpointBlobs, async (bytes) => readLegacyTranscriptBytes(bytes), join(environmentRoot, 'runtime', 'transcript-checkpoints'), sessionFile => agentRuntime.transcript(sessionFile));
   const terminals = new WorkspaceHubTerminalCoordinator(database, machineId);
   const environments = new WorkspaceEnvironmentManager(database, authority, terminals, authority, {
     machineId,
@@ -449,13 +408,13 @@ export async function startMachineRuntime() {
         const initialized = Bun.spawn(['git', 'init', '-b', manifest.repository.branch], { cwd: directory, stdout: 'ignore', stderr: 'pipe' });
         const [exitCode, error] = await Promise.all([initialized.exited, new Response(initialized.stderr).text()]);
         if (exitCode !== 0) throw new Error(`Unable to initialize retirement checkout: ${error}`);
-        await walgit.fetchCheckpoint({ binding: gitBinding(definition.projectId), repositoryPath: directory, checkpointRef: manifest.repository.checkpointRef });
-        await restoreGitIntermediateCheckpoint({ repositoryPath: directory, branch: manifest.repository.branch, checkpoint: manifest.repository });
         if (definition.repositoryReference) {
           const origin = Bun.spawn(['git', 'remote', 'add', 'origin', definition.repositoryReference], { cwd: directory, stdout: 'ignore', stderr: 'pipe' });
           const [originExit, originError] = await Promise.all([origin.exited, new Response(origin.stderr).text()]);
           if (originExit !== 0) throw new Error(`Unable to restore canonical origin: ${originError}`);
         }
+        await gitRemote.fetchCheckpoint({ binding: gitBinding(definition.projectId, spaceId), repositoryPath: directory, checkpointRef: manifest.repository.checkpointRef });
+        await restoreGitIntermediateCheckpoint({ repositoryPath: directory, branch: manifest.repository.branch, checkpoint: manifest.repository });
         return directory;
       } catch (error) {
         await rm(directory, { recursive: true, force: true });
@@ -487,14 +446,12 @@ export async function startMachineRuntime() {
       drain: async (spaceId) => {
         await serviceManager.stopOwned(spaceId);
         await terminals.stopOwned(spaceId);
+        if (!executorRuntime) throw new Error('Executor initialization is incomplete; cannot release workspace writer');
+        await executorRuntime.drainWorkspace(spaceId);
       },
     },
     async (repositoryPath) => gitIdentity.apply(await settings.getUserSettings(), [repositoryPath]),
-    async (projectId) => {
-      if (database.listSpaces(projectId).length > 0
-        || database.listSpaceCleanupJobs().some((job) => job.projectId === projectId && job.state === 'prepared')) return;
-      await walgit.removeProjectCache(projectId);
-    },
+    undefined,
     async (spaceId, projectId) => {
       await serviceManager.forgetSpace(spaceId);
       await terminals.forgetSpace(spaceId);
@@ -654,7 +611,7 @@ export async function startMachineRuntime() {
     await spaces.open(spaceId, generation, { resumeOnMachineRestart: true });
     await canonicalSessionWriter.flush({ projectId, spaceId });
   };
-  const resolvePublishedHead = createPublishedSpaceHeadResolver({ authority, blobs: encryptedCheckpointBlobs, gitRemote: walgit, binding: gitBinding });
+  const resolvePublishedHead = createPublishedSpaceHeadResolver({ authority, blobs: encryptedCheckpointBlobs, gitRemote, binding: gitBinding });
   const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl), resolvePublishedHead);
 
   const handlers = new GitSpaceHandlers(database, artifacts, projectEventWriter);
@@ -734,7 +691,6 @@ export async function startMachineRuntime() {
     destroyMachine: (targetMachineId) => authority.destroyMachine(targetMachineId),
     settings,
     inference: authority,
-    providers,
     devices,
     gitIdentity,
     deployment: {
@@ -746,7 +702,7 @@ export async function startMachineRuntime() {
         void releases.nudge();
         return status;
       },
-      get thisMachine() { const status = omp.status(); return { sha: machineReleaseSha, ompSha: status.sha, ompDraining: status.draining, generation: process.env.GITSPACE_GENERATION_HASH ?? null }; },
+      get thisMachine() { return { sha: machineReleaseSha, generation: process.env.GITSPACE_GENERATION_HASH ?? null }; },
     },
     onInternalError: ({ incidentId, phase, cause, procedurePath }) => {
       console.error('[gitspace-rpc]', { incidentId, phase, procedurePath, cause });
@@ -754,12 +710,11 @@ export async function startMachineRuntime() {
   });
   let preparingReplacement = !startupCommitted;
   let activeRpcRequests = 0;
-  let cronDrainActive = false;
   let replacementControl: Promise<unknown> = Promise.resolve();
   const prepareReplacement = async () => {
     preparingReplacement = true;
     releases.stop();
-    while (activeRpcRequests > 0 || cronDrainActive) await Bun.sleep(25);
+    while (activeRpcRequests > 0) await Bun.sleep(25);
     if (database.listSpaceCleanupJobs().some((job) => job.state === 'prepared')) {
       throw new Error('Unresolved checkpoint outcomes prevent provider replacement');
     }
@@ -842,10 +797,14 @@ export async function startMachineRuntime() {
       finally { activeRpcRequests -= 1; }
     },
     hostname: process.env.GITSPACE_RPC_HOST ?? '127.0.0.1',
-    releaseStatus: () => { const status = omp.status(); return { machineRelease: machineReleaseSha, ompRelease: status.sha, ompDraining: status.draining }; },
+    releaseStatus: () => ({ machineRelease: machineReleaseSha }),
     port: Number(process.env.GITSPACE_RPC_PORT ?? 0),
     additionalFetch: async (request) => {
       const service = preparingReplacement ? null : await serviceManager.proxy(request);
+      if (['/runtime/execute', '/runtime/receipt'].includes(new URL(request.url).pathname)) {
+        if (preparingReplacement || !executorRuntime) return Response.json({ error: 'Executor unavailable' }, { status: 503 });
+        return executorRuntime.executor.fetch(request);
+      }
       if (service) return service;
       const url = new URL(request.url);
       if (!url.pathname.startsWith('/__control/') || request.method !== 'POST') return null;
@@ -864,12 +823,6 @@ export async function startMachineRuntime() {
         catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
       }
       if (preparingReplacement) return Response.json({ error: 'Provider replacement preparation is active' }, { status: 409 });
-      if (url.pathname === '/__control/omp-activate') {
-        const input = ompGenerationSelectionSchema.safeParse(await request.json());
-        if (!input.success) return Response.json({ error: input.error.message }, { status: 400 });
-        try { return Response.json(await omp.activate(input.data)); }
-        catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
-      }
       if (url.pathname === '/__control/retire') {
         stopMode = 'replace';
         return Response.json({ stopMode });
@@ -888,86 +841,31 @@ export async function startMachineRuntime() {
       return Response.json({ offset: event.offset });
     },
   });
+  executorRuntime = await createMachineExecutor({
+    environmentRoot, machineId, database, artifacts, cloud: cloudRuntime, gitRemote,
+    browser: { enabled: browserEnabled, relay: browserRelay },
+    prepareAttachment: (local, signal) => environments.prepareAttachment(local, signal),
+    originGitEnvironment: async (origin) => gitIdentity.gitEnvironment(origin),
+    ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
+    operations: machineOperationalTools({ environments, services: serviceManager, authority, artifacts, mcp, controls: await workspaceControls.promise, journal: () => {
+      if (!executorRuntime) throw new Error('Executor initialization is incomplete');
+      return executorRuntime.journal;
+    }, checkpoint: async spaceId => {
+      if (!executorRuntime) throw new Error('Executor initialization is incomplete');
+      await executorRuntime.checkpointWorkspace(spaceId);
+    } }),
+    commitSnapshot: async (local, checkpoint, previousWorktreeCommit, final = false) => {
+      await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
+        projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
+        attachmentId: local.attachment.attachmentId, generation: local.attachment.generation, checkpoint, previousWorktreeCommit, final,
+      }), RuntimeActionResultSchema);
+    },
+  });
 
-  const cronAdapter = {
-    // Only runs whose target is open here are claimed; the rest wait for their holder.
-    claimNext: ({ projectId }: { projectId: string; claimedBy: string }) => authority.claimNextProjectCron(
-      projectId,
-      database.listSpaces(projectId).filter((space) => space.holderId === machineId && space.placementState !== 'closed').map((space) => space.id),
-    ),
-    resolveCanonicalAgent: async (target: { scope: 'project'; projectId: string } | { scope: 'workspace'; projectId: string; spaceId: string }) => {
-      const space = target.scope === 'project'
-        ? database.getBaseSpace(target.projectId)
-        : database.getSpace(target.spaceId);
-      if (!space || space.projectId !== target.projectId || (target.scope === 'workspace' && space.kind !== 'worktree')) {
-        return { status: 'blocked' as const, message: 'The stable cron target no longer exists in this project' };
-      }
-      if (space.placementState === 'closed' || space.holderId !== machineId || space.generation < 1) {
-        return { status: 'blocked' as const, message: 'The stable cron target is not open on this machine' };
-      }
-      const opened = await sessions.openSpace(space.id);
-      if (opened.status === 'error') {
-        return { status: 'blocked' as const, message: `The canonical agent could not be opened: ${opened.error.message}` };
-      }
-      return { status: 'ready' as const, agent: opened.value, spaceId: space.id, generation: space.generation };
-    },
-    promptCanonicalAgent: async (input: {
-      agent: NonNullable<ReturnType<typeof sessions.get>>;
-      spaceId: string;
-      generation: number;
-      runId: string;
-      prompt: string;
-      readScopes: readonly string[];
-      writeScopes: readonly string[];
-    }) => {
-      const current = database.getSpace(input.spaceId);
-      if (!current || current.generation !== input.generation || current.holderId !== machineId || current.placementState === 'closed') {
-        return { status: 'blocked' as const, message: 'The cron target moved before its canonical agent could be prompted' };
-      }
-      if (input.agent.spaceId !== input.spaceId) {
-        return { status: 'failed' as const, message: 'Canonical session identity does not match the resolved cron target' };
-      }
-      const prompted = await sessions.prompt(input.agent.id, input.prompt, { streamingBehavior: 'followUp' });
-      if (prompted.status === 'error') return { status: 'failed' as const, message: prompted.error.message };
-      return prompted.value
-        ? { status: 'accepted' as const, message: `Queued unattended run ${input.runId} with ${input.readScopes.length} read and ${input.writeScopes.length} write scopes` }
-        : { status: 'blocked' as const, message: 'The canonical agent could not accept the unattended prompt' };
-    },
-    completeRun: (input: {
-      projectId: string;
-      runId: string;
-      claimToken: string;
-      state: 'succeeded' | 'blocked' | 'failed';
-      message: string | null;
-      resolvedSpaceId: string | null;
-      resolvedGeneration: number | null;
-    }) => authority.completeProjectCronRun(input),
-  };
-  const cronFailures = new Map<string, ProjectCronDrainFailure>();
-  const drainProjectCrons = async (): Promise<void> => {
-    if (cronDrainActive || preparingReplacement) return;
-    cronDrainActive = true;
-    try {
-      await drainProjectCronQueues({
-        projectIds: database.listProjects().map((project) => project.id),
-        claimedBy: machineId,
-        adapter: cronAdapter,
-        processDue: (projectId) => authority.processDueProjectCrons(projectId),
-        failures: cronFailures,
-        shouldStop: () => preparingReplacement,
-        report: (projectId, error) => console.error(`[gitspace-crons] project ${projectId} failed; retrying every ${PROJECT_CRON_FAILURE_RETRY_MS / 60_000} minutes`, error),
-      });
-    } finally {
-      cronDrainActive = false;
-    }
-  };
-  const cronDrainTimer = setInterval(() => {
-    void drainProjectCrons().catch((error: unknown) => console.error('[gitspace-crons]', error));
-    // The same tick retries canonical publications whose replay failed; the writer bounds how often.
+  const publicationReplayTimer = setInterval(() => {
     if (startupCommitted && !preparingReplacement) canonicalSessionWriter.replayInBackground(machineId, heldSession);
   }, 5_000);
 
-  const existingMachine = (await authority.listMachineDefinitions()).find((machine) => machine.id === machineId);
   await authority.putMachineDefinition({
     id: machineId,
     label: process.env.GITSPACE_MACHINE_LABEL ?? machineId,
@@ -981,13 +879,12 @@ export async function startMachineRuntime() {
     operationId: existingMachine?.operationId ?? null,
     error: existingMachine?.error ?? null,
   });
-  void drainProjectCrons().catch((error: unknown) => console.error('[gitspace-crons]', error));
   let stopping = false;
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
     preparingReplacement = true;
-    clearInterval(cronDrainTimer);
+    clearInterval(publicationReplayTimer);
     artifactUploads.close();
     if (bootstrapProjectId) {
       await authority.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: bootstrapProjectId,
@@ -1030,28 +927,19 @@ export async function startMachineRuntime() {
       }
     }
     await sessions.stopForRestart();
-    await omp.dispose();
-    await providers.close();
     await settings.stop();
-    await walgit.dispose();
+    await executorRuntime?.close();
     await http.stop();
     await canonicalSessionWriter.settle(stopMode);
     // Stop event producers before waiting for the durable outbox to empty.
     await projectEventWriter.flush();
     database.close();
   };
-  // OMP's postmortem module installs its own SIGINT/SIGTERM handlers at import
-  // time and hard-exits after a 10s cleanup deadline, which would race the
-  // release checkpoints. The daemon owns its lifetime: drop those listeners,
-  // run our stop, then let OMP's registered cleanups run before exiting.
-  process.removeAllListeners('SIGINT');
-  process.removeAllListeners('SIGTERM');
   const shutdown = (): void => {
     void stop()
       .catch((error) => {
         try { appendFileSync(join(environmentRoot, 'stop.log'), `${new Date().toISOString()} [gitspace-stop] failed ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); } catch { /* diagnostics only */ }
       })
-      .then(() => postmortem.cleanup())
       .finally(() => process.exit(0));
   };
   process.once('SIGINT', shutdown);
@@ -1061,7 +949,7 @@ export async function startMachineRuntime() {
     pid: process.pid, hostPid: Number(process.env.GITSPACE_HOST_PID) || process.ppid,
     url: http.url, hash: process.env.GITSPACE_GENERATION_HASH,
   });
-  console.log(`GitSpace RPC ready at ${http.url}/rpc generation=${process.env.GITSPACE_GENERATION_HASH ?? 'unknown'} machine=${machineReleaseSha ?? 'local'} omp=${omp.status().sha ?? 'local'}`);
+  console.log(`GitSpace RPC ready at ${http.url}/rpc generation=${process.env.GITSPACE_GENERATION_HASH ?? 'unknown'} machine=${machineReleaseSha ?? 'local'} runtime=cloud`);
   if (!startupCommitted) {
     // Health is available to the updater, but no agent, service, cron, or user
     // RPC may run until the whole host's durable transaction has finished.
@@ -1079,7 +967,6 @@ export async function startMachineRuntime() {
     startupCommitted = true;
     stopMode = 'release';
     preparingReplacement = false;
-    void drainProjectCrons().catch((error: unknown) => console.error('[gitspace-crons]', error));
   }
   return { environmentRoot, database, artifacts, sessions, settings, handlers, http, stop };
 }

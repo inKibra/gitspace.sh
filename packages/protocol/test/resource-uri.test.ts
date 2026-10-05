@@ -20,7 +20,14 @@ describe('OMP resource URIs', () => {
       'local://workspace/a%5c..%5csecret', 'local://workspace/a%00.txt', 'local://workspace/a?scope=base',
       'local://workspace/a#other', 'local://workspace//a', 'artifact://12/../13', 'artifact://12@other',
       'local://workspace/%FF', 'artifact://12:9-2',
+      'browser-artifact://machine/../secret', 'browser-artifact://machine/%2Fsecret', 'browser-artifact://machine/..', 'browser-artifact://machine/artifact?workspace=other',
     ]) expect(parseResourceUri(uri)).toBeNull();
+  });
+
+  it('keeps expiring browser output machine-qualified through safe Inspector navigation', () => {
+    const uri = 'browser-artifact://Machine-A/output-1:2-3';
+    expect(resourceUriFromHref(resourceLinkHref(uri)!)).toBe(uri);
+    expect(parseResourceUri(uri)).toMatchObject({ kind: 'browser-artifact', machineId: 'Machine-A', id: 'output-1', selector: { ranges: [{ start: 2, end: 3 }] } });
   });
 
   it('round-trips safe navigation and applies OMP raw and multi-range selectors', () => {

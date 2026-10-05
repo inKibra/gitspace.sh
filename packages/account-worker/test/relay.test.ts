@@ -100,7 +100,7 @@ function parseTunnelRequest(input: string): TunnelRequestMessage {
 }
 
 async function ciphertextHash(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -433,7 +433,7 @@ describe('portable RelayDO', () => {
         'content-length': String(sealed.byteLength),
         'x-gitspace-encryption': 'aes-256-gcm-v1',
       },
-      body: sealed,
+      body: Uint8Array.from(sealed),
     }));
     expect(put.status).toBe(201);
 

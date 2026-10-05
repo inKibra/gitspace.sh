@@ -31,7 +31,7 @@
     "./rpc-crypto": "./src/rpc-crypto.ts"
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
     "test": "bun ../../scripts/test-isolated.ts test"
   },
   "devDependencies": {
@@ -42,6 +42,7 @@
     "@gitspace/protocol-agent": "workspace:*",
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
+    "@gitspace/protocol-runtime": "workspace:*",
     "@gitspace/protocol-sync": "workspace:*",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",

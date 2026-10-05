@@ -2,17 +2,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spaceGitCheckpointRef } from '@gitspace/protocol-workspace';
+import type { z } from 'zod';
+import type { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
 
-export interface GitIntermediateCheckpoint {
-  checkpointRef: string;
-  headCommit: string;
-  branch: string;
-  indexCommit: string;
-  trackedWorktreeCommit: string;
-  worktreeCommit: string;
-  indexTree: string;
-  worktreeTree: string;
-}
+export type GitIntermediateCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 
 export class GitCheckpointError extends Error {
   constructor(readonly operation: string, message: string) {
@@ -22,11 +15,12 @@ export class GitCheckpointError extends Error {
 }
 
 interface CommandResult {
+  exitCode: number;
   stdout: string;
   stderr: string;
 }
 
-async function runGit(repositoryPath: string, args: string[], options: { env?: Record<string, string>; input?: string } = {}): Promise<CommandResult> {
+async function runGit(repositoryPath: string, args: string[], options: { env?: Record<string, string>; input?: string; raw?: boolean; allowMissingRef?: boolean } = {}): Promise<CommandResult> {
   const child = Bun.spawn(['git', ...args], {
     cwd: repositoryPath,
     env: { ...Bun.env, ...options.env },
@@ -39,8 +33,8 @@ async function runGit(repositoryPath: string, args: string[], options: { env?: R
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
-  if (exitCode !== 0) throw new GitCheckpointError(`git ${args[0] ?? ''}`.trim(), stderr.trim() || `exited with ${exitCode}`);
-  return { stdout: stdout.trim(), stderr: stderr.trim() };
+  if (exitCode !== 0 && !(options.allowMissingRef && exitCode === 1)) throw new GitCheckpointError(`git ${args[0] ?? ''}`.trim(), stderr.trim() || `exited with ${exitCode}`);
+  return { exitCode, stdout: options.raw ? stdout : stdout.trim(), stderr: stderr.trim() };
 }
 
 function portablePath(repositoryPath: string, path: string): string {
@@ -62,12 +56,21 @@ function checkpointEnvironment(): Record<string, string> {
   };
 }
 
-async function commitTree(repositoryPath: string, tree: string, parent: string, message: string): Promise<string> {
-  const committed = await runGit(repositoryPath, ['commit-tree', tree, '-p', parent], {
+async function commitTree(repositoryPath: string, tree: string, parent: string | null, message: string): Promise<string> {
+  const committed = await runGit(repositoryPath, ['commit-tree', tree, ...(parent === null ? [] : ['-p', parent])], {
     env: checkpointEnvironment(),
     input: `${message}\n`,
   });
   return committed.stdout;
+}
+
+export async function readGitCheckpointHead(repositoryPath: string): Promise<Pick<GitIntermediateCheckpoint, 'branch' | 'headCommit'>> {
+  const branchRef = (await runGit(repositoryPath, ['symbolic-ref', 'HEAD'])).stdout;
+  if (!branchRef.startsWith('refs/heads/')) throw new GitCheckpointError('branch', 'HEAD must name a branch');
+  const branch = branchRef.slice('refs/heads/'.length);
+  const branchExists = await runGit(repositoryPath, ['show-ref', '--verify', '--quiet', branchRef], { allowMissingRef: true });
+  const headCommit = branchExists.exitCode === 1 ? null : (await runGit(repositoryPath, ['rev-parse', '--verify', 'HEAD^{commit}'])).stdout;
+  return { branch, headCommit };
 }
 
 export async function createGitIntermediateCheckpoint(input: {
@@ -76,10 +79,8 @@ export async function createGitIntermediateCheckpoint(input: {
   revision: number;
   portableUntrackedPaths?: string[];
 }): Promise<GitIntermediateCheckpoint> {
-  const branch = (await runGit(input.repositoryPath, ['branch', '--show-current'])).stdout;
-  if (!branch) throw new GitCheckpointError('branch', 'detached HEAD checkpoints are not supported');
+  const { branch, headCommit } = await readGitCheckpointHead(input.repositoryPath);
   const checkpointRef = spaceGitCheckpointRef(input.spaceId, input.revision);
-  const headCommit = (await runGit(input.repositoryPath, ['rev-parse', 'HEAD'])).stdout;
   const indexTree = (await runGit(input.repositoryPath, ['write-tree'])).stdout;
   const indexCommit = await commitTree(input.repositoryPath, indexTree, headCommit, `GitSpace index checkpoint ${input.revision}`);
   const temporary = await mkdtemp(join(tmpdir(), 'gitspace-checkpoint-'));
@@ -95,7 +96,7 @@ export async function createGitIntermediateCheckpoint(input: {
       indexCommit,
       `GitSpace tracked worktree checkpoint ${input.revision}`,
     );
-    const discovered = input.portableUntrackedPaths ?? (await runGit(input.repositoryPath, ['ls-files', '--others', '--exclude-standard', '-z'])).stdout.split('\0').filter(Boolean);
+    const discovered = input.portableUntrackedPaths ?? (await runGit(input.repositoryPath, ['ls-files', '--others', '--exclude-standard', '-z'], { raw: true })).stdout.split('\0').filter(Boolean);
     const portablePaths = [...new Set(discovered.map((path) => portablePath(input.repositoryPath, path)))].sort();
     for (const path of portablePaths) {
       const ignored = Bun.spawn(['git', 'check-ignore', '-q', '--', path], { cwd: input.repositoryPath, stdout: 'ignore', stderr: 'ignore' });
@@ -126,8 +127,60 @@ export async function restoreGitIntermediateCheckpoint(input: {
   }
   const branchRef = `refs/heads/${input.branch}`;
   await runGit(input.repositoryPath, ['symbolic-ref', 'HEAD', branchRef]);
-  await runGit(input.repositoryPath, ['update-ref', branchRef, input.checkpoint.headCommit]);
-  await runGit(input.repositoryPath, ['reset', '--hard', input.checkpoint.headCommit]);
+  if (input.checkpoint.headCommit === null) {
+    await runGit(input.repositoryPath, ['update-ref', '-d', branchRef]);
+  } else {
+    await runGit(input.repositoryPath, ['update-ref', branchRef, input.checkpoint.headCommit]);
+    await runGit(input.repositoryPath, ['reset', '--hard', input.checkpoint.headCommit]);
+  }
   await runGit(input.repositoryPath, ['read-tree', '--reset', '-u', input.checkpoint.worktreeCommit]);
   await runGit(input.repositoryPath, ['read-tree', input.checkpoint.indexCommit]);
+}
+
+/** Serializes capture/publication; a failed publication is retried with the same immutable ref. */
+export class IncrementalGitSnapshots {
+  private pending: Promise<GitIntermediateCheckpoint> | undefined;
+  private unpublished: GitIntermediateCheckpoint | undefined;
+
+  constructor(private readonly options: {
+    repositoryPath: string;
+    spaceId: string;
+    allocateRevision(): Promise<number>;
+    loadPending(): Promise<GitIntermediateCheckpoint | null>;
+    loadCommitted(): Promise<GitIntermediateCheckpoint | null>;
+    savePending(checkpoint: GitIntermediateCheckpoint): Promise<void>;
+    publish(checkpoint: GitIntermediateCheckpoint): Promise<void>;
+    commit(checkpoint: GitIntermediateCheckpoint): Promise<void>;
+  }) {}
+
+  capture(): Promise<GitIntermediateCheckpoint> {
+    if (this.pending) return this.pending;
+    const operation = this.captureNext();
+    this.pending = operation;
+    void operation.finally(() => { this.pending = undefined; }).catch(() => {});
+    return operation;
+  }
+
+  async settle(): Promise<void> {
+    await this.pending;
+  }
+
+  private async captureNext(): Promise<GitIntermediateCheckpoint> {
+    const checkpoint = this.unpublished ?? await this.options.loadPending() ?? await createGitIntermediateCheckpoint({
+      repositoryPath: this.options.repositoryPath,
+      spaceId: this.options.spaceId,
+      revision: await this.options.allocateRevision(),
+    });
+    const committed = await this.options.loadCommitted();
+    if (committed && committed.headCommit === checkpoint.headCommit && committed.branch === checkpoint.branch && committed.indexTree === checkpoint.indexTree && committed.worktreeTree === checkpoint.worktreeTree) {
+      if (committed.checkpointRef !== checkpoint.checkpointRef) await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit]);
+      return committed;
+    }
+    this.unpublished = checkpoint;
+    await this.options.savePending(checkpoint);
+    await this.options.publish(checkpoint);
+    await this.options.commit(checkpoint);
+    this.unpublished = undefined;
+    return checkpoint;
+  }
 }

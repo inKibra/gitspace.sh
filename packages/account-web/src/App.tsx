@@ -42,13 +42,13 @@ export const verticalSliceFixture: GitSpaceShellProps = {
 
 /**
  * One launched release from `workspace-a` (worker/frontend applied, machine
- * and OMP converging) while a second launch from `workspace-b` builds here.
+ * converging) while a second launch from `workspace-b` builds here.
  */
 export const deploymentStatusFixture: DeploymentStatusView = {
-  desired: { worker: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', machine: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', omp: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', frontend: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', updatedAt: '2026-08-30T10:00:00.000Z' },
+  desired: { worker: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', machine: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', frontend: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', updatedAt: '2026-08-30T10:00:00.000Z' },
   current: {
     worker: { sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', version: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0' },
-    machines: { darktop: { sha: null, ompSha: null, generation: 'gen-0f3a9c' }, studio: { sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', ompSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', generation: 'gen-77ab21' } },
+    machines: { darktop: { sha: null, generation: 'gen-0f3a9c' }, studio: { sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', generation: 'gen-77ab21' } },
   },
   releases: [{
     sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
@@ -66,11 +66,11 @@ export const deploymentStatusFixture: DeploymentStatusView = {
     status: { worker: 'applied', frontend: 'applied', machines: { studio: 'applied' }, omps: { studio: 'applied' } },
     error: null,
   }],
-  thisMachine: { machineId: 'darktop', sha: null, ompSha: null, ompDraining: 0, generation: 'gen-0f3a9c' },
+  thisMachine: { machineId: 'darktop', sha: null, generation: 'gen-0f3a9c' },
   launch: {
     launchId: 'launch-7',
     workspaceId: 'workspace-b',
-    targets: ['worker', 'machine', 'omp', 'frontend'],
+    targets: ['worker', 'machine', 'frontend'],
     sha: 'b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6',
     phase: 'build',
     message: 'building machine daemon',

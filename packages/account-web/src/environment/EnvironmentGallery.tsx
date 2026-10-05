@@ -31,6 +31,7 @@ export function EnvironmentGallery() {
   };
   const approve = (targetId: string): void => {
     setEnvironment((current) => {
+      if (current.ledger?.browserOrigins.some(origin => origin.hash === targetId)) return { ...current, ledger: { ...current.ledger, approvals: [...current.ledger.approvals.filter(approval => approval.executionHash !== targetId), { executionHash: targetId, scope: 'workspace', approvedBy: 'This browser', approvedAt: '2026-09-01T12:00:00.000Z' }] } };
       const check = current.bundle.checks[targetId];
       if (check?.trust) return { ...current, bundle: { ...current.bundle, checks: { ...current.bundle.checks, [targetId]: { ...check, trust: approvedTrust(check.trust.commandHash) } } } };
       return { ...current, lifecycle: current.lifecycle.map((script) => script.id === targetId ? { ...script, trust: approvedTrust(script.trust.commandHash) } : script) };
@@ -39,6 +40,7 @@ export function EnvironmentGallery() {
   };
   const revoke = (targetId: string): void => {
     setEnvironment((current) => {
+      if (current.ledger?.browserOrigins.some(origin => origin.hash === targetId)) return { ...current, ledger: { ...current.ledger, approvals: current.ledger.approvals.filter(approval => approval.executionHash !== targetId) } };
       const check = current.bundle.checks[targetId];
       if (check?.trust) return { ...current, bundle: { ...current.bundle, checks: { ...current.bundle.checks, [targetId]: { ...check, trust: { status: 'pending', commandHash: check.trust.commandHash } } } } };
       return { ...current, lifecycle: current.lifecycle.map((script) => script.id === targetId ? { ...script, trust: { status: 'pending', commandHash: script.trust.commandHash } } : script) };
@@ -158,7 +160,7 @@ export function EnvironmentGallery() {
               <div className="flex max-w-md flex-col items-center gap-3 text-center"><TerminalIcon size={24} strokeWidth={1.5} className="text-muted-foreground" /><h2 className="text-subtitle font-semibold text-foreground">{activity.startsWith('Opened file') ? 'File viewer' : activity.includes('terminal') ? 'Lifecycle terminal' : 'Workspace canvas'}</h2><p className="text-body text-muted-foreground">{activity.startsWith('Opened file') ? activity.replace('Opened file · ', '') : activity.includes('terminal') ? activity : 'The transcript stays open while workspace setup remains in the right inspector.'}</p>{activity.includes('terminal') ? <code className={`${shape.container} w-full bg-surface-3 p-3 text-left font-mono text-caption text-foreground`}>$ {activity.replace('Opened terminal · ', '')}<br />running approved scripts…</code> : null}</div>
             </div>
           </section>
-          <aside className="flex min-h-0 bg-surface-1 lg:border-l lg:border-border" aria-label="Workspace setup inspector"><EnvironmentView model={environment} onProfileChange={(profile) => setEnvironment((current) => ({ ...current, workspace: { ...current.workspace, profile } }))} onApprove={approve} onRevoke={revoke} onGrantSecret={grantSecret} onInputChange={updateInput} onFixCheck={fixCheck} onUpdateCheck={updateCheck} onDeleteCheck={deleteCheck} onAddCheck={addCheck} onAddValue={addWorkspaceValue} onOpenSecrets={() => setTab(1)} onOpenLifecycleFile={(scriptId) => setActivity(`Opened file · .gitspace/lifecycle/${scriptId}`)} onOpenLifecycleOutput={(scriptId) => setActivity(`Opened terminal · output for ${scriptId}`)} onRunChecks={() => setActivity('Opened terminal · running environment checks')} onRunLifecycle={runLifecycle} /></aside>
+          <aside className="flex min-h-0 bg-surface-1 lg:border-l lg:border-border" aria-label="Workspace setup inspector"><EnvironmentView model={environment} runtimeAvailable={new URL(window.location.href).searchParams.get('offline') !== '1'} onProfileChange={(profile) => setEnvironment((current) => ({ ...current, workspace: { ...current.workspace, profile } }))} onApprove={approve} onRevoke={revoke} onGrantSecret={grantSecret} onInputChange={updateInput} onFixCheck={fixCheck} onUpdateCheck={updateCheck} onDeleteCheck={deleteCheck} onAddCheck={addCheck} onAddValue={addWorkspaceValue} onOpenSecrets={() => setTab(1)} onOpenLifecycleFile={(scriptId) => setActivity(`Opened file · .gitspace/lifecycle/${scriptId}`)} onOpenLifecycleOutput={(scriptId) => setActivity(`Opened terminal · output for ${scriptId}`)} onRunChecks={() => setActivity('Opened terminal · running environment checks')} onRunLifecycle={runLifecycle} /></aside>
         </div>
       </TabsSubtlePanel>
       <TabsSubtlePanel index={1} selectedIndex={tab} idPrefix="environment-gallery" className="h-full min-h-0"><SecretsPageMock model={secrets} onProjectChange={(selectedProject) => setSecrets((current) => ({ ...current, selectedProject }))} onGrant={grantUserSecret} onRevoke={revokeUserSecret} onAddSecret={addSecret} onUpdateValue={updateValue} onAddValue={addProjectValue} /></TabsSubtlePanel>

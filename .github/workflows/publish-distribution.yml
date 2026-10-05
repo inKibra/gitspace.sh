@@ -76,7 +76,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/gitspace/native
-          key: native-walgit-${{ matrix.target }}-${{ hashFiles('packages/deployment/src/native-build.ts', 'packages/deployment/src/native-runtime.ts', 'patches/walgit/*.patch') }}
+          key: native-runtime-${{ matrix.target }}-${{ hashFiles('packages/deployment/src/native-runtime.ts', 'packages/deployment/src/executable-manifest.ts') }}
       - name: Build this native client and complete runtime
         env:
           GITSPACE_RELEASE: ${{ inputs.release || github.ref_name }}

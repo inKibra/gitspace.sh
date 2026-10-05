@@ -20,6 +20,7 @@ export interface LifecycleActor {
   kind: 'browser' | 'client' | 'machine';
   lifecycleControl: boolean;
   destroyedMachineId?: string;
+  attachment?: { attachmentId: string; generation: number };
 }
 export interface LifecycleRunRecord { run: LifecycleRun; token: string | null; scope: string; lock: string }
 export interface LifecycleTransitionFacts {
@@ -52,10 +53,18 @@ export function isInteractiveLifecycleScript(content: string): boolean {
 export function authorizeLifecycleMachineMutation(input: LifecycleMutation, facts: {
   machineId: string; projectId: string; machineOnline: boolean;
   placement: { projectId: string; machineId: string | null; generation: number; state: string } | null;
+  attachment?: { attachmentId: string; generation: number; machineId: string; projectId: string; workspaceId: string; role: string; state: string } | null;
 }): void {
   if (input.op === 'approval' || input.op === 'abandon') throw new EnvironmentError('PermissionDenied', 'Execution approval and destruction-confirmed recovery require account lifecycle control');
   if (input.op !== 'claim') return;
   if (!facts.machineOnline) throw new EnvironmentError('RunnerUnavailable', 'Lifecycle execution requires an online authorized machine', { machineId: facts.machineId });
+  if (input.attachment) {
+    const attachment = facts.attachment;
+    if (!attachment || attachment.attachmentId !== input.attachment.attachmentId || attachment.generation !== input.attachment.generation || attachment.machineId !== facts.machineId || attachment.projectId !== facts.projectId || !['attaching', 'ready'].includes(attachment.state) || attachment.role === 'primary' || input.generation !== null || !['machine/prepare', 'checks', 'workspace/materialize', 'workspace/dematerialize'].includes(input.phase)) {
+      throw new EnvironmentError('PermissionDenied', 'Lifecycle attachment admission is missing or stale');
+    }
+    return;
+  }
   const detachedPreparation = input.generation === null && (input.phase === 'machine/prepare' || input.phase === 'checks');
   if (input.phase.startsWith('cloud/') || detachedPreparation) return;
   const placement = facts.placement;
@@ -70,9 +79,15 @@ export interface LifecycleTransition {
 }
 
 export function emptyLifecycleState(projectId: string, spaceId: string): LifecycleState {
-  return { revision: 0, projectId, spaceId, bundleJson: null, selectedProfile: null, executions: [],
+  return { revision: 0, projectId, spaceId, bundleJson: null, selectedProfile: null, executions: [], browserOrigins: [],
     values: { global: {}, project: {}, workspace: {} }, approvals: [], policy: { automatic: false },
     bindings: {}, provisioned: null, destroyedAt: null, runs: [], claim: null };
+}
+
+/** Only canonical committed origins participate; bundle previews and automatic policy do not grant access. */
+export function approvedBrowserOrigins(state: LifecycleState): string[] {
+  const approved = new Set(state.approvals.map((entry) => entry.executionHash));
+  return state.browserOrigins.filter((entry) => approved.has(entry.hash)).map((entry) => entry.pattern);
 }
 export function isLifecycleRunActive(run: Pick<LifecycleRun, 'status'>): boolean {
   return run.status === 'accepted' || run.status === 'running' || run.status === 'cancelling';
@@ -176,10 +191,10 @@ export function projectEnvironmentState(lifecycle: LifecycleState) {
 export function assertEnvironmentExecutionReady(input: {
   phase: LifecycleRunPhase; state: LifecycleState; bundle: EnvironmentBundle; effective: EffectiveEnvironmentProfile;
   values: Readonly<Record<string, string>>; configuredSecrets: readonly string[]; executionCount: number;
-  holder: boolean; detached: boolean; runnerAvailable: boolean;
+  holder: boolean; detached: boolean; runnerAvailable: boolean; attachment?: boolean;
 }): void {
   if (!input.holder && !input.detached) throw new EnvironmentError('PermissionDenied', 'Lifecycle execution requires a checkout held by this authorized runner');
-  if (input.detached && (input.phase.startsWith('workspace/') || input.phase === 'cloud/provision')) throw new EnvironmentError('PreconditionFailed', 'Detached recovery cannot provision or materialize a workspace');
+  if (input.detached && !input.attachment && (input.phase.startsWith('workspace/') || input.phase === 'cloud/provision')) throw new EnvironmentError('PreconditionFailed', 'Detached recovery cannot provision or materialize a workspace');
   if (!input.runnerAvailable) throw new EnvironmentError('RunnerUnavailable', 'Workspace Hub lifecycle execution is unavailable');
   if (!input.executionCount) return;
   for (const name of [...input.effective.values, ...input.effective.secrets]) {
@@ -205,7 +220,8 @@ function sameHashes(a: readonly string[], b: readonly string[]): boolean {
   const hashes = new Set(a);
   return hashes.size === new Set(b).size && b.every((hash) => hashes.has(hash));
 }
-export function lifecycleRunScope(input: { phase: LifecycleRunPhase; profile: string; executionHashes: readonly string[]; generation: number | null }, machineId: string, spaceId: string): string {
+export function lifecycleRunScope(input: { phase: LifecycleRunPhase; profile: string; executionHashes: readonly string[]; generation: number | null; attachment?: { attachmentId: string; generation: number } }, machineId: string, spaceId: string): string {
+  if (input.attachment) return JSON.stringify(['attachment', input.attachment.attachmentId, input.attachment.generation, input.phase, input.profile, [...new Set(input.executionHashes)].sort()]);
   return input.phase === 'machine/prepare' ? JSON.stringify([input.phase, machineId, input.profile, [...new Set(input.executionHashes)].sort()])
     : input.phase.startsWith('cloud/') ? JSON.stringify(['cloud', spaceId]) : JSON.stringify([input.phase, spaceId, input.generation]);
 }
@@ -257,7 +273,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
     case 'approval': {
       if (!actor.lifecycleControl) throw new EnvironmentError('PermissionDenied', 'Execution approval requires lifecycle control authorization');
-      if (input.approved && !state.executions.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review execution content before approving');
+      if (input.approved && !state.executions.some((entry) => entry.hash === input.executionHash) && !state.browserOrigins.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review current content before approving');
       state.approvals = state.approvals.filter((entry) => entry.scope !== input.scope || entry.executionHash !== input.executionHash);
       if (input.approved) state.approvals.push({ scope: input.scope, executionHash: input.executionHash, approvedAt: now, approvedBy: actor.actorId });
       sharedChanged = input.scope === 'project';
@@ -265,14 +281,16 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
     case 'policy': state.policy = { automatic: input.automatic }; break;
     case 'claim': {
+      if (input.attachment && (actor.attachment?.attachmentId !== input.attachment.attachmentId || actor.attachment.generation !== input.attachment.generation)) throw new EnvironmentError('PermissionDenied', 'Attachment lifecycle claim lacks authenticated admission');
       const existing = facts.runs.find((entry) => entry.run.id === input.runId);
       if (existing) {
         const run = existing.run;
+        if (JSON.stringify(run.attachment) !== JSON.stringify(input.attachment)) throw new EnvironmentError('RunConflict', 'Run identity belongs to another attachment');
         if (run.spaceId !== state.spaceId || run.phase !== input.phase || Boolean(run.interactive) !== Boolean(input.interactive) || run.profile !== input.profile || run.generation !== input.generation || !sameHashes(run.executionHashes, input.executionHashes)) throw new EnvironmentError('RunConflict', 'Run identity already belongs to a different operation', { runId: input.runId });
         return { state: { ...state, claim: { runId: run.id, status: 'existing', reason: null, token: null } }, changed: false, sharedChanged: false };
       }
       const scope = lifecycleRunScope(input, actor.machineId, state.spaceId);
-      const lock = input.phase === 'machine/prepare' ? `machine:${actor.machineId}` : `workspace:${state.spaceId}`;
+      const lock = input.phase === 'machine/prepare' ? `machine:${actor.machineId}` : input.attachment ? `attachment:${input.attachment.attachmentId}:${input.attachment.generation}` : `workspace:${state.spaceId}`;
       if (facts.runs.some((entry) => entry.token && (entry.run.spaceId === state.spaceId || entry.lock === lock))) throw new EnvironmentError('RunConflict', 'A runner still owns this lifecycle claim; stop it or confirm machine destruction before recovery');
       if (state.destroyedAt && input.phase !== 'cloud/destroy' && !(input.phase === 'cloud/provision' && input.rerun)) throw new EnvironmentError('PreconditionFailed', 'This workspace lifecycle was explicitly destroyed');
       if (input.phase.startsWith('cloud/') && !input.rerun && facts.runs.some((entry) => entry.scope === scope && entry.run.phase === input.phase && !isLifecycleRunActive(entry.run) && entry.run.status !== 'succeeded')) throw new EnvironmentError('RecoveryRequired', 'Previous cloud effects require inspection and an explicit rerun');
@@ -286,6 +304,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       const run: LifecycleRun = { id: input.runId, projectId: state.projectId, spaceId: state.spaceId, phase: input.phase,
         status: skipped ? 'succeeded' : 'accepted', profile: input.profile, machineId: actor.machineId, generation: input.generation,
         interactive: input.interactive ?? false,
+        ...(input.attachment ? { attachment: input.attachment } : {}),
         executionHashes: input.executionHashes, terminalName: input.terminalName ?? null, results: [], output: '',
         exitCode: skipped ? 0 : null, startedAt: now, finishedAt: skipped ? now : null, deadlineAt, cancelRequestedAt: null, failure: null, incidents: [] };
       record = { run, scope, lock, token: skipped ? null : input.ownershipToken ?? facts.token };
@@ -323,7 +342,10 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       record.run.output = (record.run.output + output).slice(-LIFECYCLE_PREVIEW_LIMIT);
       if (input.results) record.run.results = input.results.map((result) => ({ ...result, output: sanitizeLifecycleOutput(result.output).slice(-LIFECYCLE_PREVIEW_LIMIT) }));
       log = { runId: input.runId, output };
-      if (input.bindings) state.bindings = { ...state.bindings, ...input.bindings };
+      if (input.bindings) {
+        if (record.run.attachment) record.run.bindings = { ...record.run.bindings, ...input.bindings };
+        else state.bindings = { ...state.bindings, ...input.bindings };
+      }
       break;
     }
     case 'finish': {
@@ -340,7 +362,8 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         results: (input.results.length ? input.results : record.run.results).map((result) => ({ ...result, output: sanitizeLifecycleOutput(result.output).slice(-LIFECYCLE_PREVIEW_LIMIT) })), output: output ? output.slice(-LIFECYCLE_PREVIEW_LIMIT) : record.run.output };
       if (failure) record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:failure`, kind: 'domain', occurredAt: now, message: failure.message, failure }];
       record.token = null;
-      state.bindings = { ...state.bindings, ...input.bindings };
+      if (record.run.attachment) record.run.bindings = { ...record.run.bindings, ...input.bindings };
+      else state.bindings = { ...state.bindings, ...input.bindings };
       if (status === 'succeeded' && record.run.phase === 'cloud/provision') {
         state.provisioned = { runId: record.run.id, profile: record.run.profile, executionHashes: record.run.executionHashes, machineId: record.run.machineId, completedAt: now };
         state.destroyedAt = null;

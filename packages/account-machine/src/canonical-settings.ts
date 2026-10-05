@@ -1,343 +1,68 @@
 import { createHash } from 'node:crypto';
-import { watch, type FSWatcher } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
-import { Settings } from '@oh-my-pi/pi-coding-agent/config/settings';
-import { SETTINGS_SCHEMA, isCredential, type SettingPath } from '@oh-my-pi/pi-coding-agent/config/settings-schema';
-import {
-  extractInferenceSettings,
-  inferenceCredentialPaths,
-  inferenceSettingSection,
-  managedOmpSettingDefaults,
-  ompSettingValueSchema,
-  type OmpConfigDocument,
-  type OmpSettingSchemaItem,
-  type OmpSettingValue,
-  type UserSettings,
-  type UserSettingsUpdate,
-} from '@gitspace/protocol';
-
-function isSettingPath(path: string): path is SettingPath {
-  return Object.hasOwn(SETTINGS_SCHEMA, path);
-}
+import { parseRuntimeSettings, runtimeSettingsView, setRuntimeSetting, type RuntimeConfigDocument, type RuntimeSettingValue, type UserSettings, type UserSettingsUpdate } from '@gitspace/protocol';
 import { CloudSpaceAuthorityError } from './cloud-space-authority.js';
 
 export interface CanonicalSettingsCloud {
   getUserSettings(): Promise<UserSettings>;
   updateUserSettings(input: UserSettingsUpdate): Promise<UserSettings>;
   reserveUserHandle(expectedRevision: number, handle: string): Promise<UserSettings>;
-  getOmpConfig(): Promise<OmpConfigDocument>;
-  updateOmpConfig(input: { expectedGeneration: number; content: string; checksum: `sha256:${string}` }): Promise<OmpConfigDocument>;
-  subscribeSettings?(
-    onChange: (event: { userRevision: number; ompGeneration: number }) => void,
-    onState: (state: 'connecting' | 'open' | 'offline') => void,
-  ): () => void;
+  getRuntimeConfig(): Promise<RuntimeConfigDocument>;
+  updateRuntimeConfig(input: { expectedGeneration: number; content: string; checksum: `sha256:${string}` }): Promise<RuntimeConfigDocument>;
+  subscribeSettings?(onChange: (event: { userRevision: number; runtimeGeneration: number }) => void, onState: (state: 'connecting' | 'open' | 'offline') => void): () => void;
 }
-
 export class CanonicalSettingsConflict extends Error {
-  constructor(readonly resource: 'user-settings' | 'omp-config', readonly expected: number, readonly actual: number) {
+  constructor(readonly resource: 'user-settings' | 'runtime-config', readonly expected: number, readonly actual: number) {
     super(`${resource} changed from ${expected} to ${actual}`);
     this.name = 'CanonicalSettingsConflict';
   }
 }
-export type CanonicalSettingsSyncState =
-  | { status: 'connecting' | 'synced' | 'offline'; message: null }
-  | { status: 'conflict' | 'error'; message: string };
-export interface CanonicalSettingsChangedEvent {
-  userRevision: number;
-  ompGeneration: number;
-  sync: CanonicalSettingsSyncState;
+export type CanonicalSettingsSyncState = { status: 'connecting' | 'synced' | 'offline'; message: null } | { status: 'conflict' | 'error'; message: string };
+export interface CanonicalSettingsChangedEvent { userRevision: number; runtimeGeneration: number; sync: CanonicalSettingsSyncState }
+function conflictFrom(error: unknown): unknown {
+  if (error instanceof CloudSpaceAuthorityError && error.code === 'SETTINGS_CONFLICT') {
+    const { resource, expected, actual } = error.details;
+    if ((resource === 'user-settings' || resource === 'runtime-config') && typeof expected === 'number' && typeof actual === 'number') return new CanonicalSettingsConflict(resource, expected, actual);
+  }
+  return error;
 }
 
-
-interface OmpSettingsAccess {
-  get(path: string): unknown;
-  isConfigured(path: string): boolean;
-  set(path: string, value: unknown): void;
-  flush(): Promise<void>;
-  reloadFromDisk(): Promise<void>;
-}
-
-interface SyncMetadata {
-  generation: number;
-  checksum: `sha256:${string}`;
-  updatedAt: string;
-  updatedBy: string;
-}
-
-const MAX_CONFIG_BYTES = 262_144;
-function checksum(content: string): `sha256:${string}` { return `sha256:${createHash('sha256').update(content).digest('hex')}`; }
-function conflictFrom(error: unknown): CanonicalSettingsConflict | null {
-  if (!(error instanceof CloudSpaceAuthorityError) || error.code !== 'SETTINGS_CONFLICT') return null;
-  const { resource, expected, actual } = error.details;
-  return (resource === 'user-settings' || resource === 'omp-config') && typeof expected === 'number' && typeof actual === 'number'
-    ? new CanonicalSettingsConflict(resource, expected, actual)
-    : null;
-}
-
-function assertSharedAdvanced(content: string): void {
-  const config: unknown = Bun.YAML.parse(content);
-  if (config === null || config === undefined) return;
-  if (typeof config !== 'object' || Array.isArray(config)) throw new Error('Shared OMP Advanced configuration must be a YAML mapping');
-  if (inferenceCredentialPaths(config).length > 0) throw new Error('Shared OMP configuration contains raw credentials; connect them in Inference → Providers and remove them from Advanced before synchronizing');
-  if (Object.keys(extractInferenceSettings(config as Record<string, unknown>)).length > 0) throw new Error('Models, Agents, and Providers belong to inference profiles; move these settings to Inference before synchronizing Advanced');
-}
-
+/** Machines apply user Git identity only; runtime configuration is cloud-owned. */
 export class CanonicalSettingsCoordinator {
-  private readonly configPath: string;
-  private readonly metadataPath: string;
-  private settings: OmpSettingsAccess | null = null;
-  private document: OmpConfigDocument | null = null;
-  private watcher: FSWatcher | null = null;
   private unsubscribe: (() => void) | null = null;
-  private publishTimer: ReturnType<typeof setTimeout> | null = null;
-  private applyingRemote = false;
-  private stopped = false;
-  private dirty = false;
   private operation: Promise<void> = Promise.resolve();
-  private syncState: CanonicalSettingsSyncState = { status: 'connecting', message: null };
-  private userRevision = 0;
+  private event: CanonicalSettingsChangedEvent = { userRevision: 0, runtimeGeneration: 0, sync: { status: 'connecting', message: null } };
   private readonly listeners = new Set<(event: CanonicalSettingsChangedEvent) => void>();
-
-  constructor(
-    private readonly cloud: CanonicalSettingsCloud,
-    private readonly machineId: string,
-    private readonly agentDir: string,
-    private readonly cwd: string,
-    private readonly reloadSessions: () => Promise<void>,
-    private readonly applyUserSettings: (settings: UserSettings) => Promise<void> = async () => undefined,
-  ) {
-    this.configPath = join(agentDir, 'config.yml');
-    this.metadataPath = `${this.configPath}.gitspace-sync.json`;
-  }
-
+  constructor(private readonly cloud: CanonicalSettingsCloud, private readonly applyUserSettings: (settings: UserSettings) => Promise<void> = async () => undefined) {}
   async start(): Promise<void> {
-    await mkdir(this.agentDir, { recursive: true });
-    this.settings = await Settings.init({ cwd: this.cwd, agentDir: this.agentDir }) as OmpSettingsAccess;
-    const local = await this.readLocal();
-    try {
-      let remote = await this.cloud.getOmpConfig();
-      assertSharedAdvanced(remote.content);
-      if (remote.generation === 0 && local.length > 0) {
-        assertSharedAdvanced(local);
-        remote = await this.cloud.updateOmpConfig({ expectedGeneration: 0, content: local, checksum: checksum(local) });
-      } else if (remote.generation > 0 && checksum(local) !== remote.checksum) {
-        await this.applyRemote(remote);
-      }
-      this.document = remote;
-      await this.writeMetadata(remote);
-      this.syncState = { status: 'synced', message: null };
-    } catch (error) {
-      const cached = await this.readMetadata(local);
-      this.document = cached ?? { generation: 0, content: local, checksum: checksum(local), updatedAt: new Date(0).toISOString(), updatedBy: this.machineId };
-      this.dirty = cached ? checksum(local) !== cached.checksum : local.length > 0;
-      console.warn('[settings-sync] starting from the local OMP settings cache:', error instanceof Error ? error.message : error);
-      this.syncState = { status: 'offline', message: null };
-    }
-    try {
-      const userSettings = await this.cloud.getUserSettings();
-      this.userRevision = userSettings.revision;
-      await this.applyUserSettings(userSettings);
-    } catch (error) {
-      console.warn('[settings-sync] user settings could not be applied locally:', error instanceof Error ? error.message : error);
-    }
-    this.watcher = watch(dirname(this.configPath), (_event, filename) => {
-      if (this.stopped || this.applyingRemote || (filename && filename !== basename(this.configPath))) return;
-      if (this.publishTimer) clearTimeout(this.publishTimer);
-      this.publishTimer = setTimeout(() => this.enqueue(() => this.publishLocal(true)), 200);
-    });
-    this.unsubscribe = this.cloud.subscribeSettings?.(
-      (event) => {
-        this.userRevision = event.userRevision;
+    try { await this.applyCurrentUser(); } catch (error) { console.warn('[settings-sync] user settings unavailable:', error instanceof Error ? error.message : error); }
+    this.unsubscribe = this.cloud.subscribeSettings?.((event) => {
+      this.event = { ...this.event, ...event };
+      this.operation = this.operation.then(() => this.applyCurrentUser()).catch((error) => {
+        this.event.sync = { status: 'error', message: error instanceof Error ? error.message : String(error) };
         this.emit();
-        this.enqueue(async () => {
-          if (event.ompGeneration > (this.document?.generation ?? -1)) await this.pullLatest();
-          const userSettings = await this.cloud.getUserSettings();
-          this.userRevision = userSettings.revision;
-          await this.applyUserSettings(userSettings);
-          this.emit();
-        });
-      },
-      (state) => {
-        this.syncState = state === 'open' ? { status: 'synced', message: null } : state === 'offline' ? { status: 'offline', message: null } : { status: 'connecting', message: null };
-        this.emit();
-      },
-    ) ?? null;
+      });
+    }, (state) => { this.event.sync = { status: state === 'open' ? 'synced' : state, message: null }; this.emit(); }) ?? null;
   }
-
-  async stop(): Promise<void> {
-    this.stopped = true;
-    this.watcher?.close();
-    if (this.publishTimer) clearTimeout(this.publishTimer);
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    this.watcher = null;
-    this.publishTimer = null;
-    await this.operation;
-  }
-  subscribe(listener: (event: CanonicalSettingsChangedEvent) => void): () => void {
-    this.listeners.add(listener);
-    listener(this.currentEvent());
-    return () => this.listeners.delete(listener);
-  }
-
+  async stop(): Promise<void> { this.unsubscribe?.(); this.unsubscribe = null; await this.operation; }
+  subscribe(listener: (event: CanonicalSettingsChangedEvent) => void): () => void { this.listeners.add(listener); listener(this.event); return () => this.listeners.delete(listener); }
+  private emit(): void { for (const listener of this.listeners) listener(this.event); }
+  private async applyCurrentUser(): Promise<void> { const value = await this.cloud.getUserSettings(); this.event.userRevision = value.revision; await this.applyUserSettings(value); this.emit(); }
   getUserSettings(): Promise<UserSettings> { return this.cloud.getUserSettings(); }
   async updateUserSettings(input: UserSettingsUpdate): Promise<UserSettings> {
-    try {
-      const settings = await this.cloud.updateUserSettings(input);
-      this.userRevision = settings.revision;
-      await this.applyUserSettings(settings);
-      this.emit();
-      return settings;
-    } catch (error) { throw conflictFrom(error) ?? error; }
+    try { const value = await this.cloud.updateUserSettings(input); await this.applyUserSettings(value); this.event.userRevision = value.revision; this.emit(); return value; } catch (error) { throw conflictFrom(error); }
   }
   async reserveHandle(expectedRevision: number, handle: string): Promise<UserSettings> {
-    try {
-      const settings = await this.cloud.reserveUserHandle(expectedRevision, handle);
-      this.userRevision = settings.revision;
-      this.emit();
-      return settings;
-    } catch (error) { throw conflictFrom(error) ?? error; }
+    try { return await this.cloud.reserveUserHandle(expectedRevision, handle); } catch (error) { throw conflictFrom(error); }
   }
-
-  async getOmpSettings(): Promise<{ document: OmpConfigDocument; schema: OmpSettingSchemaItem[]; sync: CanonicalSettingsSyncState }> {
-    if (!this.settings || !this.document) throw new Error('Canonical OMP settings are not initialized');
-    assertSharedAdvanced(this.document.content);
-    return { document: this.document, schema: this.schemaView(), sync: this.syncState };
+  async getRuntimeSettings() {
+    const document = await this.cloud.getRuntimeConfig();
+    return { document, schema: runtimeSettingsView(parseRuntimeSettings(JSON.parse(document.content || '{}'))), sync: { status: 'synced' as const, message: null } };
   }
-
-  async setOmpSetting(path: string, value: OmpSettingValue): Promise<{ document: OmpConfigDocument; schema: OmpSettingSchemaItem[]; sync: CanonicalSettingsSyncState }> {
-    if (!this.settings || !this.document) throw new Error('Canonical OMP settings are not initialized');
-    if (!isSettingPath(path)) throw new Error(`Unknown OMP setting ${path}`);
-    if (inferenceSettingSection(path)) throw new Error('Manage Models, Agents, and Providers in Inference, not shared Advanced settings');
-    if (isCredential(path) || path.startsWith('auth.broker.')) throw new Error('Connect credentials in Inference → Providers; raw credentials and ambient auth brokers are not supported in Advanced');
-    this.settings.set(path, ompSettingValueSchema.parse(value));
-    await this.settings.flush();
-    await this.publishLocal(false);
-    await this.reloadSessions();
-    return { document: this.document, schema: this.schemaView(), sync: this.syncState };
-  }
-
-  private schemaView(): OmpSettingSchemaItem[] {
-    if (!this.settings) return [];
-    return (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map((path) => {
-      const definition = SETTINGS_SCHEMA[path] as { default?: unknown; type?: string; values?: readonly string[]; ui?: { tab?: string; label?: string; description?: string; options?: unknown } };
-      const kind = definition.type === 'boolean' || definition.type === 'enum' || definition.type === 'number' || definition.type === 'string' || definition.type === 'array' || definition.type === 'record' ? definition.type : 'other';
-      const rawOptions = definition.ui?.options;
-      const options = definition.values ? [...definition.values] : Array.isArray(rawOptions)
-        ? rawOptions.map((option: unknown) => typeof option === 'string' ? option : option && typeof option === 'object' && typeof (option as { value?: unknown }).value === 'string' ? (option as { value: string }).value : null).filter((option): option is string => option !== null)
-        : [];
-      const credential = isCredential(path);
-      // Sessions run with GitSpace's managed default until Advanced configures the path.
-      const managedDefault = Object.hasOwn(managedOmpSettingDefaults, path) ? managedOmpSettingDefaults[path] : undefined;
-      const configured = inferenceSettingSection(path) ? definition.default : this.settings!.isConfigured(path) ? this.settings!.get(path) : managedDefault ?? this.settings!.get(path);
-      return {
-        path,
-        tab: definition.ui?.tab ?? 'other',
-        label: definition.ui?.label ?? path,
-        ...(definition.ui?.description ? { description: definition.ui.description } : {}),
-        kind,
-        value: credential ? null : ompSettingValueSchema.parse(configured ?? null),
-        defaultJson: JSON.stringify(credential ? null : managedDefault ?? definition.default ?? null),
-        options,
-        credential,
-      };
-    });
-  }
-  private enqueue(task: () => Promise<void>): void {
-    this.operation = this.operation.then(task).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.syncState = { status: 'error', message };
-      console.error('[settings-sync] background synchronization failed', error);
-    });
-  }
-
-  private async readLocal(): Promise<string> {
-    try {
-      const content = await readFile(this.configPath, 'utf8');
-      if (Buffer.byteLength(content) > MAX_CONFIG_BYTES) throw new Error('OMP configuration exceeds 256 KiB');
-      return content;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
-      throw error;
-    }
-  }
-
-  private async publishLocal(resolveConflict: boolean): Promise<void> {
-    if (this.applyingRemote || !this.document) return;
-    const content = await this.readLocal();
-    assertSharedAdvanced(content);
-    const nextChecksum = checksum(content);
-    if (nextChecksum === this.document.checksum) { this.dirty = false; return; }
-    this.syncState = { status: 'connecting', message: null };
-    try {
-      this.document = await this.cloud.updateOmpConfig({ expectedGeneration: this.document.generation, content, checksum: nextChecksum });
-      this.dirty = false;
-      await this.writeMetadata(this.document);
-      this.syncState = { status: 'synced', message: null };
-    } catch (error) {
-      const conflict = conflictFrom(error);
-      if (!conflict) {
-        this.dirty = true;
-        this.syncState = { status: 'error', message: error instanceof Error ? error.message : String(error) };
-        throw error;
-      }
-      this.syncState = { status: 'conflict', message: conflict.message };
-      const remote = await this.cloud.getOmpConfig();
-      await this.applyRemote(remote);
-      this.dirty = false;
-      if (!resolveConflict) throw conflict;
-    }
-  }
-
-  private async pullLatest(): Promise<void> {
-    if (!this.document) return;
-    if (this.dirty) {
-      await this.publishLocal(true);
-      if (this.dirty) return;
-    }
-    const remote = await this.cloud.getOmpConfig();
-    if (remote.generation > this.document.generation) await this.applyRemote(remote);
-  }
-
-  private async applyRemote(remote: OmpConfigDocument): Promise<void> {
-    if (!this.settings) throw new Error('OMP settings are not initialized');
-    assertSharedAdvanced(remote.content);
-    this.applyingRemote = true;
-    try {
-      const tempPath = `${this.configPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-      await writeFile(tempPath, remote.content, { encoding: 'utf8', mode: 0o600 });
-      await rename(tempPath, this.configPath);
-      this.document = remote;
-      await this.writeMetadata(remote);
-      await this.settings.reloadFromDisk();
-      await this.reloadSessions();
-    } finally {
-      this.applyingRemote = false;
-    }
-  }
-
-  private currentEvent(): CanonicalSettingsChangedEvent {
-    return { userRevision: this.userRevision, ompGeneration: this.document?.generation ?? 0, sync: this.syncState };
-  }
-
-  private emit(): void {
-    const event = this.currentEvent();
-    for (const listener of this.listeners) listener(event);
-  }
-
-  private async readMetadata(content: string): Promise<OmpConfigDocument | null> {
-    try {
-      const raw = JSON.parse(await readFile(this.metadataPath, 'utf8')) as Partial<SyncMetadata>;
-      if (!Number.isInteger(raw.generation) || typeof raw.checksum !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(raw.checksum) || typeof raw.updatedAt !== 'string' || typeof raw.updatedBy !== 'string') return null;
-      return { generation: raw.generation!, content, checksum: raw.checksum as `sha256:${string}`, updatedAt: raw.updatedAt, updatedBy: raw.updatedBy };
-    } catch { return null; }
-  }
-
-  private async writeMetadata(document: OmpConfigDocument): Promise<void> {
-    const tempPath = `${this.metadataPath}.${process.pid}.tmp`;
-    const metadata: SyncMetadata = { generation: document.generation, checksum: document.checksum as `sha256:${string}`, updatedAt: document.updatedAt, updatedBy: document.updatedBy };
-    await writeFile(tempPath, JSON.stringify(metadata), { encoding: 'utf8', mode: 0o600 });
-    await rename(tempPath, this.metadataPath);
+  async setRuntimeSetting(path: string, value: RuntimeSettingValue, expectedGeneration: number) {
+    const current = await this.cloud.getRuntimeConfig();
+    if (current.generation !== expectedGeneration) throw new CanonicalSettingsConflict('runtime-config', expectedGeneration, current.generation);
+    const content = JSON.stringify(setRuntimeSetting(parseRuntimeSettings(JSON.parse(current.content || '{}')), path, value));
+    try { await this.cloud.updateRuntimeConfig({ expectedGeneration, content, checksum: `sha256:${createHash('sha256').update(content).digest('hex')}` }); } catch (error) { throw conflictFrom(error); }
+    return this.getRuntimeSettings();
   }
 }

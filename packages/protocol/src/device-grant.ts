@@ -35,7 +35,7 @@ export const deviceCapabilitySchema = z.enum([
   'deployment.control',
   /** Explicit API-client authority for account credentials, inference, approval policy and review decisions. */
   'account.admin',
-  /** Explicit API-client authority for lifecycle approval, recovery, cancellation and retirement. */
+  /** Explicit API-client authority for execution and browser-origin approval, lifecycle recovery, cancellation and retirement. */
   'lifecycle.control',
 ]);
 export type DeviceCapability = z.infer<typeof deviceCapabilitySchema>;
@@ -331,6 +331,9 @@ export function verifyRpcSignature(header: SignedRpcHeader, input: Omit<RpcSigna
 /** The capability a procedure needs, derived from its kind unless the path is special-cased. */
 export function requiredCapability(procedurePath: string, kind: 'query' | 'mutation' | 'subscription'): DeviceCapability {
   if (procedurePath === 'session.prompt' || procedurePath.startsWith('session.answer') || procedurePath === 'session.steer') return 'session.prompt';
+  if (procedurePath === 'runtime.submit' || procedurePath === 'runtime.cancel' || procedurePath === 'runtime.answer' || procedurePath === 'runtime.browserSelect') return 'session.prompt';
+  // The command handler checks the stronger capability for each mutation.
+  if (procedurePath === 'runtime.session') return 'rpc.read';
   if (procedurePath.startsWith('machine.image.') && kind === 'mutation') return 'deployment.control';
   if (procedurePath.startsWith('machine.') && kind === 'mutation') return 'fleet.control';
   if (procedurePath.startsWith('devices.') && kind === 'mutation') return 'devices.manage';
@@ -357,7 +360,7 @@ export function requireDeviceAdministration<T extends { deviceId: string; kind: 
 
 /** Additional authorization; ordinary mutation capability is still required. */
 export function requiredAdministrativeCapability(path: string, input?: unknown): 'account.admin' | 'lifecycle.control' | null {
-  if (['providers.apiKey.set', 'providers.logout', 'inference.create', 'inference.update', 'inference.delete', 'inference.assign', 'session.setApproval', 'inspector.workflow.waiveGate', 'inspector.guide.setApproval', 'inspector.rubric.appendJudgment'].includes(path)) return 'account.admin';
+  if (['providers.apiKey.set', 'providers.logout', 'providers.login.start', 'providers.login.respond', 'providers.login.cancel', 'inference.create', 'inference.update', 'inference.delete', 'inference.assign', 'session.setApproval', 'inspector.workflow.waiveGate', 'inspector.guide.setApproval', 'inspector.rubric.appendJudgment'].includes(path)) return 'account.admin';
   if (['environment.approve', 'environment.revokeApproval', 'environment.recoverRun', 'environment.cancelRun'].includes(path)) return 'lifecycle.control';
   if (path === 'environment.runPhase' && input && typeof input === 'object' && (input as Record<string, unknown>).phase === 'cloud/destroy') return 'lifecycle.control';
   return null;

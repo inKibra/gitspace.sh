@@ -51,7 +51,7 @@ cp -r skills/gitspace-linear-breakdown ~/.claude/skills/
 
 - One folder per skill. Folder name matches the `name:` frontmatter.
 - `SKILL.md` is the only required file. Optional companions: `README.md`, `scripts/`, `prompts/`, `examples/`.
-- Skills here must stay portable. If a skill needs the GitSpace-internal `/space` extension, it belongs in `src/lib/tmux-lite/agents/skills/` (bundled managed defaults), not here.
+- Skills here must stay portable. GitSpace-internal tools belong in the current runtime's managed skill catalog, not this portable registry.
 
 ## Authoring a new skill for this registry
 

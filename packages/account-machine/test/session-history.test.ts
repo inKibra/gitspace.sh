@@ -24,12 +24,13 @@ async function fixture(entries: Record<string, unknown>[]) {
 }
 
 it('keeps prompt recall bounded without silently shortening recalled messages', () => {
-  const source: SessionControlView = {
+  const source = {
     sessionId: 'session', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null,
     fastMode: false, approvalMode: 'always-ask', planMode: false, context: null, cost: 0, todos: [],
     queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, historyAnchorId: 'entry-999',
+    activity: { active: false, reasons: [] }, renderState: 'waiting',
     history: Array.from({ length: 1000 }, (_, index) => ({ entryId: `entry-${index}`, text: `Prompt ${index} ${'x'.repeat(1000)}` })),
-  };
+  } satisfies SessionControlView;
   source.history.at(-1)!.text = 'large prompt '.repeat(10_000);
   const result = boundSessionControl(source);
   expect(result.history.length).toBeLessThanOrEqual(64);

@@ -7,7 +7,6 @@ interface BootstrapMigrationInput {
   environmentRoot: string;
   candidatePath: string;
   initialMachineManifestHash: string;
-  initialOmpManifestHash: string;
 }
 interface BootstrapMigration {
   version: 1;
@@ -77,10 +76,8 @@ export async function prepareBootstrapMigration(
   if (intent?.phase === 'committed' && intent.candidatePath !== input.candidatePath)
     return { async commit() {}, async rollback() {} };
   if (!intent || intent.phase === 'rolled-back') {
-    for (const hash of [input.initialMachineManifestHash, input.initialOmpManifestHash]) {
-      if (!/^sha256:[a-f0-9]{64}$/u.test(hash))
-        throw new Error('Bootstrap migration requires authenticated initial manifest anchors');
-    }
+    if (!/^sha256:[a-f0-9]{64}$/u.test(input.initialMachineManifestHash))
+      throw new Error('Bootstrap migration requires an authenticated initial machine manifest anchor');
     const distribution = await optionalRead(join(bundle, 'distribution-manifest.json'));
     const selectionPath = join(dirname(root), 'runtime-selection.json');
     const nativeSelection = await optionalRead(selectionPath);
@@ -95,7 +92,7 @@ export async function prepareBootstrapMigration(
     const staging = `${runtime}.staging`;
     await mkdir(dirname(runtime), { recursive: true, mode: 0o700 });
     try {
-      // Native installs retain their private Bun and independently selected OMP recipe.
+      // Native installs retain their private Bun and immutable distribution payloads.
       // Provider bootstubs have no native runtime selection and need only the stable loader.
       if (nativeSelection !== null) {
         await linkImmutableTree(bundle, staging);
@@ -110,7 +107,6 @@ export async function prepareBootstrapMigration(
       const bootstrap = [
         `process.env.GITSPACE_BUNDLE_ROOT = ${JSON.stringify(bundle)};`,
         `process.env.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH = ${JSON.stringify(input.initialMachineManifestHash)};`,
-        `process.env.GITSPACE_INITIAL_OMP_MANIFEST_HASH = ${JSON.stringify(input.initialOmpManifestHash)};`,
         `const { startMachineHost } = await import(${JSON.stringify(pathToFileURL(join(runtime, 'machine-bootstrap.js')).href)});`,
         'await startMachineHost();',
         '',

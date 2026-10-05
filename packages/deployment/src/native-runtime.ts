@@ -1,56 +1,25 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
-import { delimiter, dirname, isAbsolute, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { nativeAbiSchema } from '@gitspace/protocol/deployment';
-import { readExecutableFile, validateNativeAbi } from '@gitspace/account-omp/manifest';
+import { readExecutableFile, validateNativeAbi } from './executable-manifest.js';
 import { z } from 'zod';
 
 const digestSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   size: z.number().int().positive(),
 });
-const absolutePath = z.string().min(1).refine(isAbsolute, 'Environment native tool paths must be absolute');
-export const walgitProvenanceSchema = z.object({
-  repository: z.literal('https://github.com/tobi/walgit.git'),
-  revision: z.string().regex(/^[a-f0-9]{40}$/u),
-  rustVersion: z.string().min(1),
-  bunVersion: z.string().min(1),
-  build: z.literal('static-openssl-v1'),
-  patch: digestSchema.extend({ path: z.literal('patches/walgit/conditional-multipart.patch') }),
-}).strict();
-
-/** An account source declaration, never an implicit PATH/global-binary preference. */
-export const machineNativeDeclarationSchema = z.object({
-  version: z.literal(1),
-  walgit: z.discriminatedUnion('source', [
-    z.object({ source: z.literal('pinned-walgit') }).strict(),
-    z.object({
-      source: z.literal('release'),
-      artifact: digestSchema.extend({
-        location: z.string().min(1),
-        abi: nativeAbiSchema,
-      }).strict(),
-    }).strict(),
-    digestSchema.extend({ source: z.literal('environment'), path: absolutePath, abi: nativeAbiSchema }).strict(),
-  ]),
-}).strict();
-export type MachineNativeDeclaration = z.infer<typeof machineNativeDeclarationSchema>;
-
-/** Part of the authenticated complete machine tree, including environment selection. */
+/** Part of the authenticated complete machine tree. */
 export const machineNativeRuntimeSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   bunVersion: z.string().min(1),
   abi: nativeAbiSchema,
-  walgit: z.discriminatedUnion('source', [
-    digestSchema.extend({ source: z.literal('release'), path: z.literal('native/walgit'), provenance: walgitProvenanceSchema.nullable() }).strict(),
-    digestSchema.extend({ source: z.literal('environment'), path: absolutePath }).strict(),
-  ]),
 }).strict();
 export type MachineNativeRuntime = z.infer<typeof machineNativeRuntimeSchema>;
 
 /** Official Git LFS in the authenticated machine tree. Its directory is the only PATH entry a generation adds. */
 export const GIT_LFS_PATH = 'native/bin/git-lfs';
-// Beside, not inside, machine-native.json: predecessor hosts strictly parse that file while verifying a candidate.
+// Git LFS provenance is authenticated alongside the machine ABI declaration.
 export const GIT_LFS_DECLARATION = 'native/git-lfs.json';
 export const gitLfsRuntimeSchema = digestSchema.extend({
   version: z.literal(1),
@@ -63,7 +32,6 @@ export const gitLfsRuntimeSchema = digestSchema.extend({
 export type GitLfsRuntime = z.infer<typeof gitLfsRuntimeSchema>;
 
 export interface PreparedMachineNativeRuntime {
-  walgit: string;
   /** Null only for generations that predate bundled Git LFS, e.g. a rollback target. */
   gitLfs: string | null;
 }
@@ -126,15 +94,7 @@ export async function prepareMachineNativeRuntime(path: string): Promise<Prepare
   const runtime = await readMachineNativeRuntime(path);
   validateNativeAbi(runtime.abi);
   if (runtime.bunVersion !== Bun.version) throw new Error(`Native generation requires Bun ${runtime.bunVersion}, found ${Bun.version}`);
-  const binary = runtime.walgit.source === 'release' ? join(path, runtime.walgit.path) : runtime.walgit.path;
-  await verifyNativeFile(binary, runtime.walgit);
-  if (runtime.walgit.source === 'release' && runtime.walgit.provenance) {
-    const snapshot = await nativeFileDigest(join(path, 'native/patches/conditional-multipart.patch'));
-    const expected = runtime.walgit.provenance.patch;
-    if (snapshot.sha256 !== expected.sha256 || snapshot.size !== expected.size) throw new Error('WalGit patch snapshot integrity mismatch');
-  }
-  await startNative([binary, '--version'], (stdout) => /walgit/iu.test(stdout), 'WalGit');
-  return { walgit: binary, gitLfs: await prepareGitLfs(path) };
+  return { gitLfs: await prepareGitLfs(path) };
 }
 
 /**

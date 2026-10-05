@@ -19,11 +19,13 @@ An agent's default plan file is `local://workspace/PLAN.md`, or `local://base/PL
 
 ## Build with context
 
-Run the main agent inside the workspace on the machine that owns the checkout. Skills, plugins, secrets, and project context are available from the same browser surface.
+The workspace agent runs in a cloud-owned Pi Session. Conversation history, questions, and task records survive a machine disconnect. Provider requests and credential refresh run in the cloud; they do not require an online machine. File and shell tools use the conversation's assigned machine checkout, so repository work and process effects still need an available executor.
 
 Structured agent questions appear as native interactions. Answer the decision directly without searching terminal output for a prompt.
 
-For repository setup, use the built-in `workspace-lifecycle` skill. It inspects the repository and CI, proposes the lifecycle split, and asks permission before editing. Execution needs separate human approval of the final content. Agents use `space.environment` for authorized runs and logs; they cannot grant content approval, recover uncertain runs, or destroy cloud resources. See [Workspace lifecycle](/workspace-lifecycle).
+The live workspace view shows a bounded window of recent messages and completed tasks. Older history and task receipts remain in durable storage. Reconnecting can replace the live view with a fresh snapshot; it does not replay an uncertain machine effect.
+
+For repository setup, use the built-in `workspace-lifecycle` skill. It inspects the repository and CI, proposes the lifecycle split, and asks permission before editing. Execution needs separate human approval of the final content. Agents use the `environment` tool for authorized runs and logs; they cannot grant content approval, recover uncertain runs, or destroy cloud resources. See [Workspace lifecycle](/workspace-lifecycle).
 
 ### Workspace status
 
@@ -31,9 +33,9 @@ The workspace header and sidebar use the same accepted status for the selected w
 
 ### Context compaction
 
-The workspace header and sidebar show **Compacting context** for manual compaction, automatic maintenance before or after a turn, and running background compaction. Method, model, and automatic retry details appear when available. Finishing an assistant turn does not clear maintenance that is still running. The indicator clears when the remaining compaction work succeeds, fails, or is cancelled; a completed background result waiting to be applied is not running work. Human-attention and failure states retain their priority.
+The session's compact action asks Pi to summarize a conversation prefix. It uses the conversation's admitted inference profile and model. The summary instructions ask it to preserve goals, constraints, decisions, unresolved questions, file paths, and tool results needed to continue. An empty, failed, or aborted summary is an error.
 
-Each native V1/V2 compaction request has a six-minute deadline, including its Codex stream watchdogs. Ordinary model-request deadlines are unchanged. A deadline retains its timeout cause rather than becoming a generic WebSocket transport failure, and cancelling a request does not replay it through transport fallback.
+Compaction runs in the cloud and follows Pi's task lifecycle. It does not require the conversation's machine checkout to be online.
 
 ## Configure account and project access
 
@@ -53,9 +55,9 @@ Crons list schedules across the account. Choose the owning project when creating
 
 ## Manage workspaces from an agent
 
-Agents use the `space` namespace in JavaScript code-mode `eval`, not a CLI. `space.list()` discovers workspaces in the current project, including closed workspaces and their goals. `space.get({ workspaceId })` reads a specific workspace without opening it.
+Agents use typed tools directly, not a CLI or a JavaScript `space` namespace. `space_workspace` with `args: { method: 'list' }` discovers workspace definitions in the current project, including closed workspaces. Method `current` reads the current workspace.
 
-Use `space.describe({ method: 'create' })` to read the input schema, then `space.create(...)` to create a workspace with optional initial Goal, Workflow, and Rubric records. Check the returned `ready` field. If an instruction write fails after creation, the result includes the created workspace identity and completed writes so the agent can repair that workspace instead of creating a duplicate.
+Use `space_workspace` with `args: { method: 'create', name, branch, sourceKind, sourceRef }` to create a workspace. Optional fields include `phase`, `dependsOn`, `goal`, `workflow`, and `rubric`. Check the returned `ready` field. If an instruction write fails after creation, the result includes the created workspace identity and completed writes so the agent can repair that workspace instead of creating a duplicate.
 
 New workspaces start in Plan when `phase` is omitted. The browser creation dialog also defaults to Plan; selecting another phase explicitly (including creation from a board column) keeps that choice, subject to dependency phase ceilings. Existing and restored workspace phases are unchanged. Initial Goal and Workflow drafts remain separate typed instructions and are not rewritten by the workspace phase default.
 
@@ -65,9 +67,9 @@ For another workspace, use `sourceKind: 'workspace'` and its workspace ID as `so
 
 Source resolution and destination branch validation happen before publishing the new workspace. An invalid source or branch does not leave a new failed workspace entry.
 
-The namespace also exposes `setPhase`, `setRelations`, `open`, `close`, `archive`, and `restore`. These use the workspace lifecycle and checkpoint rules. Keep the revision and placement generation from the latest read; stale changes reject. An agent cannot close or archive its own workspace from a running tool. Use another workspace or the browser for that action. This API does not move or delegate agents.
+`space_phase` changes the current workspace's phase. The `space_workspace` tool also supports `setRelations`, `open`, and `restore` under the workspace lifecycle and checkpoint rules. Keep the revision and placement generation from the latest read; stale changes reject. An agent cannot close or archive its own workspace from a running tool. Use the browser for that action.
 
-Pass `workspaceId` to `space.goal.get/put`, `space.workflow.get/put`, or `space.rubric.get/put` to edit another workspace in the same project. Closed workspaces stay closed. Writes require the record's `expectedRevision`; use zero only when creating an absent record.
+Pass `workspaceId` inside `args` to `space_goal`, `space_workflow`, or `space_rubric` to edit another workspace in the same project. Use method `get` to read, `describe` with `operation: 'put'` for the input schema, and `put` to write. Closed workspaces stay closed. Writes require the record's `expectedRevision`; use zero only when creating an absent record.
 
 Instruction changes post a notice to the affected agent session without interrupting its current tool or starting an idle turn. The agent reads the latest Goal, Workflow, and Rubric before its next provider request.
 
@@ -92,6 +94,8 @@ The **Review** product keeps discussions attached to files, hunks, lines, or the
 
 Agents read and write artifacts with ordinary tools through `local://workspace/<path>` and `local://base/<path>`. Workspace agents can read project artifacts but write only their workspace artifacts. Project agents can write project artifacts. Published edits refresh the browser catalog and open artifact views; evidence references still point to their recorded version.
 
+These encrypted `local://` evidence files are separate from Cloudflare Artifacts repositories, which store code. A published code view names a committed snapshot; it does not include unflushed changes in a machine checkout.
+
 In **Artifacts**, select one or more workspace files and choose **Copy to project artifacts**. Each copy is an independent project file with source provenance. The originals remain. Choose another destination when a file already exists, or explicitly confirm replacement of its displayed version. A newer destination version invalidates that confirmation.
 
 Select one project or workspace artifact and choose **Share** to create a link to that fixed version. Set an optional expiry, copy the link, or revoke it from **Active links**. Later edits do not change the download.
@@ -110,4 +114,4 @@ Move the workspace through `plan`, `code`, `review`, and `ship`. Archive or rele
 
 ## Direct attention across the fleet
 
-The fleet view distinguishes work that is active, waiting, failed, or needs attention. Machine placement appears with the workspace, so you know where the code and runtime live before taking control or moving the work.
+The fleet view distinguishes work that is active, waiting, failed, or needs attention. Machine placement identifies the checkout and effect executor, not the owner of the conversation. Restarting an agent does not restart its machine processes, and losing a connection does not prove those processes stopped.

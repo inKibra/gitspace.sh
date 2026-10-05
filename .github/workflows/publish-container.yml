@@ -46,7 +46,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=cloud-container
           cache-to: type=gha,mode=max,scope=cloud-container
-      - name: Exercise packaged Bun, walgit, and OMP with a clean home
+      - name: Exercise packaged Bun and machine executables with a clean home
         run: |
           test "$(docker run --rm --entrypoint bun "$IMAGE" --version)" = '1.4.0'
           docker run --rm --entrypoint bun "$IMAGE" /opt/gitspace/probe-image.js

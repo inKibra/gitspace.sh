@@ -7,47 +7,42 @@ function splitReleaseStatus(): DeploymentStatusView {
   const record = deploymentStatusFixture.releases[0]!;
   return {
     ...deploymentStatusFixture,
-    desired: { worker: null, frontend: null, machine: 'machine-release', omp: 'omp-release', updatedAt: record.createdAt },
+    desired: { worker: null, frontend: null, machine: 'machine-release', updatedAt: record.createdAt },
     current: { worker: { sha: null, version: 'channel' }, machines: {} },
-    thisMachine: { machineId: 'home', sha: 'machine-release', ompSha: 'omp-release', ompDraining: 0, generation: 'generation-a' },
+    thisMachine: { machineId: 'home', sha: 'machine-release', generation: 'generation-a' },
     releases: [
       { ...record, sha: 'machine-release', status: { ...record.status, machines: { home: 'applied' }, omps: {} } },
-      { ...record, sha: 'omp-release', status: { ...record.status, machines: {}, omps: { home: 'applied' } } },
+      { ...record, sha: 'omp-release', status: { ...record.status, machines: {}, omps: { home: 'failed' } } },
     ],
     launch: null,
   };
 }
 
 describe('independent target convergence', () => {
-  it('requires both selected generations and waits for old OMP sessions to drain', () => {
+  it('requires the selected complete machine generation and ignores historical OMP outcomes', () => {
     let status = splitReleaseStatus();
     expect(converging(status)).toBe(false);
     expect(machineConvergence(status)).toEqual({ applied: 1, total: 1 });
-    status = { ...status, thisMachine: { ...status.thisMachine, ompSha: 'previous-omp' } };
-    expect(converging(status)).toBe(true);
-    expect(machineConvergence(status)).toEqual({ applied: 0, total: 1 });
-    status = { ...status, thisMachine: { ...status.thisMachine, ompSha: status.desired.omp, ompDraining: 1 } };
+    status = { ...status, thisMachine: { ...status.thisMachine, sha: 'previous-machine' } };
     expect(converging(status)).toBe(true);
     expect(machineConvergence(status)).toEqual({ applied: 0, total: 1 });
   });
 
-  it('continues polling a channel reset until machine and OMP have both reverted', () => {
+  it('continues polling a channel reset until the machine has reverted', () => {
     let status = splitReleaseStatus();
-    status = { ...status, desired: { ...status.desired, machine: null, omp: null } };
+    status = { ...status, desired: { ...status.desired, machine: null } };
     expect(converging(status)).toBe(true);
     status = { ...status, thisMachine: { ...status.thisMachine, sha: null } };
-    expect(converging(status)).toBe(true);
-    status = { ...status, thisMachine: { ...status.thisMachine, ompSha: null } };
     expect(converging(status)).toBe(false);
   });
 
-  it('does not poll forever after an OMP activation failure', () => {
+  it('does not poll forever after a machine activation failure', () => {
     let status = splitReleaseStatus();
     status = {
       ...status,
-      thisMachine: { ...status.thisMachine, ompSha: 'previous-omp' },
-      releases: status.releases.map((record) => record.sha === status.desired.omp
-        ? { ...record, status: { ...record.status, omps: { home: 'failed' } } }
+      thisMachine: { ...status.thisMachine, sha: 'previous-machine' },
+      releases: status.releases.map((record) => record.sha === status.desired.machine
+        ? { ...record, status: { ...record.status, machines: { home: 'failed' } } }
         : record),
     };
     expect(converging(status)).toBe(false);
@@ -58,13 +53,12 @@ describe('independent target convergence', () => {
     let status = splitReleaseStatus();
     status = {
       ...status,
-      current: { ...status.current, machines: { pending: { sha: 'previous-machine', ompSha: 'previous-omp', generation: 'previous' } } },
+      current: { ...status.current, machines: { pending: { sha: 'previous-machine', generation: 'previous' } } },
       releases: status.releases.map((record) => ({
         ...record,
         status: {
           ...record.status,
           machines: record.sha === status.desired.machine ? { ...record.status.machines, pending: 'pending' } : record.status.machines,
-          omps: record.sha === status.desired.omp ? { ...record.status.omps, pending: 'failed' } : record.status.omps,
         },
       })),
     };

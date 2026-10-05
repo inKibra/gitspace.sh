@@ -1,23 +1,22 @@
-import { authPolicyFor, authProviders } from '@oh-my-pi/pi-catalog/compat/auth';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
+import { ACCOUNT_CLOUD_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
 import { consumeDurableStream } from './durable-stream.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import type { LifecycleState } from '@gitspace/protocol-environment';
 import type { CloudImageState } from '@gitspace/protocol/cloud-image';
 import {
   credentialProtocolBase64, deviceCanAdminister, requiredCapability, requiresImageSelectionControl, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
-  type DeviceCapability, type GitSpaceRpcContext, type ProviderView, type CloudProjectSummary,
+  parseRuntimeSettings, runtimeSettingsView, type RuntimeConfigDocument,
+  type DeviceCapability, type GitSpaceRpcContext, type CloudProjectSummary,
 } from '@gitspace/protocol';
 import {
   gitspaceContract, getUserSettingsContract, updateUserSettingsContract, reserveUserHandleContract,
-  getGitIdentityContract, getOmpSettingsContract, settingsEventsContract, listMachinesContract,
+  getGitIdentityContract, getRuntimeSettingsContract, setRuntimeSettingContract, settingsEventsContract, listMachinesContract,
   machineLifecycleEventsContract, createSandboxMachineContract, updateMachineNotesContract,
   sleepMachineContract, resumeMachineContract, destroyMachineContract,
   listCloudImagesContract, cloudImageEventsContract, getCloudImageDefaultContract, setCloudImageDefaultContract,
   setCloudImageContract, retryCloudImageContract, cancelCloudImageContract, recoverCloudImageContract,
-  listProjectsContract, listDevicesContract, revokeDeviceContract, listProvidersContract,
-  setProviderApiKeyContract, logoutProviderContract, getComposioSetupContract,
-  putComposioSetupContract, deleteComposioSetupContract,
+  listProjectsContract, listDevicesContract, revokeDeviceContract,
+  getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
   ensureGitSpaceProjectContract, placementsContract, locateSessionContract, type SpacePlacementView,
   projectEventsContract, projectDirectoryEventsContract, environmentEventsContract, spaceEventsContract, recordIncidentContract,
 } from '@gitspace/protocol/rpc-contract';
@@ -38,6 +37,8 @@ import { inspectorCloudProcedures } from './account-inspector-rpc.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { environmentCloudProcedures } from './account-environment-rpc.js';
 import { configurationCloudProcedures } from './account-configuration-rpc.js';
+import { runtimeCloudProcedures } from './account-runtime-rpc.js';
+import { providerCloudProcedures } from './account-provider-rpc.js';
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_BATCH_ITEMS = 32;
@@ -162,38 +163,6 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return ok(spaceId ? (await readDirectory()).spaces.find((space) => space.spaceId === spaceId) ?? null : null);
     } catch (error) { return err(errors.OperationFailed({ operation: 'locate session', message: message(error) })); }
   });
-  const providers = async (profileId: string): Promise<ProviderView[]> => {
-    const [snapshot, machines] = await Promise.all([vault.ompSnapshot(profileId), catalog.listMachines()]);
-    const online = machines.some((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
-    return authProviders().map((policy) => {
-      const credentialProvider = policy.storeAs ?? policy.id;
-      const stored = snapshot.credentials.filter((entry) => entry.provider === credentialProvider);
-      const oauth = stored.some((entry) => entry.credential.type === 'oauth');
-      const apiKey = policy.apiKeyFormat === 'bearer' && (!policy.login || policy.login.kind === 'api-key' || policy.env !== undefined);
-      return {
-        id: policy.id, credentialProvider, name: policy.name, available: policy.available ?? true,
-        // Interactive OAuth still routes to a machine, when one is available.
-        loginable: online && policy.login !== undefined,
-        authKind: !online && apiKey && !oauth ? 'api_key' : oauth || policy.refresh !== undefined || policy.callbackPort !== undefined || policy.pasteCode === true ? 'oauth' : apiKey ? 'api_key' : 'none',
-        hasAuth: stored.length > 0, source: stored.length ? oauth ? 'oauth' : 'api_key' : null,
-        accounts: stored.map(({ id, credential }) => {
-          const base = credential.type === 'oauth' ? credential.email ?? credential.accountId ?? 'OAuth account' : 'API key';
-          const org = credential.type === 'oauth' ? credential.orgName ?? credential.orgId : null;
-          return {
-            id: String(id), type: credential.type, disabled: false,
-            label: org && org !== base ? `${base} · ${org}` : base,
-            email: credential.type === 'oauth' ? credential.email ?? null : null,
-          };
-        }),
-        hasUsage: false,
-      };
-    });
-  };
-  const provider = async (profileId: string, id: string) => {
-    const value = (await providers(profileId)).find((item) => item.id === id);
-    if (!value) throw new Error(`Unknown provider: ${id}`);
-    return value;
-  };
   const composioSetup = async () => {
     const metadata = await vault.providerSecretMetadata('composio');
     const platform = Boolean(env.COMPOSIO_API_KEY?.trim());
@@ -234,12 +203,23 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return ok(view);
     } catch (error) { return err(errors.OperationFailed({ operation: 'get Git identity', message: message(error) })); }
   });
-  const getOmp = server.implement(getOmpSettingsContract).handler(async ({ errors }) => {
+  const runtimeView = (document: RuntimeConfigDocument) => ({
+    document,
+    schema: runtimeSettingsView(parseRuntimeSettings(JSON.parse(document.content || '{}'))).map(({ value, description, options, defaultJson, ...item }) => ({
+      ...item, valueJson: JSON.stringify(value), description: description ?? null, options: options ?? [], ...(defaultJson === undefined ? {} : { defaultJson }),
+    })),
+    sync: { status: 'synced' as const, message: null },
+  });
+  const getRuntime = server.implement(getRuntimeSettingsContract).handler(async ({ errors }) => {
     try {
-      // The cloud owns this document, not a machine's installed OMP schema or
-      // runtime defaults. Schema-driven editing stays on the machine runtime.
-      return ok({ document: await settings.getOmp(), schema: [], sync: { status: 'offline' as const, message: 'No online machine is available to provide the OMP settings schema.' } });
-    } catch (error) { return err(errors.OperationFailed({ operation: 'get OMP settings', message: message(error) })); }
+      return ok(runtimeView(await settings.getRuntime()));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'get runtime settings', message: message(error) })); }
+  });
+  const setRuntime = server.implement(setRuntimeSettingContract).handler(async ({ input, errors }) => {
+    try {
+      const result = await settings.setRuntime(deviceId, input);
+      return result.status === 'conflict' ? err(errors.SettingsConflict(result)) : ok(runtimeView(result.value));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'set runtime setting', message: message(error) })); }
   });
   const settingsEvents = server.implement(settingsEventsContract).stream(async function* ({ input, signal, errors }) {
     try {
@@ -421,28 +401,6 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return ok({ deviceId: result.value.deviceId, revokedAt: new Date(result.value.revokedAt).toISOString() });
     } catch (error) { return err(errors.OperationFailed({ operation: 'revoke device', message: message(error) })); }
   });
-  const listProviders = server.implement(listProvidersContract).handler(async ({ input, errors }) => {
-    try { return ok({ providers: await providers(input.profileId) }); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'list providers', message: message(error) })); }
-  });
-  const setApiKey = server.implement(setProviderApiKeyContract).handler(async ({ input, errors }) => {
-    try {
-      await requireAdministration();
-      const policy = authPolicyFor(input.providerId);
-      if (!policy || policy.apiKeyFormat !== 'bearer' || (policy.login && policy.login.kind !== 'api-key' && !policy.env)) throw new Error('This provider requires machine-based sign-in');
-      await vault.putBrowserApiKey(input.profileId, policy.storeAs ?? policy.id, input.key);
-      return ok({ provider: await provider(input.profileId, input.providerId) });
-    } catch (error) { return err(errors.OperationFailed({ operation: 'set provider API key', message: message(error) })); }
-  });
-  const logout = server.implement(logoutProviderContract).handler(async ({ input, errors }) => {
-    try {
-      await requireAdministration();
-      const policy = authPolicyFor(input.providerId);
-      if (!policy) throw new Error(`Unknown provider: ${input.providerId}`);
-      await vault.disableBrowserCredentials(input.profileId, policy.storeAs ?? policy.id, input.credentialId);
-      return ok({ provider: await provider(input.profileId, input.providerId) });
-    } catch (error) { return err(errors.OperationFailed({ operation: 'sign out provider', message: message(error) })); }
-  });
   const getComposio = server.implement(getComposioSetupContract).handler(async ({ errors }) => {
     try { return ok(await composioSetup()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'get Composio setup', message: message(error) })); }
@@ -501,13 +459,14 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   });
   const configuration = configurationCloudProcedures(env, userId, deviceId, origin);
   return server.router({
+    runtime: runtimeCloudProcedures(env, userId, deviceId),
     placements, session: { locate: locateSession },
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign, events: inferenceEvents },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
-    settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, omp: { get: getOmp }, events: settingsEvents },
+    settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, events: settingsEvents },
     machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, ensureGitSpace, events: projectEvents, directoryEvents },
     space: { events: spaceEvents }, incidents: { record: recordIncident },
-    devices: { list: devices, revoke }, providers: { list: listProviders, apiKey: { set: setApiKey }, logout },
+    devices: { list: devices, revoke }, providers: providerCloudProcedures(env, userId, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
     inspector: inspectorCloudProcedures(env, userId, requireSubscription, async () => {
       const device = await vault.currentDeviceGrant(deviceId);
@@ -562,11 +521,6 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
     return { kind: 'machine', procedures, holder: holders[0] ?? null };
   }
   if (cloud.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Cloud and machine operations must use separate signed batches');
-  if (items.some((item) => Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, item.path))) {
-    if (items.some((item) => !Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, item.path))) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Runtime metadata requires a separate signed batch');
-    const machines = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines();
-    if (machines.some((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint)) return { kind: 'machine', procedures, holder: null };
-  }
   // A CPU-limit kill leaves no later log line; joining this line by request ID names the batch.
   console.log(JSON.stringify({ event: 'rpc_start', procedures, items: items.length, requestBytes: body.byteLength }));
   const capabilities: DeviceCapability[] = [];
@@ -579,7 +533,10 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   }
   const url = new URL(request.url);
   const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId);
-  const authorized = await vault.authorizeAccountDeviceRequest({ header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body, capabilities });
+  const proof = { header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body, capabilities };
+  const authorized = items.every(item => item.path.startsWith('runtime.'))
+    ? await vault.authorizeWorkspaceRuntimeRequest(proof)
+    : await vault.authorizeAccountDeviceRequest(proof);
   if (authorized.status === 'error') return reject(authorized.error.code === 'REQUEST_REPLAY' ? 409 : authorized.error.code === 'RPC_FORBIDDEN' ? 403 : 401, authorized.error.code, authorized.error.message);
   const handler = createFetchHandler({ router: accountRouter(env, userId, authorized.value.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: CONTRACT_VERSION, createContext: () => ({}) });
   const response = await handler(request);

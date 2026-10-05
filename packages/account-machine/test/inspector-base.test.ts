@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spaceCheckpointManifestKey, spaceCheckpointManifestSchema, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
+import { spaceCheckpointManifestKey, spaceCheckpointManifestSchema } from '@gitspace/protocol-workspace';
 import type { SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import { createGitIntermediateCheckpoint } from '../src/git-checkpoint.js';
 import { createPublishedSpaceHeadResolver, type PublishedSpaceHeadResolverOptions } from '../src/inspector-base.js';
@@ -96,7 +96,7 @@ async function fixture() {
     authority,
     blobs,
     gitRemote: remote,
-    binding: (projectId) => ({ projectId, bucket: 'account-storage', endpoint: 'https://storage.invalid', region: 'auto' }),
+    binding: (projectId) => ({ projectId, repository: `project-${projectId}` }),
   };
   const input = { projectId: 'project-a', spaceId: 'base-a', branch: 'main', repositoryPath: target };
 
@@ -120,7 +120,7 @@ async function fixture() {
     };
   }
 
-  async function publish(revision: number): Promise<SpaceCheckpointManifest> {
+  async function publish(revision: number) {
     const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: input.spaceId, revision });
     git(source, 'push', remotePath, `${checkpoint.checkpointRef}:${checkpoint.checkpointRef}`);
     const manifest = spaceCheckpointManifestSchema.parse({
@@ -135,7 +135,9 @@ async function fixture() {
       createdAt: '2026-09-08T00:00:00.000Z',
     });
     await saveManifest(manifest, revision);
-    return manifest;
+    const headCommit = manifest.repository.headCommit;
+    if (headCommit === null) throw new Error('Committed fixture has no HEAD');
+    return { ...manifest, repository: { ...manifest.repository, headCommit } };
   }
 
   const manifest = await publish(1);
@@ -154,6 +156,13 @@ function checkoutState(repositoryPath: string) {
 }
 
 describe('Inspector saved base resolver', () => {
+  it('reports an unborn published branch as an unavailable base without fetching phantom commits', async () => {
+    const f = await fixture();
+    await f.saveManifest({ ...f.manifest, repository: { ...f.manifest.repository, headCommit: null } }, 1);
+    await expect(f.resolveBase(f.input)).rejects.toThrow(/unavailable:.*unborn/i);
+    expect(f.remote.fetches).toBe(0);
+  });
+
   it('fetches the saved branch head without a base checkout and preserves the inspected checkout and index', async () => {
     const f = await fixture();
     const encrypted = new EncryptedCheckpointBlobStore(f.blobs, new Uint8Array(32).fill(7));
@@ -175,7 +184,7 @@ describe('Inspector saved base resolver', () => {
 
   it('uses existing commit objects when checkpoint storage is unreachable', async () => {
     const f = await fixture();
-    await f.remote.fetchCheckpoint({ binding: f.options.binding(f.input.projectId), repositoryPath: f.target, checkpointRef: f.manifest.repository.checkpointRef });
+    await f.remote.fetchCheckpoint({ binding: f.options.binding(f.input.projectId, f.input.spaceId), repositoryPath: f.target, checkpointRef: f.manifest.repository.checkpointRef });
     f.remote.beforeFetch = async () => { throw new Error('checkpoint storage offline'); };
     await expect(f.resolveBase(f.input)).resolves.toBe(f.manifest.repository.headCommit);
   });

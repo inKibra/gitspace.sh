@@ -32,13 +32,7 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      # web/ is a separate package (the root has no workspaces) and `typecheck`
-      # runs `tsc -b` inside it, so it needs its own dependency tree.
-      - name: Install (web)
-        run: bun install --frozen-lockfile
-        working-directory: web
-
-      # Covers the root project, the web app, and the web tests project.
+      # Every current package's typecheck script.
       - name: Typecheck
         run: bun run typecheck
 
@@ -47,18 +41,15 @@ jobs:
       - name: Typecheck coverage
         run: bun run typecheck:coverage
 
-      - name: Lockfile sync
-        run: bun run check:lockfile-sync
-
       - name: Architecture boundaries
         run: bun run check:arch
 
+      - name: Current product boundary
+        run: bun run check:product-boundary
+
   test:
     name: Tests
-    # macOS on purpose. The suite drives real PTYs (Bun.Terminal, /dev/ptmx) and
-    # Bun.secrets/keychain, and fd-leak.integration.test.ts guards a limit that
-    # is "acute on macOS where the default soft NOFILE limit is 256". A Linux
-    # container tier for the integration suites is tracked in #121.
+    # Machine suites exercise native PTYs and platform process cleanup.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,19 +58,6 @@ jobs:
 
       - name: Install
         run: bun install --frozen-lockfile
-
-      # cloudflared is a real runtime dependency, not a test fixture: `machine
-      # serve start` launches a tunnel through it, and three suites
-      # (cloud-launch, hosting/supervisor, web.integration) drive that path.
-      # Developers have it via Homebrew, so its absence only ever showed up here.
-      - name: Install cloudflared
-        run: brew install cloudflared
-
-      # web.integration drives `gssh web`, which refuses to start without built
-      # assets ("Web UI assets not found"). Developers have web/dist lying
-      # around; a clean runner does not.
-      - name: Build web assets
-        run: bun run build:web
 
       # scripts/test-isolated.ts runs each file in its own process: mock.module
       # is process-global and mock.restore() does not undo it, so a bare
@@ -96,13 +74,29 @@ jobs:
           # `ps -Ao ... | grep` rather than pgrep: macOS pgrep has no -a, and
           # joining pids for `ps -p` is needlessly fragile. This form prints the
           # offending processes directly.
-          leaked=$(ps -Ao pid=,ppid=,command= | grep -E 'internal-process-runner|tmux-lite/server\.ts' | grep -v grep || true)
+          leaked=$(ps -Ao pid=,ppid=,command= | grep -E 'packages/supervisor/src/(runner|process)' | grep -v grep || true)
           if [ -n "$leaked" ]; then
             echo "::error::Test run leaked processes"
             echo "$leaked"
             exit 1
           fi
           echo "No leaked processes."
+
+  runtime-safety:
+    name: Runtime safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Typecheck runtime source and tests
+        run: bun run --filter '@gitspace/account-worker' --filter '@gitspace/account-machine' --filter '@gitspace/account-web' --filter '@gitspace/protocol-runtime' --filter '@gitspace/runtime-core' --filter '@gitspace/runtime-workspace-do' --filter '@gitspace/runtime-machine' --filter '@gitspace/supervisor' --filter '@gitspace/catalog' --filter '@gitspace/provider-auth' typecheck
+      - name: Verify runtime and account contracts
+        run: bun run --filter '@gitspace/account-worker' --filter '@gitspace/account-machine' --filter '@gitspace/account-web' --filter '@gitspace/protocol-runtime' --filter '@gitspace/runtime-core' --filter '@gitspace/runtime-workspace-do' --filter '@gitspace/runtime-machine' --filter '@gitspace/supervisor' --filter '@gitspace/catalog' --filter '@gitspace/provider-auth' --sequential test
 
   design-tests:
     name: Design tests

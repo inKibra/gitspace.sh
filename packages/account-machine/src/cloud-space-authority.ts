@@ -1,8 +1,6 @@
 import { z } from 'zod';
 import {
-  inferenceExecutionContextSchema,
   inferenceStateSchema,
-  type InferenceExecutionContext,
   type InferenceState,
   type InferenceCreateInput,
   type InferenceUpdateInput,
@@ -46,12 +44,12 @@ import {
   type InspectorOverview,
   type JournalEntryView,
   type MarkGuideSectionReadInput,
-  type OmpConfigDocument,
+  type RuntimeConfigDocument,
   type McpAuditEvent,
   type McpConnection,
   type McpConnectionDraft,
   type McpConnectionStatus,
-  type OmpConfigUpdate,
+  type RuntimeConfigUpdate,
   type ProjectCronDraft,
   type ProjectCronRunView,
   type DeviceGrantRecord,
@@ -828,12 +826,12 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('settings.handle.reserve', { expectedRevision, handle });
   }
 
-  getOmpConfig(): Promise<OmpConfigDocument> {
-    return this.call('settings.omp.get', {});
+  getRuntimeConfig(): Promise<RuntimeConfigDocument> {
+    return this.call('settings.runtime.get', {});
   }
 
-  updateOmpConfig(input: OmpConfigUpdate): Promise<OmpConfigDocument> {
-    return this.call('settings.omp.update', { ...input });
+  updateRuntimeConfig(input: RuntimeConfigUpdate): Promise<RuntimeConfigDocument> {
+    return this.call('settings.runtime.update', { ...input });
   }
 
   async listInferenceProfiles(): Promise<InferenceState> {
@@ -856,21 +854,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return inferenceStateSchema.parse(await this.call('inference.assign', { ...input }));
   }
 
-  async resolveInference(projectId: string): Promise<InferenceExecutionContext> {
-    const context = inferenceExecutionContextSchema.parse(await this.call('inference.resolve', { projectId }));
-    if (context.projectId !== projectId || context.assignmentRevision === null) {
-      throw new CloudSpaceAuthorityError('INFERENCE_SCOPE_MISMATCH', 'Canonical inference context does not match the requested project');
-    }
-    return context;
-  }
-
-  async providerInference(profileId: string): Promise<InferenceExecutionContext> {
-    const context = inferenceExecutionContextSchema.parse(await this.call('inference.providers', { profileId }));
-    if (context.profile.id !== profileId || context.projectId !== null || context.assignmentRevision !== null) {
-      throw new CloudSpaceAuthorityError('INFERENCE_SCOPE_MISMATCH', 'Canonical provider context does not match the requested profile');
-    }
-    return context;
-  }
   getGitIdentity(): Promise<GitIdentityDocument | null> {
     return this.call('settings.git.get', {});
   }
@@ -1006,7 +989,7 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('skills.update', { ...input });
   }
   subscribeSettings(
-    onChange: (event: { userRevision: number; ompGeneration: number }) => void,
+    onChange: (event: { userRevision: number; runtimeGeneration: number }) => void,
     onState: (state: 'connecting' | 'open' | 'offline') => void,
   ): () => void {
     let stopped = false;
@@ -1024,9 +1007,9 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
       socket.addEventListener('open', () => { retryMs = 500; onState('open'); });
       socket.addEventListener('message', (message) => {
         try {
-          const event = JSON.parse(String(message.data)) as { type?: unknown; userRevision?: unknown; ompGeneration?: unknown };
-          if (event.type === 'settings.changed' && typeof event.userRevision === 'number' && typeof event.ompGeneration === 'number') {
-            onChange({ userRevision: event.userRevision, ompGeneration: event.ompGeneration });
+          const event = JSON.parse(String(message.data)) as { type?: unknown; userRevision?: unknown; runtimeGeneration?: unknown };
+          if (event.type === 'settings.changed' && typeof event.userRevision === 'number' && typeof event.runtimeGeneration === 'number') {
+            onChange({ userRevision: event.userRevision, runtimeGeneration: event.runtimeGeneration });
           }
         } catch {
           // Ignore malformed control-plane events; the next valid event remains usable.
@@ -1080,22 +1063,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return values.map(projectCronRunView);
   }
 
-  async claimNextProjectCron(projectId: string, heldSpaceIds: readonly string[]): Promise<{ run: ProjectCronRunView; claimToken: string; leaseExpiresAt: Date } | null> {
-    const value = await this.call<{ run: ProjectCronRunView; claimToken: string; leaseExpiresAt: string } | null>('crons.claimNext', { projectId, heldSpaceIds: [...heldSpaceIds] });
-    return value ? { ...value, run: projectCronRunView(value.run), leaseExpiresAt: new Date(value.leaseExpiresAt) } : null;
-  }
-
-  async completeProjectCronRun(input: {
-    projectId: string;
-    runId: string;
-    claimToken: string;
-    state: 'succeeded' | 'blocked' | 'failed';
-    message: string | null;
-    resolvedSpaceId: string | null;
-    resolvedGeneration: number | null;
-  }): Promise<ProjectCronRunView> {
-    return projectCronRunView(await this.call<ProjectCronRunView>('crons.completeRun', { ...input }));
-  }
 
   bootstrapInspector(identity: InspectorIdentity): Promise<InspectorIdentity> {
     return this.call('inspector.bootstrap', { ...identity });

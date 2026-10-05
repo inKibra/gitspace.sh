@@ -2,6 +2,7 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import type { AskBlock, TransportBlock, TurnBlock } from '@gitspace/blocks';
 import type { PendingAskAnswer, SessionControlView } from '@gitspace/protocol';
 import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
+import type { SessionControlView as RuntimeSessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
 import {
@@ -106,7 +107,7 @@ export interface ArtifactView {
 }
 
 export interface SessionControlsProps {
-  value: SessionControlView;
+  value: RuntimeSessionControlView;
   onCycleRole(direction: 'forward' | 'backward'): Promise<void>;
   onSetModel(provider: string, model: string): Promise<void>;
   onSetThinking(thinking: string | null): Promise<void>;
@@ -139,10 +140,14 @@ export interface GitSpaceShellProps {
   history?: { loading: boolean; error: string | null; onRetry(): void };
   transport: TransportBlock[];
   artifacts: ArtifactView[];
+  /** Cloud runtime status is independent of the directory's machine placement projection. */
+  runtimeSummary?: SidebarSpaceSummary;
   machines?: Array<{ id: string; label: string }>;
   onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>) => void | Promise<void>;
   sessionControls?: SessionControlsProps;
+  approvalCard?: ReactNode;
   controlsError?: string;
+  onRetryControls?: () => void;
   onRetryAgent?: () => Promise<void>;
   onSetWorkspacePhase?: (workspaceId: string, phase: WorkspaceView['phase']) => void | Promise<void>;
   onSetWorkspaceRelations?: (workspaceId: string, relations: WorkspaceView['relations']) => void | Promise<void>;
@@ -297,11 +302,13 @@ export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryAgent, turns, transcript, history, transport, onSend, pending, error, onReopenSpace, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, skills, banner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, pending, error, onReopenSpace, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, skills, banner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
+  approvalCard?: ReactNode;
   controlsError?: string;
+  onRetryControls?: () => void;
   onRetryAgent?: GitSpaceShellProps['onRetryAgent'];
   turns: TurnBlock[];
   transcript?: TranscriptHistory;
@@ -424,7 +431,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col" style={{ '--composer-overlay-height': `${composerOverlayHeight}px` } as CSSProperties}>
     {history ? <TranscriptHistoryNotice {...history} /> : null}
     {mainAgent?.errorMessage || mainAgent?.failed ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">Agent failure: {mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}</p> : null}
-    {controlsError ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{controlsError}</p> : null}
+    {controlsError && !onRetryControls ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{controlsError}</p> : null}
     {workspace.status.compaction && mainAgent?.state === 'running' ? <p role="status" className="flex shrink-0 items-center gap-2 px-4 py-2 text-caption text-muted-foreground"><ThinkingIndicator />Compacting context{workspace.status.compaction.detail ? ` · ${workspace.status.compaction.detail}` : ''}</p> : null}
     <ScrollArea ref={bindTranscriptViewport} onTouchStartCapture={transcript ? undefined : onTranscriptTouchStart} onTouchEndCapture={transcript ? undefined : onTranscriptTouchEnd} onTouchCancelCapture={transcript ? undefined : onTranscriptTouchEnd} className="min-h-0 flex-1" viewportClassName="h-full">
       {transcript
@@ -434,6 +441,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
     {banner ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-3"><div className="pointer-events-auto">{banner}</div></div> : null}
     <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-4">
       <div className="w-full max-w-xl">
+        {approvalCard}
         {standaloneAsk && pendingAsk && sessionControls
           ? <div className={`${shape.container} pointer-events-auto mb-2 flex max-h-[50dvh] flex-col gap-2 overflow-y-auto bg-surface-3 p-3 shadow-surface-3`}>
               {pendingAsk.links.length
@@ -460,7 +468,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
               <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || (inactive && !released && !workspace.closedAt && !onRetryAgent) || (released && claimMachines.length > 0 && !claimMachineId)} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? onRetryAgent ? 'Retrying agent…' : 'Opening…' : workspace.closedAt ? 'Restore' : released ? 'Reopen' : onRetryAgent ? 'Retry agent' : 'Start'}</Button>
               {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
             </div>
-          : <Composer workspace={workspace} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
+          : <Composer workspace={workspace} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
       </div>
     </div>
   </div>;
@@ -584,7 +592,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, machines = [], onSend, sessionControls, controlsError, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -650,10 +658,10 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     detail: !project.connected ? 'Connection unavailable' : mainAgent?.recovering ? 'Agent is recovering' : !mainAgent || mainAgent.controlsAvailable === false ? 'Agent unavailable' : null,
   }), [workspace, project.connected, mainAgent]);
   const directoryProject = accountDirectory?.directory[workspace.projectId];
-  const selectedSummary = accountDirectory
+  const selectedSummary = runtimeSummary ?? (accountDirectory
     ? (workspace.kind === 'project' ? directoryProject?.baseSummary : directoryProject?.workspaces.find((space) => space.id === workspace.id)?.summary)
       ?? { holder: { kind: 'unknown' as const }, closedAt: null, freshness: 'unknown' as const }
-    : fallbackSummary;
+    : fallbackSummary);
   const sidebarProjects = useMemo<SidebarProject[]>(() => {
     if (accountSidebar) return [];
     const byProject = new Map<string, SidebarProject>((projects ?? []).map((item) => [item.id, { id: item.id, name: item.name, lifecycle: item.lifecycle, workspaces: [] }]));
@@ -718,7 +726,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content">
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} pending={sendPending || closePendingSpaceId === workspace.id} error={sendError} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills} banner={launchBanner} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} approvalCard={approvalCard} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} pending={sendPending || closePendingSpaceId === workspace.id} error={sendError} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills} banner={launchBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined)}</aside> : null}

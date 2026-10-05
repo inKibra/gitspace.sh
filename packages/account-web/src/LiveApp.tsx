@@ -1,25 +1,23 @@
-import { executionAgentId, transcriptRowsToTurns, type ExecutionBlock, type SideAgentBlock, type TransportBlock, type TurnBlock } from '@gitspace/blocks';
-import type { DeploymentStatusView, InspectorView, LaunchProgressView, OmpSettingValue, ProviderLoginEvent, ReleaseTarget, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
-import { DEFAULT_INFERENCE_PROFILE_ID } from '@gitspace/protocol/inference';
-import { executionHash, projectEnvironmentState, lifecycleSummary, lifecycleExecutionOutcome, isLifecycleRunActive, latestLifecycleRun, latestExecutionRun, type EnvironmentBundle as ProtocolEnvironmentBundle } from '@gitspace/protocol-environment';
-import { currentAgentExecutionFailure, currentAgentFailure } from '@gitspace/protocol-agent';
+import { executionAgentId, type ExecutionBlock, type SideAgentBlock, type TurnBlock } from '@gitspace/blocks';
+import type { InspectorView, RuntimeSettingValue, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
+import { DEFAULT_INFERENCE_PROFILE_ID, inferenceSettingMetadata } from '@gitspace/protocol/inference';
+import { executionHash, projectEnvironmentState, lifecycleExecutionOutcome, isLifecycleRunActive, latestLifecycleRun, latestExecutionRun, type EnvironmentBundle as ProtocolEnvironmentBundle } from '@gitspace/protocol-environment';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
-import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip, useShape } from '@gitspace/ui';
-import { LayoutRight, Terminal } from '@untitledui/icons';
+import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ContextType, type ReactNode } from 'react';
 import { isTaggedError } from 'result-rpc';
 import { ResultRpcProvider, useResultMutation, useResultQuery, useResultRuntime } from 'result-rpc/react';
-import { CreateWorkspaceDialog, EmptyState, GitSpaceShell, PageCanvas, PageHeader, TranscriptHistoryNotice, type GitSpaceShellProps, type ProviderAuthView, type SpaceHolderView } from './GitSpaceShell.js';
+import { CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, type GitSpaceShellProps } from './GitSpaceShell.js';
 import { AccountWorkPages } from './AccountWorkPages.js';
-import { LaunchSheet, LaunchedBanner, LAUNCHED_STORAGE_KEY, readLaunchedMark, type LaunchedMark } from './LaunchSheet.js';
-import { createGitSpaceBrowserClient, homeRpcUrl, rpcClient } from './rpc-client.js';
+import { createGitSpaceBrowserClient, rpcClient } from './rpc-client.js';
 import { currentDevice, DEVICE_REJECTED_EVENT, deviceRejected, setCurrentDevice } from './device-session.js';
 import { createApiClient, enrollDevice, type ApiClientDraft, type BrowserDevice } from './device.js';
 import { requestMcpAccess } from './mcp-access.js';
 import { applyAppearance } from './appearance.js';
 import type { ProviderLoginFlow, ProvidersSectionProps } from './ProvidersSection.js';
+import { forgetProviderLogin, readProviderLogin, saveProviderLogin, type RecoverableProviderLogin } from './provider-login-recovery.js';
 import { SettingsPage } from './SettingsPage.js';
 import { InferenceProvider, useInference } from './InferenceContext.js';
 import { InferencePage } from './InferencePage.js';
@@ -27,88 +25,25 @@ import { EnvironmentView } from './environment/EnvironmentView.js';
 import { LifecycleLogDialog } from './environment/LifecycleLogDialog.js';
 import type { EnvironmentViewModel, LifecyclePhase, LifecycleRun, TrustState } from './environment/types.js';
 import { Inspector } from './inspector/index.js';
-import { appendLaunchProgress, launchTrackFrom, RELEASE_TARGETS, shortSha, type LaunchTrack } from './release.js';
 import { ACCOUNT_DIRECTORY_CHANGED, PRODUCT_ROUTE_LABELS, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
 import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
-import { VirtualTranscript } from './VirtualTranscript.js';
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
 import { SkillsPage } from './SkillsPage.js';
 import { PluginsPage } from './PluginsPage.js';
 import { ProjectSecretsPage, type ProjectSecretsProps } from './ProjectSecretsPage.js';
 import { ProjectCronsPage, type ProjectCronTargetOption } from './ProjectCronsPage.js';
-import { useTranscriptHistory, type TranscriptHistorySource } from './useTranscriptHistory.js';
 import { AccountDirectoryContext, useWorkspaceProjection } from './useAccountDirectory.js';
-import { WorkspaceCreationPanel } from './WorkspaceCreationPanel.js';
 import { invalidatesRead, useRetainedRead, useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { useRepositoryTree } from './useRepositoryTree.js';
-import { useLiveSessionControls } from './useLiveSessionControls.js';
-import { useAgentRecovery } from './useAgentRecovery.js';
-import { ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
+import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadInspectorContent, loadInspectorResource } from './resource-content.js';
-import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountOmpConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useRuntimeSynchronization, useSpaceSynchronization, useSynchronizationOwner, useSynchronizedEvents } from './SynchronizationProvider.js';
-import type { SynchronizationOwner } from './synchronization.js';
-import { recordActionIncident } from './incident-outbox.js';
+import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useSpaceSynchronization } from './SynchronizationProvider.js';
+import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
+import { useRuntimeInspectorState } from './useRuntimeInspectorState.js';
+import { CloudCreationProgress } from './CloudCreationProgress.js';
 
-const INSPECTOR_EVENT_ENTITIES: Readonly<Record<string, true>> = {
-  goal: true,
-  workflow: true,
-  rubric: true,
-  journal: true,
-  'change-guide': true,
-  'review-thread': true,
-};
-
-interface MachineHealth { generation: string | null; machineRelease: string | null; ompRelease: string | null }
-
-/** `GET /health` beside `/rpc`: unauthenticated, so it answers even while the device session is mid-swap. */
-async function fetchMachineHealth(): Promise<MachineHealth | null> {
-  try {
-    const healthUrl = new URL(homeRpcUrl, window.location.origin);
-    healthUrl.pathname = healthUrl.pathname.replace(/\/rpc$/u, '/health');
-    const response = await fetch(healthUrl, { cache: 'no-store' });
-    if (!response.ok) return null;
-    const body: unknown = await response.json();
-    if (body === null || typeof body !== 'object') return null;
-    return {
-      generation: 'generation' in body && typeof body.generation === 'string' ? body.generation : null,
-      machineRelease: 'machineRelease' in body && typeof body.machineRelease === 'string' ? body.machineRelease : null,
-      ompRelease: 'ompRelease' in body && typeof body.ompRelease === 'string' ? body.ompRelease : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-const HEALTH_GATE_TIMEOUT_MS = 90_000;
-/**
- * `code-version` means the frontend generation is already swapped; machine
- * and OMP targets may still be converging through the stable host.
- */
-async function awaitMachineSwap(owner: SynchronizationOwner, projectId: string, target: 'machine' | 'omp' | null, sha: string | null): Promise<boolean> {
-  const result = Promise.withResolvers<boolean>();
-  const channel = owner.channel(`runtime:${projectId}`, (after, signal) => rpcClient.events({ projectId, after }, { signal }));
-  let stopped = false;
-  let open = false;
-  let unsubscribe: (() => void) | undefined;
-  const finish = (served: boolean) => { if (stopped) return; stopped = true; clearTimeout(deadline); unsubscribe?.(); result.resolve(served); };
-  const deadline = setTimeout(() => finish(false), HEALTH_GATE_TIMEOUT_MS);
-  const inspect = () => {
-    const connected = channel.snapshot().connection === 'open';
-    if (!connected) { open = false; return; }
-    if (open || stopped) return;
-    open = true;
-    // One health read per actual stream reconnection, not a state polling loop.
-    void fetchMachineHealth().then((health) => {
-      const running = target === 'omp' ? health?.ompRelease : health?.machineRelease;
-      if (health && (target === null || sha === null || running === sha)) finish(true);
-    });
-  };
-  unsubscribe = channel.subscribe(inspect);
-  inspect();
-  return result.promise;
-}
 
 function isRetryableConnectionError(error: Error): boolean {
   const message = `${error.name} ${error.message}`.toLowerCase();
@@ -145,13 +80,6 @@ function spaceOpeningError(cause: unknown): string {
   return rpcErrorMessage(cause, 'Open workspace');
 }
 
-function isReleaseTarget(value: unknown): value is ReleaseTarget {
-  return typeof value === 'string' && RELEASE_TARGETS.includes(value as ReleaseTarget);
-}
-
-function isLaunchStatus(value: unknown): value is LaunchProgressView['status'] {
-  return value === 'running' || value === 'succeeded' || value === 'failed';
-}
 
 function optionalQueryParameter(name: string): string | null {
   if (typeof window === 'undefined') return null;
@@ -160,31 +88,6 @@ function optionalQueryParameter(name: string): string | null {
 
 const CONFIGURE_ENVIRONMENT_PROMPT = 'Use the workspace-lifecycle skill to help me configure this repository. Inspect the repository and our shared environment ledger, then discuss the local preparation and cloud resources this project needs. Propose the five lifecycle phases and profiles. Do not edit files or run lifecycle scripts until I review the plan; approval to edit is not approval to execute.';
 
-function LiveEnvironmentStatus({ spaceId, onInspect, onConfigure, onRevealTerminal }: { spaceId: string; onInspect(): void; onConfigure?: () => Promise<void>; onRevealTerminal(name: string): void }) {
-  const query = useResultQuery(rpcClient.environment.get, { spaceId });
-  const retained = useRetainedRead(query, spaceId);
-  const synchronized = useEnvironmentSynchronization(spaceId);
-  const read = { ...retained, value: retained.value && synchronized.value ? { ...retained.value, ...projectEnvironmentState(synchronized.value) } : retained.value };
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-  const interactiveRun = read.value?.lifecycle.runs.find((run) => run.interactive && isLifecycleRunActive(run) && run.terminalName);
-  const revealedRun = useRef<string | null>(null);
-  useEffect(() => {
-    if (!interactiveRun?.terminalName || revealedRun.current === interactiveRun.id) return;
-    revealedRun.current = interactiveRun.id;
-    onRevealTerminal(interactiveRun.terminalName);
-  }, [interactiveRun?.id, interactiveRun?.terminalName, onRevealTerminal]);
-  if (!read.value) return read.error ? <span role="alert" className="text-caption text-destructive">{rpcErrorMessage(read.error, 'environment.get')}</span> : null;
-  const state = read.value.lifecycle;
-  const configured = state.bundleJson !== null || read.value.executions.length > 0;
-  const summary = lifecycleSummary(state);
-  return <span className="flex min-w-0 items-center gap-1">
-    <Button variant="ghost" size="compact" className={`min-h-10 max-w-48 truncate ${summary.attention ? 'text-destructive' : 'text-muted-foreground'}`} onClick={onInspect}>{summary.label}</Button>
-    {!configured && onConfigure ? <Button variant="ghost" size="compact" className="min-h-10" loading={pending} onClick={() => { setPending(true); setError(null); void onConfigure().catch((cause: unknown) => setError(rpcErrorMessage(cause, 'Configure environment with agent'))).finally(() => setPending(false)); }}>Configure with agent</Button> : null}
-    {read.error ? <span role="alert" className="max-w-64 truncate text-caption text-destructive" title={rpcErrorMessage(read.error, 'environment.get')}>Environment refresh: {rpcErrorMessage(read.error, 'environment.get')}</span> : null}
-    {error ? <span role="alert" className="max-w-64 truncate text-caption text-destructive" title={error}>{error}</span> : null}
-  </span>;
-}
 
 function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, generation, machineId, runtimeAvailable, onAskAgent }: { projectName: string; workspaceName: string; spaceId: string; workspace: boolean; generation: number; machineId?: string; runtimeAvailable: boolean; onAskAgent?: (text: string) => Promise<void> }) {
   const query = useResultQuery(rpcClient.environment.get, { spaceId });
@@ -219,6 +122,11 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
     void operation().catch((error: unknown) => setActionError(rpcErrorMessage(error, 'Read environment evidence'))).finally(() => setReadingEvidence(false));
   };
   const openExecution = (targetId: string, approve: boolean): void => loadEvidence(async () => {
+    const origin = remote.lifecycle.browserOrigins.find((entry) => entry.hash === targetId);
+    if (origin) {
+      setEvidence({ title: `Browser origin: ${origin.pattern}`, output: `Allow logged-in Chrome access to ${origin.pattern}.\nOnly tabs in this workspace's browser group are accessible.`, ...(approve ? { approvalHash: origin.hash } : {}) });
+      return;
+    }
     const execution = remote.executions.find((item) => item.id === targetId);
     if (!execution) throw new Error('Execution is no longer present. Refresh the environment.');
     const content = execution.content;
@@ -309,10 +217,17 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
       onOpenRunLog={openRunLog}
       onProfileChange={(profile) => mutate(async () => { const result = await rpcClient.environment.setProfile({ spaceId, profile }); if (result.status === 'error') throw result.error; })}
       onApprove={(targetId) => openExecution(targetId, true)}
-      onRevoke={(targetId) => { const execution = remote.executions.find((item) => item.id === targetId); if (execution?.approval) mutate(async () => { const result = await rpcClient.environment.revokeApproval({ spaceId, scope: execution.approval!, executionHash: execution.hash }); if (result.status === 'error') throw result.error; }); }}
+      onRevoke={(targetId) => {
+        const origin = remote.lifecycle.browserOrigins.find((entry) => entry.hash === targetId);
+        const execution = remote.executions.find((item) => item.id === targetId);
+        const hash = origin?.hash ?? execution?.hash;
+        const approval = remote.lifecycle.approvals.find((entry) => entry.executionHash === hash && entry.scope === 'project')
+          ?? remote.lifecycle.approvals.find((entry) => entry.executionHash === hash && entry.scope === 'workspace');
+        if (approval) mutate(async () => { const result = await rpcClient.environment.revokeApproval({ spaceId, scope: approval.scope, executionHash: approval.executionHash }); if (result.status === 'error') throw result.error; });
+      }}
       onGrantSecret={openSecrets}
       onInputChange={(name, value) => mutate(async () => { const result = await rpcClient.environment.putValue({ spaceId, scope: workspace ? 'workspace' : 'project', name, value }); if (result.status === 'error') throw result.error; })}
-      onFixCheck={onAskAgent ? (checkId) => mutate(() => onAskAgent(`Inspect the failing environment check ${checkId} using space.environment.get and its durable run logs. Explain the cause and propose a fix; do not grant yourself execution approval.`)) : undefined}
+      onFixCheck={onAskAgent ? (checkId) => mutate(() => onAskAgent(`Inspect the failing environment check ${checkId} using the environment tool with method get and its durable run logs. Explain the cause and propose a fix; do not grant yourself execution approval.`)) : undefined}
       onUpdateCheck={(checkId, patch) => saveBundle({ ...bundle, checks: { ...bundle.checks, [checkId]: bundle.checks[checkId]?.kind === 'command' ? { kind: 'command', label: patch.label ?? bundle.checks[checkId].label, command: patch.probe ?? bundle.checks[checkId].command } : { ...bundle.checks[checkId]!, label: patch.label, requirement: patch.requirement } } })}
       onDeleteCheck={(checkId) => saveBundle({ ...bundle, checks: Object.fromEntries(Object.entries(bundle.checks).filter(([id]) => id !== checkId)), profiles: Object.fromEntries(Object.entries(bundle.profiles).map(([name, profile]) => [name, { ...profile, checks: profile.checks.filter((id) => id !== checkId) }])) })}
       onAddCheck={(check) => saveBundle({ ...updateProfile((profile) => ({ ...profile, checks: [...new Set([...profile.checks, check.id])] })), checks: { ...bundle.checks, [check.id]: check.source === 'catalog' ? { kind: 'built-in', check: check.id, label: check.label, requirement: check.requirement } : { kind: 'command', command: check.probe ?? '', label: check.label } } })}
@@ -332,7 +247,7 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
     />
     {selectedLogRun && logSelection ? <LifecycleLogDialog key={`${spaceId}:${selectedLogRun.id}:${logSelection.script.id}`} run={selectedLogRun} script={logSelection.script} revision={remote.lifecycle.revision} loadPage={async (runId, offset, signal) => { const result = await rpcClient.environment.runLog({ spaceId, runId, offset }, { signal }); if (result.status === 'error') throw result.error; return result.value; }} onClose={() => setLogSelection(null)} /> : null}
     <Dialog open={evidence !== null} onOpenChange={(open) => { if (!open) setEvidence(null); }}>
-      <DialogContent size="sm"><DialogHeader><DialogTitle>{evidence?.approvalHash ? 'Review exact execution content' : evidence?.title}</DialogTitle><DialogDescription>{evidence?.approvalHash ? 'Approves only this content hash. Editing a script requires a new approval; this does not run it or authorize retirement.' : 'Saved lifecycle evidence. Logs remain available after a checkout is removed.'}</DialogDescription></DialogHeader>
+      <DialogContent size="sm"><DialogHeader><DialogTitle>{evidence?.approvalHash ? 'Review environment permission' : evidence?.title}</DialogTitle><DialogDescription>{evidence?.approvalHash ? 'Approves only this exact item. Changed content requires a new approval. This does not execute commands or authorize retirement.' : 'Saved lifecycle evidence. Logs remain available after a checkout is removed.'}</DialogDescription></DialogHeader>
         {evidence?.approvalHash ? <code className="break-all font-mono text-caption text-muted-foreground">{evidence.approvalHash}</code> : null}
         <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{evidence?.output || 'No output recorded.'}</pre>
         {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
@@ -342,7 +257,7 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
   </div>;
 }
 
-function LiveInspector({
+export function LiveInspector({
   projectId,
   spaceId,
   generation,
@@ -361,6 +276,7 @@ function LiveInspector({
   onAskAgent,
   initialView,
   resourceRequest,
+  runtimeContext,
 }: {
   projectId: string;
   spaceId: string;
@@ -380,9 +296,11 @@ function LiveInspector({
   onAskAgent?: (text: string) => Promise<void>;
   initialView?: 'environment';
   resourceRequest?: ResourceRequest;
+  runtimeContext?: RuntimeInspectorContext;
 }) {
   const request = { spaceId, expectedGeneration: generation };
   const queryRuntime = useResultRuntime();
+  const runtimeInspector = useRuntimeInspectorState(runtimeContext);
   const overview = useResultQuery(rpcClient.inspector.overview, request);
   const artifactCatalog = useResultQuery(rpcClient.inspector.artifacts.list, request);
   const [secondaryQueries, setSecondaryQueries] = useState({ repository: false, journal: false, threads: false, services: false });
@@ -401,7 +319,7 @@ function LiveInspector({
   const usageInFlight = useRef(false);
   const usageLastRead = useRef<{ sessionId: string; revision: number } | null>(null);
   const [agentsRequested, setAgentsRequested] = useState(false);
-  const agents = useResultQuery(rpcClient.session.agents, { sessionId: sessionId ?? '' }, { enabled: runtimeAvailable && controlsAvailable && agentsRequested && sessionId !== null });
+  const agents = useResultQuery(rpcClient.session.agents, { sessionId: sessionId ?? '' }, { enabled: !runtimeContext && runtimeAvailable && controlsAvailable && agentsRequested && sessionId !== null });
   const stackedOn = scope?.kind === 'workspace' ? scope.relations.stackedOn : null;
   const stackStatus = useResultQuery(rpcClient.workspace.stackStatus, { workspaceId: spaceId }, { enabled: runtimeAvailable && stackedOn !== null && scope?.kind === 'workspace' && !scope.closedAt });
   const overviewRead = useRetainedRead(overview, readKey);
@@ -448,7 +366,7 @@ function LiveInspector({
   }, [overview.state]);
 
   useEffect(() => {
-    if (!runtimeAvailable || !controlsAvailable || !usageRequested || sessionId === null || usageInFlight.current) return;
+    if (runtimeContext || !runtimeAvailable || !controlsAvailable || !usageRequested || sessionId === null || usageInFlight.current) return;
     if (usageLastRead.current?.sessionId === sessionId && usageLastRead.current.revision === usageRevision) return;
     usageInFlight.current = true;
     usageLastRead.current = { sessionId, revision: usageRevision };
@@ -535,6 +453,12 @@ function LiveInspector({
     onRequestResource={(uri, signal) => loadInspectorResource({
       readArtifact: (input, options) => rpcClient.inspector.artifacts.read(input, options),
       readResource: (input, options) => rpcClient.inspector.resources.read(input, options),
+      ...(runtimeContext ? { readBrowserArtifact: async (input: { machineId: string; artifactId: string; offset: number; limit: number }, signal?: AbortSignal) => {
+        const response = await rpcClient.runtime.session({ projectId: runtimeContext.snapshot.projectId, workspaceId: runtimeContext.snapshot.workspaceId, ...(runtimeContext.conversationId ? { conversationId: runtimeContext.conversationId } : {}), command: { type: 'browserArtifact', ...input } }, { signal });
+        if (response.status === 'error') throw response.error;
+        if (!response.value.browserArtifact) throw new Error('The machine did not return browser artifact content.');
+        return response.value.browserArtifact;
+      } } : {}),
     }, { spaceId, projectId, generation, sessionId, runtimeAvailable }, uri, signal)}
     scope={scope}
     workspaces={workspaces}
@@ -607,8 +531,8 @@ function LiveInspector({
     }}
     threads={threadsValue ?? []}
     services={servicesValue ?? []}
-    subagents={subagents}
-    usage={{
+    subagents={runtimeInspector?.subagents ?? subagents}
+    usage={runtimeInspector?.usage ?? {
       sessionId,
       report: usageRead.value ?? null,
       status: !controlsAvailable || !usageRequested || sessionId === null ? 'idle' : usage.fetch === 'fetching' || usage.state === 'pending' ? 'loading' : usageRead.error ? 'error' : 'ready',
@@ -616,7 +540,7 @@ function LiveInspector({
       load: () => setUsageRequested(true),
       refresh: () => { if (!runtimeAvailable || !controlsAvailable || sessionId === null) return; setUsageRequested(true); setUsageRevision((current) => current + 1); },
     }}
-    agentSetup={{
+    agentSetup={runtimeInspector?.agentSetup ?? {
       sessionId,
       report: agentsRead.value ?? null,
       status: !controlsAvailable || !agentsRequested || sessionId === null ? 'idle' : agents.fetch === 'fetching' || agents.state === 'pending' ? 'loading' : agentsRead.error ? 'error' : 'ready',
@@ -844,7 +768,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
   </AccountDirectoryContext.Provider></AccountSidebarContext.Provider></ProjectSettingsContext.Provider></AccountWorkActionsContext.Provider>;
 }
 
-type LiveWorkspaceProps = { onOpenSettings: (section?: 'source') => void; defaultMachineId: string | null; onNavigateView: (view: AppView) => void; user: { name: string; handle: string | null }; providers: readonly ProviderAuthView[] };
+type LiveWorkspaceProps = { onOpenSettings: (section?: 'source') => void };
 
 function selectInspection(projectId: string, workspaceId: string | null): void {
   const url = new URL(window.location.href);
@@ -860,934 +784,29 @@ function LiveWorkspace(props: LiveWorkspaceProps) {
   const projects = useAccountProjects();
   const projectId = location.searchParams.get('project') ?? '';
   const workspaceId = location.searchParams.get('workspace');
-  const availability = useResultQuery(rpcClient.inspector.availability, { projectId, workspaceId }, { enabled: projectId.length > 0 });
-  const selectionKey = JSON.stringify([projectId, workspaceId]);
   const projectValues = useRetainedQueryValue(projects, 'projects');
-  const available = useRetainedQueryValue(availability, selectionKey);
   const account = useContext(AccountDirectoryContext);
-  useEffect(() => {
-    const changed = () => { void projects.refetch(); if (projectId) void availability.refetch(); };
-    window.addEventListener(ACCOUNT_DIRECTORY_CHANGED, changed);
-    return () => window.removeEventListener(ACCOUNT_DIRECTORY_CHANGED, changed);
-  }, [projectId, workspaceId]);
-  // An unfinished or failed creation never offers a runtime, even if a placement is momentarily open.
-  const creating = workspaceId !== null && !!account?.directory[projectId]?.workspaces.find((workspace) => workspace.id === workspaceId)?.summary?.creation;
-  if (projectId && available?.runtimeAvailable && !creating) return <>
-    <RunningWorkspace key={selectionKey} {...props} projectId={projectId} workspaceId={workspaceId} />
-    {availability.state === 'failure' ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto w-fit max-w-full rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">{rpcErrorMessage(availability.error, 'inspector.availability')}<Button variant="ghost" size="compact" onClick={() => void availability.refetch()}>Retry</Button></div> : null}
-  </>;
+  if (!projectId) return <AccountWork view="projects" />;
   if (!projectValues && projects.state === 'failure') return <PageCanvas><EmptyState title="Project directory unavailable" description={rpcErrorMessage(projects.error, 'Load project directory')} action={<Button variant="ghost" onClick={() => void projects.refetch()}>Retry</Button>} /></PageCanvas>;
   if (!projectValues) return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Loading projects…" description="Reading your account without starting a machine." /></PageCanvas>;
-  if (!projectId) return <AccountWork view="projects" />;
   const selectedProject = projectValues.find((project) => project.id === projectId);
   if (!selectedProject) return <PageCanvas><EmptyState title="Project not found" description="Choose another project from your account sidebar." /></PageCanvas>;
-  if (selectedProject.lifecycle === 'cloud-only') return <CloudOnlyProject key={projectId} project={selectedProject} defaultMachineId={props.defaultMachineId} onOpenSettings={props.onOpenSettings} />;
-  if (!available && availability.state === 'failure') return <PageCanvas><EmptyState title="Workspace availability unavailable" description={rpcErrorMessage(availability.error, 'inspector.availability')} action={<Button variant="ghost" onClick={() => void availability.refetch()}>Retry</Button>} /></PageCanvas>;
-  if (!available) return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Loading workspace…" description="Checking cloud workspace availability without starting a machine." /></PageCanvas>;
-  return <OfflineWorkspace key={`${projectId}:${workspaceId ?? ''}`} projectId={projectId} workspaceId={workspaceId} defaultMachineId={props.defaultMachineId} onOpenSettings={props.onOpenSettings} />;
+  return <RuntimeWorkspace key={JSON.stringify([projectId, workspaceId])} projectId={projectId} workspaceId={workspaceId ?? projectId} onOpenSettings={props.onOpenSettings} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(id) => selectInspection(projectId, id)} renderInspector={(context) => <RuntimeInspector context={context} />} creation={workspaceId ? <CloudCreationProgress projectId={projectId} workspaceId={workspaceId} onDeleted={() => selectInspection(projectId, null)} /> : null} />;
 }
 
-function CloudOnlyProject({ project, defaultMachineId, onOpenSettings }: {
-  project: { id: string; name: string; source: { release: string | null; branch: string | null; commit: string | null } | null };
-  defaultMachineId: string | null;
-  onOpenSettings: LiveWorkspaceProps['onOpenSettings'];
-}) {
-  const machines = useAccountMachines();
-  const machineValues = useRetainedQueryValue(machines, 'machines');
-  const [chosen, setChosen] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const openingRef = useRef(false);
-  const [opened, setOpened] = useState(false);
-  const [needsStateRefresh, setNeedsStateRefresh] = useState(false);
-  const [checkingState, setCheckingState] = useState(false);
-  const refreshOpenState = async (): Promise<void> => {
-    setCheckingState(true);
-    try {
-      const directory = await rpcClient.project.list({ lifecycle: 'all' });
-      if (directory.status === 'error') throw directory.error;
-      const current = directory.value.find((candidate) => candidate.id === project.id);
-      if (!current) throw new Error('Project is no longer in your account.');
-      // Cloud-only remains true while activation is cloning; it does not prove the first open settled.
-      if (current.lifecycle === 'cloud-only') setNeedsStateRefresh(true);
-      else {
-        const canonical = await rpcClient.inspector.view({ projectId: project.id, workspaceId: null });
-        if (canonical.status === 'error') throw canonical.error;
-        setNeedsStateRefresh(canonical.value.placement !== null && canonical.value.placement.state !== 'closed');
-      }
-      refreshInspection();
-    } catch (cause) {
-      setNeedsStateRefresh(true);
-      setError((current) => `${current ?? 'The open outcome is unknown.'} ${rpcErrorMessage(cause, 'Refresh cloud state')}`);
-    } finally { setCheckingState(false); }
-  };
-  const projectSynchronization = useProjectSynchronization(project.id);
-  useEventRefresh(projectSynchronization.cursor, () => { refreshInspection(); if (pending || needsStateRefresh) return refreshOpenState(); });
-  const online = (machineValues ?? []).filter((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
-  const machine = chosen !== null ? online.find((machine) => machine.id === chosen) : online.find((machine) => machine.id === defaultMachineId) ?? online[0];
-  const open = async (): Promise<void> => {
-    if (!machine?.rpcEndpoint || openingRef.current || needsStateRefresh || checkingState) return;
-    openingRef.current = true;
-    setChosen(machine.id);
-    setPending(true); setOpened(false); setError(null);
-    const operationId = crypto.randomUUID();
-    try {
-      const result = await createGitSpaceBrowserClient({ url: machine.rpcEndpoint }).project.open({ projectId: project.id });
-      if (result.status === 'error') throw result.error;
-      setOpened(true);
-      refreshInspection();
-    } catch (cause) {
-      setError(spaceOpeningError(cause));
-      await recordActionIncident({ projectId: project.id, spaceId: project.id, sessionId: null, operation: 'open space', operationId, error: cause })
-        .catch((error: unknown) => setError((current) => `${current} Incident could not be saved locally: ${error instanceof Error ? error.message : String(error)}`));
-      setNeedsStateRefresh(true);
-      await refreshOpenState();
-      openingRef.current = false;
-      setPending(false);
-    }
-  };
-  return <main className="flex min-h-0 flex-1 flex-col bg-background">
-    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center gap-4 px-6">
-      <h1 className="text-title font-semibold">{project.name}</h1>
-      <p className="text-body text-muted-foreground">Your built-in GitSpace project is saved in the cloud. Opening it creates a checkout and project workspace on the machine you choose. Nothing runs until you open it.</p>
-      <p className="break-all font-mono text-caption text-muted-foreground">Release {project.source?.release ?? 'not pinned'} · {project.source?.branch ?? 'HEAD'}{project.source?.commit ? ` · ${project.source.commit}` : ''}</p>
-      {online.length || chosen ? <Select value={chosen ?? machine?.id ?? ''} onValueChange={setChosen} disabled={pending}><SelectTrigger aria-label="Open GitSpace on machine" /><SelectContent>{chosen && !machine ? <SelectItem value={chosen} index={online.length} disabled>{chosen} · unavailable</SelectItem> : null}{online.map((candidate, index) => <SelectItem value={candidate.id} index={index} key={candidate.id}>{candidate.label}</SelectItem>)}</SelectContent></Select> : <p className="text-body text-muted-foreground">Connect or start a machine in Account settings when you are ready. This project remains available without one.</p>}
-      <div><Button variant="primary" disabled={!machine || pending || needsStateRefresh || checkingState} loading={pending} onClick={() => void open()}>{pending ? opened ? 'Connecting to project…' : 'Opening GitSpace project…' : 'Open GitSpace project'}</Button></div>
-      {pending ? <p role="status" className="text-caption text-muted-foreground">{opened ? 'The open request succeeded. Waiting for the workspace to become available.' : `Opening on ${machine?.label}. Preparing the checkout and restoring saved state may take a moment.`}</p> : null}
-      <div><Button variant="ghost" onClick={() => onOpenSettings()}>Account settings</Button></div>
-      {error || machines.state === 'failure' ? <p role="alert" className="text-caption text-destructive">{error ?? (machines.state === 'failure' ? rpcErrorMessage(machines.error, 'machine.list') : null)}</p> : null}
-      {error ? <div className="flex flex-col gap-2"><p className="text-caption text-muted-foreground">{needsStateRefresh ? 'Opening remains disabled until cloud state confirms it is safe to retry.' : 'Cloud state has been refreshed. You can retry the open request explicitly.'}</p><Button variant="secondary" disabled={checkingState || pending} loading={checkingState} onClick={() => void refreshOpenState()}>Refresh project state</Button></div> : null}
-    </div>
-  </main>;
-}
-
-function OfflineWorkspace({ projectId, workspaceId, defaultMachineId, onOpenSettings }: {
-  projectId: string;
-  workspaceId: string | null;
-  defaultMachineId: string | null;
-  onOpenSettings: LiveWorkspaceProps['onOpenSettings'];
-}) {
-  const shape = useShape();
-  const context = useResultQuery(rpcClient.inspector.view, { projectId, workspaceId });
-  const saved = useRetainedQueryValue(context, JSON.stringify([projectId, workspaceId]));
-  const workspaceActions = useContext(AccountWorkActionsContext);
-  const historySource = useRef<TranscriptHistorySource | null>(null);
-  if (saved) {
-    historySource.current = saved.savedTranscript.status === 'none' ? null : {
-      key: JSON.stringify(['saved', projectId, workspaceId, saved.checkpoint?.sessionId, saved.checkpoint?.generation, saved.checkpoint?.createdAt]),
-      revision: saved,
-      page: async (request, signal) => {
-        const result = await rpcClient.inspector.transcriptPage({ projectId, workspaceId, ...request }, { signal });
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      },
-      content: async (request, signal) => {
-        const result = await rpcClient.inspector.transcriptContent({ projectId, workspaceId, ...request }, { signal });
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      },
-    };
-  }
-  if (!saved) historySource.current = null;
-  const history = useTranscriptHistory(historySource.current);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
-  const [chosenMachineId, setChosenMachineId] = useState<string | null>(null);
-  const [opening, setOpening] = useState(false);
-  const [openError, setOpenError] = useState<string | null>(null);
-  const openingRef = useRef(false);
-  const [opened, setOpened] = useState(false);
-  const [needsStateRefresh, setNeedsStateRefresh] = useState(false);
-  const [checkingState, setCheckingState] = useState(false);
-  const refreshOpenState = async (): Promise<void> => {
-    setCheckingState(true);
-    try {
-      const canonical = await rpcClient.inspector.view({ projectId, workspaceId });
-      if (canonical.status === 'error') throw canonical.error;
-      await context.refetch();
-      setNeedsStateRefresh(canonical.value.placement !== null && canonical.value.placement.state !== 'closed');
-      refreshInspection();
-    } catch (cause) {
-      setNeedsStateRefresh(true);
-      setOpenError((current) => `${current ?? 'The open outcome is unknown.'} ${rpcErrorMessage(cause, 'Refresh cloud state')}`);
-    } finally { setCheckingState(false); }
-  };
-  const remoteTransition = saved?.placement?.state === 'opening' || saved?.placement?.state === 'closing';
-  const projectSynchronization = useProjectSynchronization(projectId);
-  const placementSynchronization = useSpaceSynchronization(workspaceId ?? projectId);
-  useEventRefresh(projectSynchronization.cursor, () => context.refetch());
-  useEventRefresh(placementSynchronization.cursor, () => { refreshInspection(); return context.refetch(); });
+export function RuntimeInspector({ context }: { context: RuntimeInspectorContext }) {
   const [reviewerId, setReviewerId] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void currentDevice().then((device) => { if (!cancelled) setReviewerId(device?.deviceId ?? null); });
     return () => { cancelled = true; };
   }, []);
-  const machines = saved?.machines ?? [];
-  const onlineMachines = machines.filter((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint !== null);
-  const machineId = chosenMachineId !== null
-    ? onlineMachines.some((machine) => machine.id === chosenMachineId) ? chosenMachineId : null
-    : [defaultMachineId, saved?.checkpoint?.lastMachineId, onlineMachines[0]?.id].find((id) => id && onlineMachines.some((machine) => machine.id === id)) ?? null;
-  const turns = useMemo(() => transcriptRowsToTurns(history.rows), [history.rows]);
-  const openWorkspace = async (): Promise<void> => {
-    if (context.state !== 'success' || !machineId || openingRef.current || remoteTransition || needsStateRefresh || checkingState) return;
-    openingRef.current = true;
-    setChosenMachineId(machineId);
-    setOpened(false);
-    setOpening(true);
-    setOpenError(null);
-    const operationId = crypto.randomUUID();
-    try {
-      const machine = onlineMachines.find((candidate) => candidate.id === machineId)!;
-      const client = createGitSpaceBrowserClient({ url: machine.rpcEndpoint! });
-      const input = { spaceId: context.value.identity.spaceId, expectedGeneration: context.value.placement?.generation ?? 0 };
-      const result = context.value.workspace.archivedAt ? await client.workspace.restore(input) : await client.space.reopen(input);
-      if (result.status === 'error') throw result.error;
-      setOpened(true);
-      refreshInspection();
-    } catch (error) {
-      setOpenError(spaceOpeningError(error));
-      await recordActionIncident({ projectId, spaceId: context.value.identity.spaceId, sessionId: saved?.checkpoint?.sessionId ?? null, operation: 'open space', operationId, error })
-        .catch((cause: unknown) => setOpenError((current) => `${current} Incident could not be saved locally: ${cause instanceof Error ? cause.message : String(cause)}`));
-      setNeedsStateRefresh(true);
-      await refreshOpenState();
-      openingRef.current = false;
-      setOpening(false);
-    }
-  };
-  // A worktree still being created, or whose creation failed, has nothing to open: only Retry or Delete.
-  const creationState = saved?.workspace.kind === 'worktree' && (saved.workspace.lifecycle === 'provisioning' || saved.workspace.lifecycle === 'failed') ? saved.workspace.lifecycle : null;
-  const navigation = <header className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-    {saved ? <span className="min-w-0 flex-1 basis-40 truncate text-body font-medium" title={saved.workspace.name}>{saved.workspace.name}</span> : null}
-    <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-1">
-      {creationState ? null : <>
-        <Tooltip content="Open this workspace on a machine first"><span><Button variant="ghost" size="icon-compact" aria-label="Open terminals" disabled><Terminal width={16} height={16} strokeWidth={1.5} /></Button></span></Tooltip>
-        <Tooltip content="Inspector"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip>
-      </>}
-      <Button variant="ghost" size="compact" onClick={() => onOpenSettings()}>Account settings</Button>
-    </div>
-  </header>;
-  if (!saved) return <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">{navigation}<div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto"><EmptyState icon={context.state === 'pending' ? <ThinkingIndicator /> : undefined} title={context.state === 'pending' ? 'Loading saved workspace…' : 'Cloud Inspector unavailable'} description={context.state === 'failure' ? rpcErrorMessage(context.error, 'inspector.view') : 'Reading canonical workspace records without opening the workspace.'} action={context.state === 'failure' ? <Button variant="ghost" onClick={() => void context.refetch()}>Retry</Button> : undefined} /></div></main>;
-  if (creationState) return <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">{navigation}
-    {context.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">Cloud Inspector: {rpcErrorMessage(context.error, 'inspector.view')}<Button variant="ghost" size="compact" onClick={() => void context.refetch()}>Retry</Button></div> : null}
-    <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto p-4">
-      <WorkspaceCreationPanel key={saved.workspace.id} name={saved.workspace.name} state={creationState} creation={saved.creation}
-        onRetry={async () => {
-          // Refreshes like the account lifecycle mutations; the workspace stays selected and opens once creation succeeds.
-          try { await configurationResult(rpcClient.workspace.retryCreate({ workspaceId: saved.workspace.id })); }
-          finally { refreshInspection(); await context.refetch(); }
-        }}
-        onDelete={async () => {
-          if (!workspaceActions) throw new Error('Account actions are unavailable. Refresh and try again.');
-          await workspaceActions.onDeleteWorkspace(saved.workspace.id);
-          selectInspection(projectId, null);
-        }} />
-    </div>
-  </main>;
-  return <ResourceNavigation.Provider value={(request) => { setResourceRequest({ spaceId: saved.identity.spaceId, request }); setInspectorOpen(true); }}><main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">{navigation}
-    {context.state === 'failure' ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto w-fit max-w-full rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">Cloud Inspector: {rpcErrorMessage(context.error, 'inspector.view')}<Button variant="ghost" size="compact" onClick={() => void context.refetch()}>Retry</Button></div> : null}
-    <div className="flex min-h-0 min-w-0 flex-1 max-md:flex-col">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <TranscriptHistoryNotice loading={history.initialLoading || (history.loading && history.error !== null)} error={history.error} onRetry={history.refresh} />
-      <ScrollArea className="min-h-0 min-w-0 flex-1" viewportClassName="h-full">
-        <div className="flex min-w-0 flex-col gap-2 px-4 py-4 [overflow-wrap:anywhere] sm:px-6">
-          <span className="text-caption text-muted-foreground">{saved.project.name} · {saved.workspace.branch}</span>
-          <h1 className="text-title font-semibold">{saved.workspace.name}</h1>
-          {saved.checkpoint ? <p className="text-caption text-muted-foreground tabular-nums">Saved checkpoint · generation {saved.checkpoint.generation} · {new Date(saved.checkpoint.createdAt).toLocaleString()}{saved.checkpoint.lastMachineId ? ` · last on ${machines.find((machine) => machine.id === saved.checkpoint!.lastMachineId)?.label ?? saved.checkpoint.lastMachineId}` : ''}</p> : null}
-        </div>
-        <h2 className="px-4 pb-2 text-caption font-medium text-muted-foreground sm:px-6">Saved transcript</h2>
-        {saved.savedTranscript.status === 'available' || history.rows.length > 0 ? <VirtualTranscript history={history} transport={[]} /> : <div className="px-4 py-4 sm:px-6"><EmptyState title={saved.savedTranscript.status === 'none' ? 'No saved transcript' : 'Saved transcript unavailable'} description={saved.savedTranscript.reason ?? 'No transcript has been saved for this workspace.'} action={saved.savedTranscript.status === 'unavailable' && !history.error ? <Button variant="ghost" disabled={history.loading} onClick={() => { history.refresh(); void context.refetch(); }}>Retry transcript</Button> : undefined} /></div>}
-      </ScrollArea>
-        <div className="flex shrink-0 justify-center px-4 pb-4 pt-2 sm:px-6">
-          <div className={`${shape.container} flex w-full min-w-0 max-w-xl flex-col gap-2 bg-surface-3 p-3 shadow-surface-3 [overflow-wrap:anywhere]`}>
-            <p role={opening || remoteTransition ? 'status' : undefined} className="text-caption text-muted-foreground">{opening ? opened ? 'The open request succeeded. Connecting to the workspace…' : 'Opening workspace and restoring saved state on the selected machine…' : remoteTransition ? `Workspace ${saved.placement?.state} on ${saved.placement?.machineId ?? 'its machine'}. Waiting for cloud state…` : onlineMachines.length ? 'Open this workspace on a machine to continue.' : 'No online machines. Manage machines in Account settings to open this workspace.'}</p>
-            <div className="flex flex-wrap items-center gap-2">
-              {onlineMachines.length || chosenMachineId ? <Select size="compact" value={chosenMachineId ?? machineId ?? ''} disabled={opening || remoteTransition} onValueChange={setChosenMachineId}><SelectTrigger aria-label="Open on machine" /><SelectContent>{chosenMachineId && !machineId ? <SelectItem value={chosenMachineId} index={onlineMachines.length} disabled>{machines.find((machine) => machine.id === chosenMachineId)?.label ?? chosenMachineId} · unavailable</SelectItem> : null}{onlineMachines.map((machine, index) => <SelectItem value={machine.id} index={index} key={machine.id}>{machine.label}</SelectItem>)}</SelectContent></Select> : null}
-              <Tooltip content={machineId ? 'Open workspace on the selected machine' : 'Choose an online machine in Account settings'}><span><Button variant="secondary" size="compact" disabled={!machineId || opening || remoteTransition || needsStateRefresh || checkingState} loading={opening || remoteTransition} onClick={() => void openWorkspace()}>{opening || remoteTransition ? 'Opening workspace…' : 'Open workspace'}</Button></span></Tooltip>
-              <Button variant="ghost" size="compact" onClick={() => setInspectorOpen(true)}>Inspect workspace</Button>
-            </div>
-            {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
-            {openError ? <><p className="text-caption text-muted-foreground">{needsStateRefresh ? 'Opening remains disabled until cloud state confirms it is safe to retry.' : 'Cloud state has been refreshed. Your selected machine is preserved; retry only when you are ready.'}</p><Button variant="ghost" disabled={checkingState || opening} loading={checkingState} onClick={() => void refreshOpenState()}>Refresh workspace state</Button></> : null}
-          </div>
-        </div>
-      </div>
-      {inspectorOpen ? <aside className="flex min-h-0 w-[min(55vw,900px)] min-w-0 flex-col border-l border-border max-md:h-1/2 max-md:w-full" aria-label="Inspector">{reviewerId ? <LiveInspector key={`${saved.identity.spaceId}:${saved.placement?.generation ?? 0}:${saved.placement?.machineId ?? ''}`} projectId={projectId} spaceId={saved.identity.spaceId} generation={saved.placement?.generation ?? 0} reviewerId={reviewerId} sessionId={saved.checkpoint?.sessionId ?? null} turns={turns} workspaces={[]} onSelectWorkspace={(id) => selectInspection(projectId, id)} refreshToken={0} runtimeAvailable={false} controlsAvailable={false} resourceRequest={resourceRequest?.spaceId === saved.identity.spaceId ? resourceRequest.request : undefined} onClose={() => { setInspectorOpen(false); setResourceRequest(null); }} /> : <EmptyState title="Inspector identity unavailable" description="This browser must be enrolled to inspect workspace records." />}</aside> : null}
-    </div>
-  </main></ResourceNavigation.Provider>;
+  if (!reviewerId) return <EmptyState title="Loading Inspector…" description="Reading browser identity." />;
+  return <LiveInspector projectId={context.snapshot.projectId} spaceId={context.snapshot.workspaceId} generation={context.scope.generation} reviewerId={reviewerId} sessionId={context.sessionId} turns={context.turns} scope={context.scope} workspaces={context.workspaces} onSelectWorkspace={(id) => selectInspection(context.snapshot.projectId, id)} onSetRelations={context.onSetRelations} refreshToken={context.snapshot.cursor} resourceRequest={context.resourceRequest} initialView={context.initialView} runtimeAvailable controlsAvailable={context.sessionId !== null} onAskAgent={context.onAskAgent} onGenerateChangeGuide={() => context.onAskAgent('Use the review-guide-narrator skill to generate or refresh the Change Guide.')} onClose={context.onClose} runtimeContext={context} />;
 }
 
-function RunningWorkspace({ projectId, workspaceId, onOpenSettings, defaultMachineId, onNavigateView, user, providers }: LiveWorkspaceProps & { projectId: string; workspaceId: string | null }) {
-  const synchronizationOwner = useSynchronizationOwner();
-  const accountDirectory = useContext(AccountDirectoryContext);
-  const placementsQuery = useResultQuery(rpcClient.placements, {});
-  const placementsValue = useRetainedQueryValue(placementsQuery, 'placements');
-  const homeMachineId = placementsValue?.machineId ?? null;
-  const [reviewerId, setReviewerId] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void currentDevice().then((device) => { if (!cancelled) setReviewerId(device?.deviceId ?? null); });
-    return () => { cancelled = true; };
-  }, []);
-  const projectsQuery = useAccountProjects();
-  const projectsValue = useRetainedQueryValue(projectsQuery, 'projects');
-  const bootstrap = useResultQuery(rpcClient.space.view, { projectId, workspaceId }, { enabled: projectId.length > 0 });
-  const bootstrapValue = useRetainedQueryValue(bootstrap, JSON.stringify([projectId, workspaceId]));
-  const machinesQuery = useAccountMachines();
-  const machinesValue = useRetainedQueryValue(machinesQuery, 'machines');
-  const [eventConnection, setEventConnection] = useState<'connecting' | 'open' | 'reconnecting' | 'closed'>('connecting');
-  const skillsQuery = useResultQuery(rpcClient.skills.list, {});
-  const skillsValue = useRetainedQueryValue(skillsQuery, 'skills');
-  const liveSession = bootstrapValue?.mainAgent ?? null;
-  const liveSessionId = liveSession?.id ?? '';
-  const selectedSpace = bootstrapValue?.workspaces.find((candidate) => candidate.id === workspaceId) ?? bootstrapValue?.baseSpace;
-  const selectedPlacement = placementsValue?.spaces.find((candidate) => candidate.spaceId === selectedSpace?.id);
-  const runtimeAvailable = !!selectedSpace && !selectedSpace.closedAt && !('archivedAt' in selectedSpace && selectedSpace.archivedAt) && selectedSpace.possessedBy !== null
-    && !(placementsQuery.state === 'failure' && invalidatesRead(placementsQuery.error))
-    && (placementsValue === undefined || (selectedPlacement?.state === 'open' && selectedPlacement.holderId === selectedSpace.possessedBy && selectedPlacement.generation === selectedSpace.spaceGeneration));
-  const controlsAvailable = runtimeAvailable && liveSession?.controlsAvailable === true;
-  const recoveringAgent = useAgentRecovery(liveSession?.health, selectedSpace?.possessedBy ?? null, selectedSpace?.spaceGeneration ?? 0,
-    runtimeAvailable && !controlsAvailable && eventConnection === 'open', bootstrap.refetch);
-  useEffect(() => {
-    if (!selectedSpace || !runtimeAvailable || !accountDirectory?.acceptRuntime || selectedSpace.possessedBy === null) return;
-    return accountDirectory.acceptRuntime(projectId, selectedSpace.id, {
-      holder: { kind: 'held', machineId: selectedSpace.possessedBy, label: machinesValue?.find((machine) => machine.id === selectedSpace.possessedBy)?.label ?? selectedSpace.possessedBy },
-      generation: selectedSpace.spaceGeneration, closedAt: selectedSpace.closedAt, status: selectedSpace.status,
-      freshness: eventConnection !== 'open' ? 'stale' : !liveSession || !controlsAvailable ? 'unknown' : 'fresh',
-      detail: eventConnection !== 'open' ? 'Connection unavailable' : recoveringAgent ? 'Agent is recovering' : !liveSession || !controlsAvailable ? 'Agent unavailable' : null,
-    });
-  }, [accountDirectory?.acceptRuntime, projectId, selectedSpace, runtimeAvailable, eventConnection, liveSession, controlsAvailable, recoveringAgent, machinesValue]);
-  const runtimeKey = JSON.stringify([projectId, workspaceId, selectedSpace?.spaceGeneration, selectedSpace?.possessedBy, liveSessionId]);
-  const activeRuntime = useRef<string | null>(null);
-  activeRuntime.current = controlsAvailable ? runtimeKey : null;
-  const requireRuntime = (): void => {
-    if (activeRuntime.current !== runtimeKey) throw new Error('This agent is no longer active. Refresh the workspace or retry its agent.');
-  };
-  const historySource = useRef<TranscriptHistorySource | null>(null);
-  if (bootstrapValue) {
-    const value = bootstrapValue;
-    const space = value.workspaces.find((candidate) => candidate.id === workspaceId) ?? value.baseSpace;
-    historySource.current = {
-      key: JSON.stringify(['running', projectId, workspaceId, space.spaceGeneration, space.possessedBy, value.mainAgent?.id, value.checkpoint?.sessionId, value.checkpoint?.generation]),
-      revision: value,
-      page: async (request, signal) => {
-        const result = await rpcClient.transcriptPage({ projectId, workspaceId, ...request }, { signal });
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      },
-      content: async (request, signal) => {
-        const result = await rpcClient.transcriptContent({ projectId, workspaceId, ...request }, { signal });
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      },
-    };
-  }
-  if (!bootstrapValue) historySource.current = null;
-  const history = useTranscriptHistory(historySource.current);
-  const turns = useMemo(() => transcriptRowsToTurns(history.rows), [history.rows]);
-  const controlRead = useLiveSessionControls(liveSessionId, liveSession?.ompSessionId ?? '', controlsAvailable ? runtimeKey : null, bootstrapValue);
-  const sessionControlValue = controlRead.value;
-  const canSend = controlsAvailable && !(controlRead.error && invalidatesRead(controlRead.error));
-  if (!canSend) activeRuntime.current = null;
-  const reconciledControlFailure = useRef<string | null>(null);
-  useEffect(() => {
-    if (!controlsAvailable) { reconciledControlFailure.current = null; return; }
-    if (!controlRead.error) {
-      if (controlRead.value) reconciledControlFailure.current = null;
-      return;
-    }
-    if (reconciledControlFailure.current === runtimeKey) return;
-    reconciledControlFailure.current = runtimeKey;
-    void Promise.all([bootstrap.refetch(), placementsQuery.refetch()]);
-  }, [controlRead.error, controlsAvailable, runtimeKey, controlRead.value]);
-  const retryableBootstrapFailure = bootstrap.state === 'failure' && isRetryableConnectionError(bootstrap.error);
-  const [transport, setTransport] = useState<TransportBlock[]>([]);
-  const [inspectorRefreshToken, setInspectorRefreshToken] = useState(0);
-  // Deployment progress comes from the same durable runtime stream as agent state.
-  const deploymentQuery = useResultQuery(rpcClient.deployment.status, {});
-  const deploymentValue = useRetainedQueryValue(deploymentQuery, 'deployment');
-  const launchDeployment = useResultMutation(rpcClient.deployment.launch);
-  const revertDeployment = useResultMutation(rpcClient.deployment.revert);
-  const [launch, setLaunch] = useState<LaunchTrack | null>(null);
-  const [launchSheetOpen, setLaunchSheetOpen] = useState(false);
-  const [launchedMark, setLaunchedMark] = useState<LaunchedMark | null>(() => readLaunchedMark(window.localStorage, Date.now()));
-  // The event stream effect outlives renders; refs hand it the newest launch and status.
-  const launchRef = useRef<LaunchTrack | null>(null);
-  const deploymentRef = useRef<DeploymentStatusView | null>(null);
-  useEffect(() => { launchRef.current = launch; }, [launch]);
-  useEffect(() => { deploymentRef.current = deploymentValue ?? null; }, [deploymentValue]);
-  // The status snapshot seeds launches begun elsewhere; typed events refresh it.
-  const statusLaunch = deploymentValue?.launch ?? null;
-  useEffect(() => {
-    if (!statusLaunch) return;
-    if (launchRef.current?.launchId !== statusLaunch.launchId && statusLaunch.status === 'running') setLaunchSheetOpen(true);
-    setLaunch((current) => {
-      if (current?.launchId !== statusLaunch.launchId) return launchTrackFrom(statusLaunch);
-      if (current.status !== 'running' && statusLaunch.status === 'running') return current;
-      return appendLaunchProgress(current, { phase: statusLaunch.phase, message: statusLaunch.message, at: statusLaunch.updatedAt }, { sha: statusLaunch.sha, status: statusLaunch.status, error: statusLaunch.error });
-    });
-  }, [statusLaunch]);
-  // Launching the release this machine already runs (a dev checkout relaunching itself): no generation swap will come, so the browser phases complete in place.
-  const alreadyServed = launch?.status === 'succeeded' && launch.sha !== null && deploymentQuery.state === 'success'
-    && (!launch.targets.includes('machine') || deploymentQuery.value.thisMachine.sha === launch.sha)
-    && (!launch.targets.includes('omp') || deploymentQuery.value.thisMachine.ompSha === launch.sha);
-  useEffect(() => {
-    if (!alreadyServed) return;
-    setLaunch((current) => {
-      if (!current || current.log.some((line) => line.phase === 'reload')) return current;
-      const at = new Date().toISOString();
-      return appendLaunchProgress(appendLaunchProgress(current, { phase: 'restart', message: 'This machine already serves the release', at }), { phase: 'reload', message: 'Nothing to reload', at });
-    });
-  }, [alreadyServed]);
-  // The post-reload strip lives ten seconds, then the mark is gone for good.
-  const dismissLaunched = (): void => {
-    window.localStorage.removeItem(LAUNCHED_STORAGE_KEY);
-    setLaunchedMark(null);
-  };
-  useEffect(() => {
-    if (!launchedMark) return;
-    const timer = setTimeout(dismissLaunched, 10_000);
-    return () => clearTimeout(timer);
-  }, [launchedMark]);
-  const launchInto = async (targetWorkspaceId: string, targets: readonly ReleaseTarget[] = RELEASE_TARGETS): Promise<void> => {
-    const result = await launchDeployment.mutateAsync({ workspaceId: targetWorkspaceId, targets: [...targets] }).then(
-      (outcome) => outcome.status === 'ok' ? outcome : { status: 'error' as const, error: outcome.error },
-      (error: unknown) => ({ status: 'error' as const, error: error instanceof Error ? error : new Error(String(error)) }),
-    );
-    setLaunchSheetOpen(true);
-    if (result.status === 'error') {
-      // The machine refused before any work started (capability, busy, unknown workspace): a failed track with nothing to retry into but the same input.
-      const at = new Date().toISOString();
-      const message = rpcErrorMessage(result.error, 'Launch workspace release');
-      setLaunch({ launchId: `rejected:${at}`, workspaceId: targetWorkspaceId, targets, sha: null, status: 'failed', error: message, log: [{ phase: 'failed', message, at }] });
-      return;
-    }
-    setLaunch(launchTrackFrom(result.value));
-    await deploymentQuery.refetch();
-  };
-  const revertToStable = async (): Promise<void> => {
-    const result = await revertDeployment.mutateAsync({});
-    if (result.status === 'error') {
-      const message = rpcErrorMessage(result.error, 'Revert to stable release');
-      setLaunch({ launchId: `rejected:${Date.now()}`, workspaceId: '', targets: [], sha: null, status: 'failed', error: message, log: [{ phase: 'failed', message, at: new Date().toISOString() }] });
-      setLaunchSheetOpen(true);
-      return;
-    }
-    await deploymentQuery.refetch();
-  };
-  /** A `deployment` fact event: one progress line of the launch it names. */
-  const applyLaunchEvent = (entityId: string, createdAt: Date, payload: Record<string, unknown>): void => {
-    const { launchId, phase, message, status, workspaceId: launchWorkspaceId, targets } = payload;
-    if (typeof launchId !== 'string' || typeof phase !== 'string' || typeof message !== 'string' || !isLaunchStatus(status)) return;
-    const sha = entityId === 'pending' ? null : entityId;
-    const entry = { phase, message, at: createdAt.toISOString() };
-    const error = status === 'failed' ? message : null;
-    if (launchRef.current?.launchId !== launchId) setLaunchSheetOpen(true);
-    setLaunch((current) => current?.launchId === launchId
-      ? appendLaunchProgress(current, entry, { sha: sha ?? current.sha, status, error: error ?? current.error })
-      : { launchId, workspaceId: typeof launchWorkspaceId === 'string' ? launchWorkspaceId : '', targets: Array.isArray(targets) ? targets.filter(isReleaseTarget) : [], sha, status, error, log: [entry] });
-  };
-  /**
-   * The frontend generation swapped. A launch that is not failed and names a
-   * release is the one being reloaded into (its machine daemon may still be
-   * replacing); a plain dev rebuild has none and gets the same health gate
-   * without the banner.
-   */
-  const reloadAfterSwap = async (): Promise<void> => {
-    const track = launchRef.current;
-    const launched = track && track.status !== 'failed' && track.sha !== null && !track.log.some((line) => line.phase === 'reload') ? track : null;
-    const stamp = (phase: 'restart' | 'reload', message: string): void => setLaunch((current) => current ? appendLaunchProgress(current, { phase, message, at: new Date().toISOString() }) : current);
-    if (launched) stamp('restart', 'Waiting for this machine to serve the release');
-    const swapTarget = launched?.targets.includes('omp') ? 'omp' : launched?.targets.includes('machine') ? 'machine' : null;
-    const served = await awaitMachineSwap(synchronizationOwner, projectId, swapTarget, swapTarget ? launched?.sha ?? null : null);
-    // A swap the launch did not produce (a dev rebuild while it runs, or a gate timeout) reloads without the launched mark; the launch stays tracked through `status.launch`.
-    if (launched?.sha && served) {
-      stamp('reload', 'Reloading this page');
-      const label = deploymentRef.current?.releases.find((release) => release.sha === launched.sha)?.label ?? shortSha(launched.sha);
-      window.localStorage.setItem(LAUNCHED_STORAGE_KEY, JSON.stringify({ sha: launched.sha, label, at: Date.now() }));
-    }
-    window.location.reload();
-  };
 
-  useEffect(() => {
-    if (bootstrap.state === 'success') document.title = `${bootstrap.value.project.name} · GitSpace`;
-  }, [bootstrap.state, bootstrap.state === 'success' ? bootstrap.value.project.name : null]);
 
-  const runtimeSynchronization = useRuntimeSynchronization(projectId);
-  const projectSynchronization = useProjectSynchronization(projectId);
-  const placementSynchronization = useSpaceSynchronization(workspaceId ?? projectId);
-  useEffect(() => {
-    setEventConnection(runtimeSynchronization.connection === 'open' ? 'open' : runtimeSynchronization.connection === 'connecting' ? 'connecting' : 'reconnecting');
-  }, [runtimeSynchronization.connection]);
-  useEventRefresh(projectSynchronization.cursor, () => bootstrap.refetch());
-  useEventRefresh(placementSynchronization.cursor, () => Promise.all([placementsQuery.refetch(), bootstrap.refetch()]));
-  const runtimeInvalidations = useRef(new Set<string>());
-  useSynchronizedEvents(`runtime:${projectId}`, (after, signal) => rpcClient.events({ projectId, after }, { signal }), (frame) => {
-    if (frame.type === 'resync') return;
-    const event = frame.value;
-    if (event?.operation === 'code-version') { void reloadAfterSwap(); return; }
-    if (event?.entity === 'deployment') applyLaunchEvent(event.entityId, event.createdAt, event.payload);
-    runtimeInvalidations.current.add(event?.entity ?? 'snapshot');
-    setInspectorRefreshToken((current) => current + 1);
-  });
-  useEventRefresh(inspectorRefreshToken, async () => {
-    const entities = new Set(runtimeInvalidations.current);
-    runtimeInvalidations.current.clear();
-    const refreshes: Promise<unknown>[] = [];
-    if (entities.has('skill')) refreshes.push(skillsQuery.refetch());
-    if (entities.has('deployment') || entities.has('snapshot')) refreshes.push(deploymentQuery.refetch());
-    if ([...entities].some((entity) => !INSPECTOR_EVENT_ENTITIES[entity] && entity !== 'deployment' && entity !== 'skill')) refreshes.push(bootstrap.refetch());
-    await Promise.all(refreshes);
-  });
-
-  const prompt = useResultMutation(rpcClient.session.prompt);
-  useEffect(() => { prompt.reset(); }, [runtimeKey, controlsAvailable]);
-  const archiveWorkspace = useResultMutation(rpcClient.workspace.archive);
-  const closeSpace = useResultMutation(rpcClient.space.close);
-  const createProject = useResultMutation(rpcClient.project.create);
-  const createWorkspace = useResultMutation(rpcClient.workspace.create);
-  const archiveProject = useResultMutation(rpcClient.project.archive);
-  const restoreProject = useResultMutation(rpcClient.project.restore);
-  const deleteProject = useResultMutation(rpcClient.project.delete);
-  const deleteWorkspace = useResultMutation(rpcClient.workspace.delete);
-  const moveSpace = async (targetSpaceId: string, destinationMachineId: string): Promise<void> => {
-    if (bootstrap.state !== 'success' || machinesQuery.state !== 'success') throw new Error('Fleet directory is unavailable');
-    const target = targetSpaceId === bootstrap.value.baseSpace.id
-      ? bootstrap.value.baseSpace
-      : bootstrap.value.workspaces.find((candidate) => candidate.id === targetSpaceId);
-    const destination = machinesQuery.value.find((machine) => machine.id === destinationMachineId);
-    if (!target || !destination?.rpcEndpoint) throw new Error('Move destination is unavailable');
-    const source = target.possessedBy ?? 'its machine';
-    setTransport([{ id: 'move-close', type: 'transport', title: `Closing on ${source}`, detail: 'Publishing Git and agent checkpoint', status: 'reconnecting' }]);
-    const closed = await closeSpace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
-    if (closed.status === 'error') throw closed.error;
-    setTransport([
-      { id: 'move-close', type: 'transport', title: `Closed on ${source}`, detail: 'Local files retained', status: 'replaced' },
-      { id: 'move-open', type: 'transport', title: `Reopening on ${destination.label}`, detail: 'Claiming the canonical space', status: 'reconnecting' },
-    ]);
-    const destinationUrl = destination.id === homeMachineId ? homeRpcUrl : destination.rpcEndpoint;
-    const opened = await createGitSpaceBrowserClient({ url: destinationUrl }).space.reopen({ spaceId: targetSpaceId, expectedGeneration: closed.value.generation });
-    if (opened.status === 'error') throw opened.error;
-    setTransport([
-      { id: 'move-close', type: 'transport', title: `Closed on ${source}`, detail: 'Local files retained', status: 'replaced' },
-      { id: 'move-open', type: 'transport', title: `Reopened on ${destination.label}`, detail: 'Canonical space claimed', status: 'restored' },
-    ]);
-    await Promise.all([placementsQuery.refetch(), bootstrap.refetch()]);
-  };
-  const openingSpaces = useRef(new Map<string, Promise<void>>());
-  const uncertainOpenings = useRef(new Set<string>());
-  const claimSpace = (targetSpaceId: string, destinationMachineId: string | null): Promise<void> => {
-    const existing = openingSpaces.current.get(targetSpaceId);
-    if (existing) return existing;
-    const operation = (async (): Promise<void> => {
-      if (bootstrap.state !== 'success') throw new Error('Workspace is unavailable');
-      const target = targetSpaceId === bootstrap.value.baseSpace.id ? bootstrap.value.baseSpace : bootstrap.value.workspaces.find((candidate) => candidate.id === targetSpaceId);
-      if (!target) throw new Error(`Space ${targetSpaceId} is unavailable`);
-      const destinationUrl = destinationMachineId === null || destinationMachineId === homeMachineId
-        ? homeRpcUrl
-        : (machinesQuery.state === 'success' ? machinesQuery.value : []).find((machine) => machine.id === destinationMachineId)?.rpcEndpoint ?? null;
-      if (!destinationUrl) throw new Error('That machine is not reachable right now');
-      const inspection = { projectId: target.projectId, workspaceId: targetSpaceId === bootstrap.value.baseSpace.id ? null : targetSpaceId };
-      const canonical = await rpcClient.inspector.view(inspection);
-      if (canonical.status === 'error') throw canonical.error;
-      if (uncertainOpenings.current.has(targetSpaceId) && canonical.value.placement && canonical.value.placement.state !== 'closed') {
-        refreshInspection();
-        await bootstrap.refetch();
-        throw new Error(`The previous open outcome has been checked: this workspace is ${canonical.value.placement.state} on ${canonical.value.placement.machineId ?? 'its machine'}. No duplicate open request was sent.`);
-      }
-      const input = { spaceId: targetSpaceId, expectedGeneration: canonical.value.placement?.generation ?? 0 };
-      const destinationClient = createGitSpaceBrowserClient({ url: destinationUrl });
-      try {
-        const opened = canonical.value.workspace.archivedAt ? await destinationClient.workspace.restore(input) : await destinationClient.space.reopen(input);
-        if (opened.status === 'error') throw opened.error;
-        uncertainOpenings.current.delete(targetSpaceId);
-        refreshInspection();
-        await Promise.all([placementsQuery.refetch(), bootstrap.refetch(), projectsQuery.refetch()]);
-      } catch (cause) {
-        uncertainOpenings.current.add(targetSpaceId);
-        await recordActionIncident({ projectId, spaceId: targetSpaceId, sessionId: null, operation: 'open space', operationId: crypto.randomUUID(), error: cause });
-        await Promise.allSettled([rpcClient.inspector.view(inspection), placementsQuery.refetch(), bootstrap.refetch()]);
-        refreshInspection();
-        throw cause;
-      }
-    })().finally(() => { openingSpaces.current.delete(targetSpaceId); });
-    openingSpaces.current.set(targetSpaceId, operation);
-    return operation;
-  };
-  const retryAgent = async (): Promise<void> => {
-    if (!selectedSpace || !runtimeAvailable || controlsAvailable || recoveringAgent) throw new Error('Refresh this workspace before retrying its agent.');
-    const canonical = await rpcClient.inspector.view({ projectId, workspaceId });
-    if (canonical.status === 'error') throw canonical.error;
-    const placement = canonical.value.placement;
-    if (placement?.state !== 'open' || placement.machineId !== selectedSpace.possessedBy || placement.generation !== selectedSpace.spaceGeneration) {
-      await Promise.allSettled([bootstrap.refetch(), placementsQuery.refetch()]);
-      refreshInspection();
-      throw new Error('This workspace changed ownership. Refresh it before retrying its agent.');
-    }
-    try {
-      const result = await rpcClient.space.reopen({ spaceId: selectedSpace.id, expectedGeneration: placement.generation });
-      if (result.status === 'error') throw result.error;
-    } catch (cause) {
-      await recordActionIncident({ projectId, spaceId: selectedSpace.id, sessionId: liveSession?.id ?? null, operation: 'recover', operationId: crypto.randomUUID(), error: cause });
-      throw cause;
-    } finally {
-      await Promise.allSettled([bootstrap.refetch(), placementsQuery.refetch()]);
-      refreshInspection();
-    }
-  };
-  const shell = useMemo<GitSpaceShellProps | null>(() => {
-    if (!bootstrapValue) return null;
-    const value = bootstrapValue;
-    const selectedWorkspace = workspaceId === null
-      ? null
-      : value.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-    const selectedSpaceId = selectedWorkspace?.id ?? value.baseSpace.id;
-    const mainAgent = value.mainAgent;
-    const agentAction = async <T,>(operation: string, invoke: () => Promise<{ status: 'ok'; value: T } | { status: 'error'; error: Error }>): Promise<T> => {
-      const operationId = crypto.randomUUID();
-      try {
-        requireRuntime();
-        const result = await invoke();
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      } catch (error) {
-        await recordActionIncident({ projectId, spaceId: selectedSpaceId, sessionId: mainAgent?.id ?? null, operation, operationId, error });
-        throw error;
-      }
-    };
-    const artifacts = value.artifacts.map((artifact) => ({
-      url: artifact.url,
-      name: artifact.path.split('/').at(-1) ?? artifact.path,
-      path: artifact.path,
-      scope: artifact.scope,
-      size: artifact.size,
-      ...(artifact.mediaType ? { mediaType: artifact.mediaType } : {}),
-    }));
-    const terminalApi: NonNullable<GitSpaceShellProps['terminals']> = {
-      spaceId: selectedSpaceId,
-      events: (name, after, signal) => rpcClient.terminals.events({ spaceId: selectedSpaceId, name, after }, { signal }),
-      live: (name, signal) => rpcClient.terminals.live({ spaceId: selectedSpaceId, name }, { signal }),
-      create: async () => {
-        const result = await rpcClient.terminals.create({ spaceId: selectedSpaceId });
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      },
-      send: async (name, data) => {
-        const result = await rpcClient.terminals.send({ spaceId: selectedSpaceId, name, data });
-        if (result.status === 'error') throw result.error;
-      },
-      stop: async (name) => {
-        const result = await rpcClient.terminals.stop({ spaceId: selectedSpaceId, name });
-        if (result.status === 'error') throw result.error;
-      },
-    };
-    // Placement table → per-space holder: who runs it, or `released` when it is closed in the cloud.
-    const machineLabels: Record<string, string> = Object.fromEntries((machinesValue ?? []).map((machine) => [machine.id, machine.label]));
-    const placements: Record<string, { holderId: string; state: string }> = Object.fromEntries((placementsValue?.spaces ?? []).map((space) => [space.spaceId, { holderId: space.holderId, state: space.state }]));
-    const holderOf = (spaceId: string): SpaceHolderView => {
-      const placement = placements[spaceId];
-      if (!placement) return { kind: 'unknown' };
-      if (placement.state === 'closed' || placement.holderId === 'unassigned') return { kind: 'released' };
-      return { kind: 'held', machineId: placement.holderId, label: machineLabels[placement.holderId] ?? placement.holderId };
-    };
-    const baseSpace: GitSpaceShellProps['baseSpace'] = {
-      kind: 'project',
-      id: value.baseSpace.id,
-      projectId: value.baseSpace.projectId,
-      projectName: value.project.name,
-      name: value.baseSpace.name,
-      branch: value.baseSpace.branch,
-      phase: null,
-      possessedBy: value.baseSpace.possessedBy ?? 'Unpossessed',
-      holder: holderOf(value.baseSpace.id),
-      status: value.baseSpace.status,
-      generation: value.baseSpace.spaceGeneration,
-      closedAt: value.baseSpace.closedAt,
-    };
-    const workspaces: GitSpaceShellProps['workspaces'] = value.workspaces.map((candidate) => ({
-      kind: 'workspace' as const,
-      id: candidate.id,
-      projectId: candidate.projectId,
-      projectName: candidate.projectName,
-      name: candidate.name,
-      branch: candidate.branch,
-      phase: candidate.phase,
-      possessedBy: candidate.possessedBy ?? 'Unpossessed',
-      holder: holderOf(candidate.id),
-      status: candidate.status,
-      generation: candidate.spaceGeneration,
-      closedAt: candidate.closedAt,
-      relations: candidate.relations,
-      stack: candidate.stack,
-    }));
-    const scope: GitSpaceShellProps['workspace'] = workspaces.find((candidate) => candidate.id === selectedWorkspace?.id) ?? baseSpace;
-    const selectWorkspace = (nextWorkspaceId: string): void => selectInspection(value.workspaces.find((candidate) => candidate.id === nextWorkspaceId)?.projectId ?? projectId, nextWorkspaceId);
-    const setWorkspaceRelations: NonNullable<GitSpaceShellProps['onSetWorkspaceRelations']> = async (targetWorkspaceId, relations) => {
-      const result = await rpcClient.workspace.setRelations({ workspaceId: targetWorkspaceId, dependsOn: [...relations.dependsOn], relatedTo: [...relations.relatedTo], stackedOn: relations.stackedOn });
-      if (result.status === 'error') throw result.error;
-      await bootstrap.refetch();
-    };
-    const listed = projectsValue?.find((project) => project.id === value.project.id);
-    // Label the repository by its remote name; projects without a remote show their own name.
-    const repository = listed?.repositoryReference?.replace(/\.git$/u, '').split(/[/:]/u).filter(Boolean).at(-1) ?? value.project.name;
-    const isGitSpaceProject = listed?.role === 'gitspace-source';
-    const sidebarDeployment: GitSpaceShellProps['deployment'] = deploymentValue ? {
-      status: deploymentValue,
-      launch,
-      isGitSpaceProject,
-      onLaunch: (targetWorkspaceId) => launchInto(targetWorkspaceId),
-      onRevert: revertToStable,
-    } : null;
-    return {
-      project: {
-        id: value.project.id,
-        name: value.project.name,
-        repository,
-        connected: eventConnection === 'open',
-      },
-      projects: projectsValue ?? [],
-      workspace: scope,
-      baseSpace,
-      workspaces,
-      mainAgent: mainAgent ? {
-        id: mainAgent.id,
-        title: `${mainAgent.scope === 'project' ? 'Project' : 'Workspace'} agent ${mainAgent.ompSessionId.slice(0, 8)}`,
-        state: mainAgent.renderState,
-        model: 'OMP',
-        recovering: recoveringAgent,
-        controlsAvailable,
-        errorMessage: currentAgentExecutionFailure(mainAgent.health)?.message ?? null,
-        failed: mainAgent.state === 'failed',
-      } : null,
-      onRetryAgent: runtimeAvailable && !controlsAvailable && !recoveringAgent ? retryAgent : undefined,
-      controlsError: controlsAvailable && controlRead.error ? `Agent controls could not refresh: ${rpcErrorMessage(controlRead.error, 'session.control')}` : undefined,
-      sessionControls: mainAgent && canSend && sessionControlValue ? {
-        value: sessionControlValue,
-        onReadHistory: async (request, signal) => {
-          requireRuntime();
-          const result = await rpcClient.session.history({ sessionId: mainAgent.id, ...request }, { signal });
-          if (result.status === 'error') throw result.error;
-          requireRuntime();
-          return result.value;
-        },
-        onCycleRole: async (direction) => {
-          await agentAction('cycle-role', () => rpcClient.session.cycleRole({ sessionId: mainAgent.id, direction }));
-          await controlRead.refetch();
-        },
-        onSetModel: async (provider, model) => {
-          await agentAction('set-model', () => rpcClient.session.setModel({ sessionId: mainAgent.id, provider, model }));
-          await controlRead.refetch();
-        },
-        onSetThinking: async (thinking) => {
-          await agentAction('set-thinking', () => rpcClient.session.setThinking({ sessionId: mainAgent.id, thinking }));
-          await controlRead.refetch();
-        },
-        onSetFast: async (enabled) => {
-          await agentAction('set-fast', () => rpcClient.session.setFast({ sessionId: mainAgent.id, enabled }));
-          await controlRead.refetch();
-        },
-        onSetApproval: async (approvalMode) => {
-          await agentAction('set-approval', () => rpcClient.session.setApproval({ sessionId: mainAgent.id, approvalMode }));
-          await controlRead.refetch();
-        },
-        onSetGoal: async (enabled) => {
-          await agentAction('set-goal', () => rpcClient.session.setGoal({ sessionId: mainAgent.id, enabled, objective: null }));
-          await controlRead.refetch();
-        },
-        onCompact: async (instructions) => {
-          await agentAction('compact', () => rpcClient.session.compact({ sessionId: mainAgent.id, instructions: instructions ?? null }));
-          await controlRead.refetch();
-        },
-        onClearQueue: async () => {
-          await agentAction('clear-queue', () => rpcClient.session.clearQueue({ sessionId: mainAgent.id }));
-          await controlRead.refetch();
-        },
-        onRemoveQueuedMessage: async (kind, index) => {
-          await agentAction('remove-queued-message', () => rpcClient.session.removeQueuedMessage({ sessionId: mainAgent.id, kind, index }));
-          await controlRead.refetch();
-        },
-        onPromoteQueuedMessage: async (index) => {
-          await agentAction('promote-queued-message', () => rpcClient.session.promoteQueuedMessage({ sessionId: mainAgent.id, index }));
-          await controlRead.refetch();
-        },
-        onAnswerAsk: async (id, answers) => {
-          await agentAction('answer-ask', () => rpcClient.session.answerAsk({ sessionId: mainAgent.id, id, answers }));
-          await controlRead.refetch();
-        },
-        onStop: async () => {
-          await agentAction('stop', () => rpcClient.session.stop({ sessionId: mainAgent.id }));
-          await bootstrap.refetch();
-        },
-        onNavigateTree: async (entryId) => {
-          await agentAction('navigate-tree', () => rpcClient.session.navigateTree({ sessionId: mainAgent.id, entryId }));
-          await bootstrap.refetch();
-        },
-      } : undefined,
-      onSetWorkspacePhase: async (targetWorkspaceId, phase) => {
-        const result = await rpcClient.workspace.setPhase({ workspaceId: targetWorkspaceId, phase });
-        if (result.status === 'error') throw result.error;
-        await bootstrap.refetch();
-      },
-      onSetWorkspaceRelations: setWorkspaceRelations,
-      turns,
-      transcript: history,
-      history: { loading: history.initialLoading || (history.loading && history.error !== null), error: history.error, onRetry: history.refresh },
-      transport,
-      artifacts,
-      // Move destinations: every online machine except the one currently holding the selected space.
-      machines: (machinesValue ?? []).filter((machine) => machine.state === 'online' && machine.rpcEndpoint !== null && machine.id !== scope.possessedBy).map(({ id, label }) => ({ id, label })),
-      terminals: runtimeAvailable ? terminalApi : undefined,
-      skills: skillsValue ?? [],
-      renderEnvironmentStatus: (onInspect, onRevealTerminal) => <LiveEnvironmentStatus key={`${selectedSpaceId}:${scope.generation}`} spaceId={selectedSpaceId} onInspect={onInspect} onRevealTerminal={onRevealTerminal} onConfigure={mainAgent && canSend ? async () => { await agentAction('prompt', () => prompt.mutateAsync({ sessionId: mainAgent.id, text: CONFIGURE_ENVIRONMENT_PROMPT, streamingBehavior: 'followUp', images: [] })); } : undefined} />,
-      renderInspector: (onClose, initialView, resourceRequest) => <LiveInspector
-        key={`${selectedSpaceId}:${scope.generation}:${scope.possessedBy}`}
-        resourceRequest={resourceRequest}
-        initialView={initialView}
-        runtimeAvailable={runtimeAvailable}
-        controlsAvailable={controlsAvailable}
-        onAskAgent={mainAgent && canSend ? async (text) => { await agentAction('prompt', () => prompt.mutateAsync({ sessionId: mainAgent.id, text, streamingBehavior: 'followUp', images: [] })); } : undefined}
-        projectId={projectId}
-        spaceId={selectedSpaceId}
-        generation={selectedWorkspace?.spaceGeneration ?? value.baseSpace.spaceGeneration}
-        reviewerId={reviewerId ?? ''}
-        sessionId={mainAgent?.id ?? value.checkpoint?.sessionId ?? null}
-        turns={turns}
-        scope={scope}
-        workspaces={workspaces}
-        onSelectWorkspace={selectWorkspace}
-        onSetRelations={setWorkspaceRelations}
-        refreshToken={inspectorRefreshToken}
-        onClose={onClose}
-        onGenerateChangeGuide={mainAgent && canSend ? async () => {
-          await agentAction('prompt', () => prompt.mutateAsync({
-            sessionId: mainAgent.id,
-            text: 'Use the review-guide-narrator skill. Delegate a focused narrator subagent to analyze the current diff and typed Journal, submit every stale Change Guide cluster through the GitSpace Change Guide API, fix validation errors, and confirm the saved guide.',
-            streamingBehavior: 'followUp',
-            images: [],
-          }));
-        } : undefined}
-      />,
-      ...(mainAgent && canSend ? {
-        onSend: async (text: string, behavior?: 'steer' | 'followUp', images?: Array<{ data: string; mimeType: string }>) => {
-          await agentAction('prompt', () => prompt.mutateAsync({ sessionId: mainAgent.id, text, streamingBehavior: behavior ?? 'followUp', images: images ?? [] }));
-          await controlRead.refetch();
-        },
-      } : {}),
-      sendPending: prompt.state === 'pending',
-      ...(prompt.state === 'failure' ? { sendError: rpcErrorMessage(prompt.error, 'session.prompt') } : {}),
-      onSelectWorkspace: selectWorkspace,
-      onSelectProject: (nextProjectId: string) => selectInspection(nextProjectId, null),
-      onCloseSpace: async (targetSpaceId: string) => {
-        const target = targetSpaceId === value.baseSpace.id ? value.baseSpace : value.workspaces.find((candidate) => candidate.id === targetSpaceId);
-        if (!target) throw new Error(`Space ${targetSpaceId} is unavailable`);
-        const result = await closeSpace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
-        if (result.status === 'error') throw result.error;
-        refreshInspection();
-        if (targetSpaceId === selectedSpaceId) return;
-        await Promise.all([placementsQuery.refetch(), bootstrap.refetch()]);
-      },
-      onReopenSpace: (targetSpaceId: string) => claimSpace(targetSpaceId, null),
-      onArchiveWorkspace: async (targetSpaceId: string) => {
-        const canonical = await rpcClient.inspector.view({ projectId: value.project.id, workspaceId: targetSpaceId });
-        if (canonical.status === 'error') throw canonical.error;
-        const result = await archiveWorkspace.mutateAsync({
-          projectId: canonical.value.workspace.projectId, spaceId: targetSpaceId,
-          expectedRevision: canonical.value.workspace.revision, expectedGeneration: canonical.value.placement?.generation ?? null,
-        });
-        if (result.status === 'error') throw result.error;
-        refreshInspection();
-        if (targetSpaceId === selectedSpaceId) return;
-        await Promise.all([bootstrap.refetch(), projectsQuery.refetch()]);
-      },
-      onClaimWorkspace: claimSpace,
-      // Claim targets: every reachable online machine; the space is held by nobody, so none is excluded.
-      claimMachines: (machinesValue ?? []).filter((machine) => machine.state === 'online' && machine.rpcEndpoint !== null).map(({ id, label }) => ({ id, label })),
-      homeMachineId,
-      defaultMachineId,
-      checkpoint: value.checkpoint,
-      onMoveWorkspace: moveSpace,
-      onCreateProject: async (input) => {
-        const result = await createProject.mutateAsync(input);
-        if (result.status === 'error') throw result.error;
-        await projectsQuery.refetch();
-        refreshInspection();
-        selectInspection(result.value.project.id, null);
-      },
-      onCreateWorkspace: async (input) => {
-        const result = await createWorkspace.mutateAsync({ ...input, dependsOn: [...input.dependsOn] });
-        if (result.status === 'error') throw result.error;
-        await projectsQuery.refetch();
-        if (input.projectId === projectId) await bootstrap.refetch();
-        refreshInspection();
-        selectInspection(input.projectId, result.value.workspace.id);
-      },
-      onArchiveProject: async (targetProjectId, expectedRevision) => {
-        const result = await archiveProject.mutateAsync({ projectId: targetProjectId, expectedRevision });
-        if (result.status === 'error') throw result.error;
-        await projectsQuery.refetch();
-        refreshInspection();
-      },
-      onRestoreProject: async (targetProjectId, expectedRevision) => {
-        const result = await restoreProject.mutateAsync({ projectId: targetProjectId, expectedRevision });
-        if (result.status === 'error') throw result.error;
-        await projectsQuery.refetch();
-        refreshInspection();
-      },
-      onDeleteProject: async (targetProjectId, expectedRevision) => {
-        const result = await deleteProject.mutateAsync({ projectId: targetProjectId, expectedRevision });
-        if (result.status === 'error') throw result.error;
-        const candidates = projectsQuery.state === 'success'
-          ? projectsQuery.value.filter((candidate) => candidate.id !== targetProjectId && candidate.lifecycle === 'active')
-          : [];
-        await projectsQuery.refetch();
-        if (targetProjectId !== projectId) return;
-        const url = new URL(window.location.href);
-        if (candidates[0]) url.searchParams.set('project', candidates[0].id);
-        else url.searchParams.delete('project');
-        url.searchParams.delete('workspace');
-        refreshInspection();
-        navigateProductUrl(setProductRoute(url, candidates[0] ? 'agent' : 'projects'));
-      },
-      onDeleteWorkspace: async (targetWorkspaceId) => {
-        const result = await deleteWorkspace.mutateAsync({ workspaceId: targetWorkspaceId });
-        if (result.status === 'error') throw result.error;
-        await projectsQuery.refetch();
-        refreshInspection();
-        if (workspaceId === targetWorkspaceId) {
-          selectInspection(projectId, null);
-        } else {
-          await bootstrap.refetch();
-        }
-      },
-      onOpenSettings,
-      user,
-      onNavigateView,
-      deployment: sidebarDeployment,
-      launchBanner: launchedMark ? <LaunchedBanner mark={launchedMark} onRevert={revertToStable} onDismiss={dismissLaunched} /> : null,
-    };
-  }, [bootstrapValue, projectsValue, machinesValue, placementsValue, skillsValue, deploymentValue, controlsAvailable, runtimeAvailable, recoveringAgent, runtimeKey, sessionControlValue, controlRead.error, controlRead.refetch, launchDeployment.state, launch, launchedMark, eventConnection, inspectorRefreshToken, prompt.state, prompt.state === 'failure' ? prompt.error : null, archiveWorkspace.state, createProject.state, createWorkspace.state, archiveProject.state, restoreProject.state, deleteProject.state, deleteWorkspace.state, workspaceId, homeMachineId, defaultMachineId, transport, onOpenSettings, onNavigateView, user.name, user.handle, turns, history]);
-  const recoveryScheduled = retryableBootstrapFailure && runtimeSynchronization.connection !== 'open';
-  if (!shell && projectsQuery.state === 'pending') return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening projects…" description="Loading cloud project authority." /></PageCanvas>;
-  if (!shell && projectsQuery.state === 'failure') return <PageCanvas><EmptyState title="Projects are unavailable" description={rpcErrorMessage(projectsQuery.error, 'project.list')} action={<Button variant="ghost" onClick={() => void projectsQuery.refetch()}>Retry</Button>} /></PageCanvas>;
-
-  if (!shell && (bootstrap.state === 'pending' || recoveryScheduled)) return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening GitSpace…" description={recoveryScheduled ? 'Reconnecting to the selected machine.' : 'Loading the selected agent.'} /></PageCanvas>;
-  if (!shell && bootstrap.state === 'failure') return <PageCanvas><EmptyState title="GitSpace is unavailable" description={rpcErrorMessage(bootstrap.error, 'space.view')} action={<Button variant="ghost" onClick={() => { refreshInspection(); void bootstrap.refetch(); }}>Retry</Button>} /></PageCanvas>;
-  if (!shell) return <PageCanvas><EmptyState title="Project unavailable" description="The selected project is not available on this machine." /></PageCanvas>;
-  return <>
-    <div className="shrink-0">{([['Placements', placementsQuery], ['Machines', machinesQuery], ['Skills', skillsQuery], ['Source', deploymentQuery]] as const).map(([label, query]) => query.state === 'failure' ? <p key={label} role="alert" className="px-4 py-1 text-caption text-destructive">{label}: {rpcErrorMessage(query.error, label)}<Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry</Button></p> : null)}</div>
-    <GitSpaceShell {...shell} providers={providers} />
-    {bootstrap.state === 'failure' ? <div role={recoveryScheduled ? 'status' : 'alert'} className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 flex justify-center px-4">
-      <div className="flex items-center gap-2 rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">
-        {recoveryScheduled ? <ThinkingIndicator size="compact" /> : null}
-        <span>{recoveryScheduled ? 'Reconnecting to this machine…' : rpcErrorMessage(bootstrap.error, 'space.view')}</span>
-        {!recoveryScheduled ? <Button variant="ghost" size="compact" onClick={() => { refreshInspection(); void bootstrap.refetch(); }}>Retry</Button> : null}
-      </div>
-    </div> : null}
-    {launch ? <LaunchSheet launch={launch} open={launchSheetOpen} onOpenChange={setLaunchSheetOpen} onRetry={() => launchInto(launch.workspaceId, launch.targets).catch((cause: unknown) => {
-      const message = rpcErrorMessage(cause, 'Launch workspace release');
-      setLaunch((current) => current ? { ...current, status: 'failed', error: message } : current);
-    })} /> : null}
-  </>;
-}
 
 function GitSpaceProduct() {
   const location = useProductLocation();
@@ -1828,18 +847,21 @@ function GitSpaceProduct() {
   const setCloudImageDefault = useResultMutation(rpcClient.machine.image.defaults.set);
   const onlineMachineIds = (machinesValue ?? []).filter((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint).map((machine) => machine.id).sort().join(',');
   const runtimeAvailable = runtimeMetadataEnabled && onlineMachineIds.length > 0;
-  const ompQuery = useResultQuery(rpcClient.settings.omp.get, {}, { enabled: runtimeMetadataEnabled });
+  const runtimeQuery = useResultQuery(rpcClient.settings.runtime.get, {}, { enabled: runtimeMetadataEnabled });
   const gitIdentityQuery = useAccountGitIdentity();
-  const ompRead = useRetainedQueryValue(ompQuery, 'omp-settings');
-  const ompConfiguration = useAccountOmpConfiguration();
-  const ompDocument = useRetainedQueryValue(ompConfiguration, 'omp-document');
-  const ompValue = ompRead && ompDocument ? { ...ompRead, document: ompDocument } : ompRead;
+  const runtimeRead = useRetainedQueryValue(runtimeQuery, 'runtime-settings');
+  const runtimeConfiguration = useAccountRuntimeConfiguration();
+  const runtimeDocument = useRetainedQueryValue(runtimeConfiguration, 'runtime-document');
+  const runtimeValue = runtimeRead;
+  useEffect(() => {
+    if (runtimeDocument && runtimeRead && runtimeDocument.generation > runtimeRead.document.generation) void runtimeQuery.refetch();
+  }, [runtimeDocument?.generation, runtimeRead?.document.generation]);
   const gitIdentityValue = useRetainedQueryValue(gitIdentityQuery, 'git-identity');
-  const settingsOmpValue = ompValue ?? { schema: [], document: ompDocument ?? { generation: 0, content: '', checksum: '', updatedAt: new Date(0).toISOString(), updatedBy: 'unavailable' }, sync: { status: 'error' as const, message: ompQuery.state === 'failure' ? rpcErrorMessage(ompQuery.error, 'settings.omp.get') : 'OMP settings are unavailable' } };
+  const settingsRuntimeValue = runtimeValue ?? { schema: [], document: runtimeDocument ?? { generation: 0, content: '', checksum: '', updatedAt: new Date(0).toISOString(), updatedBy: 'unavailable' }, sync: { status: 'error' as const, message: runtimeQuery.state === 'failure' ? rpcErrorMessage(runtimeQuery.error, 'settings.runtime.get') : 'Runtime settings are unavailable' } };
   const settingsGitIdentityValue = gitIdentityValue ?? null;
   const updateSettings = useResultMutation(rpcClient.settings.update);
   const reserveHandle = useResultMutation(rpcClient.settings.reserveHandle);
-  const setOmpSetting = useResultMutation(rpcClient.settings.omp.set);
+  const setRuntimeSetting = useResultMutation(rpcClient.settings.runtime.set);
   const updateMachineNotes = useResultMutation(rpcClient.machine.updateNotes);
   const ensureStarterProject = useResultMutation(rpcClient.project.ensureGitSpace);
   const createSandboxMachine = useResultMutation(rpcClient.machine.createSandbox);
@@ -1866,6 +888,7 @@ function GitSpaceProduct() {
   const setupBrowserRelay = useResultMutation(rpcClient.browserRelay.setup);
   const startBrowserRelay = useResultMutation(rpcClient.browserRelay.start);
   const stopBrowserRelay = useResultMutation(rpcClient.browserRelay.stop);
+  const unpairBrowserRelay = useResultMutation(rpcClient.browserRelay.unpair);
   const testBrowserRelay = useResultMutation(rpcClient.browserRelay.test);
   const saveComposioSetup = async (apiKey: string): Promise<void> => {
     const result = await putComposioSetup.mutateAsync({ apiKey });
@@ -1877,11 +900,11 @@ function GitSpaceProduct() {
     if (result.status === 'error') throw result.error;
     await composioSetupQuery.refetch();
   };
-  const runBrowserRelay = async (operation: 'setup' | 'start' | 'stop' | 'test'): Promise<void> => {
+  const runBrowserRelay = async (operation: 'setup' | 'start' | 'stop' | 'unpair' | 'test'): Promise<void> => {
     const procedure = operation === 'setup' ? setupBrowserRelay
       : operation === 'start' ? startBrowserRelay
         : operation === 'stop' ? stopBrowserRelay
-          : testBrowserRelay;
+          : operation === 'unpair' ? unpairBrowserRelay : testBrowserRelay;
     const result = await procedure.mutateAsync({});
     await browserRelayQuery.refetch();
     if (result.status === 'error') throw result.error;
@@ -1908,31 +931,26 @@ function GitSpaceProduct() {
   };
   const providersEnabled = runtimeMetadataEnabled && !!activeProfile;
   const providersQuery = useResultQuery(rpcClient.providers.list, { profileId }, { enabled: providersEnabled });
-  const modelsQuery = useResultQuery(rpcClient.providers.models, { profileId }, { enabled: runtimeAvailable && providersEnabled });
+  const modelsQuery = useResultQuery(rpcClient.providers.models, { profileId }, { enabled: providersEnabled });
   const providersKey = JSON.stringify(queryRuntime.cache.key(rpcClient.providers.list, { profileId }));
   const modelsKey = JSON.stringify(queryRuntime.cache.key(rpcClient.providers.models, { profileId }));
   const providersValue = useRetainedQueryValue(providersQuery, providersEnabled ? providersKey : null, { key: providersKey, updatedAt: providersQuery.updatedAt });
   const modelsValue = useRetainedQueryValue(modelsQuery, providersEnabled ? modelsKey : null, { key: modelsKey, updatedAt: modelsQuery.updatedAt });
-  // Usage is fetched only once the Providers tab/step is shown; the first
-  // load reads the machine's cache, every explicit refresh bypasses it.
+  // Usage is optional account metadata, fetched only when the Providers view is shown.
   const [usageProfile, setUsageProfile] = useState<string | null>(null);
   const usageVisible = usageProfile === profileId;
   const [usageRefresh, setUsageRefresh] = useState(false);
-  const usageQuery = useResultQuery(rpcClient.providers.usage, { profileId, providerId: null, refresh: usageRefresh }, { enabled: runtimeAvailable && providersEnabled && usageVisible });
+  const usageQuery = useResultQuery(rpcClient.providers.usage, { profileId, providerId: null, refresh: usageRefresh }, { enabled: providersEnabled && usageVisible });
   const usageKey = JSON.stringify(queryRuntime.cache.key(rpcClient.providers.usage, { profileId, providerId: null, refresh: usageRefresh }));
   const usageValue = useRetainedQueryValue(usageQuery, providersEnabled ? usageKey : null, { key: usageKey, updatedAt: usageQuery.updatedAt });
   useEffect(() => { setUsageRefresh(false); }, [profileId]);
   useEffect(() => {
     if (!providersEnabled) return;
-    // The cloud's offline provider view cannot sign in. Replace it when the
-    // reachable runtime changes, including first-machine startup during onboarding.
     void providersQuery.refetch();
-    if (runtimeAvailable) {
-      void modelsQuery.refetch();
-      void gitIdentityQuery.refetch();
-      if (usageVisible) void usageQuery.refetch();
-    }
-  }, [providersEnabled, onlineMachineIds, profileId, activeProfile?.revision]);
+    void modelsQuery.refetch();
+    if (runtimeAvailable) void gitIdentityQuery.refetch();
+    if (usageVisible) void usageQuery.refetch();
+  }, [providersEnabled, profileId, activeProfile?.revision]);
   const startProviderLogin = useResultMutation(rpcClient.providers.login.start);
   const respondProviderLogin = useResultMutation(rpcClient.providers.login.respond);
   const cancelProviderLogin = useResultMutation(rpcClient.providers.login.cancel);
@@ -1977,14 +995,14 @@ function GitSpaceProduct() {
       throw error;
     }
   };
-  const updateOmp = async (path: string, value: OmpSettingValue): Promise<void> => {
+  const updateRuntime = async (path: string, value: RuntimeSettingValue): Promise<void> => {
     setSettingsError(null);
     try {
-      const updated = await setOmpSetting.mutateAsync({ path, valueJson: JSON.stringify(value) });
+      const updated = await setRuntimeSetting.mutateAsync({ expectedGeneration: settingsRuntimeValue.document.generation, path, valueJson: JSON.stringify(value) });
       if (updated.status === 'error') throw updated.error;
-      await ompQuery.refetch();
+      await runtimeQuery.refetch();
     } catch (error) {
-      setSettingsError(rpcErrorMessage(error, 'settings.omp.set'));
+      setSettingsError(rpcErrorMessage(error, 'settings.runtime.set'));
       throw error;
     }
   };
@@ -2073,19 +1091,47 @@ function GitSpaceProduct() {
   };
   const refreshProviders = async (): Promise<void> => {
     await providersQuery.refetch();
-    if (runtimeAvailable) {
-      await modelsQuery.refetch();
-      if (usageVisible) await usageQuery.refetch();
-    }
+    await modelsQuery.refetch();
+    if (usageVisible) await usageQuery.refetch();
   };
-  const appendLoginEvent = (flowId: string, event: ProviderLoginEvent): void => {
-    setLoginFlow((current) => current?.flowId === flowId ? { ...current, events: [...current.events, event], done: event.type === 'done' } : current);
+  const connectProviderLogin = (flow: RecoverableProviderLogin): void => {
+    loginStream.current?.abort();
+    const controller = new AbortController();
+    loginStream.current = controller;
+    setLoginFlow({ ...flow, events: [], done: false });
+    void (async () => {
+      try {
+        for await (const event of rpcClient.providers.login.events({ profileId: flow.profileId, flowId: flow.flowId }, { signal: controller.signal })) {
+          if (controller.signal.aborted) return;
+          if (event.status === 'error') throw event.error;
+          setLoginFlow((current) => current?.flowId === flow.flowId ? { ...current, events: [...current.events, event.value], done: event.value.type === 'done' } : current);
+          if (event.value.type === 'done') {
+            forgetProviderLogin(flow.profileId);
+            if (event.value.ok && providerScope.current === flow.profileId) await refreshProviders();
+            return;
+          }
+        }
+        if (!controller.signal.aborted) throw new Error('Sign-in updates disconnected. The cloud flow has not been canceled.');
+      } catch (cause) {
+        if (!controller.signal.aborted) setLoginFlow((current) => current?.flowId === flow.flowId ? { ...current, connectionError: rpcErrorMessage(cause, 'Read cloud sign-in') } : current);
+      }
+    })();
   };
+  useEffect(() => {
+    setLoginFlow(null);
+    if (!activeProfile) return;
+    try {
+      const saved = readProviderLogin(activeProfile.id);
+      if (saved) connectProviderLogin(saved);
+    } catch (cause) { setSettingsError(rpcErrorMessage(cause, 'Resume cloud sign-in')); }
+    return () => { loginStream.current?.abort(); };
+  }, [activeProfile?.id]);
   const signInProvider = async (providerId: string): Promise<void> => {
     if (!activeProfile) throw new Error('An active inference profile is required to connect providers.');
-    if (loginFlow && !loginFlow.done) {
+    if (loginFlow?.profileId === profileId && !loginFlow.done) {
       const cancelled = await cancelProviderLogin.mutateAsync({ profileId: loginFlow.profileId, flowId: loginFlow.flowId });
       if (cancelled.status === 'error') throw cancelled.error;
+      forgetProviderLogin(loginFlow.profileId);
     }
     loginStream.current?.abort();
     setSettingsError(null);
@@ -2094,34 +1140,10 @@ function GitSpaceProduct() {
       setSettingsError(rpcErrorMessage(started.error, 'Start provider sign-in'));
       throw started.error;
     }
-    const { flowId } = started.value;
-    const controller = new AbortController();
-    loginStream.current = controller;
-    setLoginFlow({ flowId, profileId, providerId, events: [], done: false });
-    void (async () => {
-      let finished = false;
-      try {
-        for await (const event of rpcClient.providers.login.events({ profileId, flowId }, { signal: controller.signal })) {
-          if (controller.signal.aborted) return;
-          if (event.status === 'error') {
-            appendLoginEvent(flowId, { type: 'done', ok: false, error: rpcErrorMessage(event.error, 'providers.login.events') });
-            finished = true;
-            break;
-          }
-          appendLoginEvent(flowId, event.value);
-          if (event.value.type === 'done') {
-            finished = true;
-            if (event.value.ok && providerScope.current === profileId) await refreshProviders();
-            break;
-          }
-        }
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        appendLoginEvent(flowId, { type: 'done', ok: false, error: rpcErrorMessage(error, 'providers.login.events') });
-        finished = true;
-      }
-      if (!finished && !controller.signal.aborted) appendLoginEvent(flowId, { type: 'done', ok: false, error: 'The sign-in stream ended before the provider finished.' });
-    })();
+    const flow = { flowId: started.value.flowId, profileId, providerId };
+    if (providerScope.current === flow.profileId) connectProviderLogin(flow);
+    try { saveProviderLogin(flow); }
+    catch (cause) { setSettingsError(`Sign-in started, but this browser could not save its recovery identity. Keep this page open or cancel and retry with browser storage enabled. ${rpcErrorMessage(cause, 'Save sign-in recovery')}`); }
   };
   const respondLogin = async (promptId: string, value: string): Promise<void> => {
     if (!loginFlow) throw new Error('No sign-in in progress');
@@ -2131,14 +1153,15 @@ function GitSpaceProduct() {
   const dismissLogin = async (): Promise<void> => {
     const flow = loginFlow;
     if (!flow) return;
-    loginStream.current?.abort();
-    loginStream.current = null;
-    setLoginFlow(null);
-    // A finished flow is already gone on the machine; only a live one needs cancelling.
+    // Only an explicit Cancel cancels the cloud flow. Unload merely stops this observer.
     if (!flow.done) {
       const result = await cancelProviderLogin.mutateAsync({ profileId: flow.profileId, flowId: flow.flowId });
       if (result.status === 'error') throw result.error;
     }
+    forgetProviderLogin(flow.profileId);
+    loginStream.current?.abort();
+    loginStream.current = null;
+    setLoginFlow(null);
   };
   const signOutProvider = async (providerId: string, credentialId: string | null): Promise<void> => {
     const result = await logoutProvider.mutateAsync({ profileId, providerId, credentialId });
@@ -2152,7 +1175,6 @@ function GitSpaceProduct() {
   };
   const refreshUsage = async (): Promise<void> => {
     await providersQuery.refetch();
-    if (!runtimeAvailable) return;
     if (usageRefresh) await usageQuery.refetch();
     else setUsageRefresh(true);
   };
@@ -2162,14 +1184,14 @@ function GitSpaceProduct() {
     loading: providersValue === undefined,
     ...(providersQuery.state === 'failure' ? { error: rpcErrorMessage(providersQuery.error, 'providers.list') } : {}),
     usage: usageValue ?? null,
-    usageStatus: !runtimeAvailable || !usageVisible ? 'idle' : usageQuery.state === 'failure' ? 'error' : usageQuery.state === 'pending' || usageQuery.fetch === 'fetching' ? 'loading' : 'ready',
-    ...(runtimeAvailable && usageQuery.state === 'failure' ? { usageError: rpcErrorMessage(usageQuery.error, 'providers.usage') } : {}),
+    usageStatus: !usageVisible ? 'idle' : usageQuery.state === 'failure' ? 'error' : usageQuery.state === 'pending' || usageQuery.fetch === 'fetching' ? 'loading' : 'ready',
+    ...(usageQuery.state === 'failure' ? { usageError: rpcErrorMessage(usageQuery.error, 'providers.usage') } : {}),
     onShow: () => setUsageProfile(profileId),
     onRefreshUsage: refreshUsage,
     onSignIn: signInProvider,
     onSignOut: signOutProvider,
     onSetApiKey: saveProviderApiKey,
-    login: { flow: loginFlow?.profileId === profileId ? loginFlow : null, respond: respondLogin, cancel: dismissLogin },
+    login: { flow: loginFlow?.profileId === profileId ? loginFlow : null, respond: respondLogin, cancel: dismissLogin, reconnect: () => { if (loginFlow) connectProviderLogin(loginFlow); } },
   };
   const inferencePage = (onboarding = false) => <InferencePage
     inference={inference} selectedProfileId={profileId} onSelectProfile={(id) => {
@@ -2178,10 +1200,10 @@ function GitSpaceProduct() {
       navigateProductUrl(url);
     }}
     projects={productProjectsValue ?? []}
-    schema={settingsOmpValue.schema} schemaLoading={ompQuery.state === 'pending'}
-    schemaError={ompQuery.state === 'failure' ? rpcErrorMessage(ompQuery.error, 'settings.omp.get') : null}
-    onRefreshSchema={() => { void ompQuery.refetch(); void modelsQuery.refetch(); }}
-    models={modelsValue?.models ?? []} modelsReady={modelsValue !== undefined} modelsLoading={runtimeAvailable && modelsQuery.state === 'pending'}
+    schema={inferenceSettingMetadata.map(({ value, description, options, ...item }) => ({ ...item, valueJson: JSON.stringify(value), description: description ?? null, options: options ?? [] }))} schemaLoading={false}
+    schemaError={null}
+    onRefreshSchema={() => { void modelsQuery.refetch(); }}
+    models={modelsValue?.models ?? []} modelsReady={modelsValue !== undefined} modelsLoading={modelsQuery.state === 'pending'}
     modelsError={modelsQuery.state === 'failure' ? rpcErrorMessage(modelsQuery.error, 'providers.models') : null}
     providers={providersSection} onboarding={onboarding}
     initialTab={onboarding || location.searchParams.get('section') === 'providers' ? 'Providers' : undefined}
@@ -2189,7 +1211,7 @@ function GitSpaceProduct() {
   if (route === 'inference') return inferencePage();
   // Account/machine metadata refreshes are not navigation away from an open workspace.
   if (settingsValue && draft?.onboardingComplete && !forceOnboarding && route !== 'settings') return <>
-    <LiveWorkspace onOpenSettings={(section) => navigateProduct('settings', 'push', section ?? null)} defaultMachineId={draft.defaults.machineId} onNavigateView={(next) => navigateProduct(next)} user={{ name: draft.profile.displayName, handle: draft.profile.handle }} providers={providerViews} />
+    <LiveWorkspace onOpenSettings={(section) => navigateProduct('settings', 'push', section ?? null)} />
     {settingsQuery.state === 'failure' ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto w-fit max-w-full rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">Account settings: {rpcErrorMessage(settingsQuery.error, 'settings.get')}<Button variant="ghost" size="compact" onClick={() => void settingsQuery.refetch()}>Retry</Button></div> : null}
   </>;
   if (!settingsValue && settingsQuery.state === 'failure') {
@@ -2199,7 +1221,7 @@ function GitSpaceProduct() {
     return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings." /></PageCanvas>;
   }
   const reads = [
-    ['Account settings', settingsQuery], ['OMP settings', ompQuery], ['Git identity', gitIdentityQuery], ['Machines', machinesQuery],
+    ['Account settings', settingsQuery], ['Runtime settings', runtimeQuery], ['Git identity', gitIdentityQuery], ['Machines', machinesQuery],
     ['Devices', devicesQuery], ['Source', settingsDeploymentQuery], ['Composio setup', composioSetupQuery], ['Browser relay', browserRelayQuery],
     ['Projects', productProjectsQuery], ['Models', modelsQuery],
     ['Cloud images', cloudImagesQuery], ['Cloud image default', imageDefaultQuery],
@@ -2210,10 +1232,10 @@ function GitSpaceProduct() {
     mode={mode}
     settings={draft}
     machines={machinesValue ?? []}
-    ompSettings={settingsOmpValue.schema}
+    runtimeSettings={settingsRuntimeValue.schema}
     inferenceSetup={inferencePage(true)}
-    ompGeneration={settingsOmpValue.document.generation}
-    ompSync={settingsOmpValue.sync}
+    runtimeGeneration={settingsRuntimeValue.document.generation}
+    runtimeSync={settingsRuntimeValue.sync}
     gitIdentity={settingsGitIdentityValue}
     onChange={(next) => {
       setDraft(next);
@@ -2222,7 +1244,7 @@ function GitSpaceProduct() {
       if (draft && next.defaults.appearance !== draft.defaults.appearance) void saveSettings(next).catch(() => undefined);
     }}
     onSave={saveSettings}
-    onSetOmpSetting={updateOmp}
+    onSetRuntimeSetting={updateRuntime}
     onUpdateMachine={saveMachineNotes}
     onCreateSandbox={createSandbox}
     cloudImages={cloudImagesValue ?? []}
@@ -2257,11 +1279,12 @@ function GitSpaceProduct() {
     onSetupBrowserRelay={() => runBrowserRelay('setup')}
     onStartBrowserRelay={() => runBrowserRelay('start')}
     onStopBrowserRelay={() => runBrowserRelay('stop')}
+    onUnpairBrowserRelay={() => runBrowserRelay('unpair')}
     onTestBrowserRelay={() => runBrowserRelay('test')}
     projects={(productProjectsValue ?? []).map((project) => ({ id: project.id, name: project.name }))}
     onBack={() => navigateProduct(optionalQueryParameter('project') ? 'agent' : 'projects', 'replace')}
     onComplete={completeOnboarding}
-    saving={ensureStarterProject.state === 'pending' || updateSettings.state === 'pending' || reserveHandle.state === 'pending' || setOmpSetting.state === 'pending' || updateMachineNotes.state === 'pending' || createSandboxMachine.state === 'pending' || sleepMachine.state === 'pending' || resumeMachine.state === 'pending' || destroyMachine.state === 'pending' || revertDeployment.state === 'pending'}
+    saving={ensureStarterProject.state === 'pending' || updateSettings.state === 'pending' || reserveHandle.state === 'pending' || setRuntimeSetting.state === 'pending' || updateMachineNotes.state === 'pending' || createSandboxMachine.state === 'pending' || sleepMachine.state === 'pending' || resumeMachine.state === 'pending' || destroyMachine.state === 'pending' || revertDeployment.state === 'pending'}
     error={settingsError}
   /></>;
   if (!draft.onboardingComplete || forceOnboarding) return page('onboarding');
@@ -2542,11 +1565,7 @@ function AccountPlugins({ projects }: { projects: readonly ConfigurationProject[
     onUpdateComposioTools={async (connectionId, expectedRevision, toolPolicy) => { await configurationResult(rpcClient.mcp.composio.updateTools({ connectionId, expectedRevision, toolPolicy })); await refresh(); }}
     onDisconnectComposio={async (connectionId, expectedRevision) => { await configurationResult(rpcClient.mcp.composio.disconnect({ connectionId, expectedRevision })); await refresh(); }}
     onRefresh={refresh}
-    onDiscover={async (projectId, machineId) => {
-      const machine = machines.state === 'success' ? machines.value.find((candidate) => candidate.id === machineId) : null;
-      if (!machine?.rpcEndpoint || machine.state !== 'online' || machine.desiredState !== 'online') throw new Error('Choose an online machine for runtime diagnostics.');
-      return configurationResult(createGitSpaceBrowserClient({ url: machine.rpcEndpoint }).mcp.discover({ projectId }));
-    }}
+    onDiscover={(projectId) => configurationResult(rpcClient.mcp.discover({ projectId, requestId: crypto.randomUUID() }))}
   />;
 }
 

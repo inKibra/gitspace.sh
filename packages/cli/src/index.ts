@@ -172,7 +172,7 @@ async function startMachine(): Promise<void> {
       GITSPACE_PUBLIC_RPC_URL: `${config.relayUrl}/tunnel/${encodeURIComponent(config.machine.id)}/rpc`,
       GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
       GITSPACE_SERVICE_NAMESPACE: config.handle,
-      GITSPACE_OMP_AGENT_DIR: join(CONFIG_ROOT, 'omp'),
+      // Retired broker credentials must not leak into tool-machine processes.
       OMP_AUTH_BROKER_URL: undefined,
       OMP_AUTH_BROKER_TOKEN: undefined,
       GITSPACE_MANAGED_SPACE_ROOT: process.env.GITSPACE_MANAGED_SPACE_ROOT ?? join(homedir(), 'gitspace', 'spaces'),

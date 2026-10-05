@@ -1,0 +1,23 @@
+{
+  "name": "@gitspace/protocol-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./session-controls": "./src/session-controls.ts",
+    "./workspace-controls": "./src/workspace-controls.ts",
+    "./attachment-controls": "./src/attachment-controls.ts",
+    "./machine-controls": "./src/machine-controls.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@gitspace/blocks": "workspace:*",
+    "@gitspace/protocol-agent": "workspace:*",
+    "@gitspace/protocol-environment": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}

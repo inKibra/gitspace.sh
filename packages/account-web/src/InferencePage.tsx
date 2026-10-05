@@ -3,7 +3,7 @@ import { DEFAULT_INFERENCE_PROFILE_ID, type InferenceProfile } from '@gitspace/p
 import type { AvailableModel } from '@gitspace/protocol';
 import { Badge, Button, Card, CardDescription, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Select, SelectContent, SelectItem, SelectTrigger, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
-import { OmpSettingsEditor, type OmpSettingView } from './SettingsPage.js';
+import { RuntimeSettingsEditor, type RuntimeSettingView } from './SettingsPage.js';
 import type { ProvidersSectionProps } from './ProvidersSection.js';
 import { useInference, type InferenceController } from './InferenceContext.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -39,7 +39,7 @@ export interface InferencePageProps {
   selectedProfileId: string;
   onSelectProfile(profileId: string): void;
   projects: ReadonlyArray<{ id: string; name: string }>;
-  schema: readonly OmpSettingView[];
+  schema: readonly RuntimeSettingView[];
   schemaLoading: boolean;
   schemaError: string | null;
   onRefreshSchema(): void;
@@ -110,8 +110,8 @@ export function InferencePage({ inference, selectedProfileId, onSelectProfile, p
         </div>
         {schemaError ? <div role="alert" className="text-caption text-destructive">{schemaError}<Button variant="ghost" onClick={onRefreshSchema}>Retry editor metadata</Button></div> : null}
         {modelsError ? <p role="alert" className="text-caption text-destructive">Models: {modelsError}. Connect this profile’s providers or refresh. Existing selections are preserved.</p> : !modelsReady ? <p role="status" className="text-caption text-muted-foreground">{modelsLoading ? 'Loading this profile’s models…' : 'This profile’s model catalog is not ready yet.'}</p> : !models.length ? <p className="text-caption text-muted-foreground">No runnable models in this profile. Connect a provider on the Providers tab.</p> : null}
-        {editor?.missingDefaults.length ? <p role="alert" className="text-caption text-destructive">Editor defaults are unavailable for {editor.missingDefaults.join(', ')}. Upgrade the machine and refresh metadata. Account values are not substituted.</p> : null}
-        {schemaLoading && !schema.length ? <p role="status" className="text-caption text-muted-foreground">Loading editor metadata…</p> : <OmpSettingsEditor key={profile.id} sections={['Models', 'Agents', 'Providers']} initialTab={initialTab} ompSettings={editor?.items ?? []} ompGeneration={profile.revision} models={models} modelsReady={modelsReady} providers={providers} saving={inference.pending || !!schemaError} onSetOmpSetting={async (path, value) => { await inference.update(profile, profile.name, updatedProfileSettings(profile, path, value)); }} />}
+        {editor?.missingDefaults.length ? <p role="alert" className="text-caption text-destructive">Editor defaults are unavailable for {editor.missingDefaults.join(', ')}. Refresh cloud metadata. Account values are not substituted.</p> : null}
+        {schemaLoading && !schema.length ? <p role="status" className="text-caption text-muted-foreground">Loading editor metadata…</p> : <RuntimeSettingsEditor key={profile.id} sections={['Models', 'Agents', 'Providers']} initialTab={initialTab} runtimeSettings={editor?.items ?? []} runtimeGeneration={profile.revision} models={models} modelsReady={modelsReady} providers={providers} saving={inference.pending || !!schemaError} onSetRuntimeSetting={async (path, value) => { await inference.update(profile, profile.name, updatedProfileSettings(profile, path, value)); }} />}
         <section aria-label="Project assignments" className="flex flex-col gap-3">
           <h3 className="text-subtitle font-semibold">Affected projects <span className="tabular-nums">({affected.length})</span></h3>
           {affected.length ? affected.map((project) => <div key={project.id} className="flex flex-wrap items-center justify-between gap-3"><span className="text-body">{project.name}</span><ProjectInferenceSelector projectId={project.id} projectName={project.name} /></div>) : <p className="text-caption text-muted-foreground">No projects use this profile yet.</p>}

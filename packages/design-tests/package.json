@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
     "lint": "bun run src/design-lint.ts",
     "test": "playwright test",
     "test:update": "playwright test --update-snapshots"

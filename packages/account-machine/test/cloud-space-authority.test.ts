@@ -65,12 +65,12 @@ describe('interrupted release acknowledgement', () => {
   it.each(['applied', 'wrong-worker', 'partial-selection', 'failed'] as const)('reconciles a lost response only for a confirmed release: %s', async (outcome) => {
     const sha = 'release-after-worker-swap';
     const status: DeploymentStatus = {
-      desired: { worker: sha, machine: outcome === 'partial-selection' ? null : sha, omp: null, frontend: null, updatedAt: new Date().toISOString() },
+      desired: { worker: sha, machine: outcome === 'partial-selection' ? null : sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: outcome === 'wrong-worker' ? 'previous' : sha, version: sha }, machines: {} },
       releases: [{
         sha, label: sha, workspaceId: 'space-a', builtBy: 'machine-a', createdAt: new Date().toISOString(),
-        artifacts: { worker: null, machine: null, omp: null, frontend: null }, worker: null, omp: null,
-        status: { worker: outcome === 'failed' ? 'failed' : 'applied', frontend: 'skipped', machines: {}, omps: {} },
+        artifacts: { worker: null, machine: null, frontend: null }, worker: null,
+        status: { worker: outcome === 'failed' ? 'failed' : 'applied', frontend: 'skipped', machines: {} },
         error: outcome === 'failed' ? 'Worker health check failed' : null,
       }],
     };
@@ -141,7 +141,7 @@ describe('cloud application data store', () => {
           return new Response(null, { status: 201 });
         }
         const bytes = objects.get(key);
-        return bytes ? new Response(bytes) : new Response(null, { status: 404 });
+        return bytes ? new Response(new Uint8Array(bytes)) : new Response(null, { status: 404 });
       }) as typeof fetch,
     };
     const store = new CloudDataCheckpointBlobStore(options);
@@ -192,10 +192,10 @@ describe('cloud application data store', () => {
     const store = new CloudDataCheckpointBlobStore({
       baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a',
       signingPrivateKey: new Uint8Array(32).fill(5),
-      fetcher: (async () => new Response(new ReadableStream<Uint8Array>({
+      fetcher: Object.assign(async () => new Response(new ReadableStream<Uint8Array>({
         pull(controller) { controller.enqueue(new TextEncoder().encode('private-response'.repeat(1_000))); },
         cancel() { canceled = true; },
-      }), { status: 400, headers: { 'cf-ray': 'secret-token' } })) as typeof fetch,
+      }), { status: 400, headers: { 'cf-ray': 'secret-token' } }), { preconnect: fetch.preconnect }),
     });
     const failure = await store.get('releases/native/machine.manifest.json').catch((error: unknown) => error);
     expect(failure).toMatchObject({ code: 'DATA_GET_FAILED', details: { status: 400, operation: 'data.get' } });
@@ -274,6 +274,7 @@ describe('cloud application data store', () => {
       expect(failed.elapsedMs).toBeGreaterThan(0);
       expect(failed.responseHeadersMs).toBeUndefined();
       expect(completed.responseHeadersMs).toBeGreaterThanOrEqual(0);
+      if (typeof completed.elapsedMs !== 'number') throw new Error('Expected numeric elapsed time');
       expect(completed.responseHeadersMs).toBeLessThanOrEqual(completed.elapsedMs);
       expect(completed.status).toBe(200);
     } finally {
@@ -544,7 +545,7 @@ describe('cloud application data store', () => {
     const store = new CloudDataCheckpointBlobStore({
       baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a',
       signingPrivateKey: new Uint8Array(32).fill(5),
-      fetcher: (async () => { requests += 1; throw failure; }) as typeof fetch,
+      fetcher: Object.assign(async () => { requests += 1; throw failure; }, { preconnect: fetch.preconnect }),
     });
     const sleep = spyOn(Bun, 'sleep').mockResolvedValue(undefined);
     try {
@@ -559,7 +560,7 @@ describe('cloud application data store', () => {
     const store = new CloudDataCheckpointBlobStore({
       baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a',
       signingPrivateKey: new Uint8Array(32).fill(5),
-      fetcher: (async () => { requests += 1; throw failure; }) as typeof fetch,
+      fetcher: Object.assign(async () => { requests += 1; throw failure; }, { preconnect: fetch.preconnect }),
     });
     await expect(store.put('objects/canceled', new Uint8Array([1]))).rejects.toBe(failure);
     expect(requests).toBe(1);

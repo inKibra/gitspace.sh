@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import { DaemonStateSchema } from '@gitspace/supervisor';
 import type { GitSpaceDatabase } from '@gitspace/core';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
@@ -8,7 +10,7 @@ export interface TerminalSnapshot { terminals: WorkspaceTerminalView[]; output: 
 interface Row { cursor: number; previous: number; body: string }
 const RETAINED_SNAPSHOTS = 16;
 
-/** App-owned observations of Hub's durable logs. A revision commits its full value and replay entry together. */
+/** Durable observations of supervisor output; full values and replay revisions commit together. */
 export class TerminalSnapshotJournal {
   readonly listeners = new Set<(resource: string) => void>();
   constructor(private readonly database: GitSpaceDatabase) {
@@ -50,7 +52,15 @@ export class TerminalSnapshotJournal {
     return initial ? [snapshot()] : [];
   }
 }
+const TerminalSnapshotSchema = z.object({
+  terminals: z.array(z.object({
+    spaceId: z.string(), name: z.string(), id: z.string(),
+    kind: z.enum(['user', 'agent', 'lifecycle', 'service']), state: DaemonStateSchema,
+    machineId: z.string(), owner: z.string().nullable(), command: z.string(), cwd: z.string(),
+    createdAt: z.coerce.date(), exitCode: z.number().nullable(), protected: z.boolean().optional(),
+  })),
+  output: z.object({ spaceId: z.string(), name: z.string(), state: DaemonStateSchema, cursor: streamCursorSchema, data: z.string() }).nullable(),
+});
 function decode(body: string): TerminalSnapshot {
-  const value = JSON.parse(body) as TerminalSnapshot;
-  return { ...value, terminals: value.terminals.map((terminal) => ({ ...terminal, createdAt: new Date(terminal.createdAt) })) };
+  return TerminalSnapshotSchema.parse(JSON.parse(body));
 }

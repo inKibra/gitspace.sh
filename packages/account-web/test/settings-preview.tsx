@@ -1,5 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { SettingsPage } from '../src/SettingsPage.js';
+import '@gitspace/ui/fluid-theme.css';
 import '../src/styles.css';
 import './settings-preview.css';
 
@@ -30,8 +31,8 @@ createRoot(root).render(<SettingsPage
   onChangeCloudImage={unavailable}
   onRecoverCloudImage={unavailable}
   onSetCloudImageDefault={unavailable}
-  ompSettings={[]}
-  ompGeneration={4}
+  runtimeSettings={[]}
+  runtimeGeneration={4}
   inferenceSetup={<a href="/test/inference-preview.html">Configure Default inference</a>}
   devices={[]}
   onRevokeDevice={unavailable}
@@ -56,14 +57,15 @@ createRoot(root).render(<SettingsPage
   onSetupBrowserRelay={unavailable}
   onStartBrowserRelay={unavailable}
   onStopBrowserRelay={unavailable}
+  onUnpairBrowserRelay={unavailable}
   onTestBrowserRelay={unavailable}
   deployment={null}
   onRevertDeployment={unavailable}
-  ompSync={{ status: 'synced', message: null }}
+  runtimeSync={{ status: 'synced', message: null }}
   gitIdentity={{ generation: 1, publicKey: 'ssh-ed25519 AAAA preview', fingerprint: 'SHA256:preview', updatedAt: new Date().toISOString(), updatedBy: 'local-machine' }}
   onChange={() => undefined}
   onSave={async () => undefined}
-  onSetOmpSetting={async () => undefined}
+  onSetRuntimeSetting={async () => undefined}
   onUpdateMachine={async () => undefined}
   onCreateSandbox={async () => { (window as typeof window & { __sandboxRequested?: boolean }).__sandboxRequested = true; }}
   onBack={() => undefined}

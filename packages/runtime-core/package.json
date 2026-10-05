@@ -1,0 +1,31 @@
+{
+  "name": "@gitspace/runtime-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./inference": "./src/inference/index.ts",
+    "./session-controls": "./src/session-controls.ts",
+    "./retained-rules": "./src/retained-rules.ts",
+    "./history": "./src/history.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "bun ../../scripts/test-isolated.ts src"
+  },
+  "dependencies": {
+    "@gitspace/blocks": "workspace:*",
+    "@gitspace/protocol-runtime": "workspace:*",
+    "@gitspace/protocol": "workspace:*",
+    "@gitspace/protocol-agent": "workspace:*",
+    "@gitspace/catalog": "workspace:*",
+    "@gitspace/provider-auth": "workspace:*",
+    "@earendil-works/pi-durable": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/chord": "1.0.0",
+    "typebox": "1.3.27",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  }
+}

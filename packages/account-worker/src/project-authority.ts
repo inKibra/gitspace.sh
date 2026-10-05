@@ -17,6 +17,8 @@ import type {
   ProjectOperationState,
 } from '@gitspace/protocol';
 import { ProjectEnvironmentStore } from './project-environment.js';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
+import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { LifecycleMutationSchema, environmentFailure, type LifecycleActor, type EnvironmentFailure, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { AccountDirectoryProjection, DirectoryOutbox, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
@@ -937,6 +939,36 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.environment.get(this.requireLifecycleWorkspace(spaceId).id, spaceId);
   }
 
+  async refreshBrowserOrigins(spaceId: string): Promise<LifecycleState> {
+    const project = this.requireLifecycleWorkspace(spaceId);
+    const workspace = this.listWorkspaces().find(item => item.id === spaceId);
+    if (!workspace) throw new Error('Committed environment workspace is unavailable');
+    const identity = { projectId: project.id, workspaceId: spaceId };
+    const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
+    try {
+      // Use the already-authorized local metadata: the generic initializer calls
+      // this authority back and must not run inside an authority RPC.
+      if (project.repositoryReference === null) {
+        await code.ensureEmptyProject(project.id, project.baseBranch);
+      } else {
+        const url = project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/');
+        await code.importProject(project.id, { url, branch: project.baseBranch });
+      }
+      await code.forkWorkspace(project.id, spaceId);
+      const { origins } = await committedBrowserOrigins({
+        code,
+        repository: artifactsWorkspaceRepository(spaceId),
+        branch: workspace.branch,
+        checkpoint: () => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${spaceId}`).runtimeCodeCheckpoint(identity),
+      });
+      return this.environment.setBrowserOrigins(project.id, spaceId, origins);
+    } catch (error) {
+      // Unavailable is not an observed removal: retain membership and approvals.
+      this.environment.markBrowserOriginsUnavailable(project.id, spaceId);
+      throw error;
+    }
+  }
+
   mutateLifecycleState(spaceId: string, input: LifecycleMutation, actor: LifecycleActor): { status: 'ok'; state: LifecycleState } | { status: 'error'; failure: EnvironmentFailure } {
     try {
       return { status: 'ok', state: this.environment.mutate(this.requireLifecycleWorkspace(spaceId).id, spaceId, input, actor) };
@@ -977,6 +1009,29 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<WorkspaceRow>(
       'SELECT * FROM workspaces ORDER BY kind,name',
     ).toArray().map(workspaceDefinition);
+  }
+
+  /** Initializes canonical base metadata only; never creates or acquires a checkout. */
+  ensureBaseWorkspace(input: { userId: string; projectId: string }): CloudWorkspaceDefinition {
+    if (input.userId !== this.env.ACCOUNT_ID) throw new Error('Account does not own this project authority');
+    const project = this.requireProject();
+    if (project.id !== input.projectId) throw new Error('Project identity mismatch');
+    const existing = this.ctx.storage.sql.exec<WorkspaceRow>('SELECT * FROM workspaces WHERE workspace_id=?', project.id).toArray()[0];
+    if (existing) {
+      if (existing.kind !== 'base' || existing.project_id !== project.id) throw new Error('Canonical base identity is occupied by another workspace');
+      return workspaceDefinition(existing);
+    }
+    return this.commit('workspace', project.id, () => {
+      if (this.ctx.storage.sql.exec('SELECT workspace_id FROM deleted_workspaces WHERE workspace_id=?', project.id).toArray().length) throw new Error('Deleted base identity cannot be republished');
+      // Active describes the cloud definition, not an attached working copy.
+      const lifecycle = project.lifecycle === 'cloud-only' ? 'active' : project.lifecycle;
+      this.ctx.storage.sql.exec(
+        `INSERT INTO workspaces(workspace_id,project_id,kind,name,branch,phase,source_kind,source_ref,source_commit,lifecycle,goal_id,revision,archived_at,created_at,updated_at)
+         VALUES(?,?,'base',?,?,NULL,'base',?,NULL,?,NULL,1,?,?,?)`,
+        project.id, project.id, project.name, project.baseBranch, project.baseBranch, lifecycle, project.archivedAt, project.updatedAt, project.updatedAt,
+      );
+      return workspaceDefinition(this.ctx.storage.sql.exec<WorkspaceRow>('SELECT * FROM workspaces WHERE workspace_id=?', project.id).one());
+    });
   }
 
   putWorkspace(input: Omit<CloudWorkspaceDefinition, 'revision' | 'createdAt' | 'updatedAt' | 'archivedAt'> & {
@@ -1501,10 +1556,10 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return true;
   }
 
-  appendEvent(input: Omit<ProjectEvent, 'offset' | 'createdAt' | 'eventId'> & { eventId?: string }): ProjectEvent {
+  appendEvent(input: Omit<ProjectEvent, 'offset' | 'createdAt' | 'eventId'> & { eventId?: string }): Response {
     const eventId = input.eventId ?? crypto.randomUUID();
     const existing = this.ctx.storage.sql.exec<{ offset: number }>('SELECT offset FROM project_events WHERE event_id=?', eventId).toArray()[0];
-    if (existing) return this.listEvents(existing.offset - 1)[0]!;
+    if (existing) return Response.json(this.readEventRecords(existing.offset - 1, 1)[0]!);
     return this.commit(input.entity, input.entityId, () => {
     const offset = this.ctx.storage.sql.exec<{ offset: number }>(
       `INSERT INTO project_events(event_id,scope,entity,entity_id,revision,operation,payload_json,created_at)
@@ -1518,7 +1573,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       JSON.stringify(input.payload),
       new Date().toISOString(),
     ).one().offset;
-    return this.listEvents(offset - 1)[0]!;
+    return Response.json(this.readEventRecords(offset - 1, 1)[0]!);
     });
   }
 
@@ -1526,10 +1581,14 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ offset: number }>('SELECT COALESCE(MAX(offset), 0) AS offset FROM project_events').one().offset;
   }
 
-  listEvents(afterOffset: number): ProjectEvent[] {
+  listEvents(afterOffset: number): Response {
+    return Response.json(this.readEventRecords(afterOffset));
+  }
+
+  private readEventRecords(afterOffset: number, limit = -1): ProjectEvent[] {
     return this.ctx.storage.sql.exec<ProjectEventRow>(
-      'SELECT * FROM project_events WHERE offset>? ORDER BY offset',
-      afterOffset,
+      'SELECT * FROM project_events WHERE offset>? ORDER BY offset LIMIT ?',
+      afterOffset, limit,
     ).toArray().map((row) => ({
       offset: row.offset,
       eventId: row.event_id,

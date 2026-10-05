@@ -4,8 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createExecutableArtifactManifest, nativeHostAbi } from '@gitspace/account-omp/manifest';
-import { nativeFileDigest } from '../../deployment/src/native-runtime.js';
+import { createExecutableArtifactManifest, nativeHostAbi } from '@gitspace/deployment/manifest';
 import { alive, atomicJson, readJson, type MachineSelection } from '../src/machine-update.js';
 
 const source = (name: string) => pathToFileURL(resolve(import.meta.dir, '../src', name)).href;
@@ -14,8 +13,8 @@ const token = 'disposable-update-control';
 type Ready = { pid: number; hash: string; url: string };
 
 async function eventually<T>(action: () => Promise<T | null | false>, description: string): Promise<T> {
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
+  const deadline = performance.now() + 20_000;
+  while (performance.now() < deadline) {
     const result = await action();
     if (result) return result;
     await Bun.sleep(50);
@@ -43,20 +42,13 @@ afterEach(async () => {
 
 async function artifact(root: string, label: string, healthy = true, paused = false) {
   const path = join(root, 'bundles', label);
-  await mkdir(join(path, 'native'), { recursive: true });
-  await writeFile(join(path, 'native/walgit'), '#!/bin/sh\necho fixture-walgit\n', { mode: 0o755 });
+  await mkdir(path, { recursive: true });
   await writeFile(
     join(path, 'machine-native.json'),
     JSON.stringify({
-      version: 1,
+      version: 2,
       bunVersion: Bun.version,
       abi: nativeHostAbi(),
-      walgit: {
-        source: 'release',
-        path: 'native/walgit',
-        ...(await nativeFileDigest(join(path, 'native/walgit'))),
-        provenance: null,
-      },
     }),
   );
   await writeFile(
@@ -130,7 +122,8 @@ async function artifact(root: string, label: string, healthy = true, paused = fa
     console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
   `,
   );
-  const built = await createExecutableArtifactManifest(path, 'machine', null, nativeHostAbi());
+  await writeFile(join(path, 'machine-worker.js'), `import './machine.js';`);
+  const built = await createExecutableArtifactManifest(path, 'machine', nativeHostAbi());
   return {
     selection: { version: 1, path, hash: built.manifest.treeHash, releaseSha: label } satisfies MachineSelection,
     manifestHash: built.manifestHash,
@@ -153,7 +146,6 @@ async function fixture() {
     GITSPACE_INITIAL_MACHINE_MANIFEST_HASH: initial.manifestHash,
     GITSPACE_MACHINE_ID: 'disposable-whole-machine',
     GITSPACE_ARTIFACT_KEY: Buffer.alloc(32, 1).toString('base64'),
-    GITSPACE_OMP_AGENT_DIR: join(root, 'omp'),
     GITSPACE_CONTROL_TOKEN: token,
     GITSPACE_RPC_HOST: '127.0.0.1',
     GITSPACE_RPC_PORT: '0',
@@ -256,7 +248,7 @@ it('recovers an updater crash after the candidate starts without admitting two w
       join(root, 'machine-update.json'),
     );
     const waiting = await readFile(join(root, 'candidate-waiting'), 'utf8').catch(() => null);
-    return pending?.phase === 'starting' && pending.successorPid && waiting && pending;
+    return pending?.phase === 'starting' && pending.successorPid && waiting ? pending : null;
   }, 'candidate mutation before health gate');
   // Kill only the disposable updater. Its replacement must stop the surviving
   // candidate before restoring the checkpoint and starting the predecessor.

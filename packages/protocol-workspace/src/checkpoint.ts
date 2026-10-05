@@ -33,17 +33,24 @@ export const spaceCheckpointManifestSchema = z.object({
   previousRevision: z.number().int().positive().nullable(),
   repository: z.object({
     checkpointRef: z.string().min(1).max(512),
-    headCommit: gitObjectIdSchema,
+    headCommit: gitObjectIdSchema.nullable(),
     branch: z.string().min(1).max(255),
     indexCommit: gitObjectIdSchema,
     worktreeCommit: gitObjectIdSchema,
   }),
-  agent: z.object({
+  agent: z.union([z.object({
+    kind: z.literal('cloud'),
+    sessionId: storageIdSchema,
+    conversationId: z.string().min(1),
+    cursor: z.number().int().nonnegative(),
+    resumePending: z.boolean().default(false),
+  }), z.object({
+    kind: z.literal('legacy').default('legacy'),
     sessionId: storageIdSchema,
     ompSessionId: storageIdSchema,
     ompCheckpointHash: hashSchema,
     resumePending: z.boolean().default(false),
-  }),
+  })]),
   artifacts: z.object({
     manifestHash: hashSchema,
     generation: z.number().int().nonnegative(),

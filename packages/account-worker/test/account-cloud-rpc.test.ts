@@ -1,4 +1,4 @@
-import { env, SELF } from 'cloudflare:test';
+import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encodeApiKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
 import { createGitSpaceClient } from '@gitspace/protocol/client';
@@ -10,11 +10,20 @@ import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
 import { createBrowserClient, type BrowserClientOf } from 'result-rpc/client';
 import { parse, stringify } from 'devalue';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
+import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+
+afterEach(() => vi.restoreAllMocks());
+function emptyCommittedSource() {
+  const info: ArtifactsRepoInfo = { id: 'empty-fixture', name: 'empty-fixture', description: null, defaultBranch: 'main', createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false, remote: 'https://artifacts.invalid/empty.git' };
+  vi.spyOn(ArtifactsCodeStore.prototype, 'ensureEmptyProject').mockResolvedValue(info);
+  vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(info);
+  vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockResolvedValue(null);
+}
 
 async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.write', 'fleet.control', 'devices.manage'], kind: 'browser' | 'client' = 'browser', scope: DeviceScope = { kind: 'user' }) {
   const userId = env.ACCOUNT_ID;
@@ -74,6 +83,7 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
   });
 
   it.each(['browser', 'client'] as const)('allows authorized %s lifecycle control while preserving content review', async (kind) => {
+    emptyCommittedSource();
     const fixture = await account(['rpc.read', 'rpc.write', ...(kind === 'client' ? ['lifecycle.control' as const] : [])], kind);
     const projectId = 'lifecycle-project';
     const spaceId = 'lifecycle-space';
@@ -146,6 +156,7 @@ describe('Inspector administrative authority', () => {
 
 describe('account cloud RPC without machines', () => {
   it('manages shared secrets and values without machines and enforces effective grants', async () => {
+    emptyCommittedSource();
     const fixture = await account();
     const { projectId, spaceId, authority } = await inspectorWorkspace(fixture.userId);
     const configured = await authority.mutateLifecycleState(spaceId, {
@@ -213,8 +224,9 @@ describe('account cloud RPC without machines', () => {
     expect(created.status).toBe('ok');
     expect(await rpc('crons.list', { projectId })).toMatchObject({ status: 'ok', value: [{ id: created.value.id }] });
     expect(await rpc('crons.create', { projectId, draft: { ...cronDraft, target: { ...cronDraft.target, spaceId: 'foreign' } } })).toMatchObject({ status: 'error' });
-    expect(await rpc('crons.runNow', { projectId, cronId: created.value.id })).toMatchObject({ status: 'ok', value: { state: 'pending', projectId } });
-    expect(await rpc('crons.history', { projectId, cronId: created.value.id })).toMatchObject({ status: 'ok', value: [{ state: 'pending' }] });
+    const queued = await rpc('crons.runNow', { projectId, cronId: created.value.id });
+    expect(queued).toMatchObject({ status: 'ok', value: { projectId, cronId: created.value.id, prompt: cronDraft.prompt } });
+    expect(await rpc('crons.history', { projectId, cronId: created.value.id })).toMatchObject({ status: 'ok', value: [{ id: queued.value.id, projectId, cronId: created.value.id, prompt: cronDraft.prompt }] });
     expect(await env.PROJECT_CRONS.getByName(JSON.stringify([fixture.userId, projectId])).list(projectId)).toMatchObject([{ id: created.value.id }]);
     expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
   });
@@ -308,10 +320,10 @@ describe('account cloud RPC without machines', () => {
   });
 
   it('keeps missing machine data from failing concurrent account queries for API clients', async () => {
-    const fixture = await account(['rpc.read'], 'client');
-    const content = 'modelRoles:\n  default: openai/gpt-4o\n';
+    const fixture = await account(['rpc.read', 'rpc.write'], 'client');
+    const content = '{"toolExecution":"sequential"}';
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content)));
-    await env.USER_SETTINGS.getByName(fixture.userId).updateOmp('bootstrap', { expectedGeneration: 0, content, checksum: `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}` });
+    await env.USER_SETTINGS.getByName(fixture.userId).updateRuntime('bootstrap', { expectedGeneration: 0, content, checksum: `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}` });
     const client = createGitSpaceClient({
       key: encodeApiKey({
         version: 2, userId: fixture.userId, deviceId: fixture.deviceId,
@@ -321,11 +333,14 @@ describe('account cloud RPC without machines', () => {
       }),
       fetch: ((input, init) => SELF.fetch(new Request(input, init))) as typeof fetch,
     });
-    const [settings, omp, machine] = await Promise.all([
-      client.settings.get({}), client.settings.omp.get({}), client.browserRelay.status({}),
+    const [settings, runtime, machine] = await Promise.all([
+      client.settings.get({}), client.settings.runtime.get({}), client.browserRelay.status({}),
     ]);
     expect(settings).toMatchObject({ status: 'ok', value: { profile: { handle: fixture.handle } } });
-    expect(omp).toMatchObject({ status: 'ok', value: { document: { content }, schema: [], sync: { status: 'offline' } } });
+    expect(runtime).toMatchObject({ status: 'ok', value: { document: { content }, schema: expect.arrayContaining([expect.objectContaining({ path: 'toolExecution', valueJson: '"sequential"' })]), sync: { status: 'synced' } } });
+    const updated = await client.settings.runtime.set({ expectedGeneration: 1, path: 'toolExecution', valueJson: '"parallel"' });
+    expect(updated).toMatchObject({ status: 'ok', value: { document: { generation: 2, content: '{"toolExecution":"parallel"}' } } });
+    expect(await client.settings.runtime.set({ expectedGeneration: 1, path: 'toolExecution', valueJson: '"sequential"' })).toMatchObject({ status: 'error' });
     expect(machine.status).toBe('error');
   });
 
@@ -377,7 +392,7 @@ describe('account cloud RPC without machines', () => {
     expect(await env.FLEET_CATALOG.getByName(owner.userId).listMachines()).toEqual([]);
   });
 
-  it('stores provider keys in the canonical broker but never discloses them in RPC views', async () => {
+  it('stores provider keys in the canonical vault but never discloses them in RPC views', async () => {
     const fixture = await account();
     const key = 'sk-account-rpc-secret-key';
     const saved = await SELF.fetch(fixture.request(single('providers.apiKey.set', { profileId: 'default', providerId: 'openai', key })));
@@ -385,14 +400,14 @@ describe('account cloud RPC without machines', () => {
     expect(saved.status, savedBody).toBe(200);
     expect(savedBody).not.toContain(key);
     expect(parse(savedBody)).toMatchObject({ status: 'ok', value: { provider: { id: 'openai', hasAuth: true } } });
-    const snapshot = await fixture.vault.ompSnapshot('default');
-    expect(snapshot.credentials).toMatchObject([{ provider: 'openai', credential: { type: 'api_key', key } }]);
-    const logout = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai', credentialId: String(snapshot.credentials[0]!.id) })));
-    expect(parse(await logout.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: false, accounts: [] } } });
-    expect((await fixture.vault.ompSnapshot('default')).credentials).toEqual([]);
+    const accounts = await fixture.vault.cloudCredentialAccounts('default');
+    expect((await fixture.vault.cloudResolveCredential({ profileId: 'default', credentialId: accounts[0]!.id })).credential).toEqual({ type: 'api_key', key });
+    const logout = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai', credentialId: accounts[0]!.id })));
+    expect(parse(await logout.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: false, accounts: [{ id: accounts[0]!.id, disabled: true }] } } });
+    expect(await fixture.vault.cloudCredentialAccounts('default')).toEqual([]);
   });
 
-  it('identifies Codex sign-in aliases as one credential store without merging organization accounts', async () => {
+  it('keeps Codex organization accounts independently selectable and revocable', async () => {
     const fixture = await account();
     for (const orgId of ['personal', 'team']) {
       await fixture.vault.putCredential({
@@ -405,14 +420,14 @@ describe('account cloud RPC without machines', () => {
     expect(response.status, body).toBe(200);
     const result = parse(body) as { status: 'ok'; value: { providers: ProviderView[] } };
     const codex = result.value.providers.find((provider) => provider.id === 'openai-codex')!;
-    const device = result.value.providers.find((provider) => provider.id === 'openai-codex-device')!;
     expect(codex.credentialProvider).toBe('openai-codex');
-    expect(device.credentialProvider).toBe(codex.credentialProvider);
-    expect(codex.accounts.map((account) => account.label)).toEqual(['same@example.com · personal', 'same@example.com · team']);
     expect(new Set(codex.accounts.map((account) => account.id)).size).toBe(2);
-    expect(device.accounts).toEqual(codex.accounts);
     expect(body).not.toContain('refresh-personal');
     expect(body).not.toContain('access-personal');
+    const first = codex.accounts[0]!, second = codex.accounts[1]!;
+    const logout = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai-codex', credentialId: first.id })));
+    expect(parse(await logout.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: true, accounts: [{ id: first.id, disabled: true }, { id: second.id, disabled: false }] } } });
+    expect((await fixture.vault.cloudCredentialAccounts('default', 'openai-codex')).map(account => account.id)).toEqual([second.id]);
   });
 
   it('manages inference profiles with typed conflicts and refuses account API clients provider/profile writes', async () => {
@@ -436,7 +451,7 @@ describe('account cloud RPC without machines', () => {
       expect(parse(await (await SELF.fetch(api.request(single(path, input)))).text())).toMatchObject({ status: 'error' });
     }
     expect((await fixture.vault.ensureInference()).profiles.map(candidate => candidate.name)).toEqual(['Default', 'Renamed']);
-    expect((await fixture.vault.ompSnapshot(profile.id)).credentials).toEqual([]);
+    expect(await fixture.vault.cloudCredentialAccounts(profile.id)).toEqual([]);
   });
 
   it('keeps profile provider views scoped and rejects missing profile identity before mutation', async () => {
@@ -447,11 +462,38 @@ describe('account cloud RPC without machines', () => {
     const response = await SELF.fetch(fixture.request(single('providers.list', { profileId })));
     const text = await response.text();
     const result = parse(text) as { status: 'ok'; value: { providers: ProviderView[] } };
-    expect(result.value.providers.find(provider => provider.id === 'openai')).toMatchObject({ hasAuth: false, accounts: [] });
+    expect(result.value.providers.find(provider => provider.id === 'openai')).toMatchObject({ hasAuth: false, authKind: 'none', supportsOAuth: false, supportsApiKey: true, accounts: [] });
+    expect(result.value.providers.find(provider => provider.id === 'anthropic')).toMatchObject({ hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: true, accounts: [] });
+    expect(result.value.providers.find(provider => provider.id === 'openai-codex')).toMatchObject({ hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: false, accounts: [] });
     expect(text).not.toContain('default-private-key');
     const missing = await SELF.fetch(fixture.request(single('providers.apiKey.set', { providerId: 'openai', key: 'unscoped-key' })));
     expect(parse(await missing.text())).toMatchObject({ status: 'error' });
-    expect((await fixture.vault.ompSnapshot('default')).credentials[0]!.credential).toMatchObject({ key: 'default-private-key' });
+    const storedAccount = (await fixture.vault.cloudCredentialAccounts('default'))[0]!;
+    expect((await fixture.vault.cloudResolveCredential({ profileId: 'default', credentialId: storedAccount.id })).credential).toEqual({ type: 'api_key', key: 'default-private-key' });
+  });
+
+  it('bypasses recent account usage observations only for an explicit refresh', async () => {
+    const fixture = await account();
+    await fixture.vault.putBrowserApiKey('default', 'openai', 'offline-fixture-key');
+    const [credential] = await fixture.vault.cloudCredentialAccounts('default', 'openai');
+    if (!credential) throw new Error('Expected fixture credential');
+    await runInDurableObject(fixture.vault, async (_instance, state) => {
+      state.storage.sql.exec(
+        'INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, NULL, ?)',
+        'default', credential.id, Date.now(), 'Cached usage observation',
+      );
+    });
+    const client = inspectorClient(fixture);
+    expect(await client.providers.usage({ profileId: 'default', providerId: 'openai', refresh: false })).toMatchObject({
+      status: 'ok', value: { errors: [{ provider: 'openai', message: 'Cached usage observation' }] },
+    });
+    // API-key usage is unsupported locally, so refresh can be proven without any provider request.
+    const refreshed = await client.providers.usage({ profileId: 'default', providerId: 'openai', refresh: true });
+    expect(refreshed).toMatchObject({ status: 'ok', value: { reports: [], errors: [{ provider: 'openai', message: 'Usage reporting is unavailable; inference remains enabled' }] } });
+    if (refreshed.status !== 'ok') throw new Error('Expected refreshed usage');
+    expect(await client.providers.usage({ profileId: 'default', providerId: 'openai', refresh: false })).toMatchObject({
+      status: 'ok', value: { errors: refreshed.value.errors },
+    });
   });
 
   it('streams committed profile invalidations without broker credentials and replays after reconnect', async () => {
@@ -490,7 +532,7 @@ describe('account cloud RPC without machines', () => {
     expect((await env.USER_SETTINGS.getByName(fixture.userId).get('check')).onboardingComplete).toBe(false);
 
     const signed = fixture.request(single('settings.get'));
-    const replay = signed.clone();
+    const replay = new Request(signed.url, { method: signed.method, headers: signed.headers, body: signed.clone().body });
     expect((await SELF.fetch(signed)).status).toBe(200);
     expect((await SELF.fetch(replay)).status).toBe(409);
     const original = fixture.request(single('settings.get'));
@@ -644,9 +686,9 @@ describe('bounded saved Inspector transcripts', () => {
     snapshot[CHECKPOINT_CHUNK_BYTES] = 10;
     snapshot.set(published.snapshot, CHECKPOINT_CHUNK_BYTES + 1);
     const objectKey = `projects/${space.projectId}/sessions/canonical/chunked.checkpoint`;
-    const hash = async (bytes: Uint8Array): Promise<`sha256:${string}`> => `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+    const hash = async (bytes: Uint8Array): Promise<`sha256:${string}`> => `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes))), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
     const chunks: Array<{ hash: `sha256:${string}`; size: number }> = [];
-    let lastChunk = new Uint8Array();
+    let lastChunk: Uint8Array = new Uint8Array();
     let lastKey = '';
     for (let offset = 0; offset < snapshot.byteLength; offset += CHECKPOINT_CHUNK_BYTES) {
       const plaintext = snapshot.subarray(offset, offset + CHECKPOINT_CHUNK_BYTES);
@@ -765,12 +807,12 @@ describe('bounded saved Inspector transcripts', () => {
     expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
   });
 
-  it('distinguishes absent and valid empty snapshots from missing saved objects', async () => {
+  it('distinguishes empty cloud and legacy conversations from missing saved objects', async () => {
     const fixture = await account(['rpc.read']);
     const space = await inspectorWorkspace(fixture.userId);
     const client = inspectorClient(fixture);
     const input = { projectId: space.projectId, workspaceId: space.spaceId };
-    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'none' } } });
+    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { checkpoint: null, savedTranscript: { status: 'available' } } });
     expect(await collectInspectorTranscript(client, space.projectId, space.spaceId)).toEqual([]);
     const published = await publishInspectorSession(fixture, space, []);
     expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'available' } } });
@@ -882,7 +924,8 @@ describe('machine-independent Inspector', () => {
     const availability = await worker.fetch(fixture.request(single('inspector.availability', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
     expect(parse(await availability.text())).toMatchObject({ status: 'ok', value: { runtimeAvailable: false } });
     const opened = await worker.fetch(fixture.request(single('inspector.view', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
-    expect(parse(await opened.text())).toMatchObject({ status: 'ok', value: { identity: { projectId: space.projectId, spaceId: space.spaceId }, placement: null, savedTranscript: { status: 'none' } } });
+    expect(parse(await opened.text())).toMatchObject({ status: 'ok', value: { identity: { projectId: space.projectId, spaceId: space.spaceId }, placement: null } });
+    expect(await collectInspectorTranscript(inspectorClient(fixture, (request) => worker.fetch(request, cloudEnv)), space.projectId, space.spaceId)).toEqual([]);
     const saved = await worker.fetch(fixture.request(single('inspector.goal.put', { expectedGeneration: 0, input: {
       projectId: space.projectId, spaceId: space.spaceId, expectedRevision: 0,
       goal: { id: 'offline-goal', title: 'Review without compute', summary: 'Canonical goal', phase: 'review', requirements: [], updatedBy: 'human' },
@@ -941,7 +984,7 @@ describe('machine-independent Inspector', () => {
     ].map((entry) => JSON.stringify(entry)).join('\n');
     const persist = async (objectKey: string, content: string) => {
       const sealed = await encryptArtifactBytes(new TextEncoder().encode(content), key);
-      const hash: `sha256:${string}` = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', sealed)), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+      const hash: `sha256:${string}` = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(sealed))), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
       await env.DATA.put(`users/${fixture.userId}/${objectKey}`, sealed, { customMetadata: { sha256: hash } });
       return hash;
     };
@@ -950,7 +993,7 @@ describe('machine-independent Inspector', () => {
     const scopeKey = await deriveArtifactScopeKey(key, scopeId);
     const publishArtifact = async (content: string) => {
       const sealed = await encryptArtifactBytes(new TextEncoder().encode(content), scopeKey);
-      const hash = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', sealed)), (byte) => byte.toString(16).padStart(2, '0')).join('')}` as const;
+      const hash = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(sealed))), (byte) => byte.toString(16).padStart(2, '0')).join('')}` as const;
       await env.DATA.put(`users/${fixture.userId}/accounts/${Buffer.from(fixture.userId).toString('base64url')}/artifacts/sha256/${hash.slice(7)}`, sealed, { customMetadata: { sha256: hash } });
       return hash;
     };
@@ -961,7 +1004,7 @@ describe('machine-independent Inspector', () => {
     const manifest: SpaceCheckpointManifest = {
       version: 1, projectId: space.projectId, spaceId: space.spaceId, revision, previousRevision,
       repository: { checkpointRef: spaceGitCheckpointRef(space.spaceId, revision), headCommit: 'a'.repeat(40), branch: 'review', indexCommit: 'b'.repeat(40), worktreeCommit: 'c'.repeat(40) },
-      agent: { sessionId, ompSessionId, ompCheckpointHash: ompHash, resumePending: false },
+      agent: { kind: 'legacy', sessionId, ompSessionId, ompCheckpointHash: ompHash, resumePending: false },
       artifacts: { manifestHash: scopeHash, generation: 1 }, createdAt: at,
     };
     const manifestHash = await persist(manifestKey, JSON.stringify(manifest));
@@ -993,10 +1036,10 @@ describe('machine-independent Inspector', () => {
     const artifact = { spaceId: space.spaceId, expectedGeneration: 2, url: 'local://workspace/review.txt' };
     const written = await worker.fetch(fixture.request(single('inspector.artifacts.write', { ...artifact, mediaType: 'text/plain', base64: btoa('Cloud review evidence') })), cloudEnv);
     expect(parse(await written.text())).toMatchObject({ status: 'error' });
-    const artifactChunks: Uint8Array[] = [];
+    const artifactChunks: Uint8Array<ArrayBuffer>[] = [];
     for await (const result of savedClient.inspector.artifacts.read({ ...artifact, hash: artifactHash })) {
       if (result.status === 'error') throw result.error;
-      if (result.value.type === 'chunk') artifactChunks.push(credentialProtocolBase64.decode(result.value.base64));
+      if (result.value.type === 'chunk') artifactChunks.push(Uint8Array.from(credentialProtocolBase64.decode(result.value.base64)));
     }
     expect(await new Blob(artifactChunks).text()).toBe('Cloud review evidence');
     const metadataPage = await savedClient.inspector.artifacts.readPage({ ...artifact, hash: artifactHash, cursor: null, limit: 1 });

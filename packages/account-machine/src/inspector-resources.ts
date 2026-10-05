@@ -16,6 +16,7 @@ export async function readInspectorResource(input: {
 }): Promise<Generator<ResourcePreviewFrame>> {
   const resource = parseResourceUri(input.url);
   if (!resource) throw new Error('Unsupported or unsafe resource URI');
+  if (resource.kind === 'browser-artifact') throw new Error('Read browser artifacts through the authorized cloud browser control, not session files');
   const sessionRoot = input.sessionFile?.endsWith('.jsonl') ? input.sessionFile.slice(0, -6) : null;
   let bytes: Uint8Array | null = null;
   const mediaType = resource.kind === 'artifact' ? 'text/plain' : null;

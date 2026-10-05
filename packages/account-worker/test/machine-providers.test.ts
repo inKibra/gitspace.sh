@@ -6,7 +6,7 @@ import type { FleetMachineDefinition } from '../src/fleet-catalog.js';
 import { http } from 'msw';
 import { network } from './network.js';
 
-function mockProvider(fetch: (request: Request) => Promise<Response>) {
+function mockProvider(fetch: (request: Pick<Request, 'url'>) => Promise<Response>) {
   network.use(http.all(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/*`, ({ request }) => fetch(request)));
 }
 
@@ -32,7 +32,7 @@ it('recovers an externally stopped sandbox to its desired online state', async (
   let current: FleetMachineDefinition = { ...sandbox, state: 'resuming', operationId: 'interrupted-resume', lifecycleRevision: 4 };
   const actions: string[] = [];
   const service = {
-    fetch: async (request: Request) => {
+    fetch: async (request: Pick<Request, 'url'>) => {
       const action = new URL(request.url).pathname.split('/').at(-1)!;
       actions.push(action);
       if (action === 'cancel-replacement') return Response.json({ prepared: false });
@@ -85,7 +85,7 @@ it('does not acknowledge resume from a stale online catalog entry', async () => 
 it('checkpoints an open workspace before stopping and preserves its restart checkpoint', async () => {
   const { userId, catalog, authority, identity } = await openSpaceMachine();
   const actions: string[] = [];
-  const service = { fetch: async (request: Request) => {
+  const service = { fetch: async (request: Pick<Request, 'url'>) => {
     const action = new URL(request.url).pathname.split('/').at(-1)!;
     actions.push(action);
     if (action === 'prepare-replacement') {
@@ -119,7 +119,7 @@ it.each(['control', 'reconciliation'] as const)('restores admission after a fail
   let admitted = true;
   let stopped = false;
   const actions: string[] = [];
-  const service = { fetch: async (request: Request) => {
+  const service = { fetch: async (request: Pick<Request, 'url'>) => {
     const action = new URL(request.url).pathname.split('/').at(-1)!;
     actions.push(action);
     if (action === 'prepare-replacement') {
@@ -165,7 +165,7 @@ it.each(['control', 'reconciliation'] as const)('restores admission after a fail
 it('never trusts preparation while cloud ownership still has an open space', async () => {
   const { userId, catalog, authority } = await openSpaceMachine();
   const actions: string[] = [];
-  const service = { fetch: async (request: Request) => {
+  const service = { fetch: async (request: Pick<Request, 'url'>) => {
     const action = new URL(request.url).pathname.split('/').at(-1)!;
     actions.push(action);
     if (action === 'prepare-replacement') return Response.json({ prepared: true });
@@ -185,7 +185,7 @@ it('keeps failed cancellation online-intended and retries saving an unready but 
   let admitted = true;
   let cancelFails = true;
   const actions: string[] = [];
-  const service = { fetch: async (request: Request) => {
+  const service = { fetch: async (request: Pick<Request, 'url'>) => {
     const action = new URL(request.url).pathname.split('/').at(-1)!;
     actions.push(action);
     if (action === 'prepare-replacement') {
@@ -232,7 +232,7 @@ it('rejects a missing checkpoint acknowledgement without stopping', async () => 
   await catalog.putMachine(sandbox);
   let stopped = false;
   let cancelled = false;
-  const service = { fetch: async (request: Request) => {
+  const service = { fetch: async (request: Pick<Request, 'url'>) => {
     const action = new URL(request.url).pathname.split('/').at(-1)!;
     if (action === 'prepare-replacement') return Response.json({});
     if (action === 'cancel-replacement') {

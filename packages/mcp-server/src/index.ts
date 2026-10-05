@@ -33,8 +33,28 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
   'session-history': { path: 'session.history', description: 'Inspect the branching history of an agent session without changing its current branch. Percent-encode the input for gitspace_session_history and follow its page boundaries. To read conversation messages instead, use transcripts.' },
   'subagent-transcripts': { path: 'subagents.page', description: 'Inspect a bounded conversation page for one subagent using its parent sessionId and subagentId. Percent-encode the input for gitspace_subagents_page; retain the returned generation. Retrieve shortened row content with gitspace_subagents_content.' },
 };
-// Protected terminal bytes are browser-only and must never enter agent tool results.
-const excluded = (path: string) => path.startsWith('providers.login.') || path === 'mcp.composio.authorize' || path === 'terminals.live';
+// Human authorization and protected terminal bytes are browser-only.
+const excluded = (path: string) => path.startsWith('providers.login.') || path.startsWith('browserRelay.') || [
+  'mcp.composio.authorize', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
+  'session.setApproval', 'session.answerAsk', 'inspector.guide.setApproval',
+].includes(path);
+const agentSessionCommands = [
+  'control', 'agentSetup', 'historyAnchorId', 'messages', 'persist', 'handoff', 'resume', 'stop',
+  'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged', 'prompt',
+  'setWorkspacePhase', 'cycleRole', 'setModel', 'setThinking', 'setFast', 'setGoal',
+  'compact', 'removeQueuedMessage', 'promoteQueuedMessage', 'navigateTree', 'saveAgentDefinition',
+];
+/** Narrow the owned wire schema without copying or replacing its command definitions. */
+function agentInputSchema(path: string, schema: Record<string, unknown>): Record<string, unknown> {
+  if (path !== 'runtime.session' && path !== 'runtime.qa') return schema;
+  const field = path === 'runtime.session' ? 'command' : 'action';
+  const discriminator = path === 'runtime.session' ? 'type' : 'kind';
+  const values = path === 'runtime.session' ? agentSessionCommands : ['dismiss', 'merge'];
+  return { ...schema, allOf: [...(Array.isArray(schema.allOf) ? schema.allOf : []), {
+    properties: { [field]: { properties: { [discriminator]: { enum: values } }, required: [discriminator] } },
+    required: [field],
+  }] };
+}
 const toolName = (path: string) => `gitspace_${path.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replaceAll('.', '_').toLowerCase()}`;
 const title = (path: string) => path.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replaceAll('.', ' ');
 const objectSchema = (properties: Record<string, unknown>, required = Object.keys(properties)) => ({ type: 'object' as const, properties, required, additionalProperties: false });
@@ -151,6 +171,8 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
   const allowed = (path: string, input?: unknown) => {
     const procedure = gitspaceContract.procedures.get(path);
     if (!procedure || excluded(path) || !options.capabilities.includes(requiredCapability(path, procedure._def.kind))) return false;
+    if (input !== undefined && path === 'runtime.session' && !agentSessionCommands.includes(String(record(record(input).command).type))) return false;
+    if (input !== undefined && path === 'runtime.qa' && !['dismiss', 'merge'].includes(String(record(record(input).action).kind))) return false;
     const readOnly = reviewedAnnotations[path]?.readOnlyHint === true;
     if (procedure._def.kind !== 'mutation' && !readOnly && !options.capabilities.includes('rpc.write')) return false;
     if (path === 'machines' && !options.capabilities.includes('fleet.control')) return false;
@@ -174,13 +196,13 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
     if (pagedStreams[path] || !allowed(path)) continue;
     const representation = procedureJsonRepresentation(path);
     const stream = procedure._def.kind === 'subscription';
-    const inputSchema = stream ? { ...representation.inputSchema, properties: { ...record(representation.inputSchema.properties), _mcp: objectSchema({ waitMs: { type: 'integer', minimum: 1, maximum: STREAM_LIMITS.maxWaitMs, default: STREAM_LIMITS.waitMs, description: 'Maximum milliseconds to wait for this event batch, not for the underlying operation to finish. Use nextInput to resume after a timeout.' } }, []) } } : representation.inputSchema;
+    const inputSchema = stream ? { ...representation.inputSchema, properties: { ...record(representation.inputSchema.properties ?? {}), _mcp: objectSchema({ waitMs: { type: 'integer', minimum: 1, maximum: STREAM_LIMITS.maxWaitMs, default: STREAM_LIMITS.waitMs, description: 'Maximum milliseconds to wait for this event batch, not for the underlying operation to finish. Use nextInput to resume after a timeout.' } }, []) } } : representation.inputSchema;
     const outputSchema = stream ? objectSchema({ items: { type: 'array', items: embedSchema(representation.outputSchema, '#/properties/items/items') }, nextInput: { anyOf: [embedSchema(representation.inputSchema, '#/properties/nextInput/anyOf/0'), { type: 'null' }] }, complete: { type: 'boolean' }, reason: { type: 'string', enum: ['complete', 'limit', 'timeout', 'resync', 'ended'] }, gap: { type: 'boolean' } }) : objectSchema({ result: embedSchema(representation.outputSchema, '#/properties/result') });
     const name = toolName(path);
     if (catalog.has(name)) throw new Error('MCP tool name collision');
     catalog.set(name, { path, stream, tool: {
       name, title: title(path), description: `${toolDescriptions[path]}${stream ? ' This is a bounded event read: continue with nextInput and resynchronize when gap is true; complete=false is not end of history.' : ''}`,
-      inputSchema: inputSchema as Tool['inputSchema'], outputSchema: outputSchema as Tool['outputSchema'],
+      inputSchema: agentInputSchema(path, inputSchema) as Tool['inputSchema'], outputSchema: outputSchema as Tool['outputSchema'],
       annotations: reviewedAnnotations[path],
     } });
   }

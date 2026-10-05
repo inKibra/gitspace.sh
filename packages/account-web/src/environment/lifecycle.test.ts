@@ -10,7 +10,7 @@ const completed: LifecycleRun = {
 const state: LifecycleState = {
   revision: 1, projectId: 'project-a', spaceId: 'workspace-a', bundleJson: null, selectedProfile: 'base',
   values: { global: {}, project: {}, workspace: {} }, approvals: [], policy: { automatic: true }, bindings: {},
-  provisioned: null, destroyedAt: null, runs: [], claim: null, executions: [],
+  provisioned: null, destroyedAt: null, runs: [], claim: null, executions: [], browserOrigins: [],
 };
 
 describe('environment readiness scopes', () => {

@@ -52,12 +52,12 @@ describe('RPC JSON representations', () => {
 
   it('preserves guarded normalization/default semantics while retaining original wire fingerprints', () => {
     const schema = z.object({ label: z.string().trim().min(1).max(3), enabled: z.boolean().default(true), optional: z.string().optional() });
-    const guard = (value: unknown): value is z.infer<typeof schema> => schema.safeParse(value).success;
+    const guard = (value: unknown): value is z.input<typeof schema> => schema.safeParse(value).success;
     const original = rpcWire.serializable(guard, { id: 'regression/guard' });
     const represented = wire.serializable(guard, { id: 'regression/guard', jsonSchema: schema });
     const value = { label: '  abc  ', optional: undefined, retained: 'unknown property' };
-    const encoded = represented.encode(value as unknown as z.infer<typeof schema>);
-    expect(encoded).toEqual(original.encode(value as unknown as z.infer<typeof schema>));
+    const encoded = represented.encode(value);
+    expect(encoded).toEqual(original.encode(value));
     expect(represented.schema).toBe(original.schema);
     if (!encoded.ok) throw new Error('Expected the guard to accept its original input');
     expect(encoded.value).toBe(value);

@@ -1,6 +1,6 @@
 import { wire } from './json-wire.js'
 import { z } from 'zod';
-import { ompConfigDocumentSchema, ompSettingValueSchema, type OmpSettingValue } from './user-settings.js';
+import { runtimeConfigDocumentSchema, runtimeSettingValueSchema, type RuntimeSettingValue, type RuntimeSettingSchemaItem } from './user-settings.js';
 
 export const DEFAULT_INFERENCE_PROFILE_ID = 'default';
 export const INFERENCE_PROFILE_VERSION = 1 as const;
@@ -21,8 +21,6 @@ const namedEntryMaps: Record<string, true> = {
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
   modelRoles: 'Models', cycleOrder: 'Models', modelTags: 'Models', enabledModels: 'Models',
   modelProviderOrder: 'Models', modelRoleStorage: 'Models',
-  // enabledProviders/disabledProviders stay shared: OMP uses them chiefly for skill, agent and plugin
-  // discovery sources (`claude`, `claude-plugins`), and profile credential scope already bounds inference.
   providers: 'Providers', agents: 'Agents',
 };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
@@ -72,14 +70,14 @@ export function inferenceCredentialPaths(value: unknown, prefix = ''): string[] 
 }
 
 /** Preserve complete owned subtrees (including custom roles/provider configuration). */
-export function extractInferenceSettings(config: Record<string, unknown>): Record<string, OmpSettingValue> {
-  const settings: Record<string, OmpSettingValue> = {};
+export function extractInferenceSettings(config: Record<string, unknown>): Record<string, RuntimeSettingValue> {
+  const settings: Record<string, RuntimeSettingValue> = {};
   const visit = (value: Record<string, unknown>, prefix: string): void => {
     for (const [key, child] of Object.entries(value)) {
       const path = prefix ? `${prefix}.${key}` : key;
       if (!safePath(path)) throw new Error('Unsafe configuration path');
       if (inferenceSettingSection(path)) {
-        if (child !== undefined) settings[path] = structuredClone(ompSettingValueSchema.parse(child));
+        if (child !== undefined) settings[path] = structuredClone(runtimeSettingValueSchema.parse(child));
       } else if (record(child)) visit(child, path);
     }
   };
@@ -102,7 +100,7 @@ export function stripInferenceSettings(config: Record<string, unknown>): Record<
   return visit(config, '');
 }
 
-export function applyInferenceSettings(config: Record<string, unknown>, settings: Record<string, OmpSettingValue>): Record<string, unknown> {
+export function applyInferenceSettings(config: Record<string, unknown>, settings: Record<string, RuntimeSettingValue>): Record<string, unknown> {
   const result = stripInferenceSettings(config);
   // A schema-path edit takes precedence over its stored parent subtree, independent of JSON key order.
   for (const path of Object.keys(settings).sort((left, right) => left.split('.').length - right.split('.').length || left.localeCompare(right))) {
@@ -118,32 +116,19 @@ export function applyInferenceSettings(config: Record<string, unknown>, settings
   return result;
 }
 
-/** Where GitSpace-managed sessions differ from OMP's schema defaults. Shared Advanced or repository config still overrides them. */
-export const managedOmpSettingDefaults: Readonly<Record<string, OmpSettingValue>> = {
-  'generate_image.enabled': true,
-};
-
-/** Fill managed defaults beneath a composed OMP config; any configured value, including `false`, wins. */
-export function applyManagedOmpSettingDefaults(config: Record<string, unknown>): Record<string, unknown> {
-  const result = structuredClone(config);
-  for (const [path, value] of Object.entries(managedOmpSettingDefaults)) {
-    const parts = path.split('.');
-    let target: Record<string, unknown> | null = result;
-    for (const part of parts.slice(0, -1)) {
-      if (target[part] === undefined) target[part] = {};
-      const next: unknown = target[part];
-      target = record(next) ? next : null;
-      if (!target) break;
-    }
-    const leaf = parts[parts.length - 1]!;
-    if (target && target[leaf] === undefined) target[leaf] = structuredClone(value);
-  }
-  return result;
-}
+/** Profile editor metadata is independent of any machine-installed runtime schema. */
+export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
+  { path: 'modelRoles', tab: 'Models', label: 'Model roles', kind: 'record', value: {}, defaultJson: '{}', credential: false },
+  { path: 'cycleOrder', tab: 'Models', label: 'Quick cycle', kind: 'array', value: [], defaultJson: '[]', credential: false },
+  { path: 'modelTags', tab: 'Models', label: 'Model tags', kind: 'record', value: {}, defaultJson: '{}', credential: false },
+  { path: 'enabledModels', tab: 'Models', label: 'Enabled models', kind: 'array', value: [], defaultJson: '[]', credential: false },
+  { path: 'agents', tab: 'Agents', label: 'Agent definitions', kind: 'record', value: {}, defaultJson: '{}', credential: false },
+  { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },
+];
 
 const profileIdSchema = z.string().min(1).max(160).regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u);
 const revisionSchema = z.number().int().nonnegative();
-export const inferenceSettingsSchema = z.record(z.string(), ompSettingValueSchema).superRefine((settings, context) => {
+export const inferenceSettingsSchema = z.record(z.string(), runtimeSettingValueSchema).superRefine((settings, context) => {
   for (const [path, value] of Object.entries(settings)) {
     if (!safePath(path) || !inferenceSettingSection(path)) context.addIssue({ code: 'custom', path: [path], message: 'Setting is not owned by an inference profile' });
     if (isInferenceCredentialField(path) || inferenceCredentialPaths(value, path).length > 0) {
@@ -180,7 +165,7 @@ export const inferenceExecutionContextSchema = z.strictObject({
   projectId: z.string().min(1).max(160).nullable(),
   assignmentRevision: revisionSchema.nullable(),
   profile: inferenceProfileSchema,
-  advanced: ompConfigDocumentSchema,
+  advanced: runtimeConfigDocumentSchema,
   broker: z.strictObject({ url: z.string().url(), token: z.string().min(1) }),
 }).refine(value => (value.projectId === null) === (value.assignmentRevision === null), 'Project identity and assignment revision must be bound together');
 export type InferenceExecutionContext = z.infer<typeof inferenceExecutionContextSchema>;

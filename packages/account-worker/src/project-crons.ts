@@ -9,6 +9,8 @@ import {
   type ProjectCronTarget,
   type ProjectCronView,
 } from '@gitspace/protocol/cron-contract';
+import { z } from 'zod';
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 
 interface CronRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -64,11 +66,6 @@ interface NormalizedCronDraft {
   enabled: boolean;
 }
 
-export interface ProjectCronClaim {
-  run: ProjectCronRunView;
-  claimToken: string;
-  leaseExpiresAt: Date;
-}
 
 export class ProjectCronValidationError extends Error {
   readonly field: string;
@@ -181,20 +178,14 @@ function timestamp(value: number | undefined): number {
 }
 
 function parseStringArray(value: string): string[] {
-  const parsed: unknown = JSON.parse(value);
-  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== 'string')) throw new Error('Stored cron scope is malformed');
-  return parsed;
+  return z.array(z.string()).parse(JSON.parse(value));
 }
 
 function parseTarget(value: string): ProjectCronTarget {
-  const parsed: unknown = JSON.parse(value);
-  if (!parsed || typeof parsed !== 'object') throw new Error('Stored cron target is malformed');
-  const target = parsed as Record<string, unknown>;
-  if (target.scope === 'project' && typeof target.projectId === 'string') return { scope: 'project', projectId: target.projectId };
-  if (target.scope === 'workspace' && typeof target.projectId === 'string' && typeof target.spaceId === 'string') {
-    return { scope: 'workspace', projectId: target.projectId, spaceId: target.spaceId };
-  }
-  throw new Error('Stored cron target is malformed');
+  return z.discriminatedUnion('scope', [
+    z.object({ scope: z.literal('project'), projectId: z.string() }),
+    z.object({ scope: z.literal('workspace'), projectId: z.string(), spaceId: z.string() }),
+  ]).parse(JSON.parse(value));
 }
 
 function runView(row: RunRow): ProjectCronRunView {
@@ -277,6 +268,11 @@ export class ProjectCronsDO extends DurableObject<Env> {
           created_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS project_cron_runs_history ON project_cron_runs(cron_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS project_cron_requests (
+          request_id TEXT PRIMARY KEY,
+          cron_id TEXT NOT NULL,
+          run_id TEXT NOT NULL UNIQUE
+        );
         CREATE UNIQUE INDEX IF NOT EXISTS project_cron_one_active_run
           ON project_cron_runs(cron_id) WHERE state IN ('pending', 'running');
       `);
@@ -363,17 +359,27 @@ export class ProjectCronsDO extends DurableObject<Env> {
     return { projectId, cronId, deleted: true };
   }
 
-  async runNow(input: { projectId: string; cronId: string; now?: number }): Promise<ProjectCronRunView> {
+  async runNow(input: { projectId: string; cronId: string; requestId?: string; now?: number }): Promise<ProjectCronRunView> {
     const projectId = this.ensureProject(input.projectId);
     const cronId = identifier(input.cronId, 'cronId');
+    const requestId = input.requestId === undefined ? null : identifier(input.requestId, 'requestId');
     const now = timestamp(input.now);
     let runId = '';
     this.ctx.storage.transactionSync(() => {
+      if (requestId !== null) {
+        const receipt = this.ctx.storage.sql.exec<{ cron_id: string; run_id: string }>('SELECT cron_id,run_id FROM project_cron_requests WHERE request_id=?', requestId).toArray()[0];
+        if (receipt) {
+          if (receipt.cron_id !== cronId) throw new ProjectCronValidationError('requestId', 'Request identity belongs to a different cron');
+          runId = receipt.run_id;
+          return;
+        }
+      }
       this.expireStaleRuns(now);
       const cron = this.requiredRow(projectId, cronId);
       const active = this.activeRun(cronId);
       if (active) throw new ProjectCronAlreadyRunningError(cronId, active.id, active.state as 'pending' | 'running');
       runId = this.insertRun(cron, 'manual', now, now);
+      if (requestId !== null) this.ctx.storage.sql.exec('INSERT INTO project_cron_requests(request_id,cron_id,run_id) VALUES(?,?,?)', requestId, cronId, runId);
     });
     await this.refreshAlarm(now);
     return runView(this.requiredRun(projectId, runId));
@@ -413,45 +419,22 @@ export class ProjectCronsDO extends DurableObject<Env> {
     return created.map((runId) => runView(this.requiredRun(projectId, runId)));
   }
 
-  /**
-   * Claim the next due run whose target this machine holds. `heldSpaceIds`
-   * names the spaces (base space id = project id) the claimant can prompt;
-   * runs for spaces held elsewhere stay pending for their holder.
-   */
-  async claimNext(input: { projectId: string; claimedBy: string; heldSpaceIds?: readonly string[]; now?: number }): Promise<ProjectCronClaim | null> {
-    const projectId = this.ensureProject(input.projectId);
-    const claimedBy = identifier(input.claimedBy, 'claimedBy');
-    const now = timestamp(input.now);
-    const claimToken = crypto.randomUUID();
-    const held = JSON.stringify(input.heldSpaceIds ?? []);
-    const placementAware = input.heldSpaceIds !== undefined;
-    let runId: string | null = null;
-    this.ctx.storage.transactionSync(() => {
+  /** Cloud-only claim. An unresolved claim is never made eligible by elapsed time. */
+  private claimNextCloudRun(projectId: string, now: number): boolean {
+    return this.ctx.storage.transactionSync(() => {
       this.expireStaleRuns(now);
-      const candidate = placementAware
-        ? this.ctx.storage.sql.exec<{ id: string }>(`
-          SELECT id FROM project_cron_runs
-          WHERE project_id = ? AND state = 'pending'
-            AND COALESCE(json_extract(target_json, '$.spaceId'), json_extract(target_json, '$.projectId')) IN (SELECT value FROM json_each(?))
-          ORDER BY scheduled_for, created_at, rowid LIMIT 1
-        `, projectId, held).toArray()[0]
-        : this.ctx.storage.sql.exec<{ id: string }>(`
-          SELECT id FROM project_cron_runs WHERE project_id = ? AND state = 'pending' ORDER BY scheduled_for, created_at, rowid LIMIT 1
-        `, projectId).toArray()[0];
-      if (!candidate) return;
-      const changed = this.ctx.storage.sql.exec<{ id: string }>(`
-        UPDATE project_cron_runs SET state = 'running', claimed_at = ?, started_at = ?, claim_token = ?, claimed_by = ?
-        WHERE id = ? AND project_id = ? AND state = 'pending'
-        RETURNING id
-      `, now, now, claimToken, claimedBy, candidate.id, projectId).toArray();
-      if (changed.length === 1) runId = candidate.id;
+      const candidate = this.ctx.storage.sql.exec<{ id: string }>(
+        "SELECT id FROM project_cron_runs WHERE project_id=? AND state='pending' ORDER BY scheduled_for,created_at,rowid LIMIT 1", projectId,
+      ).toArray()[0];
+      if (!candidate) return false;
+      return this.ctx.storage.sql.exec<{ id: string }>(
+        "UPDATE project_cron_runs SET state='running',claimed_at=?,started_at=?,claim_token=?,claimed_by=? WHERE id=? AND project_id=? AND state='pending' RETURNING id",
+        now, now, crypto.randomUUID(), `cloud:${projectId}`, candidate.id, projectId,
+      ).toArray().length === 1;
     });
-    await this.refreshAlarm(now);
-    if (runId === null) return null;
-    return { run: runView(this.requiredRun(projectId, runId)), claimToken, leaseExpiresAt: new Date(now + PROJECT_CRON_ACTIVE_LOCK_MS) };
   }
 
-  async completeRun(input: {
+  private async completeRun(input: {
     projectId: string;
     runId: string;
     claimToken: string;
@@ -498,6 +481,41 @@ export class ProjectCronsDO extends DurableObject<Env> {
     const identity = this.ctx.storage.sql.exec<{ project_id: string }>('SELECT project_id FROM project_cron_identity WHERE id = 1').toArray()[0];
     if (!identity) return;
     await this.processDue({ projectId: identity.project_id });
+    await this.dispatchCloudRuns(identity.project_id);
+  }
+
+  private async dispatchCloudRuns(projectId: string): Promise<void> {
+    // Commit claim identity before invoking another actor. Recovery uses the same
+    // run/request identity; even a lost submission reply cannot duplicate a turn.
+    for (let count = 0; count < 32; count++) {
+      if (!this.claimNextCloudRun(projectId, Date.now())) break;
+    }
+    const runs = this.ctx.storage.sql.exec<RunRow>("SELECT * FROM project_cron_runs WHERE project_id=? AND state='running' ORDER BY scheduled_for LIMIT 64", projectId).toArray();
+    await Promise.all(runs.map(async row => {
+      if (row.claimed_by !== `cloud:${projectId}` || !row.claim_token) return;
+      const target = parseTarget(row.target_json);
+      const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: target.scope === 'project' ? projectId : target.spaceId });
+      const runtime = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.workspaceId}`);
+      const requestId = `cron:${row.id}`;
+      try {
+        let receipt = await runtime.runtimeRequestStatus({ ...identity, requestId });
+        if (receipt.state === 'pending') {
+          await runtime.runtimeCronSubmit({ ...identity, requestId, text: row.prompt, readScopes: parseStringArray(row.read_scopes_json), writeScopes: parseStringArray(row.write_scopes_json) });
+          receipt = await runtime.runtimeRequestStatus({ ...identity, requestId });
+        }
+        if (receipt.state === 'succeeded' || receipt.state === 'failed' || receipt.state === 'interrupted') {
+          await this.completeRun({ projectId, runId: row.id, claimToken: row.claim_token, state: receipt.state === 'succeeded' ? 'succeeded' : 'failed', message: receipt.message });
+        } else if (Date.now() - row.created_at >= PROJECT_CRON_ACTIVE_LOCK_MS && receipt.conversationId !== null) {
+          await runtime.runtimeCancel({ ...identity, conversationId: receipt.conversationId });
+          this.ctx.storage.sql.exec("UPDATE project_cron_runs SET message='Deadline elapsed; cancellation requested, awaiting terminal cloud receipt' WHERE id=? AND claim_token=?", row.id, row.claim_token);
+        }
+      } catch (error) {
+        // Transport failure is not terminal proof. Keep the canonical claim and
+        // retry status/re-submit with the identical id, never issue a fresh run.
+        this.ctx.storage.sql.exec('UPDATE project_cron_runs SET message=? WHERE id=? AND claim_token=?', `Cloud dispatch unresolved: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4000), row.id, row.claim_token);
+      }
+    }));
+    await this.refreshAlarm(Date.now());
   }
 
   private ensureProject(projectIdInput: string): string {
@@ -559,10 +577,10 @@ export class ProjectCronsDO extends DurableObject<Env> {
   private expireStaleRuns(now: number): void {
     const cutoff = now - PROJECT_CRON_ACTIVE_LOCK_MS;
     this.ctx.storage.sql.exec(`
-      UPDATE project_cron_runs SET state = 'failed', completed_at = ?, claim_token = NULL,
-        message = CASE WHEN state = 'pending' THEN 'Run was not claimed within one hour' ELSE 'Run did not complete before its one-hour claim expired' END
-      WHERE (state = 'pending' AND created_at <= ?) OR (state = 'running' AND claimed_at <= ?)
-    `, now, cutoff, cutoff);
+      UPDATE project_cron_runs SET state = 'blocked', completed_at = ?, claim_token = NULL,
+        message = 'Run was not admitted within one hour'
+      WHERE state = 'pending' AND created_at <= ?
+    `, now, cutoff);
   }
 
   private async refreshAlarm(now: number): Promise<void> {
@@ -570,10 +588,10 @@ export class ProjectCronsDO extends DurableObject<Env> {
       SELECT MIN(due_at) AS due_at FROM (
         SELECT MIN(next_run_at) AS due_at FROM project_crons WHERE enabled = 1 AND next_run_at IS NOT NULL
         UNION ALL
-        SELECT MIN(CASE WHEN state = 'pending' THEN created_at ELSE claimed_at END + ?) AS due_at
+        SELECT MIN(CASE WHEN state = 'pending' THEN ? ELSE ? END) AS due_at
           FROM project_cron_runs WHERE state IN ('pending', 'running')
       )
-    `, PROJECT_CRON_ACTIVE_LOCK_MS).toArray()[0]?.due_at ?? null;
+    `, now + 1, now + 30_000).toArray()[0]?.due_at ?? null;
     if (due === null) {
       await this.ctx.storage.deleteAlarm();
       return;

@@ -3,7 +3,7 @@ export interface GitSpaceRpcHttpServerOptions {
   hostname?: string;
   port?: number;
   additionalFetch?: (request: Request) => Response | null | Promise<Response | null>;
-  releaseStatus?: () => { machineRelease: string | null; ompRelease: string | null; ompDraining: number };
+  releaseStatus?: () => { machineRelease: string | null };
 }
 
 export interface GitSpaceRpcHttpServer {
@@ -42,7 +42,7 @@ export function startGitSpaceRpcHttpServer(options: GitSpaceRpcHttpServerOptions
               transport: 'http-stream',
               environmentId: process.env.GITSPACE_ENVIRONMENT_ID ?? null,
               generation: process.env.GITSPACE_GENERATION_HASH ?? null,
-              ...(options.releaseStatus?.() ?? { machineRelease: null, ompRelease: null, ompDraining: 0 }),
+              ...(options.releaseStatus?.() ?? { machineRelease: null }),
             })
           : await options.handler(request);
         for (const [name, value] of Object.entries(CORS_HEADERS)) response.headers.set(name, value);

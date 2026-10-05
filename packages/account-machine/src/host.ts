@@ -22,13 +22,13 @@ const selection: MachineSelection = JSON.parse(requiredEnvironment('GITSPACE_HOS
 await verifyMachine(selection);
 const owner = Number(process.env.GITSPACE_UPDATE_OWNER);
 if (owner) {
-  const deadline = Date.now() + 30_000;
+  const deadline = performance.now() + 30_000;
   for (;;) {
     const transaction = await readJson<{ pid: number; successorPid?: number }>(
       join(environmentRoot, 'machine-update.json'),
     );
     if (transaction?.pid === owner && transaction.successorPid === process.pid) break;
-    if (!alive(owner) || Date.now() > deadline) throw new Error('Complete-host launch was not durably authorized');
+    if (!alive(owner) || performance.now() > deadline) throw new Error('Complete-host launch was not durably authorized');
     await Bun.sleep(50);
   }
 } else if (await readJson(join(environmentRoot, 'machine-update.json'))) {
@@ -53,9 +53,9 @@ if (previousMachine && alive(previousMachine.pid)) {
   if (!retired.ok || ((await retired.json()) as { stopMode?: string }).stopMode !== 'replace')
     throw new Error('Orphan machine did not acknowledge retained ownership');
   process.kill(previousMachine.pid, 'SIGTERM');
-  const deadline = Date.now() + 150_000;
+  const deadline = performance.now() + 150_000;
   while (alive(previousMachine.pid)) {
-    if (Date.now() > deadline) throw new Error('Orphan machine did not drain; startup remains fenced');
+    if (performance.now() > deadline) throw new Error('Orphan machine did not drain; startup remains fenced');
     await Bun.sleep(100);
   }
 }
@@ -71,7 +71,6 @@ const environment = new ReplacementEnvironment({
   webPort: Number(process.env.GITSPACE_HOST_WEB_PORT),
   machineId: requiredEnvironment('GITSPACE_MACHINE_ID'),
   artifactKey,
-  ompAgentDir: requiredEnvironment('GITSPACE_OMP_AGENT_DIR'),
   controlToken: process.env.GITSPACE_CONTROL_TOKEN,
 });
 process.env.GITSPACE_HOST_RPC_PORT = String(environment.options.rpcPort);

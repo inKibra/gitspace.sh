@@ -272,6 +272,9 @@ describe('transcript paging boundary schemas', () => {
     const message = rowFor({ id: 'middle-message', type: 'message', role: 'assistant', text: 'Middle of the turn' });
     const sideAgent = rowFor({ id: 'side', type: 'side-agent', agentId: 'scout', label: 'Scout', status: 'done' });
     const user = { ...rowFor({ id: 'next-user', type: 'message', role: 'user', text: 'Next turn' }), turnId: 'next-turn' };
+    if (message.item.type !== 'message' || sideAgent.item.type !== 'side-agent' || user.item.type !== 'message') {
+      throw new Error('Expected preview rows to preserve their item types');
+    }
     expect(transcriptRowsToTurns([message, sideAgent, user])).toEqual([
       { id: 'turn', type: 'turn', status: 'done', items: [message.item], sideAgents: [sideAgent.item] },
       { id: 'next-turn', type: 'turn', status: 'done', user: user.item, items: [], sideAgents: [] },

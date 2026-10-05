@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM"],
+    "types": ["bun"]
+  },
+  "include": ["smoke/run.ts", "smoke/cloud-files.test.ts", "smoke/primary-checkpoint.test.ts"]
+}

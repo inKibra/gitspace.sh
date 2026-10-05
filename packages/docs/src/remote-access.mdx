@@ -19,7 +19,7 @@ gitspace machine setup --pair <token>
 
 The computer creates its own Ed25519 and X25519 keys. Compare the signing key in the terminal with the browser, then approve it. The browser signs a delegated machine grant backed by its account-root authorization chain. Setup downloads the verified runtime and starts it without a source checkout or account recovery key.
 
-The started runtime connects to the account relay. It owns the repositories, workspaces, agents, and services placed on that machine.
+The started runtime connects to the account relay. It manages attached checkouts and runs authorized file, shell, terminal, and service operations. Pi conversations, task state, inference, and provider authentication stay in the cloud; the machine does not host a fallback agent session.
 
 ## Connect a browser
 
@@ -49,16 +49,19 @@ Once linked, `gitspace open` opens the account URL only. It does not mint an inv
 Browser
   | signed account or machine RPC request
   v
-Account cloud APIs and relay
-  | account state works without a machine; workspace requests follow ownership
+Account Worker and workspace Durable Object
+  | cloud conversations, tasks, provider auth, inference, committed code reads
+  | authorized machine effects through the relay
   v
-Machine runtime
-  | reads or changes the workspace it owns
+Machine supervisor and attached checkout
+  | execution evidence and results
   v
-Signed response to the browser
+Cloud task state and browser view
 ```
 
-The browser uses the account Worker for account-scoped state and the relay tunnel for machine-scoped operations. Machine placement therefore remains part of the workspace model.
+The browser uses cloud APIs for durable workspace state and the relay for machine-scoped operations. Enrollment identifies a machine; a workspace attachment and its authority generation determine which effects it may run. A reachable tunnel alone does not authorize execution.
+
+Provider login and inference need no machine connection. The encrypted cloud vault retains login state and credentials, refreshes tokens, and selects accounts within the project's inference profile. Device-code polling continues without an open browser. Reopening the same browser restores a saved login flow; manual code and callback flows still wait for your input.
 
 ## Account access and billing
 
@@ -83,4 +86,8 @@ gitspace doctor
 
 `machine status` reports the local daemon and probes the relay service and this machine's tunnel separately. A reachable relay does not prove that the machine tunnel works. `doctor` checks machine enrollment, bundled runtime components, Git/OpenSSH prerequisites, and account connectivity. Account release controls manage subsequent runtime changes.
 
+There are three active release targets: Worker, frontend, and machine. Historical OMP release records do not activate OMP processes. A native-v1 host needs the existing authenticated recovery/bootstrap path before it can accept native-v2; changing the selected release does not make an old host compatible.
+
 If an open request loses its response, the machine may still be restoring the workspace. Refresh the recorded cloud state before another attempt. GitSpace does not replay an open request after a tunnel failure. A project that still says cloud-only may have a clone in progress; that label alone does not make another open safe.
+
+Losing a tunnel also does not prove that a shell command or service stopped. GitSpace keeps unresolved effects uncertain until it can reconcile execution evidence. Do not treat reconnecting, restarting a cloud conversation, or selecting another machine as permission to repeat an effect.

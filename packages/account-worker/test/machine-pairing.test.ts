@@ -71,7 +71,7 @@ describe('browser-approved machine pairing', () => {
     const owner = await account();
     expect((await SELF.fetch(new Request(`${base}create`, { method: 'POST', body: JSON.stringify({ userId: owner.userId }) }))).status).toBe(403);
     const request = signedRequest('create', { userId: owner.userId }, owner.deviceId, browserKey);
-    const replay = request.clone();
+    const replay = new Request(request.url, { method: request.method, headers: request.headers, body: request.clone().body });
     expect((await SELF.fetch(request)).status).toBe(200);
     expect(await (await SELF.fetch(replay)).json()).toMatchObject({ error: { code: 'REQUEST_REPLAY' } });
     const altered = signedRequest('create', { userId: owner.userId }, owner.deviceId, browserKey);

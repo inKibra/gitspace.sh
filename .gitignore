@@ -11,10 +11,6 @@ npm/
 *.js.map
 *.d.ts.map
 *.jsx.map
-src/relay/embedded-assets.generated.js
-src/cloud/bootstrap-bundle.generated.js
-src/version.generated.ts
-src/version.generated.js
 
 # Environment
 .env
@@ -48,15 +44,14 @@ temp/
 
 # Cloudflare
 .wrangler/
-worker/.mf-build/
 
 # GitSpace marker files
 gitspace.lock
 
-# gssh workspace review — workspace review notes
+# Workspace review notes
 .gitspace/review/
 
-# gssh workspace local state
+# Workspace local state
 .gitspace/workspace/
 
 .gitspace/.processes/

@@ -1,4 +1,12 @@
 import { defineErrors, rpc, type InputOf } from 'result-rpc'; import { wire, richObjectJsonSchema } from './json-wire.js';
+import {
+  RuntimeSnapshotInputSchema, RuntimeSnapshotSchema, RuntimeSubmitInputSchema,
+  RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema,
+  RuntimeWatchEventSchema, RuntimeActionResultSchema,
+} from '@gitspace/protocol-runtime';
+import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
+import { RuntimePlacementInputSchema, RuntimeQaActionInputSchema, RuntimeQaActionResultSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentRequestResultSchema, RuntimePrimaryAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { EnvironmentFailureSchema, LifecycleRunSchema, LifecycleStateSchema, type EnvironmentFailure, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
 import {
   AgentHealthStateSchema, AgentLifecycleStateSchema, AgentSessionRenderStateSchema, SessionActivitySchema,
@@ -113,7 +121,7 @@ export const rpcErrors = defineErrors('gitspace', {
     httpStatus: 409,
   },
   settingsConflict: {
-    data: wire.object({ resource: wire.enum(['user-settings', 'omp-config', 'inference-profile', 'inference-assignment']), expected: wire.number, actual: wire.number }),
+    data: wire.object({ resource: wire.enum(['user-settings', 'runtime-config', 'inference-profile', 'inference-assignment']), expected: wire.number, actual: wire.number }),
     httpStatus: 409,
   },
   spaceGenerationConflict: {
@@ -273,14 +281,14 @@ export const UserSettingsViewCodec = wire.object({
   updatedAt: wire.string,
   updatedBy: wire.string,
 });
-export const OmpConfigDocumentCodec = wire.object({
+export const RuntimeConfigDocumentCodec = wire.object({
   generation: wire.number,
   content: wire.string,
   checksum: wire.string,
   updatedAt: wire.string,
   updatedBy: wire.string,
 });
-export const OmpSettingSchemaItemCodec = wire.object({
+export const RuntimeSettingSchemaItemCodec = wire.object({
   path: wire.string,
   tab: wire.string,
   label: wire.string,
@@ -304,7 +312,7 @@ export const GitIdentityViewCodec = wire.object({
 });
 export const SettingsChangedEventCodec = wire.object({
   userRevision: wire.number,
-  ompGeneration: wire.number,
+  runtimeGeneration: wire.number,
   sync: SettingsSyncStateCodec,
 });
 export const ProjectSecretMetadataCodec = wire.object({
@@ -548,6 +556,60 @@ export interface GitSpaceRpcCaller {
 export interface GitSpaceRpcContext { caller?: GitSpaceRpcCaller }
 export const gitspaceRpc = rpc.context<GitSpaceRpcContext>();
 
+function runtimeWire<S extends z.ZodType>(schema: S, id: string) {
+  return wire.serializable((value): value is z.output<S> => schema.safeParse(value).success, { id, jsonSchema: schema });
+}
+
+export const runtimeSnapshotContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeSnapshotInputSchema, 'gitspace/runtime-snapshot-input/v1'))
+  .output(runtimeWire(RuntimeSnapshotSchema, 'gitspace/runtime-snapshot/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
+export const runtimeSubmitContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeSubmitInputSchema, 'gitspace/runtime-submit/v1'))
+  .output(runtimeWire(RuntimeActionResultSchema, 'gitspace/runtime-action-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeCancelContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeCancelInputSchema, 'gitspace/runtime-cancel/v1'))
+  .output(runtimeWire(RuntimeActionResultSchema, 'gitspace/runtime-action-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeAnswerContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeAnswerInputSchema, 'gitspace/runtime-answer/v1'))
+  .output(runtimeWire(RuntimeActionResultSchema, 'gitspace/runtime-action-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeBrowserTrustContract = gitspaceRpc.procedure()
+  .input(wire.object({}))
+  .output(wire.object({ accountId: wire.string, algorithm: wire.literal('Ed25519'), publicKey: wire.string }))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
+export const runtimeWatchContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeWatchInputSchema, 'gitspace/runtime-watch/v1'))
+  .output(runtimeWire(RuntimeWatchEventSchema, 'gitspace/runtime-watch-event/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+
+export const runtimeSessionContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeSessionInputSchema, 'gitspace/runtime-session-input/v1'))
+  .output(runtimeWire(RuntimeSessionResultSchema, 'gitspace/runtime-session-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimePlacementContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimePlacementInputSchema, 'gitspace/runtime-placement-input/v1'))
+  .output(runtimeWire(RuntimeActionResultSchema, 'gitspace/runtime-action-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeQaContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeQaActionInputSchema, 'gitspace/runtime-qa-input/v1'))
+  .output(runtimeWire(RuntimeQaActionResultSchema, 'gitspace/runtime-qa-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeAttachmentRequestContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeAttachmentRequestInputSchema, 'gitspace/runtime-attachment-request/v1'))
+  .output(runtimeWire(RuntimeAttachmentRequestResultSchema, 'gitspace/runtime-attachment-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimePrimaryAttachmentRequestContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimePrimaryAttachmentRequestInputSchema, 'gitspace/runtime-primary-attachment-request/v1'))
+  .output(runtimeWire(RuntimeAttachmentRequestResultSchema, 'gitspace/runtime-attachment-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeAttachmentDetachRequestContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeAttachmentDetachRequestInputSchema, 'gitspace/runtime-attachment-detach-request/v1'))
+  .output(runtimeWire(RuntimeAttachmentRequestResultSchema, 'gitspace/runtime-attachment-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+
 export const spaceViewContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string) }))
@@ -715,10 +777,10 @@ export const reserveUserHandleContract = gitspaceRpc
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-export const getOmpSettingsContract = gitspaceRpc
+export const getRuntimeSettingsContract = gitspaceRpc
   .procedure()
   .input(wire.object({}))
-  .output(wire.object({ document: OmpConfigDocumentCodec, schema: wire.array(OmpSettingSchemaItemCodec), sync: SettingsSyncStateCodec }))
+  .output(wire.object({ document: RuntimeConfigDocumentCodec, schema: wire.array(RuntimeSettingSchemaItemCodec), sync: SettingsSyncStateCodec }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
 
@@ -1000,8 +1062,12 @@ export const disconnectComposioPluginContract = gitspaceRpc
   .mutation();
 
 export const BrowserRelayStatusCodec = wire.object({
+  machineId: wire.string,
   state: wire.enum(['stopped', 'starting', 'waiting', 'connected', 'error']),
   installed: wire.boolean,
+  connected: wire.optional(wire.boolean),
+  pairingCode: wire.optional(wire.nullable(wire.string)),
+  pairedKeyFingerprint: wire.optional(wire.nullable(wire.string)),
   extensionPath: wire.string,
   chromeExtensionPath: wire.string,
   owned: wire.boolean,
@@ -1022,6 +1088,9 @@ export const startBrowserRelayContract = gitspaceRpc
   .procedure().input(wire.object({})).output(BrowserRelayStatusCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const stopBrowserRelayContract = gitspaceRpc
+  .procedure().input(wire.object({})).output(BrowserRelayStatusCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const unpairBrowserRelayContract = gitspaceRpc
   .procedure().input(wire.object({})).output(BrowserRelayStatusCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const testBrowserRelayContract = gitspaceRpc
@@ -1051,10 +1120,10 @@ export const deleteProjectMcpGrantContract = gitspaceRpc
 
 export const discoverProjectMcpToolsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string }))
+  .input(wire.object({ projectId: wire.string, requestId: wire.string }))
   .output(wire.array(DiscoveredMcpToolViewCodec))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
-  .query();
+  .mutation();
 
 export const createSandboxMachineContract = gitspaceRpc
   .procedure()
@@ -1072,10 +1141,10 @@ export const retryCloudImageContract = gitspaceRpc.procedure().input(wire.object
 export const cancelCloudImageContract = gitspaceRpc.procedure().input(wire.object({ machineId: wire.string, operationId: wire.string })).output(CloudImageStateCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const recoverCloudImageContract = gitspaceRpc.procedure().input(wire.object({ machineId: wire.string, operationId: wire.string, recoveryOperationId: wire.string, selection: CloudImageSelectionCodec, discardUncheckpointedCandidate: wire.optional(wire.boolean) })).output(CloudImageStateCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 
-export const setOmpSettingContract = gitspaceRpc
+export const setRuntimeSettingContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ path: wire.string, valueJson: wire.string }))
-  .output(wire.object({ document: OmpConfigDocumentCodec, schema: wire.array(OmpSettingSchemaItemCodec), sync: SettingsSyncStateCodec }))
+  .input(wire.object({ expectedGeneration: wire.number, path: wire.string, valueJson: wire.string }))
+  .output(wire.object({ document: RuntimeConfigDocumentCodec, schema: wire.array(RuntimeSettingSchemaItemCodec), sync: SettingsSyncStateCodec }))
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
@@ -1088,7 +1157,7 @@ export const machineLifecycleEventsContract = gitspaceRpc
 export const settingsEventsContract = gitspaceRpc
   .procedure()
   .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
-  .output(streamCodec(wire.object({ user: UserSettingsViewCodec, omp: OmpConfigDocumentCodec, git: wire.nullable(GitIdentityViewCodec), inferenceRevision: wire.optional(wire.number) })))
+  .output(streamCodec(wire.object({ user: UserSettingsViewCodec, runtime: RuntimeConfigDocumentCodec, git: wire.nullable(GitIdentityViewCodec), inferenceRevision: wire.optional(wire.number) })))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .subscription();
 
@@ -1108,6 +1177,8 @@ export const ProviderViewCodec = wire.object({
   name: wire.string,
   available: wire.boolean,
   loginable: wire.boolean,
+  supportsOAuth: wire.boolean,
+  supportsApiKey: wire.boolean,
   authKind: wire.enum(['oauth', 'api_key', 'none']),
   hasAuth: wire.boolean,
   source: wire.nullable(wire.string),
@@ -1979,7 +2050,7 @@ export const locateSessionContract = gitspaceRpc
   .query();
 /** Self-development: GitSpace built from a workspace, launched across account-owned targets. */
 export const ReleaseStatusWireCodec = wire.enum(['pending', 'applied', 'failed', 'skipped']);
-export const ReleaseTargetWireCodec = wire.enum(['worker', 'machine', 'omp', 'frontend']);
+export const ReleaseTargetWireCodec = wire.enum(['worker', 'machine', 'frontend']);
 export const ReleaseArtifactWireCodec = wire.object({ key: wire.string, hash: wire.string, size: wire.number });
 export const OmpReleaseMetadataWireCodec = wire.object({
   upstreamVersion: wire.string,
@@ -1994,9 +2065,9 @@ export const ReleaseRecordWireCodec = wire.object({
   builtBy: wire.string,
   createdAt: wire.string,
   inferenceVersion: wire.optional(wire.literal(1)),
-  artifacts: wire.object({ worker: wire.nullable(ReleaseArtifactWireCodec), machine: wire.nullable(ReleaseArtifactWireCodec), omp: wire.nullable(ReleaseArtifactWireCodec), frontend: wire.nullable(ReleaseArtifactWireCodec) }),
-  omp: wire.nullable(OmpReleaseMetadataWireCodec),
-  status: wire.object({ worker: ReleaseStatusWireCodec, frontend: ReleaseStatusWireCodec, machines: wire.record(ReleaseStatusWireCodec), omps: wire.record(ReleaseStatusWireCodec) }),
+  artifacts: wire.object({ worker: wire.nullable(ReleaseArtifactWireCodec), machine: wire.nullable(ReleaseArtifactWireCodec), omp: wire.optional(wire.nullable(ReleaseArtifactWireCodec)), frontend: wire.nullable(ReleaseArtifactWireCodec) }),
+  omp: wire.optional(wire.nullable(OmpReleaseMetadataWireCodec)),
+  status: wire.object({ worker: ReleaseStatusWireCodec, frontend: ReleaseStatusWireCodec, machines: wire.record(ReleaseStatusWireCodec), omps: wire.optional(wire.record(ReleaseStatusWireCodec)) }),
   error: wire.nullable(wire.string),
 });
 /** A launch in flight (or the last one) on the answering machine; phases arrive as `deployment` fact events too. */
@@ -2014,14 +2085,14 @@ export const LaunchProgressWireCodec = wire.object({
 });
 export type LaunchProgressView = InputOf<typeof LaunchProgressWireCodec>;
 export const DeploymentStatusWireCodec = wire.object({
-  desired: wire.object({ worker: wire.nullable(wire.string), machine: wire.nullable(wire.string), omp: wire.nullable(wire.string), frontend: wire.nullable(wire.string), updatedAt: wire.string }),
+  desired: wire.object({ worker: wire.nullable(wire.string), machine: wire.nullable(wire.string), frontend: wire.nullable(wire.string), updatedAt: wire.string }),
   current: wire.object({
     worker: wire.object({ sha: wire.nullable(wire.string), version: wire.nullable(wire.string) }),
-    machines: wire.record(wire.object({ sha: wire.nullable(wire.string), ompSha: wire.nullable(wire.string), generation: wire.nullable(wire.string) })),
+    machines: wire.record(wire.object({ sha: wire.nullable(wire.string), generation: wire.nullable(wire.string) })),
   }),
   releases: wire.array(ReleaseRecordWireCodec),
   /** This machine's own running generation, so the caller can tell home from the fleet. */
-  thisMachine: wire.object({ machineId: wire.string, sha: wire.nullable(wire.string), ompSha: wire.nullable(wire.string), ompDraining: wire.number, generation: wire.nullable(wire.string) }),
+  thisMachine: wire.object({ machineId: wire.string, sha: wire.nullable(wire.string), generation: wire.nullable(wire.string) }),
   launch: wire.nullable(LaunchProgressWireCodec),
 });
 export type DeploymentStatusView = InputOf<typeof DeploymentStatusWireCodec>;
@@ -2094,6 +2165,18 @@ export const terminalLiveContract = gitspaceRpc.procedure()
   .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
 
 export const gitspaceContract = gitspaceRpc.contract({
+  runtime: {
+    snapshot: runtimeSnapshotContract,
+    submit: runtimeSubmitContract,
+    cancel: runtimeCancelContract,
+    answer: runtimeAnswerContract,
+    browserTrust: runtimeBrowserTrustContract,
+    watch: runtimeWatchContract,
+    session: runtimeSessionContract,
+    placement: runtimePlacementContract,
+    qa: runtimeQaContract,
+    attachment: { request: runtimeAttachmentRequestContract, primary: { request: runtimePrimaryAttachmentRequestContract }, detach: runtimeAttachmentDetachRequestContract },
+  },
   transcript: transcriptContract,
   transcriptPage: transcriptPageContract,
   transcriptContent: transcriptContentContract,
@@ -2112,7 +2195,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     git: { get: getGitIdentityContract },
     update: updateUserSettingsContract,
     reserveHandle: reserveUserHandleContract,
-    omp: { get: getOmpSettingsContract, set: setOmpSettingContract },
+    runtime: { get: getRuntimeSettingsContract, set: setRuntimeSettingContract },
     events: settingsEventsContract,
   },
   inference: { list: inferenceListContract, create: inferenceCreateContract, update: inferenceUpdateContract, delete: inferenceDeleteContract, assign: inferenceAssignContract, events: inferenceEventsContract },
@@ -2186,6 +2269,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     setup: setupBrowserRelayContract,
     start: startBrowserRelayContract,
     stop: stopBrowserRelayContract,
+    unpair: unpairBrowserRelayContract,
     test: testBrowserRelayContract,
   },
   crons: {

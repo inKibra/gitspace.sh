@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { AvailableModel, BrowserRelayStatus, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, OmpSettingValue, UserSettings } from '@gitspace/protocol';
+import type { AvailableModel, BrowserRelayStatus, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
 import { inferenceSettingSection } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import type { ApiClientDraft } from './device.js';
 import type { McpAccessView } from '@gitspace/protocol/mcp-access';
 import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { rpcClient } from './rpc-client.js';
 import {
   Accordion,
   AccordionContent,
@@ -51,11 +52,11 @@ import { navigateProductUrl } from './routes.js';
 import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBrowserDialog.js';
 
 // Onboarding embeds the same Default profile surface used by Inference.
-type Section = 'profile' | 'omp' | 'omp-providers' | 'git' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
-const OMP_TABS = ['Models', 'Agents', 'Providers', 'Advanced'] as const;
-type OmpTab = (typeof OMP_TABS)[number];
+type Section = 'profile' | 'runtime' | 'runtime-providers' | 'git' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
+const SETTINGS_TABS = ['Models', 'Agents', 'Providers', 'Advanced'] as const;
+type SettingsTab = (typeof SETTINGS_TABS)[number];
 export interface SettingsMachineView { id: string; label: string; state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error'; kind: 'physical' | 'sandbox'; provider: 'physical' | 'cloudflare-sandbox'; notes: string; desiredState: 'online' | 'offline' | 'removed'; lifecycleRevision: number; operationId: string | null; error: string | null }
-export interface OmpSettingView {
+export interface RuntimeSettingView {
   path: string;
   tab: string;
   label: string;
@@ -70,13 +71,13 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   mode: 'settings' | 'onboarding';
   settings: UserSettings;
   machines: readonly SettingsMachineView[];
-  ompSettings: readonly OmpSettingView[];
-  ompGeneration: number;
+  runtimeSettings: readonly RuntimeSettingView[];
+  runtimeGeneration: number;
   inferenceSetup: ReactNode;
   gitIdentity: { generation: number; publicKey: string; fingerprint: string; updatedAt: string; updatedBy: string } | null;
   onChange: (settings: UserSettings) => void;
   onSave: (settings: UserSettings) => Promise<void>;
-  onSetOmpSetting: (path: string, value: OmpSettingValue) => Promise<void>;
+  onSetRuntimeSetting: (path: string, value: RuntimeSettingValue) => Promise<void>;
   onUpdateMachine: (machineId: string, notes: string) => Promise<void>;
   onCreateSandbox: (image?: CloudImageSelection) => Promise<void>;
   cloudImages: readonly CloudImageState[];
@@ -101,12 +102,13 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   onSetupBrowserRelay: () => Promise<void>;
   onStartBrowserRelay: () => Promise<void>;
   onStopBrowserRelay: () => Promise<void>;
+  onUnpairBrowserRelay: () => Promise<void>;
   onTestBrowserRelay: () => Promise<void>;
   /** Projects this account can scope an API client to. */
   projects: ReadonlyArray<{ id: string; name: string }>;
   onBack: () => void;
   onComplete: (settings: UserSettings) => Promise<void>;
-  ompSync: { status: 'connecting' | 'synced' | 'offline' | 'conflict' | 'error'; message: string | null };
+  runtimeSync: { status: 'connecting' | 'synced' | 'offline' | 'conflict' | 'error'; message: string | null };
   /** What GitSpace runs here and across the fleet; null until the home machine answers. */
   deployment: DeploymentStatusView | null;
   /** Point the account back at our channel build; every target converges on it. */
@@ -164,10 +166,10 @@ function ProfileSettings({ settings, onChange }: Pick<SettingsPageProps, 'settin
   </SettingRows></Group>;
 }
 
-function parseValue(item: OmpSettingView): OmpSettingValue { return JSON.parse(item.valueJson) as OmpSettingValue; }
+function parseValue(item: RuntimeSettingView): RuntimeSettingValue { return JSON.parse(item.valueJson) as RuntimeSettingValue; }
 function settle(promise: Promise<void>): void { void promise.catch(() => undefined); }
-function draftText(item: OmpSettingView, value: OmpSettingValue): string { return item.credential ? '' : typeof value === 'string' ? value : value === null ? '' : JSON.stringify(value, null, 2); }
-function OmpControl({ item, onSet, disabled }: { item: OmpSettingView; onSet: (value: OmpSettingValue) => Promise<void>; disabled: boolean }) {
+function draftText(item: RuntimeSettingView, value: RuntimeSettingValue): string { return item.credential ? '' : typeof value === 'string' ? value : value === null ? '' : JSON.stringify(value, null, 2); }
+function SettingControl({ item, onSet, disabled }: { item: RuntimeSettingView; onSet: (value: RuntimeSettingValue) => Promise<void>; disabled: boolean }) {
   const shape = useShape();
   const value = parseValue(item);
   const [text, setText] = useState(draftText(item, value));
@@ -175,16 +177,16 @@ function OmpControl({ item, onSet, disabled }: { item: OmpSettingView; onSet: (v
   const draftSetter = useRef<typeof onSet | null>(null);
   useEffect(() => { if (!draftSetter.current) setText(draftText(item, value)); }, [item.valueJson, item.credential]);
   const discard = <Button variant="ghost" size="compact" onClick={() => { draftSetter.current = null; setText(draftText(item, value)); setError(null); }}>Discard draft</Button>;
-  if (item.kind === 'boolean') return <Switch label="Enabled" checked={value === true} disabled={disabled} onToggle={() => settle(onSet(value !== true))} />;
-  if (item.kind === 'enum') return <Select value={typeof value === 'string' ? value : ''} disabled={disabled} onValueChange={(next) => settle(onSet(next))}><SelectTrigger aria-label={item.label} />{selectOptions(item.options.map((option) => ({ value: option, label: option })))}</Select>;
-  if (item.kind === 'number') return <TextField label={item.label} type="number" value={typeof value === 'number' ? String(value) : ''} disabled={disabled} onChange={(next) => settle(onSet(Number(next)))} />;
+  if (item.kind === 'boolean') return <Select value={value === null ? 'default' : String(value)} disabled={disabled} onValueChange={(next) => settle(onSet(next === 'default' ? null : next === 'true'))}><SelectTrigger aria-label={item.label} />{selectOptions([{ value: 'default', label: 'Use runtime default' }, { value: 'true', label: 'Enabled' }, { value: 'false', label: 'Disabled' }])}</Select>;
+  if (item.kind === 'enum') return <Select value={typeof value === 'string' ? value : 'default'} disabled={disabled} onValueChange={(next) => settle(onSet(next === 'default' ? null : next))}><SelectTrigger aria-label={item.label} />{selectOptions([{ value: 'default', label: 'Use runtime default' }, ...item.options.map((option) => ({ value: option, label: option }))])}</Select>;
+  if (item.kind === 'number') return <TextField label={item.label} type="number" placeholder="Runtime default" value={typeof value === 'number' ? String(value) : ''} disabled={disabled} onChange={(next) => settle(onSet(next.trim() === '' ? null : Number(next)))} />;
   if (item.kind === 'array' || item.kind === 'record') {
     // FLUID-GAP: multi-line JSON editor (no textarea/code editor in the registry)
     return <span className="flex flex-col gap-2"><textarea aria-label={item.label} aria-invalid={!!error} rows={4} value={text} disabled={disabled} className={`${shape.input} w-64 border border-border bg-surface-2 p-2 font-mono text-caption text-foreground disabled:opacity-50`} onChange={(event) => { draftSetter.current ??= onSet; setText(event.currentTarget.value); setError(null); }} onBlur={() => {
       const update = draftSetter.current;
       if (!update || text === draftText(item, value)) return;
-      let parsed: OmpSettingValue;
-      try { parsed = JSON.parse(text) as OmpSettingValue; }
+      let parsed: RuntimeSettingValue;
+      try { parsed = JSON.parse(text) as RuntimeSettingValue; }
       catch { setError('Invalid JSON. Correct the draft before saving.'); return; }
       void update(parsed).then(() => { draftSetter.current = null; setError(null); }, (cause) => setError(rpcErrorMessage(cause, 'Save configuration')));
     }} />{error ? <span role="alert" className="max-w-64 text-caption text-destructive">{error}{discard}</span> : null}</span>;
@@ -195,8 +197,8 @@ function OmpControl({ item, onSet, disabled }: { item: OmpSettingView; onSet: (v
     void update(text).then(() => { draftSetter.current = null; setError(null); }, (cause) => setError(rpcErrorMessage(cause, 'Save configuration')));
   }} />{error ? <span role="alert" className="max-w-64 text-caption text-destructive">{error}{discard}</span> : null}</span>;
 }
-function OmpRows({ items, saving, onSetOmpSetting }: { items: readonly OmpSettingView[] } & Pick<SettingsPageProps, 'saving' | 'onSetOmpSetting'>) {
-  return <SettingRows>{items.map((item) => <SettingRow key={item.path} title={item.label} description={item.description ?? item.path}><OmpControl item={item} disabled={saving} onSet={(value) => onSetOmpSetting(item.path, value)} /></SettingRow>)}</SettingRows>;
+function SettingRowsEditor({ items, saving, onSetRuntimeSetting }: { items: readonly RuntimeSettingView[] } & Pick<SettingsPageProps, 'saving' | 'onSetRuntimeSetting'>) {
+  return <SettingRows>{items.map((item) => <SettingRow key={item.path} title={item.label} description={item.description ?? item.path}><SettingControl item={item} disabled={saving} onSet={(value) => onSetRuntimeSetting(item.path, value)} /></SettingRow>)}</SettingRows>;
 }
 const THINKING_LEVELS = ['auto', 'off', 'low', 'medium', 'high', 'xhigh'] as const;
 /** A model role is `provider/model[:thinking]`; the picker splits it into a model select and a thinking select. */
@@ -220,11 +222,11 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
     </Select>
   </span>;
 }
-export function OmpSettingsEditor({ ompSettings, ompGeneration, onSetOmpSetting, saving, providers, models = [], modelsReady = false, sections, initialTab }: Pick<SettingsPageProps, 'ompSettings' | 'ompGeneration' | 'onSetOmpSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly OmpTab[]; initialTab?: OmpTab }) {
-  const [tab, setTab] = useState<OmpTab>(initialTab ?? sections[0] ?? 'Advanced');
-  const rolesItem = ompSettings.find((item) => item.path === 'modelRoles');
-  const cycleItem = ompSettings.find((item) => item.path === 'cycleOrder');
-  const overridesItem = ompSettings.find((item) => item.path === 'task.agentModelOverrides');
+export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], modelsReady = false, sections, initialTab }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly SettingsTab[]; initialTab?: SettingsTab }) {
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? sections[0] ?? 'Advanced');
+  const rolesItem = runtimeSettings.find((item) => item.path === 'modelRoles');
+  const cycleItem = runtimeSettings.find((item) => item.path === 'cycleOrder');
+  const overridesItem = runtimeSettings.find((item) => item.path === 'task.agentModelOverrides');
   const roles = rolesItem ? parseValue(rolesItem) as Record<string, string> : {};
   const cycle = cycleItem ? parseValue(cycleItem) as string[] : [];
   const overrides = overridesItem ? parseValue(overridesItem) as Record<string, string | string[]> : {};
@@ -232,38 +234,38 @@ export function OmpSettingsEditor({ ompSettings, ompGeneration, onSetOmpSetting,
   const roleIds = [...new Set([...Object.keys(roleLabels), ...Object.keys(roles)])];
   const agentDefaults: Readonly<Record<string, string>> = { scout: 'smol', reviewer: 'slow', 'security-reviewer': 'slow', librarian: 'slow', task: 'task', designer: 'designer', sonic: 'tiny' };
   const agentNames = [...new Set([...Object.keys(agentDefaults), ...Object.keys(overrides)])];
-  const advanced = ompSettings.filter((item) => inferenceSettingSection(item.path) === null && !item.credential);
+  const advanced = runtimeSettings.filter((item) => inferenceSettingSection(item.path) === null && !item.credential);
   const advancedGroups = useMemo(() => Map.groupBy(advanced, (item) => item.tab), [advanced]);
   const advancedTabs = [...advancedGroups.keys()].sort();
   const [advancedTab, setAdvancedTab] = useState(advancedTabs[0] ?? 'other');
   const visibleAdvancedTab = advancedGroups.has(advancedTab) ? advancedTab : advancedTabs[0] ?? 'other';
-  const providerSettings = ompSettings.filter((item) => inferenceSettingSection(item.path) === 'Providers' && !item.credential);
-  const agentSettings = ompSettings.filter((item) => inferenceSettingSection(item.path) === 'Agents' && item.path !== 'task.agentModelOverrides' && !item.credential);
+  const providerSettings = runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Providers' && !item.credential);
+  const agentSettings = runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Agents' && item.path !== 'task.agentModelOverrides' && !item.credential);
   const setRole = async (role: string, model: string): Promise<void> => {
-    if (rolesItem) await onSetOmpSetting(rolesItem.path, { ...roles, [role]: model });
+    if (rolesItem) await onSetRuntimeSetting(rolesItem.path, { ...roles, [role]: model });
   };
   const toggleCycle = async (role: string): Promise<void> => {
     if (!cycleItem) return;
     const next = cycle.includes(role) ? cycle.filter((candidate) => candidate !== role) : [...cycle, role];
-    if (next.length) await onSetOmpSetting(cycleItem.path, next);
+    if (next.length) await onSetRuntimeSetting(cycleItem.path, next);
   };
   const setAgentRole = async (agent: string, role: string): Promise<void> => {
-    if (overridesItem) await onSetOmpSetting(overridesItem.path, { ...overrides, [agent]: `pi/${role}` });
+    if (overridesItem) await onSetRuntimeSetting(overridesItem.path, { ...overrides, [agent]: `pi/${role}` });
   };
   let content: ReactNode;
   if (tab === 'Models') {
-    content = <Group title={<>Model roles · <span className="tabular-nums">generation {ompGeneration}</span></>}>
+    content = <Group title={<>Model roles · <span className="tabular-nums">generation {runtimeGeneration}</span></>}>
       <SettingRows>{roleIds.map((role) => <SettingRow key={role} title={roleLabels[role] ?? role} description={role}>
         <Switch label="Quick cycle" checked={cycle.includes(role)} disabled={saving || !cycleItem} onToggle={() => settle(toggleCycle(role))} />
         <RoleModelPicker role={role} label={roleLabels[role] ?? role} value={roles[role] ?? ''} models={models} modelsReady={modelsReady} disabled={saving || !rolesItem} onChange={(value) => settle(setRole(role, value))} />
       </SettingRow>)}</SettingRows>
       <p className="text-caption text-muted-foreground">Quick cycle controls one-click cycling. At least one role remains selected. Role names match the workspace composer.</p>
-      <OmpRows items={ompSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && item.path !== 'cycleOrder' && !item.credential)} saving={saving} onSetOmpSetting={onSetOmpSetting} />
+      <SettingRowsEditor items={runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && item.path !== 'cycleOrder' && !item.credential)} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} />
     </Group>;
   } else if (tab === 'Agents') {
     content = <>
       <Group title="Agent model roles"><SettingRows>{agentNames.map((agent) => { const raw = overrides[agent]; const selected = String(raw ?? `pi/${agentDefaults[agent] ?? 'task'}`).replace(/^pi\//u, ''); const known = roleIds.includes(selected); return <SettingRow key={agent} title={agent} description={known ? roleLabels[selected] ?? selected : `Custom selector: ${Array.isArray(raw) ? raw.join(', ') : selected}`}><Select value={selected} disabled={!overridesItem || saving} onValueChange={(value) => settle(setAgentRole(agent, value))}><SelectTrigger aria-label={`Role for ${agent}`} />{selectOptions([...(known ? [] : [{ value: selected, label: `Custom: ${selected}` }]), ...roleIds.map((role) => ({ value: role, label: roleLabels[role] ?? role }))])}</Select></SettingRow>; })}</SettingRows></Group>
-      <Group title="Agent runtime settings"><OmpRows items={agentSettings} saving={saving} onSetOmpSetting={onSetOmpSetting} /></Group>
+      <Group title="Agent runtime settings"><SettingRowsEditor items={agentSettings} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} /></Group>
     </>;
   } else if (tab === 'Providers') {
     content = <>
@@ -273,8 +275,8 @@ export function OmpSettingsEditor({ ompSettings, ompGeneration, onSetOmpSetting,
           <AccordionTrigger>Advanced provider settings</AccordionTrigger>
           <AccordionContent>
             <div className="flex flex-col gap-3 pb-2">
-              <span className="text-caption text-muted-foreground">Raw OMP <code>providers.*</code> settings · <span className="tabular-nums">generation {ompGeneration}</span></span>
-              <OmpRows items={providerSettings} saving={saving} onSetOmpSetting={onSetOmpSetting} />
+              <span className="text-caption text-muted-foreground">Profile <code>providers.*</code> settings · <span className="tabular-nums">generation {runtimeGeneration}</span></span>
+              <SettingRowsEditor items={providerSettings} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} />
             </div>
           </AccordionContent>
         </AccordionItem>
@@ -283,20 +285,20 @@ export function OmpSettingsEditor({ ompSettings, ompGeneration, onSetOmpSetting,
   } else {
     const visible = advancedGroups.get(visibleAdvancedTab) ?? [];
     content = <>
-      {subtleTabs(advancedTabs, visibleAdvancedTab, setAdvancedTab, 'omp-advanced')}
-      <TabsSubtlePanel index={Math.max(0, advancedTabs.indexOf(visibleAdvancedTab))} selectedIndex={Math.max(0, advancedTabs.indexOf(visibleAdvancedTab))} idPrefix="omp-advanced">
-        <Group title={<>{visibleAdvancedTab} · <span className="tabular-nums">generation {ompGeneration}</span></>}><OmpRows items={visible} saving={saving} onSetOmpSetting={onSetOmpSetting} /></Group>
+      {subtleTabs(advancedTabs, visibleAdvancedTab, setAdvancedTab, 'runtime-advanced')}
+      <TabsSubtlePanel index={Math.max(0, advancedTabs.indexOf(visibleAdvancedTab))} selectedIndex={Math.max(0, advancedTabs.indexOf(visibleAdvancedTab))} idPrefix="runtime-advanced">
+        <Group title={<>{visibleAdvancedTab} · <span className="tabular-nums">generation {runtimeGeneration}</span></>}><SettingRowsEditor items={visible} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} /></Group>
       </TabsSubtlePanel>
     </>;
   }
   const tabIndex = sections.indexOf(tab);
   return <>
-    {subtleTabs(sections, tab, (value) => setTab(value as OmpTab), 'omp-tabs')}
+    {subtleTabs(sections, tab, (value) => setTab(value as SettingsTab), 'omp-tabs')}
     <TabsSubtlePanel index={tabIndex} selectedIndex={tabIndex} idPrefix="omp-tabs" className="flex flex-col gap-8">{content}</TabsSubtlePanel>
   </>;
 }
-function OmpSyncBadge({ ompSync }: Pick<SettingsPageProps, 'ompSync'>) {
-  return <Badge color={ompSync.status === 'synced' ? 'green' : ompSync.status === 'offline' || ompSync.status === 'connecting' ? 'gray' : 'amber'}>{ompSync.status === 'synced' ? <>Synced</> : ompSync.message ?? ompSync.status}</Badge>;
+function RuntimeSyncBadge({ runtimeSync }: Pick<SettingsPageProps, 'runtimeSync'>) {
+  return <Badge color={runtimeSync.status === 'synced' ? 'green' : runtimeSync.status === 'offline' || runtimeSync.status === 'connecting' ? 'gray' : 'amber'}>{runtimeSync.status === 'synced' ? <>Synced</> : runtimeSync.message ?? runtimeSync.status}</Badge>;
 }
 
 function GitSettings({ settings, gitIdentity, onChange }: Pick<SettingsPageProps, 'settings' | 'gitIdentity' | 'onChange'>) {
@@ -330,7 +332,7 @@ const API_CLIENT_CAPABILITIES: ReadonlyArray<{ id: DeviceCapability; label: stri
   { id: 'deployment.control', label: 'Deployment', description: 'Select cloud images and control GitSpace runtime releases (account scope required)' },
   { id: 'devices.manage', label: 'Device management', description: 'Revoke enrolled browsers and API clients (whole account required)' },
   { id: 'account.admin', label: 'Account administration', description: 'Manage provider keys, inference, session approval policy and review decisions (whole account and Write required)' },
-  { id: 'lifecycle.control', label: 'Lifecycle control', description: 'Approve execution content, cancel and recover runs, retire resources (whole account and Write required)' },
+  { id: 'lifecycle.control', label: 'Lifecycle control', description: 'Approve execution content and browser origins through API/MCP, cancel and recover runs, retire resources (whole account and Write required)' },
 ];
 
 function ApiClientPermissions({ projects, projectId, setProjectId, capabilities, setCapabilities, ttl, setTtl, id }: {
@@ -445,13 +447,14 @@ function ComposioSetupDialog({ open, onOpenChange, setup, onPut, onDelete }: {
     </DialogContent>
   </Dialog>;
 }
-function BrowserRelayWalkthrough({ open, onOpenChange, relay, onSetup, onStart, onTest }: {
+export function BrowserRelayWalkthrough({ open, onOpenChange, relay, onSetup, onStart, onTest, onUnpair }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   relay: BrowserRelayStatus | null;
   onSetup: () => Promise<void>;
   onStart: () => Promise<void>;
   onTest: () => Promise<void>;
+  onUnpair: () => Promise<void>;
 }) {
   const [extensionsCopied, setExtensionsCopied] = useState(false);
   const [developerMode, setDeveloperMode] = useState(false);
@@ -460,6 +463,10 @@ function BrowserRelayWalkthrough({ open, onOpenChange, relay, onSetup, onStart, 
   const [tested, setTested] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pairing, setPairing] = useState<{ code: string; machineId: string; json: string } | null>(null);
+  const pairingGeneration = useRef(0);
+  useEffect(() => { pairingGeneration.current++; setPairing(null); }, [open, relay?.pairingCode, relay?.machineId]);
+  const pairingJson = pairing?.code === relay?.pairingCode && pairing?.machineId === relay?.machineId ? pairing?.json : null;
   const prepared = relay?.installed === true && relay.state !== 'stopped' && relay.state !== 'error';
   const run = async (name: string, operation: () => Promise<void>, complete?: () => void) => {
     setPending(name);
@@ -478,15 +485,21 @@ function BrowserRelayWalkthrough({ open, onOpenChange, relay, onSetup, onStart, 
     <DialogContent className="max-w-3xl">
       <DialogHeader>
         <DialogTitle>Set up Chrome Browser Relay</DialogTitle>
-        <DialogDescription>Complete this once for the Chrome profile you want agents to control. GitSpace prepares the machine; Chrome keeps extension installation under your control.</DialogDescription>
+        <DialogDescription>Load the extension in the Chrome profile you want agents to control. Pair it once with your signed-in GitSpace account. The paired extension reconnects after native runtime or browser restarts.</DialogDescription>
       </DialogHeader>
-      <div className="flex max-h-[65vh] flex-col gap-4 overflow-y-auto pr-1">
+      <div className="flex max-h-[65vh] flex-col gap-4 overflow-y-auto pr-1 max-sm:[&_[data-slot=card]]:flex-col max-sm:[&_[data-slot=card]]:items-stretch max-sm:[&_[data-slot=card]]:gap-0 max-sm:[&_[data-slot=card]]:pr-3 max-sm:[&_[data-slot=card-footer]]:ml-0 max-sm:[&_[data-slot=card-footer]]:flex-wrap max-sm:[&_[data-slot=card-footer]]:pb-3">
         <SettingRows>
-          <SettingRow title="Extension directory" description={<code className="break-all text-xs">{relay?.extensionPath ?? 'Preparing path…'}</code>}><Badge color={relay?.installed ? 'green' : 'gray'}>{relay?.installed ? 'Installed' : 'Not installed'}</Badge></SettingRow>
+          <SettingRow title="Paired browser identity" description={relay?.pairedKeyFingerprint ? <span className="break-all font-mono text-xs">SHA-256 {relay.pairedKeyFingerprint}</span> : 'No browser identity is paired.'}>
+            {relay?.pairedKeyFingerprint ? <Button variant="secondary" size="compact" disabled={pending !== null} loading={pending === 'unpair'} onClick={() => void run('unpair', onUnpair)}>Forget paired browser</Button> : null}
+          </SettingRow>
+        </SettingRows>
+        <p className="text-caption text-muted-foreground">Forget disconnects the paired browser and removes its saved public key. Use this after reinstalling the extension or resetting its identity, then get new pairing JSON. Reset identity in the extension popup deletes its private key and account trust.</p>
+        <SettingRows>
+          <SettingRow title="Extension directory" description={<code className="break-all text-xs">{relay?.extensionPath ?? 'Preparing path…'}</code>}><Badge color={relay?.installed ? 'green' : 'gray'}>{relay?.installed ? 'Files prepared' : 'Not prepared'}</Badge></SettingRow>
           <SettingRow title="Local relay" description={<code className="text-xs">{relay?.endpoint ?? 'http://127.0.0.1:9224'}</code>}><Badge color={relay?.state === 'connected' ? 'green' : relay?.state === 'waiting' ? 'blue' : 'gray'}>{relay?.state ?? 'checking'}</Badge></SettingRow>
         </SettingRows>
         <SettingRows>
-          <SettingRow title={numberedTitle(1, 'Prepare Browser Relay')} description="Installs OMP’s extension, configures its local relay URL, and starts the machine-side process.">
+          <SettingRow title={numberedTitle(1, 'Prepare Browser Relay')} description="Writes the GitSpace Chrome extension, configures its local relay URL, and starts the machine-side relay.">
             {prepared ? <Badge color="green">{icon(Check)}Done</Badge> : <Button variant="primary" size="compact" loading={pending === 'prepare'} onClick={() => void run('prepare', relay?.installed ? onStart : onSetup)}>Prepare</Button>}
           </SettingRow>
           <SettingRow title={numberedTitle(2, 'Open Chrome extensions')} description={<span>Paste <code>chrome://extensions</code> into Chrome’s address bar. Web pages cannot open Chrome settings directly.</span>}>
@@ -499,14 +512,24 @@ function BrowserRelayWalkthrough({ open, onOpenChange, relay, onSetup, onStart, 
             <Button variant="secondary" size="compact" disabled={!developerMode || !relay} onClick={() => { if (relay) void navigator.clipboard.writeText(relay.chromeExtensionPath); }}>Copy path</Button>
             <Switch label="Extension loaded" checked={extensionLoaded} disabled={!developerMode} onToggle={() => setExtensionLoaded((value) => !value)} />
           </SettingRow>
-          <SettingRow title={numberedTitle(5, 'Confirm the extension badge says “on”')} description="The badge changes to “on” after the extension reaches the localhost relay.">
+          <SettingRow title={numberedTitle(5, 'Pair the extension')} description={<span>Get pairing JSON from your signed-in account, then paste it into the GitSpace extension popup and click Pair. The account trust key comes from GitSpace’s authenticated cloud session, never localhost. The code is temporary. Chrome stores a non-exportable private key in the extension’s IndexedDB; the machine stores only its public key. No reusable shared secret is written to extension files.{pairingJson ? <code className="mt-2 block select-all whitespace-pre-wrap break-all font-mono text-caption">{pairingJson}</code> : <span className="mt-1 block">{relay?.state === 'connected' ? 'Paired with Chrome.' : relay?.pairingCode ? 'Ready to retrieve account trust and prepare pairing JSON.' : 'Prepare the relay to obtain a pairing code.'}</span>}</span>}>
+            {relay?.pairingCode ? <Button variant="secondary" size="compact" disabled={pending !== null} loading={pending === 'pairing'} onClick={() => void run('pairing', async () => {
+              const code = relay.pairingCode!;
+              const generation = pairingGeneration.current;
+              const response = await rpcClient.runtime.browserTrust({});
+              if (response.status === 'error') throw response.error;
+              if (generation === pairingGeneration.current) setPairing({ code, machineId: relay.machineId, json: JSON.stringify({ code, machineId: relay.machineId, trust: response.value }, null, 2) });
+            })}>Get pairing JSON</Button> : null}
+            {pairingJson ? <Button variant="secondary" size="compact" disabled={pending !== null} onClick={() => void run('copy-pairing', () => navigator.clipboard.writeText(pairingJson))}>Copy pairing JSON</Button> : null}
+          </SettingRow>
+          <SettingRow title={numberedTitle(6, 'Confirm Chrome is connected')} description="Check that the extension has connected to this machine’s localhost relay.">
             {badgeConfirmed || relay?.state === 'connected' ? <Badge color="green">{icon(Check)}Connected</Badge> : <Button variant="secondary" size="compact" loading={pending === 'badge'} disabled={!extensionLoaded} onClick={() => void run('badge', onTest, () => setBadgeConfirmed(true))}>Check connection</Button>}
           </SettingRow>
-          <SettingRow title={numberedTitle(6, 'Test Browser Relay')} description={tested ? 'The relay endpoint and Chrome extension bridge responded successfully.' : 'Verifies the localhost relay and connected Chrome extension bridge.'}>
+          <SettingRow title={numberedTitle(7, 'Test Browser Relay')} description={tested ? 'The local relay reports a connected Chrome extension. No tabs were opened or controlled.' : 'Checks relay connection status without opening or controlling a tab.'}>
             {tested ? <Badge color="green">{icon(Check)}Passed</Badge> : <Button variant="primary" size="compact" loading={pending === 'test'} disabled={!extensionLoaded || relay?.state !== 'connected'} onClick={() => void run('test', onTest, () => setTested(true))}>Run test</Button>}
           </SettingRow>
         </SettingRows>
-        <Elevated offset={1} className="rounded-lg p-3 text-caption text-muted-foreground"><strong className="block text-foreground">Browser access is powerful.</strong>When connected, OMP can attach to Chrome tabs through the debugger API. Stop Browser Relay when you do not want that browser profile available to agents.</Elevated>
+        <Elevated offset={1} className="rounded-lg p-3 text-caption text-muted-foreground"><strong className="block text-foreground">Headless by default. Your Chrome only when needed.</strong>Agents use local headless Chromium for tests, previews, and scraping without browser approval. Only the main agent may explicitly request Browser Relay for your signed-in accounts. Each workspace gets one coloured Chrome tab group named after the workspace. Drag a tab into the group to share it; drag it out to take it back. Other tabs are invisible to the agent. Each new group needs approval outside yolo, including after revocation. Approved hosts come from the committed environment definition. Approve new hosts in Environment or through an API/MCP key with lifecycle.control, whole-account scope, and Write. Yolo does not approve origins. Project approval applies only where the committed bundle lists the origin; older branches gain it after merging or rebasing base to include it. JavaScript and screenshots need no separate approval. Browser content may enter agent history, and redaction cannot guarantee a page contains no sensitive content. Revoke group access in Workspace machines or stop Browser Relay to disconnect Chrome.</Elevated>
         {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
       </div>
       <DialogFooter>
@@ -644,9 +667,9 @@ function ConnectionsSettings({
   devices, onRevokeDevice, onSignOut, onCreateApiClient, projects,
   canManageMcp, canEnableMcp, onMcpStatus, onMcpEnable, onMcpRotate, onMcpDisable,
   composioSetup, onPutComposioSetup, onDeleteComposioSetup,
-  browserRelay, onSetupBrowserRelay, onStartBrowserRelay, onStopBrowserRelay, onTestBrowserRelay,
+  browserRelay, onSetupBrowserRelay, onStartBrowserRelay, onStopBrowserRelay, onUnpairBrowserRelay, onTestBrowserRelay,
   canConnectBrowser, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected,
-}: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup' | 'browserRelay' | 'onSetupBrowserRelay' | 'onStartBrowserRelay' | 'onStopBrowserRelay' | 'onTestBrowserRelay'> & BrowserConnectionActions & McpAccessActions) {
+}: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup' | 'browserRelay' | 'onSetupBrowserRelay' | 'onStartBrowserRelay' | 'onStopBrowserRelay' | 'onUnpairBrowserRelay' | 'onTestBrowserRelay'> & BrowserConnectionActions & McpAccessActions) {
   const [apiClientOpen, setApiClientOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [composioOpen, setComposioOpen] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('setup') === 'composio');
@@ -680,15 +703,16 @@ function ConnectionsSettings({
     </Group>
     <Group title="Browser control">
       <SettingRows>
-        <SettingRow title={connectedBrowser ? `${connectedBrowser} Browser Relay` : 'Browser Relay'} description={browserRelay ? <>{connectedBrowser ? `${connectedBrowser} is connected at ${browserRelay.endpoint}.` : browserRelay.state === 'waiting' ? 'Relay is running. Load and enable the unpacked Chrome extension to connect.' : browserRelay.message ?? 'Lets agents work in browser tabs you approve.'}<span className="mt-1 block font-mono text-xs">{browserRelay.extensionPath}</span></> : 'Checking this machine…'}>
+        <SettingRow title={connectedBrowser ? `${connectedBrowser} Browser Relay` : 'Browser Relay'} description={browserRelay ? <>{connectedBrowser ? `${connectedBrowser} is connected at ${browserRelay.endpoint}.` : browserRelay.state === 'waiting' ? 'Relay is running. Load and enable the unpacked Chrome extension to connect.' : browserRelay.message ?? 'Gives the main agent access to its workspace tab group when it needs your signed-in accounts.'}<span className="mt-1 block font-mono text-xs">{browserRelay.extensionPath}</span></> : 'Checking this machine…'}>
           <Button variant={browserRelay?.installed ? 'secondary' : 'primary'} size="compact" onClick={() => setRelayGuideOpen(true)}>Setup guide</Button>
           {browserRelay?.installed && (browserRelay.state === 'stopped' || browserRelay.state === 'error') ? <Button variant="secondary" size="compact" loading={relayPending} onClick={() => void runRelayAction(onStartBrowserRelay)}>Start</Button> : null}
           {browserRelay?.state === 'waiting' || browserRelay?.state === 'connected' ? <Button variant="secondary" size="compact" disabled={relayPending} onClick={() => void runRelayAction(onTestBrowserRelay)}>Test</Button> : null}
           {browserRelay?.owned && (browserRelay.state === 'waiting' || browserRelay.state === 'connected') ? <Button variant="ghost" size="compact" disabled={relayPending} onClick={() => void runRelayAction(onStopBrowserRelay)}>Stop</Button> : null}
         </SettingRow>
       </SettingRows>
+      <p className="text-caption text-muted-foreground">Headless Chromium is the default and needs no browser approval. Only the main agent may request Browser Relay for your signed-in session. Relay tabs belong to one coloured group per workspace: drag tabs in to share them and out to take them back. Approve hosts in Environment or through an API/MCP key with lifecycle.control, whole-account scope, and Write. Yolo does not approve origins. Project approval applies only where the committed bundle lists the origin; older branches gain it after merging or rebasing base to include it. Each new group asks for approval outside yolo. JavaScript and screenshots are included in the origin grant. Browser tools and remote callers use the same signed workspace-group grant. Shell and codemode run as the machine user and are trusted as that user; browser controls do not isolate same-user code. Browser content may enter agent history. Use a separate personal project for personal browser tasks.</p>
       {relayError ? <p role="alert" className="text-caption text-destructive">{relayError}</p> : null}
-      <BrowserRelayWalkthrough open={relayGuideOpen} onOpenChange={setRelayGuideOpen} relay={browserRelay} onSetup={onSetupBrowserRelay} onStart={onStartBrowserRelay} onTest={onTestBrowserRelay} />
+      <BrowserRelayWalkthrough open={relayGuideOpen} onOpenChange={setRelayGuideOpen} relay={browserRelay} onSetup={onSetupBrowserRelay} onStart={onStartBrowserRelay} onTest={onTestBrowserRelay} onUnpair={onUnpairBrowserRelay} />
     </Group>
     <Group title="Browsers">
       <DeviceRows devices={devices} kind="browser" onRevokeDevice={onRevokeDevice} onSignOut={onSignOut} />
@@ -845,14 +869,14 @@ export function SourceSettings({ deployment, onRevertDeployment, saving }: Pick<
   const channel = RELEASE_TARGETS.every((target) => deployment.desired[target] === null);
   return <>
     <Group title="Running"><SettingRows>
-      <SettingRow title={<>This machine<Badge color="green">Home</Badge></>} description={<span className="font-mono">{deployment.thisMachine.machineId}</span>}><div className="flex flex-wrap justify-end gap-1"><RunningBadge sha={deployment.thisMachine.sha} generation={deployment.thisMachine.generation} /><Badge color={deployment.thisMachine.ompSha === null ? 'gray' : 'blue'}>OMP <span className="font-mono">{deployment.thisMachine.ompSha === null ? 'stable' : shortSha(deployment.thisMachine.ompSha)}</span></Badge>{deployment.thisMachine.ompDraining > 0 ? <Badge color="amber"><span className="tabular-nums">{deployment.thisMachine.ompDraining}</span> OMP sessions draining</Badge> : null}</div></SettingRow>
+      <SettingRow title={<>This machine<Badge color="green">Home</Badge></>} description={<span className="font-mono">{deployment.thisMachine.machineId}</span>}><RunningBadge sha={deployment.thisMachine.sha} generation={deployment.thisMachine.generation} /></SettingRow>
       <SettingRow title="Worker" description="The tenant worker answering this account, by its own version stamp."><Badge color={deployment.current.worker.sha === null ? 'gray' : 'blue'}><span className="font-mono">{deployment.current.worker.version ?? 'unknown'}</span></Badge></SettingRow>
-      {others.map(([machineId, running]) => <SettingRow key={machineId} title={machineId} description={`Machine ${running.sha ? shortSha(running.sha) : 'stable'} · OMP ${running.ompSha ? shortSha(running.ompSha) : 'stable'}`}><RunningBadge sha={running.sha} generation={running.generation} /></SettingRow>)}
+      {others.map(([machineId, running]) => <SettingRow key={machineId} title={machineId} description={`Machine ${running.sha ? shortSha(running.sha) : 'stable'}`}><RunningBadge sha={running.sha} generation={running.generation} /></SettingRow>)}
     </SettingRows></Group>
     <Group title="Desired"><SettingRows>
       {RELEASE_TARGETS.map((target) => <SettingRow key={target} title={RELEASE_TARGET_LABEL[target]} description={desiredLabel(deployment, target)}><Badge color={deployment.desired[target] === null ? 'gray' : 'blue'}>{deployment.desired[target] === null ? 'Channel' : 'Release'}</Badge></SettingRow>)}
       <SettingRow title="All targets" description={`Selections updated ${new Date(deployment.desired.updatedAt).toLocaleString()}`}>
-        <Button variant="secondary" size="compact" disabled={channel || saving} onClick={() => { if (window.confirm('Go back to the stable GitSpace build? The worker swaps now; machines, OMP, and the frontend follow.')) settle(onRevertDeployment()); }}>Back to stable</Button>
+        <Button variant="secondary" size="compact" disabled={channel || saving} onClick={() => { if (window.confirm('Go back to the stable GitSpace build? The worker swaps now; machines and the frontend follow.')) settle(onRevertDeployment()); }}>Back to stable</Button>
       </SettingRow>
     </SettingRows></Group>
     <Group title="Releases">{releases.length
@@ -864,23 +888,23 @@ function DefaultsSettings({ settings, machines, onChange }: Pick<SettingsPagePro
   const update = (value: Partial<UserSettings['defaults']>) => onChange(replace(settings, 'defaults', { ...settings.defaults, ...value }));
   return <>
     <Group title="Placement"><SettingRows><SettingRow title="Default machine" description="New spaces open here when available."><Select value={settings.defaults.machineId ?? ''} onValueChange={(value) => update({ machineId: value || null })}><SelectTrigger aria-label="Default machine" />{selectOptions([{ value: '', label: 'Automatic' }, ...machines.map((machine) => ({ value: machine.id, label: machine.label }))])}</Select></SettingRow></SettingRows></Group>
-    <Group title="Setup"><SettingRows><SettingRow title="Run setup again" description="Walk through profile, OMP, providers, Git, machine, and defaults from the start."><Button variant="secondary" size="compact" asChild><a href="/settings?mode=onboarding" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = new URL(window.location.href); url.searchParams.set('mode', 'onboarding'); navigateProductUrl(url); }}>Open setup</a></Button></SettingRow></SettingRows></Group>
+    <Group title="Setup"><SettingRows><SettingRow title="Run setup again" description="Walk through profile, runtime, providers, Git, machine, and defaults from the start."><Button variant="secondary" size="compact" asChild><a href="/settings?mode=onboarding" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = new URL(window.location.href); url.searchParams.set('mode', 'onboarding'); navigateProductUrl(url); }}>Open setup</a></Button></SettingRow></SettingRows></Group>
   </>;
 }
 
 const sectionInfo: Array<{ id: Section; label: string; icon: (typeof ICONS)[keyof typeof ICONS]; kicker: string; title: string; description: string }> = [
   { id: 'profile', label: 'Profile', icon: ICONS.user, kicker: 'Account', title: 'Your GitSpace profile', description: 'Cloud-owned identity and namespace shared by every machine.' },
-  { id: 'omp', label: 'OMP', icon: ICONS.bot, kicker: 'OMP', title: 'Shared Advanced settings', description: 'Shared runtime configuration for every inference profile. Manage Models, Agents, and Providers under Navigate → Inference.' },
-  { id: 'omp-providers', label: 'Inference', icon: ICONS.cpu, kicker: 'Default inference', title: 'Set up Default inference', description: 'Connect providers and configure the Default profile. The same profile is available under Navigate → Inference after setup.' },
+  { id: 'runtime', label: 'Runtime', icon: ICONS.bot, kicker: 'Runtime', title: 'Shared Advanced settings', description: 'Shared runtime configuration for every inference profile. Manage Models, Agents, and Providers under Navigate → Inference.' },
+  { id: 'runtime-providers', label: 'Inference', icon: ICONS.cpu, kicker: 'Default inference', title: 'Set up Default inference', description: 'Connect providers and configure the Default profile. The same profile is available under Navigate → Inference after setup.' },
   { id: 'git', label: 'Git', icon: ICONS.git, kicker: 'Git', title: 'Shared Git identity', description: 'One GitSpace SSH identity and commit attribution shared by your enrolled machines.' },
   { id: 'machines', label: 'Machines', icon: ICONS.server, kicker: 'Machines', title: 'Machines', description: 'Live fleet state and placement notes from GitSpace Cloud.' },
   { id: 'connections', label: 'Connections', icon: ICONS.key, kicker: 'Connections', title: 'Connections', description: 'Plugin providers, browser control, and enrolled devices for this account and machine.' },
   { id: 'hostnames', label: 'Domains', icon: ICONS.globe, kicker: 'Domains', title: 'Hostname', description: 'Your globally reserved GitSpace namespace.' },
-  { id: 'source', label: 'Source', icon: ICONS.rocket, kicker: 'Source', title: 'What GitSpace runs', description: 'The account-owned worker, machine runtime, OMP generation, and frontend. Launch any target independently from the GitSpace project; return to stable here.' },
+  { id: 'source', label: 'Source', icon: ICONS.rocket, kicker: 'Source', title: 'What GitSpace runs', description: 'The account-owned worker, machine runtime, and frontend. Launch any target independently from the GitSpace project; return to stable here.' },
   { id: 'defaults', label: 'Defaults', icon: ICONS.settings, kicker: 'Defaults', title: 'Workspace defaults', description: 'Cloud-owned defaults for new work.' },
 ];
 // The settings tab strip; the providers step only exists as an onboarding step.
-const settingsTabs = sectionInfo.filter((item) => item.id !== 'omp-providers');
+const settingsTabs = sectionInfo.filter((item) => item.id !== 'runtime-providers');
 export function requestedSettingsSection(search: string): { section: Section } {
   const requested = new URLSearchParams(search).get('section');
   const section = settingsTabs.find((item) => item.id === requested)?.id ?? 'profile';
@@ -891,8 +915,8 @@ function SaveState({ saving, error }: Pick<SettingsPageProps, 'saving' | 'error'
   return saving ? <span className="text-caption text-muted-foreground">Saving…</span> : null;
 }
 function SettingsContent({ section, ...props }: { section: Section } & SettingsPageProps) {
-  if (section === 'omp') return <OmpSettingsEditor {...props} sections={['Advanced']} />;
-  if (section === 'omp-providers') return <>{props.inferenceSetup}</>;
+  if (section === 'runtime') return <RuntimeSettingsEditor {...props} sections={['Advanced']} />;
+  if (section === 'runtime-providers') return <>{props.inferenceSetup}</>;
   if (section === 'git') return <GitSettings {...props} />;
   if (section === 'machines') return <MachineSettings {...props} />;
   if (section === 'connections') return <ConnectionsSettings {...props} />;
@@ -901,9 +925,9 @@ function SettingsContent({ section, ...props }: { section: Section } & SettingsP
   if (section === 'defaults') return <DefaultsSettings {...props} />;
   return <ProfileSettings {...props} />;
 }
-function SectionHeader({ section, actions, ...props }: { section: Section; actions?: ReactNode } & Pick<SettingsPageProps, 'ompSync'>) {
+function SectionHeader({ section, actions, ...props }: { section: Section; actions?: ReactNode } & Pick<SettingsPageProps, 'runtimeSync'>) {
   const info = sectionInfo.find((item) => item.id === section) ?? sectionInfo[0]!;
-  return <PageHeader kicker={info.kicker} title={info.title} description={info.description} actions={<>{section === 'omp' ? <OmpSyncBadge ompSync={props.ompSync} /> : null}{actions}</>} />;
+  return <PageHeader kicker={info.kicker} title={info.title} description={info.description} actions={<>{section === 'runtime' ? <RuntimeSyncBadge runtimeSync={props.runtimeSync} /> : null}{actions}</>} />;
 }
 function SettingsShell(props: SettingsPageProps) {
   const [requested] = useState(() => requestedSettingsSection(typeof window === 'undefined' ? '' : window.location.search));
@@ -911,14 +935,14 @@ function SettingsShell(props: SettingsPageProps) {
   const selectedIndex = settingsTabs.findIndex((item) => item.id === section);
   return <PageCanvas>
     <div className="pb-4"><Button variant="ghost" size="compact" aria-label="Back to workspace" onClick={props.onBack} leadingIcon={glyph(ArrowLeft)}>Back to workspace</Button></div>
-    <SectionHeader section={section} ompSync={props.ompSync} actions={<><SaveState {...props} /><Button variant="primary" disabled={props.saving} onClick={() => settle(props.onSave(props.settings))}>{props.saving ? 'Saving' : 'Save changes'}</Button></>} />
+    <SectionHeader section={section} runtimeSync={props.runtimeSync} actions={<><SaveState {...props} /><Button variant="primary" disabled={props.saving} onClick={() => settle(props.onSave(props.settings))}>{props.saving ? 'Saving' : 'Save changes'}</Button></>} />
     <div className="pb-6"><TabsSubtle selectedIndex={selectedIndex} idPrefix="settings-section" onSelect={(index) => setSection(settingsTabs[index]?.id ?? 'profile')}>{settingsTabs.map(({ id, label, icon: Icon }, index) => <TabsSubtleItem key={id} index={index} label={label} icon={Icon} />)}</TabsSubtle></div>
     <TabsSubtlePanel index={selectedIndex} selectedIndex={selectedIndex} idPrefix="settings-section" className="flex flex-col gap-8"><SettingsContent section={section} {...props} /></TabsSubtlePanel>
   </PageCanvas>;
 }
 function OnboardingShell(props: SettingsPageProps) {
   const [step, setStep] = useState(0);
-  const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'Machine', section: 'machines' }, { label: 'Inference', section: 'omp-providers' }, { label: 'Advanced', section: 'omp' }, { label: 'Git', section: 'git' }, { label: 'Defaults', section: 'defaults' }];
+  const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'Machine', section: 'machines' }, { label: 'Inference', section: 'runtime-providers' }, { label: 'Advanced', section: 'runtime' }, { label: 'Git', section: 'git' }, { label: 'Defaults', section: 'defaults' }];
   const current = steps[step]!;
   const last = step === steps.length - 1;
   const profileIncomplete = step === 0 && (!props.settings.profile.displayName.trim() || !props.settings.profile.handle);
@@ -928,7 +952,7 @@ function OnboardingShell(props: SettingsPageProps) {
       <span className="flex items-center gap-2 text-body font-semibold text-foreground">{icon(Zap)}GitSpace</span>
       <span className="flex items-center gap-3"><SaveState {...props} /><Badge color="gray"><span className="tabular-nums">{step + 1} of {steps.length}</span></Badge></span>
     </div>
-    <SectionHeader section={current.section} ompSync={props.ompSync} actions={<span aria-hidden className="flex items-center gap-1.5">{steps.map(({ label }, index) => <i key={label} className={`h-1.5 w-1.5 rounded-full ${index === step ? 'bg-foreground' : 'bg-border'}`} />)}</span>} />
+    <SectionHeader section={current.section} runtimeSync={props.runtimeSync} actions={<span aria-hidden className="flex items-center gap-1.5">{steps.map(({ label }, index) => <i key={label} className={`h-1.5 w-1.5 rounded-full ${index === step ? 'bg-foreground' : 'bg-border'}`} />)}</span>} />
     <div className="flex flex-col gap-8"><SettingsContent section={current.section} {...props} /></div>
     {last ? <Group title="Your GitSpace source"><SettingRows><SettingRow title="GitSpace is included" description="Your account always includes the GitSpace source project. Open it on a machine when you are ready to make changes; setup does not need a running machine or GitHub authorization."><Badge color="green">Included</Badge></SettingRow></SettingRows></Group> : null}
     <footer className="mt-10 flex items-center justify-between gap-4 border-t border-border pt-6">

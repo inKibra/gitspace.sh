@@ -25,9 +25,11 @@ To connect another browser, create an invitation from **Account > Connections > 
 
 If initial account creation was interrupted, return to gitspace.sh and choose **Resume with a saved recovery key**. Enter the same handle and key. Recovery does not create a second account or consume another invitation for a completed account. Keep the original invitation until initial account creation finishes.
 
-## 2. Choose where work runs
+## 2. Choose where machine work runs
 
 Complete your profile, then choose a machine during setup. You can also skip this step and return through **Account settings > Machines**.
+
+Pi conversations, task state, provider authentication, and inference run in the account cloud. A machine supplies a checkout and runs file changes, shell commands, terminals, and services. You can configure providers without connecting one.
 
 ### Use a cloud machine
 
@@ -49,7 +51,7 @@ Once you have a workspace and a configured provider, ask its normal agent to use
 
 Choose **Add a computer** in the web app. Follow the walkthrough on the computer you want to connect.
 
-The client supports published macOS and Linux platform builds. On Windows, use a supported Linux distribution in WSL. Install Git and the OpenSSH client first. GitSpace supplies its own Bun, OMP, and walgit runtime; no GitSpace source checkout or local build is required.
+The client supports published macOS and Linux platform builds. On Windows, use a supported Linux distribution in WSL. Install Git and the OpenSSH client first. GitSpace supplies the verified machine runtime and its Bun executable; no GitSpace source checkout or local build is required.
 
 Run the installer:
 
@@ -86,11 +88,13 @@ gitspace doctor
 
 ## 3. Configure your agent provider
 
-Once a machine is online, connect a provider from the **Providers** step or **Settings > OMP > Providers**. Choose the model settings your agents should use. You can skip provider setup while exploring the account, but an agent needs a configured provider before it can work.
+Connect a provider from the setup **Inference** step or **Navigate > Inference > Providers**. Select the inference profile used by your project, then choose its model settings. You can skip this while exploring the account, but an agent needs a configured provider before it can work.
 
-For Codex, choose **Sign in** or **Add account**. GitSpace prefers OpenAI's device-code flow: open the sign-in page, enter the displayed code, and approve access. Keep the GitSpace dialog open. It updates when authorization finishes, without a localhost callback or a pasted callback URL.
+GitSpace stores credentials and pending login secrets in its encrypted cloud vault. Login, token refresh, account selection, and inference do not require an online machine. Each profile can retain several accounts for the same provider. Unavailable usage reports do not remove an account or mark its quota exhausted.
 
-Codex sign-in methods share one account list. The device flow adds credentials to the same account store used by Codex agents.
+For Codex, choose **Sign in** or **Add account**. Open the sign-in page, enter the displayed device code, and approve access. Cloud polling continues if you close the dialog or browser. Reopening GitSpace in the same browser restores the saved flow while it remains valid. No localhost callback or pasted callback URL is needed for this device flow.
+
+Other providers may ask you to paste a code, a complete callback URL, or a project ID. Those flows wait for the requested value; reopening the dialog does not supply it. Codex sign-in methods share one account list within the selected profile.
 
 ## 4. Configure Git and finish setup
 
@@ -102,7 +106,7 @@ GitSpace reapplies your saved author name, email, and SSH configuration when it 
 
 Every account includes the GitSpace source project. Setup creates its cloud definition without an online machine or GitHub authorization. There is no source-project opt-out. The project stays **Cloud only** until you open it on a machine; GitSpace then checks out its recorded source branch and commit. A failed checkout leaves the cloud definition available to retry.
 
-Finishing setup takes you to **Projects**, without selecting a project or starting a machine. The sidebar lists all your projects. Select one to inspect it, then open it on a machine when you want to run an agent.
+Finishing setup takes you to **Projects**, without selecting a project or starting a machine. Select a project to inspect its cloud records and conversations. Open a workspace on a machine when you need a checkout or machine effects.
 
 ## 5. Try a small task
 
@@ -116,14 +120,16 @@ For repository prerequisites, ask the normal workspace agent to use the built-in
 
 Ask the agent to make a small change. Review its diff, answer any questions, open a terminal, and save an artifact. Close and reopen the workspace, then continue the conversation.
 
-Controlled workspace close, cloud machine Stop, and provider replacement publish durable checkpoints. These save the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, agent conversation, and GitSpace artifacts. Ignored files are excluded.
+Controlled workspace close, cloud machine Stop, and provider replacement publish durable checkpoints. These save supported Git state, including commits, staged and unstaged tracked changes, and non-ignored untracked files. GitSpace's encrypted evidence artifacts remain separate from the Cloudflare Artifacts repositories that hold code. Pi conversation and task state live in cloud storage rather than depending on a machine checkpoint.
 
-After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
+After unexpected disk loss, the last completed checkpoint limits checkout recovery; uncheckpointed files may be lost. Cloud conversation recovery does not recover those files or prove whether an interrupted command finished. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
 
 ## Releases and additional machines
 
 Add each computer through its own pairing walkthrough. Each receives a separate identity and grant.
 
-Your account manages releases of the Worker, frontend, machine runtime, and OMP. The installer bootstraps a computer; there is no standalone local update command. Use the account release controls for subsequent runtime changes.
+Your account manages three active release targets: Worker, frontend, and machine runtime. Pi runs in the cloud Worker; OMP is not an active release target. Saved OMP conversations and old release records remain historical data, not a runtime fallback.
+
+The installer bootstraps a computer; there is no standalone local update command. Use account release controls for subsequent runtime changes. An older native-v1 host must pass through the existing authenticated recovery/bootstrap path before it can accept the native-v2 runtime. Selecting a release alone cannot upgrade that predecessor.
 
 See [CLI reference](/cli-reference) for local start, stop, status, and diagnostic commands, or [Agent workflow](/agent-workflow) for the workspace workflow.

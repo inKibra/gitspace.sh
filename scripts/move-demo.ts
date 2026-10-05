@@ -1,13 +1,11 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
 import { AwsClient } from 'aws4fetch';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { Miniflare } from 'miniflare';
 import { credentialProtocolBase64, signCredentialAuthorityGrant } from '../packages/protocol/src/index.js';
-import { buildMachineBundle, buildOmpBundle, type BuiltOmpArtifact } from '../packages/deployment/src/index.js';
-import { machineBrokerToken } from '../packages/operator-worker/src/account-access.js';
+import { buildMachineBundle } from '../packages/deployment/src/index.js';
 
 const repositoryRoot = dirname(import.meta.dir);
 const root = process.env.GITSPACE_MOVE_DEMO_ROOT ?? join(repositoryRoot, '.gitspace', 'environments', 'move-demo');
@@ -19,7 +17,6 @@ const secretAccessKey = new Bun.CryptoHasher('sha256').update(`${root}:git-secre
 const artifactKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${root}:artifact-key`).digest());
 const rootPrivateKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${root}:root`).digest());
 const bootstrapToken = crypto.randomUUID();
-const ompBrokerToken = new Bun.CryptoHasher('sha256').update(`${root}:omp-broker`).digest('hex');
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
 
 function environment(extra: Record<string, string> = {}): Record<string, string> {
@@ -103,7 +100,7 @@ async function buildMachine(): Promise<string> {
   return output;
 }
 
-async function startMachine(input: { id: string; port: number; artifact: string; omp: BuiltOmpArtifact; workspace?: string }): Promise<ReturnType<typeof Bun.spawn>> {
+async function startMachine(input: { id: string; port: number; artifact: string; workspace?: string }): Promise<ReturnType<typeof Bun.spawn>> {
   const machineRoot = join(root, 'machines', input.id);
   const managedRoot = join(machineRoot, 'managed');
   await mkdir(managedRoot, { recursive: true });
@@ -115,11 +112,6 @@ async function startMachine(input: { id: string; port: number; artifact: string;
       GITSPACE_MACHINE_LABEL: input.id === 'machine-a' ? 'Machine A' : 'Machine B',
       GITSPACE_PUBLIC_RPC_URL: `/${input.id}/rpc`,
       GITSPACE_ARTIFACT_KEY: Buffer.from(artifactKey).toString('base64'),
-      GITSPACE_OMP_AGENT_DIR: Bun.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent'),
-      GITSPACE_OMP_RUNTIME_PATH: join(input.omp.path, 'omp.js'),
-      GITSPACE_OMP_MANIFEST_HASH: input.omp.manifestHash,
-      OMP_AUTH_BROKER_URL: `${controlUrl}/omp/users/demo-user`,
-      OMP_AUTH_BROKER_TOKEN: await machineBrokerToken(ompBrokerToken, 'demo-user', input.id, 1),
       GITSPACE_MIGRATIONS_FOLDER: join(input.artifact, 'drizzle'),
       GITSPACE_RPC_PORT: String(input.port),
       GITSPACE_CONTROL_URL: controlUrl,
@@ -180,7 +172,7 @@ const control = new Miniflare({
     FLEET_CATALOG: { className: 'FleetCatalogDO', useSQLite: true },
   },
   r2Buckets: ['DATA'],
-  bindings: { CF_ACCOUNT_ID: 'local', CF_API_TOKEN: 'local', R2_PARENT_ACCESS_KEY_ID: 'local', GITSPACE_DEV_BOOTSTRAP_TOKEN: bootstrapToken, GITSPACE_OMP_BROKER_TOKEN: ompBrokerToken },
+  bindings: { CF_ACCOUNT_ID: 'local', CF_API_TOKEN: 'local', R2_PARENT_ACCESS_KEY_ID: 'local', GITSPACE_DEV_BOOTSTRAP_TOKEN: bootstrapToken },
   durableObjectsPersist: join(root, 'control', 'durable-objects'),
   r2Persist: join(root, 'control', 'data-r2'),
   host: '127.0.0.1',
@@ -191,9 +183,8 @@ await registerMachine('machine-a');
 await registerMachine('machine-b');
 const workspace = await prepareFixture();
 const machineArtifact = await buildMachine();
-const ompArtifact = await buildOmpBundle(repositoryRoot, join(root, 'omp-artifacts', crypto.randomUUID()));
-const machineA = await startMachine({ id: 'machine-a', port: 4521, artifact: machineArtifact, omp: ompArtifact, workspace });
-await startMachine({ id: 'machine-b', port: 4522, artifact: machineArtifact, omp: ompArtifact });
+const machineA = await startMachine({ id: 'machine-a', port: 4521, artifact: machineArtifact, workspace });
+await startMachine({ id: 'machine-b', port: 4522, artifact: machineArtifact });
 const frontendRoot = await buildFrontend();
 const web = Bun.serve({
   hostname: '127.0.0.1',

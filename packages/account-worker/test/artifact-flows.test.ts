@@ -35,7 +35,7 @@ async function fixture() {
   const key = credentialProtocolBase64.decode(await vault.artifactKey(userId));
   const persist = async (scopeId: string, content: string) => {
     const sealed = await encryptArtifactBytes(new TextEncoder().encode(content), await deriveArtifactScopeKey(key, scopeId));
-    const hash = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', sealed)), (byte) => byte.toString(16).padStart(2, '0')).join('')}` as const;
+    const hash = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(sealed))), (byte) => byte.toString(16).padStart(2, '0')).join('')}` as const;
     await env.DATA.put(`users/${userId}/accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${hash.slice(7)}`, sealed);
     return hash;
   };

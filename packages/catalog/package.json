@@ -1,0 +1,13 @@
+{
+  "name": "@gitspace/catalog",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./overrides": "./src/models.gitspace.json" },
+  "scripts": {
+    "test": "bun ../../scripts/test-isolated.ts test",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json"
+  },
+  "devDependencies": { "@earendil-works/pi-ai": "1.0.0" },
+  "dependencies": { "better-result": "3.0.1", "zod": "^4.4.3" }
+}

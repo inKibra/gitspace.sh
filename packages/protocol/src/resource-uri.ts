@@ -5,12 +5,13 @@ export interface ResourceSelector {
 export type ResourceUri = (
   | { kind: 'local'; mount: 'base' | 'workspace' | 'workspaces' | null; path: string; workspaceId: string | null }
   | { kind: 'artifact'; id: string }
+  | { kind: 'browser-artifact'; machineId: string; id: string }
 ) & { url: string; selector: ResourceSelector; suffix: string };
 
 /** Parse OMP resources without URL's dot-segment normalization or hostname lowercasing. */
 export function parseResourceUri(input: string): ResourceUri | null {
   if (input.length > 8_192 || /[\u0000-\u0020\u007f\\?#]/u.test(input)) return null;
-  const match = /^(local|artifact):\/\/(.*)$/iu.exec(input);
+  const match = /^(local|artifact|browser-artifact):\/\/(.*)$/iu.exec(input);
   if (!match) return null;
   const scheme = match[1]!.toLowerCase();
   let target = match[2]!;
@@ -36,6 +37,14 @@ export function parseResourceUri(input: string): ResourceUri | null {
   const selector = { raw, ranges };
   const suffix = match[2]!.slice(target.length);
   if (scheme === 'artifact') return /^\d+$/u.test(target) ? { kind: 'artifact', id: target, url: `artifact://${target}`, selector, suffix } : null;
+  if (scheme === 'browser-artifact') {
+    const parts = target.split('/');
+    if (parts.length !== 2) return null;
+    let machineId: string, id: string;
+    try { machineId = decodeURIComponent(parts[0]!); id = decodeURIComponent(parts[1]!); } catch { return null; }
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,255}$/u.test(machineId) || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,255}$/u.test(id)) return null;
+    return { kind: 'browser-artifact', machineId, id, url: `browser-artifact://${encodeURIComponent(machineId)}/${encodeURIComponent(id)}`, selector, suffix };
+  }
   let parts: string[];
   try { parts = target.split('/').map((part) => decodeURIComponent(part)); } catch { return null; }
   if (!parts.length || parts.some((part) => !part || part === '.' || part === '..' || /[\u0000-\u001f\u007f/\\]/u.test(part))) return null;

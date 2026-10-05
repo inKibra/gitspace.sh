@@ -15,7 +15,7 @@ describe('account GitSpace source provenance', () => {
       vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(7)),
     });
     await vault.ensureInference();
-    const cloudEnv = { ...env, ASSETS: { fetch: async () => Response.json({ release: 'channel:test', branch: 'main', commit: 'a'.repeat(40) }) } as Fetcher };
+    const cloudEnv = { ...env, ASSETS: { fetch: async () => Response.json({ release: 'channel:test', branch: 'main', commit: 'a'.repeat(40) }), connect: (address, options) => env.ASSETS.connect(address, options) } satisfies Fetcher };
     const [first, concurrent] = await Promise.all([
       ensureAccountGitSpaceProject(cloudEnv, userId),
       ensureAccountGitSpaceProject(cloudEnv, userId),
@@ -33,8 +33,8 @@ describe('account GitSpace source provenance', () => {
   it('uses the channel frontend metadata rather than an unrelated fallback branch', async () => {
     const userId = env.ACCOUNT_ID;
     const metadata = { release: 'a'.repeat(40), branch: 'release/channel', commit: 'a'.repeat(40) };
-    const cloudEnv = { ...env, ASSETS: { fetch: async (request: Request) => new URL(request.url).pathname === '/__account/gitspace-source.json'
-      ? Response.json(metadata) : new Response('Not found', { status: 404 }) } as Fetcher };
+    const cloudEnv = { ...env, ASSETS: { fetch: async (input) => new URL(input instanceof Request ? input.url : input.toString()).pathname === '/__account/gitspace-source.json'
+      ? Response.json(metadata) : new Response('Not found', { status: 404 }), connect: (address, options) => env.ASSETS.connect(address, options) } satisfies Fetcher };
     const project = await ensureAccountGitSpaceProject(cloudEnv, userId, { sourceBranch: 'unrelated', sourceCommit: 'c'.repeat(40) });
     expect(project).toMatchObject({ lifecycle: 'cloud-only', baseBranch: metadata.branch, source: metadata });
     expect(await env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`).listWorkspaces()).toEqual([]);
@@ -47,12 +47,12 @@ describe('account GitSpace source provenance', () => {
     const releases = env.TENANT_RELEASES.getByName(userId);
     await releases.stage({
       sha, label: 'Account frontend', workspaceId: null,
-      artifacts: { worker: null, machine: null, omp: null, frontend: { key, hash: `sha256:${'a'.repeat(64)}`, size: 1 } },
-      worker: null, omp: null,
+      artifacts: { worker: null, machine: null, frontend: { key, hash: `sha256:${'a'.repeat(64)}`, size: 1 } },
+      worker: null,
     }, 'human');
     await releases.launch({ sha, targets: ['frontend'] });
     await env.DATA.put(`users/${userId}/${key}/gitspace-source.json`, JSON.stringify({ release: sha, branch: 'account/source', commit: sha }));
-    const cloudEnv = { ...env, ASSETS: { fetch: async () => Response.json({ release: 'channel:other', branch: 'other', commit: 'e'.repeat(40) }) } as Fetcher };
+    const cloudEnv = { ...env, ASSETS: { fetch: async () => Response.json({ release: 'channel:other', branch: 'other', commit: 'e'.repeat(40) }), connect: (address, options) => env.ASSETS.connect(address, options) } satisfies Fetcher };
     const project = await ensureAccountGitSpaceProject(cloudEnv, userId, { sourceBranch: 'wrong-fallback' });
     expect(project.source).toEqual({ release: sha, branch: 'account/source', commit: sha });
     expect(project.baseBranch).toBe('account/source');

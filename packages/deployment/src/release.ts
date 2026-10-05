@@ -11,8 +11,6 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { buildInitialRuntime, workspaceSha } from './builders.js';
-import { prepareOmpRuntimeArtifact } from '../../account-omp/src/runtime-recipe.js';
-import { OMP_IPC_VERSION, OmpRpcPeer, type OmpChildApi } from '../../account-omp/src/ipc.js';
 import {
   DISTRIBUTION_BUN_VERSION,
   currentDistributionPlatform,
@@ -134,36 +132,12 @@ async function minimumGlibc(root: string, files: DistributionFile[], client: str
   return minimum;
 }
 
-async function probeOmpRuntime(runtime: string, scratch: string): Promise<void> {
-  const home = join(scratch, 'probe-home');
-  await mkdir(home);
-  const cacheRoot = join(scratch, 'probe-omp-cache');
-  const entrypoint = await prepareOmpRuntimeArtifact(join(runtime, 'omp'), { cacheRoot });
-  const rpc = new OmpRpcPeer<OmpChildApi, Record<string, never>>((message) => child.send(message), {});
-  const child = Bun.spawn([join(runtime, 'bin/bun'), entrypoint], {
-    cwd: runtime,
-    env: { HOME: home, XDG_CONFIG_HOME: home, TMPDIR: home, PATH: `${join(runtime, 'bin')}:/usr/bin:/bin:/usr/sbin:/sbin` },
-    stdout: 'inherit', stderr: 'inherit',
-    ipc: (message) => rpc.receive(message),
-    onExit: (_child, code) => rpc.close(new Error(`Packaged OMP exited during health check (${code})`)),
-  });
-  try {
-    const health = await rpc.call('health', [], AbortSignal.timeout(30_000));
-    if (health.protocolVersion !== OMP_IPC_VERSION || health.bunVersion !== DISTRIBUTION_BUN_VERSION || health.platform !== process.platform || health.arch !== process.arch) {
-      throw new Error('Packaged OMP runtime health does not match the native distribution');
-    }
-  } finally {
-    rpc.close();
-    child.kill();
-    await child.exited;
-  }
-}
 
 export async function buildDistribution(options: { release: string; output: string; platform?: string }): Promise<string> {
   requireBun();
   const platform = currentDistributionPlatform();
   if (options.platform && options.platform !== platform) {
-    throw new Error(`Cannot build ${options.platform} on ${platform}: native SDK addons, walgit and Bun must match the native runner. Use macos-15 (darwin-arm64), macos-15-intel (darwin-x64), ubuntu-24.04 (linux-x64), or ubuntu-24.04-arm (linux-arm64).`);
+    throw new Error(`Cannot build ${options.platform} on ${platform}: Git LFS and Bun must match the native runner. Use macos-15 (darwin-arm64), macos-15-intel (darwin-x64), ubuntu-24.04 (linux-x64), or ubuntu-24.04-arm (linux-arm64).`);
   }
   if (platform.startsWith('linux-')) currentGlibcVersion();
   const release = distributionReleaseSchema.parse(options.release);
@@ -180,17 +154,9 @@ export async function buildDistribution(options: { release: string; output: stri
     await compileClient(platform, bun, client);
     const initial = await buildInitialRuntime(ROOT, runtime);
     await mkdir(join(runtime, 'bin'));
-    // A genuine private Bun preserves process.execPath for machine/OMP/worker children; no global runtime or special execution environment is required.
+    // A private Bun preserves process.execPath for machine and supervisor children.
     await cp(bun, join(runtime, 'bin/bun'));
     await chmod(join(runtime, 'bin/bun'), 0o755);
-    await writeFile(join(runtime, 'bin/omp'), [
-      '#!/bin/sh',
-      'set -eu',
-      'runtime_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)',
-      'exec "$runtime_dir/bin/bun" "$runtime_dir/omp-launcher.js" "$@"',
-      '',
-    ].join('\n'), { mode: 0o755 });
-    await probeOmpRuntime(runtime, staging);
     const files = await inventory(runtime);
     const glibc = await minimumGlibc(runtime, files, client);
     const payload = join(artifacts, 'runtime.bin.gz');
@@ -205,11 +171,9 @@ export async function buildDistribution(options: { release: string; output: stri
       schemaVersion: 1, release, platform, sourceRevision: revision, bunVersion: Bun.version,
       bunAsset: BUN_ASSETS[platform],
       sourceLock: await digest(join(ROOT, 'bun.lock')),
-      ompRecipe: JSON.parse(await readFile(join(runtime, 'omp/omp-runtime.json'), 'utf8')) as unknown,
       native: JSON.parse(await readFile(join(runtime, 'machine/machine-native.json'), 'utf8')) as unknown,
       gitLfs: JSON.parse(await readFile(join(runtime, 'machine/native/git-lfs.json'), 'utf8')) as unknown,
       machine: { treeHash: initial.machine.hash, manifestHash: initial.machine.manifestHash },
-      omp: { treeHash: initial.omp.hash, manifestHash: initial.omp.manifestHash, metadata: initial.omp.metadata },
     };
     await writeFile(join(artifacts, 'provenance.json'), JSON.stringify(provenance));
     const manifest = distributionManifestSchema.parse({

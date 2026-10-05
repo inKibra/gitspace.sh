@@ -178,6 +178,17 @@ export class TranscriptProjector {
 
   constructor(private readonly sessionId: string, private readonly store: TranscriptProjectionStore) {}
 
+  /** Derived indexes persist only the active projection state, never the history. */
+  checkpoint(): string {
+    return JSON.stringify({ current: this.#current, message: this.#message ? { ordinal: this.#message.ordinal, parts: [...this.#message.parts] } : undefined });
+  }
+
+  restore(checkpoint: string): void {
+    const state = JSON.parse(checkpoint) as { current?: ProjectionTurn; message?: { ordinal: number; parts: [number, 'message' | 'thinking'][] } };
+    this.#current = state.current;
+    this.#message = state.message ? { ordinal: state.message.ordinal, parts: new Map(state.message.parts) } : undefined;
+  }
+
   #ensureTurn(event: TranscriptEventInput): ProjectionTurn {
     if (!this.#current) {
       this.#current = { id: `${this.sessionId}:turn:${event.ordinal}`, hasContent: false, pending: 0, failed: false };

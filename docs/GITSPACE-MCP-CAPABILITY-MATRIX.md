@@ -46,7 +46,7 @@ The permission column reports the **current base backend capability**, not a pro
 | `deployment.control` | GitSpace release changes and machine image mutations. It does not grant platform administration. |
 | `devices.manage` | Device revocation and device-management policy. Delegating a new credential also requires a valid delegation chain. |
 | `account.admin` | Explicit API-client authority for account administration previously restricted to browser identity. Requires account scope and `rpc.write`. |
-| `lifecycle.control` | Explicit API-client authority for lifecycle approval, revocation, cancellation, recovery, and cloud destruction. Requires account scope and `rpc.write`. |
+| `lifecycle.control` | Explicit API/MCP-client authority for lifecycle approval, including browser origins, revocation, cancellation, recovery, and cloud destruction. Requires account scope and `rpc.write`. Project origin approval applies only where the workspace's committed bundle lists that origin. |
 
 Scope rules and gaps:
 
@@ -209,7 +209,7 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | `environment.get`<br>`environment.runLog` | `rpc.read` | T | - | - | F | Tool | Bounded inspection; preserve resource ownership and generation checks. Never implicitly open a space or start its runtime. |
 | `environment.putBundle`<br>`environment.putValue`<br>`environment.deleteValue` | `rpc.write` | F | T | T | F | Tool | Changes, replaces, or removes saved state/permissions. Revision checks are not a general retry guarantee. Configuration can affect later execution; describe that effect. |
 | `environment.setProfile` | `rpc.write` | F | F | T | F | Tool | Reversible selection of the workspace environment profile; changes configuration without starting checks or provisioning resources. |
-| `environment.approve`<br>`environment.revokeApproval` | `rpc.write` + `lifecycle.control` for clients | F | F | T | F | Tool | Records or withdraws approval for exact execution content without running or cancelling anything. Delegated lifecycle authority, with content-hash preconditions preserved. |
+| `environment.approve`<br>`environment.revokeApproval` | `rpc.write` + `lifecycle.control` for clients | F | F | T | F | Tool | Records or withdraws approval for exact execution content or browser-origin hashes without running or cancelling anything. API/MCP keys with `lifecycle.control` may approve browser origins. Project origin approval applies only where the workspace's committed bundle lists that origin. Content-hash preconditions remain required. |
 | `environment.recoverRun` | `rpc.write` + `lifecycle.control` for clients | F | T | T | F | Tool | Releases a stranded lifecycle claim after its runner machine was destroyed, abandoning the old run. Account recovery is excluded; workspace run recovery is not. |
 | `environment.runChecks`<br>`environment.runPhase` | `rpc.write` | F | T | T | T | Tool | Same spaceId/runId is deduplicated by durable acceptance; preserve identical inputs and reconcile results. `cloud/destroy` additionally requires lifecycle authority. |
 | `environment.cancelRun` | `rpc.write` + `lifecycle.control` for clients | F | T | T | T | Tool | Records cancellation, not proof of process exit. Poll the durable run to terminal state. |
@@ -233,9 +233,10 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
-| `browserRelay.status` | `rpc.read` | T | - | - | F | Tool | Read broker/relay status, not access to logged-in tabs. |
-| `browserRelay.test` | `rpc.write` | T | - | - | F | Tool | Probes the relay's browser connection only; read-only despite mutation RPC kind, so it keeps the rpc.write requirement. |
-| `browserRelay.setup`<br>`browserRelay.start`<br>`browserRelay.stop` | `rpc.write` | F | T | T | F | Tool | Installs/configures/starts/stops browser tooling. Browser control requires a separate workspace grant and user consent. |
+| `browserRelay.status` | `rpc.read` | T | - | - | F | Excluded | Read relay status and paired-key fingerprint, not logged-in tabs. Browser Relay routes are not MCP tools. |
+| `browserRelay.test` | `rpc.write` | T | - | - | F | Excluded | Checks the relay's browser connection only; keeps its mutation permission. |
+| `browserRelay.setup`<br>`browserRelay.start`<br>`browserRelay.stop` | `rpc.write` | F | T | T | F | Excluded | Installs/configures/starts/stops browser tooling. Browser control requires a separate workspace grant and user consent. |
+| `browserRelay.unpair` | `rpc.write`, account-scoped browser | F | T | F | F | Excluded | Human-only Forget paired browser action. Deletes the saved public key, disconnects the old identity, and issues fresh pairing details. Client devices and agent callers cannot invoke this route. |
 
 ### crons
 
@@ -362,7 +363,7 @@ The annotation table classifies these by caller-visible effect: one-time initial
 
 ### 2. Human provenance is not an input enum
 
-**Explicit delegated administration:** account-scoped API clients may perform account administration with `account.admin` and lifecycle approval, cancellation, recovery, and destruction with `lifecycle.control`. Both require `rpc.write`. Existing clients gain no new authority automatically. The lifecycle actor records its actual kind and verified control authority instead of claiming `human: true`.
+**Explicit delegated administration:** account-scoped API clients may perform account administration with `account.admin` and lifecycle approval, cancellation, recovery, and destruction with `lifecycle.control`. Both require `rpc.write`. API/MCP keys with `lifecycle.control` may approve browser origins. Project origin approval applies only where the workspace's committed bundle lists that origin; older branches gain it after merging or rebasing the base branch. Existing clients gain no new authority automatically. The lifecycle actor records its actual kind and verified control authority instead of claiming `human: true`.
 
 **Excluded flows:** provider OAuth and Composio consent, identity bootstrap, enrollment, and account recovery retain their existing paths and authorization.
 

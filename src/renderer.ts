@@ -1,1 +1,0 @@
-export function renderEvidence(label: string): string { return `Evidence: ${label}`; }

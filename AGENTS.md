@@ -5,9 +5,8 @@ GitSpace is a browser workspace for coding agents across local and cloud machine
 ## Current CLI and agent interfaces
 
 - The current CLI is **`gitspace`**, implemented in `packages/cli/src/index.ts` and exposed by `packages/cli/package.json` and `bin/gitspace`.
-- **`gssh` is a legacy executable, not a special agent CLI.** Root `src/`, `web/`, and `bin/gssh` belong to the older product. Do not use their command tree, architecture, or configuration paths as guidance for current features.
-- Do not mechanically replace the old executable name in examples: old subcommands are not necessarily available in the current CLI.
-- Embedded agents use the available `space` and `mcp` namespaces, OMP tools, and matching skills. Check their current schemas rather than translating old CLI commands into invented new ones.
+- The old `gssh` product has been removed. Its command tree and configuration paths are not supported by the current CLI.
+- Embedded Pi agents use the cloud runtime's typed tools, including `environment`, `space_workspace`, retained workflow tools, and project-granted MCP connections. Check their current schemas and matching skills rather than translating old CLI commands into invented APIs.
 - Verify commands against `packages/cli/src/index.ts`, `gitspace --help`, and [the current CLI reference](packages/docs/src/cli-reference.mdx). Label proposed commands as proposals until implemented.
 - [README.md](README.md) describes current onboarding and development. User documentation lives in `packages/docs/src/`.
 
@@ -60,8 +59,10 @@ These commands operate a linked machine; they are not the agent's workspace-mana
 | Local client | `packages/cli/` |
 | Account browser app | `packages/account-web/` |
 | Tenant control plane and durable authorities | `packages/account-worker/` |
-| Machine runtime, lifecycle runner, workspace/session recovery | `packages/account-machine/` |
-| Embedded OMP adapter and runtime | `packages/account-omp/` |
+| Machine attachments, lifecycle runner, workspace recovery | `packages/account-machine/` |
+| Cloud Pi harness and durable workspace runtime | `packages/runtime-core/`, `packages/runtime-workspace-do/` |
+| Signed machine effects and process supervision | `packages/runtime-machine/`, `packages/supervisor/` |
+| Runtime contracts, provider authentication and model catalog | `packages/protocol-runtime/`, `packages/provider-auth/`, `packages/catalog/` |
 | Shared RPC and credential contracts | `packages/protocol/` |
 | Agent, environment, workspace, and synchronization contracts | `packages/protocol-agent/`, `packages/protocol-environment/`, `packages/protocol-workspace/`, `packages/protocol-sync/` |
 | Core persistence | `packages/core/` |
@@ -71,16 +72,16 @@ These commands operate a linked machine; they are not the agent's workspace-mana
 | Platform, operator, and cloud provider services | `packages/platform/`, `packages/operator-worker/`, `packages/operator-web/`, `packages/sandbox-worker/` |
 | Current user documentation | `packages/docs/src/` |
 
-Follow existing package boundaries and typed contracts. Do not introduce imports from the legacy implementation merely because it has a similarly named feature.
+Follow existing package boundaries and typed contracts.
 
 ## Lifecycle, sessions, and artifacts
 
 - Before repository setup or lifecycle work, read the `workspace-lifecycle` skill. Use `.gitspace/bundle.json` and the existing `.gitspace/lifecycle/` phases, not the old pre/setup/select/remove hooks.
 - Preserve content approvals, durable run identities, machine/placement fencing, cancellation, and uncertain-effect recovery. Authentication or user input does not approve code or authorize a cloud rerun.
-- Checkpoints preserve supported Git changes, agent conversation, and GitSpace artifacts. They do not preserve installed packages, ignored files, arbitrary home-directory state, or machine credentials.
+- Checkpoints preserve supported Git changes, references to cloud conversation state, and GitSpace evidence. Code repositories use Artifacts; encrypted `local://` evidence is separate. Checkpoints do not preserve installed packages, ignored files, arbitrary home-directory state, or machine credentials.
 - Do not assume a workspace move copies the machine disk. Keep project state separate from disposable machine state.
 - Use the `workspace-services` skill for services and `space-artifacts` for artifact publication. Do not substitute legacy CLI commands for these interfaces.
-- Preserve existing session-recovery and bounded-history behavior when modifying agent/session paths.
+- Pi session state, inference, login, refresh and account selection belong to the cloud. Machines execute authorized effects; do not add a machine inference fallback. Preserve bounded history and durable recovery when modifying these paths.
 
 ## Security
 
@@ -97,10 +98,10 @@ From a development checkout:
 ```sh
 bun install --frozen-lockfile
 bun run dev
-bun run typecheck:packages
+bun run typecheck
 ```
 
-Use the relevant package's scripts for builds and tests. Root scripts also retain legacy targets; inspect them before assuming a root command validates the current feature.
+Root build, test, and typecheck commands target the current packages. Use package-local scripts for focused checks.
 
 Bun module mocks leak between test files in a shared process. Use isolated processes for trusted results, for example:
 
@@ -112,7 +113,7 @@ A single `bun test <one.test.ts>` is also valid. Worker packages use their own V
 
 For CLI changes, exercise the actual current entrypoint, for example `bun packages/cli/src/index.ts --help`. For UI changes, verify the actual browser surface. Do not run setup, lifecycle, or deployment effects merely to inspect them.
 
-Use TypeScript ESM and existing package-local error, logging, authorization, and validation patterns. Check current manifests for dependencies instead of copying assumptions from the legacy root implementation.
+Use TypeScript ESM and existing package-local error, logging, authorization, and validation patterns. Check current manifests for dependencies instead of copying assumptions from the legacy root implementation. For all TypeScript work, read [the type-system skill](.agents/skills/type-system/SKILL.md): owner-connected types, zod at boundaries, `better-result` errors, no laundering casts, and `*.typecheck.ts` type tests.
 
 ## Documentation
 

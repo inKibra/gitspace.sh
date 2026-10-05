@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import {
   applyInferenceSettings,
-  applyManagedOmpSettingDefaults,
   extractInferenceSettings,
   inferenceCredentialPaths,
   inferenceSettingsSchema,
@@ -38,12 +37,6 @@ describe('inference profile configuration boundaries', () => {
     expect(inferenceSettingsSchema.safeParse({ disabledProviders: ['claude'] }).success).toBe(false);
   });
 
-  it('turns image generation on for managed sessions unless shared or repository config decides otherwise', () => {
-    expect(applyManagedOmpSettingDefaults({ terminal: { rows: 40 } })).toEqual({ terminal: { rows: 40 }, generate_image: { enabled: true } });
-    expect(applyManagedOmpSettingDefaults({ generate_image: { enabled: false, provider: 'openai' } })).toEqual({ generate_image: { enabled: false, provider: 'openai' } });
-    // A malformed parent is left for OMP's own validation rather than silently replaced.
-    expect(applyManagedOmpSettingDefaults({ generate_image: 'off' })).toEqual({ generate_image: 'off' });
-  });
 
   it('preserves custom role, agent and provider names during migration without mistaking names for credentials', () => {
     const source = {

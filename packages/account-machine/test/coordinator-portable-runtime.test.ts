@@ -1,9 +1,9 @@
+import type { AgentRuntime, RuntimeEvent, RuntimeSession } from '@gitspace/protocol-runtime/session-controls';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { serializeTitleSlot } from '@oh-my-pi/pi-coding-agent/session/session-title-slot';
-import { sourceWalgit } from '../../deployment/src/native-build.js';
+import { readLegacyTranscriptFile, readLegacyTranscriptBytes } from '../src/legacy-transcript.js';
 import {
   FactEventStore,
   GitSpaceDatabase,
@@ -21,16 +21,11 @@ import {
   FileCheckpointBlobStore,
   MachinePortableSpaceController,
   MachineSessionCoordinator,
-  WalgitSupervisor,
+  ArtifactsGitRemote,
   PortableSpaceLifecycle,
-  projectOmpTranscript,
-  projectOmpCheckpointTranscript,
-  type OmpRuntime,
-  type OmpRuntimeEvent,
-  type OmpRuntimeSession,
   type SpaceCheckpointAuthority,
   type SpaceGitCheckpointRemote,
-  type WalgitProjectBinding,
+  type ArtifactsRepositoryBinding,
 } from '../src/index.js';
 
 import { eq } from 'drizzle-orm';
@@ -39,7 +34,6 @@ import { CanonicalSessionOutbox, CloudCanonicalSessionWriter } from '../src/clou
 import { CloudProjectEventWriter } from '../src/cloud-project-events.js';
 
 const roots: string[] = [];
-const ompEntrypoint = join(import.meta.dir, '../../account-omp/src/runtime.ts');
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -59,31 +53,32 @@ function git(cwd: string, ...args: string[]): string {
   return result.stdout.toString().trim();
 }
 
-class PortableOmpRuntime implements OmpRuntime {
+class PortableOmpRuntime implements AgentRuntime {
   resumeCalls = 0;
   disposeCalls = 0;
   openError: Error | null = null;
   messagesError: Error | null = null;
   private active = false;
   constructor(private sessionFile: string) {}
-  async create(input: { workingDirectory: string; sessionKey: string; artifactsDir: string; workspaceId: string | null }): Promise<OmpRuntimeSession> {
+  async create(input: { workingDirectory: string; sessionKey: string; artifactsDir: string; workspaceId: string | null }): Promise<RuntimeSession> {
     mkdirSync(dirname(this.sessionFile), { recursive: true });
     writeFileSync(this.sessionFile, `${JSON.stringify({ type: 'session', version: 3, id: 'omp-portable', timestamp: new Date().toISOString(), cwd: input.workingDirectory })}\n`);
     return this.session(input.artifactsDir, input.workspaceId === null ? 'base' : 'workspace');
   }
-  async open(input: { workingDirectory: string; sessionKey: string; artifactsDir: string; sessionFile: string; workspaceId: string | null }): Promise<OmpRuntimeSession> {
+  async open(input: { workingDirectory: string; sessionKey: string; artifactsDir: string; sessionFile: string; workspaceId: string | null }): Promise<RuntimeSession> {
     if (this.openError) throw this.openError;
     expect(readFileSync(input.sessionFile, 'utf8')).toContain('omp-portable');
     this.sessionFile = input.sessionFile;
     return this.session(input.artifactsDir, input.workspaceId === null ? 'base' : 'workspace');
   }
-  transcript(sessionFile: string) { return projectOmpTranscript(sessionFile, ompEntrypoint); }
-  checkpointTranscript(bytes: Uint8Array) { return projectOmpCheckpointTranscript(bytes, ompEntrypoint); }
-  private session(artifactsDir: string, scope: 'base' | 'workspace'): OmpRuntimeSession {
+  transcript(sessionFile: string) { return readLegacyTranscriptFile(sessionFile); }
+  checkpointTranscript(bytes: Uint8Array) { return Promise.resolve(readLegacyTranscriptBytes(bytes)); }
+  async checkpointReference(): Promise<never> { throw new Error('Historical fixture does not contain a cloud conversation'); }
+  private session(artifactsDir: string, scope: 'base' | 'workspace'): RuntimeSession {
     if (this.active) throw new Error('Portable agent already has a live worker');
     this.active = true;
     let disposed = false;
-    const handlers = new Set<(event: OmpRuntimeEvent) => void>();
+    const handlers = new Set<(event: RuntimeEvent) => void>();
     return {
       id: 'omp-portable',
       sessionFile: this.sessionFile,
@@ -129,6 +124,9 @@ class PortableOmpRuntime implements OmpRuntime {
       subscribeActivity: (handler) => { handler({ active: false, reasons: [] }, null); return () => undefined; },
       activity: () => ({ activity: { active: false, reasons: [] }, failure: null }),
       persist: async () => undefined,
+      reloadSettings: async () => { throw new Error('Settings reload is not exercised by this fixture'); },
+      instructionsChanged: async () => { throw new Error('Instruction reload is not exercised by this fixture'); },
+      inferenceChanged: async () => { throw new Error('Inference reload is not exercised by this fixture'); },
       setWorkspacePhase: async () => undefined,
       handoff: async () => false,
       resume: async () => { this.resumeCalls += 1; },
@@ -218,7 +216,7 @@ async function failedBaseFixture(configureRepository?: (repositoryPath: string) 
   writeFileSync(join(mount, 'stable.txt'), 'durable artifact');
   const stopped = await initial.stopForRestart();
   if (stopped.status === 'error') throw stopped.error;
-  writeFileSync(sessionFile, serializeTitleSlot({ title: 'Retained base', updatedAt: new Date().toISOString() }) + readFileSync(sessionFile, 'utf8'));
+  writeFileSync(sessionFile, JSON.stringify({ type: 'title', v: 1, title: 'Retained base', updatedAt: new Date().toISOString(), pad: '' }) + '\n' + readFileSync(sessionFile, 'utf8'));
   writeFileSync(join(mount, 'unsynced.txt'), 'last local artifact');
   const runtime = new PortableOmpRuntime(sessionFile);
   runtime.openError = new Error('Provider credentials unavailable during worker recovery');
@@ -229,7 +227,7 @@ async function failedBaseFixture(configureRepository?: (repositoryPath: string) 
   const lifecycle = new PortableSpaceLifecycle(authority,
     new EncryptedCheckpointBlobStore(new FileCheckpointBlobStore(join(root, 'blobs')), new Uint8Array(32).fill(4)),
     new BareRemote(remote));
-  const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'bucket', endpoint: 'https://example.invalid', region: 'auto' };
+  const binding: ArtifactsRepositoryBinding = { projectId: 'project-a', repository: 'project-project-a' };
   const controller = new MachinePortableSpaceController(database, sessions, lifecycle, 'machine-a', () => binding, cloudDefinition, root, undefined, undefined, configureRepository);
   return { root, repository, sessionFile, mount, database, store, artifacts, session, runtime, sessions, authority, lifecycle, binding, controller };
 }
@@ -396,7 +394,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
       await controller.close(database.getSpace('project-a')!, 1);
       runtime.openError = null;
       await controller.open('project-a', 2);
-      const env = { ...Bun.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+      const env: Record<string, string | undefined> = { ...Bun.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
       for (const key of ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_CONFIG_COUNT']) delete env[key];
       const committed = Bun.spawnSync(['git', '-c', 'user.useConfigOnly=true', 'commit', '--allow-empty', '-m', 'Commit after restore'], {
         cwd: repository,
@@ -538,7 +536,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     const artifactKey = new Uint8Array(32).fill(7);
     const authority = new Authority();
     const lifecycle = new PortableSpaceLifecycle(authority, new EncryptedCheckpointBlobStore(durableBlobs, artifactKey), new BareRemote(remote));
-    const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'bucket', endpoint: 'https://example.invalid', region: 'auto' };
+    const binding: ArtifactsRepositoryBinding = { projectId: 'project-a', repository: 'project-project-a' };
     const source = new GitSpaceDatabase(join(machineRoot, 'gitspace.db'));
     source.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(machineRoot, 'project-a', 'base') });
     source.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: repository });
@@ -608,7 +606,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     const encrypted = new EncryptedCheckpointBlobStore(durableBlobs, artifactKey);
     const authority = new Authority();
     const lifecycle = new PortableSpaceLifecycle(authority, encrypted, new BareRemote(remote));
-    const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'bucket', endpoint: 'https://example.invalid', region: 'auto' };
+    const binding: ArtifactsRepositoryBinding = { projectId: 'project-a', repository: 'project-project-a' };
     const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
     database.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(root, 'project-a', 'base') });
     database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: repository });
@@ -712,7 +710,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
       new EncryptedCheckpointBlobStore(new FileCheckpointBlobStore(join(root, 'bucket')), new Uint8Array(32).fill(4)),
       new BareRemote(remote),
     );
-    const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'user-bucket', endpoint: 'https://example.invalid', region: 'auto' };
+    const binding: ArtifactsRepositoryBinding = { projectId: 'project-a', repository: 'project-project-a' };
     const spaces = new MachinePortableSpaceController(database, coordinator, lifecycle, 'machine-a', () => binding, async () => null, root, () => ['portable.txt']);
     await spaces.close(database.getSpace('workspace-a')!, 1);
     expect(authority.state).toBe('closed');
@@ -780,7 +778,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     const authority = new Authority();
     const blobs = new EncryptedCheckpointBlobStore(new FileCheckpointBlobStore(join(root, 'bucket')), new Uint8Array(32).fill(4));
     const lifecycle = new PortableSpaceLifecycle(authority, blobs, new BareRemote(remote));
-    const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'user-bucket', endpoint: 'https://example.invalid', region: 'auto' };
+    const binding: ArtifactsRepositoryBinding = { projectId: 'project-a', repository: 'project-project-a' };
     const spaces = new MachinePortableSpaceController(database, coordinator, lifecycle, 'machine-a', () => binding, cloudDefinition, join(root, 'managed-spaces'));
     await spaces.release(database.getSpace('workspace-a')!, 1);
     expect(authority.state).toBe('closed');
@@ -832,8 +830,8 @@ describe('CoordinatorPortableSpaceRuntime', () => {
       },
     }, (bytes) => {
       projections += 1;
-      return projectOmpCheckpointTranscript(bytes, ompEntrypoint);
-    }, join(root, 'checkpoint-transcripts'));
+      return Promise.resolve(readLegacyTranscriptBytes(bytes));
+    }, join(root, 'checkpoint-transcripts'), async () => { throw new Error('Historical fixture must not read a cloud conversation'); });
     const metadata = await reader.readMetadata('project-a', 'workspace-a');
     expect(metadata).toEqual({ sessionId: created.value.id, generation: 2, lastMachineId: 'machine-a' });
     expect(checkpointObjectReads).toEqual([authority.manifestKey!]);
@@ -872,7 +870,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     if (stopped.status === 'error') throw stopped.error;
     database.close();
   });
-  it.skipIf(process.env.GITSPACE_LIVE_PORTABLE_TEST !== '1')('closes and reopens through Miniflare R2 and walgit on RustFS', async () => {
+  it.skipIf(process.env.GITSPACE_LIVE_PORTABLE_TEST !== '1')('closes and reopens through encrypted R2 and Artifacts', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-live-portable-'));
     roots.push(root);
     const projectId = `project-${crypto.randomUUID().slice(0, 8)}`;
@@ -909,26 +907,19 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     };
     const authority = new CloudSpaceCheckpointAuthority(controlOptions);
     await authority.bootstrap({ projectId, spaceId });
-    const binding: WalgitProjectBinding = {
-      projectId,
-      bucket: process.env.GITSPACE_GIT_BUCKET!,
-      endpoint: process.env.GITSPACE_GIT_ENDPOINT!,
-      region: 'us-east-1',
-    };
-    const walgit = new WalgitSupervisor({
-      binaryPath: await sourceWalgit(join(import.meta.dir, '../../..')),
-      runtimeRoot: join(root, 'walgit-runtime'),
+    const binding: ArtifactsRepositoryBinding = { projectId, repository: process.env.GITSPACE_ARTIFACTS_REPOSITORY! };
+    const gitRemote = new ArtifactsGitRemote({
       credentials: async () => ({
-        accessKeyId: process.env.GITSPACE_GIT_ACCESS_KEY_ID!,
-        secretAccessKey: process.env.GITSPACE_GIT_SECRET_ACCESS_KEY!,
-        expiresAt: new Date(Date.now() + 60 * 60 * 1_000),
+        remote: process.env.GITSPACE_ARTIFACTS_REMOTE!,
+        plaintext: process.env.GITSPACE_ARTIFACTS_TOKEN!,
+        expiresAt: process.env.GITSPACE_ARTIFACTS_TOKEN_EXPIRES_AT!,
       }),
-      port: () => 4_601,
+      lfsEnvironment: async () => ({}),
     });
     const lifecycle = new PortableSpaceLifecycle(
       authority,
       new EncryptedCheckpointBlobStore(new CloudDataCheckpointBlobStore(controlOptions), new Uint8Array(32).fill(4)),
-      walgit,
+      gitRemote,
     );
     const spaces = new MachinePortableSpaceController(database, coordinator, lifecycle, 'local-machine', () => binding, (id) => cloudDefinition(id, projectId), root);
     await spaces.close(database.getSpace(spaceId)!, 1);
@@ -949,7 +940,6 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(restoredArtifacts.value.map((entry) => entry.path)).toContain('agent.txt');
     expect((await coordinator.prompt(created.value.id, 'after-open')).status).toBe('ok');
     expect(await coordinator.transcript(created.value.id)).toHaveLength(2);
-    await walgit.dispose();
     database.close();
   });
 });

@@ -68,7 +68,7 @@ body { overflow: hidden; }
 .terminal-resize-handle:hover::after, .terminal-resize-handle:focus-visible::after { background: var(--focus-ring); }
 
 /* ── Status dot (data, not chrome: a colored point) ── */
-.status-dot { display: inline-block; width: 6px; height: 6px; flex: none; border-radius: 9999px; background: currentColor; }
+.status-dot { display: inline-block; width: 6px; height: 6px; flex: none; border-radius: var(--radius-xl); background: currentColor; }
 .status-dot[data-pulse] { animation: status-pulse 1.8s ease-in-out infinite; }
 @keyframes status-pulse { 50% { opacity: .4; } }
 @media (prefers-reduced-motion: reduce) { .status-dot[data-pulse] { animation: none; } }

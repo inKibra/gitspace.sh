@@ -1,0 +1,197 @@
+import { DurableObject } from 'cloudflare:workers';
+import { createModels, createAssistantMessageEventStream, type Model, type StreamFunction, type AssistantMessage } from '@earendil-works/pi-ai';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { createOperationalTasks, type OperationalServices } from '../../runtime-core/src/tasks.js';
+import { RuntimeAnswerInputSchema, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { createWorkspaceRuntime } from '../src/runtime.js';
+import { createReplicaStore } from '../src/replica-store.js';
+import { PlacementDoc, QuestionsDoc } from '../../runtime-core/src/documents.js';
+
+const identity = RuntimeIdentitySchema.parse({ projectId: 'smoke-project', workspaceId: 'smoke-workspace' });
+const modelRef = { provider: 'fixture', modelId: 'fixture' };
+const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+const model: Model<'fixture'> = { id: 'fixture', name: 'Local deterministic provider', provider: 'fixture', api: 'fixture', baseUrl: 'https://fixture.invalid', input: ['text'], cost, reasoning: false, contextWindow: 8192, maxTokens: 1024 };
+const unsupported = async (): Promise<never> => { throw new Error('Smoke unexpectedly invoked an external service'); };
+function check(value: unknown, message: string): asserts value { if (!value) throw new Error(message); }
+const receiptText = 'full durable receipt '.repeat(1000);
+const stream: StreamFunction = (_model, context) => {
+  const result = createAssistantMessageEventStream();
+  const last = context.messages.findLast(message => message.role !== 'system');
+  const text = typeof last?.content === 'string' ? last.content : (last?.content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n');
+  const ask = last?.role === 'user' && text === 'ask for a color';
+  const plan = last?.role === 'user' && text === 'propose a plan';
+  const output: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: ask || plan ? [{ type: 'toolCall', id: crypto.randomUUID(), name: plan ? 'propose_plan' : 'ask', arguments: { prompt: plan ? 'Approve this deterministic smoke plan?' : 'Choose a color', choices: plan ? ['Misleading model choice', 'Another model choice'] : ['blue', 'green'] } }] : [{ type: 'text', text: `fixture reply: ${text}` }], stopReason: ask || plan ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { ...cost, total: 0 } } };
+  result.push({ type: 'start', partial: output });
+  result.push({ type: 'done', reason: ask || plan ? 'toolUse' : 'stop', message: output });
+  result.end();
+  return result;
+};
+
+export class RuntimeSmoke extends DurableObject<unknown> {
+  private readonly runtime;
+  private readonly operations: OperationalServices;
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env);
+    const models = createModels();
+    models.setProvider({ id: 'fixture', name: 'Smoke fixture', auth: { apiKey: { name: 'Fixture only', async resolve() { return { auth: { apiKey: 'not-a-real-key' } }; } } }, getModels: () => [model], stream, streamSimple: stream });
+    this.operations = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, wakeAt: timestamp => ctx.storage.setAlarm(timestamp) };
+    this.runtime = createWorkspaceRuntime({
+      storage: ctx.storage, identity, models, model: modelRef,
+      code: { readFile: unsupported, writeSnapshot: unsupported },
+      tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported },
+      operations: this.operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
+      onReport: error => console.error('RUNTIME_REPORT', String(error)),
+      admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },
+      bindInferenceConversation: async (conversationId, _signal, _submissions, requests) => {
+        for (const id of requests) check(await ctx.storage.get(`admission:${id}`) === conversationId, 'Missing durable admission');
+        return requests.filter(id => id.startsWith('fallback-')).map(requestId => ({ requestId, message: 'Selected model fixture/removed disappeared; using fixture/fixture.' }));
+      },
+      session: { catalog: async () => ({ models: [{ provider: 'fixture', id: 'fixture', name: 'Smoke', contextWindow: 8192 }], roles: [] }), reload: unsupported },
+      qa: { list: async () => [], act: unsupported }, modelProxy: unsupported, mcpProxy: unsupported,
+      attachments: { seal: unsupported, open: unsupported, dispatch: unsupported },
+      waitUntil: promise => ctx.waitUntil(promise), schedule: timestamp => ctx.storage.setAlarm(timestamp),
+    });
+  }
+  async alarm() { await (await this.runtime).wake(); }
+  async fetch(request: Request): Promise<Response> {
+    try {
+      const runtime = await this.runtime;
+      const url = new URL(request.url);
+      if (url.pathname === '/watch-current') {
+        const snapshot = await runtime.snapshot();
+        return runtime.watch({ ...identity, after: snapshot.cursor });
+      }
+      if (url.pathname === '/session') {
+        const body: unknown = await request.json();
+        const input = RuntimeSessionInputSchema.parse(body);
+        const canApprove = typeof body === 'object' && body !== null && 'canApprove' in body && body.canApprove === true;
+        return Response.json(await runtime.session(input.conversationId, input.command, canApprove));
+      }
+      if (url.pathname === '/answer') {
+        const input = RuntimeAnswerInputSchema.parse(await request.json());
+        return Response.json(await runtime.answer(input, { deviceId: 'fixture-browser', canApprove: true }));
+      }
+      if (url.pathname === '/browser-approval-proof') {
+        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+        const questionId = 'approval:browser-group-proof';
+        const card = { ...identity, id: 'current-group', conversationId: String(root.id), machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: crypto.randomUUID(), groupName: 'Smoke workspace', origins: ['example.com'], source: 'relay' as const, expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'open' as const, requiresApproval: true };
+        await runtime.harness.commit(async tx => { (await tx.doc(QuestionsDoc)).items.push({ id: questionId, conversationId: String(root.id), kind: 'approval', prompt: 'Create workspace browser group', choices: ['Approve', 'Reject'], answer: null, browser: card }); }, BACKGROUND_CONTEXT);
+        const answer = (expectedBrowserPreparationId?: string) => runtime.answer({ ...identity, questionId, answer: true, expectedBrowserPreparationId }, { deviceId: 'fixture-browser', canApprove: true });
+        const mustReject = async (expected?: string) => { let rejected = false; try { await answer(expected); } catch { rejected = true; } check(rejected, 'Missing or stale browser preparation accepted'); check((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === questionId)?.answer === null, 'Failed browser approval changed durable answer'); };
+        await mustReject(); await mustReject('previous-group');
+        await answer(card.id);
+        check((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === questionId)?.answer === true, 'Group creation approval was not committed');
+        return Response.json({ missingRejected: true, staleRejected: true, groupApproved: true });
+      }
+      if (url.pathname === '/placement-handoff-proof') {
+        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+        const a = RuntimeAttachmentSchema.parse({ ...identity, machineId: 'placement-a', attachmentId: 'placement-a', generation: 1, role: 'primary', state: 'detached', checkout: { kind: 'shared', branch: 'main' }, capabilities: [], updatedAt: new Date().toISOString() });
+        const b = RuntimeAttachmentSchema.parse({ ...a, machineId: 'placement-b', attachmentId: 'placement-b', state: 'ready' });
+        const seed = (value: typeof a) => this.ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', value.attachmentId, JSON.stringify(value), 'fixture-only');
+        seed(a); seed(b);
+        const reset = async (attachmentId = a.attachmentId, generation = a.generation) => root.commit(async tx => {
+          const doc = await tx.doc(PlacementDoc, root.id);
+          doc.attachmentId = attachmentId; doc.generation = generation;
+        }, BACKGROUND_CONTEXT);
+        const assign = () => runtime.assignPlacement(String(root.id), b.attachmentId, b.generation);
+        await reset(); await assign();
+        check((await runtime.harness.snapshot(PlacementDoc, root.id, BACKGROUND_CONTEXT))?.attachmentId === b.attachmentId, 'Detached primary did not hand off placement');
+        await assign();
+        const reject = async () => {
+          const before = await runtime.harness.snapshot(PlacementDoc, root.id, BACKGROUND_CONTEXT);
+          let rejected = false;
+          try { await assign(); } catch { rejected = true; }
+          check(rejected, 'Unsafe placement handoff accepted');
+          check(JSON.stringify(await runtime.harness.snapshot(PlacementDoc, root.id, BACKGROUND_CONTEXT)) === JSON.stringify(before), 'Rejected handoff mutated placement');
+        };
+        for (const state of ['ready', 'attaching', 'lost', 'draining'] as const) {
+          seed({ ...a, state }); await reset(); await reject();
+        }
+        seed(a);
+        await reset('missing-history'); await reject();
+        await reset(a.attachmentId, a.generation + 1); await reject();
+        for (const role of ['runner', 'delegate'] as const) {
+          seed(b); seed({ ...a, role }); await reset(); await reject();
+          seed(a); seed({ ...b, role }); await reset(); await reject();
+        }
+        seed({ ...b, state: 'attaching' }); await reset(); await reject();
+        this.ctx.storage.sql.exec('DELETE FROM runtime_attachments WHERE id IN (?,?)', a.attachmentId, b.attachmentId);
+        await root.commit(async tx => { const doc = await tx.doc(PlacementDoc, root.id); doc.attachmentId = null; doc.generation = 0; }, BACKGROUND_CONTEXT);
+        return Response.json({ detachedPrimaryHandoff: true, unsafeHandoffsRejected: true });
+      }
+      if (url.pathname === '/submit') {
+        await runtime.submit({ ...identity, requestId: url.searchParams.get('requestId') ?? crypto.randomUUID(), text: url.searchParams.get('text') ?? '' });
+      }
+      if (url.pathname === '/fallback-notices') {
+        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+        const entries = await root.entries({}, 100, undefined, BACKGROUND_CONTEXT);
+        return Response.json(entries.items.filter(entry => entry.kind === 'gitspace.model-fallback').map(entry => entry.data));
+      }
+      if (url.pathname === '/burst') {
+        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+        const operation = createOperationalTasks(this.operations).find(task => task.definition.name === 'gitspace.Checkpoint');
+        check(operation, 'Missing checkpoint task definition');
+        const ids = await root.commit(async tx => {
+          const ids = [];
+          for (let i = 0; i < 140; i++) ids.push(await tx.createTask(operation, { args: { i }, deadlineAt: new Date(Date.now() + 120_000).toISOString(), replay: 'safe' }, { ownership: { kind: 'conversation' }, conversationId: root.id, background: true }));
+          return ids;
+        }, BACKGROUND_CONTEXT);
+        runtime.harness.resume();
+        const results = await Promise.all(ids.map(id => runtime.harness.waitForTask(id, BACKGROUND_CONTEXT)));
+        for (const result of results) check(JSON.stringify(result).includes(receiptText), 'Durable operation result was truncated');
+        const snapshot = await runtime.snapshot();
+        const terminal = snapshot.tasks.filter(task => task.state === 'completed');
+        check(terminal.length === 128, 'Terminal projection must retain the newest 128 tasks');
+        check(terminal.every(task => !JSON.stringify(task.result).includes(receiptText)), 'Projection retained unbounded results');
+        check(terminal.some(task => task.id === String(ids.at(-1))), 'Newest terminal receipt missing');
+        check(!terminal.some(task => task.id === String(ids[0])), 'Old terminal projection was not evicted');
+        // Read again after projection to defend against pruning the durable receipts themselves.
+        check(JSON.stringify(await runtime.harness.waitForTask(ids[0]!, BACKGROUND_CONTEXT)).includes(receiptText), 'Projection deleted full old receipt');
+        return Response.json({ tasks: ids.length, projected: terminal.length, receiptCharacters: receiptText.length });
+      }
+      if (url.pathname === '/history-seed') {
+        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+        const ids = await root.commit(async tx => {
+          const ids = [];
+          for (let i = 0; i < 620; i++) ids.push((await tx.appendEntry(root.id, { kind: 'smoke.history', model: [{ role: 'user', content: `history-${i} ${'x'.repeat(i === 619 ? 600000 : i % 2 ? 6000 : 800)}`, timestamp: Date.now() }] })).id);
+          return ids;
+        }, BACKGROUND_CONTEXT);
+        const pivot = ids[20]!;
+        const branches: string[] = [];
+        for (let i = 0; i < 205; i++) {
+          const branch = await root.fork(pivot, { ownership: { kind: 'ownerless' } }, BACKGROUND_CONTEXT);
+          const entry = await branch.commit(tx => tx.appendEntry(branch.id, { kind: 'smoke.branch', model: [{ role: 'user', content: `branch-${i}`, timestamp: Date.now() }] }), BACKGROUND_CONTEXT);
+          branches.push(String(entry.id));
+        }
+        return Response.json({ conversationId: String(root.id), ids: ids.map(String), pivot: String(pivot), branches });
+      }
+      if (url.pathname === '/transcript') return Response.json(await runtime.transcript());
+      return Response.json(await runtime.snapshot());
+    } catch (error) { return Response.json({ error: String(error) }, { status: 500 }); }
+  }
+}
+export class ReplicaSmoke extends DurableObject {
+  async fetch(): Promise<Response> {
+    const legacy = JSON.stringify(RuntimeSnapshotSchema.parse({ version: 1, ...identity, cursor: 7, conversations: [], tasks: [], attachments: [], questions: [], documents: {} }));
+    const event = JSON.stringify({ type: 'delta', baseCursor: 6, cursor: 7, ops: [] });
+    this.ctx.storage.sql.exec('CREATE TABLE runtime_projection(id INTEGER PRIMARY KEY,snapshot TEXT NOT NULL)');
+    this.ctx.storage.sql.exec('INSERT INTO runtime_projection VALUES(1,?)', legacy);
+    this.ctx.storage.sql.exec('CREATE TABLE runtime_publications(cursor INTEGER PRIMARY KEY,event TEXT NOT NULL)');
+    this.ctx.storage.sql.exec('INSERT INTO runtime_publications VALUES(7,?)', event);
+    const store = createReplicaStore(this.ctx.storage);
+    check(store.snapshot() === legacy && store.events(6)?.[0]?.event === event, 'Replica migration lost committed state or replay');
+    const text = 'x' + '\u{1d11e}'.repeat(1_100_000);
+    const large = JSON.stringify({ ...JSON.parse(legacy), cursor: 8, documents: { text } });
+    store.commit(8, large, JSON.stringify({ text }));
+    check(store.snapshot() === large, 'Large replica or Unicode was corrupted');
+    check(store.events(7) === null, 'Oversized replay must request a lossless reset');
+    let failed = false;
+    try { store.commit(8, legacy, event); } catch { failed = true; }
+    check(failed && store.snapshot() === large, 'Failed publication did not roll back its projection');
+    check(createReplicaStore(this.ctx.storage).snapshot() === large, 'Reopened chunk store lost its committed projection');
+    return Response.json({ bytes: new TextEncoder().encode(large).byteLength });
+  }
+}
+export default { fetch(request: Request, env: { SMOKE: DurableObjectNamespace<RuntimeSmoke>; REPLICA: DurableObjectNamespace<ReplicaSmoke> }) {
+  return new URL(request.url).pathname === '/replica-proof' ? env.REPLICA.getByName('replica').fetch(request) : env.SMOKE.getByName('runtime-regressions').fetch(request);
+} };

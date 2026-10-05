@@ -1,0 +1,9 @@
+{
+  "name": "@gitspace/supervisor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./protocol": "./src/protocol.ts", "./broker": "./src/broker.ts", "./terminal-output": "./src/terminal-output.ts" },
+  "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json", "test": "bun ../../scripts/test-isolated.ts test" },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.30.1", "zod": "^4.4.3" }
+}

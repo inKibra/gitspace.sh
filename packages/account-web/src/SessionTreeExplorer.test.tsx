@@ -19,7 +19,7 @@ function page(anchorId: string | null, entries: SessionHistoryEntry[], options: 
 function controls(onReadHistory?: SessionControlsProps['onReadHistory'], historyAnchorId = 'current'): SessionControlsProps {
   const operation = async () => undefined;
   return {
-    value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId, activity: { active: false, reasons: [] }, renderState: 'waiting' },
+    value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId },
     onCycleRole: operation, onSetModel: operation, onSetThinking: operation, onSetFast: operation, onSetApproval: operation, onSetGoal: operation, onCompact: operation, onClearQueue: operation, onRemoveQueuedMessage: operation, onPromoteQueuedMessage: operation, onAnswerAsk: operation, onStop: operation, onNavigateTree: operation, onReadHistory,
   };
 }
@@ -62,6 +62,16 @@ afterEach(async () => {
   if (!animationDescriptor) Reflect.deleteProperty(Element.prototype, 'getAnimations');
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it('keeps prompt intake enabled when the next admission must resolve an unavailable saved model', async () => {
+  const session = controls();
+  session.value.provider = 'removed-provider';
+  session.value.model = 'removed-model';
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} controls={session} onSend={async () => {}} running={false} pending={false} />));
+  const input = container.querySelector<HTMLTextAreaElement>('textarea');
+  expect(input).not.toBeNull();
+  expect(input?.disabled).toBe(false);
 });
 
 it('loads only while open, keeps the inspected window through live updates, and separates inspection from a failed resume', async () => {

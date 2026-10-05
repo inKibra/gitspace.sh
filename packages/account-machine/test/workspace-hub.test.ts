@@ -3,17 +3,21 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
-import { closeDaemonClients, daemonClientForProject } from '@oh-my-pi/pi-coding-agent/launch/client';
+import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 
 const roots: string[] = [];
 afterEach(async () => {
+  for (const root of roots) {
+    const client = await daemonClientForProject(join(root, 'workspace'));
+    await client.request({ op: 'shutdown' });
+  }
   await closeDaemonClients();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('WorkspaceHubTerminalCoordinator', () => {
-  it('creates, attaches, writes, and stops a real OMP Hub PTY', async () => {
+  it('creates, attaches, writes, and stops a real GitSpace supervisor PTY', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-'));
     roots.push(root);
     const repositoryPath = join(root, 'repo');

@@ -54,9 +54,9 @@ export function useAccountGitIdentity() {
   const snapshot = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
   return readSnapshot(snapshot, (value) => value.git);
 }
-export function useAccountOmpConfiguration() {
+export function useAccountRuntimeConfiguration() {
   const snapshot = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
-  return readSnapshot(snapshot, (value) => value.omp);
+  return readSnapshot(snapshot, (value) => value.runtime);
 }
 export function useAccountInference() {
   const snapshot = useSynchronizedResource('inference', (after, signal) => rpcClient.inference.events({ after }, { signal }));

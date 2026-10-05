@@ -42,13 +42,13 @@ import {
   setupBrowserRelayContract,
   startBrowserRelayContract,
   stopBrowserRelayContract,
+  unpairBrowserRelayContract,
   testBrowserRelayContract,
   deleteProjectMcpGrantContract,
-  discoverProjectMcpToolsContract,
   destroyMachineContract,
   gitspaceContract,
   getGitIdentityContract,
-  getOmpSettingsContract,
+  getRuntimeSettingsContract,
   getComposioSetupContract,
   getMcpConnectionStatusContract,
   getWorkspaceEnvironmentContract,
@@ -70,13 +70,7 @@ import {
   setProjectBaseBranchContract,
   resumeMachineContract,
   sleepMachineContract,
-  ompSettingValueSchema,
-  cancelProviderLoginContract,
-  listProvidersContract,
-  logoutProviderContract,
-  providerLoginEventsContract,
-  providerUsageContract,
-  listAvailableModelsContract,
+  runtimeSettingValueSchema,
   placementsContract,
   locateSessionContract,
   type SpacePlacementView,
@@ -88,9 +82,6 @@ import {
   type ReleaseRecord,
   type ReleaseTarget,
   revokeDeviceContract,
-  respondProviderLoginContract,
-  setProviderApiKeyContract,
-  startProviderLoginContract,
   promptSessionContract,
   getSessionControlContract,
   getSessionUsageContract,
@@ -122,7 +113,7 @@ import {
   stopWorkspaceTerminalContract,
   terminalEventsContract,
   terminalLiveContract,
-  setOmpSettingContract,
+  setRuntimeSettingContract,
   subagentTranscriptContract,
   subagentTranscriptEventsContract,
   subagentTranscriptPageContract,
@@ -194,7 +185,6 @@ import {
   type ComposioToolPolicy,
   type ComposioSetup,
   type BrowserRelayStatus,
-  type DiscoveredMcpTool,
   type CloudProjectOperation,
   type CloudProjectSummary,
   type CloudWorkspaceDefinition,
@@ -211,7 +201,6 @@ import {
   type ProjectCronDraft,
   type ProjectCronRunView,
   type ProjectEvent,
-  type ProviderLoginEvent,
   type ProjectCronView,
   type PutChangeGuideInput,
   type PutGoalInput,
@@ -256,7 +245,6 @@ import {
 import { WorkspaceEnvironmentManager, type WorkspaceEnvironmentView } from './workspace-environment.js';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import { CanonicalSettingsConflict, type CanonicalSettingsCoordinator } from './canonical-settings.js';
-import { ProviderAuthError, type ProviderAuthCoordinator, type ProfileProviderAuthCoordinator } from './provider-auth.js';
 import type { SharedGitIdentityCoordinator } from './shared-git-identity.js';
 import { CloudSpaceAuthorityError } from './cloud-space-authority.js';
 import {
@@ -273,7 +261,7 @@ import { emptyTotals } from './session-usage-report.js';
 import { readInspectorResource } from './inspector-resources.js';
 import type { TranscriptPage, TranscriptPageRequest, TranscriptContentPage, TranscriptContentRequest } from '@gitspace/blocks';
 import { boundSessionControl } from '@gitspace/protocol-agent';
-import type { OmpSessionControlView } from './omp-runtime.js';
+import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 
 export interface FleetMachineRpcView {
   id: string;
@@ -314,13 +302,13 @@ export interface MachineMcpRpc {
   listGrants(projectId: string): Promise<ProjectMcpGrant[]>;
   putGrant(projectId: string, connectionId: string, enabled: boolean, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<ProjectMcpGrant>;
   deleteGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<{ projectId: string; connectionId: string; deleted: boolean }>;
-  discover(projectId: string, workspaceId: string | null, workspacePath: string): Promise<DiscoveredMcpTool[]>;
 }
 export interface BrowserRelayRpc {
   status(): Promise<BrowserRelayStatus>;
   setup(): Promise<BrowserRelayStatus>;
   start(): Promise<BrowserRelayStatus>;
   stop(): Promise<BrowserRelayStatus>;
+  unpair(): Promise<BrowserRelayStatus>;
   test(): Promise<BrowserRelayStatus>;
 }
 export interface ProjectCronsRpc {
@@ -397,7 +385,7 @@ export interface DeploymentRpc {
   launch(input: { workspaceId: string; targets: ReleaseTarget[] }): LaunchProgress;
   launchProgress(): LaunchProgress | null;
   revert(): Promise<DeploymentStatus>;
-  thisMachine: { sha: string | null; ompSha: string | null; ompDraining: number; generation: string | null };
+  thisMachine: { sha: string | null; generation: string | null };
 }
 
 export interface GitSpaceRpcRouterOptions {
@@ -436,7 +424,6 @@ export interface GitSpaceRpcRouterOptions {
   controlMachine?(action: 'sleep' | 'resume', machineId: string): Promise<FleetMachineRpcView>;
   destroyMachine?(machineId: string): Promise<{ machineId: string; removed: boolean }>;
   settings?: CanonicalSettingsCoordinator;
-  providers?: ProfileProviderAuthCoordinator;
   inference?: Pick<CloudSpaceCheckpointAuthority, 'listInferenceProfiles' | 'createInferenceProfile' | 'updateInferenceProfile' | 'deleteInferenceProfile' | 'assignInferenceProfile'>;
   devices?: DeviceRegistry;
   deployment?: DeploymentRpc;
@@ -622,10 +609,6 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   const settingsCoordinator = (): CanonicalSettingsCoordinator => {
     if (!options.settings) throw new Error('Canonical settings are unavailable');
     return options.settings;
-  };
-  const providersCoordinator = (profileId: string): Promise<ProviderAuthCoordinator> => {
-    if (!options.providers) throw new Error('Provider sign-in is unavailable');
-    return options.providers.forProfile(profileId);
   };
   const cronsAuthority = (): ProjectCronsRpc => {
     if (!options.crons) throw new Error('Project cron authority is unavailable');
@@ -961,6 +944,15 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'stop Browser Relay', message: error instanceof Error ? error.message : 'Unable to stop Browser Relay' }));
     }
   });
+  const unpairBrowserRelay = server.implement(unpairBrowserRelayContract).handler(async ({ errors, context }) => {
+    try {
+      if (context.caller?.kind !== 'browser' || context.caller.scope.kind !== 'user' || !context.caller.capabilities.includes('rpc.write')) throw new Error('Forgetting a paired browser requires an account-scoped browser session');
+      if (!options.browserRelay) throw new Error('Browser Relay is unavailable');
+      return ok(await options.browserRelay.unpair());
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'forget paired browser', message: error instanceof Error ? error.message : 'Unable to forget paired browser' }));
+    }
+  });
   const testBrowserRelay = server.implement(testBrowserRelayContract).handler(async ({ errors }) => {
     if (!options.browserRelay) return err(errors.OperationFailed({ operation: 'test Browser Relay', message: 'Browser Relay is unavailable' }));
     try {
@@ -1003,16 +995,6 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
         return err(errors.McpRevisionConflict({ resource: String(error.details.resource ?? `grant:${input.connectionId}`), expected: Number(error.details.expected ?? input.expectedRevision), actual: Number(error.details.actual ?? -1) }));
       }
       return err(errors.OperationFailed({ operation: 'delete project MCP grant', message: error instanceof Error ? error.message : 'Unable to delete project MCP grant' }));
-    }
-  });
-  const discoverProjectMcpTools = server.implement(discoverProjectMcpToolsContract).handler(async ({ input, errors }) => {
-    const project = options.database.getProject(input.projectId);
-    const base = options.database.getSpace(input.projectId);
-    if (!project || !base) return err(errors.ProjectNotFound({ projectId: input.projectId }));
-    try {
-      return ok(await mcpAuthority().discover(input.projectId, null, base.rootPath));
-    } catch (error) {
-      return err(errors.OperationFailed({ operation: 'discover project MCP tools', message: error instanceof Error ? error.message : 'Unable to discover project MCP tools' }));
     }
   });
   const createProject = server.implement(createProjectContract).handler(async ({ input, errors }) => {
@@ -1339,7 +1321,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
 
   /** Live controls carry the same agent status as the space view's `mainAgent`. */
-  const controlView = (sessionId: string, control: OmpSessionControlView) => {
+  const controlView = (sessionId: string, control: SessionControlView) => {
     const session = options.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} does not exist`);
     return { ...boundSessionControl(control), ...agentStatus(session) };
@@ -1547,8 +1529,8 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     }
   });
 
-  const ompSettingsView = async () => {
-    const value = await settingsCoordinator().getOmpSettings();
+  const runtimeSettingsView = async () => {
+    const value = await settingsCoordinator().getRuntimeSettings();
     return {
       document: value.document,
       sync: value.sync,
@@ -1565,18 +1547,18 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       })),
     };
   };
-  const getOmpSettings = server.implement(getOmpSettingsContract).handler(async ({ errors }) => {
+  const getRuntimeSettings = server.implement(getRuntimeSettingsContract).handler(async ({ errors }) => {
     try {
-      return ok(await ompSettingsView());
+      return ok(await runtimeSettingsView());
     } catch (error) {
-      return err(errors.OperationFailed({ operation: 'get OMP settings', message: error instanceof Error ? error.message : 'Unable to load OMP settings' }));
+      return err(errors.OperationFailed({ operation: 'get runtime settings', message: error instanceof Error ? error.message : 'Unable to load runtime settings' }));
     }
   });
-  const setOmpSetting = server.implement(setOmpSettingContract).handler(async ({ input, errors }) => {
+  const setRuntimeSetting = server.implement(setRuntimeSettingContract).handler(async ({ input, errors }) => {
     try {
-      const value = ompSettingValueSchema.parse(JSON.parse(input.valueJson));
-      await settingsCoordinator().setOmpSetting(input.path, value);
-      return ok(await ompSettingsView());
+      const value = runtimeSettingValueSchema.parse(JSON.parse(input.valueJson));
+      await settingsCoordinator().setRuntimeSetting(input.path, value, input.expectedGeneration);
+      return ok(await runtimeSettingsView());
     } catch (error) {
       if (error instanceof CanonicalSettingsConflict) {
         return err(errors.SettingsConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
@@ -1593,7 +1575,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     const { resource, expected, actual } = error.details;
     if (typeof expected !== 'number' || typeof actual !== 'number') return null;
     switch (resource) {
-      case 'user-settings': case 'omp-config': case 'inference-profile': case 'inference-assignment': return { resource, expected, actual } as const;
+      case 'user-settings': case 'runtime-config': case 'inference-profile': case 'inference-assignment': return { resource, expected, actual } as const;
       default: return null;
     }
   };
@@ -1631,71 +1613,6 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       const conflict = inferenceConflict(error);
       if (conflict) return err(errors.SettingsConflict(conflict));
       return err(errors.OperationFailed({ operation: 'assign inference profile', message: error instanceof Error ? error.message : 'Unable to assign inference profile' }));
-    }
-  });
-  const providerFailure = (operation: string, fallback: string, error: unknown) =>
-    error instanceof ProviderAuthError
-      ? { operation: error.operation, message: error.message }
-      : { operation, message: error instanceof Error ? error.message : fallback };
-  const listProviders = server.implement(listProvidersContract).handler(async ({ input, errors }) => {
-    try {
-      return ok({ providers: await (await providersCoordinator(input.profileId)).list() });
-    } catch (error) {
-      return err(errors.OperationFailed(providerFailure('list providers', 'Unable to list providers', error)));
-    }
-  });
-  const startProviderLogin = server.implement(startProviderLoginContract).handler(async ({ input, errors }) => {
-    try {
-      return ok({ flowId: await (await providersCoordinator(input.profileId)).startLogin(input.providerId) });
-    } catch (error) {
-      return err(errors.OperationFailed(providerFailure('start provider login', 'Unable to start provider sign-in', error)));
-    }
-  });
-  const providerLoginEvents = server.implement(providerLoginEventsContract).stream(async function* ({ input, errors, signal }) {
-    let stream: AsyncIterable<ProviderLoginEvent>;
-    try {
-      stream = (await providersCoordinator(input.profileId)).events(input.flowId, signal);
-    } catch (error) {
-      yield err(errors.OperationFailed(providerFailure('subscribe to provider login', 'Unable to follow provider sign-in', error)));
-      return;
-    }
-    for await (const event of stream) yield ok(event);
-  });
-  const respondProviderLogin = server.implement(respondProviderLoginContract).handler(async ({ input, errors }) => {
-    try {
-      await (await providersCoordinator(input.profileId)).respond(input.flowId, input.promptId, input.value);
-      return ok({});
-    } catch (error) {
-      return err(errors.OperationFailed(providerFailure('respond to provider login', 'Unable to answer provider sign-in prompt', error)));
-    }
-  });
-  const cancelProviderLogin = server.implement(cancelProviderLoginContract).handler(async ({ input, errors }) => {
-    try {
-      await (await providersCoordinator(input.profileId)).cancel(input.flowId);
-      return ok({});
-    } catch (error) {
-      return err(errors.OperationFailed(providerFailure('cancel provider login', 'Unable to cancel provider sign-in', error)));
-    }
-  });
-  const logoutProvider = server.implement(logoutProviderContract).handler(async ({ input, errors }) => {
-    try {
-      return ok({ provider: await (await providersCoordinator(input.profileId)).logout(input.providerId, input.credentialId) });
-    } catch (error) {
-      return err(errors.OperationFailed(providerFailure('sign out provider', 'Unable to sign out of provider', error)));
-    }
-  });
-  const setProviderApiKey = server.implement(setProviderApiKeyContract).handler(async ({ input, errors }) => {
-    try {
-      return ok({ provider: await (await providersCoordinator(input.profileId)).setApiKey(input.providerId, input.key) });
-    } catch (error) {
-      return err(errors.OperationFailed(providerFailure('set provider API key', 'Unable to store provider API key', error)));
-    }
-  });
-  const providerUsage = server.implement(providerUsageContract).handler(async ({ input, errors }) => {
-    try {
-      return ok(await (await providersCoordinator(input.profileId)).usage(input.providerId, input.refresh));
-    } catch (error) {
-      return err(errors.OperationFailed(providerFailure('fetch provider usage', 'Unable to fetch provider usage', error)));
     }
   });
   const listDevices = server.implement(listDevicesContract).handler(async ({ context, errors }) => {
@@ -1765,13 +1682,6 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return ok(deploymentView(await options.deployment.revert()));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'revert release', message: error instanceof Error ? error.message : 'Unable to revert release' }));
-    }
-  });
-  const listAvailableModels = server.implement(listAvailableModelsContract).handler(async ({ input, errors }) => {
-    try {
-      return ok({ models: await (await providersCoordinator(input.profileId)).models() });
-    } catch (error) {
-      return err(errors.OperationFailed(providerFailure('list models', 'Unable to list available models', error)));
     }
   });
   // Local checkouts are not the account directory. Placement always comes from cloud authority.
@@ -2878,17 +2788,9 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       get: getSettings,
       update: updateSettings,
       reserveHandle,
-      omp: { get: getOmpSettings, set: setOmpSetting },
+      runtime: { get: getRuntimeSettings, set: setRuntimeSetting },
     },
     inference: { list: listInference, create: createInference, update: updateInference, delete: deleteInference, assign: assignInference },
-    providers: {
-      list: listProviders,
-      login: { start: startProviderLogin, events: providerLoginEvents, respond: respondProviderLogin, cancel: cancelProviderLogin },
-      logout: logoutProvider,
-      apiKey: { set: setProviderApiKey },
-      usage: providerUsage,
-      models: listAvailableModels,
-    },
     space: { view: spaceView, close: closeSpace, reopen: reopenSpace },
     devices: { list: listDevices, revoke: revokeDevice },
     deployment: { status: deploymentStatus, launch: deploymentLaunch, revert: deploymentRevert },
@@ -2934,7 +2836,6 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
         put: putProjectMcpGrant,
         delete: deleteProjectMcpGrant,
       },
-      discover: discoverProjectMcpTools,
     },
     crons: { list: listCrons, create: createCron, update: updateCron, delete: deleteCron, runNow: runCronNow, history: cronHistory },
     skills: { list: listSkills, update: updateSkill },
@@ -2961,6 +2862,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       status: getBrowserRelayStatus,
       setup: setupBrowserRelay,
       start: startBrowserRelay,
+      unpair: unpairBrowserRelay,
       stop: stopBrowserRelay,
       test: testBrowserRelay,
     },

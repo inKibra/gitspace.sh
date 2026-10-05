@@ -73,6 +73,9 @@ export function protectedLifecycleWrapper(config: {
 import { createServer } from 'node:net';
 import { openSync, writeSync, closeSync, chmodSync, rmSync } from 'node:fs';
 const config = ${JSON.stringify(config)};
+// Translate the absolute approval deadline once on runner entry; elapsed waits
+// thereafter must not move with wall-clock corrections.
+const monotonicDeadline = performance.now() + Math.max(0, config.deadline - Date.now());
 const log = openSync(config.spoolPath, 'a');
 const emit = text => { writeSync(log, text); writeSync(1, text); };
 const peers = new Set();
@@ -152,7 +155,7 @@ const server = createServer(socket => {
 });
 let deadlineTimer;
 const deadline = () => {
-  const remaining = config.deadline - Date.now();
+  const remaining = monotonicDeadline - performance.now();
   if (remaining <= 0) stop();
   else deadlineTimer = setTimeout(deadline, Math.min(remaining, 2147483647));
 };

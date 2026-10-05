@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { OmpSettingsEditor, type OmpSettingView } from './SettingsPage.js';
+import { RuntimeSettingsEditor, type RuntimeSettingView } from './SettingsPage.js';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -22,8 +22,8 @@ it('preserves an unsaved configuration draft and rejects its stale revision inst
   let currentRevision = 1;
   let stored = { client: 'private/original-model' };
   const render = async (revision: number) => {
-    const item: OmpSettingView = { path: 'modelTags', label: 'Model tags', tab: 'models', description: null, kind: 'record', valueJson: JSON.stringify(stored), options: [], credential: false };
-    await act(() => root.render(<OmpSettingsEditor sections={['Models']} ompSettings={[item]} ompGeneration={revision} saving={false} onSetOmpSetting={async (_path, value) => {
+    const item: RuntimeSettingView = { path: 'modelTags', label: 'Model tags', tab: 'models', description: null, kind: 'record', valueJson: JSON.stringify(stored), options: [], credential: false };
+    await act(() => root.render(<RuntimeSettingsEditor sections={['Models']} runtimeSettings={[item]} runtimeGeneration={revision} saving={false} onSetRuntimeSetting={async (_path, value) => {
       if (revision !== currentRevision) throw new Error('Concurrent edit: refresh before saving');
       stored = value as typeof stored;
     }} />));
@@ -52,9 +52,9 @@ it('preserves an unsaved configuration draft and rejects its stale revision inst
 });
 
 it('only marks a configured model unavailable after its catalog has loaded', async () => {
-  const item: OmpSettingView = { path: 'modelRoles', label: 'Model roles', tab: 'models', description: null, kind: 'record', valueJson: JSON.stringify({ default: 'private/saved-model' }), options: [], credential: false };
+  const item: RuntimeSettingView = { path: 'modelRoles', label: 'Model roles', tab: 'models', description: null, kind: 'record', valueJson: JSON.stringify({ default: 'private/saved-model' }), options: [], credential: false };
   const render = async (modelsReady: boolean) => {
-    await act(() => root.render(<OmpSettingsEditor sections={['Models']} ompSettings={[item]} ompGeneration={1} models={[]} modelsReady={modelsReady} saving={false} onSetOmpSetting={async () => undefined} />));
+    await act(() => root.render(<RuntimeSettingsEditor sections={['Models']} runtimeSettings={[item]} runtimeGeneration={1} models={[]} modelsReady={modelsReady} saving={false} onSetRuntimeSetting={async () => undefined} />));
   };
   await render(false);
   expect(container.querySelector('[role="alert"]')).toBeNull();

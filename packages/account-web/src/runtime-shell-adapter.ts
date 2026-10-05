@@ -1,0 +1,43 @@
+import type { MessageBlock, MessageImage, SideAgentBlock, TurnBlock } from '@gitspace/blocks';
+import type { InspectorView } from '@gitspace/protocol';
+import type { SpaceViewCodec } from '@gitspace/protocol/rpc-contract';
+import type { InputOf } from 'result-rpc';
+import type { RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { deriveWorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import type { AgentScopeView, ProjectAgentView, WorkspaceView } from './GitSpaceShell.js';
+
+/** Runtime ownership is cloud-owned, independently of any attached working copy. */
+export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<InspectorView, 'project' | 'workspace' | 'workspaces' | 'machines' | 'placement'>, relationWorkspaces: InputOf<typeof SpaceViewCodec>['workspaces'] = []): { workspace: AgentScopeView; baseSpace: ProjectAgentView; workspaces: WorkspaceView[]; relationsReady: boolean } {
+  const primary = snapshot.attachments.find(item => item.role === 'primary' && item.state !== 'detached');
+  const document = snapshot.documents['gitspace.workspace'];
+  const phaseValue = document && typeof document === 'object' && !Array.isArray(document) ? document.phase : null;
+  const phase = phaseValue === 'plan' || phaseValue === 'code' || phaseValue === 'review' || phaseValue === 'ship' ? phaseValue : inspection.workspace.phase ?? 'plan';
+  const status = deriveWorkspaceStatusSummary({ agents: snapshot.conversations.map(item => ({ state: item.status === 'running' ? 'running' : item.status === 'waiting' ? 'permission-needed' : 'waiting', ...(item.status === 'failed' ? { failure: { code: 'RUNTIME_FAILED', message: 'Conversation failed' } } : {}) })) });
+  const common = { projectId: inspection.project.id, projectName: inspection.project.name, generation: primary?.generation ?? inspection.placement?.generation ?? 0, possessedBy: primary?.machineId ?? '', holder: primary ? { kind: 'held' as const, machineId: primary.machineId, label: inspection.machines.find(item => item.id === primary.machineId)?.label ?? primary.machineId } : { kind: 'unknown' as const }, status };
+  const baseSpace: ProjectAgentView = { ...common, kind: 'project', id: inspection.project.id, name: inspection.project.name, branch: inspection.project.baseBranch, phase: null, closedAt: inspection.project.archivedAt ? new Date(inspection.project.archivedAt) : null };
+  const definitions = inspection.workspaces.some(item => item.id === inspection.workspace.id) ? inspection.workspaces : [...inspection.workspaces, inspection.workspace];
+  const workspaces: WorkspaceView[] = definitions.filter(item => item.kind === 'worktree').map(item => {
+    const saved = relationWorkspaces.find(workspace => workspace.id === item.id);
+    return { ...common, kind: 'workspace', id: item.id, name: item.name, branch: item.branch, phase: item.id === snapshot.workspaceId ? phase : item.phase ?? 'plan', closedAt: item.archivedAt ? new Date(item.archivedAt) : null, relations: saved?.relations ?? { dependsOn: [], relatedTo: [], stackedOn: null }, stack: saved?.stack ?? { blockedBy: [], blocking: [], findings: [] } };
+  });
+  const relationsReady = workspaces.every(workspace => relationWorkspaces.some(saved => saved.id === workspace.id));
+  return { baseSpace, workspaces, relationsReady, workspace: inspection.workspace.kind === 'base' ? baseSpace : workspaces.find(item => item.id === inspection.workspace.id)! };
+}
+
+export function runtimeSubagents(snapshot: RuntimeSnapshot): SideAgentBlock[] {
+  return snapshot.conversations.filter(item => item.parentId !== null).map(item => ({ id: `agent:${item.id}`, type: 'side-agent', agentId: item.id, label: item.title || item.id, status: item.status === 'idle' ? 'done' : item.status === 'waiting' ? 'blocked' : item.status, summary: item.messages.flatMap(message => message.role === 'assistant' ? message.content.flatMap(content => content.type === 'text' ? [content.text] : []) : []).at(-1) }));
+}
+
+/** A snapshot immediately paints the existing transcript while its bounded history loads. */
+export function runtimeTurns(snapshot: RuntimeSnapshot, conversationId: string | undefined): TurnBlock[] {
+  const conversation = snapshot.conversations.find(item => item.id === conversationId);
+  const turns: TurnBlock[] = [];
+  for (const message of conversation?.messages ?? []) {
+    if (message.role !== 'user' && message.role !== 'assistant') continue;
+    const block: MessageBlock = { id: message.id, type: 'message', role: message.role, text: message.content.flatMap(content => content.type === 'text' ? [content.text] : []).join(''), images: message.content.flatMap<MessageImage>(content => content.type === 'image' && (content.mimeType === 'image/png' || content.mimeType === 'image/jpeg' || content.mimeType === 'image/webp') ? [{ data: content.data, mimeType: content.mimeType }] : []) };
+    if (message.role === 'user' || !turns.length) turns.push({ id: `turn:${message.id}`, type: 'turn', status: 'done', startedAt: message.createdAt, items: [], sideAgents: [], ...(message.role === 'user' ? { user: block } : {}) });
+    if (message.role === 'assistant') turns.at(-1)!.items.push(block);
+  }
+  if (turns.length) { turns.at(-1)!.sideAgents = runtimeSubagents(snapshot); turns.at(-1)!.status = conversation?.status === 'running' || conversation?.status === 'waiting' ? 'running' : conversation?.status === 'failed' ? 'error' : 'done'; }
+  return turns;
+}

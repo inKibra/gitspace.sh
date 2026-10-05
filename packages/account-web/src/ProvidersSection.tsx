@@ -32,12 +32,13 @@ import { formatProjectCronTime } from './ProjectCronsPage.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 export type ProvidersUsageStatus = 'idle' | 'loading' | 'ready' | 'error';
-export interface ProviderLoginFlow { flowId: string; profileId: string; providerId: string; events: readonly ProviderLoginEvent[] }
+export interface ProviderLoginFlow { flowId: string; profileId: string; providerId: string; events: readonly ProviderLoginEvent[]; connectionError?: string }
 export interface ProviderLoginProps {
   flow: ProviderLoginFlow | null;
   respond(promptId: string, value: string): Promise<void>;
   /** Cancels a running flow or dismisses a finished one. */
   cancel(): Promise<void>;
+  reconnect?(): void;
 }
 export interface ProvidersSectionProps {
   providers: readonly ProviderView[];
@@ -162,8 +163,8 @@ function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAcc
     <CardHeader><CardTitle>{provider.name}</CardTitle><CardDescription>{providerDescription(provider)}</CardDescription></CardHeader>
     <CardFooter className="gap-2">
       <Badge variant="dot" color={badge.color}>{badge.label}</Badge>
-      {provider.authKind === 'api_key'
-        ? <Button variant="secondary" size="compact" type="button" disabled={pending !== null} onClick={onAddKey}>{provider.accounts.length ? 'Replace API key' : 'Add API key'}</Button>
+      {provider.supportsApiKey
+        ? <Button variant="secondary" size="compact" type="button" disabled={pending !== null} onClick={onAddKey}>{provider.accounts.some(account => account.type === 'api_key') ? 'Replace API key' : 'Add API key'}</Button>
         : null}
       {signInMethods.length > 1
         ? <DropdownMenu>
@@ -199,7 +200,7 @@ function ApiKeyDialog({ provider, onOpenChange, onSubmit }: { provider: Provider
   };
   return <Dialog open={provider !== null} onOpenChange={onOpenChange}>
     {provider ? <DialogContent>
-      <DialogHeader><DialogTitle>{provider.name} API key</DialogTitle><DialogDescription>Stored in this machine’s OMP credential store. The key never leaves the machine.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>{provider.name} API key</DialogTitle><DialogDescription>Encrypted in this inference profile’s cloud credential vault. Machines do not receive provider credentials.</DialogDescription></DialogHeader>
       <form id="provider-api-key-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
         <InputGroup className="w-full"><InputField index={0} label="API key" type="password" value={key} onChange={setKey} autoComplete="off" autoFocus required /></InputGroup>
         {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
@@ -237,7 +238,8 @@ export function SignInFlowView({ flow, providerName, login, onRetry }: { flow: P
   const [answered, setAnswered] = useState<readonly string[]>([]);
   const auth = flow.events.findLast((event) => event.type === 'auth');
   const done = flow.events.find((event) => event.type === 'done');
-  const prompt = done ? undefined : flow.events.findLast((event) => event.type === 'prompt' && !answered.includes(event.promptId));
+  const latestStep = flow.events.findLast((event) => event.type === 'prompt' || event.type === 'progress');
+  const prompt = !done && latestStep?.type === 'prompt' && !answered.includes(latestStep.promptId) ? latestStep : undefined;
   const progress = flow.events.filter((event) => event.type === 'progress');
   const deviceAuthorization = flow.providerId === 'openai-codex-device';
   const close = (): void => void login.cancel();
@@ -250,19 +252,19 @@ export function SignInFlowView({ flow, providerName, login, onRetry }: { flow: P
     status = <span className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator aria-label="Starting sign-in" />Starting sign-in…</span>;
   }
   return <>
-    <DialogHeader><DialogTitle>Sign in to {providerName}</DialogTitle><DialogDescription>Approve access on the provider’s site. Keep this dialog open until sign-in completes.</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>Sign in to {providerName}</DialogTitle><DialogDescription>Approve access on the provider’s site. Cloud sign-in continues if this browser closes. Return to this profile to resume any remaining code-entry step or view the result. Cancel explicitly stops sign-in.</DialogDescription></DialogHeader>
     <div className="flex flex-col gap-4">
       {auth?.type === 'auth' && !done ? <>
         {auth.instructions ? <p className={deviceAuthorization ? 'font-mono text-body font-medium tabular-nums text-foreground' : 'text-caption text-muted-foreground'}>{auth.instructions}</p> : null}
         <InputCopy label="Sign-in URL" value={auth.url} />
-        {/* OMP's launchUrl belongs to the machine's loopback interface, not necessarily this browser. */}
         <Button variant="primary" asChild><a href={auth.url} target="_blank" rel="noopener noreferrer">Open sign-in page</a></Button>
         {deviceAuthorization ? <p role="status" aria-live="polite" className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator aria-label="Waiting for authorization" />Waiting for authorization. This dialog updates automatically after approval.</p> : null}
-        {auth.launchUrl && prompt ? <p className="text-caption text-muted-foreground">If sign-in ends at a localhost page that cannot load, copy the full URL from that tab’s address bar and paste it below. Sign-in on the same machine can finish automatically.</p> : null}
+        {auth.launchUrl && prompt ? <p className="text-caption text-muted-foreground">If sign-in ends at a localhost page that cannot load, copy the full URL from that tab’s address bar and paste it below. No connected machine is required.</p> : null}
       </> : null}
       {progress.length ? <ul className="flex flex-col gap-1 text-caption text-muted-foreground">{progress.map((event, index) => event.type === 'progress' ? <li key={`${index}:${event.message}`}>{event.message}</li> : null)}</ul> : null}
       {prompt?.type === 'prompt' ? <LoginPromptForm key={prompt.promptId} prompt={prompt} onRespond={async (promptId, value) => { await login.respond(promptId, value); setAnswered((current) => [...current, promptId]); }} /> : null}
       {status}
+      {flow.connectionError ? <p role="alert" className="text-caption text-destructive">{flow.connectionError}{login.reconnect ? <Button variant="ghost" onClick={login.reconnect}>Reconnect sign-in</Button> : null}</p> : null}
     </div>
     <DialogFooter>
       {done?.type === 'done'
@@ -292,10 +294,9 @@ export function ProvidersSection({ providers, loading = false, error, usage, usa
     } else if (provider.id === provider.credentialProvider) {
       group.provider = provider;
     }
-    if (provider.loginable && provider.authKind === 'oauth') group.signInMethods.push(provider);
+    if (provider.supportsOAuth) group.signInMethods.push(provider);
   }
-  // The browser may be on another computer. Codex device authorization completes
-  // without a loopback callback, including when the runtime is a cloud machine.
+  // Codex device authorization completes in the cloud without a loopback callback.
   const codex = groups.get('openai-codex');
   const codexDevice = codex?.signInMethods.find((method) => method.id === 'openai-codex-device' && method.available);
   if (codex && codexDevice) codex.signInMethods = [codexDevice];
@@ -338,7 +339,7 @@ export function ProvidersSection({ providers, loading = false, error, usage, usa
       ? <EmptyState icon={icon(CpuChip01)} title="Providers are unavailable" description={error} action={<Button variant="ghost" type="button" onClick={() => void onRefreshUsage()}>Retry</Button>} />
       : loading ? <EmptyState icon={<ThinkingIndicator />} title="Loading this profile’s providers…" />
       : visible.length === 0
-        ? <EmptyState icon={icon(CpuChip01)} title="No providers on this machine" description="The machine’s OMP install reports no loginable or configured model providers." />
+        ? <EmptyState icon={icon(CpuChip01)} title="No providers in this profile" description="The cloud provider catalog reports no loginable or configured model providers." />
         : <CardGroup orientation="inline" border="outlined" separated proximityHover={false}>
           {visible.map(({ provider, signInMethods }) => <ProviderRow
             key={provider.credentialProvider}

@@ -2,13 +2,13 @@ import { resolve } from 'node:path';
 import { spaceCheckpointManifestKey, parseWorkspaceCheckpoint, spaceGitCheckpointRef, WorkspaceDomainError } from '@gitspace/protocol-workspace';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { CheckpointBlobStore, SpaceGitCheckpointRemote } from './portable-space-lifecycle.js';
-import type { WalgitProjectBinding } from './walgit-supervisor.js';
+import type { ArtifactsRepositoryBinding } from './artifacts-git-remote.js';
 
 export interface PublishedSpaceHeadResolverOptions {
   authority: Pick<CloudSpaceCheckpointAuthority, 'getSpace'>;
   blobs: Pick<CheckpointBlobStore, 'get'>;
   gitRemote: Pick<SpaceGitCheckpointRemote, 'fetchCheckpoint'>;
-  binding(projectId: string): WalgitProjectBinding;
+  binding(projectId: string, workspaceId: string): ArtifactsRepositoryBinding;
 }
 
 export type PublishedSpaceHeadResolver = (input: {
@@ -74,13 +74,16 @@ export function createPublishedSpaceHeadResolver(options: PublishedSpaceHeadReso
       if (checkpointRef !== spaceGitCheckpointRef(spaceId, manifest.revision)) {
         throw new Error('Checkpoint Git ref does not match the requested space revision');
       }
+      if (headCommit === null) {
+        throw new Error('Published workspace branch is unborn; create its first commit before using it as a source');
+      }
 
       const key = JSON.stringify([resolve(repositoryPath), projectId, checkpointRef, placement.manifestHash]);
       let pending = fetching.get(key);
       if (!pending) {
         pending = (async () => {
           if (await hasCommit(repositoryPath, headCommit)) return;
-          await options.gitRemote.fetchCheckpoint({ binding: options.binding(projectId), repositoryPath, checkpointRef });
+          await options.gitRemote.fetchCheckpoint({ binding: options.binding(projectId, spaceId), repositoryPath, checkpointRef });
           if (!await hasCommit(repositoryPath, headCommit)) {
             throw new Error(`Published checkpoint ${checkpointRef} does not contain saved branch head ${headCommit}`);
           }

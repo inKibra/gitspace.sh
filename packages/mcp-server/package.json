@@ -5,7 +5,7 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "scripts": {
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
     "test": "bun ../../scripts/test-isolated.ts test"
   },
   "dependencies": {

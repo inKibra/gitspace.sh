@@ -13,6 +13,7 @@ import {
 
 const bundle: EnvironmentBundle = {
   version: 1,
+  browser: { origins: [] },
   defaultProfile: 'backend',
   profiles: {
     base: { checks: ['git'], secrets: ['GITHUB_TOKEN'], values: ['LOG_LEVEL'] },

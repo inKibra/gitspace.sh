@@ -10,6 +10,7 @@ export default defineConfig({
   define: { GITSPACE_WORKER_SHA: JSON.stringify('test-inference-worker') },
   plugins: [
     cloudflareTest({
+      remoteBindings: false,
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
         serviceBindings: {
@@ -23,7 +24,7 @@ export default defineConfig({
           RELAY_URL: 'https://test.gitspace.sh',
           PLATFORM_URL: 'https://platform.test',
           PLATFORM_TOKEN: 'test-platform-token',
-          GITSPACE_OMP_BROKER_TOKEN: 'test-omp-broker-token',
+          GITSPACE_OMP_BROKER_TOKEN: 'test-credential-broker-token',
           RELAY_NAME: 'test',
           AUTH_MAX_SKEW_MS: 300_000,
           TUNNEL_HEADER_TIMEOUT_MS: 2_000,

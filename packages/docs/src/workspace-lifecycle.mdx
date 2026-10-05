@@ -13,7 +13,7 @@ Selecting a project or workspace does not run setup. Creating a workspace does n
 
 ## Configure a repository
 
-1. Open a workspace on an online machine. Its agent needs a configured model provider.
+1. Open a workspace with an online machine checkout for repository inspection and edits. Configure its inference profile in the cloud; the agent's conversation and provider access do not depend on that machine staying online.
 2. Ask: **Use the workspace-lifecycle skill to inspect this repository and propose its lifecycle configuration. Do not edit or execute yet.**
 3. Review the proposal. It should name the files to change, required tools, profiles, secret names, existing resource IDs, costs, and any cloud effects.
 4. Approve the repository edits. The agent can now write the agreed configuration and check its syntax. This does not authorize installs, repository checks, provisioning, or teardown.
@@ -49,7 +49,9 @@ If the original machine is gone, choose another authorized online runner in the 
 
 Before local removal, GitSpace drains services and runs dematerialization. It must save the checkpoint successfully before deleting the managed checkout. A failed dematerialization or checkpoint blocks deletion, not your access to the workspace. Fix the failure while the local files remain available.
 
-Failures in another workspace's session sync or another project's event sync do not fail your checkpoint. Your workspace's required session updates and your project's event log must still reach the cloud before GitSpace releases local files.
+Private runner and delegate checkouts have a separate drain step. GitSpace verifies the attachment generation, stops owned processes, confirms that any mount is gone, and refuses deletion while execution claims remain unresolved. A lost attachment fences work but does not authorize deleting files. Shared primary checkouts do not use this cleanup path.
+
+Pi conversation state lives in the cloud, not in the checkout. The checkpoint records its cloud session and conversation reference alongside the saved code and artifact state. Moving a checkout does not transfer ownership of the conversation to the destination machine.
 
 A fresh arrival recreates local state. Do not rely on files left behind on the previous machine, even when you return to it.
 
@@ -57,7 +59,8 @@ A fresh arrival recreates local state. Do not rely on files left behind on the p
 | --- | --- |
 | Git commits and branch; staged and unstaged tracked changes | Saved by a completed checkpoint |
 | Non-ignored untracked files | Saved by a completed checkpoint |
-| Agent conversation and GitSpace artifacts | Saved with supported workspace state |
+| Pi agent conversation | Kept in cloud runtime storage; the checkpoint records its reference |
+| GitSpace `local://` evidence artifacts | Saved separately from the code repository, with encrypted artifact storage |
 | Profile, values, approvals, script snapshots, bindings, provision identity, run records and logs | Kept in the cloud lifecycle ledger, outside the checkout |
 | Ignored `.env`, `node_modules`, caches, build output | Not checkpointed; recreate during materialization |
 | Machine packages and arbitrary home-directory files | Not workspace state; prepare again where needed |
@@ -68,6 +71,8 @@ A checkpoint is not a disk backup. If you keep a database only in an ignored loc
 </Warning>
 
 After an unexpected interruption, the last completed checkpoint remains the recovery limit for local work. An interrupted cloud command may have taken effect without reporting success. Inspect the provider and recorded bindings before authorizing recovery. GitSpace must not retry an uncertain cloud effect in the background.
+
+Cloud conversation recovery does not restart an unresolved shell command or lifecycle script. The machine supervisor reconciles recorded process identity and execution evidence. A disconnected machine may still be running the original effect.
 
 ## Interactive authentication
 
@@ -80,6 +85,8 @@ The terminal lists scripts in execution order, with each step's status and exit 
 The runner still owns the deadline, cancellation, and result. Closing the pane or reloading discards its private output but does not stop a running script. Reopening reconnects to that same process without replay. A broken connection also clears private output. The terminal never leaves a shell with the script's injected secrets.
 
 Input echo is disabled, and raw terminal input and output stay out of persistent logs and replay. Recorded results contain safe execution metadata, not the authentication conversation. Approved scripts may write credentials into protected, ignored local files. Those files are not checkpointed: expect to authenticate again after a move or session expiry. This feature does not share sessions across projects or machines.
+
+This machine-local authentication is for lifecycle scripts and their tools. Inference-provider login and refresh use the cloud credential vault instead; they do not depend on an Environment terminal or a connected machine.
 
 ## Recover a failed setup
 

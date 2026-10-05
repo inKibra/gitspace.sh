@@ -3,42 +3,6 @@ import { tenantPlatformJson } from './tenant-platform.js';
 import type { AccountStateDO, AccountRecord } from './account-state.js';
 import type { CredentialVaultDO, CredentialVaultResult } from './application.js';
 
-export interface ProfileBrokerIdentity {
-  profileId: string;
-  machineId: string;
-  generation: number;
-  capability: 'inference' | 'manage';
-}
-
-/** Distinct purpose/version: legacy enrollment bearers cannot authorize profile access. */
-export async function profileBrokerToken(secret: string, userId: string, identity: ProfileBrokerIdentity): Promise<string> {
-  if (!secret || !userId || typeof identity.profileId !== 'string' || !/^[A-Za-z0-9._-]{1,160}$/u.test(identity.profileId)
-    || !identity.machineId || identity.machineId.length > 160
-    || !Number.isSafeInteger(identity.generation) || identity.generation < 1
-    || !['inference', 'manage'].includes(identity.capability)) throw new Error('Broker identity is invalid');
-  const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(identity)))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
-  const payload = `gsip1.${encoded}`;
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${userId}\n${payload}`)));
-  return `${payload}.${btoa(String.fromCharCode(...signature)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')}`;
-}
-
-export async function verifyProfileBrokerToken(secret: string, userId: string, authorization: string | null): Promise<ProfileBrokerIdentity | null> {
-  const token = /^Bearer (gsip1\.([A-Za-z0-9_-]{1,2048}))\.([A-Za-z0-9_-]{43})$/u.exec(authorization ?? '');
-  if (!secret || !token) return null;
-  try {
-    const identity = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(token[2]!.replaceAll('-', '+').replaceAll('_', '/')), character => character.charCodeAt(0)))) as ProfileBrokerIdentity;
-    if (!identity || typeof identity.profileId !== 'string' || !/^[A-Za-z0-9._-]{1,160}$/u.test(identity.profileId)
-      || typeof identity.machineId !== 'string' || !identity.machineId || identity.machineId.length > 160
-      || !Number.isSafeInteger(identity.generation) || identity.generation < 1
-      || !['inference', 'manage'].includes(identity.capability)) return null;
-    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
-    const signature = Uint8Array.from(atob(token[3]!.replaceAll('-', '+').replaceAll('_', '/')), character => character.charCodeAt(0));
-    return await crypto.subtle.verify('HMAC', key, signature, new TextEncoder().encode(`${userId}\n${token[1]}`)) ? identity : null;
-  } catch { return null; }
-}
-
-
 /** Tenant ownership is immutable; platform control also fences existing subscriptions. */
 export async function activeAccount(env: Env, userId: string): Promise<CredentialVaultResult<AccountRecord>> {
   if (userId !== env.ACCOUNT_ID) return { status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account does not own this tenant' } };

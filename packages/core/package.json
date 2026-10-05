@@ -10,7 +10,7 @@
     "db:generate": "drizzle-kit generate",
     "db:check": "drizzle-kit check",
     "db:studio": "drizzle-kit studio",
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
     "test": "bun ../../scripts/test-isolated.ts test"
   },
   "dependencies": {

@@ -1,8 +1,16 @@
 /** Account authority operations have a separate batch queue from machine work.
  * A signed envelope cannot be split or rewritten after signing. */
 export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
+  'runtime.snapshot': true, 'runtime.submit': true, 'runtime.cancel': true,
+  'runtime.answer': true, 'runtime.watch': true,
+  'runtime.browserTrust': true, 'runtime.browserTargets': true, 'runtime.browserSelect': true,
+  'runtime.session': true, 'runtime.placement': true, 'runtime.qa': true,
+  'runtime.attachment.request': true,
+  'providers.login.start': true, 'providers.login.events': true,
+  'providers.login.respond': true, 'providers.login.cancel': true,
+  'providers.usage': true, 'providers.models': true,
   'settings.get': true, 'settings.update': true, 'settings.reserveHandle': true, 'settings.git.get': true,
-  'settings.omp.get': true, 'settings.events': true,
+  'settings.runtime.get': true, 'settings.runtime.set': true, 'settings.events': true,
   'inference.list': true, 'inference.create': true, 'inference.update': true,
   'inference.delete': true, 'inference.assign': true, 'inference.events': true,
   placements: true, 'session.locate': true,
@@ -20,6 +28,7 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'mcp.connections.list': true, 'mcp.connections.create': true, 'mcp.connections.update': true,
   'mcp.connections.delete': true, 'mcp.connections.status': true,
   'mcp.grants.list': true, 'mcp.grants.put': true, 'mcp.grants.delete': true,
+  'mcp.discover': true,
   'skills.list': true, 'skills.update': true,
   'secrets.list': true, 'secrets.put': true, 'secrets.delete': true,
   'secrets.account.list': true, 'secrets.account.put': true, 'secrets.account.delete': true,
@@ -42,11 +51,6 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'environment.events': true, 'environment.cancelRun': true,
 };
 
-/** Runtime metadata has a canonical cloud view only when no machine is online. */
-export const ACCOUNT_RUNTIME_RPC_PATHS: Readonly<Record<string, true>> = {
-  'settings.omp.get': true,
-  'providers.list': true,
-};
 
 /** Workspace reads use cloud state when there is no live holder.
  * Per-space queues remain separate from account mutations and runtime work. */

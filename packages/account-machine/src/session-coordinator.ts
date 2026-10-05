@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { watch } from 'node:fs';
 import { cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { parseTitleSlotLine } from '@oh-my-pi/pi-coding-agent/session/session-title-slot';
+import { LegacyTitleSlotSchema } from './legacy-transcript.js';
 import {
   LocalArtifactResolver,
   agentSessions,
@@ -20,12 +20,14 @@ import { AGENT_ISSUE_FAILURE_CODES, SessionProjectUnavailable } from '@gitspace/
 import { WorkspaceDomainError, type WorkspaceFailure } from '@gitspace/protocol-workspace';
 import { and, eq, inArray } from 'drizzle-orm';
 import { Result, type Result as ResultType } from 'better-result';
-import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpSessionControlView, OmpTranscriptEvent } from './omp-runtime.js';
-import type { PendingAskAnswer } from '../../account-omp/src/ask-bridge.js';
+import type { AgentRuntime, RuntimeEvent, RuntimeSession, SessionControlView, TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
+import type { PendingAskAnswer } from '@gitspace/protocol-runtime/session-controls';
+import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { buildSessionUsageReport, type SessionUsageReport } from './session-usage-report.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import { TranscriptIndex } from './transcript-index.js';
 import { withArtifactSyncDiagnostics } from './cloud-request-diagnostics.js';
+import type { PortableAgentSnapshot } from './portable-space-lifecycle.js';
 
 
 interface SessionArtifacts {
@@ -38,7 +40,7 @@ interface SessionArtifacts {
 }
 
 interface LiveSession extends SessionArtifacts {
-  runtime: OmpRuntimeSession;
+  runtime: RuntimeSession;
   generation: number;
   unsubscribe: () => void;
   activityUnsubscribe: () => void;
@@ -89,8 +91,8 @@ async function retainedSessionBytes(session: AgentSession): Promise<Uint8Array> 
   let version = 1;
   const ids = new Set<string>();
   for (const [index, line] of lines.entries()) {
-    if (index === 0 && parseTitleSlotLine(line)) continue;
     const entry: unknown = JSON.parse(line);
+    if (index === 0 && LegacyTitleSlotSchema.safeParse(entry).success) continue;
     if (!entry || typeof entry !== 'object' || !('type' in entry) || typeof entry.type !== 'string' || !entry.type) {
       throw new Error(`Retained session has an invalid entry at line ${index + 1}`);
     }
@@ -121,7 +123,7 @@ async function retainedSessionBytes(session: AgentSession): Promise<Uint8Array> 
   return bytes;
 }
 
-function serializableEvent(event: OmpRuntimeEvent): Record<string, unknown> {
+function serializableEvent(event: RuntimeEvent): Record<string, unknown> {
   try {
     return JSON.parse(JSON.stringify(event)) as Record<string, unknown>;
   } catch {
@@ -144,12 +146,7 @@ const PERSISTED_TRANSCRIPT_EVENTS: Readonly<Record<string, true>> = {
 
 
 
-export interface CoordinatorPortableAgentSnapshot {
-  sessionId: string;
-  ompSessionId: string;
-  ompSession: Uint8Array;
-  resumePending?: boolean;
-}
+export type CoordinatorPortableAgentSnapshot = PortableAgentSnapshot;
 
 export interface CoordinatorPortableArtifactSnapshot {
   generation: number;
@@ -183,12 +180,12 @@ export class MachineSessionCoordinator {
   private readonly runtimeId = crypto.randomUUID();
   private readonly recoveryControllers = new Map<string, AbortController>();
   private readonly automaticAttempts = new Set<string>();
-  private readonly disposalFences = new Map<string, OmpRuntimeSession>();
+  private readonly disposalFences = new Map<string, RuntimeSession>();
 
   constructor(
     private readonly database: GitSpaceDatabase,
     private readonly artifacts: LocalArtifactResolver,
-    private readonly omp: OmpRuntime,
+    private readonly agentRuntime: AgentRuntime,
     private readonly machineId: string,
     private readonly runtimeRoot: string,
     private readonly events?: ProjectEventWriter & { flush?(projectId?: string): Promise<void> },
@@ -236,7 +233,7 @@ export class MachineSessionCoordinator {
     this.assertSessionPlacement(spaceId, generation, allowOpening);
     const recordId = existing?.id ?? crypto.randomUUID();
     let recoveryToken = this.beginOperation(spaceId, 'recovery');
-    let runtime: OmpRuntimeSession | undefined;
+    let runtime: RuntimeSession | undefined;
     let savedSession: Uint8Array | undefined;
     const controller = new AbortController();
     this.recoveryControllers.set(spaceId, controller);
@@ -271,7 +268,7 @@ export class MachineSessionCoordinator {
       if (existing) {
         await this.disposeUnusableSession(existing.id);
         check();
-        savedSession = await bounded(retainedSessionBytes(existing));
+        if (!existing.sessionFile.startsWith('cloud-session://')) savedSession = await bounded(retainedSessionBytes(existing));
       }
       const retainedFailure = existing?.health.issues.execution?.failure;
       const state = await bounded(this.prepareSessionArtifacts(recordId, target.capability, !!existing, check));
@@ -284,19 +281,20 @@ export class MachineSessionCoordinator {
         executionFailure: retainedFailure?.domain === 'agent' ? retainedFailure : null,
       };
       this.assertSessionPlacement(spaceId, generation, allowOpening);
-      runtime = existing ? await this.omp.open({ ...input, sessionFile: existing.sessionFile }, controller.signal) : await this.omp.create(input, controller.signal);
+      runtime = existing ? await this.agentRuntime.open({ ...input, sessionFile: existing.sessionFile }, controller.signal) : await this.agentRuntime.create(input, controller.signal);
       check();
-      if (existing && runtime.id !== existing.ompSessionId) {
-        throw new Error(`OMP session id changed from ${existing.ompSessionId} to ${runtime.id}`);
-      }
-      if (existing && resolve(runtime.sessionFile) !== resolve(existing.sessionFile)) {
-        throw new Error('OMP opened a different session file instead of the retained canonical history');
+      if (existing && (existing.sessionFile.startsWith('cloud-session://') || !runtime.sessionFile.startsWith('cloud-session://'))) {
+        if (runtime.id !== existing.ompSessionId) throw new Error(`Conversation id changed from ${existing.ompSessionId} to ${runtime.id}`);
+        if (runtime.sessionFile !== existing.sessionFile) throw new Error('Runtime opened a different retained conversation');
       }
       const now = new Date().toISOString();
       const record = existing ?? this.database.orm.insert(agentSessions).values({
         id: recordId, spaceId, ompSessionId: runtime.id, sessionFile: runtime.sessionFile,
         state: 'opening', lastEventOffset: 0, createdAt: now, updatedAt: now,
       }).returning().get();
+      if (existing && !existing.sessionFile.startsWith('cloud-session://') && runtime.sessionFile.startsWith('cloud-session://')) {
+        this.database.orm.update(agentSessions).set({ ompSessionId: runtime.id, sessionFile: runtime.sessionFile }).where(eq(agentSessions.id, existing.id)).run();
+      }
       if (!existing) {
         const begun = beginAgentOperation(record.health, 'recovery', recoveryToken.operationId);
         this.commitAgentState(record, { health: begun.state });
@@ -306,7 +304,7 @@ export class MachineSessionCoordinator {
       this.assertSessionPlacement(spaceId, generation, allowOpening);
       await bounded(this.adopt(record, runtime, state.artifactsDir, target.capability, state.artifactBaseline, generation, check));
       this.assertSessionPlacement(spaceId, generation, allowOpening);
-      if (!runtime.isAvailable()) throw new AgentDomainError(runtime.activity().failure ?? { domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP worker disconnected while opening the session', context: { sessionId: recordId } });
+      if (!runtime.isAvailable()) throw new AgentDomainError(runtime.activity().failure ?? { domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'Cloud session projection disconnected while opening', context: { sessionId: recordId } });
       if (this.quiesced.has(recordId)) throw new Error('Space began closing while the agent was opening');
       const current = this.get(recordId)!;
       this.commitAgentState(current, { state: 'active' });
@@ -449,7 +447,7 @@ export class MachineSessionCoordinator {
     }
   }
 
-  async control(sessionId: string): Promise<OmpSessionControlView> {
+  async control(sessionId: string): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('read session controls', new Error('Session is not active'), sessionId);
     return live.runtime.control();
@@ -467,72 +465,72 @@ export class MachineSessionCoordinator {
     return { ...await live.runtime.saveAgentDefinition(input), sessionId };
   }
 
-  async cycleRole(sessionId: string, direction: 'forward' | 'backward'): Promise<OmpSessionControlView> {
+  async cycleRole(sessionId: string, direction: 'forward' | 'backward'): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('cycle session role', new Error('Session is not active'), sessionId);
     return live.runtime.cycleRole(direction);
   }
 
 
-  async setModel(sessionId: string, provider: string, model: string): Promise<OmpSessionControlView> {
+  async setModel(sessionId: string, provider: string, model: string): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('set session model', new Error('Session is not active'), sessionId);
     return live.runtime.setModel(provider, model);
   }
-  async setThinking(sessionId: string, thinking: string | null): Promise<OmpSessionControlView> {
+  async setThinking(sessionId: string, thinking: string | null): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('set session thinking', new Error('Session is not active'), sessionId);
     return live.runtime.setThinking(thinking);
   }
 
-  async setFast(sessionId: string, enabled: boolean): Promise<OmpSessionControlView> {
+  async setFast(sessionId: string, enabled: boolean): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('set session fast mode', new Error('Session is not active'), sessionId);
     return live.runtime.setFast(enabled);
   }
 
-  async setApproval(sessionId: string, approvalMode: 'always-ask' | 'write' | 'yolo'): Promise<OmpSessionControlView> {
+  async setApproval(sessionId: string, approvalMode: 'always-ask' | 'write' | 'yolo'): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('set session approval', new Error('Session is not active'), sessionId);
     return live.runtime.setApproval(approvalMode);
   }
 
-  async setGoal(sessionId: string, input: { enabled: boolean; objective?: string }): Promise<OmpSessionControlView> {
+  async setGoal(sessionId: string, input: { enabled: boolean; objective?: string }): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('set session goal', new Error('Session is not active'), sessionId);
     return live.runtime.setGoal(input);
   }
 
-  async compact(sessionId: string, instructions?: string): Promise<OmpSessionControlView> {
+  async compact(sessionId: string, instructions?: string): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('compact session', new Error('Session is not active'), sessionId);
     return live.runtime.compact(instructions);
   }
 
-  async clearQueue(sessionId: string): Promise<OmpSessionControlView> {
+  async clearQueue(sessionId: string): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('clear session queue', new Error('Session is not active'), sessionId);
     return live.runtime.clearQueue();
   }
-  async removeQueuedMessage(sessionId: string, kind: 'steering' | 'followUp', index: number): Promise<OmpSessionControlView> {
+  async removeQueuedMessage(sessionId: string, kind: 'steering' | 'followUp', index: number): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('remove queued message', new Error('Session is not active'), sessionId);
     return live.runtime.removeQueuedMessage(kind, index);
   }
 
-  async promoteQueuedMessage(sessionId: string, index: number): Promise<OmpSessionControlView> {
+  async promoteQueuedMessage(sessionId: string, index: number): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('steer queued message', new Error('Session is not active'), sessionId);
     return live.runtime.promoteQueuedMessage(index);
   }
 
-  async answerAsk(sessionId: string, id: string, answers: readonly PendingAskAnswer[]): Promise<OmpSessionControlView> {
+  async answerAsk(sessionId: string, id: string, answers: readonly PendingAskAnswer[]): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('answer ask request', new Error('Session is not active'), sessionId);
     return live.runtime.answerAsk(id, answers);
   }
 
-  async stop(sessionId: string): Promise<OmpSessionControlView> {
+  async stop(sessionId: string): Promise<SessionControlView> {
     const session = this.get(sessionId);
     if (session && this.opening.has(session.spaceId)) {
       this.quiesced.add(sessionId);
@@ -547,19 +545,21 @@ export class MachineSessionCoordinator {
     return live.runtime.stop();
   }
 
-  async navigateTree(sessionId: string, entryId: string): Promise<OmpSessionControlView> {
+  async navigateTree(sessionId: string, entryId: string): Promise<SessionControlView> {
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('navigate session tree', new Error('Session is not active'), sessionId);
     const control = await live.runtime.navigateTree(entryId);
     await live.runtime.persist();
     const index = this.indexFor(sessionId, sessionId);
-    await index.syncSourceFile(live.runtime.sessionFile);
-    index.navigateBranch(control.historyAnchorId);
+    if (live.runtime.sessionFile.startsWith('cloud-session://')) index.seed(await this.agentRuntime.transcript(live.runtime.sessionFile));
+    else { await index.syncSourceFile(live.runtime.sessionFile); index.navigateBranch(control.historyAnchorId); }
     const createdAt = new Date().toISOString();
     this.liveTranscripts.set(sessionId, index);
     this.database.orm.update(agentSessions).set({
       lastEventOffset: index.eventCount,
       updatedAt: createdAt,
+      ompSessionId: live.runtime.id,
+      sessionFile: live.runtime.sessionFile,
     }).where(eq(agentSessions.id, sessionId)).run();
     return control;
   }
@@ -630,7 +630,7 @@ export class MachineSessionCoordinator {
     this.publishCanonicalSession(space.projectId, session.id);
   }
 
-  private async disposeSessionRuntime(sessionId: string, runtime: OmpRuntimeSession): Promise<void> {
+  private async disposeSessionRuntime(sessionId: string, runtime: RuntimeSession): Promise<void> {
     this.disposalFences.set(sessionId, runtime);
     const live = this.live.get(sessionId);
     if (live?.runtime === runtime) {
@@ -700,13 +700,13 @@ export class MachineSessionCoordinator {
     }).returning().get();
   }
 
-  async transcript(sessionId: string): Promise<OmpTranscriptEvent[]> {
+  async transcript(sessionId: string): Promise<TranscriptEvent[]> {
     const session = this.get(sessionId);
     if (!session) throw runtimeError('transcript', new Error('Session does not exist'), sessionId);
     const cached = this.liveTranscripts.get(sessionId);
     if (cached) return cached.snapshot();
     try {
-      return await this.omp.transcript(session.sessionFile);
+      return await this.agentRuntime.transcript(session.sessionFile);
     } catch (error) {
       if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return [];
       throw error;
@@ -730,7 +730,8 @@ export class MachineSessionCoordinator {
     if (live) return live;
     const index = this.indexFor(sessionId, sessionId);
     try {
-      await index.syncFile(session.sessionFile);
+      if (session.sessionFile.startsWith('cloud-session://')) index.seed(await this.agentRuntime.transcript(session.sessionFile));
+      else await index.syncFile(session.sessionFile);
     } catch (error) {
       if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') throw error;
       if (!index.initialized || index.eventCount > 0) index.seed([]);
@@ -738,12 +739,13 @@ export class MachineSessionCoordinator {
     return index;
   }
 
-  private async seedRuntimeTranscript(sessionId: string, runtime: OmpRuntimeSession, check?: () => void): Promise<TranscriptIndex> {
+  private async seedRuntimeTranscript(sessionId: string, runtime: RuntimeSession, check?: () => void): Promise<TranscriptIndex> {
     await runtime.persist();
     check?.();
     const index = this.indexFor(sessionId, sessionId);
     try {
-      await index.syncFile(runtime.sessionFile, true);
+      if (runtime.sessionFile.startsWith('cloud-session://')) index.seed(await this.agentRuntime.transcript(runtime.sessionFile));
+      else await index.syncFile(runtime.sessionFile, true);
       check?.();
     } catch (error) {
       if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') throw error;
@@ -769,7 +771,9 @@ export class MachineSessionCoordinator {
     if (runtime) await runtime.persist();
     const index = this.indexFor(sessionId, sessionId);
     try {
-      await index.syncSourceFile(runtime?.sessionFile ?? session.sessionFile);
+      const source = runtime?.sessionFile ?? session.sessionFile;
+      if (source.startsWith('cloud-session://')) index.seed(await this.agentRuntime.transcript(source));
+      else await index.syncSourceFile(source);
     } catch (error) {
       if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') throw error;
       // An empty runtime may not have written JSONL yet. Its live pending rows
@@ -854,12 +858,12 @@ export class MachineSessionCoordinator {
       }
     });
   }
-  async subagentTranscript(sessionId: string, subagentId: string): Promise<OmpTranscriptEvent[]> {
+  async subagentTranscript(sessionId: string, subagentId: string): Promise<TranscriptEvent[]> {
     const session = this.get(sessionId);
     if (!session || !/^[A-Za-z0-9._-]{1,128}$/u.test(subagentId)) throw runtimeError('subagent transcript', new Error('Subagent session does not exist'), sessionId);
     const path = join(session.sessionFile.replace(/\.jsonl$/u, ''), `${subagentId}.jsonl`);
     try {
-      return await this.omp.transcript(path);
+      return await this.agentRuntime.transcript(path);
     } catch (error) {
       throw runtimeError('subagent transcript', error, sessionId);
     }
@@ -910,6 +914,11 @@ export class MachineSessionCoordinator {
     if (!session) throw runtimeError('quiesce', new Error('Space session does not exist'));
     const live = this.live.get(session.id);
     this.quiesced.add(session.id);
+    if (session.sessionFile.startsWith('cloud-session://')) {
+      await this.agentRuntime.checkpointReference(session.sessionFile);
+      await Promise.all(this.activePrompts.get(session.id) ?? []);
+      return;
+    }
     if (!live?.runtime.isAvailable()) {
       const denied = agentCheckpointFailure({ sessionId: session.id, activity: session.activity, pendingAsk: false, steering: 0, followUp: 0 });
       if (denied) throw new AgentDomainError(denied);
@@ -961,7 +970,9 @@ export class MachineSessionCoordinator {
       if (!live.runtime.isAvailable()) throw runtimeError('checkpoint', new Error('Agent disconnected while quiescing; retry close to capture retained data'), session.id);
       await live.runtime.persist();
     }
-    const ompSession = await retainedSessionBytes(session);
+    const agent: PortableAgentSnapshot = session.sessionFile.startsWith('cloud-session://')
+      ? { kind: 'cloud', sessionId: session.id, ...await this.agentRuntime.checkpointReference(session.sessionFile), resumePending: this.get(session.id)?.resumePending ?? false }
+      : { kind: 'legacy', sessionId: session.id, ompSessionId: session.ompSessionId, ompSession: await retainedSessionBytes(session), resumePending: this.get(session.id)?.resumePending ?? false };
     const state = live ?? await this.prepareSessionArtifacts(session.id, capability, true);
     const generation = await this.syncSessionArtifacts(state);
     const scope = this.database.orm.select().from(artifactScopes).where(eq(artifactScopes.spaceId, spaceId)).get();
@@ -973,12 +984,7 @@ export class MachineSessionCoordinator {
     await this.events?.flush?.(space.projectId);
     if (verified.status === 'error') throw runtimeError('checkpoint artifacts', verified.error, session.id);
     return {
-      agent: {
-        sessionId: session.id,
-        ompSessionId: session.ompSessionId,
-        ompSession,
-        resumePending: this.get(session.id)?.resumePending ?? false,
-      },
+      agent,
       artifacts: { generation, manifest: new TextEncoder().encode(JSON.stringify({ version: 2, scope })) },
     };
   }
@@ -998,8 +1004,10 @@ export class MachineSessionCoordinator {
     const sessions = this.list(spaceId);
     const paths = new Set<string>();
     for (const session of sessions) {
-      await this.assertCleanupPath(session.sessionFile);
-      paths.add(session.sessionFile);
+      if (!session.sessionFile.startsWith('cloud-session://')) {
+        await this.assertCleanupPath(session.sessionFile);
+        paths.add(session.sessionFile);
+      }
       const children = session.sessionFile.replace(/\.jsonl$/u, '');
       if (children !== session.sessionFile) {
         await this.assertCleanupPath(children);
@@ -1165,8 +1173,12 @@ export class MachineSessionCoordinator {
     const space = this.database.getSpace(input.spaceId);
     if (!space) throw runtimeError('restore space', new Error('Space metadata does not exist'));
     let session: AgentSession | null | undefined = this.list(input.spaceId)[0];
+    const conversationId = input.agent.kind === 'cloud' ? input.agent.conversationId : input.agent.ompSessionId;
+    const sessionFile = input.agent.kind === 'cloud'
+      ? `cloud-session://${encodeURIComponent(space.projectId)}/${encodeURIComponent(input.spaceId)}/${encodeURIComponent(conversationId)}`
+      : join(this.runtimeRoot, 'portable-sessions', `${input.agent.sessionId}.jsonl`);
     const canonical = await this.canonicalSessions?.get(space.projectId, input.agent.sessionId);
-    if (canonical && (canonical.workspaceId !== input.spaceId || canonical.ompSessionId !== input.agent.ompSessionId)) {
+    if (canonical && (canonical.workspaceId !== input.spaceId || canonical.ompSessionId !== conversationId)) {
       throw new AgentDomainError({ domain: 'agent', code: 'AGENT_HISTORY_INVALID', message: 'Portable agent identity does not match its canonical session', context: { spaceId: input.spaceId, sessionId: input.agent.sessionId } });
     }
     const health = session && (!canonical || session.health.revision >= canonical.health.revision)
@@ -1177,8 +1189,8 @@ export class MachineSessionCoordinator {
       this.database.orm.insert(agentSessions).values({
         id: input.agent.sessionId,
         spaceId: input.spaceId,
-        ompSessionId: input.agent.ompSessionId,
-        sessionFile: join(this.runtimeRoot, 'portable-sessions', `${input.agent.sessionId}.jsonl`),
+        ompSessionId: conversationId,
+        sessionFile,
         state: 'closed',
         lastEventOffset: 0,
         resumePending: input.agent.resumePending ?? false,
@@ -1190,11 +1202,16 @@ export class MachineSessionCoordinator {
       session = this.get(input.agent.sessionId);
     }
     if (!session) throw runtimeError('restore space', new Error('Agent projection could not be created'), input.agent.sessionId);
-    if (session.id !== input.agent.sessionId || session.ompSessionId !== input.agent.ompSessionId) {
+    if (session.id !== input.agent.sessionId || session.ompSessionId !== conversationId) {
       throw runtimeError('restore space', new Error('Portable agent identity does not match canonical session'), session.id);
     }
-    await mkdir(dirname(session.sessionFile), { recursive: true });
-    await writeFile(session.sessionFile, input.agent.ompSession);
+    if (input.agent.kind === 'legacy') {
+      await mkdir(dirname(session.sessionFile), { recursive: true });
+      await writeFile(session.sessionFile, input.agent.ompSession);
+    } else {
+      const reference = await this.agentRuntime.checkpointReference(sessionFile);
+      if (reference.cursor < input.agent.cursor) throw new Error('Cloud conversation has not reached the checkpoint revision');
+    }
     this.liveTranscripts.delete(session.id);
     const transcript = await this.sessionTranscriptIndex(session.id);
     const artifactManifest = JSON.parse(new TextDecoder().decode(input.artifacts.manifest)) as { version: number; scope?: ArtifactScope };
@@ -1212,15 +1229,15 @@ export class MachineSessionCoordinator {
     return this.get(session.id)!;
   }
 
-  async reloadOmpSettings(): Promise<void> {
-    await Promise.all([...this.live.values()].map((session) => session.runtime.reloadSettings?.() ?? Promise.resolve()));
+  async reloadSettings(): Promise<void> {
+    await Promise.all([...this.live.values()].map((session) => session.runtime.reloadSettings()));
   }
 
   async instructionsChanged(projectId: string, spaceId: string): Promise<void> {
     await Promise.all([...this.live.values()].filter((live) =>
       live.capability.projectId === projectId
       && (live.capability.kind === 'workspace' ? live.capability.workspaceId : live.capability.projectId) === spaceId,
-    ).map((live) => live.runtime.instructionsChanged?.() ?? Promise.resolve()));
+    ).map((live) => live.runtime.instructionsChanged()));
   }
 
   /** Reconcile a committed phase without opening a closed or dormant session. */
@@ -1418,7 +1435,7 @@ export class MachineSessionCoordinator {
 
   private async adopt(
     record: AgentSession,
-    runtime: OmpRuntimeSession,
+    runtime: RuntimeSession,
     artifactsDir: string,
     capability: ArtifactCapability,
     artifactBaseline: Map<string, string>,
@@ -1458,7 +1475,7 @@ export class MachineSessionCoordinator {
     check();
   }
 
-  private updateActivity(sessionId: string, capability: ArtifactCapability, runtime: OmpRuntimeSession, generation: number, activity: SessionActivity, failure: AgentFailure | null = null): void {
+  private updateActivity(sessionId: string, capability: ArtifactCapability, runtime: RuntimeSession, generation: number, activity: SessionActivity, failure: AgentFailure | null = null): void {
     let current = this.get(sessionId);
     const live = this.live.get(sessionId);
     if (!current || (live && live.runtime !== runtime)) return;
@@ -1499,7 +1516,18 @@ export class MachineSessionCoordinator {
     }, changes);
   }
 
-  private appendEvent(sessionId: string, event: OmpRuntimeEvent): void {
+  private appendEvent(sessionId: string, event: RuntimeEvent): void {
+    if (event.type === 'cloud_snapshot') {
+      const snapshot = RuntimeSnapshotSchema.parse(event.snapshot);
+      const live = this.live.get(sessionId);
+      const conversation = snapshot.conversations.find(value => value.id === live?.runtime.id);
+      if (!conversation) return;
+      const index = this.liveTranscripts.get(sessionId) ?? this.indexFor(sessionId, sessionId);
+      index.seed(conversation.messages.map((message, offset) => ({ ordinal: offset + 1, kind: 'message_end', payload: { message }, createdAt: message.createdAt })));
+      this.liveTranscripts.set(sessionId, index);
+      this.database.orm.update(agentSessions).set({ lastEventOffset: index.eventCount, updatedAt: new Date().toISOString() }).where(eq(agentSessions.id, sessionId)).run();
+      return;
+    }
     const liveUpdate = event.type === 'message_update' || event.type === 'tool_execution_update';
     if (!liveUpdate && !PERSISTED_TRANSCRIPT_EVENTS[event.type]) return;
     const index = this.liveTranscripts.get(sessionId) ?? this.indexFor(sessionId, sessionId);
@@ -1781,7 +1809,7 @@ export class MachineSessionCoordinator {
 
   private readonly resumeAcceptedCallbacks = new Map<string, () => void>();
 
-  private async resumeIfPending(record: AgentSession, runtime: OmpRuntimeSession, capability: ArtifactCapability): Promise<void> {
+  private async resumeIfPending(record: AgentSession, runtime: RuntimeSession, capability: ArtifactCapability): Promise<void> {
     if (!record.resumePending) return;
     this.recoveringSessions.add(record.id);
     const accepted = Promise.withResolvers<void>();

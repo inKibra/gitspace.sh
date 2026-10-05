@@ -6,5 +6,4 @@ export * from './sqlite-diagnostics.js';
 export * from './machine-bootstrap-migration.js';
 export * from './policies/frontend.js';
 export * from './policies/machine.js';
-export * from './policies/omp.js';
 export * from './policies/shared.js';

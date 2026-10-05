@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDeploymentPlan, DeploymentJournal, hashArtifactPath } from '@gitspace/deployment';
 import { ReplacementEnvironment, environmentLaunchResponseSchema, environmentStatusSchema } from '../src/index.js';
-import { nativeHostAbi } from '@gitspace/account-omp/manifest';
+import { nativeHostAbi } from '@gitspace/deployment/manifest';
 import { GIT_LFS_DECLARATION, GIT_LFS_PATH, nativeFileDigest } from '../../deployment/src/native-runtime.js';
 
 const roots: string[] = [];
@@ -17,12 +17,9 @@ afterEach(async () => {
 });
 
 async function nativeFixture(path: string): Promise<void> {
-  await mkdir(join(path, 'native'), { recursive: true });
-  const binary = join(path, 'native/walgit');
-  await writeFile(binary, '#!/bin/sh\necho walgit-test\n', { mode: 0o755 });
+  await mkdir(path, { recursive: true });
   await writeFile(join(path, 'machine-native.json'), JSON.stringify({
-    version: 1, bunVersion: Bun.version, abi: nativeHostAbi(),
-    walgit: { source: 'release', path: 'native/walgit', ...await nativeFileDigest(binary), provenance: null },
+    version: 2, bunVersion: Bun.version, abi: nativeHostAbi(),
   }));
 }
 
@@ -51,7 +48,6 @@ describe('replacement environment host routes', () => {
       webPort: 0,
       machineId: 'machine-a',
       artifactKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1),
-      ompAgentDir: join(root, 'omp'),
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -64,7 +60,7 @@ describe('replacement environment host routes', () => {
     const unauthorized = await fetch(`${environment.hostUrl}/__environment/status`);
     expect(unauthorized.status).toBe(401);
     const before = environmentStatusSchema.parse(await (await fetch(`${environment.hostUrl}/__environment/status`, { headers: { authorization: 'Bearer control-token' } })).json());
-    expect(before).toEqual({ machineHash: null, frontendHash: null, machineReleaseSha: null, ompReleaseSha: null, frontendReleaseSha: null, lastLaunch: null });
+    expect(before).toEqual({ machineHash: null, frontendHash: null, machineReleaseSha: null, frontendReleaseSha: null, lastLaunch: null });
 
     const launched = await fetch(`${environment.hostUrl}/__environment/launch`, {
       method: 'POST',
@@ -74,7 +70,7 @@ describe('replacement environment host routes', () => {
     expect(launched.status).toBe(200);
     expect(environmentLaunchResponseSchema.parse(await launched.json())).toEqual({ status: 'applied', hash, error: null });
     const after = environmentStatusSchema.parse(await (await fetch(`${environment.hostUrl}/__environment/status`, { headers: { authorization: 'Bearer control-token' } })).json());
-    expect(after).toEqual({ machineHash: null, frontendHash: hash, machineReleaseSha: null, ompReleaseSha: null, frontendReleaseSha: 'rel-1', lastLaunch: { sha: 'rel-1', entrypoint: 'frontend', target: 'frontend', status: 'applied', error: null } });
+    expect(after).toEqual({ machineHash: null, frontendHash: hash, machineReleaseSha: null, frontendReleaseSha: 'rel-1', lastLaunch: { sha: 'rel-1', entrypoint: 'frontend', target: 'frontend', status: 'applied', error: null } });
     expect(await (await fetch(`${environment.hostUrl}/index.html`)).text()).toBe('<html>release 1</html>');
 
     // A tampered artifact fails verification at stage; the engine reports the failure instead of throwing.
@@ -94,7 +90,7 @@ describe('replacement environment host routes', () => {
     expect(await (await fetch(`${environment.hostUrl}/index.html`)).text()).toBe('<html>release 1</html>');
   });
 
-  it('keeps OMP identity independent of machine replacement and rejects OMP host launches', async () => {
+  it('rejects retired release targets without changing the running machine', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-environment-machine-'));
     roots.push(root);
     const environment = new ReplacementEnvironment({
@@ -105,7 +101,6 @@ describe('replacement environment host routes', () => {
       webPort: 0,
       machineId: 'machine-a',
       artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'),
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -127,7 +122,7 @@ describe('replacement environment host routes', () => {
       revision: 'machine-rel-1',
       dirty: false,
     });
-    expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: 'machine-rel-1', ompReleaseSha: null });
+    expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: 'machine-rel-1' });
 
     for (const request of [
       { target: 'omp', applies: ['machine'] },
@@ -138,13 +133,10 @@ describe('replacement environment host routes', () => {
         headers: { authorization: 'Bearer control-token', 'content-type': 'application/json' },
         body: JSON.stringify({ entrypoint: 'machine-daemon', ...request, path: candidate, hash, sha: 'omp-rel-2' }),
       });
-      expect(rejected.status).toBe(409);
-      expect(environmentLaunchResponseSchema.parse(await rejected.json()).status).toBe('failed');
+      expect(rejected.status).toBe(400);
       expect(environment.status()).toMatchObject({
         machineHash: hash,
         machineReleaseSha: 'machine-rel-1',
-        ompReleaseSha: null,
-        lastLaunch: { sha: 'omp-rel-2', target: request.target, status: 'failed' },
       });
     }
   });
@@ -160,7 +152,6 @@ describe('replacement environment host routes', () => {
       webPort: 0,
       machineId: 'machine-a',
       artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'),
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -210,7 +201,6 @@ describe('replacement environment host routes', () => {
       frontendHash: channelHash,
       frontendReleaseSha: null,
       machineHash: null,
-      ompReleaseSha: null,
       lastLaunch: { sha: null, target: 'frontend', status: 'applied' },
     });
     const rejectedOmp = await fetch(`${environment.hostUrl}/__environment/channel`, {
@@ -230,7 +220,6 @@ describe('replacement environment host routes', () => {
       webPort: 0,
       machineId: 'machine-a',
       artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'),
       controlToken: 'control-token',
       environment: { GITSPACE_MACHINE_RELEASE_SHA: 'stale-custom', GITSPACE_RELEASE_SHA: 'legacy-custom' },
     });
@@ -267,7 +256,7 @@ describe('replacement environment host routes', () => {
     const channel = JSON.parse(await readFile(join(root, 'machine-boot.json'), 'utf8'));
     expect(channel).toMatchObject({ sha: null, legacySha: null });
     expect(channel.pid).not.toBe(custom.pid);
-    expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: null, ompReleaseSha: null });
+    expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: null });
   });
 
   it('starts each machine generation with its own bundled git-lfs for machine git and agent sessions', async () => {
@@ -275,18 +264,17 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'test-machine-git-lfs', root, repositoryRoot: root, rpcPort: 0, webPort: 0, machineId: 'machine-a',
-      artifactKey: new Uint8Array(32).fill(1), ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      artifactKey: new Uint8Array(32).fill(1), controlToken: 'control-token',
     });
     environments.push(environment);
     const booted: Array<{ generation: string; path: string; machineGit: string; agentGit: string }> = [];
     for (const label of ['generation-a', 'generation-b']) {
       const candidate = join(root, label);
       await mkdir(candidate);
-      // Machine git helpers spawn without `env` (Bun then uses the startup environment); OMP children get ompChildEnvironment().
+      // Both inherited and explicit child environments resolve this generation's bundled tools.
       await writeFile(join(candidate, 'machine.js'), `
-        import { ompChildEnvironment } from ${JSON.stringify(join(import.meta.dir, '../src/omp-runtime.ts'))};
         const machine = Bun.spawnSync(['git', 'lfs', 'version'], { stdout: 'pipe', stderr: 'pipe' });
-        const agent = Bun.spawnSync(['git', 'lfs', 'version'], { env: ompChildEnvironment(), stdout: 'pipe', stderr: 'pipe' });
+        const agent = Bun.spawnSync(['git', 'lfs', 'version'], { env: { ...process.env }, stdout: 'pipe', stderr: 'pipe' });
         await Bun.write(process.env.GITSPACE_ENVIRONMENT_ROOT + '/machine-tools.json', JSON.stringify({
           generation: process.env.GITSPACE_MACHINE_RUNTIME_PATH,
           path: process.env.PATH,
@@ -317,7 +305,7 @@ describe('replacement environment host routes', () => {
     const options = {
       id: 'restart-test', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
       machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      controlToken: 'control-token',
     };
     for (const label of ['channel', 'selected']) {
       const path = join(root, label);
@@ -370,7 +358,7 @@ describe('replacement environment host routes', () => {
     const environment = new ReplacementEnvironment({
       id: 'native-rollback', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
       machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      controlToken: 'control-token',
     });
     environments.push(environment);
     for (const [label, healthy] of [['previous', true], ['next', false], ['updated', true]] as const) {
@@ -434,7 +422,7 @@ describe('replacement environment host routes', () => {
     const environment = new ReplacementEnvironment({
       id: 'wal-checkpoint', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
       machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      controlToken: 'control-token',
     });
     environments.push(environment);
     const database = new Database(join(root, 'gitspace.db'));
@@ -477,7 +465,7 @@ describe('replacement environment host routes', () => {
     const environment = new ReplacementEnvironment({
       id: 'journal-migration', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
       machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      controlToken: 'control-token',
     });
     environments.push(environment);
     const migrated = new DeploymentJournal(join(root, 'deployment.db'));
@@ -500,7 +488,7 @@ describe('replacement environment host routes', () => {
     const environment = new ReplacementEnvironment({
       id: 'retire-refusal', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
       machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      controlToken: 'control-token',
     });
     environments.push(environment);
     const previous = join(root, 'previous');
@@ -529,7 +517,7 @@ describe('replacement environment host routes', () => {
     const environment = new ReplacementEnvironment({
       id: 'shutdown-timeout', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
       machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      controlToken: 'control-token',
     });
     environments.push(environment);
     const previous = join(root, 'previous');
@@ -546,9 +534,12 @@ describe('replacement environment host routes', () => {
     await environment.deploy({ artifacts: [artifact], releaseSha: 'previous', revision: 'previous', dirty: false });
     const pid = Number(await readFile(join(root, 'pid'), 'utf8'));
     const originalSetTimeout = globalThis.setTimeout;
-    const deadline = spyOn(globalThis, 'setTimeout').mockImplementation(
-      (handler, delay, ...args) => originalSetTimeout(handler, delay === 120_000 ? 30 : delay, ...args),
-    );
+    const deadline = spyOn(globalThis, 'setTimeout').mockImplementation(new Proxy(originalSetTimeout, {
+      apply(target, receiver, args) {
+        if (args[1] === 120_000) args[1] = 30;
+        return Reflect.apply(target, receiver, args);
+      },
+    }));
     try {
       await expect(environment.deploy({ artifacts: [artifact], releaseSha: 'next', revision: 'next', dirty: false })).rejects.toThrow();
       expect(process.kill(pid, 0)).toBe(true);
@@ -567,7 +558,7 @@ describe('replacement environment host routes', () => {
     const environment = new ReplacementEnvironment({
       id: 'readiness-failure', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
       machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      controlToken: 'control-token',
     });
     environments.push(environment);
     const previous = join(root, 'previous');
@@ -604,7 +595,7 @@ describe('replacement environment host routes', () => {
     const environment = new ReplacementEnvironment({
       id: 'lock-evidence', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
       machineId: 'lock-proof-machine', artifactKey: new Uint8Array(32).fill(1),
-      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+      controlToken: 'control-token',
     });
     environments.push(environment);
     const candidate = join(root, 'candidate');

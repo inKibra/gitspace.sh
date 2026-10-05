@@ -14,6 +14,7 @@ import {
 import type { EffectiveSecretMetadata } from '@gitspace/protocol';
 import type { WorkspaceLifecyclePlanResult, WorkspaceLifecyclePlanStep } from './workspace-hub.js';
 import type { ProjectLifecycleAuthority } from './project-lifecycle.js';
+import type { LocalAttachment } from '@gitspace/runtime-machine';
 
 
 export interface EnvironmentExecutionView {
@@ -100,17 +101,25 @@ export class WorkspaceEnvironmentManager {
     }
   }
 
-  async view(spaceId: string, cloudOnly = false): Promise<WorkspaceEnvironmentView> {
-    const space = this.database.getSpace(spaceId);
+  async view(spaceId: string, cloudOnly = false, attachment?: LocalAttachment): Promise<WorkspaceEnvironmentView> {
+    const space = attachment ? {
+      id: attachment.attachment.workspaceId, projectId: attachment.attachment.projectId, rootPath: attachment.rootPath,
+      kind: String(attachment.attachment.workspaceId) === String(attachment.attachment.projectId) ? 'base' : 'worktree',
+      holderId: null, placementState: 'open', generation: attachment.attachment.generation,
+    } : this.database.getSpace(spaceId);
     if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
     let lifecycle = await this.authority.getLifecycleState(space.projectId, spaceId);
-    const available = !cloudOnly && space.placementState !== 'closed' && space.holderId === this.options.machineId
+    if (attachment) {
+      const copyBindings = lifecycle.runs.filter(run => run.attachment?.attachmentId === attachment.attachment.attachmentId && run.attachment.generation === attachment.attachment.generation).reduce<Record<string, string>>((bindings, run) => ({ ...bindings, ...run.bindings }), {});
+      lifecycle = { ...lifecycle, bindings: { ...lifecycle.bindings, ...copyBindings } };
+    }
+    const available = (attachment !== undefined || (!cloudOnly && space.placementState !== 'closed' && space.holderId === this.options.machineId))
       && await stat(space.rootPath).then((entry) => entry.isDirectory(), (error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? false : Promise.reject(error));
     const source = available ? await readFile(join(space.rootPath, '.gitspace', 'bundle.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error)) : null;
     const bundle = source !== null ? parseEnvironmentBundleJson(source)
       : lifecycle.bundleJson !== null ? parseEnvironmentBundleJson(lifecycle.bundleJson)
         : loadEnvironmentBundle({ version: 1, defaultProfile: 'base', profiles: { base: {} } });
-    if ((source !== null || lifecycle.bundleJson !== null) && JSON.stringify(bundle) !== lifecycle.bundleJson) {
+    if (!attachment && (source !== null || lifecycle.bundleJson !== null) && JSON.stringify(bundle) !== lifecycle.bundleJson) {
       lifecycle = await this.authority.mutateLifecycleState(space.projectId, spaceId, { op: 'configure', bundleJson: JSON.stringify(bundle) });
     }
     const selectedProfile = lifecycle.selectedProfile ?? bundle.defaultProfile;
@@ -140,7 +149,7 @@ export class WorkspaceEnvironmentManager {
     const executions: EnvironmentExecutionView[] = available ? [...checks, ...scripts] : lifecycle.executions.map((execution) => ({
       ...execution, phase: execution.phase ?? undefined, fileName: execution.fileName ?? undefined, approval: approval(execution.hash), ...(execution.kind === 'script' ? { interactive: isInteractiveLifecycleScript(execution.content) } : {}),
     }));
-    if (available && (source !== null || executions.length > 0)) {
+    if (!attachment && available && (source !== null || executions.length > 0)) {
       const snapshot = executions.map(({ approval: _approval, interactive: _interactive, ...execution }) => ({ ...execution, phase: execution.phase ?? null, fileName: execution.fileName ?? null }));
       if (JSON.stringify(snapshot) !== JSON.stringify(lifecycle.executions)) {
         lifecycle = await this.authority.mutateLifecycleState(space.projectId, spaceId, { op: 'configure', bundleJson: JSON.stringify(bundle), executions: snapshot });
@@ -279,6 +288,29 @@ export class WorkspaceEnvironmentManager {
     }
   }
 
+  /** Runner copies must complete their own approved preparation before attachment readiness. */
+  async prepareAttachment(local: LocalAttachment, signal: AbortSignal): Promise<void> {
+    const { workspaceId, projectId, attachmentId, generation } = local.attachment;
+    for (const phase of ['machine/prepare', 'checks', 'workspace/materialize'] as const) {
+      signal.throwIfAborted();
+      const runId = `attachment:${attachmentId}:${generation}:${phase}`;
+      let cancellation: Promise<unknown> | undefined;
+      const cancel = () => { cancellation ??= this.authority.mutateLifecycleState(projectId, workspaceId, { op: 'cancel', runId }); void cancellation.catch(() => {}); };
+      signal.addEventListener('abort', cancel, { once: true });
+      try {
+        const results = await this.runApproved(workspaceId, phase, true, local.rootPath, {
+          runId, deadlineAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+          accepted: () => { if (signal.aborted) cancel(); },
+        }, local);
+        if (results.some(result => result.exitCode !== 0)) throw new EnvironmentError('ExecutionFailed', 'Attachment preparation failed', { attachmentId, phase });
+        signal.throwIfAborted();
+      } finally {
+        signal.removeEventListener('abort', cancel);
+        await cancellation;
+      }
+    }
+  }
+
   async dematerialize(spaceId: string): Promise<void> {
     const current = await this.view(spaceId);
     if (current.lifecycle.policy.automatic && !current.lifecycle.destroyedAt) await this.runApproved(spaceId, 'workspace/dematerialize', false);
@@ -330,17 +362,21 @@ export class WorkspaceEnvironmentManager {
     return this.authority.getLifecycleRunLog(space.projectId, spaceId, runId, offset);
   }
 
-  private async runApproved(spaceId: string, phase: LifecycleRunPhase, rerun: boolean, workingDirectory?: string, request?: { runId: string; interactive?: boolean; deadlineAt?: string; accepted: (run: LifecycleRun) => void }): Promise<readonly EnvironmentExecutionResult[]> {
-    const space = this.database.getSpace(spaceId);
+  private async runApproved(spaceId: string, phase: LifecycleRunPhase, rerun: boolean, workingDirectory?: string, request?: { runId: string; interactive?: boolean; deadlineAt?: string; accepted: (run: LifecycleRun) => void }, attachment?: LocalAttachment): Promise<readonly EnvironmentExecutionResult[]> {
+    const space = attachment ? {
+      id: attachment.attachment.workspaceId, projectId: attachment.attachment.projectId,
+      kind: String(attachment.attachment.workspaceId) === String(attachment.attachment.projectId) ? 'base' : 'worktree',
+      holderId: null, placementState: 'open', generation: attachment.attachment.generation,
+    } : this.database.getSpace(spaceId);
     if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
-    const current = await this.view(spaceId, workingDirectory !== undefined);
+    const current = await this.view(spaceId, workingDirectory !== undefined, attachment);
     const planned = current.executions.filter((execution) => phase === 'checks' ? execution.kind === 'check' : execution.phase === phase);
     if (request?.interactive && (phase === 'checks' || workingDirectory !== undefined)) throw new EnvironmentError('InvalidConfiguration', 'Interactive lifecycle execution requires a script phase in an open workspace');
     assertEnvironmentExecutionReady({
       phase, state: current.lifecycle, bundle: current.bundle, effective: current.effective, values: current.values.effective,
       configuredSecrets: current.configuredSecrets, executionCount: planned.length,
       holder: space.holderId === this.options.machineId && space.placementState !== 'closed',
-      detached: workingDirectory !== undefined, runnerAvailable: this.runner !== undefined,
+      detached: workingDirectory !== undefined, runnerAvailable: this.runner !== undefined, attachment: attachment !== undefined,
     });
     const secretNames = planned.length > 0 ? [...current.effective.secrets] : [];
     const steps = await Promise.all(planned.map(async (execution): Promise<WorkspaceLifecyclePlanStep> => {
@@ -366,6 +402,7 @@ export class WorkspaceEnvironmentManager {
       op: 'claim', runId, ownershipToken: token, phase, profile: current.selectedProfile, executionHashes: planned.map((execution) => execution.hash),
       interactive: request?.interactive ?? false,
       generation: phase.startsWith('cloud/') || workingDirectory ? null : space.generation, rerun, terminalName, ...(request?.deadlineAt ? { deadlineAt: request.deadlineAt } : {}),
+      ...(attachment ? { attachment: { attachmentId: attachment.attachment.attachmentId, generation: attachment.attachment.generation } } : {}),
     });
     const acceptedRun = state.runs.find((run) => run.id === runId);
     if (!acceptedRun) throw new EnvironmentError('RunConflict', 'Authority did not persist the accepted lifecycle run', { runId });

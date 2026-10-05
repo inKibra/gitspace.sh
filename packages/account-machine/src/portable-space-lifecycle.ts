@@ -13,7 +13,7 @@ import {
 } from '@gitspace/protocol-workspace';
 import { decryptArtifactBytes, encryptArtifactBytes } from '@gitspace/protocol';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
-import type { WalgitProjectBinding } from './walgit-supervisor.js';
+import type { ArtifactsRepositoryBinding } from './artifacts-git-remote.js';
 
 export interface CheckpointBlobStore {
   put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`>;
@@ -108,25 +108,23 @@ export interface SpaceCheckpointAuthority {
 }
 
 export interface SpaceGitCheckpointRemote {
-  publishCheckpoint(input: { binding: WalgitProjectBinding; repositoryPath: string; checkpointRef: string }): Promise<void>;
-  fetchCheckpoint(input: { binding: WalgitProjectBinding; repositoryPath: string; checkpointRef: string }): Promise<void>;
+  publishCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string }): Promise<void>;
+  fetchCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string }): Promise<void>;
 }
+export type PortableAgentSnapshot =
+  | { kind: 'cloud'; sessionId: string; conversationId: string; cursor: number; resumePending?: boolean }
+  | { kind: 'legacy'; sessionId: string; ompSessionId: string; ompSession: Uint8Array; resumePending?: boolean };
 
 export interface PortableSpaceRuntime {
   quiesce(): Promise<void>;
   prepareLocalCleanup?(): Promise<void>;
   recordLocalCheckpoint?(receipt: { revision: number; manifestKey: string; manifestHash: `sha256:${string}` }): void;
   resumeAfterFailedClose(): Promise<void>;
-  captureAgent(): Promise<{
-    sessionId: string;
-    ompSessionId: string;
-    ompSession: Uint8Array;
-    resumePending?: boolean;
-  }>;
+  captureAgent(): Promise<PortableAgentSnapshot>;
   captureArtifacts(): Promise<{ generation: number; manifest: Uint8Array }>;
   deleteLocalState(): Promise<void>;
   prepareEmptyRepository(): Promise<void>;
-  restoreAgent(input: { sessionId: string; ompSessionId: string; ompSession: Uint8Array; resumePending?: boolean }): Promise<void>;
+  restoreAgent(input: PortableAgentSnapshot): Promise<void>;
   restoreArtifacts(input: { generation: number; manifest: Uint8Array }): Promise<void>;
   activate(): Promise<void>;
 }
@@ -139,7 +137,7 @@ export interface PortableSpaceDescriptor {
   repositoryPath: string;
   portableUntrackedPaths?: string[];
   resumeOnMachineRestart?: boolean;
-  binding: WalgitProjectBinding;
+  binding: ArtifactsRepositoryBinding;
 }
 
 export interface CloseSpaceResult {
@@ -182,10 +180,11 @@ export class PortableSpaceLifecycle {
       });
       await this.gitRemote.publishCheckpoint({ binding: space.binding, repositoryPath: space.repositoryPath, checkpointRef: repository.checkpointRef });
       const [agent, artifacts] = await Promise.all([runtime.captureAgent(), runtime.captureArtifacts()]);
-      const ompCheckpointHash = await this.blobs.put(
-        spaceOmpCheckpointKey(space.projectId, space.spaceId, operation.revision),
-        agent.ompSession,
-      );
+      const agentCheckpoint = agent.kind === 'cloud' ? agent : {
+        kind: 'legacy' as const, sessionId: agent.sessionId, ompSessionId: agent.ompSessionId,
+        ompCheckpointHash: await this.blobs.put(spaceOmpCheckpointKey(space.projectId, space.spaceId, operation.revision), agent.ompSession),
+        resumePending: agent.resumePending ?? false,
+      };
       const artifactManifestKey = spaceArtifactManifestKey(space.projectId, space.spaceId, operation.revision, artifacts.generation);
       const artifactManifestHash = await this.blobs.put(artifactManifestKey, artifacts.manifest);
       const manifest = parseWorkspaceCheckpoint({
@@ -201,12 +200,7 @@ export class PortableSpaceLifecycle {
           indexCommit: repository.indexCommit,
           worktreeCommit: repository.worktreeCommit,
         },
-        agent: {
-          sessionId: agent.sessionId,
-          ompSessionId: agent.ompSessionId,
-          ompCheckpointHash,
-          resumePending: agent.resumePending ?? false,
-        },
+        agent: agentCheckpoint,
         artifacts: { manifestHash: artifactManifestHash, generation: artifacts.generation },
         createdAt: new Date().toISOString(),
       });
@@ -250,21 +244,16 @@ export class PortableSpaceLifecycle {
         branch: manifest.repository.branch,
         checkpoint: manifest.repository,
       });
-      const [ompSession, artifactManifest] = await Promise.all([
-        requiredBlob(this.blobs, spaceOmpCheckpointKey(space.projectId, space.spaceId, manifest.revision), manifest.agent.ompCheckpointHash),
-        requiredBlob(
-          this.blobs,
-          spaceArtifactManifestKey(space.projectId, space.spaceId, manifest.revision, manifest.artifacts.generation),
-          manifest.artifacts.manifestHash,
-        ),
-      ]);
-      await runtime.restoreArtifacts({ generation: manifest.artifacts.generation, manifest: artifactManifest });
-      await runtime.restoreAgent({
+      const artifactManifest = await requiredBlob(this.blobs, spaceArtifactManifestKey(space.projectId, space.spaceId, manifest.revision, manifest.artifacts.generation), manifest.artifacts.manifestHash);
+      const agent: PortableAgentSnapshot = manifest.agent.kind === 'cloud' ? manifest.agent : {
+        kind: 'legacy',
         sessionId: manifest.agent.sessionId,
         ompSessionId: manifest.agent.ompSessionId,
-        ompSession,
+        ompSession: await requiredBlob(this.blobs, spaceOmpCheckpointKey(space.projectId, space.spaceId, manifest.revision), manifest.agent.ompCheckpointHash),
         resumePending: manifest.agent.resumePending,
-      });
+      };
+      await runtime.restoreArtifacts({ generation: manifest.artifacts.generation, manifest: artifactManifest });
+      await runtime.restoreAgent(agent);
       await runtime.activate();
       await this.authority.commitOpen({ ...identity, revision: operation.revision });
       return manifest;

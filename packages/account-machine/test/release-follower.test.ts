@@ -5,16 +5,13 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { hashArtifactPath } from '@gitspace/deployment';
-import { createExecutableArtifactManifest, executableManifestPath, sha256 } from '@gitspace/account-omp/manifest';
+import { createExecutableArtifactManifest, executableManifestPath, sha256 } from '@gitspace/deployment/manifest';
 import type { DeploymentStatus, ReleaseRecord } from '@gitspace/protocol';
 import { EXECUTABLE_CHUNK_BYTES } from '@gitspace/protocol/deployment';
 import { ReleaseFollower, releaseObjectKeys, type EnvironmentLaunchRequest, type EnvironmentStatus } from '../src/index.js';
-import { ProcessOmpRuntime } from '../src/omp-runtime.js';
-import type { OmpGenerationSelection } from '../src/omp-runtime.js';
-import { OMP_IPC_VERSION } from '../../account-omp/src/ipc.js';
 
 const roots: string[] = [];
-const servers: Server[] = [];
+const servers: Server<undefined>[] = [];
 const originalHostHash = process.env.GITSPACE_HOST_HASH;
 afterEach(() => {
   if (originalHostHash === undefined) delete process.env.GITSPACE_HOST_HASH;
@@ -27,17 +24,16 @@ function hashOf(bytes: Uint8Array): `sha256:${string}` {
   return `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`;
 }
 
-function release(sha: string, machine: { key: string; hash: `sha256:${string}`; size: number } | null, frontend: { key: string; hash: `sha256:${string}`; size: number } | null, omp: { key: string; hash: `sha256:${string}`; size: number } | null = null): ReleaseRecord {
+function release(sha: string, machine: { key: string; hash: `sha256:${string}`; size: number } | null, frontend: { key: string; hash: `sha256:${string}`; size: number } | null): ReleaseRecord {
   return {
     sha,
     label: `release ${sha}`,
     workspaceId: 'workspace-a',
     builtBy: 'machine-a',
     createdAt: new Date().toISOString(),
-    artifacts: { worker: null, machine, omp, frontend },
+    artifacts: { worker: null, machine, frontend },
     worker: null,
-    omp: omp ? { upstreamVersion: '18.1.10', bunVersion: Bun.version, packages: { '@oh-my-pi/pi-coding-agent': '18.1.10' }, patches: [] } : null,
-    status: { worker: 'skipped', frontend: frontend ? 'applied' : 'skipped', machines: {}, omps: {} },
+    status: { worker: 'skipped', frontend: frontend ? 'applied' : 'skipped', machines: {} },
     error: null,
   };
 }
@@ -57,7 +53,7 @@ function fakeHost(answer: 'applied' | 'failed'): FakeHost {
     token: 'control-token',
     launches: [],
     channels: [],
-    status: { machineHash: null, frontendHash: null, machineReleaseSha: null, ompReleaseSha: null, frontendReleaseSha: null, lastLaunch: null },
+    status: { machineHash: null, frontendHash: null, machineReleaseSha: null, frontendReleaseSha: null, lastLaunch: null },
     answer,
   };
   const server = Bun.serve({
@@ -91,7 +87,6 @@ function fakeHost(answer: 'applied' | 'failed'): FakeHost {
           machineHash: input.target === 'machine' ? input.hash : host.status.machineHash,
           frontendHash: input.target === 'frontend' ? input.hash : host.status.frontendHash,
           machineReleaseSha: input.target === 'machine' ? input.sha : host.status.machineReleaseSha,
-          ompReleaseSha: input.target === 'omp' ? input.sha : host.status.ompReleaseSha,
           frontendReleaseSha: input.target === 'frontend' ? input.sha : host.status.frontendReleaseSha,
           lastLaunch: { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'applied', error: null },
         };
@@ -106,23 +101,23 @@ function fakeHost(answer: 'applied' | 'failed'): FakeHost {
 }
 
 function fakeAuthority(status: DeploymentStatus) {
-  const reports: Array<{ sha: string; target: 'machine' | 'omp'; generation: string; status: 'applied' | 'failed'; error?: string }> = [];
-  const channelReports: Array<{ target: 'machine' | 'omp'; generation: string }> = [];
+  const reports: Array<{ sha: string; target: 'machine'; generation: string; status: 'applied' | 'failed'; error?: string }> = [];
+  const channelReports: Array<{ target: 'machine'; generation: string }> = [];
   return {
     reports,
     channelReports,
-    reportMachineChannelApplied: async (input: { target: 'machine' | 'omp'; generation: string }) => { channelReports.push(input); },
+    reportMachineChannelApplied: async (input: { target: 'machine'; generation: string }) => { channelReports.push(input); },
     deploymentStatus: async () => status,
-    reportMachineApplied: async (input: { sha: string; target: 'machine' | 'omp'; generation: string; status: 'applied' | 'failed'; error?: string }) => {
+    reportMachineApplied: async (input: { sha: string; target: 'machine'; generation: string; status: 'applied' | 'failed'; error?: string }) => {
       reports.push(input);
       const record = status.releases.find((candidate) => candidate.sha === input.sha)!;
-      (input.target === 'omp' ? record.status.omps : record.status.machines)['machine-a'] = input.status;
+      record.status.machines['machine-a'] = input.status;
       return record;
     },
   };
 }
 
-async function executable(sha: string, target: 'machine' | 'omp', files: Record<string, string | Uint8Array>) {
+async function executable(sha: string, target: 'machine', files: Record<string, string | Uint8Array>) {
   const root = mkdtempSync(join(tmpdir(), 'gitspace-executable-fixture-'));
   roots.push(root);
   const path = join(root, 'payload');
@@ -130,9 +125,7 @@ async function executable(sha: string, target: 'machine' | 'omp', files: Record<
     await mkdir(dirname(join(path, name)), { recursive: true });
     await writeFile(join(path, name), content);
   }
-  const { manifest, manifestHash } = await createExecutableArtifactManifest(path, target, target === 'omp'
-    ? { upstreamVersion: '18.1.10', bunVersion: Bun.version, packages: {}, patches: [] }
-    : null);
+  const { manifest, manifestHash } = await createExecutableArtifactManifest(path, target);
   const key = releaseObjectKeys(sha)[target];
   const bytes = new Uint8Array(await readFile(executableManifestPath(path)));
   const objects: Record<string, Uint8Array> = { [key]: bytes };
@@ -147,188 +140,7 @@ async function executable(sha: string, target: 'machine' | 'omp', files: Record<
   return { path, manifest, objects, artifact: { key, hash: manifestHash, size: bytes.byteLength } };
 }
 
-async function ompExecutable(sha: string, protocolVersion = OMP_IPC_VERSION) {
-  const built = await executable(sha, 'omp', { 'omp.js': `
-// OMP fixture: ${sha}
-import { OmpRpcPeer } from ${JSON.stringify(new URL('../../account-omp/src/ipc.ts', import.meta.url).pathname)};
-const rpc = new OmpRpcPeer(message => process.send(message), {
-  health: async () => ({ protocolVersion: ${protocolVersion}, platform: process.platform, arch: process.arch, bunVersion: Bun.version, pid: process.pid }),
-});
-process.on('message', message => rpc.receive(message));
-process.on('disconnect', () => process.exit(0));
-` });
-  return { ...built, selection: { path: built.path, hash: built.manifest.treeHash, manifestHash: built.artifact.hash, sha } };
-}
-
-function ompRuntime(root: string, channel: OmpGenerationSelection) {
-  return new ProcessOmpRuntime({
-    environmentRoot: root, entrypoint: join(channel.path, 'omp.js'), manifestHash: channel.manifestHash,
-    agentDir: join(root, 'agent'), sessionRoot: join(root, 'sessions'),
-  });
-}
-
 describe('release follower', () => {
-  it('boots successor OMP without replacing rollback bytes until the host commits both machine identities', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'gitspace-omp-successor-'));
-    roots.push(root);
-    const old = await ompExecutable('old-omp', OMP_IPC_VERSION - 1);
-    const next = await ompExecutable('new-omp');
-    const saved = JSON.stringify(old.selection);
-    const selectionPath = join(root, 'omp-selection.json');
-    await writeFile(selectionPath, saved);
-    const record = release('new-omp', null, null, next.artifact);
-    // The predecessor can reject the new IPC before launching the successor machine.
-    record.status.omps['machine-a'] = 'failed';
-    const authority = fakeAuthority({
-      desired: { worker: null, machine: 'new-machine', omp: 'new-omp', frontend: null, updatedAt: new Date().toISOString() },
-      current: { worker: { sha: null, version: null }, machines: {} },
-      releases: [record, release('new-machine', null, null)],
-    });
-    const host = fakeHost('applied');
-    const generation = hashOf(new TextEncoder().encode('new-machine'));
-    host.status.machineHash = hashOf(new TextEncoder().encode('old-machine'));
-    host.status.machineReleaseSha = 'old-machine';
-    const runtime = ompRuntime(root, old.selection);
-    const follower = new ReleaseFollower({
-      authority, blobs: { get: async (key) => next.objects[key] ?? null },
-      machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
-      runningMachineSha: 'new-machine', generation, omp: runtime, onError: (error) => { throw error; },
-    });
-    const candidate = await follower.initialOmpSelection();
-    await runtime.initialize(candidate);
-    expect(runtime.status()).toMatchObject({ sha: 'new-omp', hash: next.manifest.treeHash });
-    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
-    await follower.nudge();
-    await expect(runtime.activate(old.selection)).rejects.toThrow();
-    expect(authority.reports).toEqual([]);
-    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
-
-    host.status.machineHash = generation;
-    await follower.nudge();
-    expect(authority.reports).toEqual([]);
-    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
-    host.status.machineHash = null;
-    host.status.machineReleaseSha = 'new-machine';
-    await follower.nudge();
-    expect(authority.reports).toEqual([]);
-    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
-
-    host.status.machineHash = generation;
-    await follower.nudge();
-    expect(authority.reports).toEqual([]);
-    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
-    process.env.GITSPACE_HOST_HASH = generation;
-    await writeFile(join(root, 'host-selection.json'), JSON.stringify({
-      version: 1, path: root, hash: generation, releaseSha: 'new-machine',
-    }));
-    await follower.nudge();
-    follower.stop();
-    expect(JSON.parse(await readFile(selectionPath, 'utf8'))).toEqual(candidate);
-    expect(authority.reports).toEqual([
-      { sha: 'new-omp', target: 'omp', generation: next.manifest.treeHash, status: 'applied' },
-      { sha: 'new-machine', target: 'machine', generation, status: 'applied' },
-    ]);
-    expect(record.status.omps['machine-a']).toBe('applied');
-    const restarted = ompRuntime(root, old.selection);
-    await restarted.initialize();
-    expect(restarted.status()).toMatchObject({ sha: 'new-omp', hash: next.manifest.treeHash });
-  });
-
-  it('preserves the saved OMP after failed candidate verification and boots rollback without adopting desired OMP', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'gitspace-omp-rollback-'));
-    roots.push(root);
-    const old = await ompExecutable('old-omp');
-    const incompatible = await ompExecutable('incompatible-omp', OMP_IPC_VERSION - 1);
-    const saved = JSON.stringify(old.selection);
-    const selectionPath = join(root, 'omp-selection.json');
-    await writeFile(selectionPath, saved);
-    const authority = fakeAuthority({
-      desired: { worker: null, machine: 'new-machine', omp: 'incompatible-omp', frontend: null, updatedAt: new Date().toISOString() },
-      current: { worker: { sha: null, version: null }, machines: {} },
-      releases: [release('incompatible-omp', null, null, incompatible.artifact)],
-    });
-    const host = fakeHost('applied');
-    const options = {
-      authority, machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
-      generation: hashOf(new TextEncoder().encode('machine')), onError: (error: unknown) => { throw error; },
-    };
-    const successor = new ReleaseFollower({
-      ...options, runningMachineSha: 'new-machine', blobs: { get: async (key) => incompatible.objects[key] ?? null },
-    });
-    const candidate = await successor.initialOmpSelection();
-    await expect(ompRuntime(root, old.selection).initialize(candidate)).rejects.toThrow('incompatible');
-    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
-
-    const rollback = new ReleaseFollower({
-      ...options, runningMachineSha: 'old-machine',
-      blobs: { get: async () => { throw new Error('Rollback must not download desired OMP'); } },
-    });
-    const initial = await rollback.initialOmpSelection();
-    expect(initial).toBeUndefined();
-    const runtime = ompRuntime(root, old.selection);
-    await runtime.initialize(initial);
-    expect(runtime.status()).toMatchObject({ sha: 'old-omp', hash: old.manifest.treeHash });
-  });
-
-  it('persists standalone OMP activation without waiting for a machine commit', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'gitspace-omp-standalone-'));
-    roots.push(root);
-    const old = await ompExecutable('old-omp');
-    const next = await ompExecutable('next-omp');
-    const selectionPath = join(root, 'omp-selection.json');
-    await writeFile(selectionPath, JSON.stringify(old.selection));
-    const authority = fakeAuthority({
-      desired: { worker: null, machine: null, omp: 'next-omp', frontend: null, updatedAt: new Date().toISOString() },
-      current: { worker: { sha: null, version: null }, machines: {} },
-      releases: [release('old-omp', null, null, old.artifact), release('next-omp', null, null, next.artifact)],
-    });
-    const runtime = ompRuntime(root, old.selection);
-    const follower = new ReleaseFollower({
-      authority, blobs: { get: async (key) => next.objects[key] ?? null },
-      machineId: 'machine-a', environmentRoot: root, hostUrl: null, controlToken: null,
-      runningMachineSha: null, generation: null, omp: runtime, onError: (error) => { throw error; },
-    });
-    await runtime.initialize(await follower.initialOmpSelection());
-    await follower.nudge();
-    follower.stop();
-    expect(authority.reports).toContainEqual({ sha: 'next-omp', target: 'omp', generation: next.manifest.treeHash, status: 'applied' });
-    expect(JSON.parse(await readFile(selectionPath, 'utf8'))).toMatchObject({ sha: 'next-omp', hash: next.manifest.treeHash, manifestHash: next.artifact.hash });
-    const restarted = ompRuntime(root, old.selection);
-    await restarted.initialize();
-    expect(restarted.status()).toMatchObject({ sha: 'next-omp', hash: next.manifest.treeHash });
-  });
-
-  it('resumes tenant release activation after checkpoint cancellation', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-resume-'));
-    roots.push(root);
-    const old = await ompExecutable('before-checkpoint');
-    const next = await ompExecutable('after-cancellation');
-    const status: DeploymentStatus = {
-      desired: { worker: null, machine: null, omp: old.selection.sha, frontend: null, updatedAt: new Date().toISOString() },
-      current: { worker: { sha: null, version: null }, machines: {} },
-      releases: [release(old.selection.sha, null, null, old.artifact), release(next.selection.sha, null, null, next.artifact)],
-    };
-    const runtime = ompRuntime(root, old.selection);
-    const follower = new ReleaseFollower({
-      authority: fakeAuthority(status), blobs: { get: async (key) => next.objects[key] ?? old.objects[key] ?? null },
-      machineId: 'machine-a', environmentRoot: root, hostUrl: null, controlToken: null,
-      runningMachineSha: null, generation: null, omp: runtime, onError: (error) => { throw error; },
-    });
-    await runtime.initialize();
-    try {
-      await follower.start();
-      follower.stop();
-      status.desired.omp = next.selection.sha;
-      await follower.nudge();
-      expect(runtime.status().sha).toBe(old.selection.sha);
-      await follower.start();
-      expect(runtime.status().sha).toBe(next.selection.sha);
-    } finally {
-      follower.stop();
-      await runtime.dispose();
-    }
-  });
-
   it('downloads the machine bundle and migrations, verifies them, and asks the host to swap', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-'));
     roots.push(root);
@@ -341,11 +153,11 @@ describe('release follower', () => {
       'machine.js.map': '{"sources":[]}',
       'drizzle/meta/_journal.json': '{"entries":[]}',
       'drizzle/0000_init.sql': 'CREATE TABLE t (id TEXT);',
-      'pi_natives.node': 'native-sidecar',
+      'native/bin/git-lfs': 'bundled-tool',
     });
     const fetched: string[] = [];
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: sha, omp: null, frontend: null, updatedAt: new Date().toISOString() },
+      desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, artifact, null)],
     };
@@ -383,7 +195,7 @@ describe('release follower', () => {
     expect(await readFile(join(launch.path, 'drizzle', '0000_init.sql'), 'utf8')).toBe('CREATE TABLE t (id TEXT);');
     expect(launch.hash).toBe(await hashArtifactPath(launch.path));
     expect(launch.applies).toEqual(['machine']);
-    expect(await readFile(join(launch.path, 'pi_natives.node'), 'utf8')).toBe('native-sidecar');
+    expect(await readFile(join(launch.path, 'native/bin/git-lfs'), 'utf8')).toBe('bundled-tool');
     // The candidate must not report success before the stable host commits its generation.
     expect(authority.reports).toEqual([]);
 
@@ -416,58 +228,11 @@ describe('release follower', () => {
     expect(host.launches).toHaveLength(1);
   });
 
-  it('activates OMP without a host and reports applied only after the old children drain', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'gitspace-omp-follower-'));
-    roots.push(root);
-    const sha = 'omp789';
-    const { artifact, manifest, objects } = await executable(sha, 'omp', { 'omp.js': 'console.log("omp")' });
-    const status: DeploymentStatus = {
-      desired: { worker: null, machine: 'machine456', omp: sha, frontend: null, updatedAt: new Date().toISOString() },
-      current: { worker: { sha: null, version: null }, machines: { 'machine-a': { sha: 'machine456', ompSha: null, generation: 'old' } } },
-      releases: [release(sha, null, null, artifact)],
-    };
-    const authority = fakeAuthority(status);
-    let running = { sha: null as string | null, hash: 'old-omp', draining: 0 };
-    const activations: Array<{ path: string; hash: string; sha: string; manifestHash: string }> = [];
-    const follower = new ReleaseFollower({
-      authority,
-      blobs: { get: async (key) => objects[key] ?? null },
-      machineId: 'machine-a', environmentRoot: root, hostUrl: null, controlToken: null,
-      runningMachineSha: 'machine456', generation: null,
-      omp: {
-        activateChannel: async () => { throw new Error('No channel activation expected'); },
-        commitInitialSelection: async () => { throw new Error('No machine commit expected'); },
-        status: () => running,
-        activate: async (input) => {
-          activations.push(input);
-          running = { sha: input.sha, hash: input.hash, draining: 1 };
-          return running;
-        },
-      },
-      onError: (error) => { throw error; },
-    });
-    await follower.nudge();
-    expect(activations).toEqual([{
-      path: join(root, 'candidates', `omp-${artifact.hash.slice(7)}`),
-      hash: manifest.treeHash, sha, manifestHash: artifact.hash,
-    }]);
-    expect(authority.reports).toEqual([]);
-    await follower.nudge();
-    expect(authority.reports).toEqual([]);
-    expect(activations).toHaveLength(1);
-    running = { ...running, draining: 0 };
-    await follower.nudge();
-    await follower.nudge();
-    follower.stop();
-    expect(authority.reports).toEqual([{ sha, target: 'omp', generation: manifest.treeHash, status: 'applied' }]);
-    expect(status.current.machines['machine-a']?.sha).toBe('machine456');
-  });
-
-  it('restores channel targets independently and reports OMP only after custom children drain', async () => {
+  it('restores channel targets independently and reports only the committed machine', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-channel-follower-'));
     roots.push(root);
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: null, omp: null, frontend: null, updatedAt: new Date().toISOString() },
+      desired: { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [],
     };
@@ -475,20 +240,10 @@ describe('release follower', () => {
     const host = fakeHost('applied');
     host.status.machineReleaseSha = 'custom-machine';
     host.status.frontendReleaseSha = 'custom-frontend';
-    let running = { sha: 'custom-omp' as string | null, hash: 'custom-omp-tree', draining: 1 };
     const follower = new ReleaseFollower({
       authority, blobs: { get: async () => { throw new Error('Channel does not download account releases'); } },
       machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
       runningMachineSha: 'custom-machine', generation: null,
-      omp: {
-        status: () => running,
-        commitInitialSelection: async () => { throw new Error('No machine commit expected'); },
-        activate: async () => { throw new Error('No custom activation expected'); },
-        activateChannel: async () => {
-          running = { sha: null, hash: 'channel-omp-tree', draining: 1 };
-          return running;
-        },
-      },
       onError: (error) => { throw error; },
     });
     await follower.nudge();
@@ -498,17 +253,15 @@ describe('release follower', () => {
     await follower.nudge();
     expect(host.channels).toEqual(['frontend', 'machine']);
     expect(authority.channelReports).toEqual([]);
-    running = { ...running, draining: 0 };
-    await follower.nudge();
     follower.stop();
-    expect(authority.channelReports).toEqual([{ target: 'omp', generation: 'channel-omp-tree' }]);
+    expect(authority.channelReports).toEqual([]);
     const successor = new ReleaseFollower({
       authority, blobs: { get: async () => null }, machineId: 'machine-a', environmentRoot: root,
       hostUrl: host.url, controlToken: host.token, runningMachineSha: null, generation: host.status.machineHash,
       onError: (error) => { throw error; },
     });
     await successor.start();
-    expect(authority.channelReports).toEqual([{ target: 'omp', generation: 'channel-omp-tree' }]);
+    expect(authority.channelReports).toEqual([]);
     process.env.GITSPACE_HOST_HASH = host.status.machineHash!;
     await writeFile(join(root, 'host-selection.json'), JSON.stringify({
       version: 1, path: root, hash: host.status.machineHash, releaseSha: null,
@@ -516,7 +269,6 @@ describe('release follower', () => {
     await successor.nudge();
     successor.stop();
     expect(authority.channelReports).toEqual([
-      { target: 'omp', generation: 'channel-omp-tree' },
       { target: 'machine', generation: host.status.machineHash! },
     ]);
   });
@@ -528,7 +280,7 @@ describe('release follower', () => {
     native.set(new TextEncoder().encode('lastEnd'), EXECUTABLE_CHUNK_BYTES);
     const { artifact, manifest, objects } = await executable('chunked', 'machine', { 'machine.js': 'console.log(1)', 'native.node': native });
     const authority = fakeAuthority({
-      desired: { worker: null, machine: 'chunked', omp: null, frontend: null, updatedAt: new Date().toISOString() },
+      desired: { worker: null, machine: 'chunked', frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release('chunked', artifact, null)],
     });
@@ -556,7 +308,7 @@ describe('release follower', () => {
     const migration = manifest.files.find((file) => file.path.endsWith('.sql'))!;
     objects[migration.chunks[0]!.key] = new TextEncoder().encode('DROP TABLE t;');
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: sha, omp: null, frontend: null, updatedAt: new Date().toISOString() },
+      desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, artifact, null)],
     };
@@ -579,35 +331,29 @@ describe('release follower', () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-incompatible-'));
     roots.push(root);
     const sha = 'incompatible';
-    const built = await executable(sha, 'omp', { 'omp.js': 'console.log("omp")' });
+    const built = await executable(sha, 'machine', { 'machine.js': 'console.log("machine")' });
     built.manifest.compatibility.bunVersion = '0.0.0';
-    built.manifest.omp!.bunVersion = '0.0.0';
     const bytes = new TextEncoder().encode(JSON.stringify(built.manifest));
     built.objects[built.artifact.key] = bytes;
     const artifact = { ...built.artifact, hash: sha256(bytes), size: bytes.byteLength };
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: null, omp: sha, frontend: null, updatedAt: new Date().toISOString() },
+      desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
-      releases: [release(sha, null, null, artifact)],
+      releases: [release(sha, artifact, null)],
     };
     const fetched: string[] = [];
     const authority = fakeAuthority(status);
+    const host = fakeHost('applied');
     const follower = new ReleaseFollower({
       authority,
       blobs: { get: async (key) => { fetched.push(key); return built.objects[key] ?? null; } },
-      machineId: 'machine-a', environmentRoot: root, hostUrl: null, controlToken: null,
+      machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
       runningMachineSha: null, generation: null,
-      omp: {
-        status: () => ({ sha: null, hash: 'old', draining: 0 }),
-        activateChannel: async () => { throw new Error('No channel activation expected'); },
-        commitInitialSelection: async () => { throw new Error('No machine commit expected'); },
-        activate: async () => { throw new Error('must not activate'); },
-      },
     });
     await follower.nudge();
     follower.stop();
     expect(fetched).toEqual([artifact.key]);
-    expect(authority.reports[0]).toMatchObject({ target: 'omp', status: 'failed', error: expect.stringContaining('incompatible') });
+    expect(authority.reports[0]).toMatchObject({ target: 'machine', status: 'failed', error: expect.stringContaining('incompatible') });
   });
 
   it('reports a rolled-back swap as failed once and stops retrying', async () => {
@@ -616,7 +362,7 @@ describe('release follower', () => {
     const sha = 'def456';
     const { artifact, objects } = await executable(sha, 'machine', { 'machine.js': 'throw new Error("boom")' });
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: sha, omp: null, frontend: null, updatedAt: new Date().toISOString() },
+      desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, artifact, null)],
     };
@@ -664,7 +410,7 @@ describe('release follower', () => {
     for (const [path, bytes] of Object.entries(files)) await Bun.write(join(expectedRoot, path), bytes);
     const treeHash = await hashArtifactPath(expectedRoot);
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: null, omp: null, frontend: sha, updatedAt: new Date().toISOString() },
+      desired: { worker: null, machine: null, frontend: sha, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, null, { key: keys.frontend, hash: treeHash, size: 0 })],
     };

@@ -162,7 +162,10 @@ export const environmentFixture: EnvironmentViewModel = {
   lifecycle: lifecycleScripts,
   ledger: {
     revision: 3, projectId: 'gitspace', spaceId: 'agent-blame', bundleJson: null, selectedProfile: 'backend',
-    values: { global: {}, project: {}, workspace: {} }, approvals: [], executions: [], policy: { automatic: true },
+    values: { global: {}, project: {}, workspace: {} }, approvals: [], executions: [], browserOrigins: [
+      { pattern: 'github.com', hash: 'sha256:cd762e6258e8c714b09ffc73b6bd962370e124c8074218bd10ab3e03074833ba' },
+      { pattern: '*.cloudflare.com', hash: 'sha256:f26944f547f50f4b5e8b80374c5422c94983ffe70bdb1e7cb814292a438bb9c8' },
+    ], policy: { automatic: true },
     bindings: { PREVIEW_DATABASE_ID: 'preview-agent-blame', API_ORIGIN: 'https://agent-blame.example.com' },
     provisioned: { runId: 'provision-1', profile: 'backend', executionHashes: [], machineId: 'studio', completedAt: '2026-09-01T12:00:00.000Z' },
     destroyedAt: null, claim: null,

@@ -259,7 +259,22 @@ export function EnvironmentView({ model, busy = false, runtimeAvailable = true, 
         <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Checks · <span className="tabular-nums">{checks.length}</span></h3><span className="flex items-center gap-1"><Button variant="ghost" size="compact" leadingIcon={PlayIcon} onClick={onRunChecks}>Run checks</Button><Button variant="secondary" size="compact" leadingIcon={PlusIcon} onClick={() => setAddCheckOpen(true)}>Add check</Button></span></div>
         <CardGroup border="outlined" separated proximityHover={false}>{checks.map((check, index) => <CheckCard key={check.id} index={index} check={check} result={machine?.capabilities[check.id] ?? { status: 'unprobed' }} onApprove={() => onApprove(check.id)} onRevoke={() => onRevoke(check.id)} onFix={onFixCheck ? () => onFixCheck(check.id) : undefined} onEdit={() => setEditingCheck(check)} onDelete={() => setRemovingCheck(check)} />)}</CardGroup>
       </section>
+      </fieldset>
 
+      <section className="flex flex-col gap-2" aria-label="Browser origins">
+        <h3 className="text-caption font-medium text-muted-foreground">Browser origins · <span className="tabular-nums">{model.ledger?.browserOrigins.length ?? 0}</span></h3>
+        <p className="text-caption text-muted-foreground">Committed host patterns for logged-in Chrome. Approvals do not run commands. Edit browser.origins in the environment bundle and commit to change this list.</p>
+        <CardGroup border="outlined" separated proximityHover={false}>{model.ledger?.browserOrigins.map((origin, index) => {
+          const approval = model.ledger?.approvals.find((entry) => entry.executionHash === origin.hash && entry.scope === 'project')
+            ?? model.ledger?.approvals.find((entry) => entry.executionHash === origin.hash && entry.scope === 'workspace');
+          return <Card key={origin.hash} size="compact" index={index}>
+            <CardHeader><CardTitle><code className="break-all font-mono">{origin.pattern}</code></CardTitle><CardDescription>{approval ? `Approved for this ${approval.scope}` : 'Approval required'}</CardDescription></CardHeader>
+            <CardFooter><Badge size="compact" color={approval ? 'green' : 'amber'}>{approval ? 'approved' : 'pending'}</Badge><Button variant={approval ? 'ghost' : 'secondary'} size="compact" className="min-h-10" disabled={busy} onClick={() => approval ? onRevoke(origin.hash) : onApprove(origin.hash)}>{approval ? 'Revoke approval' : 'Review & approve'}</Button></CardFooter>
+          </Card>;
+        })}</CardGroup>
+      </section>
+
+      <fieldset disabled={readOnly} className="contents">
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Secrets</h3><Button variant="ghost" size="compact" onClick={onOpenSecrets}>Manage secrets & values</Button></div>
         <CardGroup border="outlined" separated proximityHover={false}>{selectedProfile.secrets.map((name, index) => {

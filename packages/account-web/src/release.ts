@@ -4,8 +4,8 @@ import type { BadgeProps } from '@gitspace/ui';
 /** One release as the machine reports it; the wire shape, not the zod one. */
 export type ReleaseRecordView = DeploymentStatusView['releases'][number];
 
-export const RELEASE_TARGETS: readonly ReleaseTarget[] = ['worker', 'machine', 'omp', 'frontend'];
-export const RELEASE_TARGET_LABEL: Record<ReleaseTarget, string> = { worker: 'Worker', machine: 'Machine', omp: 'OMP', frontend: 'Frontend' };
+export const RELEASE_TARGETS: readonly ReleaseTarget[] = ['worker', 'machine', 'frontend'];
+export const RELEASE_TARGET_LABEL: Record<ReleaseTarget, string> = { worker: 'Worker', machine: 'Machine', frontend: 'Frontend' };
 export const RELEASE_STATUS_COLOR: Record<ReleaseStatus, NonNullable<BadgeProps['color']>> = { pending: 'amber', applied: 'green', failed: 'red', skipped: 'gray' };
 
 /** `channel:<version>` shas name our build; git shas are shown truncated. */
@@ -44,8 +44,9 @@ export function machineRollup(record: ReleaseRecordView): { status: ReleaseStatu
   return fleetRollup('Machines', Object.values(record.status.machines));
 }
 
+/** Historical OMP outcomes are never part of active release convergence. */
 export function ompRollup(record: ReleaseRecordView): { status: ReleaseStatus; text: string } {
-  return fleetRollup('OMP', Object.values(record.status.omps));
+  return fleetRollup('OMP (historical)', Object.values(record.status.omps ?? {}));
 }
 
 /**
@@ -60,19 +61,15 @@ export function converging(status: DeploymentStatusView): boolean {
     if (record?.status[target] === 'pending') return true;
     if (target === 'worker' && status.current.worker.sha !== sha && record?.status.worker !== 'failed') return true;
   }
-  for (const target of ['machine', 'omp'] as const) {
-    const sha = status.desired[target];
-    const record = sha === null ? null : status.releases.find((release) => release.sha === sha);
-    const field = target === 'machine' ? 'sha' : 'ompSha';
-    const states = target === 'machine' ? record?.status.machines : record?.status.omps;
-    if (target === 'omp' && status.thisMachine.ompDraining > 0) return true;
-    const localState = states?.[status.thisMachine.machineId];
-    if (localState !== 'failed' && (status.thisMachine[field] !== sha || localState === 'pending')) return true;
-    for (const [machineId, running] of Object.entries(status.current.machines)) {
-      if (machineId === status.thisMachine.machineId) continue;
-      const state = states?.[machineId];
-      if (state !== 'failed' && (running[field] !== sha || state === 'pending')) return true;
-    }
+  const sha = status.desired.machine;
+  const record = sha === null ? null : status.releases.find((release) => release.sha === sha);
+  const states = record?.status.machines;
+  const localState = states?.[status.thisMachine.machineId];
+  if (localState !== 'failed' && (status.thisMachine.sha !== sha || localState === 'pending')) return true;
+  for (const [machineId, running] of Object.entries(status.current.machines)) {
+    if (machineId === status.thisMachine.machineId) continue;
+    const state = states?.[machineId];
+    if (state !== 'failed' && (running.sha !== sha || state === 'pending')) return true;
   }
   return false;
 }
@@ -121,7 +118,6 @@ export function appendLaunchProgress(track: LaunchTrack, entry: LaunchLogEntry, 
 /** The build target a `build` / `upload` message names; the launcher's messages are `building tenant worker`, `uploading …/machine.js`, … */
 export function launchMessageTarget(message: string): ReleaseTarget | null {
   if (/worker/i.test(message)) return 'worker';
-  if (/\\bomp\\b/i.test(message)) return 'omp';
   if (/machine/i.test(message)) return 'machine';
   if (/frontend/i.test(message)) return 'frontend';
   return null;
@@ -148,16 +144,14 @@ export function launchPhaseLabel(entry: LaunchLogEntry): string {
   return LAUNCH_PHASE_LABEL[entry.phase] ?? `${entry.phase}…`;
 }
 
-/** Current fleet machines whose machine and OMP generations both match their independent selections. */
+/** Current fleet machines whose complete host generation matches the selection. */
 export function machineConvergence(status: DeploymentStatusView): { applied: number; total: number } {
-  let applied = status.thisMachine.sha === status.desired.machine
-    && status.thisMachine.ompSha === status.desired.omp
-    && status.thisMachine.ompDraining === 0 ? 1 : 0;
+  let applied = status.thisMachine.sha === status.desired.machine ? 1 : 0;
   let total = 1;
   for (const [machineId, machine] of Object.entries(status.current.machines)) {
     if (machineId === status.thisMachine.machineId) continue;
     total++;
-    if (machine.sha === status.desired.machine && machine.ompSha === status.desired.omp) applied++;
+    if (machine.sha === status.desired.machine) applied++;
   }
   return { applied, total };
 }

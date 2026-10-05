@@ -2,15 +2,15 @@ import { readdir, readFile, rm } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { AppendFactEvent, GitSpaceDatabase } from '@gitspace/core';
-import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
+import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { hashArtifactPath, workspaceSha } from '@gitspace/deployment';
-import type { BuiltArtifact, BuiltOmpArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
-import { workerReleaseMetadataSchema, type ReleaseArtifact, type ReleaseRecord, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
+import { releaseTargetSchema, workerReleaseMetadataSchema, type ReleaseArtifact, type ReleaseRecord, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-follower.js';
 import { z } from 'zod';
 
 const targetPackages: Record<ReleaseTarget, string> = {
-  worker: 'account-worker', machine: 'account-machine', omp: 'account-omp', frontend: 'account-web',
+  worker: 'account-worker', machine: 'account-machine', frontend: 'account-web',
 };
 const inferenceCapablePackageSchema = z.object({ gitspace: z.object({ inferenceVersion: z.literal(1) }) });
 
@@ -29,6 +29,7 @@ export async function requireInferenceCapableSource(root: string, targets: reado
 export async function buildWorkspaceTarget<T extends BuiltArtifact>(
   root: string, sha: string, target: ReleaseTarget, output: string,
 ): Promise<T & { worker?: WorkerReleaseMetadata }> {
+  releaseTargetSchema.parse(target);
   const resultPath = `${output}.build.json`;
   const builder = pathToFileURL(join(root, 'packages/deployment/src/builders.ts')).href;
   const script = `
@@ -40,7 +41,6 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
     let built;
     if (target === 'worker') built = { ...await builders.buildWorkerBundle(root, ${JSON.stringify(sha)}, output), worker: await builders.workerMetadataFromWrangler(root) };
     else if (target === 'machine') built = await builders.buildMachineBundle(root, output);
-    else if (target === 'omp') built = await builders.buildOmpBundle(root, output);
     else built = await builders.buildFrontendTree(root, output);
     await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify(built));
   `;
@@ -144,7 +144,7 @@ export class DeploymentLauncher {
     if (workspace.placementState === 'closed' || workspace.holderId !== this.options.machineId) {
       throw new DeploymentLaunchError('WORKSPACE_NOT_HELD', `Workspace ${input.workspaceId} is not open on this machine`);
     }
-    const targets = [...new Set(input.targets)];
+    const targets = [...new Set(z.array(releaseTargetSchema).parse(input.targets))];
     if (targets.length === 0) throw new DeploymentLaunchError('NOT_GITSPACE', 'A release needs at least one target');
     const now = new Date().toISOString();
     this.progress = { launchId: crypto.randomUUID(), workspaceId: workspace.id, targets, sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: now, updatedAt: now };
@@ -208,9 +208,8 @@ export class DeploymentLauncher {
 
       await rm(buildRoot, { recursive: true, force: true });
       const keys = releaseObjectKeys(sha);
-      const artifacts: StageReleaseInput['artifacts'] = { worker: null, machine: null, omp: null, frontend: null };
+      const artifacts: StageReleaseInput['artifacts'] = { worker: null, machine: null, frontend: null };
       let worker: StageReleaseInput['worker'] = null;
-      let omp: StageReleaseInput['omp'] = null;
 
       if (targets.includes('worker')) {
         progress('build', 'building tenant worker');
@@ -224,13 +223,6 @@ export class DeploymentLauncher {
         const built = await buildWorkspaceTarget<BuiltExecutableArtifact>(root, sha, 'machine', join(buildRoot, 'machine'));
         progress('upload', `uploading ${keys.machine}`);
         artifacts.machine = await this.putExecutable(keys.machine, built);
-      }
-      if (targets.includes('omp')) {
-        progress('build', 'building pinned OMP runtime recipe');
-        const built = await buildWorkspaceTarget<BuiltOmpArtifact>(root, sha, 'omp', join(buildRoot, 'omp'));
-        omp = built.metadata;
-        progress('upload', `uploading ${keys.omp}`);
-        artifacts.omp = await this.putExecutable(keys.omp, built);
       }
       if (targets.includes('frontend')) {
         progress('build', 'building frontend');
@@ -258,11 +250,10 @@ export class DeploymentLauncher {
         workspaceId: workspace.id,
         artifacts,
         worker,
-        omp,
       });
       progress('launch', `launching into ${targets.join(', ')}`);
       const launched = await this.options.authority.launchRelease(sha, targets);
-      progress('launched', `worker=${launched.record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} omp=${targets.includes('omp') ? 'pending' : 'skipped'} frontend=${launched.record.status.frontend}`, {
+      progress('launched', `worker=${launched.record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} frontend=${launched.record.status.frontend}`, {
         release: launched.record.status,
         releaseError: launched.record.error,
       }, 'succeeded');

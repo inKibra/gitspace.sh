@@ -1,11 +1,11 @@
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import type {
   ComposioMcpMaterialization,
   ComposioPluginAuthorization,
   ComposioPluginCatalog,
+  ComposioSetup,
   ComposioPluginTool,
-  DiscoveredMcpTool,
   EffectiveSecretMetadata,
   McpAuditEvent,
   McpConnection,
@@ -96,6 +96,9 @@ class FakeMcpAuthority implements MachineMcpAuthority {
     });
     return structuredClone(current);
   }
+  async getComposioSetup(): Promise<ComposioSetup> { throw new Error('Setup is not used by execution tests'); }
+  async putComposioSetup(): Promise<ComposioSetup> { throw new Error('Setup is not used by execution tests'); }
+  async deleteComposioSetup(): Promise<ComposioSetup> { throw new Error('Setup is not used by execution tests'); }
   async listComposioPluginCatalog(): Promise<ComposioPluginCatalog> { return { configured: true, toolkits: [] }; }
   async authorizeComposioPlugin(): Promise<ComposioPluginAuthorization> { throw new Error('not implemented by fake'); }
   async refreshComposioPlugin(connectionId: string): Promise<McpConnection> {
@@ -144,258 +147,36 @@ class FakeMcpAuthority implements MachineMcpAuthority {
   }
 }
 
-const servers: Array<{ stop(closeActiveConnections?: boolean): void }> = [];
-afterEach(() => {
-  for (const server of servers.splice(0)) server.stop(true);
-});
-
-function startHttpServer(requiredAuthorization?: string | (() => string), calls?: string[]) {
-  const server = Bun.serve({
-    port: 0,
-    async fetch(request) {
-      const authorization = typeof requiredAuthorization === 'function' ? requiredAuthorization() : requiredAuthorization;
-      if (request.method === 'GET') return new Response(null, { status: 405 });
-      if (authorization && request.headers.get('authorization') !== authorization) {
-        return new Response('Unauthorized', { status: 401 });
-      }
-      if (request.method === 'DELETE') return new Response(null, { status: 200 });
-      const message = await request.json() as { id?: string | number; method?: string; params?: Record<string, unknown> };
-      if (message.id === undefined) return new Response(null, { status: 202 });
-      if (message.method === 'tools/call') calls?.push(request.headers.get('authorization') ?? '');
-      const result = message.method === 'initialize'
-        ? { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'gitspace-fake-http', version: '1.0.0' } }
-        : message.method === 'tools/list'
-          ? { tools: [{ name: 'paper_echo', description: 'Echo over HTTP', inputSchema: { type: 'object', properties: { value: { type: 'string' } } }, annotations: { readOnlyHint: true, destructiveHint: false } }] }
-          : message.method === 'tools/call'
-            ? { content: [{ type: 'text', text: authorization ?? String((message.params?.arguments as Record<string, unknown> | undefined)?.value ?? '') }] }
-            : {};
-      return Response.json({ jsonrpc: '2.0', id: message.id, result }, {
-        headers: { 'mcp-session-id': 'test-session' },
-      });
-    },
-  });
-  servers.push(server);
-  return server;
-}
-
 describe('MachineMcpCoordinator', () => {
-  it('projects granted stdio tools through OMP, executes by canonical name, and removes them on grant disable', async () => {
+  function stdioAuthority() {
     const authority = new FakeMcpAuthority();
-    const fixture = join(import.meta.dir, 'fixtures', 'fake-mcp-stdio.ts');
-    authority.connections = [connection({
-      id: 'stdio',
-      label: 'Fake stdio',
-      target: { kind: 'workspace' },
-      transport: { type: 'stdio', command: process.execPath, args: [fixture], cwd: null, environment: [] },
-    })];
+    authority.connections = [connection({ id: 'stdio', label: 'stdio', target: { kind: 'workspace' }, transport: { type: 'stdio', command: process.execPath, args: [join(import.meta.dir, 'fixtures', 'fake-mcp-stdio.ts')], cwd: null, environment: [] } })];
     authority.grants = [grant('stdio')];
+    return authority;
+  }
+  const scope = { projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir };
+  it('executes granted stdio tools and rejects calls after revocation', async () => {
+    const authority = stdioAuthority();
     const coordinator = new MachineMcpCoordinator(authority, 'machine-a');
-    const projected = await coordinator.createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
-    try {
-      const descriptor = projected.descriptors().find((tool) => tool.name === 'echo');
-      expect(descriptor?.ompToolName).toStartWith('mcp__');
-      expect(descriptor?.readOnly).toBe(true);
-      const tool = projected.manager.getTools().find((candidate) => candidate.name === descriptor?.ompToolName);
-      const result = await tool!.execute('call-a', { value: 'hello' }, undefined, {} as never);
-      expect(JSON.stringify(result)).toContain('hello');
-
-      authority.grants = [{ ...authority.grants[0]!, enabled: false, revision: 2 }];
-      await expect(tool!.execute('revoked-call', { value: 'must not execute' }, undefined, {} as never)).rejects.toThrow('unavailable');
-      expect(projected.descriptors()).toEqual([]);
-      expect(projected.manager.getTools()).toEqual([]);
-    } finally {
-      await projected.dispose();
-    }
+    const tools = await coordinator.execute({ ...scope, operation: 'discover', args: { connectionId: 'stdio' } });
+    expect(tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'echo', annotations: expect.objectContaining({ readOnlyHint: true }) })]));
+    const result = await coordinator.execute({ ...scope, operation: 'invoke', args: { connectionId: 'stdio', name: 'echo', arguments: { value: 'hello' } } });
+    expect(JSON.stringify(result)).toContain('hello');
+    authority.grants = [];
+    await expect(coordinator.execute({ ...scope, operation: 'invoke', args: { connectionId: 'stdio', name: 'echo' } })).rejects.toThrow('not granted');
   });
-
-  it('exposes grant-scoped MCP discovery and calls through the eval namespace', async () => {
-    const authority = new FakeMcpAuthority();
-    const fixture = join(import.meta.dir, 'fixtures', 'fake-mcp-stdio.ts');
-    authority.connections = [connection({
-      id: 'stdio',
-      label: 'Fake stdio',
-      target: { kind: 'workspace' },
-      transport: { type: 'stdio', command: process.execPath, args: [fixture], cwd: null, environment: [] },
-    })];
-    authority.grants = [grant('stdio')];
+  it('rejects network transports and a different pinned machine before execution', async () => {
+    const authority = stdioAuthority();
     const coordinator = new MachineMcpCoordinator(authority, 'machine-a');
-    const projected = await coordinator.createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
-    try {
-      expect(projected.tools().some((tool) => tool.name === 'mcp_code')).toBe(false);
-      const namespace = projected.evalNamespace();
-      const matches = await namespace.call('search', { query: 'echo' }) as DiscoveredMcpTool[];
-      expect(matches.map((tool) => tool.name)).toEqual(['echo']);
-      expect(await namespace.call('describe', { name: 'stdio.echo' })).toMatchObject({ connectionId: 'stdio', name: 'echo' });
-      const result = await namespace.call('call', { name: 'stdio.echo', args: { value: 'hello from eval' } });
-      expect(JSON.stringify(result)).toContain('hello from eval');
-      expect(authority.audit.filter((event) => event.type === 'tool-invocation')).toHaveLength(2);
-
-      authority.grants = [{ ...authority.grants[0]!, enabled: false, revision: 2 }];
-      await expect(namespace.call('call', { name: 'stdio.echo', args: { value: 'must not execute' } })).rejects.toThrow('unavailable');
-      expect(await namespace.call('list', {})).toEqual([]);
-    } finally {
-      await projected.dispose();
-    }
+    authority.connections[0]!.target = { kind: 'machine', machineId: 'machine-b' };
+    await expect(coordinator.execute({ ...scope, operation: 'discover', args: { connectionId: 'stdio' } })).rejects.toThrow('another machine');
+    authority.connections[0]!.transport = { type: 'http', url: 'https://example.com/mcp', headers: [] };
+    await expect(coordinator.execute({ ...scope, operation: 'discover', args: { connectionId: 'stdio' } })).rejects.toThrow('only in the cloud');
   });
-
-  it('discovers Streamable HTTP metadata while resolving headers only at the machine boundary', async () => {
-    const secret = 'header-secret-value';
-    const server = startHttpServer(`Bearer ${secret}`);
-    const authority = new FakeMcpAuthority();
-    authority.secretValues.MCP_HTTP_TOKEN = `Bearer ${secret}`;
-    authority.connections = [connection({
-      id: 'http',
-      label: 'Fake HTTP',
-      target: { kind: 'machine', machineId: 'machine-a' },
-      transport: { type: 'http', url: server.url.href, headers: [{ name: 'Authorization', secret: { source: 'project', name: 'MCP_HTTP_TOKEN' } }] },
-    })];
-    authority.grants = [grant('http')];
+  it('rechecks grants after secret materialization, before spawning', async () => {
+    const authority = stdioAuthority();
+    authority.materializeProjectSecrets = async () => { authority.grants = []; return {}; };
     const coordinator = new MachineMcpCoordinator(authority, 'machine-a');
-    const projected = await coordinator.createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
-    try {
-      const tools = projected.descriptors();
-      expect(tools.map((tool) => tool.name)).toEqual(['paper_echo']);
-      expect(JSON.stringify(tools)).not.toContain(secret);
-      expect(JSON.stringify(projected.manager.getServerConfig('gitspace-http'))).not.toContain(secret);
-      expect(JSON.stringify(authority.audit)).not.toContain(secret);
-      const tool = projected.manager.getTools().find((candidate) => candidate.mcpToolName === 'paper_echo')!;
-      const result = await tool.execute('call-http', { value: 'hello' }, undefined, {} as never);
-      expect(JSON.stringify(result)).not.toContain(secret);
-      expect((await coordinator.connectionStatus('http'))?.status).toBe('ready');
-    } finally {
-      await projected.dispose();
-    }
-  });
-
-  it('refreshes effective secret overrides and rotations before invoking cached tools, and fails closed on cloud outage or revocation', async () => {
-    const authority = new FakeMcpAuthority();
-    let authorization = 'Bearer account-secret';
-    const calls: string[] = [];
-    const server = startHttpServer(() => authorization, calls);
-    authority.secretValues.MCP_TOKEN = authorization;
-    authority.secretMetadata = [{
-      projectId: 'project-a', name: 'MCP_TOKEN', source: 'account', revision: 1,
-      updatedAt: '2026-08-31T00:00:00.000Z', updatedBy: 'user-a',
-    }];
-    authority.connections = [connection({
-      id: 'effective-http', label: 'Effective HTTP', target: { kind: 'workspace' },
-      transport: { type: 'http', url: server.url.href, headers: [{ name: 'Authorization', secret: { source: 'project', name: 'MCP_TOKEN' } }] },
-    })];
-    authority.grants = [grant('effective-http')];
-    const projected = await new MachineMcpCoordinator(authority, 'machine-a').createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
-    try {
-      const tool = projected.tools().find((candidate) => candidate.mcpToolName === 'paper_echo')!;
-      await tool.execute('account', {}, undefined, {} as never);
-      authorization = 'Bearer project-override';
-      authority.secretValues.MCP_TOKEN = authorization;
-      authority.secretMetadata = [{ ...authority.secretMetadata[0]!, source: 'project' }];
-      await tool.execute('project-override', {}, undefined, {} as never);
-      authorization = 'Bearer rotated-project-secret';
-      authority.secretValues.MCP_TOKEN = authorization;
-      authority.secretMetadata = [{ ...authority.secretMetadata[0]!, revision: 2 }];
-      await tool.execute('rotated-project', {}, undefined, {} as never);
-      authority.unavailable = true;
-      await expect(tool.execute('outage', {}, undefined, {} as never)).rejects.toThrow('Cloud configuration unavailable');
-      authority.unavailable = false;
-      authority.secretMetadata = [];
-      await expect(tool.execute('revoked', {}, undefined, {} as never)).rejects.toThrow('unavailable');
-      expect(calls).toEqual(['Bearer account-secret', 'Bearer project-override', 'Bearer rotated-project-secret']);
-    } finally {
-      await projected.dispose();
-    }
-  });
-
-  it('projects a granted Composio plugin through the same MCP catalog without exposing managed credentials', async () => {
-    const secret = 'composio-managed-secret';
-    const server = startHttpServer(`Bearer ${secret}`);
-    const authority = new FakeMcpAuthority();
-    authority.composioMaterialization = {
-      type: 'http',
-      url: server.url.href,
-      headers: { Authorization: `Bearer ${secret}` },
-      timeoutMs: 2_000,
-    };
-    authority.connections = [connection({
-      id: 'composio-github',
-      label: 'Work GitHub',
-      status: 'ready',
-      target: { kind: 'cloud' },
-      transport: { type: 'composio', toolkit: 'github', connectedAccountId: 'ca_test', toolPolicy: { groups: { readOnly: false, write: false, destructive: false }, allow: ['GITHUB_SEARCH_ISSUES'], deny: [] } },
-    })];
-    authority.grants = [grant('composio-github')];
-    const coordinator = new MachineMcpCoordinator(authority, 'machine-a');
-    const projected = await coordinator.createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
-    try {
-      expect(projected.descriptors().map((tool) => tool.name)).toEqual(['paper_echo']);
-      expect(JSON.stringify(projected.manager.getServerConfig('gitspace-composio-github'))).not.toContain(secret);
-      const result = await projected.evalNamespace().call('call', { name: 'composio-github.paper_echo', args: { value: 'hello' } });
-      expect(JSON.stringify(result)).not.toContain(secret);
-      authority.grants = [{ ...authority.grants[0]!, enabled: false, revision: 2 }];
-      await projected.reload();
-      expect(projected.descriptors()).toEqual([]);
-    } finally {
-      await projected.dispose();
-    }
-  });
-
-  it('reports a machine-pinned connection offline without attempting to expose its localhost endpoint', async () => {
-    const authority = new FakeMcpAuthority();
-    authority.connections = [connection({
-      id: 'paper',
-      label: 'Paper Desktop',
-      target: { kind: 'machine', machineId: 'macbook-a' },
-      transport: { type: 'http', url: 'http://127.0.0.1:29979/mcp', headers: [] },
-    })];
-    authority.grants = [grant('paper')];
-    const coordinator = new MachineMcpCoordinator(authority, 'machine-b');
-    const projected = await coordinator.createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
-    try {
-      expect(projected.descriptors()).toEqual([]);
-      expect(authority.audit.some((event) => event.type === 'connection-offline')).toBe(true);
-      expect(JSON.stringify(authority.audit)).not.toContain('29979');
-    } finally {
-      await projected.dispose();
-    }
-  });
-
-  it('reports a reachable-machine localhost server offline when the direct endpoint cannot connect', async () => {
-    const authority = new FakeMcpAuthority();
-    authority.connections = [connection({
-      id: 'paper-unreachable',
-      label: 'Paper Desktop',
-      target: { kind: 'machine', machineId: 'machine-a' },
-      transport: { type: 'http', url: 'http://127.0.0.1:1/mcp', headers: [] },
-      timeoutMs: 250,
-    })];
-    authority.grants = [grant('paper-unreachable')];
-    const coordinator = new MachineMcpCoordinator(authority, 'machine-a');
-    const projected = await coordinator.createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
-    try {
-      expect((await coordinator.connectionStatus('paper-unreachable'))?.status).toBe('offline');
-      expect(projected.descriptors()).toEqual([]);
-    } finally {
-      await projected.dispose();
-    }
-  });
-
-  it('cancels an in-flight stdio tool and closes the child lifecycle', async () => {
-    const authority = new FakeMcpAuthority();
-    const fixture = join(import.meta.dir, 'fixtures', 'fake-mcp-stdio.ts');
-    authority.connections = [connection({
-      id: 'cancel',
-      label: 'Cancelable stdio',
-      target: { kind: 'workspace' },
-      transport: { type: 'stdio', command: process.execPath, args: [fixture], cwd: null, environment: [] },
-    })];
-    authority.grants = [grant('cancel')];
-    const coordinator = new MachineMcpCoordinator(authority, 'machine-a');
-    const projected = await coordinator.createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
-    const tool = projected.manager.getTools().find((candidate) => candidate.mcpToolName === 'wait')!;
-    const abort = new AbortController();
-    const execution = tool.execute('call-wait', {}, undefined, {} as never, abort.signal);
-    abort.abort(new Error('test cancellation'));
-    await expect(execution).rejects.toThrow(/Operation aborted|test cancellation/u);
-    await projected.dispose();
-    expect(projected.manager.getConnectedServers()).toEqual([]);
+    await expect(coordinator.execute({ ...scope, operation: 'invoke', args: { connectionId: 'stdio', name: 'echo' } })).rejects.toThrow('not granted');
   });
 });

@@ -1,23 +1,19 @@
 import { mkdir, readdir, rm } from 'node:fs/promises';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { AwsClient } from 'aws4fetch';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { credentialProtocolBase64, deviceCapabilitySchema, encodeDeviceInviteToken, signCredentialAuthorityGrant, signDeviceInvite } from '../packages/protocol/src/index.js';
 import { Miniflare } from 'miniflare';
-import { AuthStorage } from '@oh-my-pi/pi-ai';
 import {
   buildFrontendTree,
   buildMachineBundle,
-  buildOmpBundle,
   buildControlWorkerBundle,
   workspaceSha,
   type DeploymentArtifact,
 } from '../packages/deployment/src/index.js';
 import { ReplacementEnvironment } from '../packages/account-machine/src/index.js';
-import { machineBrokerToken } from '../packages/operator-worker/src/account-access.js';
-import { executableManifestPath } from '../packages/account-omp/src/manifest.js';
+import { executableManifestPath } from '../packages/deployment/src/executable-manifest.js';
 
 const repositoryRoot = dirname(import.meta.dir);
 const environmentRoot = process.env.GITSPACE_SANDBOX_ROOT
@@ -27,16 +23,13 @@ const rootSigningPrivateKey = new Uint8Array(new Bun.CryptoHasher('sha256').upda
 const machineSigningPrivateKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${environmentRoot}:machine-signing`).digest());
 const machineExchangePrivateKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${environmentRoot}:machine-exchange`).digest());
 const devBootstrapToken = crypto.randomUUID();
-const ompBrokerToken = new Bun.CryptoHasher('sha256').update(`${environmentRoot}:omp-broker`).digest('hex');
 const gitAccessKeyId = 'GITSPACELOCAL';
 const gitBucketName = 'gsp-u-local-user';
 const gitSecretAccessKey = new Bun.CryptoHasher('sha256').update(`${environmentRoot}:git-secret`).digest('hex');
 const rustfsBinary = process.env.GITSPACE_RUSTFS_BINARY ?? join(environmentRoot, 'bin', 'rustfs');
-const ompAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent');
 const controlUrl = 'http://127.0.0.1:4512';
 const gitEndpoint = 'http://127.0.0.1:4513';
 const controlToken = crypto.randomUUID();
-const initialOmp = await buildOmpBundle(repositoryRoot, join(environmentRoot, 'initial-omp', crypto.randomUUID()));
 const environment = new ReplacementEnvironment({
   id: 'self-sandbox',
   root: environmentRoot,
@@ -45,14 +38,9 @@ const environment = new ReplacementEnvironment({
   webPort: 4510,
   machineId: 'local-machine',
   artifactKey,
-  ompAgentDir,
   controlToken,
   environment: {
     GITSPACE_CONTROL_URL: controlUrl,
-    OMP_AUTH_BROKER_URL: `${controlUrl}/omp/users/local-user`,
-    OMP_AUTH_BROKER_TOKEN: await machineBrokerToken(ompBrokerToken, 'local-user', 'local-machine', 1),
-    GITSPACE_OMP_RUNTIME_PATH: join(initialOmp.path, 'omp.js'),
-    GITSPACE_OMP_MANIFEST_HASH: initialOmp.manifestHash,
     GITSPACE_USER_ID: 'local-user',
     GITSPACE_ROOT_PUBLIC_KEY: credentialProtocolBase64.encode(ed25519.getPublicKey(rootSigningPrivateKey)),
     GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: Buffer.from(machineSigningPrivateKey).toString('base64'),
@@ -77,7 +65,7 @@ const environment = new ReplacementEnvironment({
   },
 });
 
-type EntrypointKind = 'machine' | 'omp' | 'frontend';
+type EntrypointKind = 'machine' | 'frontend';
 
 function processEnvironment(): Record<string, string> {
   return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
@@ -135,14 +123,6 @@ async function bootstrapDevelopmentControlPlane(): Promise<void> {
     capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
     generation: 1,
   }, rootSigningPrivateKey);
-  const localAuth = await AuthStorage.create(join(ompAgentDir, 'agent.db'));
-  await localAuth.reload();
-  const credentials = ['anthropic', 'openai-codex', 'google-gemini-cli', 'google-antigravity', 'cursor']
-    .flatMap((provider) => {
-      const credential = localAuth.getOAuthCredential(provider);
-      return credential ? [{ id: `${provider}-primary`, provider, ...credential }] : [];
-    });
-  localAuth.close();
   const response = await fetch(new URL('/__dev/bootstrap', controlUrl), {
     method: 'POST',
     headers: {
@@ -156,7 +136,6 @@ async function bootstrapDevelopmentControlPlane(): Promise<void> {
       vaultKey: credentialProtocolBase64.encode(artifactKey),
       gitBucketName,
       deviceGrant,
-      credentials,
     }),
   });
   if (!response.ok) throw new Error(`Development control bootstrap failed with ${response.status}: ${(await response.text()).slice(0, 1_024)}`);
@@ -208,7 +187,6 @@ const control = new Miniflare({
     CF_API_TOKEN: 'local',
     R2_PARENT_ACCESS_KEY_ID: 'local',
     GITSPACE_DEV_BOOTSTRAP_TOKEN: devBootstrapToken,
-    GITSPACE_OMP_BROKER_TOKEN: ompBrokerToken,
   },
   durableObjectsPersist: join(environmentRoot, 'miniflare', 'durable-objects'),
   r2Persist: join(environmentRoot, 'miniflare', 'r2'),
@@ -245,16 +223,6 @@ async function deployPending(): Promise<void> {
           await environment.deploy({ artifacts, releaseSha: null, revision: String(Date.now()), dirty: true });
           const status = environment.status();
           console.log(`GitSpace self-sandbox active machine=${status.machineHash ?? 'none'} frontend=${status.frontendHash ?? 'none'}`);
-        }
-        if (selected.has('omp')) {
-          const built = await buildOmpBundle(repositoryRoot, join(environmentRoot, 'candidates', `omp-${crypto.randomUUID()}`));
-          const response = await fetch('http://127.0.0.1:4511/__control/omp-activate', {
-            method: 'POST',
-            headers: { authorization: `Bearer ${controlToken}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ path: built.path, hash: built.hash, manifestHash: built.manifestHash, sha: null }),
-          });
-          if (!response.ok) throw new Error(`OMP activation failed (${response.status}): ${await response.text()}`);
-          console.log(`[gitspace-self-develop] OMP selected ${built.hash}: ${await response.text()}`);
         }
       } finally {
         for (const candidate of candidates) {
@@ -301,14 +269,8 @@ if (process.env.GITSPACE_DEV_NO_WATCH !== '1') {
       watchers.push(watch(directory, () => schedule('machine')));
     }
   }
-  for (const sourceRoot of [
-    join(repositoryRoot, 'packages/account-omp/src'),
-    join(repositoryRoot, 'packages/account-omp/patches'),
-  ]) {
-    for (const directory of await sourceDirectories(sourceRoot)) watchers.push(watch(directory, () => schedule('omp')));
-  }
   for (const directory of await sourceDirectories(join(repositoryRoot, 'packages/protocol/src'))) {
-    watchers.push(watch(directory, () => { schedule('machine'); schedule('omp'); }));
+    watchers.push(watch(directory, () => schedule('machine')));
   }
   for (const directory of await sourceDirectories(join(repositoryRoot, 'packages/account-web/src'))) {
     watchers.push(watch(directory, () => schedule('frontend')));

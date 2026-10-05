@@ -41,9 +41,10 @@ const session: InputOf<typeof SessionViewCodec> = {
 function transport(value: unknown, version: string) {
   const body = serialize({ v: 1, status: 'ok', value: { mainAgent: value } });
   if (!body.ok) throw new Error(body.message);
-  return fetchTransport({ url: 'https://machine.test/rpc', fetch: (async () => new Response(body.value, {
+  const fetchMock: typeof fetch = Object.assign(async () => new Response(body.value, {
     headers: { 'content-type': 'application/result-rpc+devalue; sv=1', 'x-result-rpc-contract': version },
-  })) as typeof fetch });
+  }), { preconnect: fetch.preconnect });
+  return fetchTransport({ url: 'https://machine.test/rpc', fetch: fetchMock });
 }
 function encodedSession() {
   const encoded = SessionViewCodec.encode(session);

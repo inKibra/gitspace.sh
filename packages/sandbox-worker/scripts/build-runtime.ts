@@ -72,6 +72,6 @@ if (import.meta.main) {
       'process.env.GITSPACE_PROBE_MACHINE_MANIFEST_HASH': JSON.stringify(initial.machine.manifestHash),
     },
   });
-  if (!probe.success) throw new AggregateError(probe.logs, 'Container native/OMP probe build failed');
+  if (!probe.success) throw new AggregateError(probe.logs, 'Container machine/supervisor probe build failed');
   console.log(JSON.stringify({ runtimeLayers: await partitionRuntime('/out', '/runtime-layers', slots) }));
 }

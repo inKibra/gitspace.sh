@@ -140,7 +140,7 @@ describe('GitSpaceShell', () => {
   it('links disconnected provider setup to Inference instead of account settings', () => {
     const rejects = async (): Promise<never> => { throw new Error('not called during server render'); };
     const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
-      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null }], model: 'claude', thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null, activity: { active: false, reasons: [] }, renderState: 'waiting' },
+      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null }], model: 'claude', thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
       onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetApproval: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
     };
     const disconnected = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: false }]} />);
@@ -159,7 +159,7 @@ describe('GitSpaceShell', () => {
       ] }],
     };
     const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
-      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [], model: null, thinking: null, fastMode: false, planMode: true, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk, goal: null, history: [], historyAnchorId: null, activity: { active: true, reasons: [{ kind: 'human', questions: 1, permissions: 0 }] }, renderState: 'permission-needed' },
+      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [], model: null, thinking: null, fastMode: false, planMode: true, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk, goal: null, history: [], historyAnchorId: null },
       onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetApproval: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
     };
     const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} />);

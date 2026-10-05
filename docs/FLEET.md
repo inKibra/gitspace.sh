@@ -1,9 +1,30 @@
-# FLEET.md — GitSpace 1.0 architecture
+# GitSpace fleet architecture and historical design record
 
-Status: DRAFT for approval. Originally captured 2026-08-10; rewritten
-2026-08-27 after the OMP 18 migration, cross-machine session move, skinny-event
-work, and Cloudflare platform design. This is the anchor document: change the
-decision here before filing or implementing work that depends on it.
+## Current runtime boundary
+
+The current implementation lives in `packages/`. Pi Session state, inference and
+provider authentication run in the cloud through `runtime-core`,
+`runtime-workspace-do`, and the tenant Worker. Machines provide signed,
+generation-fenced tool execution; `supervisor` owns their processes and PTYs.
+There is no active OMP runtime or machine inference fallback.
+
+Code repositories use Artifacts and Git LFS. Optional ArtifactFS attachments are
+distinct from encrypted `local://` evidence. Runner tasks pin source snapshots;
+delegated work uses separate branches and explicit integration tasks. Uncertain
+unsafe effects are not replayed automatically.
+
+The active account release targets are Worker, frontend and machine. A native-v1
+host rejects native-v2 before draining; authenticated host recovery/bootstrap
+must precede activation. Local checks do not prove real provider egress,
+Artifacts/FUSE behavior, predecessor migration, tenant activation or a long soak.
+
+Use [README](../README.md) and [current user documentation](../packages/docs/src/)
+for current operation. The sections below preserve earlier design decisions and
+implementation reports, originally captured in August 2026. Their OMP, WalGit,
+local inference, legacy command and package references are historical, not
+current requirements or executable instructions.
+
+## Historical design and progress record
 
 ---
 

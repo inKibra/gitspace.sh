@@ -10,6 +10,7 @@ import type {
 } from '@gitspace/protocol';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { PublishedSpaceHeadResolver } from './inspector-base.js';
+import { readGitCheckpointHead } from './git-checkpoint.js';
 
 export interface ProjectLifecycleAuthority extends Pick<CloudSpaceCheckpointAuthority, 'getSpace'> {
   bootstrap(input: { projectId: string; spaceId: string }): Promise<unknown>;
@@ -303,14 +304,24 @@ export class ProjectLifecycleManager {
       ownsRoot = true;
       if (repositoryUrl) {
         const environment = await this.gitEnvironment?.(repositoryUrl) ?? {};
-        await runGit(['clone', '--single-branch', ...(input.baseBranch === null ? [] : ['--branch', input.baseBranch]), '--', repositoryUrl, repositoryPath], undefined, environment);
-        if (input.baseBranch === null) baseBranch = await runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], repositoryPath);
+        const emptyRemote = input.baseBranch !== null && await runGit(['ls-remote', '--', repositoryUrl], undefined, environment) === '';
+        await runGit(['clone', '--single-branch', ...(input.baseBranch === null || emptyRemote ? [] : ['--branch', input.baseBranch]), '--', repositoryUrl, repositoryPath], undefined, environment);
+        if (emptyRemote) {
+          // An empty remote has no branch to select during clone. Keep HEAD
+          // genuinely unborn while honoring the requested initial branch name.
+          const cloned = await readGitCheckpointHead(repositoryPath);
+          if (cloned.headCommit !== null) throw new Error('Repository acquired a commit while importing its empty branch; retry the import');
+          await runGit(['check-ref-format', '--branch', baseBranch], repositoryPath);
+          await runGit(['symbolic-ref', 'HEAD', `refs/heads/${baseBranch}`], repositoryPath);
+        } else if (input.baseBranch === null) {
+          baseBranch = await runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], repositoryPath);
+        }
       } else {
         await mkdir(repositoryPath);
         await runGit(['init', '-b', baseBranch], repositoryPath);
         await runGit(['-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '--allow-empty', '-m', 'Initialize GitSpace project'], repositoryPath);
       }
-      const sourceCommit = await runGit(['rev-parse', '--verify', 'HEAD^{commit}'], repositoryPath);
+      const { headCommit: sourceCommit } = await readGitCheckpointHead(repositoryPath);
       // Repository failures must not publish a project or leave a local projection.
       if (this.database.getProject(projectId) || await this.authority.getProject(projectId)) {
         throw new Error(`Project ${projectId} already exists`);

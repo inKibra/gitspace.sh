@@ -53,7 +53,8 @@ describe('shared Git identity', () => {
     roots.push(secondRoot);
     const second = new SharedGitIdentityCoordinator(cloud, secondRoot, () => []);
     await second.start();
-    expect(readFileSync(join(secondRoot, 'git-identity', 'id_ed25519.pub'), 'utf8').trim()).toBe(cloud.identity?.publicKey);
+    if (!cloud.identity) throw new Error('Expected the shared Git identity to be retained');
+    expect(readFileSync(join(secondRoot, 'git-identity', 'id_ed25519.pub'), 'utf8').trim()).toBe(cloud.identity.publicKey);
   });
 
   it('applies concurrently without colliding on the repository config lock', async () => {

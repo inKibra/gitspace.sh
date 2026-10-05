@@ -1,10 +1,17 @@
 import {
   EnvironmentError, LifecycleMutationSchema, assertEnvironmentRetired, emptyLifecycleState,
-  transitionLifecycle, LIFECYCLE_PREVIEW_LIMIT,
-  type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog,
+  transitionLifecycle, LIFECYCLE_PREVIEW_LIMIT, LifecycleStateSchema, LifecycleRunSchema,
+  type LifecycleActor, type LifecycleMutation, type LifecycleRunLog,
   type LifecycleRunRecord, type LifecycleState,
 } from '@gitspace/protocol-environment';
 import { DurableChangeLog } from './durable-stream.js';
+import { z } from 'zod';
+
+const StoredEnvironmentSchema = LifecycleStateSchema.extend({ browserOriginsAvailable: z.boolean().default(true) });
+type StoredEnvironment = z.output<typeof StoredEnvironmentSchema>;
+function availableState({ browserOriginsAvailable, ...state }: StoredEnvironment): LifecycleState {
+  return browserOriginsAvailable ? state : { ...state, browserOrigins: [] };
+}
 
 interface JsonRow extends Record<string, SqlStorageValue> { data: string }
 interface RunRow extends JsonRow { scope: string; token: string | null; lock_key: string }
@@ -31,15 +38,56 @@ export class ProjectEnvironmentStore {
   }
 
   get(projectId: string, spaceId: string): LifecycleState {
+    return availableState(this.stored(projectId, spaceId));
+  }
+
+  private stored(projectId: string, spaceId: string): StoredEnvironment {
     const row = this.storage.sql.exec<JsonRow>('SELECT data FROM environment_state WHERE space_id=?', spaceId).toArray()[0];
     const shared = this.shared();
-    const state: LifecycleState = row ? JSON.parse(row.data) as LifecycleState : emptyLifecycleState(projectId, spaceId);
+    const state = StoredEnvironmentSchema.parse(row ? JSON.parse(row.data) : emptyLifecycleState(projectId, spaceId));
     state.values.project = shared.values;
     state.approvals = [...shared.approvals, ...state.approvals.filter((approval) => approval.scope === 'workspace')];
     state.runs = this.storage.sql.exec<JsonRow>('SELECT data FROM lifecycle_runs WHERE space_id=? ORDER BY rowid DESC', spaceId)
-      .toArray().map((entry) => JSON.parse(entry.data) as LifecycleRun);
+      .toArray().map((entry) => LifecycleRunSchema.parse(JSON.parse(entry.data)));
     state.claim = null;
     return state;
+  }
+
+  /** Trusted authority ingress only: entries are derived from the canonical committed HEAD. */
+  setBrowserOrigins(projectId: string, spaceId: string, origins: LifecycleState['browserOrigins']): LifecycleState {
+    const browserOrigins = LifecycleStateSchema.shape.browserOrigins.parse(origins);
+    const result = this.storage.transactionSync(() => {
+      const state = this.stored(projectId, spaceId);
+      if (state.browserOriginsAvailable && JSON.stringify(state.browserOrigins) === JSON.stringify(browserOrigins)) return availableState(state);
+      const retainedHashes = new Set(browserOrigins.map((entry) => entry.hash));
+      const removedHashes = new Set(state.browserOrigins.filter((entry) => !retainedHashes.has(entry.hash)).map((entry) => entry.hash));
+      const projectScope = spaceId === projectId;
+      const approvals = state.approvals.filter((entry) => !removedHashes.has(entry.executionHash) || (entry.scope === 'project' && !projectScope));
+      const sharedChanged = projectScope && state.approvals.some((entry) => entry.scope === 'project' && removedHashes.has(entry.executionHash));
+      state.approvals = approvals;
+      if (sharedChanged) this.saveShared({ values: state.values.project, approvals: approvals.filter((entry) => entry.scope === 'project') });
+      state.browserOrigins = browserOrigins;
+      state.browserOriginsAvailable = true;
+      state.revision += 1;
+      this.persist(state);
+      this.changes.append(`environment:${spaceId}`, availableState(state));
+      if (sharedChanged) this.publishShared(spaceId);
+      return availableState(state);
+    });
+    this.changes.wake();
+    return result;
+  }
+
+  markBrowserOriginsUnavailable(projectId: string, spaceId: string): void {
+    this.storage.transactionSync(() => {
+      const state = this.stored(projectId, spaceId);
+      if (!state.browserOriginsAvailable) return;
+      state.browserOriginsAvailable = false;
+      state.revision += 1;
+      this.persist(state);
+      this.changes.append(`environment:${spaceId}`, availableState(state));
+    });
+    this.changes.wake();
   }
 
   getValues(): Record<string, string> { return this.shared().values; }
@@ -49,7 +97,7 @@ export class ProjectEnvironmentStore {
     const values = this.storage.transactionSync(() => {
       const shared = this.shared();
       const first = this.storage.sql.exec<JsonRow>('SELECT data FROM environment_state LIMIT 1').toArray()[0];
-      const state = first ? JSON.parse(first.data) as LifecycleState : emptyLifecycleState('project', 'account-values');
+      const state = first ? availableState(StoredEnvironmentSchema.parse(JSON.parse(first.data))) : emptyLifecycleState('project', 'account-values');
       state.values.project = shared.values;
       const transition = transitionLifecycle({ state, runs: [], actor: { actorId: 'account-authority', machineId: 'account-authority', kind: 'machine', lifecycleControl: false }, now: new Date().toISOString(), token: '' }, mutation);
       this.saveShared({ ...shared, values: transition.state.values.project });
@@ -77,8 +125,11 @@ export class ProjectEnvironmentStore {
   mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor): LifecycleState {
     const result = this.storage.transactionSync(() => {
       const runs: LifecycleRunRecord[] = this.storage.sql.exec<RunRow>('SELECT scope,token,lock_key,data FROM lifecycle_runs')
-        .toArray().map((row) => ({ run: JSON.parse(row.data) as LifecycleRun, token: row.token, scope: row.scope, lock: row.lock_key }));
-      const transition = transitionLifecycle({ state: this.get(projectId, spaceId), runs, actor, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
+        .toArray().map((row) => ({ run: LifecycleRunSchema.parse(JSON.parse(row.data)), token: row.token, scope: row.scope, lock: row.lock_key }));
+      const stored = this.stored(projectId, spaceId);
+      const current = availableState(stored);
+      if (input.op === 'approval' && input.approved && input.scope === 'project' && spaceId !== projectId && current.browserOrigins.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('PermissionDenied', 'Approve browser origins on the base workspace for project-wide access');
+      const transition = transitionLifecycle({ state: current, runs, actor, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
       if (!transition.changed) return transition.state;
       const { state, record, log } = transition;
       if (record) this.storage.sql.exec(
@@ -92,7 +143,7 @@ export class ProjectEnvironmentStore {
         );
       }
       if (transition.sharedChanged) this.saveShared({ values: state.values.project, approvals: state.approvals.filter((entry) => entry.scope === 'project') });
-      this.persist(state);
+      this.persist({ ...state, browserOrigins: stored.browserOriginsAvailable ? state.browserOrigins : stored.browserOrigins, browserOriginsAvailable: stored.browserOriginsAvailable });
       this.changes.append(`environment:${spaceId}`, { ...state, claim: null });
       if (transition.sharedChanged) this.publishShared(spaceId);
       return state;
@@ -108,17 +159,17 @@ export class ProjectEnvironmentStore {
   private saveShared(shared: SharedEnvironment): void {
     this.storage.sql.exec('INSERT INTO environment_shared(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data', JSON.stringify(shared));
   }
-  private persist(state: LifecycleState): void {
+  private persist(state: StoredEnvironment): void {
     this.storage.sql.exec('INSERT INTO environment_state(space_id,data) VALUES(?,?) ON CONFLICT(space_id) DO UPDATE SET data=excluded.data', state.spaceId, JSON.stringify({ ...state, runs: [], claim: null }));
   }
   private publishShared(exceptSpaceId?: string): void {
     for (const row of this.storage.sql.exec<JsonRow>('SELECT data FROM environment_state').toArray()) {
-      const stored = JSON.parse(row.data) as LifecycleState;
+      const stored = StoredEnvironmentSchema.parse(JSON.parse(row.data));
       if (stored.spaceId === exceptSpaceId) continue;
-      const state = this.get(stored.projectId, stored.spaceId);
+      const state = this.stored(stored.projectId, stored.spaceId);
       state.revision += 1;
       this.persist(state);
-      this.changes.append(`environment:${state.spaceId}`, state);
+      this.changes.append(`environment:${state.spaceId}`, availableState(state));
     }
   }
 }

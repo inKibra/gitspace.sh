@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@earendil-works/chord": "1.0.0",
     "@base-ui/react": "^1.0.0",
     "@gitspace/blocks": "workspace:*",
     "@gitspace/protocol": "workspace:*",
@@ -18,6 +19,7 @@
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
     "@gitspace/protocol-sync": "workspace:*",
+    "@gitspace/protocol-runtime": "workspace:*",
     "@gitspace/ui": "workspace:*",
     "@pierre/diffs": "1.2.12",
     "@pierre/trees": "1.0.0-beta.6",
@@ -36,7 +38,8 @@
     "rehype-harden": "^1.1.8",
     "result-rpc": "0.5.0",
     "streamdown": "^2.6.0",
-    "@noble/curves": "^2.2.0"
+    "@noble/curves": "^2.2.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",

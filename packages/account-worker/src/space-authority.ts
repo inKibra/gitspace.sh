@@ -3,14 +3,27 @@ import { abortSpaceClose, beginSpaceClose, beginSpaceOpen, bootstrapSpaceAuthori
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
+import { RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeAttachInputSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { createAccountWorkspaceRuntime } from './account-runtime-host.js';
+import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
+import { RuntimeGitCheckpointSchema, RuntimePlacementInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimePrimaryAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
+import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema, RuntimeModelInputSchema, RuntimeMcpInputSchema } from '@gitspace/protocol-runtime/machine-controls';
+import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
+import { requireRuntimeIdentity } from './runtime-access.js';
+import { z } from 'zod';
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
   private readonly directoryOutbox: DirectoryOutbox;
+  private runtime: Promise<WorkspaceRuntime> | undefined;
+  private alarmLine: Promise<void> = Promise.resolve();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
-    this.directoryOutbox = new DirectoryOutbox(ctx, env);
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_alarms(owner TEXT PRIMARY KEY, timestamp INTEGER NOT NULL)');
+    this.directoryOutbox = new DirectoryOutbox(ctx, env, { set: timestamp => this.scheduleAlarm('directory', timestamp), clear: () => this.scheduleAlarm('directory', null) });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS space_authority (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -29,7 +42,232 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return state ? { source: 'space', cursor: this.directoryOutbox.head(), state } : null;
   }
 
-  async alarm(): Promise<void> { await this.directoryOutbox.flush(); }
+  private scheduleAlarm(owner: string, timestamp: number | null): Promise<void> {
+    if (timestamp === null) this.ctx.storage.sql.exec('DELETE FROM runtime_alarms WHERE owner=?', owner);
+    else this.ctx.storage.sql.exec('INSERT INTO runtime_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp', owner, timestamp);
+    const operation = this.alarmLine.then(async () => {
+      const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>('SELECT MIN(timestamp) AS timestamp FROM runtime_alarms').toArray()[0]?.timestamp;
+      if (next === null || next === undefined) await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(next);
+    });
+    this.alarmLine = operation.catch(() => {});
+    return operation;
+  }
+
+  async alarm(): Promise<void> {
+    await this.directoryOutbox.flush();
+    const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
+    if (wake && wake.timestamp <= Date.now()) {
+      await this.scheduleAlarm('runtime', null);
+      const identity = await this.ctx.storage.get<Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>>('runtime.identity');
+      if (identity) await (await this.getRuntime(identity)).wake();
+    }
+  }
+
+  private async getRuntime(raw: unknown): Promise<WorkspaceRuntime> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, identity, false);
+    const authority = this.get();
+    if (authority && (authority.projectId !== identity.projectId || authority.spaceId !== identity.workspaceId)) throw new Error('Runtime workspace identity mismatch');
+    const stored = await this.ctx.storage.get('runtime.identity');
+    if (stored !== undefined) {
+      const previous = RuntimeIdentitySchema.parse(stored);
+      if (previous.projectId !== identity.projectId || previous.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
+    } else await this.ctx.storage.put('runtime.identity', identity);
+    if (!this.runtime) {
+      this.runtime = createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp));
+      this.runtime.catch(() => { this.runtime = undefined; });
+    }
+    return this.runtime;
+  }
+
+  async runtimeSnapshot(raw: unknown): Promise<Response> { return Response.json(await (await this.getRuntime(raw)).snapshot()); }
+  async runtimeAttachments(raw: unknown) { return (await this.getRuntime(raw)).attachments.list(); }
+  async runtimeCodeCheckpoint(raw: unknown) {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const authority = this.get();
+    if (authority && (authority.projectId !== identity.projectId || authority.spaceId !== identity.workspaceId)) throw new Error('Checkpoint workspace identity mismatch');
+    const stored = await this.ctx.storage.get('runtime.identity');
+    if (stored !== undefined) {
+      const previous = RuntimeIdentitySchema.parse(stored);
+      if (previous.projectId !== identity.projectId || previous.workspaceId !== identity.workspaceId) throw new Error('Checkpoint runtime identity mismatch');
+    }
+    return readCurrentCheckpoint(this.ctx.storage);
+  }
+  async runtimeSubmit(raw: unknown) { const input = RuntimeSubmitInputSchema.parse(raw); return (await this.getRuntime(input)).submit(input); }
+  async runtimeCancel(raw: unknown) { const input = RuntimeCancelInputSchema.parse(raw); return (await this.getRuntime(input)).cancel(input); }
+  async runtimeAnswer(raw: unknown, actor: { deviceId: string; canApprove: boolean }) { const input = RuntimeAnswerInputSchema.parse(raw); return (await this.getRuntime(input)).answer(input, actor); }
+  async runtimeWatch(raw: unknown): Promise<Response> { const input = RuntimeWatchInputSchema.parse(raw); return (await this.getRuntime(input)).watch(input); }
+  async runtimeAttach(raw: unknown) {
+    const input = RuntimeAttachInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    const placement = this.get();
+    const admitted = runtime.attachments.list().find(attachment => attachment.machineId === input.machineId && attachment.generation === input.generation && attachment.role === 'primary');
+    const ownershipGeneration = admitted?.ownershipGeneration ?? admitted?.generation;
+    const browserMachine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
+    if (!browserMachine || browserMachine.desiredState === 'removed') input.capabilities = input.capabilities.filter(capability => capability !== 'browser' && capability !== 'browser_control' && !capability.startsWith('browser.'));
+    else if (browserMachine.kind !== 'physical') input.capabilities = input.capabilities.filter(capability => capability !== 'browser.relay');
+    if (input.role !== 'primary' || !admitted || !['attaching', 'ready'].includes(admitted.state) || !placement || placement.machineId !== input.machineId || placement.generation !== ownershipGeneration || placement.state !== 'open') throw new Error('Primary attachment requires a durable request and current open checkout ownership');
+    const result = await runtime.attachments.attach(input);
+    const current = this.get();
+    if (!current || current.generation !== ownershipGeneration || current.machineId !== input.machineId || current.state !== 'open') throw new Error('Checkout ownership changed during attachment');
+    runtime.publish();
+    return result;
+  }
+
+  async runtimeSession(raw: unknown, actor: { canApprove: boolean }): Promise<Response> {
+    const input = RuntimeSessionInputSchema.parse(raw);
+    return Response.json(await (await this.getRuntime(input)).session(input.conversationId, input.command, actor.canApprove));
+  }
+  async runtimeBrowserAuthority(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ machineId: z.string(), attachmentId: z.string(), generation: z.number().int().nonnegative() }).parse(raw);
+    const runtime = await this.getRuntime(input);
+    if (!runtime.attachments.list().some(item => item.machineId === input.machineId && item.attachmentId === input.attachmentId && item.generation === input.generation && ['attaching', 'ready', 'draining'].includes(item.state))) throw new Error('Browser authority requires active owned assignment');
+    const { algorithm, publicKey } = await this.env.ACCOUNT_STATE.getByName(this.env.ACCOUNT_ID).browserTrust();
+    return { algorithm, publicKey };
+  }
+
+  async runtimePlacement(raw: unknown) {
+    const input = RuntimePlacementInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    await runtime.assignPlacement(input.conversationId, input.placement.attachmentId, input.placement.generation);
+    runtime.publish();
+    return { accepted: true as const, cursor: (await runtime.snapshot()).cursor };
+  }
+
+  async runtimeQa(raw: unknown, actor: { deviceId: string; canApprove: boolean }) {
+    const input = RuntimeQaActionInputSchema.parse(raw);
+    return (await this.getRuntime(input)).qa(input, actor);
+  }
+
+  async runtimeSnapshotCommit(raw: unknown) {
+    const input = RuntimeSnapshotCommitInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
+    const repository = artifactsWorkspaceRepository(input.workspaceId);
+    const commits = new Set([input.checkpoint.indexCommit, input.checkpoint.trackedWorktreeCommit, input.checkpoint.worktreeCommit]);
+    if (input.checkpoint.headCommit !== null) commits.add(input.checkpoint.headCommit);
+    await Promise.all([...commits].map(async commit => {
+      if (!await code.readCommit(repository, commit)) throw new Error('Checkpoint commit was not published');
+    }));
+    return runtime.snapshotCommit(input);
+  }
+
+  private async attachmentController(raw: unknown) {
+    const runtime = await this.getRuntime(raw);
+    await runtime.cloudFiles.recover();
+    return new RuntimeAttachmentController({
+      attachments: runtime.attachments, code: new ArtifactsCodeStore(this.env.ARTIFACTS), publish: () => runtime.publish(),
+      snapshot: () => runtime.cloudFiles.initializeSnapshot(),
+      origin: async projectId => (await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getProject())?.repositoryReference ?? null,
+      lifecycle: (projectId, workspaceId) => this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getLifecycleState(workspaceId),
+      authorizeMachine: async machineId => {
+        const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId);
+        if (!machine || machine.desiredState === 'removed' || !await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).hasRuntimeMachine(machineId)) throw new Error('Attachment target is not an enrolled account machine');
+      },
+    });
+  }
+
+  async runtimeAttachmentRequest(raw: unknown) {
+    const input = RuntimeAttachmentRequestInputSchema.parse(raw);
+    return (await this.attachmentController(input)).request(input);
+  }
+
+  async runtimePrimaryAttachmentRequest(raw: unknown) {
+    const input = RuntimePrimaryAttachmentRequestInputSchema.parse(raw);
+    const { project, workspace } = await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
+    const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
+    if (!machine || machine.desiredState === 'removed' || !await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).hasRuntimeMachine(input.machineId)) throw new Error('Attachment target is not an enrolled account machine');
+    const runtime = await this.getRuntime(input);
+    await runtime.cloudFiles.recover();
+    await runtime.cloudFiles.initializeSnapshot();
+    const placement = this.get();
+    if (!placement || placement.state !== 'open' || placement.machineId !== input.machineId) throw new Error('Primary attachment requires existing open canonical checkout ownership on the selected machine');
+    const result = await runtime.attachments.requestPrimary({ ...input, ownershipGeneration: placement.generation, checkout: { kind: 'shared', branch: workspace?.branch ?? project.baseBranch }, capabilities: executorCapabilities });
+    const current = this.get();
+    if (!current || current.state !== 'open' || current.machineId !== input.machineId || current.generation !== placement.generation) {
+      if (result.attachment.state === 'attaching') runtime.attachments.transition(result.attachment.attachmentId, result.attachment.generation, 'draining');
+      throw new Error('Checkout ownership changed during attachment request');
+    }
+    runtime.publish();
+    return result;
+  }
+
+  async runtimeAttachmentDetachRequest(raw: unknown) {
+    const input = RuntimeAttachmentDetachRequestInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    const attachment = runtime.attachments.list().find(candidate => candidate.attachmentId === input.attachmentId);
+    if (attachment?.state === 'detached') return { attachment: runtime.attachments.detach({ ...input, state: 'detached' }) };
+    return this.runtimeDetach({ ...input, state: 'draining' });
+  }
+
+  async runtimeAssignments(raw: unknown) {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const input = RuntimeAssignmentsInputSchema.parse(raw);
+    if (await this.ctx.storage.get('runtime.identity') === undefined) return { assignments: [] };
+    return (await this.attachmentController(identity)).assignments(input);
+  }
+
+  async runtimeAttachmentReady(raw: unknown) {
+    const input = RuntimeAttachmentReadyInputSchema.parse(raw);
+    return (await this.attachmentController(input)).ready(input);
+  }
+
+  async runtimeHeartbeat(raw: unknown) {
+    const input = RuntimeHeartbeatInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    if (input.browserCapabilities) {
+      const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
+      if (machine?.kind !== 'physical' || machine.desiredState === 'removed') input.browserCapabilities = [];
+    }
+    const attachment = runtime.attachments.heartbeat(input);
+    runtime.publish();
+    return { attachment };
+  }
+
+  async runtimeDetach(raw: unknown) {
+    const input = RuntimeDetachInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    if (input.state === 'detached') await runtime.attachments.reconcileDetach(input);
+    const attachment = runtime.attachments.detach(input);
+    runtime.publish();
+    return { attachment };
+  }
+
+
+  async runtimeCronSubmit(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), text: z.string().min(1), readScopes: z.array(z.string()), writeScopes: z.array(z.string()) }).parse(raw);
+    await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
+    return (await this.getRuntime(input)).cronSubmit(input);
+  }
+
+  async runtimeRequestStatus(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1) }).parse(raw);
+    return (await this.getRuntime(input)).requestStatus(input.requestId);
+  }
+
+  async runtimeTranscript(raw: unknown): Promise<Response> {
+    const input = RuntimeIdentitySchema.extend({ conversationId: z.string().optional() }).parse(raw);
+    return Response.json(await (await this.getRuntime(input)).transcript(input.conversationId));
+  }
+
+  async runtimeModel(raw: unknown, machineId: string): Promise<Response> {
+    const input = RuntimeModelInputSchema.parse(raw);
+    if (input.dispatch.machineId !== machineId) throw new Error('Model request executor mismatch');
+    return Response.json(await (await this.getRuntime(input.dispatch)).model(input, machineId));
+  }
+
+  async runtimeMcp(raw: unknown, machineId: string): Promise<Response> {
+    const input = RuntimeMcpInputSchema.parse(raw);
+    if (input.dispatch.machineId !== machineId) throw new Error('MCP request executor mismatch');
+    return Response.json(await (await this.getRuntime(input.dispatch)).mcp(input, machineId));
+  }
+
+  async runtimeDiscoverMcp(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), args: z.object({ connectionId: z.string().min(1) }) }).parse(raw);
+    await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
+    return (await this.getRuntime(input)).discoverMcp(input);
+  }
 
   watch(spaceId: string, after: number | null): DurableStreamSubscription {
     const state = this.get();

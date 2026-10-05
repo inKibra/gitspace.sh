@@ -67,6 +67,10 @@
     "value": "300000"
   },
   {
+    "name": "ARTIFACTS",
+    "source": "artifacts"
+  },
+  {
     "name": "STORAGE_BUCKET",
     "source": "object-storage-name"
   }

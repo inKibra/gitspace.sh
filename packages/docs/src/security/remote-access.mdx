@@ -37,10 +37,20 @@ Browser RPC requests are signed. Verification binds a request to the enrolled de
 
 Current package code encrypts these data classes:
 
-- Artifact and checkpoint blobs use AES-GCM with an account-scoped key supplied to authorized machines. The managed credential vault is part of this trust boundary.
+- GitSpace evidence artifacts (`local://base/` and `local://workspace/`) use AES-GCM with scope keys derived from the account artifact key. Checkpoint blobs also use AES-GCM. Authorized cloud services and machines can decrypt this data; the managed credential vault is part of the trust boundary.
 - Machine credential envelopes use ephemeral X25519 key agreement, HKDF-SHA256 key derivation, and AES-GCM authenticated encryption.
 
 These are scoped guarantees. They do not imply that every request or terminal byte uses the same encryption boundary.
+
+Cloudflare Artifacts repositories store code separately from these encrypted evidence files. The account Worker accesses repositories through its Artifacts binding and issues repository-scoped read or write tokens to machine checkouts. Evidence encryption does not make code repositories or cloud conversation state end-to-end encrypted.
+
+## Cloud runtime and credentials
+
+The Workspace Durable Object stores Pi conversations, pending questions, and durable task records. It performs inference through the project's admitted profile and the cloud credential vault. Account selection and refresh happen in the cloud, without a connected-machine fallback. Treat the account Worker, runtime storage, and credential vault as trusted services for this data.
+
+A machine executes repository tools, jobs, services, and lifecycle scripts. Enrollment alone does not authorize every workspace effect: dispatch also checks the attachment, generation, and attempt identity. A machine disconnect does not move the conversation to that machine or prove its running processes have stopped. Unresolved unsafe effects are not automatically relaunched.
+
+Lifecycle content approval, uncertain-effect recovery, and cloud destruction remain human-authorized actions. Protected interactive lifecycle terminals require a live browser session. Raw input and output stay out of durable logs and replay; reconnecting does not recover earlier terminal text.
 
 ## Relay and Worker visibility
 
@@ -53,7 +63,7 @@ A full encrypted RPC transport exists in package library and test code, but it i
 - Protect the `gsr_` recovery key as the account root secret.
 - Use separate machine and browser enrollments instead of copying device private keys.
 - Revoke devices that should no longer have access.
-- Treat machine hosts as trusted for the repositories, agents, services, and decrypted workspace data placed on them.
+- Treat machine hosts as trusted for repository tools, services, injected secrets, and decrypted workspace data placed on them. They are effect executors, not an OS sandbox or the owner of the cloud conversation.
 - Review device grants and capability changes as security-sensitive operations.
 
 ## Algorithms in current package code
@@ -63,4 +73,4 @@ A full encrypted RPC transport exists in package library and test code, but it i
 | Account, machine, and browser signing | Ed25519 |
 | Machine credential key agreement | X25519 |
 | Key derivation for sealed credentials | HKDF-SHA256 |
-| Artifact, checkpoint, and credential encryption | AES-GCM |
+| Evidence artifact, checkpoint blob, and credential encryption | AES-GCM |

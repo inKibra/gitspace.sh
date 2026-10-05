@@ -84,8 +84,8 @@ describe('registered browser invitations', () => {
     const owner = await account();
     const invite = delegated(owner);
     const request = signedRequest(owner, 'create', { invite });
-    const replay = request.clone();
-    const unsigned = request.clone();
+    const replay = new Request(request.url, { method: request.method, headers: request.headers, body: request.clone().body });
+    const unsigned = new Request(request.url, { method: request.method, headers: request.headers, body: request.clone().body });
     unsigned.headers.delete('x-gitspace-device');
     expect((await SELF.fetch(unsigned)).status).toBe(403);
     const wrongKey = signedRequest(owner, 'create', { invite }, newBrowserKey);

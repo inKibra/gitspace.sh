@@ -1,5 +1,5 @@
 import { FileDiff } from '@pierre/diffs/react';
-import { parsePatchFiles, type AnnotationSide, type DiffLineAnnotation, type FileDiffOptions, type SelectedLineRange } from '@pierre/diffs';
+import { parsePatchFiles, type DiffLineAnnotation, type FileDiffOptions, type SelectedLineRange } from '@pierre/diffs';
 import { FileTree, useFileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from '@xyflow/react';
@@ -8,7 +8,9 @@ import { Archive, Boxes, Bot, Check, ChevronDown, File, FileCode2, FileJson2, Fi
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../src/styles.css';
-import { WorkspaceTerminals, type WorkspaceTerminalOutput, type WorkspaceTerminalView } from '../src/WorkspaceTerminals.js';
+import { WorkspaceTerminals, type WorkspaceTerminalsProps, type WorkspaceTerminalView } from '../src/WorkspaceTerminals.js';
+import { SynchronizationContext } from '../src/SynchronizationProvider.js';
+import { SynchronizationOwner } from '../src/synchronization.js';
 import './workbench-preview.css';
 
 type View = 'subagents' | 'files' | 'artifacts' | 'goal' | 'services' | 'terminals' | 'guide' | 'journal' | 'document';
@@ -80,9 +82,9 @@ function PierreViewer({ patch, filePath, plain, onThread }: { patch: string; fil
   const fileDiff = useMemo(() => parsePatchFiles(patch).flatMap((parsed) => parsed.files)[0] ?? null, [patch]);
   const threadLine = plain ? 7 : 6;
   const annotations = useMemo<DiffLineAnnotation<MockAnnotation>[]>(() => [{ side: 'additions', lineNumber: threadLine, metadata: { label: '2 comments' } }], [threadLine]);
-  const options = useMemo<FileDiffOptions<MockAnnotation>>(() => ({ diffStyle: 'unified', theme: 'github-light', disableFileHeader: true, hunkSeparators: 'line-info', enableHoverUtility: true, enableLineSelection: true, onLineSelectionEnd: (range: SelectedLineRange | null) => { if (range) onThread(Math.min(range.start, range.end)); } }), [onThread]);
+  const options = useMemo(() => ({ diffStyle: 'unified', theme: 'github-light', disableFileHeader: true, hunkSeparators: 'line-info', enableGutterUtility: true, enableLineSelection: true, onLineSelectionEnd: (range: SelectedLineRange | null) => { if (range) onThread(Math.min(range.start, range.end)); } } satisfies FileDiffOptions<MockAnnotation>), [onThread]);
   if (!fileDiff) return <div className="viewer-empty"><strong>No parseable file content for {filePath}</strong></div>;
-  return <div className="pierre-diff-host"><FileDiff fileDiff={fileDiff} options={options} lineAnnotations={annotations} renderAnnotation={(annotation) => <button className="pierre-inline-thread" onClick={() => onThread(annotation.lineNumber)}><MessageSquare size={12} /><span><strong>{annotation.metadata.label}</strong><small>Reviewer · Workspace agent</small></span></button>} renderHoverUtility={(getHoveredLine: () => { lineNumber: number; side: AnnotationSide } | undefined) => <button className="pierre-comment-plus" aria-label="Add line comment" onMouseDown={(event) => { event.preventDefault(); const hovered = getHoveredLine(); if (hovered) onThread(hovered.lineNumber); }}>+</button>} /></div>;
+  return <div className="pierre-diff-host"><FileDiff fileDiff={fileDiff} options={options} lineAnnotations={annotations} renderAnnotation={(annotation) => <button className="pierre-inline-thread" onClick={() => onThread(annotation.lineNumber)}><MessageSquare size={12} /><span><strong>{annotation.metadata.label}</strong><small>Reviewer · Workspace agent</small></span></button>} renderGutterUtility={(getHoveredLine) => <button className="pierre-comment-plus" style={{ position: 'relative', zIndex: 2 }} aria-label="Add line comment" onMouseDown={(event) => { event.preventDefault(); const hovered = getHoveredLine(); if (hovered) onThread(hovered.lineNumber); }}>+</button>} /></div>;
 }
 function SourceRows({ kind, selected, onSelect }: { kind: 'changes' | 'files'; selected: string; onSelect: (path: string) => void }) { const rows = kind === 'changes' ? changes : files; return <div className="source-list">{rows.map((row) => { const path = row.path; const folder = 'kind' in row && row.kind === 'folder'; return <button className="source-row" data-active={selected === path || undefined} onClick={() => !folder && onSelect(path)} key={path}>{folder ? <Folder size={14} /> : <FileCode2 size={14} />}<span><strong>{'name' in row ? row.name : path.split('/').at(-1)}</strong><small>{path}</small></span>{'add' in row ? <em className="change-stat"><b>+{row.add}</b><i>−{row.remove}</i></em> : null}</button>; })}</div>; }
 function CodeViewer({ diff, threadOpen, onThread }: { diff: boolean; threadOpen: boolean; onThread: (line: number) => void }) { const rows = diff ? diffLines : sourceLines.map((text) => ({ mark: ' ', text })); return <div className="code-scroll"><table className="code-table"><tbody>{rows.map((line, index) => { const number = index + 1; const hasThread = number === (diff ? 6 : 7); return <tr key={number} data-add={line.mark === '+' || undefined} data-remove={line.mark === '-' || undefined} data-thread={hasThread || undefined}><td className="line-no">{number}</td><td className="line-mark">{hasThread ? <button className="thread-dot" aria-label={`Open thread on line ${number}`} onClick={() => onThread(number)}>2</button> : <button className="comment-gutter" aria-label={`Comment on line ${number}`} onClick={() => onThread(number)}>+</button>}</td><td>{line.mark !== ' ' ? `${line.mark} ` : '  '}{line.text}</td></tr>; })}</tbody></table>{threadOpen ? null : null}</div>; }
@@ -144,20 +146,45 @@ const mockHubOutput = new Map<string,string>([
   ['agent-test', 'watching packages/account-web\r\n✓ 5 tests passed\r\nwaiting for changes…'],
   ['shell-main', 'agent-blame feature/agent-blame\r\n$ '],
 ]);
-const workbenchTerminalApi = {
-  list: async () => mockHubTerminals,
+const terminalChanges = new EventTarget();
+let terminalRevision = 0;
+function changedTerminals() { terminalRevision++; terminalChanges.dispatchEvent(new Event('change')); }
+const workbenchTerminalApi: WorkspaceTerminalsProps = {
+  spaceId: 'workspace-a',
+  async *events(name, _after, signal) {
+    let next = Promise.withResolvers<void>();
+    const changed = () => next.resolve();
+    terminalChanges.addEventListener('change', changed);
+    signal.addEventListener('abort', changed);
+    try {
+      while (!signal.aborted) {
+        yield { status: 'ok', value: { type: 'snapshot', resource: `terminals:workspace-a:${name ?? ''}`, cursor: terminalRevision, revision: terminalRevision, previous: null,
+          value: { terminals: mockHubTerminals, output: name === null ? null : { spaceId: 'workspace-a', name, state: mockHubTerminals.find(terminal => terminal.name === name)?.state ?? 'exited', cursor: (mockHubOutput.get(name) ?? '').length, data: mockHubOutput.get(name) ?? '' } } } };
+        await next.promise;
+        next = Promise.withResolvers<void>();
+      }
+    } finally {
+      terminalChanges.removeEventListener('change', changed);
+      signal.removeEventListener('abort', changed);
+    }
+  },
+  async *live() {
+    yield { status: 'error', error: new Error('This preview has no protected lifecycle terminal') };
+  },
   create: async () => {
     const terminal: WorkspaceTerminalView = { spaceId: 'workspace-a', name: `shell-${mockHubTerminals.length + 1}`, id: crypto.randomUUID(), kind: 'user', state: 'running', machineId: 'local-machine', owner: 'gitspace:workspace-a:user', command: '/bin/bash', cwd: '/workspace/agent-blame', createdAt: new Date(), exitCode: null };
     mockHubTerminals = [terminal, ...mockHubTerminals];
     mockHubOutput.set(terminal.name, 'agent-blame feature/agent-blame\r\n$ ');
+    changedTerminals();
     return terminal;
   },
-  read: async (name: string): Promise<WorkspaceTerminalOutput> => ({ spaceId: 'workspace-a', name, state: mockHubTerminals.find((terminal) => terminal.name === name)?.state ?? 'exited', cursor: (mockHubOutput.get(name) ?? '').length, data: mockHubOutput.get(name) ?? '' }),
-  send: async (name: string, data: string) => { mockHubOutput.set(name, `${mockHubOutput.get(name) ?? ''}${data}`); },
-  stop: async (name: string) => { mockHubTerminals = mockHubTerminals.map((terminal) => terminal.name === name ? { ...terminal, state: 'exited', exitCode: 0 } : terminal); },
+  send: async (name, data) => { mockHubOutput.set(name, `${mockHubOutput.get(name) ?? ''}${data}`); changedTerminals(); },
+  stop: async (name) => { mockHubTerminals = mockHubTerminals.map((terminal) => terminal.name === name ? { ...terminal, state: 'exited', exitCode: 0 } : terminal); changedTerminals(); },
 };
 function TerminalsSurface({ requestedId }: { requestedId: string | null }) {
-  return <div className="workbench-production-terminals"><WorkspaceTerminals key={requestedId ?? 'default'} {...workbenchTerminalApi} /></div>;
+  const [owner] = useState(() => new SynchronizationOwner());
+  useEffect(() => () => owner.dispose(), [owner]);
+  return <SynchronizationContext.Provider value={owner}><div className="workbench-production-terminals"><WorkspaceTerminals {...workbenchTerminalApi} requestedName={requestedId} /></div></SynchronizationContext.Provider>;
 }
 function ProjectCronsPage() {
   const [targets, setTargets] = useState<Record<string,string>>({ health: 'project', triage: 'agent-blame', digest: 'inspector-shell' });

@@ -4,6 +4,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID } from '@gitspace/protocol';
 import { ProjectAuthorityDO, UserProjectIndexDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
+import { projectEventSchema } from '@gitspace/protocol/project-authority';
 
 const projectEnv = env as typeof env & {
   PROJECT_AUTHORITY: DurableObjectNamespace<ProjectAuthorityDO>;
@@ -76,9 +77,11 @@ describe('ProjectAuthorityDO', () => {
     const tombstone = await authority.getProject();
     expect(tombstone).toMatchObject({ id: project.id, lifecycle: 'deleting', revision: project.revision + 1 });
     expect((await vault.ensureInference()).assignments).toEqual([{ projectId: project.id, profileId: profile.id, revision: 1 }]);
-    await expect(vault.deleteInferenceProfile({ profileId: profile.id, expectedRevision: profile.revision })).rejects.toThrow();
-    await expect(vault.assignInferenceProfile({ projectId: project.id, profileId: DEFAULT_INFERENCE_PROFILE_ID, expectedRevision: 1 })).rejects.toThrow();
-    await expect(authority.bootstrap(input)).rejects.toThrow();
+    await runInDurableObject(vault, async instance => {
+      await expect(instance.deleteInferenceProfile({ profileId: profile.id, expectedRevision: profile.revision })).rejects.toThrow();
+      await expect(instance.assignInferenceProfile({ projectId: project.id, profileId: DEFAULT_INFERENCE_PROFILE_ID, expectedRevision: 1 })).rejects.toThrow();
+    });
+    await runInDurableObject(authority, async instance => { await expect(instance.bootstrap(input)).rejects.toThrow(); });
 
     expect(await authority.deleteProject(project.revision)).toEqual(tombstone);
     expect(await authority.deleteProject(project.revision)).toEqual(tombstone);
@@ -96,7 +99,7 @@ describe('ProjectAuthorityDO', () => {
     const project = await authority.bootstrap({ id: 'inference-lifecycle', name: 'Lifecycle', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
     await authority.setProjectLifecycle(project.revision, 'deleting');
     expect((await vault.ensureInference()).assignments).toEqual([]);
-    await expect(authority.setProjectLifecycle(project.revision + 1, 'active')).rejects.toThrow();
+    await runInDurableObject(authority, async instance => { await expect(instance.setProjectLifecycle(project.revision + 1, 'active')).rejects.toThrow(); });
   });
 
   it('changes an active project base branch only at its current revision and never for the built-in source', async () => {
@@ -246,22 +249,22 @@ describe('ProjectAuthorityDO', () => {
     }));
     expect(running).toMatchObject({ state: 'running', revision: 2, claimToken: 'claim-a' });
 
-    const first = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.appendEvent({
+    const first = projectEventSchema.parse(await (await stub.appendEvent({
       eventId: 'project-created',
       scope: 'project', entity: 'project', entityId: 'project-b', revision: 1, operation: 'created', payload: { name: 'Project B' },
-    }));
-    const second = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.appendEvent({
+    })).json());
+    const second = projectEventSchema.parse(await (await stub.appendEvent({
       eventId: 'workspace-created',
       scope: 'workspace', entity: 'workspace', entityId: 'workspace-b', revision: 1, operation: 'created', payload: {},
-    }));
+    })).json());
     expect(second.offset).toBe(first.offset + 1);
-    expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listEvents(first.offset)))
+    expect(await (await stub.listEvents(first.offset)).json())
       .toMatchObject([{ offset: second.offset, entityId: 'workspace-b' }]);
-    const retried = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.appendEvent({
+    const retried = projectEventSchema.parse(await (await stub.appendEvent({
       eventId: 'workspace-created', scope: 'workspace', entity: 'workspace', entityId: 'workspace-b', revision: 1, operation: 'created', payload: {},
-    }));
+    })).json());
     expect(retried).toEqual(second);
-    expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listEvents(second.offset))).toEqual([]);
+    expect(await (await stub.listEvents(second.offset)).json()).toEqual([]);
   });
 
   it('keeps one optimistic canonical session directory per project', async () => {

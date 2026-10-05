@@ -20,6 +20,8 @@ const scripts = new Map<string, string>();
 const uploads: Upload[] = [];
 const objects = new Map<string, Map<string, string>>();
 const allocatedBuckets = new Set<string>();
+const allocatedNamespaces = new Set<string>();
+let rejectNamespaceCreation = false;
 const probeVersions = new Map<string, string[]>();
 // An in-flight dispatch response retains its script version until its body is released.
 const activeProbes = new Map<string, { version: string; bodies: number }>();
@@ -90,6 +92,7 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
     ],
     resources: [
       { name: 'OBJECTS', source: 'object-storage' },
+      { name: 'ARTIFACTS', source: 'artifacts' },
       { name: 'ROOT_KEY', source: 'root-public-key' },
       { name: 'TENANT', source: 'tenant-id' },
       { name: 'PROVIDER_TOKEN', source: 'provider-token' },
@@ -108,7 +111,7 @@ async function adminPost(tenant: string, body?: unknown): Promise<Response> {
       ...(body === undefined ? { 'content-length': '0' } : { 'content-type': 'application/json' }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  }), testEnv);
+  }), testEnv, createExecutionContext());
 }
 
 async function mintToken(tenant: string, appliedMigrationTag?: string | null): Promise<string> {
@@ -128,7 +131,7 @@ async function tenantPost(tenant: string, action: 'deploy' | 'revert', token: st
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
-  }), testEnv);
+  }), testEnv, createExecutionContext());
 }
 
 async function accountId(tenant: string): Promise<string> {
@@ -161,6 +164,8 @@ beforeEach(() => {
   scripts.clear();
   objects.clear();
   allocatedBuckets.clear();
+  allocatedNamespaces.clear();
+  rejectNamespaceCreation = false;
   uploads.length = 0;
   probeVersions.clear();
   activeProbes.clear();
@@ -168,6 +173,17 @@ beforeEach(() => {
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const bucketLookup = /^\/client\/v4\/accounts\/test-account\/r2\/buckets\/([^/]+)$/u.exec(url.pathname);
+    const namespaceLookup = /^\/client\/v4\/accounts\/test-account\/artifacts\/namespaces\/([^/]+)$/u.exec(url.pathname);
+    if (url.hostname === 'api.cloudflare.com' && namespaceLookup && (!init?.method || init.method === 'GET')) {
+      return Response.json({ success: allocatedNamespaces.has(namespaceLookup[1]!) }, { status: allocatedNamespaces.has(namespaceLookup[1]!) ? 200 : 404 });
+    }
+    if (url.hostname === 'api.cloudflare.com' && url.pathname === '/client/v4/accounts/test-account/artifacts/namespaces' && init?.method === 'POST') {
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer test-api-token');
+      if (rejectNamespaceCreation) return Response.json({ success: false, errors: [{ code: 10000, message: 'Artifacts access denied' }] });
+      const body = JSON.parse(String(init.body)) as { namespace: string };
+      allocatedNamespaces.add(body.namespace);
+      return Response.json({ success: true });
+    }
     if (url.hostname === 'api.cloudflare.com' && bucketLookup && (!init?.method || init.method === 'GET')) return Response.json({ success: allocatedBuckets.has(bucketLookup[1]!) }, { status: allocatedBuckets.has(bucketLookup[1]!) ? 200 : 404 });
     if (url.hostname === 'api.cloudflare.com' && url.pathname === '/client/v4/accounts/test-account/r2/buckets' && init?.method === 'POST') {
       const body = JSON.parse(String(init.body)) as { name: string };
@@ -221,7 +237,7 @@ describe('migrationDelta', () => {
 
 describe('tenant deployment token', () => {
   it('mints once, rejects bad tokens, and rotation invalidates the old token', async () => {
-    const unsigned = await worker.fetch(new Request('https://platform.test/__platform/admin/tenants/alpha/token', { method: 'POST' }), testEnv);
+    const unsigned = await worker.fetch(new Request('https://platform.test/__platform/admin/tenants/alpha/token', { method: 'POST' }), testEnv, createExecutionContext());
     expect(unsigned.status).toBe(401);
 
     const first = await mintToken('alpha');
@@ -231,7 +247,7 @@ describe('tenant deployment token', () => {
     const request = { sha: 'a1', ...staged, metadata: metadata(['v1']) };
     const forged = await tenantPost('alpha', 'deploy', `${first}x`, request);
     expect(forged.status).toBe(401);
-    const missing = await worker.fetch(new Request('https://platform.test/__platform/tenants/alpha/deploy', { method: 'POST', body: '{}' }), testEnv);
+    const missing = await worker.fetch(new Request('https://platform.test/__platform/tenants/alpha/deploy', { method: 'POST', body: '{}' }), testEnv, createExecutionContext());
     expect(missing.status).toBe(401);
 
     const second = await mintToken('alpha');
@@ -245,6 +261,35 @@ describe('tenant deployment token', () => {
 });
 
 describe('POST /__platform/tenants/:tenant/deploy', () => {
+  it('binds distinct account roots to isolated namespaces across releases', async () => {
+    const first = await mintToken('artifacts-first');
+    const otherRoot = ed25519.keygen().publicKey;
+    await env.DEPLOYMENTS.getByName('artifacts-second').configure(btoa(String.fromCharCode(...otherRoot)), 'gsp-relay-artifacts-second');
+    const tokenResponse = await adminPost('artifacts-second');
+    expect(tokenResponse.status).toBe(200);
+    const second = (await tokenResponse.json() as { token: string }).token;
+    await deploy('artifacts-first', first, 'first-release', ['v1']);
+    await deploy('artifacts-second', second, 'second-release', ['v1']);
+    await deploy('artifacts-first', first, 'first-successor', ['v1']);
+    const namespaces = uploads.map(upload => upload.metadata.bindings.find(binding => binding.type === 'artifacts'));
+    expect(namespaces[0]).toEqual({ type: 'artifacts', name: 'ARTIFACTS', namespace: `gsp-${await accountId('artifacts-first')}` });
+    expect(namespaces[1]).toEqual({ type: 'artifacts', name: 'ARTIFACTS', namespace: `gsp-${await accountId('artifacts-second')}` });
+    expect(namespaces[1]).not.toEqual(namespaces[0]);
+    expect(namespaces[2]).toEqual(namespaces[0]);
+  });
+
+  it('does not upload or change the selected worker when namespace provisioning fails', async () => {
+    const token = await mintToken('artifacts-denied');
+    const staged = await stageRelease('artifacts-denied', 'candidate');
+    rejectNamespaceCreation = true;
+    const response = await tenantPost('artifacts-denied', 'deploy', token, { sha: 'candidate', ...staged, metadata: metadata(['v1']) });
+    expect(response.status).toBe(502);
+    expect(uploads).toHaveLength(0);
+    expect((await env.DEPLOYMENTS.getByName('artifacts-denied').getState()).active).toBeNull();
+    rejectNamespaceCreation = false;
+    expect((await deploy('artifacts-denied', token, 'candidate', ['v1'])).healthy).toBe(true);
+  });
+
   it('deploys an active tenant despite exhausted and quarantined billing state', async () => {
     const tenant = `billing-${crypto.randomUUID().slice(0, 8)}`;
     const token = await mintToken(tenant);
@@ -271,6 +316,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
         { type: 'durable_object_namespace', name: 'CREDENTIALS', class_name: 'CredentialVaultDO' },
         { type: 'durable_object_namespace', name: 'USER_STORAGE', class_name: 'UserStorageDO' },
         { type: 'r2_bucket', name: 'OBJECTS', bucket_name: (await env.DEPLOYMENTS.getByName('bravo').tenantConfig())!.blobBucket },
+        { type: 'artifacts', name: 'ARTIFACTS', namespace: `gsp-${await accountId('bravo')}` },
         { type: 'plain_text', name: 'ROOT_KEY', text: ADMIN_PUBLIC_KEY },
         { type: 'plain_text', name: 'TENANT', text: 'bravo' },
         { type: 'secret_text', name: 'PROVIDER_TOKEN', text: token },
@@ -421,7 +467,7 @@ describe('operator account-bound deployment', () => {
     const bBundle = await stageRelease(b, 'account-b');
     const post = (tenant: string, action: 'deploy' | 'revert', body: Record<string, unknown>, token = 'test-bootstrap-token') => worker.fetch(new Request(`https://platform.test/__platform/operator/tenants/${tenant}/${action}`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
-    }), testEnv);
+    }), testEnv, createExecutionContext());
     const aRequest = { accountId: aId, sha: 'account-a', ...aBundle, metadata: metadata(['v1']) };
     const bRequest = { accountId: bId, sha: 'account-b', ...bBundle, metadata: metadata(['v1']) };
     expect((await post(a, 'deploy', aRequest)).status).toBe(200);

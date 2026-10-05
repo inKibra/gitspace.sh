@@ -17,6 +17,7 @@ interface Env {
   ACCOUNT_STATE: DurableObjectNamespace<import('./src/index').AccountStateDO>;
   DATA: R2Bucket;
   BLOBS: R2Bucket;
+  ARTIFACTS: Artifacts;
   ASSETS: Fetcher;
   AUTH_PUBLIC_KEY: string;
   ACCOUNT_ID: string;

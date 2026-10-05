@@ -9,12 +9,13 @@
   },
   "scripts": {
     "types": "wrangler types worker-configuration.d.ts --include-runtime false --config wrangler.jsonc",
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p test/tsconfig.json",
     "test": "vitest run --config vitest.config.ts",
     "deploy:dry": "wrangler deploy --dry-run --config wrangler.jsonc"
   },
   "dependencies": {
     "@composio/core": "0.18.0",
+    "@earendil-works/chord": "1.0.0",
     "@gitspace/blocks": "workspace:*",
     "@gitspace/mcp-server": "workspace:*",
     "@gitspace/protocol": "workspace:*",
@@ -22,16 +23,21 @@
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
     "@gitspace/protocol-sync": "workspace:*",
+    "@gitspace/protocol-runtime": "workspace:*",
+    "@gitspace/provider-auth": "workspace:*",
+    "@gitspace/catalog": "workspace:*",
+    "@gitspace/runtime-core": "workspace:*",
+    "@gitspace/runtime-workspace-do": "workspace:*",
     "@noble/curves": "^2.2.0",
-    "@oh-my-pi/pi-catalog": "18.2.11",
-    "@oh-my-pi/pi-ai": "18.2.11",
+    "@modelcontextprotocol/sdk": "1.30.1",
     "devalue": "5.8.2",
     "result-rpc": "0.5.0",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.30.1",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-durable": "1.0.0",
     "@msw/cloudflare": "^0.0.1",
     "msw": "^2.14.0"
   }

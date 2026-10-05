@@ -23,7 +23,7 @@ class Ledger implements EnvironmentLifecycleAuthority {
   readonly state: LifecycleState = {
     revision: 0, projectId: 'project-a', spaceId: 'workspace-a', bundleJson: null, selectedProfile: null,
     values: { global: {}, project: {}, workspace: {} }, approvals: [], policy: { automatic: false },
-    bindings: {}, provisioned: null, destroyedAt: null, runs: [], claim: null, executions: [],
+    bindings: {}, provisioned: null, destroyedAt: null, runs: [], claim: null, executions: [], browserOrigins: [],
   };
   async getLifecycleState() { return structuredClone(this.state); }
   async getLifecycleRunLog(_projectId: string, _spaceId: string, runId: string) {

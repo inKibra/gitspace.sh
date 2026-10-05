@@ -1,7 +1,14 @@
 import { DurableObject } from 'cloudflare:workers';
+import { runtimeMachineControl } from './account-runtime-control.js';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import type { CredentialRefreshResponse, CredentialUploadResponse, SnapshotResponse } from '@oh-my-pi/pi-ai/auth-broker';
+import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
 import { z } from 'zod';
+import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, type LoginState } from '@gitspace/provider-auth';
+import { collectUsage, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
+import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
+import type { CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
+import type { ProviderView, ProviderLoginEvent, ProviderUsage } from '@gitspace/protocol';
+import { ProviderLoginEventCodec } from '@gitspace/protocol';
 import { cloudImageProviderCall, resolveCloudImage } from './sandbox-rollout.js';
 import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSelectionSchema, type CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
@@ -13,7 +20,7 @@ import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
   credentialProtocolBase64,
-  ompConfigUpdateSchema,
+  runtimeConfigUpdateSchema,
   sealCredentialForMachine,
   signedControlRequestSchema,
   SIGNED_REQUEST_MAX_AGE_MS,
@@ -50,7 +57,7 @@ import {
 import {
   DEFAULT_INFERENCE_PROFILE_ID, inferenceCreateInputSchema, inferenceUpdateInputSchema,
   inferenceDeleteInputSchema, inferenceAssignInputSchema,
-  type InferenceProfile, type InferenceState, type InferenceExecutionContext,
+  type InferenceProfile, type InferenceState,
 } from '@gitspace/protocol/inference';
 import { LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, type LifecycleState } from '@gitspace/protocol-environment';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
@@ -111,7 +118,7 @@ import { AccountStateDO } from './account-state.js';
 import type { SpaceAuthorityResult } from '@gitspace/protocol-workspace';
 import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
-import { accountAccessResponse, profileBrokerToken, verifyProfileBrokerToken, activeAccount, authorizeControl, type ProfileBrokerIdentity } from './account-access.js';
+import { accountAccessResponse, activeAccount, authorizeControl } from './account-access.js';
 import { machineProviderFor } from './machine-providers.js';
 import {
   McpConnectionNotFoundError,
@@ -170,8 +177,7 @@ interface BrowserInvitationValue {
   status: BrowserInvitationRow['status'];
   deviceId: string | null;
 }
-// OMP 18.2.11's write contract, without importing its Bun-only auth-storage runtime.
-const brokerUploadSchema = z.strictObject({
+const credentialUploadSchema = z.strictObject({
   provider: z.string().trim().min(1).max(160),
   credential: z.discriminatedUnion('type', [
     z.strictObject({ type: z.literal('api_key'), key: z.string().min(1), source: z.literal('login').optional() }),
@@ -191,9 +197,8 @@ const brokerUploadSchema = z.strictObject({
     }).passthrough(),
   ]),
 }).refine(({ provider, credential }) => credential.type !== 'oauth' || SUPPORTED_PROVIDERS.has(provider));
-const brokerDisableSchema = z.strictObject({ cause: z.string().optional() });
 type StoredVaultOAuthCredential = StoredOAuthCredential & { type?: 'oauth' };
-type StoredVaultCredential = StoredVaultOAuthCredential | (Extract<z.infer<typeof brokerUploadSchema>['credential'], { type: 'api_key' }> & { provider: string });
+type StoredVaultCredential = StoredVaultOAuthCredential | (Extract<z.infer<typeof credentialUploadSchema>['credential'], { type: 'api_key' }> & { provider: string });
 const pairingMachineSchema = z.strictObject({
   machineId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
   label: z.string().trim().min(1).max(160),
@@ -217,7 +222,7 @@ type MachinePairingValue =
   | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; apiUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant; artifactKey: string };
 const PAIRING_CAPABILITIES: DeviceCapability[] = ['devices.manage', 'fleet.control', 'rpc.write', 'session.prompt', 'deployment.control'];
 
-function brokerCredentialIdentity(credential: StoredVaultCredential): string | null {
+function credentialIdentity(credential: StoredVaultCredential): string | null {
   if (credential.type === 'api_key') return null;
   const account = credential.accountId?.trim();
   const email = credential.email?.trim().toLowerCase();
@@ -230,13 +235,6 @@ function brokerCredentialIdentity(credential: StoredVaultCredential): string | n
   return account ? `account:${account}` : email ? `email:${email}` : project ? `project:${project}` : null;
 }
 
-function brokerCredentialEntry(id: number, credential: StoredVaultCredential): CredentialRefreshResponse['entry'] {
-  if (credential.type === 'api_key') {
-    return { id, provider: credential.provider, identityKey: null, credential: { type: 'api_key', key: credential.key, ...(credential.source ? { source: credential.source } : {}) } };
-  }
-  const { provider, ...value } = credential;
-  return { id, provider, identityKey: brokerCredentialIdentity(credential), credential: { ...value, type: 'oauth', refresh: REMOTE_REFRESH_SENTINEL } };
-}
 
 async function accountIdForRootPublicKey(rootPublicKey: string): Promise<string | null> {
   try {
@@ -280,7 +278,7 @@ export type InferenceWriteResult =
   | { status: 'ok'; value: InferenceState }
   | { status: 'conflict'; resource: 'inference-profile' | 'inference-assignment'; expected: number; actual: number };
 
-interface OmpCredentialRow extends CredentialRow {
+interface ProfileCredentialRow extends CredentialRow {
   row_id: number;
   updated_at: string;
 }
@@ -321,7 +319,7 @@ async function openVaultCredential(row: CredentialRow, vaultKey: Uint8Array): Pr
     iv: ownedBuffer(sealed.subarray(0, 12)),
     additionalData: ownedBuffer(new TextEncoder().encode(`${row.id}\n${row.revision}`)),
   }, await vaultCryptoKey(vaultKey), ownedBuffer(sealed.subarray(12)));
-  return JSON.parse(new TextDecoder().decode(plaintext)) as StoredVaultCredential;
+  return storedVaultCredentialSchema.parse(JSON.parse(new TextDecoder().decode(plaintext)));
 }
 async function sealVaultText(value: string, vaultKey: Uint8Array, context: string): Promise<string> {
   const nonce = crypto.getRandomValues(new Uint8Array(12));
@@ -347,13 +345,19 @@ async function openVaultText(sealedValue: string, vaultKey: Uint8Array, context:
   return new TextDecoder().decode(plaintext);
 }
 
+type CloudLoginRow = {
+  flow_id: string; profile_id: string; provider: string; revision: number; sealed_state: string;
+  events_json: string; status: 'pending' | 'busy' | 'done'; expires_at: number;
+};
 function publicError(code: string, message: string, retryAfterMs?: number): CredentialVaultResult<never> {
+
   return { status: 'error', error: { code, message, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) } };
 }
 
 export class CredentialVaultDO extends DurableObject<Env> {
   private inferenceMigration: Promise<InferenceState> | null = null;
   private readonly inferenceChanges: DurableChangeLog;
+  private readonly activeLoginAttempts = new Set<string>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.inferenceChanges = new DurableChangeLog(ctx.storage);
@@ -638,33 +642,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (!project || project.id !== projectId || project.lifecycle === 'deleting') throw new Error('Project is unavailable');
   }
 
-  async resolveInference(machineId: string, projectId: string | null, profileId?: string): Promise<InferenceExecutionContext> {
-    await this.ensureInference();
-    if (projectId !== null) await this.requireInferenceProject(projectId);
-    const config = this.config()!;
-    if (!await tenantReleases(this.env, config.user_id).machineInferenceCompatible(machineId)) throw new Error('Upgrade this machine and OMP to a committed inference-profile-compatible release');
-    const advanced = await (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id).getOmp();
-    const assignment = projectId === null ? null : this.ctx.storage.sql.exec<{ profile_id: string; revision: number }>('SELECT profile_id, revision FROM inference_assignments WHERE project_id = ?', projectId).toArray()[0];
-    if (projectId !== null && !assignment) throw new Error('Project inference assignment is unavailable');
-    const profile = this.requireInferenceProfile(assignment?.profile_id ?? profileId ?? '');
-    const device = this.device(machineId);
-    const capability = projectId === null ? 'manage' : 'inference';
-    if (!device || !this.authorizeBroker(machineId, device.generation, capability === 'manage' ? 'credential.manage' : 'credential.access')) throw new Error('Inference broker access is not authorized');
-    if (!this.env.GITSPACE_OMP_BROKER_TOKEN) throw new Error('Inference broker is unavailable');
-    const token = await profileBrokerToken(this.env.GITSPACE_OMP_BROKER_TOKEN, config.user_id, { profileId: profile.id, machineId, generation: device.generation, capability });
-    // Recheck after signing: a deleted scope must never be disclosed by an in-flight resolver.
-    if (!this.authorizeProfileBroker({ profileId: profile.id, machineId, generation: device.generation, capability })) throw new Error('Inference broker access ended');
-    return { version: 1, projectId, assignmentRevision: assignment?.revision ?? null, profile, advanced,
-      broker: { url: `${this.env.ACCOUNT_URL.replace(/\/+$/u, '')}/omp/users/${encodeURIComponent(config.user_id)}/profiles/${encodeURIComponent(profile.id)}`, token } };
-  }
-
-  authorizeProfileBroker(identity: ProfileBrokerIdentity): boolean {
-    return this.inferenceCutover()
-      && this.ctx.storage.sql.exec<{ version: number }>('SELECT version FROM inference_migration WHERE id = 1').one().version === 1
-      && !this.legacyCredentialConflict()
-      && this.ctx.storage.sql.exec('SELECT profile_id FROM inference_profiles WHERE profile_id = ? AND deleted_at IS NULL', identity.profileId).toArray().length === 1
-      && this.authorizeBroker(identity.machineId, identity.generation, identity.capability === 'manage' ? 'credential.manage' : 'credential.access');
-  }
 
   bootstrap(input: { userId: string; rootPublicKey: string; vaultKey: string }): CredentialVaultResult<{ userId: string }> {
     let rootPublicKey: Uint8Array;
@@ -796,6 +773,11 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return this.authorizeRpcRequest(input, false);
   }
 
+  /** Runtime routing performs canonical project/workspace scope checks after this signature admission. */
+  authorizeWorkspaceRuntimeRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
+    return this.authorizeRpcRequest(input, false, false, true);
+  }
+
   /** Current tenant-local authority, including issuer revocation and expiration. */
   currentDeviceGrant(deviceId: string): VerifiedDevice | null {
     const config = this.config();
@@ -920,7 +902,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return this.authorizeRpcRequest({ ...input, method: 'GET', body: new Uint8Array(), capabilities: ['rpc.read'] }, false, !initial);
   }
 
-  private authorizeRpcRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[]; method?: 'GET' | 'POST' }, browserOnly: boolean, revalidate = false): CredentialVaultResult<{ deviceId: string }> {
+  private authorizeRpcRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[]; method?: 'GET' | 'POST' }, browserOnly: boolean, revalidate = false, workspaceRuntime = false): CredentialVaultResult<{ deviceId: string }> {
     const config = this.config();
     const header = input.header ? decodeSignedRpcHeader(input.header) : null;
     const now = Date.now();
@@ -938,7 +920,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (!device || !verifyRpcSignature(header, { method: input.method ?? 'POST', path: input.target, body: input.body }, device.signingPublicKey)) {
       return publicError('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked');
     }
-    if ((browserOnly && device.kind !== 'browser') || device.scope.kind !== 'user'
+    if ((browserOnly && device.kind !== 'browser') || (!workspaceRuntime && device.scope.kind !== 'user')
       || !input.capabilities.every((capability) => device.capabilities.includes(capability))) {
       return publicError('RPC_FORBIDDEN', 'Device is out of scope or lacks permission');
     }
@@ -1255,7 +1237,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
 
   async putCredential(input: { id: string; credential: StoredOAuthCredential }): Promise<CredentialVaultResult<{ id: string; revision: number }>> {
     if (this.inferenceCutover()) return publicError('INFERENCE_SCOPE_REQUIRED', 'Use profile-scoped credential management');
-    if (!this.config() || !input.id || !brokerUploadSchema.safeParse({ provider: input.credential.provider, credential: { ...input.credential, type: 'oauth' } }).success) {
+    if (!this.config() || !input.id || !credentialUploadSchema.safeParse({ provider: input.credential.provider, credential: { ...input.credential, type: 'oauth' } }).success) {
       return publicError('INVALID_CREDENTIAL', 'Credential input is invalid');
     }
     return this.ctx.blockConcurrencyWhile(async () => {
@@ -1287,11 +1269,310 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return revision;
   }
 
-  async ompUpload(input: unknown, identity: ProfileBrokerIdentity): Promise<CredentialUploadResponse | null> {
-    return this.ctx.blockConcurrencyWhile(async () => {
-      if (identity.capability !== 'manage' || !this.authorizeProfileBroker(identity)) return null;
-      return this.uploadCredential(identity.profileId, input);
+
+  /** Internal DO RPC; the caller must authorize workspace scope before obtaining a capability. */
+  async sealRuntimeGrant(secret: string, scope: { projectId: string; workspaceId: string; attachmentId: string; generation: number }): Promise<string> {
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    return sealVaultText(secret, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['runtime-grant/v1', config.user_id, scope.projectId, scope.workspaceId, scope.attachmentId, scope.generation]));
+  }
+
+  async openRuntimeGrant(ciphertext: string, scope: { projectId: string; workspaceId: string; attachmentId: string; generation: number }): Promise<string> {
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    return openVaultText(ciphertext, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['runtime-grant/v1', config.user_id, scope.projectId, scope.workspaceId, scope.attachmentId, scope.generation]));
+  }
+
+  async resolveCloudInference(projectId: string, profileId?: string) {
+    await this.ensureInference();
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    const assignment = this.ctx.storage.sql.exec<{ profile_id: string; revision: number }>('SELECT profile_id, revision FROM inference_assignments WHERE project_id = ?', projectId).toArray()[0];
+    if (!assignment && !profileId) throw new Error('Project inference assignment is unavailable');
+    const profile = this.requireInferenceProfile(profileId ?? assignment!.profile_id);
+    this.assertProfileAccess(profile.id);
+    return { projectId, assignmentRevision: assignment?.revision ?? null, profile };
+  }
+
+  async cloudCredentialAccounts(profileId: string, provider?: string): Promise<CredentialAccount[]> {
+    await this.ensureInference();
+    this.assertProfileAccess(profileId);
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    this.ensureCloudAccountHealth();
+    const rows = this.ctx.storage.sql.exec<ProfileCredentialRow>("SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND state = 'active' ORDER BY rowid", profileId).toArray();
+    const result = await Promise.all(rows.filter(row => provider === undefined || row.provider === provider).map(async row => {
+      const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
+      const health = this.ctx.storage.sql.exec<{ cooldown_until: number; report_json: string | null }>('SELECT cooldown_until, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(row.row_id)).toArray()[0];
+      const report = health?.report_json ? providerUsageReportSchema.parse(JSON.parse(health.report_json)) : null;
+      const usage = report ? usageObservation(report) : undefined;
+      return { id: String(row.row_id), provider: row.provider, type: credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const, revision: row.revision, expiresAt: credential.type === 'api_key' ? null : credential.expires, identity: credentialIdentity(credential), ...(health ? { cooldownUntil: health.cooldown_until } : {}), ...(usage ? { usage } : {}) };
+    }));
+    this.assertProfileAccess(profileId);
+    return result;
+  }
+
+  async cloudResolveCredential(input: { profileId: string; credentialId: string; forceRefresh?: boolean }): Promise<ResolvedCredential> {
+    await this.ensureInference();
+    this.assertProfileAccess(input.profileId);
+    const config = this.config();
+    const rowId = Number(input.credentialId);
+    if (!config || !Number.isSafeInteger(rowId) || rowId <= 0) throw new Error('Credential is unavailable');
+    let row = this.ctx.storage.sql.exec<ProfileCredentialRow>("SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND rowid = ? AND state = 'active'", input.profileId, rowId).toArray()[0];
+    if (!row) throw new Error('Credential is unavailable');
+    let credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
+    if (credential.type !== 'api_key' && (input.forceRefresh || credential.expires <= Date.now() + ACCESS_REFRESH_SKEW_MS)) {
+      await this.refreshProfileCredential(input.profileId, rowId);
+      const refreshed = this.ctx.storage.sql.exec<ProfileCredentialRow>("SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND rowid = ? AND state = 'active'", input.profileId, rowId).toArray()[0];
+      if (!refreshed) throw new Error('Credential was revoked during refresh');
+      row = refreshed;
+      credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
+    }
+    this.assertProfileAccess(input.profileId);
+    const current = this.credential(row.id, input.profileId);
+    if (!current || current.state !== 'active' || current.revision !== row.revision) throw new Error('Credential changed during resolution');
+    return { id: input.credentialId, provider: credential.provider, revision: row.revision, credential: credential.type === 'api_key'
+      ? { type: 'api_key', key: credential.key }
+      : { type: 'oauth', access: credential.access, expires: credential.expires, ...(credential.accountId ? { accountId: credential.accountId } : {}), ...(credential.projectId ? { projectId: credential.projectId } : {}), ...(credential.email ? { email: credential.email } : {}), ...(credential.orgId ? { orgId: credential.orgId } : {}) } };
+  }
+
+  async cloudProviders(profileId: string): Promise<ProviderView[]> {
+    await this.ensureInference();
+    this.assertProfileAccess(profileId);
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    const rows = this.ctx.storage.sql.exec<ProfileCredentialRow>('SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? ORDER BY rowid', profileId).toArray();
+    const accounts = await Promise.all(rows.map(async row => {
+      const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
+      const type = credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const;
+      return { id: String(row.row_id), provider: row.provider, type, identity: credentialIdentity(credential), email: credential.type === 'api_key' ? null : credential.email ?? null, disabled: row.state !== 'active', uncertain: row.state === 'refresh-uncertain' };
+    }));
+    this.assertProfileAccess(profileId);
+    const descriptors = describeCloudProviders(this.requireInferenceProfile(profileId).settings);
+    const providers = new Set<string>([...descriptors.map(provider => provider.id), ...accounts.map(account => account.provider)]);
+    return [...providers].map(provider => {
+      const owned = accounts.filter(account => account.provider === provider);
+      const active = owned.filter(account => !account.disabled);
+      const descriptor = descriptors.find(item => item.id === provider);
+      const oauth = descriptor?.supportsOAuth ?? false;
+      return { id: provider, credentialProvider: descriptor?.credentialProvider ?? provider, name: descriptor?.name ?? provider, available: true, loginable: oauth || descriptor?.supportsApiKey === true,
+        supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
+        authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
+        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'cursor', 'google-antigravity'].includes(provider),
+        accounts: owned.map(account => ({ id: account.id, type: account.type, label: `${account.identity ?? (account.type === 'api_key' ? 'API key' : `Account ${account.id}`)}${account.uncertain ? ' (refresh uncertain; sign in again)' : ''}`, email: account.email, disabled: account.disabled })) };
     });
+  }
+
+  async cloudUsage(profileId: string, providerId: string | null, refresh = false): Promise<ProviderUsage> {
+    const accounts = await this.cloudCredentialAccounts(profileId, providerId ?? undefined);
+    const result: { generatedAt: string; reports: ProviderUsage['reports'][number][]; accountsWithoutUsage: string[]; errors: ProviderUsage['errors'][number][] } = { generatedAt: new Date().toISOString(), reports: [], accountsWithoutUsage: [], errors: [] };
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    await Promise.all(accounts.map(async account => {
+      const cached = this.ctx.storage.sql.exec<{ observed_at: number; report_json: string | null; error: string | null }>('SELECT observed_at, report_json, error FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, account.id).toArray()[0];
+      if (!refresh && cached && Date.now() - cached.observed_at < 60_000) {
+        if (cached.report_json) result.reports.push(providerUsageReportSchema.parse(JSON.parse(cached.report_json)));
+        else result.accountsWithoutUsage.push(account.identity ?? `${account.provider}:${account.id}`);
+        if (cached.error) result.errors.push({ provider: account.provider, message: cached.error });
+        return;
+      }
+      try {
+        const row = this.ctx.storage.sql.exec<ProfileCredentialRow>("SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND rowid = ? AND state = 'active'", profileId, Number(account.id)).toArray()[0];
+        if (!row) throw new Error('Account is no longer active');
+        const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
+        if (credential.type === 'api_key') throw new Error('Usage reporting is unavailable for this API key');
+        const report = await collectUsage(credential);
+        this.assertProfileAccess(profileId);
+        if (this.credential(row.id, profileId)?.state !== 'active') return;
+        this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, ?, NULL) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = excluded.report_json, error = NULL', profileId, account.id, Date.now(), JSON.stringify(report));
+        result.reports.push(report);
+      } catch {
+        const message = 'Usage reporting is unavailable; inference remains enabled';
+        this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, NULL, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = NULL, error = excluded.error', profileId, account.id, Date.now(), message);
+        result.accountsWithoutUsage.push(account.identity ?? `${account.provider}:${account.id}`);
+        result.errors.push({ provider: account.provider, message });
+      }
+    }));
+    this.assertProfileAccess(profileId);
+    return result;
+  }
+
+  private ensureCloudAccountHealth(): void {
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS cloud_account_health(profile_id TEXT NOT NULL, credential_id TEXT NOT NULL, cooldown_until INTEGER NOT NULL DEFAULT 0, observed_at INTEGER NOT NULL DEFAULT 0, report_json TEXT, error TEXT, PRIMARY KEY(profile_id, credential_id))');
+  }
+
+  async cloudCredentialFailure(input: { profileId: string; credentialId: string; kind: 'refresh' | 'rotate'; retryAfterMs?: number }): Promise<void> {
+    await this.ensureInference();
+    this.assertProfileAccess(input.profileId);
+    this.ensureCloudAccountHealth();
+    const until = Date.now() + Math.max(1_000, Math.min(input.retryAfterMs ?? (input.kind === 'rotate' ? 60_000 : 5_000), 60 * 60_000));
+    this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until) VALUES (?, ?, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET cooldown_until = MAX(cooldown_until, excluded.cooldown_until)', input.profileId, input.credentialId, until);
+  }
+
+  async cloudSetApiKey(input: { profileId: string; providerId: string; key: string }): Promise<void> {
+    await this.ensureInference();
+    this.assertProfileAccess(input.profileId);
+    const descriptor = describeCloudProviders(this.requireInferenceProfile(input.profileId).settings).find(provider => provider.id === input.providerId);
+    if (!descriptor?.supportsApiKey) throw new Error('This provider does not accept API-key credentials');
+    await this.putBrowserApiKey(input.profileId, descriptor.credentialProvider, input.key);
+  }
+
+  async cloudModels(profileId: string) {
+    const accounts = await this.cloudCredentialAccounts(profileId);
+    const profile = this.requireInferenceProfile(profileId);
+    return listCloudModels(profile.settings, accounts.map(account => account.provider));
+  }
+
+  private ensureCloudLoginStorage(): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS cloud_provider_logins (flow_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, provider TEXT NOT NULL, revision INTEGER NOT NULL, sealed_state TEXT NOT NULL, events_json TEXT NOT NULL, status TEXT NOT NULL, expires_at INTEGER NOT NULL)");
+  }
+
+  private async scheduleLoginAlarm(at: number): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.ctx.storage.getAlarm();
+      const next = Math.max(Date.now() + 1_000, at);
+      if (current === null || next < current) await this.ctx.storage.setAlarm(next);
+    });
+  }
+
+  private scheduleLoginState(state: LoginState): Promise<void> {
+    return this.scheduleLoginAlarm(Math.min(Date.parse(state.expiresAt), 'nextPollAt' in state ? Date.parse(state.nextPollAt) : Infinity));
+  }
+
+  async alarm(): Promise<void> {
+    this.ensureCloudLoginStorage();
+    const rows = this.ctx.storage.sql.exec<CloudLoginRow>("SELECT * FROM cloud_provider_logins WHERE status != 'done'").toArray();
+    if (rows.length) await this.ctx.storage.setAlarm(Date.now() + 30_000);
+    for (const row of rows) {
+      try {
+        await this.advanceCloudLogin({ profileId: row.profile_id, flowId: row.flow_id });
+      } catch {
+        this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', sealed_state = '', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND revision = ? AND status != 'done'", JSON.stringify({ type: 'done', ok: false, error: 'Authorization is no longer available; start a new login' }), row.flow_id, row.revision);
+      }
+    }
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const config = this.config();
+      const pending = this.ctx.storage.sql.exec<CloudLoginRow>("SELECT * FROM cloud_provider_logins WHERE status != 'done'").toArray();
+      let next = Infinity;
+      for (const row of pending) {
+        if (row.status === 'busy') { next = Math.min(next, Date.now() + 30_000); continue; }
+        if (!config) throw new Error('Vault is not configured');
+        const state = loginStateSchema.parse(JSON.parse(await openVaultText(row.sealed_state, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['provider-login/v1', row.profile_id, row.flow_id, row.revision]))));
+        next = Math.min(next, Date.parse(state.expiresAt), 'nextPollAt' in state ? Date.parse(state.nextPollAt) : Infinity);
+      }
+      if (next === Infinity) await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, next));
+    });
+  }
+
+  private loginRow(profileId: string, flowId: string): CloudLoginRow {
+    this.ensureCloudLoginStorage();
+    this.assertProfileAccess(profileId);
+    const row = this.ctx.storage.sql.exec<CloudLoginRow>('SELECT * FROM cloud_provider_logins WHERE flow_id = ? AND profile_id = ?', flowId, profileId).toArray()[0];
+    if (!row) throw new Error('Login flow is unavailable');
+    return row;
+  }
+
+  private async loginEventsForState(profileId: string, flowId: string, revision: number, state: LoginState): Promise<ProviderLoginEvent[]> {
+    const view = publicLogin(state);
+    switch (view.kind) {
+      case 'code': return [{ type: 'auth', url: view.authorizationUrl, launchUrl: view.authorizationUrl, instructions: view.prompt }, { type: 'prompt', promptId: `${flowId}:${revision}`, message: view.prompt, placeholder: 'Paste the full authorization response' }];
+      case 'project-input': return [{ type: 'prompt', promptId: `${flowId}:${revision}`, message: view.prompt, placeholder: 'Google Cloud project ID' }];
+      case 'device': return [{ type: 'auth', url: view.authorizationUrl, launchUrl: view.authorizationUrl, instructions: `Enter code ${view.userCode}` }];
+      case 'poll': return view.authorizationUrl ? [{ type: 'auth', url: view.authorizationUrl, launchUrl: view.authorizationUrl, instructions: 'Complete authorization in your browser' }] : [{ type: 'progress', message: 'Waiting for provider authorization' }];
+      case 'cancelled': return [{ type: 'done', ok: false, error: 'Login cancelled' }];
+      case 'complete': {
+        const provider = (await this.cloudProviders(profileId)).find(provider => provider.id === view.provider);
+        if (!provider) throw new Error('Authorized provider is unavailable');
+        return [{ type: 'done', ok: true, provider }];
+      }
+    }
+  }
+
+  async cloudLoginStart(input: { profileId: string; providerId: string }): Promise<{ flowId: string }> {
+    await this.ensureInference();
+    this.assertProfileAccess(input.profileId);
+    const provider = workerOAuthProviderSchema.parse(input.providerId);
+    const transition = await beginLogin({ provider });
+    this.assertProfileAccess(input.profileId);
+    const flowId = crypto.randomUUID();
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    const sealed = await sealVaultText(JSON.stringify(transition.state), credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['provider-login/v1', input.profileId, flowId, 0]));
+    const events = await this.loginEventsForState(input.profileId, flowId, 0, transition.state);
+    this.ensureCloudLoginStorage();
+    this.assertProfileAccess(input.profileId);
+    this.ctx.storage.sql.exec("INSERT INTO cloud_provider_logins VALUES (?, ?, ?, 0, ?, ?, 'pending', ?)", flowId, input.profileId, provider, sealed, JSON.stringify(events), Date.parse(transition.state.expiresAt));
+    await this.scheduleLoginState(transition.state);
+    return { flowId };
+  }
+
+  private async advanceCloudLogin(input: { profileId: string; flowId: string }, response?: { promptId: string; value: string }): Promise<void> {
+    const row = this.loginRow(input.profileId, input.flowId);
+    if (row.status === 'done') return;
+    if (row.status === 'busy' && this.activeLoginAttempts.has(row.flow_id)) return;
+    if (row.status === 'busy') {
+      this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', sealed_state = '', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND revision = ?", JSON.stringify({ type: 'done', ok: false, error: 'Authorization was interrupted; start a new login' }), row.flow_id, row.revision);
+      return;
+    }
+    if (row.expires_at <= Date.now()) {
+      this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND revision = ?", JSON.stringify({ type: 'done', ok: false, error: 'Login expired; start again' }), row.flow_id, row.revision);
+      return;
+    }
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    const state = loginStateSchema.parse(JSON.parse(await openVaultText(row.sealed_state, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['provider-login/v1', row.profile_id, row.flow_id, row.revision]))));
+    if (response && response.promptId !== `${row.flow_id}:${row.revision}`) throw new Error('Login prompt is no longer current');
+    if (!response && (state.kind === 'code' || state.kind === 'project-input' || state.kind === 'complete' || state.kind === 'cancelled')) return;
+    if (!response && 'nextPollAt' in state && Date.parse(state.nextPollAt) > Date.now()) return;
+    const claimed = this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'busy', events_json = CASE WHEN ? THEN json_insert(events_json, '$[#]', json(?)) ELSE events_json END WHERE flow_id = ? AND revision = ? AND status = 'pending'", response ? 1 : 0, JSON.stringify({ type: 'progress', message: 'Authorization response received' }), row.flow_id, row.revision).rowsWritten;
+    if (!claimed) return;
+    this.activeLoginAttempts.add(row.flow_id);
+    try {
+      // Commit a recovery wakeup before any non-replayable provider exchange.
+      await this.scheduleLoginAlarm(Date.now() + 30_000);
+      const transition = response ? await respondLogin(state, { code: response.value }) : await pollLogin(state);
+      await this.ctx.blockConcurrencyWhile(async () => {
+        const current = this.loginRow(row.profile_id, row.flow_id);
+        if (current.status !== 'busy' || current.revision !== row.revision) return;
+        if (transition.kind === 'complete') await this.uploadCredential(row.profile_id, { provider: transition.credential.provider, credential: { ...transition.credential, type: 'oauth' } });
+        const revision = row.revision + 1;
+        const sealed = await sealVaultText(JSON.stringify(transition.state), credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['provider-login/v1', row.profile_id, row.flow_id, revision]));
+        const events = await this.loginEventsForState(row.profile_id, row.flow_id, revision, transition.state);
+        this.assertProfileAccess(row.profile_id);
+        this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET revision = ?, sealed_state = ?, status = ?, events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND revision = ? AND status = 'busy'", revision, sealed, transition.kind === 'complete' ? 'done' : 'pending', JSON.stringify(events), row.flow_id, row.revision);
+      });
+      if (transition.kind !== 'complete') await this.scheduleLoginState(transition.state);
+    } catch {
+      this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND revision = ? AND status = 'busy'", JSON.stringify({ type: 'done', ok: false, error: 'Provider authorization failed; start a new login' }), row.flow_id, row.revision);
+    } finally {
+      this.activeLoginAttempts.delete(row.flow_id);
+    }
+  }
+
+  async cloudLoginRespond(input: { profileId: string; flowId: string; promptId: string; value: string }): Promise<void> {
+    await this.advanceCloudLogin(input, input);
+  }
+
+  cloudLoginCancel(input: { profileId: string; flowId: string }): void {
+    const row = this.loginRow(input.profileId, input.flowId);
+    if (row.status === 'done') return;
+    this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', revision = revision + 1, sealed_state = '', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ?", JSON.stringify({ type: 'done', ok: false, error: 'Login cancelled' }), row.flow_id);
+  }
+
+  async cloudLoginEvents(input: { profileId: string; flowId: string; after?: number }): Promise<{ events: ProviderLoginEvent[]; done: boolean }> {
+    await this.advanceCloudLogin(input);
+    const row = this.loginRow(input.profileId, input.flowId);
+    const stored = z.array(z.unknown()).parse(JSON.parse(row.events_json)).flat();
+    const events = stored.map(value => {
+      const decoded = ProviderLoginEventCodec.decode(value);
+      if (!decoded.ok) throw new Error('Stored login event is malformed');
+      if (decoded.value.type === 'prompt' && (row.status !== 'pending' || decoded.value.promptId !== `${row.flow_id}:${row.revision}`)) {
+        return { type: 'progress' as const, message: 'Authorization response received' };
+      }
+      return decoded.value;
+    });
+    return { events: events.slice(input.after ?? 0), done: row.status === 'done' };
   }
 
   async putBrowserApiKey(profileId: string, provider: string, key: string): Promise<void> {
@@ -1310,20 +1591,20 @@ export class CredentialVaultDO extends DurableObject<Env> {
     });
   }
 
-  private async uploadCredential(profileId: string, input: unknown): Promise<CredentialUploadResponse> {
+  private async uploadCredential(profileId: string, input: unknown): Promise<void> {
       this.requireInferenceProfile(profileId);
-      const parsed = brokerUploadSchema.parse(input);
-      const credential = { ...parsed.credential, provider: parsed.provider } as StoredVaultCredential;
+      const parsed = credentialUploadSchema.parse(input);
+      const credential = storedVaultCredentialSchema.parse({ ...parsed.credential, provider: parsed.provider });
       const config = this.config();
       if (!config) throw new Error('Vault is not configured');
-      const rows = this.ctx.storage.sql.exec<OmpCredentialRow>(
+      const rows = this.ctx.storage.sql.exec<ProfileCredentialRow>(
         "SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND provider = ? AND state = 'active' ORDER BY rowid", profileId, parsed.provider,
       ).toArray();
       const existing = await Promise.all(rows.map(async (row) => ({ row, credential: await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key)) })));
-      const identity = brokerCredentialIdentity(credential);
+      const identity = credentialIdentity(credential);
       const matches = existing.filter(({ credential: current }) => credential.type === 'api_key'
         ? current.type === 'api_key'
-        : current.type !== 'api_key' && (identity !== null ? brokerCredentialIdentity(current) === identity : current.refresh === credential.refresh));
+        : current.type !== 'api_key' && (identity !== null ? credentialIdentity(current) === identity : current.refresh === credential.refresh));
       const target = matches[0]?.row;
       // Retain row ids on an identity upsert, but never reuse a disabled row: a delayed
       // logout from another client must not disable a subsequently uploaded key.
@@ -1333,14 +1614,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
           this.disableCredentialRow(profileId, row.row_id);
         }
       }
-      const snapshot = await this.ompSnapshot(profileId);
-      return { entries: snapshot.credentials.filter((entry) => entry.provider === parsed.provider).map(({ rotatesInMs: _rotates, ...entry }) => entry) };
   }
 
-  ompDisable(rowId: number, identity: ProfileBrokerIdentity): boolean | null {
-    if (identity.capability !== 'manage' || !this.authorizeProfileBroker(identity)) return null;
-    return this.disableCredentialRow(identity.profileId, rowId);
-  }
 
   private disableCredentialRow(profileId: string, rowId: number): boolean {
     if (!Number.isSafeInteger(rowId) || rowId <= 0) return false;
@@ -1354,67 +1629,31 @@ export class CredentialVaultDO extends DurableObject<Env> {
     });
   }
 
-  private credentialGeneration(profileId: string): number {
-    return this.ctx.storage.sql.exec<{ credential_generation: number }>('SELECT credential_generation FROM inference_profiles WHERE profile_id = ? AND deleted_at IS NULL', profileId).one().credential_generation;
-  }
 
   private credentialsChanged(profileId = DEFAULT_INFERENCE_PROFILE_ID): void {
     this.ctx.storage.sql.exec('UPDATE inference_profiles SET credential_generation = MAX(credential_generation + 1, ?) WHERE profile_id = ?', Date.now(), profileId);
     if (profileId === DEFAULT_INFERENCE_PROFILE_ID) this.ctx.storage.sql.exec('UPDATE credential_snapshot SET generation = MAX(generation + 1, ?) WHERE id = 1', Date.now());
   }
 
-  async ompSnapshot(profileId: string, identity?: ProfileBrokerIdentity): Promise<SnapshotResponse> {
-    await this.ensureInference();
-    this.assertBrokerProfile(profileId, identity);
-    const config = this.config();
-    if (!config) throw new Error('Vault is not configured');
-    const now = Date.now();
-    const generation = this.credentialGeneration(profileId);
-    const vaultKey = credentialProtocolBase64.decode(config.vault_key);
-    const rows = this.ctx.storage.sql.exec<OmpCredentialRow>(
-      "SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND state = 'active' ORDER BY rowid", profileId,
-    ).toArray();
-    const credentials = await Promise.all(rows.map(async (row) => {
-      const credential = await openVaultCredential(row, vaultKey);
-      return {
-        ...brokerCredentialEntry(row.row_id, credential),
-        rotatesInMs: credential.type === 'api_key' ? null : Math.max(0, credential.expires - now),
-      };
-    }));
-    this.assertBrokerProfile(profileId, identity);
-    return {
-      generation,
-      generatedAt: now,
-      serverNowMs: now,
-      refresher: {
-        enabled: true,
-        intervalMs: 60_000,
-        skewMs: 5 * 60_000,
-        nextSweepInMs: 60_000,
-      },
-      credentials,
-    };
-  }
-  private assertBrokerProfile(profileId: string, identity?: ProfileBrokerIdentity): void {
+  private assertProfileAccess(profileId: string): void {
     if (this.legacyCredentialConflict()) throw new Error('Legacy credentials were written after inference cutover; protected forward repair is required');
     this.requireInferenceProfile(profileId);
-    if (identity && (identity.profileId !== profileId || !this.authorizeProfileBroker(identity))) throw new Error('Inference broker access ended');
   }
 
-  async ompRefresh(rowId: number, identity: ProfileBrokerIdentity): Promise<CredentialRefreshResponse> {
-    const profileId = identity.profileId;
-    this.assertBrokerProfile(profileId, identity);
+
+  private async refreshProfileCredential(profileId: string, rowId: number): Promise<void> {
+    this.assertProfileAccess(profileId);
     const config = this.config();
     if (!config || !Number.isSafeInteger(rowId) || rowId <= 0) throw new Error('Credential is unavailable');
-    const row = this.ctx.storage.sql.exec<OmpCredentialRow>(
+    const row = this.ctx.storage.sql.exec<ProfileCredentialRow>(
       'SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND rowid = ? AND state = ?',
       profileId, rowId, 'active',
     ).toArray()[0];
     if (!row) throw new Error('Credential is unavailable');
     const vaultKey = credentialProtocolBase64.decode(config.vault_key);
     const credential = await openVaultCredential(row, vaultKey);
-    this.assertBrokerProfile(profileId, identity);
-    if (credential.type === 'api_key') return { entry: brokerCredentialEntry(rowId, credential) };
+    this.assertProfileAccess(profileId);
+    if (credential.type === 'api_key') return;
     const owner = crypto.randomUUID();
     if (!this.acquireRefreshLease(row, owner)) throw new Error('Credential refresh is already in progress');
     let refreshed: StoredVaultOAuthCredential;
@@ -1422,6 +1661,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
       refreshed = await refreshCredential(credential);
     } catch (error) {
       this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ? AND owner = ?', row.id, owner);
+      if (!(error instanceof ProviderRefreshError) || error.kind !== 'rejected') {
+        const changed = this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'refresh-uncertain', updated_at = ? WHERE profile_id = ? AND id = ? AND revision = ? AND state = 'active'", new Date().toISOString(), profileId, row.id, row.revision).rowsWritten;
+        if (changed) this.credentialsChanged(profileId);
+      }
       throw error;
     }
     const revision = row.revision + 1;
@@ -1440,8 +1683,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       return changed === 1;
     });
     if (!committed) throw new Error('Credential changed during refresh');
-    this.assertBrokerProfile(profileId, identity);
-    return { entry: brokerCredentialEntry(rowId, refreshed) };
+    this.assertProfileAccess(profileId);
   }
 
 
@@ -1485,6 +1727,13 @@ export class CredentialVaultDO extends DurableObject<Env> {
       && (JSON.parse(device.capabilities_json) as string[]).includes(capability)
       ? device.generation : null;
   }
+  hasRuntimeMachine(machineId: string): boolean {
+    const device = this.device(machineId);
+    if (!device) return false;
+    const capabilities = z.array(z.string()).safeParse(JSON.parse(device.capabilities_json));
+    return capabilities.success && capabilities.data.includes('space.control');
+  }
+
   authorizeBroker(machineId: string, generation: number, capability: 'credential.access' | 'credential.manage' = 'credential.access'): boolean {
     const device = this.device(machineId);
     const capabilities = device ? JSON.parse(device.capabilities_json) as string[] : [];
@@ -1661,7 +1910,18 @@ export class CredentialVaultDO extends DurableObject<Env> {
 
   private acquireRefreshLease(row: CredentialRow, owner: string): boolean {
     return this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE expires_at <= ?', Date.now());
+      const previous = this.ctx.storage.sql.exec<{ expires_at: number; revision: number }>('SELECT expires_at, revision FROM refresh_leases WHERE credential_id = ?', row.id).toArray()[0];
+      if (previous) {
+        if (previous.expires_at > Date.now()) return false;
+        const table = this.inferenceCutover() ? 'inference_credentials' : 'oauth_credentials';
+        const scope = this.ctx.storage.sql.exec<{ profile_id: string }>(`SELECT profile_id FROM ${table} WHERE id = ? AND revision = ? AND state = 'active'`, row.id, previous.revision).toArray()[0];
+        if (scope) {
+          this.ctx.storage.sql.exec(`UPDATE ${table} SET state = 'refresh-uncertain', updated_at = ? WHERE id = ? AND revision = ? AND state = 'active'`, new Date().toISOString(), row.id, previous.revision);
+          this.credentialsChanged(scope.profile_id);
+        }
+        this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ?', row.id);
+        return false;
+      }
       try {
         this.ctx.storage.sql.exec(
           'INSERT INTO refresh_leases(credential_id, owner, revision, expires_at) VALUES (?, ?, ?, ?)',
@@ -2101,52 +2361,6 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   return new Response(object.body, { headers });
 }
 
-async function ompBrokerResponse(request: Request, env: Env, userId: string, profileId: string, operation: string): Promise<Response> {
-  const identity = env.GITSPACE_OMP_BROKER_TOKEN
-    ? await verifyProfileBrokerToken(env.GITSPACE_OMP_BROKER_TOKEN, userId, request.headers.get('authorization'))
-    : null;
-  if (!identity || identity.profileId !== profileId || !await credentialVault(env, userId).authorizeProfileBroker(identity)) {
-    return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'cache-control': 'private, no-store' } });
-  }
-  const denied = accountAccessResponse(await activeAccount(env, userId));
-  if (denied) return denied;
-  const vault = credentialVault(env, userId);
-  if (operation === 'healthz') return Response.json({ ok: true, version: 'gitspace-inference-broker-v1' }, { headers: { 'cache-control': 'private, no-store' } });
-  const disableMatch = /^credential\/(\d+)\/disable$/u.exec(operation);
-  if (request.method === 'POST' && (operation === 'credential' || disableMatch)) {
-    const headers = { 'cache-control': 'private, no-store' };
-    if (identity.capability !== 'manage') {
-      return Response.json({ error: 'credential management is not authorized' }, { status: 403, headers });
-    }
-    let body: unknown;
-    try {
-      body = await readBoundedJson(request);
-    } catch {
-      return Response.json({ error: 'Invalid credential request' }, { status: 400, headers });
-    }
-    if (operation === 'credential') {
-      const parsed = brokerUploadSchema.safeParse(body);
-      if (!parsed.success) return Response.json({ error: 'Invalid credential request' }, { status: 400, headers });
-      const result = await vault.ompUpload(parsed.data, identity);
-      return result ? Response.json(result, { headers }) : Response.json({ error: 'credential management is not authorized' }, { status: 403, headers });
-    }
-    if (!brokerDisableSchema.safeParse(body).success) return Response.json({ error: 'Invalid credential request' }, { status: 400, headers });
-    const result = await vault.ompDisable(Number(disableMatch![1]), identity);
-    return result === null
-      ? Response.json({ error: 'credential management is not authorized' }, { status: 403, headers })
-      : Response.json(result ? { ok: true } : { error: 'Credential is unavailable' }, { status: result ? 200 : 404, headers });
-  }
-  const refreshMatch = /^credential\/(\d+)\/refresh$/u.exec(operation);
-  if (refreshMatch && request.method === 'POST') {
-    return Response.json(await vault.ompRefresh(Number(refreshMatch[1]!), identity), { headers: { 'cache-control': 'private, no-store' } });
-  }
-  if (operation === 'snapshot/stream') return new Response('Not found', { status: 404 });
-  if (operation !== 'snapshot' || request.method !== 'GET') return new Response('Not found', { status: 404 });
-  const snapshot = await vault.ompSnapshot(profileId, identity);
-  const etag = `\"${snapshot.generation}\"`;
-  if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers: { etag } });
-  return Response.json(snapshot, { headers: { etag, 'cache-control': 'private, no-store' } });
-}
 function catalogSpacePayload(payload: Record<string, unknown>): PortableSpaceDefinition {
   return {
     projectId: String(payload.projectId ?? ''),
@@ -2369,7 +2583,6 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
       GITSPACE_CONTROL_TOKEN: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))),
       GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
       GITSPACE_SERVICE_NAMESPACE: accountSettings.profile.handle,
-      GITSPACE_OMP_AGENT_DIR: '/workspace/.omp',
       GITSPACE_MANAGED_SPACE_ROOT: '/workspace/spaces',
       GITSPACE_MIGRATIONS_FOLDER: '/opt/gitspace/drizzle',
       GITSPACE_RPC_PORT: '8081',
@@ -2766,17 +2979,6 @@ const worker = {
         return Response.json(publicError('INVALID_MACHINE', error instanceof Error ? error.message : 'Machine revocation failed'), { status: 400 });
       }
     }
-    if (/^\/omp\/users\/[^/]+\/v1\//u.test(url.pathname)) {
-      return Response.json({ error: 'Profile-scoped broker required; upgrade this client' }, { status: 401, headers: { 'cache-control': 'private, no-store' } });
-    }
-    const ompBrokerMatch = /^\/omp\/users\/([^/]+)\/profiles\/([^/]+)\/v1\/(healthz|snapshot|snapshot\/stream|credential|credential\/\d+\/(?:refresh|disable))$/u.exec(url.pathname);
-    if (ompBrokerMatch) {
-      try {
-        return await ompBrokerResponse(request, env, decodeURIComponent(ompBrokerMatch[1]!), decodeURIComponent(ompBrokerMatch[2]!), ompBrokerMatch[3]!);
-      } catch {
-        return Response.json({ error: 'broker unavailable' }, { status: 503 });
-      }
-    }
     if (url.pathname === '/__dev/bootstrap' && request.method === 'POST' && env.GITSPACE_DEV_BOOTSTRAP_TOKEN) {
       if (request.headers.get('authorization') !== `Bearer ${env.GITSPACE_DEV_BOOTSTRAP_TOKEN}`) return new Response('Unauthorized', { status: 401 });
       try {
@@ -2925,14 +3127,14 @@ const worker = {
         if (diagnostics) diagnostics.stage = 'parse';
         const body = signedControlRequestSchema.parse(await readBoundedJson(request));
         recordSyncRequestParsed(diagnostics, body);
-        const capability = body.operation === 'inference.resolve' ? 'credential.access'
-          : body.operation.startsWith('inference.') && body.operation !== 'inference.list' ? 'credential.manage'
+        const capability = body.operation.startsWith('inference.') && body.operation !== 'inference.list' ? 'credential.manage'
           : body.operation === 'secrets.materialize' || body.operation === 'mcp.composio.materialize' ? 'credential.access'
           : body.operation === 'secrets.put' || body.operation === 'secrets.delete'
             || body.operation === 'secrets.account.put' || body.operation === 'secrets.account.delete'
             || body.operation === 'secrets.account.grant' || body.operation === 'secrets.account.revoke' ? 'credential.manage'
-          : body.operation.startsWith('settings.') ? 'storage.access'
+          : body.operation === 'runtime.repository.credentials' || body.operation.startsWith('settings.') ? 'storage.access'
           : body.operation.startsWith('space.')
+            || body.operation.startsWith('runtime.')
             || body.operation.startsWith('catalog.')
             || body.operation.startsWith('crons.')
             || body.operation.startsWith('inspector.')
@@ -2947,10 +3149,14 @@ const worker = {
         if (diagnostics) diagnostics.stage = 'authorize';
         const authorized = await authorizeControl(env, body, capability);
         if (authorized.status === 'error') return accountAccessResponse(authorized)!;
-        if (['space.bootstrap', 'space.beginOpen', 'crons.claimNext', 'inference.resolve', 'inference.providers'].includes(body.operation)
+        if (body.operation.startsWith('runtime.')) {
+          const value = await runtimeMachineControl(env, body);
+          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
+        }
+        if (['space.bootstrap', 'space.beginOpen'].includes(body.operation)
           && await credentialVault(env, body.userId).inferenceCutover()
           && !await tenantReleases(env, body.userId).machineInferenceCompatible(body.machineId)) {
-          return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP to a committed inference-profile-compatible release before admitting work'), { status: 409, headers: { 'cache-control': 'private, no-store' } });
+          return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine to a committed inference-profile-compatible release before admitting work'), { status: 409, headers: { 'cache-control': 'private, no-store' } });
         }
         if (diagnostics) diagnostics.stage = 'rollout';
         if (body.operation === 'space.bootstrap' || body.operation === 'space.beginOpen') {
@@ -2974,12 +3180,6 @@ const worker = {
             case 'inference.update': mutation = await vault.updateInferenceProfile(inferenceUpdateInputSchema.parse(body.payload)); break;
             case 'inference.delete': mutation = await vault.deleteInferenceProfile(inferenceDeleteInputSchema.parse(body.payload)); break;
             case 'inference.assign': mutation = await vault.assignInferenceProfile(inferenceAssignInputSchema.parse(body.payload)); break;
-            case 'inference.resolve':
-              value = await vault.resolveInference(body.machineId, z.strictObject({ projectId: z.string().min(1) }).parse(body.payload).projectId);
-              break;
-            case 'inference.providers':
-              value = await vault.resolveInference(body.machineId, null, z.strictObject({ profileId: z.string().min(1) }).parse(body.payload).profileId);
-              break;
             default: throw new Error('Unsupported inference operation');
           }
           if (mutation?.status === 'conflict') return Response.json({ status: 'error', error: { code: 'SETTINGS_CONFLICT', message: 'Inference revision changed', resource: mutation.resource, expected: mutation.expected, actual: mutation.actual } }, { status: 409, headers: { 'cache-control': 'private, no-store' } });
@@ -3313,16 +3513,6 @@ const worker = {
             case 'crons.processDue':
               value = await crons.processDue({ projectId });
               break;
-            case 'crons.claimNext':
-              value = await crons.claimNext({
-                projectId,
-                claimedBy: body.machineId,
-                ...(Array.isArray(body.payload.heldSpaceIds) ? { heldSpaceIds: body.payload.heldSpaceIds.filter((id): id is string => typeof id === 'string') } : {}),
-              });
-              break;
-            case 'crons.completeRun':
-              value = await crons.completeRun({ ...body.payload, projectId } as Parameters<ProjectCronsDO['completeRun']>[0]);
-              break;
             default:
               throw new Error('Unsupported project cron operation');
           }
@@ -3397,11 +3587,11 @@ const worker = {
               value = result.value;
               break;
             }
-            case 'settings.omp.get':
-              value = await settings.getOmp();
+            case 'settings.runtime.get':
+              value = await settings.getRuntime();
               break;
-            case 'settings.omp.update': {
-              const result = await settings.updateOmp(body.machineId, ompConfigUpdateSchema.parse(body.payload));
+            case 'settings.runtime.update': {
+              const result = await settings.updateRuntime(body.machineId, runtimeConfigUpdateSchema.parse(body.payload));
               if (result.status === 'conflict') throw new SettingsRevisionConflict(result.resource, result.expected, result.actual);
               value = result.value;
               break;
@@ -3494,7 +3684,9 @@ const worker = {
             case 'project.environment.mutate':
             case 'project.environment.runLog': {
               const spaceId = String(body.payload.spaceId ?? '');
-              const current = await authority.getLifecycleState(spaceId);
+              const current = body.operation === 'project.environment.get'
+                ? await authority.refreshBrowserOrigins(spaceId)
+                : await authority.getLifecycleState(spaceId);
               if (current.projectId !== projectId) throw new Error('Lifecycle project identity mismatch');
               const projects = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(body.userId);
               if (body.operation === 'project.environment.runLog') {
@@ -3510,15 +3702,19 @@ const worker = {
                 const placement = input.op === 'claim'
                   ? await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${body.userId}:${spaceId}`).get()
                   : null;
+                const attachment = input.op === 'claim' && input.attachment
+                  ? (await env.SPACE_AUTHORITY.getByName(`${body.userId}:${spaceId}`).runtimeAttachments({ projectId, workspaceId: spaceId })).find(item => item.attachmentId === input.attachment?.attachmentId && item.generation === input.attachment.generation && item.workspaceId === spaceId)
+                  : undefined;
                 authorizeLifecycleMachineMutation(input, {
                   machineId: body.machineId,
                   projectId,
                   machineOnline: machine?.state === 'online' && machine.desiredState === 'online',
                   placement,
+                  attachment,
                 });
                 if (input.op === 'value' && input.scope === 'global') await projects.setEnvironmentValue(input.name, input.value);
                 else {
-                  const result = await authority.mutateLifecycleState(spaceId, input, { machineId: body.machineId, actorId: body.machineId, kind: 'machine', lifecycleControl: false });
+                  const result = await authority.mutateLifecycleState(spaceId, input, { machineId: body.machineId, actorId: body.machineId, kind: 'machine', lifecycleControl: false, ...(input.op === 'claim' && input.attachment && attachment ? { attachment: input.attachment } : {}) });
                   if (result.status === 'error') return Response.json({ status: 'error', error: result.failure }, { status: 409 });
                   state = result.state;
                 }
@@ -3696,12 +3892,12 @@ const worker = {
               break;
             }
             case 'project.events.append':
-              value = await authority.appendEvent(
+              value = await (await authority.appendEvent(
                 body.payload.event as Parameters<ProjectAuthorityDO['appendEvent']>[0],
-              );
+              )).json();
               break;
             case 'project.events.list':
-              value = await authority.listEvents(Number(body.payload.afterOffset ?? 0));
+              value = await (await authority.listEvents(Number(body.payload.afterOffset ?? 0))).json();
               break;
             case 'project.events.latest':
               value = await authority.latestEventOffset();

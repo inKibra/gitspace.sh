@@ -5,8 +5,6 @@ import { z } from 'zod';
 export const entrypointIdSchema = z.enum([
   'frontend',
   'machine-daemon',
-  'omp-worker',
-  'omp-broker',
   'offload-worker',
   'relay-worker',
   'relay-do',

@@ -61,7 +61,7 @@ class CloudObjects {
     }
     if (signed.operation !== 'data.get') return new Response(null, { status: 403 });
     const bytes = this.objects.get(accountKey);
-    return bytes ? new Response(bytes) : new Response(null, { status: 404 });
+    return bytes ? new Response(new Uint8Array(bytes)) : new Response(null, { status: 404 });
   }) as typeof fetch;
 
   store(accountId = 'account-a', machineId = 'machine-a'): CloudArtifactObjectStore {

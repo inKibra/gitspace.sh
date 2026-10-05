@@ -8,6 +8,9 @@
     "enable_request_signal",
     "request_signal_passthrough"
   ],
+  "artifacts": [
+    { "binding": "ARTIFACTS", "namespace": "gitspace-local" }
+  ],
   "durable_objects": {
     "bindings": [
       {

@@ -58,4 +58,23 @@ describe('Inspector bounded resource content', () => {
     const content = await loadInspectorContent(frames(new TextEncoder().encode(source), true), url);
     try { expect(content.source).toBe(source); } finally { content.dispose?.(); }
   });
+  it('reads expiring browser output by bounded pages without treating it as a machine file', async () => {
+    const source = `${'line one\n'.repeat(5000)}last line`;
+    const body = new TextEncoder().encode(source);
+    const artifact = { id: 'output', url: 'browser-artifact://machine/output', mediaType: 'text/plain', bytes: body.length, expiresAt: new Date(Date.now() + 60_000).toISOString() };
+    const transport = {
+      readArtifact: vi.fn(() => frames()), readResource: vi.fn(() => frames()),
+      readBrowserArtifact: vi.fn(async ({ offset, limit }: { offset: number; limit: number }) => {
+        const end = Math.min(body.length, offset + limit);
+        return { artifact, offset, nextOffset: end < body.length ? end : null, data: Buffer.from(body.subarray(offset, end)).toString('base64') };
+      }),
+    };
+    const context = { spaceId: 'workspace', projectId: 'project', generation: 1, sessionId: null, runtimeAvailable: false };
+    const content = await loadInspectorResource(transport, context, `${artifact.url}:2-3`);
+    try { expect(content.source).toBe('line one\nline one'); } finally { content.dispose?.(); }
+    expect(transport.readArtifact).not.toHaveBeenCalled();
+    expect(transport.readResource).not.toHaveBeenCalled();
+    transport.readBrowserArtifact.mockImplementation(async ({ offset }) => ({ artifact, offset, nextOffset: offset, data: '' }));
+    await expect(loadInspectorResource(transport, context, artifact.url)).rejects.toThrow('Invalid browser artifact cursor');
+  });
 });

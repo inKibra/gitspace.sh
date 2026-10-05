@@ -1,4 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
+import { RuntimeBrowserAuthorityCertificateBodySchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody } from '@gitspace/protocol-runtime';
+import { runtimeBrowserKey, runtimeBrowserPublicKey } from './runtime-browser.js';
 export interface AccountRecord {
   userId: string;
   handle: string;
@@ -23,4 +25,13 @@ export class AccountStateDO extends DurableObject<Env> {
    return { userId, handle: this.env.TENANT_ID, status: 'active', reason: null, createdAt, updatedAt: createdAt, tenantHostname: new URL(this.env.RELAY_URL).hostname, tenantRelease: null, tenantProvisionedAt: createdAt, lastError: null };
  }
  getByHandle(handle: string): AccountRecord | null { return handle === this.env.TENANT_ID ? this.get(this.env.ACCOUNT_ID) : null; }
+ async browserTrust() {
+   return { accountId: this.env.ACCOUNT_ID, ...await runtimeBrowserPublicKey(this.ctx.storage) };
+ }
+ async certifyBrowserAuthority(raw: RuntimeBrowserAuthorityCertificateBody) {
+   const body = RuntimeBrowserAuthorityCertificateBodySchema.parse(raw);
+   const now = Date.now();
+   if (body.accountId !== this.env.ACCOUNT_ID || Date.parse(body.issuedAt) > now + 5000 || Date.parse(body.expiresAt) <= now || Date.parse(body.expiresAt) > now + 24 * 60 * 60_000) throw new Error('Invalid workspace browser authority');
+   return signRuntimeBrowserAuthorityCertificate(body, (await runtimeBrowserKey(this.ctx.storage)).privateKey);
+ }
 }

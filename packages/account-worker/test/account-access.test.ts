@@ -9,7 +9,6 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { HttpResponse, http } from 'msw';
 import worker, { CredentialVaultDO } from '../src/index.js';
-import { profileBrokerToken } from '../src/account-access.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 
@@ -35,7 +34,6 @@ async function account() {
   await vault.putCredential({ id: 'primary', credential: { provider: 'openai-codex', access: `secret-${handle}`, refresh: 'refresh-secret', expires: Date.now() + 3_600_000 } });
   await env.USER_SETTINGS.getByName(userId).setHandle('fixture', 0, handle);
   await env.DATA.put(`users/${userId}/private`, `data-${handle}`);
-  const brokerToken = await profileBrokerToken('test-omp-broker-token', userId, { profileId: 'default', machineId: 'machine', generation: 1, capability: 'inference' });
   function signed(operation: ControlOperation, payload: Record<string, unknown> = {}) {
     return createSignedControlRequest({ userId, machineId: 'machine', operation, payload, signingPrivateKey: signing });
   }
@@ -62,12 +60,11 @@ async function account() {
       json('/v1/control', signed('artifacts.key.get')),
       SELF.fetch('https://auth.test/v1/data/private', { headers: { 'x-gitspace-control': btoa(JSON.stringify(signed('data.get', { key: 'private' }))) } }),
       json(`/v1/users/${userId}/credentials/primary/access`, createCredentialAccessRequest({ userId, machineId: 'machine', credentialId: 'primary', signingPrivateKey: signing })),
-      SELF.fetch(`https://auth.test/omp/users/${userId}/profiles/default/v1/snapshot`, { headers: { authorization: `Bearer ${brokerToken}` } }),
       json('/v1/devices/enroll', { invite, binding }),
       json('/v1/machines/enroll', { userId, label: 'Machine', deviceGrant: grant }, { authorization: createRelayAuthorization(root, '/v1/machines/enroll') }),
     ]);
   }
-  return { userId, handle, root, signing, grant, vault, brokerToken, signed, subscription, requests };
+  return { userId, handle, root, signing, grant, vault, signed, subscription, requests };
 }
 
 it('serves startup catalog snapshots without waiting for or changing provider readiness', async () => {
@@ -215,7 +212,7 @@ describe('account lifecycle authorization', () => {
 
   it.each(['suspended', 'quarantined'] as const)('blocks %s tenant access on direct APIs', async status => {
     const a = await account();
-    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200, 200]);
+    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
     platformState(status);
     for (const response of await a.requests()) {
       expect([401, 403]).toContain(response.status);
@@ -223,26 +220,6 @@ describe('account lifecycle authorization', () => {
     }
   });
 
-  it('revokes every credential broker route at the machine generation without disabling another machine', async () => {
-    const a = await account();
-    await a.vault.ensureInference();
-    const url = `https://auth.test/omp/users/${a.userId}/profiles/default/v1`;
-    const get = (token: string) => SELF.fetch(`${url}/snapshot`, { headers: { authorization: `Bearer ${token}` } });
-    expect((await get(a.brokerToken)).status).toBe(200);
-    await a.vault.registerDevice(signCredentialAuthorityGrant({ ...a.grant.grant, machineId: 'other-machine' }, a.root));
-    const otherToken = await profileBrokerToken('test-omp-broker-token', a.userId, { profileId: 'default', machineId: 'other-machine', generation: 1, capability: 'inference' });
-    await a.vault.removeManagedDevice('machine');
-    for (const [path, method] of [['snapshot', 'GET'], ['snapshot/stream', 'GET'], ['credential/1/refresh', 'POST'], ['credential', 'POST'], ['credential/1/disable', 'POST']] as const) {
-      const response = await SELF.fetch(`${url}/${path}`, { method, headers: { authorization: `Bearer ${a.brokerToken}` } });
-      expect(response.status).toBe(401);
-      expect(await response.text()).not.toContain(`secret-${a.handle}`);
-    }
-    expect((await get(otherToken)).status).toBe(200);
-    await a.vault.registerDevice(signCredentialAuthorityGrant({ ...a.grant.grant, generation: 2 }, a.root));
-    expect((await get(a.brokerToken)).status).toBe(401);
-    expect((await get(a.brokerToken.replace('gsip1.', 'gsip2.'))).status).toBe(401);
-    expect((await get(await profileBrokerToken('test-omp-broker-token', a.userId, { profileId: 'default', machineId: 'machine', generation: 2, capability: 'inference' }))).status).toBe(200);
-  });
 
   it('rejects foreign account identities at this tenant without exposing its credentials', async () => {
     const a = await account();
@@ -253,16 +230,13 @@ describe('account lifecycle authorization', () => {
     });
     expect(credential.status).toBe(403);
     expect(await credential.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
-    const crossBroker = await SELF.fetch(`https://auth.test/omp/users/${foreignUserId}/profiles/default/v1/snapshot`, { headers: { authorization: `Bearer ${a.brokerToken}` } });
-    expect(crossBroker.status).toBe(401);
-    expect(await crossBroker.text()).not.toContain(`secret-${a.handle}`);
-    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200, 200]);
+    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
   });
 
-  it('blocks incompatible runtime RPC, workspace and cron admissions after cutover without blocking deployment control', async () => {
+  it('blocks incompatible machine RPC and workspace admissions after cutover without blocking deployment control', async () => {
     const a = await account();
     await a.vault.ensureInference();
-    for (const operation of ['space.bootstrap', 'space.beginOpen', 'crons.claimNext', 'inference.resolve'] as const) {
+    for (const operation of ['space.bootstrap', 'space.beginOpen'] as const) {
       const response = await SELF.fetch('https://auth.test/v1/control', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify(a.signed(operation, { projectId: 'new-project', spaceId: 'new-space' })),
@@ -299,35 +273,28 @@ describe('account lifecycle authorization', () => {
     const foreign = await request('inference.assign', { projectId: 'foreign', profileId, expectedRevision: 0 });
     expect(foreign.ok).toBe(false);
     const listing = await (await request('inference.list', {})).text();
-    const releases = env.TENANT_RELEASES.getByName(a.userId);
-    const hash = `sha256:${'ab'.repeat(32)}`;
-    await releases.stage({
-      sha: 'profile-runtime', inferenceVersion: 1, label: 'Compatible runtime', workspaceId: 'build',
-      artifacts: {
-        worker: null, frontend: null,
-        machine: { key: 'releases/profile-runtime/machine.js', hash, size: 1 },
-        omp: { key: 'releases/profile-runtime/omp.js', hash, size: 1 },
-      },
-      worker: null, omp: { upstreamVersion: '18.1.10', bunVersion: '1.4.0', packages: {}, patches: [] },
-    }, 'machine');
-    await releases.machineApplied('machine', { sha: 'profile-runtime', target: 'machine', generation: '2', status: 'applied' });
-    await releases.machineApplied('machine', { sha: 'profile-runtime', target: 'omp', generation: '2', status: 'applied' });
     const projectId = 'bound-project';
     const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:${projectId}`);
     await env.USER_PROJECTS.getByName(a.userId).put(await authority.bootstrap({ id: projectId, name: 'Bound', baseBranch: 'main', repositoryReference: null, createdBy: 'machine' }));
     await a.vault.assignInferenceProfile({ projectId, profileId, expectedRevision: 0 });
     await a.vault.putBrowserApiKey(profileId, 'openai', 'bound-project-key');
-    const resolved = await (await request('inference.resolve', { projectId })).json() as { value: { projectId: string; assignmentRevision: number; profile: { id: string }; broker: { url: string; token: string } } };
-    expect(resolved.value).toMatchObject({ projectId, assignmentRevision: 1, profile: { id: profileId } });
-    const scoped = await SELF.fetch(`${resolved.value.broker.url}/v1/snapshot`, { headers: { authorization: `Bearer ${resolved.value.broker.token}` } });
-    expect(await scoped.json()).toMatchObject({ credentials: [{ credential: { type: 'api_key', key: 'bound-project-key' } }] });
-    const runtimeWrite = await SELF.fetch(`${resolved.value.broker.url}/v1/credential`, { method: 'POST', headers: { authorization: `Bearer ${resolved.value.broker.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'openai', credential: { type: 'api_key', key: 'must-not-write' } }) });
-    expect(runtimeWrite.status).toBe(403);
-    const management = await (await request('inference.providers', { profileId })).json() as { value: { projectId: null; assignmentRevision: null; broker: { url: string; token: string } } };
-    expect(management.value).toMatchObject({ projectId: null, assignmentRevision: null });
-    const manageWrite = await SELF.fetch(`${management.value.broker.url}/v1/credential`, { method: 'POST', headers: { authorization: `Bearer ${management.value.broker.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'openai', credential: { type: 'api_key', key: 'managed-update' } }) });
-    expect(manageWrite.status).toBe(200);
-    expect(listing).not.toContain('broker');
+    await a.vault.removeManagedDevice('machine');
+    const resolved = await a.vault.resolveCloudInference(projectId);
+    expect(resolved).toMatchObject({ projectId, assignmentRevision: 1, profile: { id: profileId } });
+    const [credential] = await a.vault.cloudCredentialAccounts(profileId, 'openai');
+    if (!credential) throw new Error('Expected the admitted profile credential');
+    expect(await a.vault.cloudResolveCredential({ profileId, credentialId: credential.id })).toMatchObject({ credential: { type: 'api_key', key: 'bound-project-key' } });
+    const denial = await runInDurableObject(a.vault, async instance => {
+      try { await instance.cloudResolveCredential({ profileId: 'default', credentialId: credential.id }); return null; }
+      catch (error) { return error instanceof Error ? error.message : String(error); }
+    });
+    expect(denial).toBe('Credential is unavailable');
+    await a.vault.cloudSetApiKey({ profileId, providerId: 'openai', key: 'managed-update' });
+    expect(await a.vault.cloudResolveCredential({ profileId, credentialId: credential.id })).toMatchObject({ credential: { type: 'api_key', key: 'managed-update' } });
+    const providers = await a.vault.cloudProviders(profileId);
+    expect(providers.find(provider => provider.id === 'openai')).toMatchObject({ hasAuth: true });
+    expect(JSON.stringify(providers)).not.toContain('managed-update');
+    expect(listing).not.toContain('bound-project-key');
     expect(listing).not.toContain('secret-');
   });
 

@@ -68,7 +68,7 @@ function sessionFixture(revision = 0): AgentSession {
   return {
     id: 'session-a', spaceId: 'workspace-a', ompSessionId: 'omp-a', sessionFile,
     state: 'active', lastEventOffset: 0, resumePending: false,
-    activity: { active: false, reasons: [] }, health: { revision, issues: {} }, errorMessage: null,
+    activity: { active: false, reasons: [] }, health: { revision, issues: {} },
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   };
 }
@@ -133,7 +133,6 @@ describe('CloudCanonicalSessionWriter', () => {
       lastEventOffset: 0,
       resumePending: false,
       activity: { active: false, reasons: [] },
-      errorMessage: null,
       health: { revision: 0, issues: {} },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

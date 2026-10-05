@@ -1,6 +1,6 @@
 import { deserialize } from 'result-rpc';
 import { batchFetchTransport, fetchTransport, type ClientTransport } from 'result-rpc/client';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
+import { ACCOUNT_CLOUD_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
 
 /**
  * One client, every machine. Every call goes to the account endpoint, which
@@ -66,9 +66,6 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   // Repository provisioning and image startup can outlast ordinary queries.
   // Keep those calls out of their batch and timeout budget.
   const provisioning = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 });
-  // Runtime schemas/provider capabilities come from a machine when online,
-  // with canonical cloud views when offline. Keep that choice independently signed.
-  const runtimeMetadata = batch();
   const inspectorContext = batch();
   // The account Worker forwards a batch whole to one holder, and lets the
   // account authority choose cloud versus the live machine for workspace reads
@@ -85,7 +82,6 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
         path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' ||
         (path.startsWith('machine.image.') && path !== 'machine.image.list' && path !== 'machine.image.events')) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
-    if (Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, path)) return runtimeMetadata;
     if (Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path)) return account;
     if (isSpaceCloudRpcPath(path)) return queue(`inspector:${spaceCloudRpcSpaceId(input) ?? ''}`);
     const target = rpcCallTarget(path, input);

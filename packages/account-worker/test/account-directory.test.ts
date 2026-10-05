@@ -219,7 +219,7 @@ describe('directory WebSocket authentication and replay', () => {
   it('binds the cursor and method to the signature, consumes nonces and rejects foreign origins before upgrade', async () => {
     const device = await browserDevice();
     const request = device.request(0, false);
-    const replay = request.clone();
+    const replay = new Request(request.url, { method: request.method, headers: request.headers, body: request.clone().body });
     expect((await SELF.fetch(request)).status).toBe(426);
     expect(await (await SELF.fetch(replay)).json()).toMatchObject({ error: { code: 'REQUEST_REPLAY' } });
     const tampered = device.request(0, false);

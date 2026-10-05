@@ -1,20 +1,15 @@
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { nativeHostAbi, validateNativeAbi } from '@gitspace/account-omp/manifest';
+import { dirname, join, resolve } from 'node:path';
+import { nativeHostAbi, validateNativeAbi } from './executable-manifest.js';
 import type { NativeAbi } from '@gitspace/protocol/deployment';
-import { hashArtifactPath } from './policies/shared.js';
 import { currentDistributionPlatform, versionAtLeast, type DistributionPlatform } from './distribution.js';
 import {
-  GIT_LFS_DECLARATION, GIT_LFS_PATH, gitLfsRuntimeSchema, machineNativeDeclarationSchema, machineNativeRuntimeSchema,
-  nativeFileDigest, prepareGitLfs, prepareMachineNativeRuntime, readGitLfsRuntime, readMachineNativeRuntime,
-  verifyNativeFile, walgitProvenanceSchema, type GitLfsRuntime, type MachineNativeRuntime,
+  GIT_LFS_DECLARATION, GIT_LFS_PATH, gitLfsRuntimeSchema, machineNativeRuntimeSchema,
+  nativeFileDigest, prepareGitLfs, prepareMachineNativeRuntime, readGitLfsRuntime,
+  verifyNativeFile, type GitLfsRuntime, type MachineNativeRuntime,
 } from './native-runtime.js';
 
-// Newer upstream writers change the packfile format. This is a data-compatibility pin.
-export const WALGIT_REVISION = '6465bf578d0bc9686019bc6d4537861ab162ee6a';
-export const WALGIT_PATCH = 'patches/walgit/conditional-multipart.patch';
-export const WALGIT_RUST_VERSION = '1.97.1';
 export const GIT_LFS_VERSION = '3.8.0';
 // Official release assets; digests match the core-team-signed sha256sums.asc of https://github.com/git-lfs/git-lfs/releases/tag/v3.8.0
 const GIT_LFS_ASSETS: Record<DistributionPlatform, { name: string; sha256: string; size: number }> = {
@@ -43,7 +38,7 @@ export async function machineNativeAbi(root: string, selected?: NativeAbi): Prom
   if (!Bun.which('readelf')) throw new Error('Native packaging requires binutils (readelf and strip)');
   abi.minimumVersion = selected?.minimumVersion ?? '2.17';
   const files = (await readdir(root)).filter((path) => path.endsWith('.node')).map((path) => join(root, path));
-  for (const path of ['native/walgit', GIT_LFS_PATH]) {
+  for (const path of [GIT_LFS_PATH]) {
     if (await Bun.file(join(root, path)).exists()) files.push(join(root, path));
   }
   for (const file of files) {
@@ -56,80 +51,6 @@ export async function machineNativeAbi(root: string, selected?: NativeAbi): Prom
   return abi;
 }
 
-async function pinnedWalgit(root: string): Promise<{ path: string; runtime: MachineNativeRuntime }> {
-  // Snapshot before hashing/building: a concurrent source edit cannot change provenance halfway through.
-  const patchBytes = await readFile(join(root, WALGIT_PATCH));
-  const patch = { path: WALGIT_PATCH, sha256: new Bun.CryptoHasher('sha256').update(patchBytes).digest('hex'), size: patchBytes.byteLength };
-  const provenance = walgitProvenanceSchema.parse({ repository: 'https://github.com/tobi/walgit.git', revision: WALGIT_REVISION, rustVersion: WALGIT_RUST_VERSION, bunVersion: Bun.version, build: 'static-openssl-v1', patch });
-  const matches = (runtime: MachineNativeRuntime): boolean => runtime.walgit.source === 'release'
-    && JSON.stringify(runtime.walgit.provenance) === JSON.stringify(provenance);
-  // An ordinary source deployment on a linked machine can reuse its authenticated exact pin,
-  // without a compiler, external registry, or bootstrap-global binary. Different declarations never reuse it.
-  const generation = process.env.GITSPACE_MACHINE_RUNTIME_PATH;
-  const generationHash = process.env.GITSPACE_GENERATION_HASH;
-  if (generation && generationHash) {
-    if (await hashArtifactPath(generation) !== generationHash) throw new Error('Selected machine generation integrity mismatch during native reuse');
-    const runtime = await readMachineNativeRuntime(generation);
-    if (matches(runtime)) return { path: (await prepareMachineNativeRuntime(generation)).walgit, runtime };
-  }
-  const key = new Bun.CryptoHasher('sha256').update(JSON.stringify({ provenance, abi: nativeHostAbi() })).digest('hex');
-  const cacheRoot = nativeCacheRoot();
-  const cached = join(cacheRoot, key);
-  if (await Bun.file(join(cached, 'machine-native.json')).exists()) {
-    const runtime = await readMachineNativeRuntime(cached);
-    if (!matches(runtime)) throw new Error(`Native cache provenance mismatch: ${cached}`);
-    return { path: (await prepareMachineNativeRuntime(cached)).walgit, runtime };
-  }
-  for (const binary of ['git', 'cargo', 'protoc', 'cmake', 'clang', 'pkg-config']) {
-    if (!Bun.which(binary)) throw new Error(`Building declared WalGit requires ${binary}. Install C/C++ tools, protobuf compiler/development headers, OpenSSL development headers, binutils and rustup toolchain ${WALGIT_RUST_VERSION}; or declare a verified release payload/environment binary in packages/account-machine/native.json.`);
-  }
-  await mkdir(cacheRoot, { recursive: true });
-  const scratch = await mkdtemp(join(cacheRoot, '.build-'));
-  const payload = join(scratch, 'payload');
-  const source = join(scratch, 'source');
-  try {
-    await mkdir(source);
-    await mkdir(join(payload, 'native'), { recursive: true });
-    await command(['git', 'init', '.'], source);
-    await command(['git', 'remote', 'add', 'origin', provenance.repository], source);
-    await command(['git', 'fetch', '--depth', '1', 'origin', WALGIT_REVISION], source);
-    await command(['git', 'checkout', '--detach', 'FETCH_HEAD'], source);
-    if (await command(['git', 'rev-parse', 'HEAD'], source) !== WALGIT_REVISION) throw new Error('WalGit source revision mismatch');
-    const snapshot = join(scratch, 'conditional-multipart.patch');
-    await writeFile(snapshot, patchBytes);
-    await command(['git', 'apply', '--', snapshot], source);
-    await command([process.execPath, 'install', '--frozen-lockfile'], join(source, 'web'));
-    await command([process.execPath, 'run', 'build'], join(source, 'web'));
-    await command(['cargo', `+${WALGIT_RUST_VERSION}`, 'build', '--locked', '--release', '-p', 'walgit-cli'], source, {
-      CARGO_INCREMENTAL: '0',
-      CARGO_ENCODED_RUSTFLAGS: `--remap-path-prefix=${source}=/gitspace-build/walgit`,
-      OPENSSL_STATIC: '1',
-    });
-    const binary = join(payload, 'native/walgit');
-    await cp(join(source, 'target/release/walgit'), binary);
-    await chmod(binary, 0o755);
-    if (process.platform === 'linux') await command(['strip', '--strip-debug', binary], source);
-    if (process.platform === 'darwin') {
-      const libraries = (await command(['otool', '-L', binary], source)).split('\n').slice(1).map((line) => line.trim().split(' ')[0]!);
-      const external = libraries.filter((path) => path && !path.startsWith('/usr/lib/') && !path.startsWith('/System/Library/'));
-      if (external.length) throw new Error(`WalGit depends on unbundled macOS libraries: ${external.join(', ')}`);
-    }
-    await mkdir(join(payload, 'native/patches'), { recursive: true });
-    await writeFile(join(payload, 'native/patches/conditional-multipart.patch'), patchBytes);
-    const runtime = machineNativeRuntimeSchema.parse({
-      version: 1, bunVersion: Bun.version, abi: await machineNativeAbi(payload),
-      walgit: { source: 'release', path: 'native/walgit', ...await nativeFileDigest(binary), provenance },
-    });
-    await writeFile(join(payload, 'machine-native.json'), JSON.stringify(runtime));
-    await prepareMachineNativeRuntime(payload);
-    try { await rename(payload, cached); } catch (error) {
-      if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-      const concurrent = await readMachineNativeRuntime(cached);
-      if (!matches(concurrent)) throw new Error('Concurrent native cache provenance mismatch');
-    }
-    return { path: (await prepareMachineNativeRuntime(cached)).walgit, runtime: await readMachineNativeRuntime(cached) };
-  } finally { await rm(scratch, { recursive: true, force: true }); }
-}
 
 /** Official Git LFS for this host, unpacked only from the hash-pinned upstream archive and cached by its digest. */
 export async function pinnedGitLfs(): Promise<{ path: string; runtime: GitLfsRuntime }> {
@@ -173,76 +94,17 @@ export async function pinnedGitLfs(): Promise<{ path: string; runtime: GitLfsRun
   return { path: join(cached, runtime.path), runtime };
 }
 
-/** Resolve the tenant's source declaration into the existing complete-tree artifact. */
-export async function packageMachineNativeRuntime(root: string, output: string): Promise<MachineNativeRuntime> {
-  const declaration = machineNativeDeclarationSchema.parse(JSON.parse(await readFile(join(root, 'packages/account-machine/native.json'), 'utf8')));
-  const selected = declaration.walgit;
-  let walgit: MachineNativeRuntime['walgit'];
-  let abi: NativeAbi | undefined;
-  if (selected.source === 'environment') {
-    abi = selected.abi;
-    walgit = { source: 'environment', path: selected.path, sha256: selected.sha256, size: selected.size };
-  } else {
-    const destination = join(output, 'native/walgit');
-    await mkdir(dirname(destination), { recursive: true });
-    if (selected.source === 'pinned-walgit') {
-      const built = await pinnedWalgit(root);
-      if (built.runtime.walgit.source !== 'release') throw new Error('Pinned build did not produce a release payload');
-      await cp(built.path, destination);
-      await verifyNativeFile(destination, built.runtime.walgit);
-      walgit = built.runtime.walgit;
-      abi = built.runtime.abi;
-      await mkdir(join(output, 'native/patches'), { recursive: true });
-      await cp(join(dirname(built.path), 'patches/conditional-multipart.patch'), join(output, 'native/patches/conditional-multipart.patch'));
-    } else {
-      abi = selected.artifact.abi;
-      validateNativeAbi(abi);
-      const { location } = selected.artifact;
-      if (location.startsWith('https://')) {
-        const response = await fetch(location, { redirect: 'error' });
-        if (!response.ok || !response.body) throw new Error(`Native payload download failed: ${response.status}`);
-        await Bun.write(destination, response);
-      } else {
-        if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(location)) throw new Error('Native artifact locations must be HTTPS URLs or local files');
-        const source = isAbsolute(location) ? location : resolve(root, location);
-        if (!(await lstat(source)).isFile()) throw new Error(`Native payload must be a regular file: ${source}`);
-        await cp(source, destination, { dereference: false });
-      }
-      if (!(await lstat(destination)).isFile()) throw new Error(`Native payload must be a regular file: ${destination}`);
-      await chmod(destination, 0o755);
-      await verifyNativeFile(destination, selected.artifact);
-      walgit = { source: 'release', path: 'native/walgit', sha256: selected.artifact.sha256, size: selected.artifact.size, provenance: null };
-    }
-  }
+/** Package the authenticated tools used by machine effects. */
+export async function packageMachineNativeRuntime(_root: string, output: string): Promise<MachineNativeRuntime> {
   // Every generation carries the same official Git LFS; the running machine puts its directory first on PATH.
   const gitLfs = await pinnedGitLfs();
   await mkdir(join(output, dirname(GIT_LFS_PATH)), { recursive: true });
   await cp(gitLfs.path, join(output, GIT_LFS_PATH));
   await verifyNativeFile(join(output, GIT_LFS_PATH), gitLfs.runtime);
   await writeFile(join(output, GIT_LFS_DECLARATION), JSON.stringify(gitLfs.runtime));
-  const runtime = machineNativeRuntimeSchema.parse({ version: 1, bunVersion: Bun.version, abi: await machineNativeAbi(output, abi), walgit });
+  const runtime = machineNativeRuntimeSchema.parse({ version: 2, bunVersion: Bun.version, abi: await machineNativeAbi(output) });
   await writeFile(join(output, 'machine-native.json'), JSON.stringify(runtime));
-  // Environment paths belong to the destination image/host, not necessarily the build runner.
-  if (walgit.source === 'release') await prepareMachineNativeRuntime(output);
-  else await prepareGitLfs(output);
+  await prepareMachineNativeRuntime(output);
   return runtime;
 }
 
-/** Direct source execution follows the same declaration; never relies on a bootstrap binary path. */
-export async function sourceWalgit(root: string): Promise<string> {
-  const declaration = machineNativeDeclarationSchema.parse(JSON.parse(await readFile(join(root, 'packages/account-machine/native.json'), 'utf8')));
-  if (declaration.walgit.source === 'pinned-walgit') return (await pinnedWalgit(root)).path;
-  const cacheRoot = nativeCacheRoot();
-  await mkdir(cacheRoot, { recursive: true });
-  const staging = await mkdtemp(join(cacheRoot, '.source-'));
-  try {
-    await packageMachineNativeRuntime(root, staging);
-    const { walgit: path } = await prepareMachineNativeRuntime(staging);
-    if (declaration.walgit.source === 'environment') return path;
-    const destination = join(cacheRoot, (await hashArtifactPath(staging)).slice(7));
-    try { await rename(staging, destination); } catch (error) {
-      if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-    }
-    return (await prepareMachineNativeRuntime(destination)).walgit;
-  } finally { await rm(staging, { recursive: true, force: true }); }
-}

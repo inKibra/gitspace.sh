@@ -31,7 +31,7 @@ export type LaunchReleaseInput = z.infer<typeof launchReleaseInputSchema>;
 
 export const machineAppliedInputSchema = z.object({
   sha: z.string().min(1).max(160),
-  target: z.enum(['machine', 'omp']),
+  target: z.literal('machine'),
   generation: z.string().min(1).max(160),
   status: z.enum(['applied', 'failed']),
   error: z.string().max(4_096).optional(),
@@ -63,7 +63,6 @@ interface ReleaseRow extends Record<string, SqlStorageValue> {
 interface DesiredRow extends Record<string, SqlStorageValue> {
   worker_sha: string | null;
   machine_sha: string | null;
-  omp_sha: string | null;
   frontend_sha: string | null;
   updated_at: string;
 }
@@ -71,7 +70,6 @@ interface DesiredRow extends Record<string, SqlStorageValue> {
 interface MachineRow extends Record<string, SqlStorageValue> {
   machine_id: string;
   sha: string | null;
-  omp_sha: string | null;
   generation: string | null;
 }
 
@@ -87,6 +85,7 @@ export class ReleaseNotFoundError extends Error {
 export class TenantReleasesDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // Keep legacy OMP columns as history; active selection and acknowledgements never read or write them.
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS releases (
         sha TEXT PRIMARY KEY,
@@ -117,7 +116,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
     const input = stageReleaseInputSchema.parse(inputValue);
     const previous = this.findRelease(input.sha);
     // A partial rebuild cannot certify legacy sibling artifacts it retained.
-    const retainsArtifacts = previous && (['worker', 'machine', 'omp', 'frontend'] as const)
+    const retainsArtifacts = previous && (['worker', 'machine', 'frontend'] as const)
       .some((target) => input.artifacts[target] === null && previous.artifacts[target] !== null);
     // The running Worker's own sha fingerprints the whole source tree that contains this check.
     const inferenceVersion = input.sha === WORKER_VERSION || (input.inferenceVersion === 1 && (!retainsArtifacts || previous?.inferenceVersion === 1)) ? 1 : undefined;
@@ -131,14 +130,14 @@ export class TenantReleasesDO extends DurableObject<Env> {
       artifacts: {
         worker: input.artifacts.worker ?? previous?.artifacts.worker ?? null,
         machine: input.artifacts.machine ?? previous?.artifacts.machine ?? null,
-        omp: input.artifacts.omp ?? previous?.artifacts.omp ?? null,
+        ...(previous?.artifacts.omp === undefined ? {} : { omp: previous.artifacts.omp }),
         frontend: input.artifacts.frontend ?? previous?.artifacts.frontend ?? null,
       },
       worker: input.worker ?? previous?.worker ?? null,
-      omp: input.omp ?? previous?.omp ?? null,
+      ...(previous?.omp === undefined ? {} : { omp: previous.omp }),
       builtBy: previous?.builtBy ?? builtBy,
       createdAt: previous?.createdAt ?? new Date().toISOString(),
-      status: previous?.status ?? { worker: 'pending', frontend: 'pending', machines: {}, omps: {} },
+      status: previous?.status ?? { worker: 'pending', frontend: 'pending', machines: {} },
       error: previous?.error ?? null,
     });
     this.ctx.storage.sql.exec(
@@ -157,7 +156,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
     this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
     const targets: ReleaseTarget[] = [...new Set(input.targets)];
     for (const target of targets) {
-      if (record.artifacts[target] === null || (target === 'worker' && record.worker === null) || (target === 'omp' && record.omp === null)) {
+      if (record.artifacts[target] === null || (target === 'worker' && record.worker === null)) {
         throw new Error(`Release ${record.sha} has no ${target} artifact`);
       }
     }
@@ -191,18 +190,12 @@ export class TenantReleasesDO extends DurableObject<Env> {
     const record = this.findRelease(input.sha);
     if (!record) return null;
     this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
-    const statuses = input.target === 'omp' ? record.status.omps : record.status.machines;
-    statuses[machineId] = input.status;
+    record.status.machines[machineId] = input.status;
     if (input.status === 'failed') {
-      record.error = input.error ?? `${input.target === 'omp' ? 'OMP' : 'Machine'} ${machineId} failed to apply ${input.sha}`;
-    } else if (input.target === 'omp') {
-      this.ctx.storage.sql.exec(
-        'INSERT INTO machines(machine_id, sha, omp_sha, generation, updated_at) VALUES (?, NULL, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET omp_sha = excluded.omp_sha, generation = excluded.generation, updated_at = excluded.updated_at',
-        machineId, input.sha, input.generation, new Date().toISOString(),
-      );
+      record.error = input.error ?? `Machine ${machineId} failed to apply ${input.sha}`;
     } else {
       this.ctx.storage.sql.exec(
-        'INSERT INTO machines(machine_id, sha, omp_sha, generation, updated_at) VALUES (?, ?, NULL, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET sha = excluded.sha, generation = excluded.generation, updated_at = excluded.updated_at',
+        'INSERT INTO machines(machine_id, sha, generation, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET sha = excluded.sha, generation = excluded.generation, updated_at = excluded.updated_at',
         machineId, input.sha, input.generation, new Date().toISOString(),
       );
     }
@@ -215,28 +208,24 @@ export class TenantReleasesDO extends DurableObject<Env> {
     const input = machineChannelAppliedInputSchema.parse(inputValue);
     await this.assertChannelCompatible();
     this.ctx.storage.sql.exec(
-      input.target === 'omp'
-        ? 'INSERT INTO machines(machine_id, sha, omp_sha, generation, updated_at) VALUES (?, NULL, NULL, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET omp_sha = NULL, generation = excluded.generation, updated_at = excluded.updated_at'
-        : 'INSERT INTO machines(machine_id, sha, omp_sha, generation, updated_at) VALUES (?, NULL, NULL, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET sha = NULL, generation = excluded.generation, updated_at = excluded.updated_at',
+      'INSERT INTO machines(machine_id, sha, generation, updated_at) VALUES (?, NULL, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET sha = NULL, generation = excluded.generation, updated_at = excluded.updated_at',
       machineId, input.generation, new Date().toISOString(),
     );
   }
 
-  /** Admission trusts acknowledged binaries, never merely the desired selection. */
+  /** Executor admission trusts the acknowledged machine binary, not an obsolete OMP selection. */
   machineInferenceCompatible(machineId: string): boolean {
-    const current = this.ctx.storage.sql.exec<Pick<MachineRow, 'sha' | 'omp_sha'>>(
-      'SELECT sha, omp_sha FROM machines WHERE machine_id=?', machineId,
+    const current = this.ctx.storage.sql.exec<Pick<MachineRow, 'sha'>>(
+      'SELECT sha FROM machines WHERE machine_id=?', machineId,
     ).toArray()[0];
-    if (!current?.sha || !current.omp_sha) return false;
+    if (!current?.sha) return false;
     const machine = this.findRelease(current.sha);
-    if (machine?.inferenceVersion !== 1 || machine.artifacts.machine === null) return false;
-    const omp = current.omp_sha === current.sha ? machine : this.findRelease(current.omp_sha);
-    return omp?.inferenceVersion === 1 && omp.artifacts.omp !== null && omp.omp !== null;
+    return machine?.inferenceVersion === 1 && machine.artifacts.machine !== null;
   }
 
   async revert(): Promise<TenantDesired> {
     await this.assertChannelCompatible();
-    const desired: TenantDesired = { worker: null, machine: null, omp: null, frontend: null, updatedAt: new Date().toISOString() };
+    const desired: TenantDesired = { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() };
     this.saveDesired(desired);
     return desired;
   }
@@ -278,9 +267,9 @@ export class TenantReleasesDO extends DurableObject<Env> {
       }
     }
     const machines: DeploymentStatus['current']['machines'] = {};
-    for (const row of this.ctx.storage.sql.exec<MachineRow>('SELECT machine_id, sha, omp_sha, generation FROM machines ORDER BY machine_id').toArray()) {
+    for (const row of this.ctx.storage.sql.exec<MachineRow>('SELECT machine_id, sha, generation FROM machines ORDER BY machine_id').toArray()) {
       if (!currentIds.has(row.machine_id)) continue;
-      machines[row.machine_id] = { sha: row.sha, ompSha: row.omp_sha, generation: row.generation };
+      machines[row.machine_id] = { sha: row.sha, generation: row.generation };
     }
     const releases = this.ctx.storage.sql.exec<ReleaseRow>('SELECT record_json FROM releases ORDER BY created_at DESC, sha').toArray()
       .map((row) => releaseRecordSchema.parse(JSON.parse(row.record_json)));
@@ -297,15 +286,15 @@ export class TenantReleasesDO extends DurableObject<Env> {
   }
 
   private desired(): TenantDesired {
-    const row = this.ctx.storage.sql.exec<DesiredRow>('SELECT worker_sha, machine_sha, omp_sha, frontend_sha, updated_at FROM release_selection WHERE id = 1').toArray()[0];
-    if (!row) return { worker: null, machine: null, omp: null, frontend: null, updatedAt: new Date(0).toISOString() };
-    return tenantDesiredSchema.parse({ worker: row.worker_sha, machine: row.machine_sha, omp: row.omp_sha, frontend: row.frontend_sha, updatedAt: row.updated_at });
+    const row = this.ctx.storage.sql.exec<DesiredRow>('SELECT worker_sha, machine_sha, frontend_sha, updated_at FROM release_selection WHERE id = 1').toArray()[0];
+    if (!row) return { worker: null, machine: null, frontend: null, updatedAt: new Date(0).toISOString() };
+    return tenantDesiredSchema.parse({ worker: row.worker_sha, machine: row.machine_sha, frontend: row.frontend_sha, updatedAt: row.updated_at });
   }
 
   private saveDesired(desired: TenantDesired): void {
     this.ctx.storage.sql.exec(
-      'INSERT INTO release_selection(id, worker_sha, machine_sha, omp_sha, frontend_sha, updated_at) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET worker_sha = excluded.worker_sha, machine_sha = excluded.machine_sha, omp_sha = excluded.omp_sha, frontend_sha = excluded.frontend_sha, updated_at = excluded.updated_at',
-      desired.worker, desired.machine, desired.omp, desired.frontend, desired.updatedAt,
+      'INSERT INTO release_selection(id, worker_sha, machine_sha, frontend_sha, updated_at) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET worker_sha = excluded.worker_sha, machine_sha = excluded.machine_sha, frontend_sha = excluded.frontend_sha, updated_at = excluded.updated_at',
+      desired.worker, desired.machine, desired.frontend, desired.updatedAt,
     );
   }
 

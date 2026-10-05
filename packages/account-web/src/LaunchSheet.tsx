@@ -30,7 +30,7 @@ const DOT_COLOR: Record<LaunchStepState, { color: 'green' | 'blue' | 'dim' | 're
  * logged; the per-target sub-lines carry the exact position.
  */
 export function launchSteps(track: LaunchTrack): LaunchStep[] {
-  const swaps = track.targets.includes('machine') || track.targets.includes('omp');
+  const swaps = track.targets.includes('machine');
   const count = swaps ? STEP_LABELS.length : 5;
   const progress = track.log.filter((entry) => entry.phase !== 'failed');
   const latest = latestLaunchProgress(track);
@@ -89,7 +89,7 @@ export function LaunchSheet({ launch, open, onOpenChange, onRetry }: LaunchSheet
   const shape = useShape();
   if (!open) return null;
   const steps = launchSteps(launch);
-  const settled = launch.status === 'succeeded' && (!(launch.targets.includes('machine') || launch.targets.includes('omp')) || launch.log.some((entry) => entry.phase === 'reload'));
+  const settled = launch.status === 'succeeded' && (!launch.targets.includes('machine') || launch.log.some((entry) => entry.phase === 'reload'));
   const title = launch.status === 'failed' ? 'Launch failed' : settled ? 'GitSpace launched' : 'Launching GitSpace';
   return <Elevated offset={4} role="dialog" aria-label="Launch progress" className={`${shape.container} fixed bottom-4 left-4 z-50 flex w-[calc(100%-2rem)] max-w-sm flex-col gap-3 p-4`}>
     <header className="flex items-start gap-2">
@@ -122,6 +122,28 @@ export function LaunchSheet({ launch, open, onOpenChange, onRetry }: LaunchSheet
   </Elevated>;
 }
 
+export interface RevertProgress {
+  status: 'running' | 'failed';
+  error: string | null;
+}
+
+export function RevertSheet({ progress, open, onOpenChange, onRetry }: { progress: RevertProgress; open: boolean; onOpenChange(open: boolean): void; onRetry(): void | Promise<void> }) {
+  const shape = useShape();
+  if (!open) return null;
+  const failed = progress.status === 'failed';
+  return <Elevated offset={4} role="dialog" aria-label="Back to stable progress" className={`${shape.container} fixed bottom-4 left-4 z-50 flex w-[calc(100%-2rem)] max-w-sm flex-col gap-3 p-4`}>
+    <header className="flex items-start gap-2">
+      <span className="min-w-0 flex-1 text-body font-semibold text-foreground">{failed ? 'Back to stable failed' : 'Going back to stable'}</span>
+      <Button variant="ghost" size="icon-compact" aria-label="Close revert progress" onClick={() => onOpenChange(false)}><XClose width={14} height={14} strokeWidth={1.5} /></Button>
+    </header>
+    {failed ? <p role="alert" className="text-caption text-destructive">{progress.error}</p> : <span className="flex items-center gap-2 text-caption text-muted-foreground"><StatusDot color="blue" pulse />Waiting for the stable frontend to activate</span>}
+    {failed ? <footer className="flex justify-end gap-2">
+      <Button variant="ghost" size="compact" onClick={() => onOpenChange(false)}>Close</Button>
+      <Button variant="primary" size="compact" onClick={() => void onRetry()}>Retry</Button>
+    </footer> : null}
+  </Elevated>;
+}
+
 export const LAUNCHED_STORAGE_KEY = 'gitspace.launched';
 /** How long after the reload the `Now running` strip is still worth showing. */
 export const LAUNCHED_BANNER_MAX_AGE_MS = 60_000;
@@ -150,7 +172,7 @@ export function LaunchedBanner({ mark, onRevert, onDismiss }: { mark: LaunchedMa
     <span className="text-muted-foreground"><Rocket02 width={14} height={14} strokeWidth={1.5} /></span>
     <span className="text-foreground">Now running <strong>{mark.label}</strong></span>
     <span className="text-muted-foreground">·</span>
-    <Button variant="ghost" size="compact" onClick={() => { onDismiss(); void onRevert(); }}>Back to stable</Button>
+    <Button variant="ghost" size="compact" onClick={() => { void onRevert(); }}>Back to stable</Button>
     <Button variant="ghost" size="icon-compact" aria-label="Dismiss" onClick={onDismiss}><XClose width={14} height={14} strokeWidth={1.5} /></Button>
   </Elevated>;
 }

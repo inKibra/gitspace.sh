@@ -6,6 +6,16 @@ export type ToolAnnotation =
   | { readOnlyHint: true; openWorldHint: boolean }
   | { readOnlyHint: false; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
 export const reviewedAnnotations: Record<string, ToolAnnotation> = {
+  "runtime.snapshot": { readOnlyHint: true, openWorldHint: false },
+  "runtime.watch": { readOnlyHint: true, openWorldHint: false },
+  "runtime.submit": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  "runtime.cancel": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  "runtime.session": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  "runtime.placement": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  "runtime.qa": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  "runtime.attachment.request": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  "runtime.attachment.primary.request": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  "runtime.attachment.detach": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   "transcriptPage": {
     "readOnlyHint": true,
     "openWorldHint": false
@@ -154,11 +164,11 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
-  "settings.omp.get": {
+  "settings.runtime.get": {
     "readOnlyHint": true,
     "openWorldHint": false
   },
-  "settings.omp.set": {
+  "settings.runtime.set": {
     "readOnlyHint": false,
     "destructiveHint": true,
     "idempotentHint": false,
@@ -445,32 +455,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "destructiveHint": true,
     "idempotentHint": false,
     "openWorldHint": true
-  },
-  "browserRelay.status": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "browserRelay.setup": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "browserRelay.start": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "browserRelay.stop": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "browserRelay.test": {
-    "readOnlyHint": true,
-    "openWorldHint": false
   },
   "crons.list": {
     "readOnlyHint": true,

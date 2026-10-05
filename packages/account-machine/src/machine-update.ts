@@ -5,7 +5,7 @@ import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { hashArtifactPath, DeploymentSqliteConnection, prepareBootstrapMigration } from '@gitspace/deployment';
 import { prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
-import { executableManifestPath, sha256 } from '@gitspace/account-omp/manifest';
+import { executableManifestPath, sha256 } from '@gitspace/deployment/manifest';
 
 export interface MachineSelection {
   version: 1;
@@ -77,7 +77,7 @@ export async function readJson<T>(path: string): Promise<T | null> {
 export async function verifyMachine(selection: MachineSelection): Promise<void> {
   if ((await hashArtifactPath(selection.path)) !== selection.hash)
     throw new Error('Complete machine artifact integrity mismatch');
-  for (const file of ['host-runtime.js', 'machine-update.js', 'machine-bootstrap.js', 'machine.js']) {
+  for (const file of ['host-runtime.js', 'machine-update.js', 'machine-bootstrap.js', 'machine.js', 'machine-worker.js']) {
     if (!existsSync(join(selection.path, file))) throw new Error(`Complete machine artifact missing ${file}`);
   }
 }
@@ -212,9 +212,6 @@ export async function requestMachineUpdate(candidate: MachineSelection, hostUrl:
       environment.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH ??= sha256(
         await readFile(executableManifestPath(join(environment.GITSPACE_BUNDLE_ROOT!, 'machine'))),
       );
-      environment.GITSPACE_OMP_MANIFEST_HASH ??= sha256(
-        await readFile(executableManifestPath(join(environment.GITSPACE_BUNDLE_ROOT!, 'omp'))),
-      );
     } else if (hostPid !== process.pid) {
       // Child RPC bindings are ephemeral. Host startup bindings are passed separately, never inferred from them.
       environment.GITSPACE_RPC_PORT = process.env.GITSPACE_HOST_RPC_PORT;
@@ -240,7 +237,6 @@ export async function requestMachineUpdate(candidate: MachineSelection, hostUrl:
         environmentRoot: root,
         candidatePath: candidate.path,
         initialMachineManifestHash: environment.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH!,
-        initialOmpManifestHash: environment.GITSPACE_OMP_MANIFEST_HASH!,
       });
     const transaction: UpdateTransaction = {
       version: 1,
@@ -274,9 +270,9 @@ export async function requestMachineUpdate(candidate: MachineSelection, hostUrl:
 }
 
 async function waitDead(pid: number, timeout = 150_000): Promise<void> {
-  const deadline = Date.now() + timeout;
+  const deadline = performance.now() + timeout;
   while (alive(pid)) {
-    if (Date.now() > deadline) throw new Error(`Process ${pid} did not drain; replacement remains fenced`);
+    if (performance.now() > deadline) throw new Error(`Process ${pid} did not drain; replacement remains fenced`);
     await Bun.sleep(100);
   }
 }
@@ -408,7 +404,7 @@ async function startHost(
   );
   await atomicJson(join(root, 'machine-update.json'), transaction);
   const pid = transaction.successorPid;
-  const deadline = Date.now() + 150_000;
+  const deadline = performance.now() + 150_000;
   while (alive(pid)) {
     const ready = legacy
       ? await readJson<HostMachine>(join(root, 'host-machine.json')).then((machine) =>
@@ -419,7 +415,7 @@ async function startHost(
       const response = await fetch(`${ready.url}/health`, { signal: AbortSignal.timeout(5_000) }).catch(() => null);
       if (response?.ok) return pid;
     }
-    if (Date.now() > deadline) break;
+    if (performance.now() > deadline) break;
     await Bun.sleep(100);
   }
   throw new Error('Complete successor host failed readiness');
@@ -429,19 +425,19 @@ export async function runMachineUpdate(): Promise<void> {
   const root = process.env.GITSPACE_ENVIRONMENT_ROOT!;
   const path = join(root, 'machine-update.json');
   if (process.env.GITSPACE_UPDATE_HANDOFF === '1') {
-    const deadline = Date.now() + 30_000;
+    const deadline = performance.now() + 30_000;
     while ((await readJson<UpdateTransaction>(path))?.pid !== process.pid) {
-      if (Date.now() > deadline) throw new Error('Updater handoff was not durably acknowledged');
+      if (performance.now() > deadline) throw new Error('Updater handoff was not durably acknowledged');
       await Bun.sleep(50);
     }
   }
   let release: (() => void) | undefined;
-  const lockDeadline = Date.now() + 30_000;
+  const lockDeadline = performance.now() + 30_000;
   while (!release) {
     try {
       release = acquireMachineLock(root, 'update');
     } catch (error) {
-      if (process.env.GITSPACE_UPDATE_HANDOFF !== '1' || Date.now() > lockDeadline) throw error;
+      if (process.env.GITSPACE_UPDATE_HANDOFF !== '1' || performance.now() > lockDeadline) throw error;
       await Bun.sleep(50);
     }
   }
@@ -459,7 +455,6 @@ export async function runMachineUpdate(): Promise<void> {
           environmentRoot: root,
           candidatePath: transaction.candidate.path,
           initialMachineManifestHash: process.env.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH!,
-          initialOmpManifestHash: process.env.GITSPACE_OMP_MANIFEST_HASH!,
         })
       : null;
     try {

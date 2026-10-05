@@ -8,12 +8,13 @@
   },
   "scripts": {
     "types": "wrangler types worker-configuration.d.ts --include-runtime false --config wrangler.jsonc",
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p test/tsconfig.json",
     "deploy:dry": "wrangler deploy --dry-run --config wrangler.jsonc",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@gitspace/protocol": "workspace:*",
-    "better-result": "3.0.1"
+    "better-result": "3.0.1",
+    "zod": "^4.4.3"
   }
 }

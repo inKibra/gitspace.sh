@@ -19,7 +19,7 @@ interface OutboxRow extends SourceRow { attempts: number }
 /** One coalescing outbox per authority. Full source snapshots make supersession safe. */
 export class DirectoryOutbox {
   private running: Promise<void> | null = null;
-  constructor(private readonly ctx: DurableObjectState, private readonly env: Env) {
+  constructor(private readonly ctx: DurableObjectState, private readonly env: Env, private readonly alarm?: { set(timestamp: number): Promise<void>; clear(): Promise<void> }) {
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS directory_outbox(
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), cursor INTEGER NOT NULL, value_json TEXT, attempts INTEGER NOT NULL DEFAULT 0
     )`);
@@ -38,7 +38,7 @@ export class DirectoryOutbox {
   /** No await between the source commit and this alarm write: storage coalesces both atomically. */
   kick(): void {
     if (!this.pending()) return;
-    const armed = this.ctx.storage.setAlarm(Date.now() + 1_000);
+    const armed = this.alarm ? this.alarm.set(Date.now() + 1_000) : this.ctx.storage.setAlarm(Date.now() + 1_000);
     this.ctx.waitUntil(armed.then(() => this.flush()));
   }
   async flush(): Promise<void> {
@@ -58,13 +58,16 @@ export class DirectoryOutbox {
         .publishDirectory(JSON.parse(pending.value_json) as DirectoryPublication);
       // A delayed acknowledgement may only clear the publication it acknowledged.
       this.ctx.storage.sql.exec('UPDATE directory_outbox SET value_json=NULL,attempts=0 WHERE singleton=1 AND cursor=?', pending.cursor);
-      if (this.pending()) await this.ctx.storage.setAlarm(Date.now() + 1_000);
-      else await this.ctx.storage.deleteAlarm();
+      if (this.pending()) await (this.alarm ? this.alarm.set(Date.now() + 1_000) : this.ctx.storage.setAlarm(Date.now() + 1_000));
+      else await (this.alarm ? this.alarm.clear() : this.ctx.storage.deleteAlarm());
       return true;
     } catch {
       this.ctx.storage.sql.exec('UPDATE directory_outbox SET attempts=MIN(attempts+1,6) WHERE singleton=1 AND cursor=?', pending.cursor);
       const current = this.pending();
-      if (current) await this.ctx.storage.setAlarm(Date.now() + Math.min(60_000, 1_000 * 2 ** current.attempts));
+      if (current) {
+        const timestamp = Date.now() + Math.min(60_000, 1_000 * 2 ** current.attempts);
+        await (this.alarm ? this.alarm.set(timestamp) : this.ctx.storage.setAlarm(timestamp));
+      }
       return false;
     }
   }

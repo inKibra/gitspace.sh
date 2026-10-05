@@ -1,11 +1,11 @@
 import { z } from 'zod';
 
 /**
- * Releases: GitSpace built from a workspace (or from our channel) as four
- * independently selectable bundles - tenant worker, machine, OMP runtime, and
- * account frontend - stored in the tenant's data bucket and described by one
+ * Releases: GitSpace built from a workspace (or from our channel) as three
+ * independently selectable bundles - tenant worker, machine, and account
+ * frontend - stored in the tenant's data bucket and described by one
  * record. "Launch into" points the tenant's `desired` at a release; the
- * platform swaps the worker, machines converge on machine/OMP bundles at idle,
+ * platform swaps the worker, machines converge on complete host bundles,
  * and the frontend is served by hash. The platform never interprets a bundle;
  * the tenant never uploads its own script.
  */
@@ -16,7 +16,7 @@ const hashSchema = z.templateLiteral(['sha256:', z.string().regex(/^[a-f0-9]{64}
 export const tenantIdSchema = z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
   .refine((name) => name !== 'api' && name !== 'platform', 'Tenant name is reserved for provider routing');
 
-export const releaseTargetSchema = z.enum(['worker', 'machine', 'omp', 'frontend']);
+export const releaseTargetSchema = z.enum(['worker', 'machine', 'frontend']);
 export type ReleaseTarget = z.infer<typeof releaseTargetSchema>;
 
 export const releaseArtifactSchema = z.object({
@@ -36,7 +36,7 @@ export const workerReleaseMetadataSchema = z.object({
   durableObjects: z.array(z.object({ name: idSchema, className: idSchema })).max(64),
   resources: z.array(z.object({
     name: idSchema,
-    source: z.enum(['object-storage', 'object-storage-name', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'literal']),
+    source: z.enum(['object-storage', 'object-storage-name', 'artifacts', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'literal']),
     value: z.string().max(4096).optional(),
   })).max(64),
   /** Ordered migration tags; the platform applies only the ones after the tenant's current tag. */
@@ -151,29 +151,32 @@ export const releaseRecordSchema = z.object({
   artifacts: z.object({
     worker: releaseArtifactSchema.nullable(),
     machine: releaseArtifactSchema.nullable(),
-    omp: releaseArtifactSchema.nullable(),
+    /** Read-only history from releases built before the cloud runtime cutover. */
+    omp: releaseArtifactSchema.nullable().optional(),
     frontend: releaseArtifactSchema.nullable(),
   }),
   worker: workerReleaseMetadataSchema.nullable(),
-  omp: ompReleaseMetadataSchema.nullable(),
+  /** Read-only history; new releases cannot stage an OMP runtime. */
+  omp: ompReleaseMetadataSchema.nullable().optional(),
   status: z.object({
     worker: releaseStatusSchema,
     frontend: releaseStatusSchema,
     machines: z.record(idSchema, releaseStatusSchema),
-    omps: z.record(idSchema, releaseStatusSchema),
+    omps: z.record(idSchema, releaseStatusSchema).optional(),
   }),
   error: z.string().max(4_096).nullable(),
 });
 export type ReleaseRecord = z.infer<typeof releaseRecordSchema>;
 
-export const stageReleaseInputSchema = releaseRecordSchema.pick({ sha: true, label: true, workspaceId: true, artifacts: true, worker: true, omp: true, inferenceVersion: true });
+export const stageReleaseInputSchema = releaseRecordSchema.pick({ sha: true, label: true, workspaceId: true, worker: true, inferenceVersion: true }).extend({
+  artifacts: releaseRecordSchema.shape.artifacts.omit({ omp: true }).strict(),
+}).strict();
 export type StageReleaseInput = z.infer<typeof stageReleaseInputSchema>;
 
 /** Independently selected release for each target; null follows that target's channel build. */
 export const tenantDesiredSchema = z.object({
   worker: idSchema.nullable(),
   machine: idSchema.nullable(),
-  omp: idSchema.nullable(),
   frontend: idSchema.nullable(),
   updatedAt: z.string().datetime(),
 });
@@ -185,7 +188,7 @@ export const deploymentStatusSchema = z.object({
     /** Worker version string as reported by the tenant's own `/healthz`. */
     worker: z.object({ sha: z.string().nullable(), version: z.string().nullable() }),
     /** Last acknowledgements for machines still in the fleet, including offline members; release results retain removed-machine history. */
-    machines: z.record(idSchema, z.object({ sha: z.string().nullable(), ompSha: z.string().nullable(), generation: z.string().nullable() })),
+    machines: z.record(idSchema, z.object({ sha: z.string().nullable(), generation: z.string().nullable() })),
   }),
   releases: z.array(releaseRecordSchema),
 });

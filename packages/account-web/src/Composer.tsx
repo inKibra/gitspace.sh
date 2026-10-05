@@ -71,7 +71,7 @@ function ProviderNotice({ provider, profileId }: { provider: ProviderAuthView; p
 }
 
 export interface ComposerProps {
-  workspace: AgentScopeView;
+  workspace: Pick<AgentScopeView, 'projectId' | 'kind' | 'phase'>;
   controls?: SessionControlsProps;
   providers?: readonly ProviderAuthView[];
   skills?: readonly SkillView[];
@@ -80,9 +80,11 @@ export interface ComposerProps {
   pending: boolean;
   recovering?: boolean;
   error?: string;
+  controlsError?: string;
+  onRetryControls?: () => void;
 }
 
-export function Composer({ workspace, controls, providers, skills = [], running, onSend, pending, recovering = false, error }: ComposerProps) {
+export function Composer({ workspace, controls, providers, skills = [], running, onSend, pending, recovering = false, error, controlsError, onRetryControls }: ComposerProps) {
   const icons = useIcons();
   const inference = useInference();
   const assignment = inference?.state?.assignments.find((entry) => entry.projectId === workspace.projectId);
@@ -96,7 +98,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const [submitError, setSubmitError] = useState<string | null>(null);
   const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
     const text = draft.trim();
-    if (!text || !onSend || pending || recovering || inferenceUnavailable || invalidModel) return false;
+    if (!text || !onSend || pending || recovering || inferenceUnavailable) return false;
     setSubmitError(null);
     try {
       const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
@@ -119,8 +121,8 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     void operation.catch((failure) => setSubmitError(rpcErrorMessage(failure, 'Session control operation')));
   };
 
-  // OMP owns the queue. Fluid owns the row interactions and reports their
-  // intent; each edit/remove is reconciled against the canonical queue.
+  // The cloud session owns the queue. The input reports human intent;
+  // each edit/remove is reconciled against the canonical queue.
   const queue = useMemo<QueuedMessage[]>(() => controls
     ? [
       ...controls.value.queue.steering.map((text, index) => ({ id: `steering:${index}`, text, files: [], kind: 'steering' as const })),
@@ -178,10 +180,11 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const selectedProvider = controls?.value.provider ? providers?.find((provider) => provider.id === controls.value.provider) : undefined;
 
   return <div className="pointer-events-none mx-auto flex w-full max-w-xl flex-col gap-2 [&>*]:pointer-events-auto">
-    {inference && !profile ? <div className="flex flex-wrap items-center justify-between gap-2 text-caption">
+    {controlsError ? <div role="alert" className="flex max-h-40 min-w-0 flex-col gap-2 overflow-y-auto rounded-lg bg-surface-3 p-3 text-caption shadow-surface-1"><p className="whitespace-pre-wrap break-words text-destructive">{controlsError}</p>{onRetryControls ? <Button variant="ghost" size="compact" className="self-start" disabled={pending} onClick={onRetryControls}>Retry provider catalog and controls</Button> : null}</div> : null}
+    {!controlsError && inference && !profile ? <div className="flex flex-wrap items-center justify-between gap-2 text-caption">
       <span role="alert" className="text-destructive">{inference.loading ? 'Loading inference profile…' : inference.error ?? 'The project’s inference assignment is unavailable. Refresh before sending.'}<Button variant="ghost" size="compact" disabled={inference.loading} onClick={() => void inference.refresh()}>Refresh profiles</Button></span>
     </div> : null}
-    {invalidModel ? <p role="alert" className="text-caption text-destructive">The selected model {selectedModelKey} is unavailable in this session’s profile. Connect its provider in Inference or choose an available model before sending.</p> : null}
+    {invalidModel ? <p role="status" className="text-caption text-muted-foreground">The selected model {selectedModelKey} is no longer available. The next run will use an authorized fallback and record the model change in the conversation.</p> : null}
     {controls ? <PlanSteps controls={controls} /> : null}
     {controls?.onReadHistory && showHistory ? <SessionTreeExplorer key={controls.value.sessionId} historyAnchorId={controls.value.historyAnchorId} onReadHistory={controls.onReadHistory} onNavigate={controls.onNavigateTree} onClose={() => setShowHistory(false)} /> : null}
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}
@@ -192,7 +195,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       onValueChange={setMessage}
       onSend={(text, files, meta) => { if (meta?.queuedId) return; void submit(text, files); }}
       placeholder={recovering ? 'Recovering agent…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
-      disabled={!onSend || pending || recovering || inferenceUnavailable || invalidModel}
+      disabled={!onSend || pending || recovering || inferenceUnavailable}
       files={attachments}
       onFilesChange={setAttachments}
       accept="image/png,image/jpeg,image/webp,text/*,application/pdf"

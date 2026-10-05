@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, mkdirSync } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { parseTitleSlotLine } from '@oh-my-pi/pi-coding-agent/session/session-title-slot';
+import { LegacyTitleSlotSchema } from './legacy-transcript.js';
 import {
   TranscriptProjector,
   previewTranscriptItem,
@@ -22,7 +22,7 @@ import {
   type TranscriptContentRequest,
   type TurnBlock,
 } from '@gitspace/blocks';
-import type { OmpTranscriptEvent } from './omp-runtime.js';
+import type { TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
 import type { SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent'
 import { pageSessionHistory, sourceHistoryMetadata, type HistorySourceEntry, type SessionHistorySource } from '@gitspace/protocol-agent'
 
@@ -176,7 +176,7 @@ export class TranscriptIndex implements TranscriptProjectionStore {
     this.bump();
   }
 
-  seed(events: Iterable<OmpTranscriptEvent>): void {
+  seed(events: Iterable<TranscriptEvent>): void {
     this.db.transaction(() => {
       this.reset();
       for (const event of events) this.append(event.kind, event.payload, event.createdAt, false);
@@ -304,18 +304,18 @@ export class TranscriptIndex implements TranscriptProjectionStore {
     })();
   }
 
-  private *journal(visible = true, after = 0): Generator<OmpTranscriptEvent> {
+  private *journal(visible = true, after = 0): Generator<TranscriptEvent> {
     const query = this.db.query<{ ordinal: number; kind: string; payload: string; createdAt: string }, [number]>(
       `SELECT ordinal, kind, payload, createdAt FROM journal WHERE ordinal > ? ${visible ? 'AND visible = 1' : ''} ORDER BY ordinal`);
     for (const row of query.iterate(after)) yield { ...row, payload: JSON.parse(row.payload) as Record<string, unknown> };
   }
 
   /** Explicit lossless snapshot API; only this consumer allocates the complete event array. */
-  snapshot(): OmpTranscriptEvent[] {
+  snapshot(): TranscriptEvent[] {
     return Array.from(this.journal(), (event, index) => ({ ...event, ordinal: index + 1 }));
   }
 
-  *eventsAfter(ordinal: number): Generator<OmpTranscriptEvent> { yield* this.journal(true, ordinal); }
+  *eventsAfter(ordinal: number): Generator<TranscriptEvent> { yield* this.journal(true, ordinal); }
 
   lastMessage(): unknown {
     const event = this.db.query<{ payload: string }, []>("SELECT payload FROM journal WHERE kind = 'message_end' ORDER BY ordinal DESC LIMIT 1").get();
@@ -450,7 +450,7 @@ export class TranscriptIndex implements TranscriptProjectionStore {
         ) SELECT event FROM branch ORDER BY sequence`);
         for (const row of branch.iterate(leaf)) {
           if (!row.event) continue;
-          const event = JSON.parse(row.event) as OmpTranscriptEvent;
+          const event = JSON.parse(row.event) as TranscriptEvent;
           this.append(event.kind, event.payload, event.createdAt, false);
         }
       }
@@ -500,7 +500,7 @@ export class TranscriptIndex implements TranscriptProjectionStore {
     let leaf = this.meta('fileLeaf') || null;
     let header = this.meta('fileHeader') || null;
     let rebuild = !sourceOnly && (reproject || this.meta('sourceProjectionDirty') === '1');
-    const projectEntry = (id: string, parentId: string | null, event: OmpTranscriptEvent | null) => {
+    const projectEntry = (id: string, parentId: string | null, event: TranscriptEvent | null) => {
       if (parentId !== (projectedLeaf || null)) rebuild = true;
       if (!rebuild && event) this.append(event.kind, event.payload, event.createdAt, event.kind === 'message_end' || event.kind === 'tool_execution_end');
       projectedLeaf = id;
@@ -509,14 +509,14 @@ export class TranscriptIndex implements TranscriptProjectionStore {
       const unprojected = this.db.query<{ id: string; parentId: string | null; event: string | null }, [number]>(
         'SELECT id, parentId, event FROM source_entries WHERE sequence > ? ORDER BY sequence');
       for (const entry of unprojected.iterate(projectedSequence)) {
-        projectEntry(entry.id, entry.parentId, entry.event ? JSON.parse(entry.event) as OmpTranscriptEvent : null);
+        projectEntry(entry.id, entry.parentId, entry.event ? JSON.parse(entry.event) as TranscriptEvent : null);
       }
     }
     this.setMeta('fileIdentity', '');
     if (offset < info.size) {
       for await (const { line, bytes } of journalLines(path, offset, info.size - 1)) {
           offset += bytes;
-          if (!line.trim() || (!header && parseTitleSlotLine(line))) continue;
+          if (!line.trim() || (!header && LegacyTitleSlotSchema.safeParse(JSON.parse(line)).success)) continue;
           const entry = JSON.parse(line) as Record<string, unknown>;
           if (!header) {
             if (entry.type !== 'session' || typeof entry.id !== 'string') throw new Error('Invalid OMP session header');
@@ -530,7 +530,7 @@ export class TranscriptIndex implements TranscriptProjectionStore {
             throw new Error('OMP transcript branch references a missing parent');
           }
           const createdAt = typeof entry.timestamp === 'string' ? entry.timestamp : new Date(0).toISOString();
-          const event: OmpTranscriptEvent | null = entry.type === 'message'
+          const event: TranscriptEvent | null = entry.type === 'message'
             ? { ordinal: sequence, kind: 'message_end', payload: { message: entry.message }, createdAt }
             : entry.type === 'custom' && typeof entry.customType === 'string'
               ? { ordinal: sequence, kind: entry.customType, payload: entry.data && typeof entry.data === 'object' ? entry.data as Record<string, unknown> : { value: entry.data }, createdAt }

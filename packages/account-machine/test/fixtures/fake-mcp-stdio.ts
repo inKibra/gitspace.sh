@@ -1,3 +1,5 @@
+export {};
+
 const decoder = new TextDecoder();
 let pending = '';
 

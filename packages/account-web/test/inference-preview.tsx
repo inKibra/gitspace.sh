@@ -2,11 +2,13 @@
 import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { InferenceProfile, InferenceState } from '@gitspace/protocol/inference';
-import { Button, SidebarInset, SidebarProvider } from '@gitspace/ui';
+import { Button, IconProvider, ShapeProvider, SidebarInset, SidebarProvider, SizeProvider, TooltipProvider, untitledIcons } from '@gitspace/ui';
+import { MotionConfig } from 'framer-motion';
+import '@gitspace/ui/fluid-theme.css';
 import { InferencePage } from '../src/InferencePage.js';
 import { InferenceContext, type InferenceController } from '../src/InferenceContext.js';
 import { AppSidebar } from '../src/AppSidebar.js';
-import type { OmpSettingView } from '../src/SettingsPage.js';
+import type { RuntimeSettingView } from '../src/SettingsPage.js';
 import type { ProviderLoginFlow, ProvidersSectionProps } from '../src/ProvidersSection.js';
 import { AccountWorkPages } from '../src/AccountWorkPages.js';
 import { Composer } from '../src/Composer.js';
@@ -30,7 +32,7 @@ const previewModels = [
   ...['gpt-6-astra', 'gpt-5.6-luna', 'gpt-5.6-codex'].map((id) => ({ provider: 'openai-codex', id, name: id.toUpperCase(), contextWindow: 400000 })),
 ];
 const initial: InferenceState = { version: 1, revision: 2, profiles, assignments: [{ projectId: 'project-a', profileId: 'default', revision: 0 }, { projectId: 'project-b', profileId: 'client-a', revision: 1 }] };
-const schema: OmpSettingView[] = [
+const schema: RuntimeSettingView[] = [
   { path: 'modelRoles', label: 'Model roles', tab: 'models', description: null, kind: 'record', valueJson: '{}', defaultJson: '{}', options: [], credential: false },
   { path: 'cycleOrder', label: 'Quick cycle', tab: 'models', description: null, kind: 'array', valueJson: '["default"]', defaultJson: '["default"]', options: [], credential: false },
   { path: 'modelTags', label: 'Model tags', tab: 'models', description: null, kind: 'record', valueJson: '{}', defaultJson: '{}', options: [], credential: false },
@@ -50,7 +52,7 @@ function Preview() {
   const [model, setModel] = useState({ provider: 'openai-codex', id: 'gpt-6-astra' });
   const idle = async (): Promise<void> => {};
   const sessionControls: SessionControlsProps = {
-    value: { sessionId: 'preview-session', role: null, roleLabel: null, roles: [], provider: model.provider, models: previewModels, model: model.id, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null, activity: { active: false, reasons: [] }, renderState: 'waiting' },
+    value: { sessionId: 'preview-session', role: null, roleLabel: null, roles: [], provider: model.provider, models: previewModels, model: model.id, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
     onSetModel: async (provider, id) => { setModel({ provider, id }); },
     onCycleRole: idle, onSetThinking: idle, onSetFast: idle, onSetApproval: idle, onSetGoal: idle, onCompact: idle, onClearQueue: idle, onRemoveQueuedMessage: idle, onPromoteQueuedMessage: idle, onAnswerAsk: idle, onStop: idle, onNavigateTree: idle,
   };
@@ -91,7 +93,7 @@ function Preview() {
     },
   };
   const providers: ProvidersSectionProps = {
-    providers: [{ id: 'anthropic', name: 'Anthropic', credentialProvider: 'anthropic', authKind: 'oauth', loginable: true, available: true, hasAuth: selected === 'default', source: selected === 'default' ? 'oauth' : null, hasUsage: false, accounts: selected === 'default' ? [{ id: 'preview-account', type: 'oauth', label: 'Default fixture account', email: null, disabled: false }] : [] }],
+    providers: [{ id: 'anthropic', name: 'Anthropic', credentialProvider: 'anthropic', authKind: 'oauth', supportsOAuth: true, supportsApiKey: true, loginable: true, available: true, hasAuth: selected === 'default', source: selected === 'default' ? 'oauth' : null, hasUsage: false, accounts: selected === 'default' ? [{ id: 'preview-account', type: 'oauth', label: 'Default fixture account', email: null, disabled: false }] : [] }],
     usage: null, usageStatus: 'idle', onShow() {}, onRefreshUsage: async () => {},
     onSignIn: async (providerId) => { setFlow({ flowId: 'preview-flow', profileId: selected, providerId, events: [{ type: 'auth', url: 'https://example.test/isolated-oauth-preview', launchUrl: null, instructions: 'Isolated fixture only. Do not open the URL or enter real credentials.' }] }); },
     onSignOut: async () => { throw new Error('Fixture account removal is disabled; no live account is connected.'); },
@@ -101,7 +103,7 @@ function Preview() {
   return <InferenceContext.Provider value={controller}><SidebarProvider className="gitspace-shell" persist={false}>
     <AppSidebar view={view} onView={(next) => { if (next === 'inference' || next === 'projects') setView(next); }} selected={view === 'agent' ? { projectId, workspaceId: null } : null} projects={projects.map((project) => ({ ...project, workspaces: [] }))} machines={[]} onSelectProject={(id) => { setProjectId(id); setView('agent'); }} onSelectWorkspace={() => {}} onOpenSettings={() => { window.location.href = '/test/settings-preview.html?section=omp'; }} />
     <SidebarInset className="min-w-0 overflow-hidden"><div className="flex flex-wrap items-center gap-3 px-8 py-3 text-caption text-muted-foreground"><span>Isolated UI fixture — no live account, provider requests, or secrets.</span><Button variant="ghost" size="compact" onClick={() => { const current = latest.current; save({ ...current, profiles: current.profiles.map((item) => item.id === selected ? { ...item, revision: item.revision + 1 } : item) }); }}>Simulate remote revision</Button></div>
-      {view === 'inference' ? <InferencePage inference={controller} selectedProfileId={selected} onSelectProfile={setSelected} projects={projects} schema={schema} schemaLoading={false} schemaError={null} onRefreshSchema={() => {}} models={selected === 'default' ? previewModels : []} modelsLoading={false} modelsError={null} providers={providers} />
+      {view === 'inference' ? <InferencePage inference={controller} selectedProfileId={selected} onSelectProfile={setSelected} projects={projects} schema={schema} schemaLoading={false} schemaError={null} onRefreshSchema={() => {}} models={selected === 'default' ? previewModels : []} modelsReady={true} modelsLoading={false} modelsError={null} providers={providers} />
         : view === 'projects' ? <AccountWorkPages view="projects" projects={projects.map((project) => ({ ...project, lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 0, archivedAt: null, updatedAt: new Date(now) }))} directory={Object.fromEntries(projects.map((project) => [project.id, { workspaces: [] }]))} loading={false} onRefresh={() => {}} onOpenWorkspace={() => {}} onOpenProject={(id) => { setProjectId(id); setView('agent'); }} actions={{}} />
         : <div className="flex flex-1 items-end p-8"><Composer workspace={{ ...verticalSliceFixture.workspace, projectId }} controls={sessionControls} running={false} pending={false} /></div>}
     </SidebarInset>
@@ -109,4 +111,4 @@ function Preview() {
 }
 const root = document.getElementById('root');
 if (!root) throw new Error('preview root missing');
-createRoot(root).render(<Preview />);
+createRoot(root).render(<MotionConfig reducedMotion="user"><ShapeProvider defaultShape="rounded"><SizeProvider defaultSize="default"><IconProvider icons={untitledIcons}><TooltipProvider><Preview /></TooltipProvider></IconProvider></SizeProvider></ShapeProvider></MotionConfig>);

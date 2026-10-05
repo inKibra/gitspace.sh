@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { applyInferenceSettings, type InferenceProfile } from '@gitspace/protocol/inference';
 import { profileSettingViews, updatedProfileSettings } from './inference-settings.js';
-import type { OmpSettingView } from './SettingsPage.js';
+import type { RuntimeSettingView } from './SettingsPage.js';
 
 const profile: InferenceProfile = {
   version: 1, id: 'client-a', name: 'Client A', revision: 4,
   settings: { agents: { enabled: false, custom: { keep: 'unchanged' } }, providers: { models: { private: { baseUrl: 'https://models.example.test', models: [] } } }, modelRoles: { default: 'private/missing-model' } },
   createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
 };
-const field = (path: string, valueJson: string, defaultJson?: string): OmpSettingView => ({ path, tab: 'runtime', label: path, description: null, kind: 'record', valueJson, defaultJson, options: [], credential: false });
+const field = (path: string, valueJson: string, defaultJson?: string): RuntimeSettingView => ({ path, tab: 'runtime', label: path, description: null, kind: 'record', valueJson, defaultJson, options: [], credential: false });
 
 describe('profile settings projection', () => {
   it('reads nested owned subtrees and schema defaults without borrowing account configuration', () => {

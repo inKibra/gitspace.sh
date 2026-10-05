@@ -8,9 +8,10 @@ import {
   FileCheckpointBlobStore,
   PortableSpaceLifecycle,
   type PortableSpaceRuntime,
+  type PortableAgentSnapshot,
   type SpaceCheckpointAuthority,
   type SpaceGitCheckpointRemote,
-  type WalgitProjectBinding,
+  type ArtifactsRepositoryBinding,
 } from '../src/index.js';
 
 const roots: string[] = [];
@@ -103,18 +104,19 @@ class TestRuntime implements PortableSpaceRuntime {
   quiesced = false;
   resumed = false;
   active = false;
-  restoredAgent?: { sessionId: string; ompSessionId: string; ompSession: Uint8Array };
+  restoredAgent?: Extract<PortableAgentSnapshot, { kind: 'legacy' }>;
   restoredArtifacts?: { generation: number; manifest: Uint8Array };
 
   constructor(
     private readonly repositoryPath: string,
     private readonly deleteRepository: boolean,
-    private readonly ompSession = new TextEncoder().encode('omp checkpoint'),
+    private readonly ompSession: Uint8Array = new TextEncoder().encode('omp checkpoint'),
   ) {}
   async quiesce() { this.quiesced = true; }
   async resumeAfterFailedClose() { this.quiesced = false; this.resumed = true; }
   async captureAgent() {
     return {
+      kind: 'legacy' as const,
       sessionId: 'session-a',
       ompSessionId: 'omp-a',
       ompSession: this.ompSession,
@@ -130,7 +132,8 @@ class TestRuntime implements PortableSpaceRuntime {
     mkdirSync(this.repositoryPath, { recursive: true });
     git(this.repositoryPath, 'init', '-b', 'main');
   }
-  async restoreAgent(input: { sessionId: string; ompSessionId: string; ompSession: Uint8Array }) {
+  async restoreAgent(input: PortableAgentSnapshot) {
+    if (input.kind !== 'legacy') throw new Error('This historical checkpoint fixture requires a legacy snapshot');
     this.restoredAgent = input;
   }
   async restoreArtifacts(input: { generation: number; manifest: Uint8Array }) { this.restoredArtifacts = input; }
@@ -160,11 +163,48 @@ function fixture() {
   writeFileSync(join(source, 'portable.txt'), 'portable\n');
   writeFileSync(join(source, 'secret.env'), 'secret\n');
   git(root, 'init', '--bare', remote);
-  const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'user-bucket', endpoint: 'https://example.invalid', region: 'auto' };
+  const binding: ArtifactsRepositoryBinding = { projectId: 'project-a', repository: 'project-project-a' };
   return { root, source, target, remote, binding };
 }
 
 describe('PortableSpaceLifecycle', () => {
+  it('hands unborn and first-committed checkpoints between machines through close and reopen', async () => {
+    const { root, source, target, remote, binding } = fixture();
+    git(source, 'update-ref', '-d', 'refs/heads/main');
+    const unbornStatus = git(source, 'status', '--porcelain=v1');
+    const authority = new TestAuthority();
+    const blobs = new EncryptedCheckpointBlobStore(new FileCheckpointBlobStore(join(root, 'bucket')), new Uint8Array(32).fill(7));
+    const lifecycle = new PortableSpaceLifecycle(authority, blobs, new BareGitRemote(remote));
+    const input = { projectId: 'project-a', spaceId: 'space-a', expectedGeneration: 1, portableUntrackedPaths: ['portable.txt'], binding };
+    const unborn = await lifecycle.close({ ...input, machineId: 'machine-a', repositoryPath: source }, new TestRuntime(source, false));
+    expect(unborn.manifest.repository.headCommit).toBeNull();
+    await lifecycle.open({ ...input, machineId: 'machine-b', repositoryPath: target }, new TestRuntime(target, false));
+    const unbornManifestHash = authority.manifestHash;
+    expect(git(target, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    expect(git(target, 'status', '--porcelain=v1')).toBe(unbornStatus);
+    git(target, 'commit', '-m', 'first real commit');
+    writeFileSync(join(target, 'later.txt'), 'committed machine only\n');
+    git(target, 'add', 'later.txt');
+    git(target, 'commit', '-m', 'later file');
+    const head = git(target, 'rev-parse', 'HEAD');
+    await lifecycle.close({ ...input, machineId: 'machine-b', repositoryPath: target }, new TestRuntime(target, false));
+    await lifecycle.open({ ...input, machineId: 'machine-a', repositoryPath: source }, new TestRuntime(source, false));
+    expect(git(source, 'rev-parse', 'HEAD')).toBe(head);
+    expect(readFileSync(join(source, 'later.txt'), 'utf8')).toBe('committed machine only\n');
+    expect(readFileSync(join(source, 'secret.env'), 'utf8')).toBe('secret\n');
+
+    await lifecycle.close({ ...input, machineId: 'machine-a', repositoryPath: source }, new TestRuntime(source, false));
+    authority.manifestKey = spaceCheckpointManifestKey('project-a', 'space-a', unborn.manifest.revision);
+    authority.manifestHash = unbornManifestHash;
+    authority.revision = unborn.manifest.revision;
+    git(target, 'branch', 'unrelated');
+    await lifecycle.open({ ...input, machineId: 'machine-b', repositoryPath: target }, new TestRuntime(target, false));
+    expect(git(target, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    expect(git(target, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('refs/heads/unrelated');
+    expect(git(target, 'status', '--porcelain=v1')).toBe(unbornStatus);
+    expect(existsSync(join(target, 'later.txt'))).toBe(false);
+  });
+
   it('closes only after durable state and reopens an agent from empty machine state', async () => {
     const { root, source, target, remote, binding } = fixture();
     const expectedStatus = git(source, 'status', '--porcelain=v1');
@@ -222,6 +262,7 @@ describe('PortableSpaceLifecycle', () => {
     expect(authority.state).toBe('closed');
     expect(existsSync(source)).toBe(false);
     expect(inner.uploads.every((upload) => upload.size <= 64 * 1024 * 1024)).toBe(true);
+    if (closed.manifest.agent.kind !== 'legacy') throw new Error('Expected historical agent checkpoint');
     const storedRoot = await inner.get(ompKey, closed.manifest.agent.ompCheckpointHash);
     expect(storedRoot).not.toBeNull();
     expect(`sha256:${new Bun.CryptoHasher('sha256').update(storedRoot!).digest('hex')}`).toBe(closed.manifest.agent.ompCheckpointHash);

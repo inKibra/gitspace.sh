@@ -97,6 +97,7 @@ export function createSignedRpcHandler(options: SignedRpcHandlerOptions) {
       if (!kind) return transportError(404, 'RPC_PROCEDURE_UNKNOWN', `Unknown procedure ${item.path}`);
       const capability = requiredCapability(item.path, kind);
       if (!device.capabilities.includes(capability)) return transportError(403, 'RPC_FORBIDDEN', `${item.path} requires ${capability}`);
+      if (item.path === 'browserRelay.unpair' && (device.kind !== 'browser' || device.scope.kind !== 'user')) return transportError(403, 'RPC_FORBIDDEN', 'Forgetting a paired browser requires an account-scoped browser session');
       if (requiresImageSelectionControl(item.path, item.input) && !device.capabilities.includes('deployment.control')) return transportError(403, 'RPC_FORBIDDEN', `${item.path} requires deployment.control`);
       const administration = requiredAdministrativeCapability(item.path, item.input);
       if (administration && !deviceCanAdminister(device, administration)) return transportError(403, 'RPC_FORBIDDEN', `${item.path} requires account-scoped ${administration}`);

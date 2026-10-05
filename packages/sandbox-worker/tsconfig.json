@@ -10,5 +10,5 @@
     "verbatimModuleSyntax": true,
     "types": ["./worker-configuration.d.ts", "bun"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"]
 }

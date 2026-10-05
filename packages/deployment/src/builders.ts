@@ -1,14 +1,13 @@
 import { cp, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from '@gitspace/account-omp/manifest';
-import { workerReleaseMetadataSchema, type OmpReleaseMetadata, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from './executable-manifest.js';
+import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
-import { installedPackageRoot, packageOmpRuntimeRecipe } from './runtime-packaging.js';
 import { packageMachineNativeRuntime } from './native-build.js';
 
 /**
- * Builders for the four account-owned GitSpace release targets. The
+ * Builders for the three account-owned GitSpace release targets. The
  * self-develop sandbox and a "launch into" release use the same builders; only
  * the output directory and worker version stamp differ.
  */
@@ -82,78 +81,16 @@ export interface BuiltExecutableArtifact extends BuiltArtifact {
   manifestHash: `sha256:${string}`;
 }
 
-/** Machine-only native/terminal packaging. OMP uses installed upstream SDK sources without loader overrides. */
+/** Reject accidental machine-side inference/runtime dependencies at the bundle boundary. */
 function machinePackagingPlugin(): Bun.BunPlugin {
   return {
     name: 'gitspace-machine-packaging',
     setup(build) {
-        build.onResolve({ filter: /^omp-legacy-pi-modules$/u }, () => {
-          throw new Error('Machine executable cannot include OMP extension execution');
-        });
-        build.onLoad({ filter: /[/\\]pi-coding-agent[/\\]src[/\\](?:sdk\.ts|session[/\\]agent-session\.ts)$/u }, ({ path }) => {
-          throw new Error(`Machine executable cannot include OMP agent execution: ${path}`);
-        });
-      build.onLoad({ filter: /[/\\]pi-natives[/\\]native[/\\]loader-state\.js$/u }, async ({ path }) => {
-        const source = await readFile(path, 'utf8');
-        const original = 'const ctx = initLoaderContext();';
-        if (!source.includes(original)) throw new Error('Unsupported pi-natives loader contract');
-        return {
-          loader: 'js',
-          contents: source.replace('cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });', '').replace(original, `const ctx = initLoaderContext({ nativeDir: import.meta.dir, leafPackageDir: null, isCompiledBinary: false });
-  ctx.candidates = ctx.addonFilenames.map(filename => path.join(import.meta.dir, filename));
-  ctx.isWorkspaceLoad = false;
-  ctx.stageFromNodeModules = false;`),
-        };
-      });
-      build.onLoad({ filter: /[/\\]pi-utils[/\\]src[/\\]worker-host\.ts$/u }, async ({ path }) => {
-        const source = await readFile(path, 'utf8');
-        const original = 'stripWindowsExtendedLengthPathPrefix(Bun.main)';
-        const initial = 'let workerHostMain: string | null = null;';
-        if (!source.includes(original) || !source.includes(initial)) throw new Error('Unsupported OMP worker-host contract');
-        const workerPath = "stripWindowsExtendedLengthPathPrefix(gitspaceFileURLToPath(new URL('./machine-worker.js', import.meta.url)))";
-        return {
-          loader: 'ts',
-          contents: `import { fileURLToPath as gitspaceFileURLToPath } from 'node:url';\n${source.replace(original, workerPath).replace(initial, `let workerHostMain: string | null = ${workerPath};`)}`,
-        };
+      build.onResolve({ filter: /^(?:@oh-my-pi\/|omp-legacy-pi-modules$)/u }, ({ path }) => {
+        throw new Error(`Machine executable cannot include OMP runtime dependencies: ${path}`);
       });
     },
   };
-}
-
-async function copyNativeRuntime(root: string, outDir: string): Promise<void> {
-  const packageRoot = await installedPackageRoot('@oh-my-pi/pi-natives', root);
-  const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as {
-    version: string; optionalDependencies: Record<string, string>;
-  };
-  const tag = `${process.platform}-${process.arch}`;
-  const name = `@oh-my-pi/pi-natives-${tag}`;
-  const leafRoot = await installedPackageRoot(name, packageRoot);
-  const leaf = JSON.parse(await readFile(join(leafRoot, 'package.json'), 'utf8')) as {
-    version: string; os: string[]; cpu: string[];
-  };
-  if (leaf.version !== manifest.version || manifest.optionalDependencies[name] !== leaf.version
-    || !leaf.os.includes(process.platform) || !leaf.cpu.includes(process.arch)) {
-    throw new Error(`Installed native addon ${name} is incompatible with pi-natives ${manifest.version}`);
-  }
-  // Baseline is required on x64; include AVX2 when upstream ships a second variant.
-  const installed = await readdir(leafRoot);
-  const filenames = process.arch === 'x64'
-    ? [`pi_natives.${tag}-baseline.node`]
-    : [`pi_natives.${tag}.node`];
-  if (process.arch === 'x64' && installed.includes(`pi_natives.${tag}-modern.node`)) filenames.push(`pi_natives.${tag}-modern.node`);
-  for (const filename of filenames) {
-    if (!installed.includes(filename) || !(await lstat(join(leafRoot, filename))).isFile()) {
-      throw new Error(`Installed native addon ${name} is missing ${filename}`);
-    }
-    await cp(join(leafRoot, filename), join(outDir, filename));
-    if (process.platform === 'linux') {
-      // Published Linux addons contain debug sections larger than a Worker request body.
-      // Strip only the staged copy; the N-API code/symbols and installed package stay unchanged.
-      const strip = Bun.spawn(['strip', '--strip-debug', join(outDir, filename)], { stdout: 'ignore', stderr: 'pipe' });
-      const error = await new Response(strip.stderr).text();
-      if (await strip.exited !== 0) throw new Error(`Cannot strip staged native addon ${filename}: ${error}`);
-    }
-  }
 }
 
 async function prepareExecutableOutput(outDir: string): Promise<void> {
@@ -184,60 +121,27 @@ export async function buildMachineBundle(root: string, outDir: string): Promise<
     });
     if (!result.success) throw new AggregateError(result.logs, 'Machine executable build failed');
   }
-  const nativeOwner = await installedPackageRoot('@oh-my-pi/pi-coding-agent', join(root, 'packages/account-machine'));
-  await copyNativeRuntime(nativeOwner, outDir);
   await cp(join(root, 'packages/core/drizzle'), join(outDir, 'drizzle'), { recursive: true });
   const native = await packageMachineNativeRuntime(root, outDir);
-  const envelope = await createExecutableArtifactManifest(outDir, 'machine', null, native.abi);
+  const envelope = await createExecutableArtifactManifest(outDir, 'machine', native.abi);
   return { path: outDir, hash: envelope.manifest.treeHash, ...envelope };
 }
 
 
-export interface BuiltOmpArtifact extends BuiltExecutableArtifact {
-  metadata: OmpReleaseMetadata;
-}
-
-/** Authenticate a small GitSpace adapter and exact upstream dependency recipe, not an eagerly bundled SDK graph. */
-export async function buildOmpBundle(root: string, outDir: string): Promise<BuiltOmpArtifact> {
-  await prepareExecutableOutput(outDir);
-  const metadata = await packageOmpRuntimeRecipe(root, outDir);
-  for (const [source, name] of [['runtime', 'omp-adapter'], ['recipe-bootstrap', 'omp']] as const) {
-    const result = await Bun.build({
-      entrypoints: [join(root, `packages/account-omp/src/${source}.ts`)],
-      target: 'bun',
-      outdir: outDir,
-      naming: `${name}.js`,
-      // SDK modules must execute from their complete patched npm sources, including workers, assets and lazy installers.
-      external: ['@oh-my-pi/*'],
-    });
-    if (!result.success) throw new AggregateError(result.logs, `OMP ${name} build failed`);
-  }
-  const envelope = await createExecutableArtifactManifest(outDir, 'omp', metadata);
-  return { path: outDir, hash: envelope.manifest.treeHash, ...envelope, metadata };
-}
-
-/** Bootstrap a host with independently versioned machine and OMP payloads and an embedded initial trust anchor. */
-export async function buildInitialRuntime(root: string, outDir: string): Promise<{ machine: BuiltExecutableArtifact; omp: BuiltOmpArtifact }> {
+/** Bootstrap a complete machine host with an embedded initial trust anchor. */
+export async function buildInitialRuntime(root: string, outDir: string): Promise<{ machine: BuiltExecutableArtifact }> {
   const machine = await buildMachineBundle(root, join(outDir, 'machine'));
-  const omp = await buildOmpBundle(root, join(outDir, 'omp'));
   for (const [source, name] of [['machine-bootstrap', 'host'], ['rpc-probe', 'rpc-probe']] as const) {
     const result = await Bun.build({
       entrypoints: [join(root, `packages/account-machine/src/${source}.ts`)],
       target: 'bun', outdir: outDir, naming: `${name}.js`, sourcemap: 'linked',
       define: {
         'process.env.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH': JSON.stringify(machine.manifestHash),
-        'process.env.GITSPACE_INITIAL_OMP_MANIFEST_HASH': JSON.stringify(omp.manifestHash),
       },
     });
     if (!result.success) throw new AggregateError(result.logs, 'Machine host build failed');
   }
-  const launcher = await Bun.build({
-    entrypoints: [join(root, 'packages/deployment/src/omp-launcher.ts')],
-    target: 'bun', outdir: outDir, naming: 'omp-launcher.js',
-    define: { 'process.env.GITSPACE_INITIAL_OMP_MANIFEST_HASH': JSON.stringify(omp.manifestHash) },
-  });
-  if (!launcher.success) throw new AggregateError(launcher.logs, 'Selected OMP command launcher build failed');
-  return { machine, omp };
+  return { machine };
 }
 
 /** Vite build of the account-owned browser copied into `outDir`. */

@@ -18,7 +18,7 @@ function signedHeader(request: ReturnType<typeof createSignedControlRequest>): s
 }
 
 async function sha256(bytes: Uint8Array): Promise<`sha256:${string}`> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes)));
   return `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
@@ -151,7 +151,7 @@ describe('signed control transport', () => {
       body: bytes,
     });
     expect(uploaded.status).toBe(201);
-    expect((await env.DATA.head(`users/${userId}/${key}`))?.customMetadata.sha256).toBe(hash);
+    expect((await env.DATA.head(`users/${userId}/${key}`))?.customMetadata?.sha256).toBe(hash);
 
     const get = createSignedControlRequest({
       userId,
@@ -248,12 +248,12 @@ describe('signed control transport', () => {
       capabilities: ['storage.access'],
       generation: 1,
     }, rootPrivateKey));
-    const content = 'cycleOrder:\n  - default\n';
+    const content = '{"toolExecution":"parallel"}';
     const hash = await sha256(new TextEncoder().encode(content));
     const update = (expectedGeneration: number) => createSignedControlRequest({
       userId,
       machineId: 'machine-a',
-      operation: 'settings.omp.update',
+      operation: 'settings.runtime.update',
       payload: { expectedGeneration, content, checksum: hash },
       signingPrivateKey: machineSigningPrivateKey,
     });
@@ -270,7 +270,7 @@ describe('signed control transport', () => {
       body: JSON.stringify(update(0)),
     });
     expect(stale.status).toBe(409);
-    expect(await stale.json()).toMatchObject({ status: 'error', error: { code: 'SETTINGS_CONFLICT', resource: 'omp-config', expected: 0, actual: 1 } });
+    expect(await stale.json()).toMatchObject({ status: 'error', error: { code: 'SETTINGS_CONFLICT', resource: 'runtime-config', expected: 0, actual: 1 } });
   });
   it('pushes settings generations to every authenticated machine subscriber', async () => {
     const userId = env.ACCOUNT_ID;
@@ -309,11 +309,11 @@ describe('signed control transport', () => {
       openSubscription('machine-a', machineSigningPrivateKey),
       openSubscription('machine-b', machineBSigningPrivateKey),
     ]);
-    const content = 'cycleOrder:\n  - slow\n';
+    const content = '{"toolExecution":"sequential"}';
     const update = createSignedControlRequest({
       userId,
       machineId: 'machine-a',
-      operation: 'settings.omp.update',
+      operation: 'settings.runtime.update',
       payload: { expectedGeneration: 0, content, checksum: await sha256(new TextEncoder().encode(content)) },
       signingPrivateKey: machineSigningPrivateKey,
     });
@@ -321,8 +321,8 @@ describe('signed control transport', () => {
     const pushedB = nextMessage(socketB);
     const stored = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(update) });
     expect(stored.status).toBe(200);
-    expect(await pushedA).toMatchObject({ type: 'settings.changed', ompGeneration: 1 });
-    expect(await pushedB).toMatchObject({ type: 'settings.changed', ompGeneration: 1 });
+    expect(await pushedA).toMatchObject({ type: 'settings.changed', runtimeGeneration: 1 });
+    expect(await pushedB).toMatchObject({ type: 'settings.changed', runtimeGeneration: 1 });
     socketA.close(1000, 'done');
     socketB.close(1000, 'done');
   });

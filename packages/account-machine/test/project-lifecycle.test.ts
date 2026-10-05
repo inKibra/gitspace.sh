@@ -7,9 +7,8 @@ import { createWorkspaceContract, type CloudProjectOperation, type CloudProjectS
 import { beginSpaceClose, commitSpaceClosed, spaceCheckpointManifestKey, spaceCheckpointManifestSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import { ProjectLifecycleManager, type ProjectLifecycleAuthority } from '../src/project-lifecycle.js';
 import type { CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
-import { createSpaceEvalNamespace } from '../src/space-eval-sdk.js';
 import { createPublishedSpaceHeadResolver } from '../src/inspector-base.js';
-import { createGitIntermediateCheckpoint } from '../src/git-checkpoint.js';
+import { createGitIntermediateCheckpoint, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -604,7 +603,7 @@ describe('ProjectLifecycleManager', () => {
     }
   });
 
-  it('creates Plan by default through RPC and code mode while preserving explicit phases and dependency ceilings', async () => {
+  it('preserves creation phases and dependency ceilings through RPC and project controls', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-creation-phase-'));
     roots.push(root);
     const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
@@ -612,18 +611,8 @@ describe('ProjectLifecycleManager', () => {
     const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
     try {
       const { project } = await manager.createProject({ name: 'Phases', baseBranch: null, repositoryUrl: null });
-      const namespace = createSpaceEvalNamespace(authority as unknown as CloudSpaceCheckpointAuthority, project.id, null, {
-        create: (input) => manager.createWorkspace(input),
-        manage: async () => { throw new Error('Unexpected management operation'); },
-        instructionsChanged: async () => { throw new Error('Unexpected instruction change'); },
-        refreshArtifacts: async () => { throw new Error('Unexpected artifact refresh'); },
-        environment: async () => { throw new Error('Unexpected environment operation'); },
-      });
-      const schema = await namespace.call('describe', { method: 'create' }) as { required: string[]; properties: { phase: { default: string } } };
-      expect(schema.required).not.toContain('phase');
-      expect(schema.properties.phase.default).toBe('plan');
       let parentId = '';
-      for (const path of ['rpc', 'code-mode']) {
+      for (const path of ['rpc', 'controls']) {
         for (const phase of [undefined, 'code'] as const) {
           const name = `${path}-${phase ?? 'default'}`;
           const input = { name, branch: name, sourceKind: 'base' as const, sourceRef: 'main', ...(phase ? { phase } : {}) };
@@ -633,9 +622,7 @@ describe('ProjectLifecycleManager', () => {
             if (!decoded.ok) throw new Error(JSON.stringify(decoded.issues));
             id = (await manager.createWorkspace(decoded.value)).workspace.id;
           } else {
-            const created = await namespace.call('create', input) as { workspace: { id: string }; ready: boolean };
-            expect(created.ready).toBe(true);
-            id = created.workspace.id;
+            id = (await manager.createWorkspace({ ...input, projectId: project.id })).workspace.id;
           }
           expect(database.getWorkspace(id)?.phase).toBe(phase ?? 'plan');
           expect(authority.workspaces.get(id)).toMatchObject({ phase: phase ?? 'plan', lifecycle: 'active' });
@@ -906,7 +893,7 @@ describe('ProjectLifecycleManager', () => {
         authority,
         blobs: { async get(key, hash) { if (key !== manifestKey || hash !== manifestHash) throw new Error('Checkpoint identity mismatch'); return bytes; } },
         gitRemote: { async fetchCheckpoint(input) { git(input.repositoryPath, 'fetch', '--no-write-fetch-head', remote, `${input.checkpointRef}:${input.checkpointRef}`); } },
-        binding: (projectId) => ({ projectId, bucket: 'test', endpoint: 'https://storage.invalid', region: 'auto' }),
+        binding: (projectId) => ({ projectId, repository: `project-${projectId}` }),
       });
       const manager = new ProjectLifecycleManager(targetDatabase, authority, 'machine-b', join(root, 'target'), undefined, undefined, resolver);
       authority.bootstrapMachineId = 'machine-b';
@@ -920,7 +907,7 @@ describe('ProjectLifecycleManager', () => {
       expect(targetDatabase.getProject(project.id)).toBeNull();
 
       const { workspace } = await manager.createWorkspace({ projectId: project.id, name: 'From saved', branch: 'from-saved', sourceKind: 'workspace', sourceRef: source.name, dependsOn: [dependency.id] });
-      expect(git(workspace.rootPath, 'rev-parse', 'HEAD')).toBe(checkpoint.headCommit);
+      expect(checkpoint.headCommit).toBe(git(workspace.rootPath, 'rev-parse', 'HEAD'));
       expect(git(workspace.rootPath, 'merge-base', 'HEAD', baseHead)).toBe(baseHead);
       expect(readFileSync(join(workspace.rootPath, 'saved.txt'), 'utf8')).toBe('committed source\n');
       expect(existsSync(join(workspace.rootPath, 'untracked.txt'))).toBe(false);
@@ -941,7 +928,7 @@ describe('ProjectLifecycleManager', () => {
       const elsewhere = { ...placement, state: 'open' as const, machineId: 'machine-c' };
       authority.spaces.set(source.id, elsewhere);
       const other = await manager.createWorkspace({ projectId: project.id, name: 'From elsewhere', branch: 'from-elsewhere', sourceKind: 'workspace', sourceRef: source.id });
-      expect(git(other.workspace.rootPath, 'rev-parse', 'HEAD')).toBe(checkpoint.headCommit);
+      expect(checkpoint.headCommit).toBe(git(other.workspace.rootPath, 'rev-parse', 'HEAD'));
       expect(git(projected.rootPath, 'rev-parse', 'HEAD')).toBe(staleHead);
       expect(authority.spaces.get(source.id)).toEqual(elsewhere);
     } finally {
@@ -974,6 +961,63 @@ describe('ProjectLifecycleManager', () => {
       expect([...authority.operations.keys()]).toEqual(operations);
       expect(database.listWorkspaces(project.id)).toEqual([]);
       expect(readdirSync(join(managedRoot, project.id))).toEqual(['base']);
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each([null, 'requested-start'])('imports a genuinely empty repository with branch %s without synthesizing HEAD and checkpoints its first real commit', async requestedBranch => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-empty-import-'));
+    roots.push(root);
+    const source = join(root, 'empty.git');
+    git(root, 'init', '--bare', '-b', 'trunk', source);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    const checkpoints: GitIntermediateCheckpoint[] = [];
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), async spaceId => {
+      const base = database.getBaseSpace(spaceId);
+      if (!base) throw new Error('Checkpoint requires a materialized base');
+      checkpoints.push(await createGitIntermediateCheckpoint({ repositoryPath: base.rootPath, spaceId, revision: checkpoints.length + 1 }));
+    });
+    try {
+      const expectedBranch = requestedBranch ?? 'trunk';
+      const imported = await manager.createProject({ name: 'Empty imported', baseBranch: requestedBranch, repositoryUrl: source });
+      expect(imported.project).toMatchObject({ lifecycle: 'active', repositoryReference: source, baseBranch: expectedBranch });
+      expect(imported.operation.state).toBe('succeeded');
+      const base = database.getBaseSpace(imported.project.id);
+      if (!base) throw new Error('Imported base is missing');
+      expect((await authority.listProjectWorkspaces(imported.project.id))[0]).toMatchObject({ branch: expectedBranch, sourceCommit: null });
+      expect(git(base.rootPath, 'symbolic-ref', 'HEAD')).toBe(`refs/heads/${expectedBranch}`);
+      expect(git(base.rootPath, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('');
+      expect(checkpoints[0]?.headCommit).toBeNull();
+      expect(checkpoints[0]?.branch).toBe(expectedBranch);
+      writeFileSync(join(base.rootPath, 'first.txt'), 'first user content\n');
+      git(base.rootPath, 'add', 'first.txt');
+      git(base.rootPath, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-m', 'first user commit');
+      const head = git(base.rootPath, 'rev-parse', 'HEAD');
+      expect(git(base.rootPath, 'rev-list', '--count', 'HEAD')).toBe('1');
+      const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: base.rootPath, spaceId: imported.project.id, revision: 2 });
+      expect(checkpoint.headCommit).toBe(head);
+      expect(git(base.rootPath, 'show', `${checkpoint.worktreeCommit}:first.txt`)).toBe('first user content');
+      expect(git(source, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('');
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rejects a missing requested branch on a nonempty remote without publishing a project', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-missing-import-branch-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
+    try {
+      await expect(manager.createProject({ name: 'Missing requested', baseBranch: 'does-not-exist', repositoryUrl: source })).rejects.toThrow();
+      expect(await authority.listProjects()).toEqual([]);
+      expect(database.listProjects()).toEqual([]);
+      expect(git(source, 'symbolic-ref', 'HEAD')).toBe('refs/heads/trunk');
+      expect(git(source, 'rev-list', '--count', 'HEAD')).toBe('1');
     } finally {
       database.close();
     }

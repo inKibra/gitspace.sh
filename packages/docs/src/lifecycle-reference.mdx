@@ -117,6 +117,8 @@ Cloud claims prevent concurrent effects. A failed or abandoned cloud attempt req
 
 Approval, recovery, and `cloud/destroy` require a human browser action. The workspace agent cannot grant itself content approval or invoke destruction.
 
+The cloud Pi runtime owns conversations and durable task records. The machine supervisor runs lifecycle scripts and owns their processes. Runtime recovery does not authorize replay of an unresolved effect; an offline machine is not evidence of process exit.
+
 ### Interactive scripts
 
 Prefer unattended scripts. Use explicit flags and configured values for ordinary setup questions. Reserve interactive execution for provider authentication or another decision that requires a person.
@@ -147,7 +149,7 @@ Closing the pane leaves a running process running. Reopening or reloading attach
 
 Interactive execution disables input echo and does not retain raw terminal input or output in run logs, Hub output, browser history caches, or terminal replay. It retains step start/end metadata, exit codes, run state, and validated resource bindings. Protected output and input require a browser session; MCP and agent log reads cannot retrieve the raw stream. The terminal ends with the script and never becomes an unrestricted shell.
 
-This is supervised, machine-local authentication on Linux or macOS, not central credential storage. Ignored credential files do not travel in checkpoints. Moves and expired sessions can require authentication again. Checks remain noninteractive, and detached recovery checkouts cannot run interactive phases. Scripts must not daemonize or leave unmanaged background processes.
+This is supervised, machine-local authentication for lifecycle tools on Linux or macOS, not inference-provider login or central credential storage. Inference authentication and refresh use the cloud credential vault without a machine prerequisite. Ignored credential files do not travel in checkpoints. Moves and expired sessions can require lifecycle-tool authentication again. Checks remain noninteractive, and detached recovery checkouts cannot run interactive phases. Scripts must not daemonize or leave unmanaged background processes.
 
 Approved scripts still receive their secrets and can intentionally write a `.env` or provider credential file. Use restrictive permissions and ignored paths. Protected terminal handling is not a sandbox and does not make arbitrary secret output safe.
 
@@ -193,6 +195,10 @@ Binding names start with a letter and contain letters, digits, underscores, peri
 
 Scripts run on an authorized machine runner, not inside a Cloudflare Worker. They inherit the machine user's `HOME`, `PATH`, and ordinary environment. GitSpace prepends `GITSPACE_MACHINE_TOOLS/bin` to `PATH`; declared values and granted secrets override inherited values. Internal `GITSPACE_*` daemon bootstrap variables are excluded, and the runner supplies its own workspace metadata. Git uses the user's normal configuration; unattended runs disable its interactive prompting.
 
+Supervisor metadata and process descriptions store injected environment names, not their values. The running supervisor holds those values in memory for child starts and restarts. After the supervisor itself restarts, it cannot recover them from metadata or substitute ambient variables. Any surviving execution must stop before a new authorized start supplies fresh values. This does not authorize a lifecycle rerun.
+
+Recovery removes legacy environment values from supervisor metadata. It does not erase old backups or credentials that scripts wrote elsewhere. Rotate credentials if those copies may have been exposed. Scripts must still avoid printing secrets.
+
 Each run keeps its logs and output in a separate temporary directory. Cleanup removes that directory, not the user's home. Use checks to verify existing tool versions and `machine/prepare` to install missing tools. Inheritance uses the daemon's environment; it does not search for tools outside its `PATH` or source login dotfiles. A cloud machine uses its own home, not a copy of your personal machine.
 
 Lifecycle `.sh` files execute their approved bytes with `/bin/bash`, without login startup files. Command checks use `/bin/sh`. The working directory is the checkout root; `$0` is the script's path in that checkout. Use `$0`, not `BASH_SOURCE`, when locating helpers beside an entry script.
@@ -201,14 +207,13 @@ A cloud provisioning success remains separate from individual run attempts. A fa
 
 ## Agent API and durable logs
 
-Use JavaScript code-mode `eval`. The `space.environment` namespace uses the same environment API as the browser:
+Use the typed `environment` tool directly:
 
-```javascript
-const current = await space.environment.get();
-const schema = await space.describe({ method: 'environment.runPhase' });
+```json
+{ "args": { "method": "get" } }
 ```
 
-Discover each method's schema before sending arguments. Available methods are `get`, `setProfile`, `putValue`, `deleteValue`, `runChecks`, `runPhase`, and `runLog`. Workspace targets default to the current workspace where optional. Use the discovered `workspaceId` field for another workspace in the same project, not a session ID.
+Available methods are `get`, `setProfile`, `putValue`, `deleteValue`, `runChecks`, `runPhase`, `cancelRun`, and `runLog`. Arguments go inside `args`; all operations target the current workspace. A run request supplies `runId`, optional `deadlineAt`, and a phase for `runPhase`. A log request supplies `runId` and optional `offset`. Agent calls cannot request protected interactive execution.
 
 An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface excludes `cloud/destroy`. Do not use raw shell to bypass this restriction or a missing content approval.
 
@@ -216,7 +221,7 @@ The environment view includes `lifecycle`, the cloud-owned record of profile, va
 
 Each script result has its own `exitCode`: zero means success, a nonzero value means failure, and null means no exit was recorded. A started script with no exit is running while the phase is active and interrupted after the phase ends. A script with no result has not started. Available `startedAt` and `finishedAt` timestamps describe that script, not the whole phase.
 
-For unattended runs, full output lives in durable cloud log chunks, not in an artifact file inside the checkout. Interactive runs retain safe step metadata instead of raw terminal output. The wire `environment.runLog` request accepts `spaceId`, `runId`, and nullable `offset`. It returns `output`, `nextOffset`, and `cursor`. Follow `nextOffset` while more stored chunks are available. A null `nextOffset` means caught up for now, not necessarily that a running script has finished; retain `cursor`, the first unread stored row, and use it as the next request's offset after a run update. The agent wrapper uses its discovered workspace-target schema. Read subsequent chunks rather than treating the preview as the full log.
+For unattended runs, full output lives in durable cloud log chunks, not in an artifact file inside the checkout. Interactive runs retain safe step metadata instead of raw terminal output. The `environment` tool's `runLog` method accepts `runId` and optional `offset`. It returns `output`, `nextOffset`, and `cursor`. Follow `nextOffset` while more stored chunks are available. A null `nextOffset` means caught up for now, not necessarily that a running script has finished; retain `cursor`, the first unread stored row, and use it as the next request's offset after a run update. Read subsequent chunks rather than treating the preview as the full log.
 
 Closed or offline workspaces retain cloud lifecycle records and logs. Running scripts still requires an authorized online machine. These are account-private records, not public artifact links. The runner redacts known resolved secret values and the cloud applies further sanitization, but redaction is not a guarantee that arbitrary output contains no secrets. Never print credentials or enable shell tracing around them.
 

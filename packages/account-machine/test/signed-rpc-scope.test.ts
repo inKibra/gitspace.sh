@@ -5,6 +5,33 @@ import { createSignedRpcFetch, RPC_DEVICE_HEADER, signRpcRequest, type DeviceCap
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { createSignedRpcHandler } from '../src/signed-rpc.js';
 
+it('allows browser unpair only for an account-scoped human browser with write permission', async () => {
+  const key = ed25519.utils.randomSecretKey();
+  const id = crypto.randomUUID();
+  let kind: 'browser' | 'client' = 'client';
+  let scope: DeviceScope = { kind: 'user' };
+  let capabilities: DeviceCapability[] = ['rpc.write'];
+  let dispatched = 0;
+  const handler = createSignedRpcHandler({
+    handler: async () => { dispatched++; return new Response(null, { status: 204 }); },
+    lookupDevice: async () => ({ deviceId: id, kind, label: 'owner', scope, capabilities, canDelegate: false, signingPublicKey: ed25519.getPublicKey(key), generation: 1, boundAt: Date.now(), expiresAt: null }),
+    procedureKind: () => 'mutation', workspaceProject: () => 'project',
+  });
+  const invoke = async () => {
+    const body = new TextEncoder().encode(stringify({ v: 1, path: 'browserRelay.unpair', input: {} }));
+    return handler(new Request('https://machine.test/rpc', { method: 'POST', body, headers: { [RPC_DEVICE_HEADER]: signRpcRequest({ deviceId: id, method: 'POST', path: '/rpc', body, signingPrivateKey: key }) } }));
+  };
+  expect((await invoke()).status).toBe(403);
+  kind = 'browser'; scope = { kind: 'project', projectId: 'project' };
+  expect((await invoke()).status).toBe(403);
+  scope = { kind: 'user' }; capabilities = ['rpc.read'];
+  expect((await invoke()).status).toBe(403);
+  expect(dispatched).toBe(0);
+  capabilities = ['rpc.write'];
+  expect((await invoke()).status).toBe(204);
+  expect(dispatched).toBe(1);
+});
+
 it('authorizes environment mutations against the scope being changed, not just the selected workspace', async () => {
   const key = ed25519.utils.randomSecretKey();
   const id = crypto.randomUUID();

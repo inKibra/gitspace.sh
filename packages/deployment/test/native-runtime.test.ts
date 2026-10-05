@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { nativeHostAbi } from '@gitspace/account-omp/manifest';
+import { nativeHostAbi } from '../src/executable-manifest.js';
 import {
   GIT_LFS_DECLARATION, GIT_LFS_PATH, machineToolEnvironment, nativeFileDigest, prepareMachineNativeRuntime,
 } from '../src/native-runtime.js';
@@ -14,15 +14,11 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-native-selection-'));
   roots.push(root);
   await mkdir(join(root, 'native'));
-  const binary = join(root, 'native/walgit');
-  const marker = join(root, 'executed');
-  await writeFile(binary, `#!/bin/sh\nprintf release > '${marker}'\necho walgit-release\n`, { mode: 0o755 });
   const runtime = {
-    version: 1, bunVersion: Bun.version, abi: nativeHostAbi(),
-    walgit: { source: 'release', path: 'native/walgit', ...await nativeFileDigest(binary), provenance: null },
+    version: 2, bunVersion: Bun.version, abi: nativeHostAbi(),
   };
   await writeFile(join(root, 'machine-native.json'), JSON.stringify(runtime));
-  return { root, binary, marker, runtime };
+  return { root, runtime };
 }
 
 async function gitLfsFixture(root: string) {
@@ -41,54 +37,32 @@ async function gitLfsFixture(root: string) {
 }
 
 describe('native generation selection', () => {
-  it('rejects tampered payload bytes without executing them', async () => {
-    const { root, binary, marker } = await fixture();
-    await writeFile(binary, '#!/bin/sh\necho walgit-tampered\n');
-    await expect(prepareMachineNativeRuntime(root)).rejects.toThrow('integrity mismatch');
-    expect(await Bun.file(marker).exists()).toBe(false);
-  });
-
   it('rejects a newer native ABI before invoking the selected tool', async () => {
-    const { root, marker, runtime } = await fixture();
+    const { root, runtime } = await fixture();
+    const { marker } = await gitLfsFixture(root);
     runtime.abi.minimumVersion = '999.0';
     await writeFile(join(root, 'machine-native.json'), JSON.stringify(runtime));
     await expect(prepareMachineNativeRuntime(root)).rejects.toThrow('incompatible');
     expect(await Bun.file(marker).exists()).toBe(false);
   });
 
-  it('executes only the declared release or environment tool despite inherited global selection', async () => {
-    const { root, marker, runtime } = await fixture();
-    const environmentBinary = join(root, 'environment-walgit');
-    const decoy = join(root, 'global-walgit');
-    await writeFile(environmentBinary, `#!/bin/sh\nprintf environment > '${marker}'\necho walgit-environment\n`, { mode: 0o755 });
-    await writeFile(decoy, `#!/bin/sh\nprintf global > '${marker}'\necho walgit-global\n`, { mode: 0o755 });
-    for (const source of ['release', 'environment']) {
-      if (source === 'environment') {
-        await writeFile(join(root, 'machine-native.json'), JSON.stringify({
-          ...runtime, walgit: { source, path: environmentBinary, ...await nativeFileDigest(environmentBinary) },
-        }));
-      }
-      const child = Bun.spawn([process.execPath, '--eval', `
-        import { prepareMachineNativeRuntime } from ${JSON.stringify(join(import.meta.dir, '../src/native-runtime.ts'))};
-        await prepareMachineNativeRuntime(${JSON.stringify(root)});
-      `], { env: { ...process.env, GITSPACE_WALGIT_BINARY: decoy }, stdout: 'pipe', stderr: 'pipe' });
-      const [error, code] = await Promise.all([new Response(child.stderr).text(), child.exited]);
-      if (code !== 0) throw new Error(`Native selection child failed: ${error}`);
-      expect(await readFile(marker, 'utf8')).toBe(source);
-    }
-  });
-
   it('runs git with the selected generation\'s verified Git LFS first on PATH', async () => {
     const { root } = await fixture();
     const { binary } = await gitLfsFixture(root);
+    const decoyDirectory = join(root, 'global-bin');
+    const decoyMarker = join(root, 'global-git-lfs-executed');
+    await mkdir(decoyDirectory);
+    await writeFile(join(decoyDirectory, 'git-lfs'), `#!/bin/sh\nprintf global > '${decoyMarker}'\necho 'git-lfs/global'\n`, { mode: 0o755 });
+    const inherited = { ...process.env, PATH: `${decoyDirectory}:${process.env.PATH ?? ''}` };
     const native = await prepareMachineNativeRuntime(root);
     expect(native.gitLfs).toBe(binary);
     const child = Bun.spawn(['git', 'lfs', 'version'], {
-      env: { ...process.env, ...machineToolEnvironment(process.env, native) }, stdout: 'pipe', stderr: 'pipe',
+      env: { ...inherited, ...machineToolEnvironment(inherited, native) }, stdout: 'pipe', stderr: 'pipe',
     });
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
     expect(stdout).toBe('git-lfs/3.8.0 (bundled fixture)\n');
+    expect(await Bun.file(decoyMarker).exists()).toBe(false);
   });
 
   it('rejects tampered Git LFS bytes without executing them', async () => {

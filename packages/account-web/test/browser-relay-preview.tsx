@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, Check, ChevronRight, Chrome, Copy, ExternalLink, GitBranch, Globe2, Laptop, Monitor, Puzzle, Radio, Server, Settings2, ShieldCheck, TestTube2, UserRound, Wifi } from 'lucide-react';
+import { ArrowLeft, Bot, Check, ChevronRight, Copy, ExternalLink, GitBranch, Globe2, Laptop, Monitor, Puzzle, Radio, Server, Settings2, ShieldCheck, TestTube2, UserRound, Wifi } from 'lucide-react';
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../src/styles.css';

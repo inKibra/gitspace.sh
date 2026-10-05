@@ -22,7 +22,7 @@ import { tenantRootPrivateKey } from './setup.js';
 
 const machineSigningPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 33);
 const machineExchangePrivateKey = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);
-const HASH = `sha256:${'ab'.repeat(32)}`;
+const HASH: `sha256:${string}` = `sha256:${'ab'.repeat(32)}`;
 
 function stageInput(sha: string): StageReleaseInput {
   return {
@@ -33,7 +33,6 @@ function stageInput(sha: string): StageReleaseInput {
     artifacts: {
       worker: { key: `releases/${sha}/worker.mjs`, hash: HASH, size: 1024 },
       machine: { key: `releases/${sha}/machine.js`, hash: HASH, size: 2048 },
-      omp: { key: `releases/${sha}/omp.js`, hash: HASH, size: 8192 },
       frontend: { key: `releases/${sha}/frontend`, hash: HASH, size: 4096 },
     },
     worker: {
@@ -61,7 +60,6 @@ function stageInput(sha: string): StageReleaseInput {
       ],
       migrations: [{ tag: 'v1', newSqliteClasses: ['CredentialVaultDO'] }],
     },
-    omp: { upstreamVersion: '18.1.10', bunVersion: '1.4.0', packages: { '@oh-my-pi/pi-coding-agent': '18.1.10' }, patches: [] },
   };
 }
 
@@ -103,31 +101,35 @@ async function tenant() {
 }
 
 describe('tenant releases', () => {
-  it('admits only actual compatible machine and OMP releases, independently of desired selections and failed upgrades', async () => {
+  it('rejects retired OMP staging, activation, and acknowledgements without changing the release', async () => {
+    const { control } = await tenant();
+    const input = stageInput('retired-target');
+    await control('deploy.stage', input);
+    const before = await control('deploy.status', {});
+    await expect(control('deploy.stage', { ...input, omp: null })).rejects.toThrow();
+    await expect(control('deploy.stage', { ...input, artifacts: { ...input.artifacts, omp: input.artifacts.machine } })).rejects.toThrow();
+    await expect(control('deploy.launch', { sha: input.sha, targets: ['omp'] })).rejects.toThrow();
+    await expect(control('deploy.machineApplied', { sha: input.sha, target: 'omp', generation: 'legacy', status: 'applied' })).rejects.toThrow();
+    await expect(control('deploy.machineChannelApplied', { target: 'omp', generation: 'legacy' })).rejects.toThrow();
+    expect(await control('deploy.status', {})).toEqual(before);
+  });
+
+  it('admits only actual compatible machine releases, independently of desired selections and failed upgrades', async () => {
     const { userId } = await tenant();
     const releases = env.TENANT_RELEASES.getByName(userId);
     await releases.stage(stageInput('compatible-machine'), 'machine-a');
-    await releases.stage(stageInput('compatible-omp'), 'machine-a');
     await releases.stage({ ...stageInput('legacy-runtime'), inferenceVersion: undefined }, 'machine-a');
     await releases.launch({ sha: 'compatible-machine', targets: ['machine'] });
-    await releases.launch({ sha: 'compatible-omp', targets: ['omp'] });
     expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
 
     await releases.machineApplied('machine-a', { sha: 'legacy-runtime', target: 'machine', generation: 'old-machine', status: 'applied' });
-    await releases.machineApplied('machine-a', { sha: 'legacy-runtime', target: 'omp', generation: 'old-omp', status: 'applied' });
     expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
     await releases.machineApplied('machine-a', { sha: 'compatible-machine', target: 'machine', generation: 'new-machine', status: 'applied' });
-    expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
-    await releases.machineApplied('machine-a', { sha: 'compatible-omp', target: 'omp', generation: 'new-omp', status: 'applied' });
     expect(await releases.machineInferenceCompatible('machine-a')).toBe(true);
     expect(await releases.machineInferenceCompatible('unacknowledged-machine')).toBe(false);
 
-    await releases.launch({ sha: 'legacy-runtime', targets: ['machine', 'omp'] });
+    await releases.launch({ sha: 'legacy-runtime', targets: ['machine'] });
     await releases.machineApplied('machine-a', { sha: 'legacy-runtime', target: 'machine', generation: 'failed-update', status: 'failed' });
-    expect(await releases.machineInferenceCompatible('machine-a')).toBe(true);
-    await releases.machineChannelApplied('machine-a', { target: 'omp', generation: 'channel-omp' });
-    expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
-    await releases.machineApplied('machine-a', { sha: 'compatible-omp', target: 'omp', generation: 'repaired-omp', status: 'applied' });
     expect(await releases.machineInferenceCompatible('machine-a')).toBe(true);
     await releases.machineChannelApplied('machine-a', { target: 'machine', generation: 'channel-machine' });
     expect(await releases.machineInferenceCompatible('machine-a')).toBe(false);
@@ -143,21 +145,19 @@ describe('tenant releases', () => {
     await env.CREDENTIALS.getByName(userId).ensureInference();
     const unverifiedWorker = await releases.status(userId, { sha: 'legacy', version: 'legacy' });
     expect(unverifiedWorker.releases.find((record) => record.sha === 'legacy')?.status.worker).toBe('pending');
-    const launched = await releases.launch({ sha: 'scoped', targets: ['worker', 'machine', 'omp', 'frontend'] });
+    const launched = await releases.launch({ sha: 'scoped', targets: ['worker', 'machine', 'frontend'] });
     await releases.machineApplied('machine-a', { sha: 'scoped', target: 'machine', generation: 'scoped-machine', status: 'applied' });
-    await releases.machineApplied('machine-a', { sha: 'scoped', target: 'omp', generation: 'scoped-omp', status: 'applied' });
     await releases.setWorkerStatus('scoped', 'applied', null);
     const before = await releases.status(userId, { sha: 'scoped', version: 'scoped' });
 
-    await expect(releases.launch({ sha: 'legacy', targets: ['worker', 'machine', 'omp', 'frontend'] })).rejects.toThrow();
-    await expect(releases.stage({ ...stageInput('unstamped'), inferenceVersion: undefined }, 'machine-a')).rejects.toThrow();
-    await expect(releases.machineApplied('machine-a', { sha: 'legacy', target: 'machine', generation: 'legacy-machine', status: 'applied' })).rejects.toThrow();
-    await expect(releases.machineApplied('machine-a', { sha: 'legacy', target: 'omp', generation: 'legacy-omp', status: 'applied' })).rejects.toThrow();
-    await expect(releases.setWorkerStatus('legacy', 'applied', null)).rejects.toThrow();
+    await expect(Promise.resolve(releases.launch({ sha: 'legacy', targets: ['worker', 'machine', 'frontend'] }))).rejects.toThrow();
+    await expect(Promise.resolve(releases.stage({ ...stageInput('unstamped'), inferenceVersion: undefined }, 'machine-a'))).rejects.toThrow();
+    await expect(Promise.resolve(releases.machineApplied('machine-a', { sha: 'legacy', target: 'machine', generation: 'legacy-machine', status: 'applied' }))).rejects.toThrow();
+    await expect(Promise.resolve(releases.setWorkerStatus('legacy', 'applied', null))).rejects.toThrow();
     const after = await releases.status(userId, { sha: 'scoped', version: 'scoped' });
     expect(after).toEqual(before);
     expect(after.desired).toEqual(launched!.desired);
-    expect(after.current.machines).toEqual({ 'machine-a': { sha: 'scoped', ompSha: 'scoped', generation: 'scoped-omp' } });
+    expect(after.current.machines).toEqual({ 'machine-a': { sha: 'scoped', generation: 'scoped-machine' } });
   });
 
   it('lets the first cutover deploy, staged unstamped by a pre-profile launcher, activate once this Worker runs as that release', async () => {
@@ -166,16 +166,15 @@ describe('tenant releases', () => {
     // The pre-profile launcher and Worker stage without a capability stamp; this test Worker is built as 'test-inference-worker'.
     await releases.stage({ ...stageInput('test-inference-worker'), inferenceVersion: undefined }, 'machine-a');
     await releases.stage({ ...stageInput('other-legacy'), inferenceVersion: undefined }, 'machine-a');
-    await releases.launch({ sha: 'test-inference-worker', targets: ['worker', 'machine', 'omp', 'frontend'] });
+    await releases.launch({ sha: 'test-inference-worker', targets: ['worker', 'machine', 'frontend'] });
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
     await env.CREDENTIALS.getByName(userId).ensureInference();
 
     await releases.machineApplied('machine-a', { sha: 'test-inference-worker', target: 'machine', generation: 'first-machine', status: 'applied' });
-    await releases.machineApplied('machine-a', { sha: 'test-inference-worker', target: 'omp', generation: 'first-omp', status: 'applied' });
     expect(await releases.machineInferenceCompatible('machine-a')).toBe(true);
     const status = await releases.status(userId, { sha: 'test-inference-worker', version: 'test-inference-worker' });
     expect(status.releases.find((record) => record.sha === 'test-inference-worker')).toMatchObject({ inferenceVersion: 1, status: { worker: 'applied' } });
-    await expect(releases.machineApplied('machine-b', { sha: 'other-legacy', target: 'machine', generation: 'legacy', status: 'applied' })).rejects.toThrow();
+    await expect(Promise.resolve(releases.machineApplied('machine-b', { sha: 'other-legacy', target: 'machine', generation: 'legacy', status: 'applied' }))).rejects.toThrow();
   });
 
   it('does not let a compatible machine-only rebuild certify retained legacy Worker and frontend artifacts', async () => {
@@ -184,18 +183,18 @@ describe('tenant releases', () => {
     const input = stageInput('mixed-capabilities');
     await releases.stage({ ...input, inferenceVersion: undefined }, 'machine-a');
     await releases.stage({
-      ...input, artifacts: { worker: null, frontend: null, omp: null, machine: input.artifacts.machine }, worker: null, omp: null,
+      ...input, artifacts: { worker: null, frontend: null, machine: input.artifacts.machine }, worker: null,
     }, 'machine-a');
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
     await env.CREDENTIALS.getByName(userId).ensureInference();
-    await expect(releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] })).rejects.toThrow();
+    await expect(Promise.resolve(releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] }))).rejects.toThrow();
     const rejected = await releases.status(userId, { sha: null, version: null });
-    expect(rejected.desired).toMatchObject({ worker: null, machine: null, omp: null, frontend: null });
+    expect(rejected.desired).toMatchObject({ worker: null, machine: null, frontend: null });
 
     // Replacing every legacy target with a compatible build permits forward repair.
     await releases.stage(input, 'machine-a');
     await releases.stage({
-      ...input, artifacts: { worker: null, frontend: null, omp: null, machine: input.artifacts.machine }, worker: null, omp: null,
+      ...input, artifacts: { worker: null, frontend: null, machine: input.artifacts.machine }, worker: null,
     }, 'machine-a');
     const launched = await releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] });
     expect(launched!.desired).toMatchObject({ worker: input.sha, frontend: input.sha });
@@ -214,15 +213,14 @@ describe('tenant releases', () => {
       }),
     );
     await releases.stage(stageInput('scoped-channel-guard'), 'machine-a');
-    await releases.launch({ sha: 'scoped-channel-guard', targets: ['worker', 'machine', 'omp', 'frontend'] });
+    await releases.launch({ sha: 'scoped-channel-guard', targets: ['worker', 'machine', 'frontend'] });
     await releases.machineApplied('machine-a', { sha: 'scoped-channel-guard', target: 'machine', generation: 'scoped', status: 'applied' });
-    await releases.machineApplied('machine-a', { sha: 'scoped-channel-guard', target: 'omp', generation: 'scoped', status: 'applied' });
     await env.CREDENTIALS.getByName(userId).ensureInference();
     activeWorker = 'scoped-channel-guard';
     const before = await releases.status(userId, { sha: 'scoped-channel-guard', version: 'scoped-channel-guard' });
 
     await expect(control('deploy.revert', {})).rejects.toThrow();
-    await expect(releases.revert()).rejects.toThrow();
+    await expect(Promise.resolve(releases.revert())).rejects.toThrow();
     await expect(control('deploy.machineChannelApplied', { target: 'machine', generation: 'legacy-channel' })).rejects.toThrow();
     await expect(control('deploy.machineChannelApplied', { target: 'omp', generation: 'legacy-channel' })).rejects.toThrow();
     expect(platformReverts).toBe(0);
@@ -253,12 +251,12 @@ describe('tenant releases', () => {
     const input = stageInput('split-targets');
     const html = '<!doctype html><title>retained frontend</title>';
     await env.DATA.put(`users/${userId}/releases/split-targets/frontend/index.html`, html);
-    await control('deploy.stage', { ...input, artifacts: { ...input.artifacts, machine: null, omp: null }, omp: null });
+    await control('deploy.stage', { ...input, artifacts: { ...input.artifacts, machine: null } });
     await releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] });
     await releases.setWorkerStatus(input.sha, 'applied', null);
     await control('deploy.stage', {
-      ...input, artifacts: { worker: null, machine: input.artifacts.machine, omp: null, frontend: null },
-      worker: null, omp: null,
+      ...input, artifacts: { worker: null, machine: input.artifacts.machine, frontend: null },
+      worker: null,
     });
     await control('deploy.launch', { sha: input.sha, targets: ['machine'] });
     expect(await (await SELF.fetch(new Request(`${origin}/`))).text()).toBe(html);
@@ -273,14 +271,14 @@ describe('tenant releases', () => {
     const { control } = await tenant();
     network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/deploy`, () => new HttpResponse(null, { status: 503 })));
     const staged = releaseRecordSchema.parse(await control('deploy.stage', stageInput('abc123')));
-    expect(staged).toMatchObject({ sha: 'abc123', builtBy: 'machine-a', status: { worker: 'pending', frontend: 'pending', machines: {}, omps: {} }, error: null });
+    expect(staged).toMatchObject({ sha: 'abc123', builtBy: 'machine-a', status: { worker: 'pending', frontend: 'pending', machines: {} }, error: null });
 
-    const launched = await control('deploy.launch', { sha: 'abc123', targets: ['worker', 'machine', 'omp', 'frontend'] }) as { record: ReleaseRecord; desired: TenantDesired };
-    expect(releaseRecordSchema.parse(launched.record).status).toEqual({ worker: 'failed', frontend: 'applied', machines: {}, omps: {} });
-    expect(launched.desired).toMatchObject({ worker: 'abc123', machine: 'abc123', omp: 'abc123', frontend: 'abc123' });
+    const launched = await control('deploy.launch', { sha: 'abc123', targets: ['worker', 'machine', 'frontend'] }) as { record: ReleaseRecord; desired: TenantDesired };
+    expect(releaseRecordSchema.parse(launched.record).status).toEqual({ worker: 'failed', frontend: 'applied', machines: {} });
+    expect(launched.desired).toMatchObject({ worker: 'abc123', machine: 'abc123', frontend: 'abc123' });
 
     const status = deploymentStatusSchema.parse(await control('deploy.status', {}));
-    expect(status.desired).toMatchObject({ worker: 'abc123', machine: 'abc123', omp: 'abc123', frontend: 'abc123' });
+    expect(status.desired).toMatchObject({ worker: 'abc123', machine: 'abc123', frontend: 'abc123' });
     expect(status.current).toEqual({ worker: { sha: null, version: null }, machines: {} });
     expect(status.releases.map((release) => release.sha)).toEqual(['abc123']);
     expect(status.releases[0]!.status.worker).toBe('failed');
@@ -290,28 +288,23 @@ describe('tenant releases', () => {
   it('records machine convergence and reverts to the channel build', async () => {
     const { userId, control } = await tenant();
     await control('deploy.stage', stageInput('def456'));
-    await control('deploy.launch', { sha: 'def456', targets: ['machine', 'omp'] });
+    await control('deploy.launch', { sha: 'def456', targets: ['machine'] });
 
     const applied = releaseRecordSchema.parse(await control('deploy.machineApplied', { sha: 'def456', target: 'machine', generation: 'gen-7', status: 'applied' }));
-    expect(applied.status).toEqual({ worker: 'skipped', frontend: 'skipped', machines: { 'machine-a': 'applied' }, omps: {} });
-    const ompApplied = releaseRecordSchema.parse(await control('deploy.machineApplied', { sha: 'def456', target: 'omp', generation: 'gen-8', status: 'applied' }));
-    expect(ompApplied.status.omps).toEqual({ 'machine-a': 'applied' });
-    const machineOnly = await control('deploy.launch', { sha: 'def456', targets: ['machine'] }) as { record: ReleaseRecord; desired: TenantDesired };
-    expect(machineOnly.desired.omp).toBe('def456');
-    expect(machineOnly.record.status.omps).toEqual({ 'machine-a': 'applied' });
+    expect(applied.status).toEqual({ worker: 'skipped', frontend: 'skipped', machines: { 'machine-a': 'applied' } });
     let status = deploymentStatusSchema.parse(await control('deploy.status', {}));
-    expect(status.current.machines).toEqual({ 'machine-a': { sha: 'def456', ompSha: 'def456', generation: 'gen-8' } });
+    expect(status.current.machines).toEqual({ 'machine-a': { sha: 'def456', generation: 'gen-7' } });
 
     const failed = releaseRecordSchema.parse(await control('deploy.machineApplied', { sha: 'def456', target: 'machine', generation: 'gen-9', status: 'failed', error: 'health probe timed out' }));
     expect(failed.status.machines).toEqual({ 'machine-a': 'failed' });
     expect(failed.error).toBe('health probe timed out');
     status = deploymentStatusSchema.parse(await control('deploy.status', {}));
-    expect(status.current.machines).toEqual({ 'machine-a': { sha: 'def456', ompSha: 'def456', generation: 'gen-8' } });
+    expect(status.current.machines).toEqual({ 'machine-a': { sha: 'def456', generation: 'gen-7' } });
 
     const reverted = deploymentStatusSchema.parse(await control('deploy.revert', {}));
-    expect(reverted.desired).toMatchObject({ worker: null, machine: null, omp: null, frontend: null });
+    expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
     expect(reverted.releases).toHaveLength(1);
-    expect(reverted.current.machines).toEqual({ 'machine-a': { sha: 'def456', ompSha: 'def456', generation: 'gen-8' } });
+    expect(reverted.current.machines).toEqual({ 'machine-a': { sha: 'def456', generation: 'gen-7' } });
     await env.FLEET_CATALOG.getByName(userId).putMachine({
       id: 'machine-b', label: 'Machine B', state: 'online', rpcEndpoint: 'https://machine-b.test/rpc',
       kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null,
@@ -320,14 +313,8 @@ describe('tenant releases', () => {
     await control('deploy.machineChannelApplied', { machineId: 'machine-b', target: 'machine', generation: 'channel-machine' });
     status = deploymentStatusSchema.parse(await control('deploy.status', {}));
     expect(status.current.machines).toEqual({
-      'machine-a': { sha: null, ompSha: 'def456', generation: 'channel-machine' },
-      'machine-b': { sha: 'def456', ompSha: null, generation: 'gen-b' },
-    });
-    await control('deploy.machineChannelApplied', { target: 'omp', generation: 'channel-omp' });
-    status = deploymentStatusSchema.parse(await control('deploy.status', {}));
-    expect(status.current.machines).toEqual({
-      'machine-a': { sha: null, ompSha: null, generation: 'channel-omp' },
-      'machine-b': { sha: 'def456', ompSha: null, generation: 'gen-b' },
+      'machine-a': { sha: null, generation: 'channel-machine' },
+      'machine-b': { sha: 'def456', generation: 'gen-b' },
     });
     await expect(control('deploy.launch', { sha: 'missing', targets: ['machine'] })).rejects.toThrow('RELEASE_NOT_FOUND');
   });
@@ -341,22 +328,18 @@ describe('tenant releases', () => {
       kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null,
     });
     await control('deploy.stage', stageInput('previous'));
-    for (const target of ['machine', 'omp'] as const) {
-      await releases.machineApplied(pending.id, { sha: 'previous', target, generation: 'gen-b', status: 'applied' });
-    }
+    await releases.machineApplied(pending.id, { sha: 'previous', target: 'machine', generation: 'gen-b', status: 'applied' });
     await control('deploy.stage', stageInput('desired'));
-    await control('deploy.launch', { sha: 'desired', targets: ['machine', 'omp'] });
-    for (const target of ['machine', 'omp'] as const) {
-      await control('deploy.machineApplied', { sha: 'desired', target, generation: 'gen-a', status: 'applied' });
-    }
+    await control('deploy.launch', { sha: 'desired', targets: ['machine'] });
+    await control('deploy.machineApplied', { sha: 'desired', target: 'machine', generation: 'gen-a', status: 'applied' });
 
     const before = deploymentStatusSchema.parse(await control('deploy.status', {}));
-    const survivor = { 'machine-a': { sha: 'desired', ompSha: 'desired', generation: 'gen-a' } };
+    const survivor = { 'machine-a': { sha: 'desired', generation: 'gen-a' } };
     expect(before.current.machines).toEqual({
       ...survivor,
-      'machine-b': { sha: 'previous', ompSha: 'previous', generation: 'gen-b' },
+      'machine-b': { sha: 'previous', generation: 'gen-b' },
     });
-    expect(before.desired).toMatchObject({ machine: 'desired', omp: 'desired' });
+    expect(before.desired).toMatchObject({ machine: 'desired' });
 
     // Being offline is not removal: it retains the existing deferred convergence semantics.
     const offline = await catalog.putMachine({ ...pending, state: 'offline', desiredState: 'offline', lifecycleRevision: 2 });
@@ -404,7 +387,7 @@ describe('tenant releases', () => {
 
     await control('deploy.stage', stageInput('good111'));
     const good = await control('deploy.launch', { sha: 'good111', targets: ['worker'] }, platform) as { record: ReleaseRecord };
-    expect(good.record.status).toEqual({ worker: 'applied', frontend: 'skipped', machines: {}, omps: {} });
+    expect(good.record.status).toEqual({ worker: 'applied', frontend: 'skipped', machines: {} });
     expect(good.record.error).toBeNull();
     expect(deploys).toHaveLength(1);
     expect(deploys[0]).toEqual({
@@ -414,17 +397,17 @@ describe('tenant releases', () => {
 
     await control('deploy.stage', stageInput('bad222'));
     const bad = await control('deploy.launch', { sha: 'bad222', targets: ['worker', 'frontend'] }, platform) as { record: ReleaseRecord; desired: TenantDesired };
-    expect(bad.record.status).toEqual({ worker: 'failed', frontend: 'applied', machines: {}, omps: {} });
+    expect(bad.record.status).toEqual({ worker: 'failed', frontend: 'applied', machines: {} });
     expect(bad.record.error).toContain('reverted to good111');
     expect(bad.desired.worker).toBe('bad222');
     await control('deploy.stage', stageInput('machine333'));
     await control('deploy.launch', { sha: 'machine333', targets: ['machine'] });
     const status = deploymentStatusSchema.parse(await control('deploy.status', {}, platform));
-    expect(status.desired).toMatchObject({ worker: 'bad222', machine: 'machine333', omp: null, frontend: 'bad222' });
+    expect(status.desired).toMatchObject({ worker: 'bad222', machine: 'machine333', frontend: 'bad222' });
     expect(status.current.worker).toEqual({ sha: 'good111', version: 'good111' });
 
     const reverted = deploymentStatusSchema.parse(await control('deploy.revert', {}, platform));
-    expect(reverted.desired).toMatchObject({ worker: null, machine: null, omp: null, frontend: null });
+    expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
     expect(reverted.current.worker).toEqual({ sha: null, version: 'channel:1' });
     expect(reverts).toEqual([{ accountId: userId, to: 'channel' }]);
     serving = 'channel';

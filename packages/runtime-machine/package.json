@@ -1,0 +1,20 @@
+{
+  "name": "@gitspace/runtime-machine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json", "test": "bun ../../scripts/test-isolated.ts src", "test:browser:headless": "bun src/browser-smoke.ts" },
+  "dependencies": {
+    "@puppeteer/browsers": "3.0.6",
+    "@earendil-works/pi-durable": "1.0.0",
+    "@earendil-works/pi-codemode": "1.0.0",
+    "@earendil-works/chord": "1.0.0",
+    "@gitspace/protocol": "workspace:*",
+    "@gitspace/protocol-runtime": "workspace:*",
+    "@gitspace/protocol-environment": "workspace:*",
+    "@gitspace/supervisor": "workspace:*",
+    "better-result": "3.0.1",
+    "zod": "^4.4.3"
+  }
+}

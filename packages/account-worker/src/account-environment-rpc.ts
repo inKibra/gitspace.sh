@@ -1,5 +1,5 @@
 import {
-  executionHash, projectEnvironmentState, EnvironmentError, environmentFailure,
+  executionHash, browserOriginHash, projectEnvironmentState, EnvironmentError, environmentFailure,
   type LifecycleMutation, type LifecycleState,
 } from '@gitspace/protocol-environment';
 import type { GitSpaceRpcContext, VerifiedDevice } from '@gitspace/protocol';
@@ -40,7 +40,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   const get = server.implement(getWorkspaceEnvironmentContract).handler(async ({ input, errors }) => {
     try {
       const { authority } = await authorityFor(input.spaceId);
-      return ok(await view(input.spaceId, await authority.getLifecycleState(input.spaceId)));
+      return ok(await view(input.spaceId, await authority.refreshBrowserOrigins(input.spaceId)));
     } catch (error) {
       const failure = environmentFailure(error);
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'read cloud environment', message: error instanceof Error ? error.message : String(error) }));
@@ -50,10 +50,17 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     const device = await requireLifecycleControl();
     const { authority } = await authorityFor(spaceId);
     if (input.approved) {
-      const state = await authority.getLifecycleState(spaceId);
-      const execution = state.executions.find((entry) => entry.hash === input.executionHash);
-      if (!execution) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review the execution content before approving');
-      if (await executionHash({ kind: execution.kind, command: execution.content }) !== execution.hash) throw new EnvironmentError('ContentChanged', 'Execution preview does not match its content hash');
+      const state = await authority.refreshBrowserOrigins(spaceId);
+      const origin = state.browserOrigins.find((entry) => entry.hash === input.executionHash);
+      if (origin) {
+        if (await browserOriginHash(origin.pattern) !== origin.hash) throw new EnvironmentError('ContentChanged', 'Browser origin does not match its content hash');
+        const workspace = (await authority.listWorkspaces()).find((entry) => entry.id === spaceId);
+        if (input.scope === 'project' && workspace?.kind !== 'base') throw new EnvironmentError('PermissionDenied', 'Approve browser origins on the base workspace for project-wide access');
+      } else {
+        const execution = state.executions.find((entry) => entry.hash === input.executionHash);
+        if (!execution) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review current content before approving');
+        if (await executionHash({ kind: execution.kind, command: execution.content }) !== execution.hash) throw new EnvironmentError('ContentChanged', 'Execution preview does not match its content hash');
+      }
     }
     const result = await authority.mutateLifecycleState(spaceId, input, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true });
     if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);

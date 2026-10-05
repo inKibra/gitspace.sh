@@ -14,14 +14,15 @@
  * stays available for fast local iteration; CI uses `bun run test` for a
  * clean, leak-free signal.
  *
- * Usage: bun scripts/test-isolated.ts [pathPrefix ...]   (default: src)
+ * Usage: bun scripts/test-isolated.ts pathPrefix [pathPrefix ...]
  */
 
 import { readdirSync, statSync } from 'fs';
 import { join } from 'path';
 
 const roots = process.argv.slice(2);
-const searchRoots = roots.length > 0 ? roots : ['src'];
+if (roots.length === 0) throw new Error('Name the package test directories to run; use bun run test:packages for all packages.');
+const searchRoots = roots;
 const CONCURRENCY = Math.max(2, Math.min(8, (navigator.hardwareConcurrency ?? 4) - 1));
 
 function findTests(dir: string, out: string[]): void {
@@ -51,12 +52,9 @@ const failed: string[] = [];
 let done = 0;
 
 async function runOne(file: string): Promise<void> {
-  // GSSH_TEST_ISOLATED silences the preload's multi-file pollution warning:
-  // one file per process is exactly the safe case it warns about.
   const proc = Bun.spawn(['bun', 'test', file], {
     stdout: 'pipe',
     stderr: 'pipe',
-    env: { ...process.env, GSSH_TEST_ISOLATED: '1' },
   });
   const code = await proc.exited;
   done += 1;

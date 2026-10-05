@@ -26,6 +26,29 @@ const claim = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op
 const finish = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'finish' }>> = {}): LifecycleMutation => ({ op: 'finish', runId, token: 'ownership', status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {}, ...overrides });
 
 describe('isomorphic environment decisions', () => {
+  it('requires authenticated attachment admission and keeps copy bindings out of primary state', () => {
+    const context = scenario();
+    const attachment = { attachmentId: 'runner-a', generation: 3 };
+    const mutation = claim('runner-preparation', { generation: null, phase: 'workspace/materialize', attachment });
+    expect(() => context.apply(mutation)).toThrow();
+    const actor = { ...machine, attachment };
+    const accepted = context.apply(mutation, actor);
+    expect(accepted.runs[0]?.attachment).toEqual(attachment);
+    const finished = context.apply(finish('runner-preparation', { bindings: { SERVICE_PORT: '5433' } }), actor);
+    expect(finished.bindings).toEqual({});
+    expect(finished.runs[0]?.bindings).toEqual({ SERVICE_PORT: '5433' });
+    expect(() => context.apply(claim('runner-preparation', { generation: null, phase: 'workspace/materialize', attachment: { ...attachment, generation: 4 } }), { ...machine, attachment: { ...attachment, generation: 4 } })).toThrow();
+  });
+
+  it('does not reuse one attachment preparation receipt for another copy', () => {
+    const context = scenario();
+    const first = { attachmentId: 'runner-a', generation: 1 };
+    context.apply(claim('first-copy', { generation: null, attachment: first }), { ...machine, attachment: first });
+    context.apply(finish('first-copy'), { ...machine, attachment: first });
+    const second = { attachmentId: 'runner-b', generation: 1 };
+    expect(context.apply(claim('second-copy', { generation: null, attachment: second }), { ...machine, attachment: second }).claim?.status).toBe('claimed');
+  });
+
   it('recognizes only an exact interactive directive in the leading shell header', () => {
     expect(isInteractiveLifecycleScript('#!/bin/bash\r\n# rationale\r\n\r\n# gitspace: interactive\r\nread value')).toBe(true);
     expect(isInteractiveLifecycleScript('echo running\n# gitspace: interactive')).toBe(false);

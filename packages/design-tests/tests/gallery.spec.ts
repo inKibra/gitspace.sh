@@ -89,3 +89,19 @@ test('rich Markdown loads code, Mermaid, and math plugins on demand', async ({ p
   await expect(page.getByText('Open external link?')).toBeVisible();
   await expect(page.getByText('https://github.com/', { exact: true })).toBeVisible();
 });
+
+test('origin approvals work without a machine and remain independent', async ({ page }) => {
+  await page.goto('/?gallery=environment&offline=1');
+  const origins = page.getByRole('region', { name: 'Browser origins' });
+  const pending = origins.getByRole('button', { name: 'Review & approve' });
+  await expect(pending).toHaveCount(2);
+  await expect(pending.first()).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Run checks', exact: true })).toBeDisabled();
+  await pending.first().click();
+  await expect(pending).toHaveCount(1);
+  await expect(origins.getByText('Approved for this workspace')).toBeVisible();
+  const revoke = origins.getByRole('button', { name: 'Revoke approval' });
+  await expect(revoke).toBeEnabled();
+  await revoke.click();
+  await expect(pending).toHaveCount(2);
+});

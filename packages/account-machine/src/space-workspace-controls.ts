@@ -1,18 +1,44 @@
 import { z } from 'zod';
 import type { FactEventStore, GitSpaceDatabase } from '@gitspace/core';
 import { assertWorkspacePhase, resolveWorkspaceRelations, WorkspacePhaseSchema, WorkspaceRelationsSchema } from '@gitspace/protocol-workspace';
-import { assertLifecycleCommandAuthorized, LifecyclePhaseSchema } from '@gitspace/protocol-environment';
+import { assertLifecycleCommandAuthorized, LifecyclePhaseSchema, LifecycleRunRequestSchema } from '@gitspace/protocol-environment';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
-import type { ProjectLifecycleManager } from './project-lifecycle.js';
+import type { CreateWorkspaceInput, ProjectLifecycleManager } from './project-lifecycle.js';
 import type { SpaceLifecycleController } from './portable-space-controller.js';
 import type { MachineSessionCoordinator } from './session-coordinator.js';
-import { spaceEnvironmentSchemas, type SpaceWorkspaceControls } from './space-eval-sdk.js';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 
 const revision = z.number().int().nonnegative();
 
-/** The eval surface shares the machine's existing lifecycle and ownership fences. */
+export interface SpaceWorkspaceCreation {
+  workspace: { id: string; projectId: string };
+  operation: unknown;
+}
+
+export interface SpaceWorkspaceControls {
+  create(input: CreateWorkspaceInput): Promise<SpaceWorkspaceCreation>;
+  manage(method: 'setPhase' | 'setRelations' | 'open' | 'close' | 'archive' | 'restore', workspace: CloudWorkspaceDefinition, input: Record<string, unknown>): Promise<unknown>;
+  instructionsChanged(projectId: string, spaceId: string): Promise<void>;
+  refreshArtifacts(projectId: string, spaceId: string): Promise<void>;
+  environment(method: SpaceEnvironmentMethod, projectId: string, spaceId: string, input: Record<string, unknown>): Promise<unknown>;
+}
+
+const environmentName = z.string().min(1).max(128).regex(/^[A-Z][A-Z0-9_]*$/u);
+const environmentScope = z.enum(['project', 'workspace']);
+export const spaceEnvironmentSchemas = {
+  get: z.object({}).strict(),
+  runLog: z.object({ runId: z.string().min(1), offset: z.number().int().nonnegative().optional() }).strict(),
+  setProfile: z.object({ profile: z.string().min(1).max(64) }).strict(),
+  putValue: z.object({ scope: environmentScope, name: environmentName, value: z.string().max(16_384) }).strict(),
+  deleteValue: z.object({ scope: environmentScope, name: environmentName }).strict(),
+  runChecks: LifecycleRunRequestSchema.omit({ phase: true, rerun: true, interactive: true }),
+  runPhase: LifecycleRunRequestSchema.extend({ phase: LifecyclePhaseSchema.exclude(['cloud/destroy']) }),
+  cancelRun: LifecycleRunRequestSchema.pick({ runId: true }),
+};
+export type SpaceEnvironmentMethod = keyof typeof spaceEnvironmentSchemas;
+
+/** Machine lifecycle controls share the existing ownership and authorization fences. */
 export function createSpaceWorkspaceControls(options: {
   database: GitSpaceDatabase;
   events: Pick<FactEventStore, 'committed'>;

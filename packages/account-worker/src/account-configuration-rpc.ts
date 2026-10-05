@@ -14,6 +14,7 @@ import {
   listSkillsContract,
   updateSkillContract,
   listMcpConnectionsContract,
+  discoverProjectMcpToolsContract,
   createMcpConnectionContract,
   updateMcpConnectionContract,
   deleteMcpConnectionContract,
@@ -43,6 +44,9 @@ import { UserMcpConnectionsDO, McpConnectionNotFoundError, McpConnectionRevision
 import { ProjectCronsDO, ProjectCronValidationError, ProjectCronNotFoundError, ProjectCronRevisionConflictError, ProjectCronAlreadyRunningError } from './project-crons.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import { signComposioState, type CredentialVaultDO } from './application.js';
+import { requireRuntimeAccess } from './account-runtime-rpc.js';
+import { RuntimeToolResultSchema, RuntimeJsonSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { z } from 'zod';
 
 function mcpConnectionView(connection: McpConnection) {
   return { ...connection, statusCheckedAt: connection.statusCheckedAt ? new Date(connection.statusCheckedAt) : null, createdAt: new Date(connection.createdAt), updatedAt: new Date(connection.updatedAt) };
@@ -51,7 +55,7 @@ function projectMcpGrantView(grant: ProjectMcpGrant) {
   return { ...grant, createdAt: new Date(grant.createdAt), updatedAt: new Date(grant.updatedAt) };
 }
 
-/** Account management uses canonical authorities, never runtime placement or control-request forwarding. */
+/** Account configuration remains canonical; MCP discovery admits effects through the cloud runtime. */
 export function configurationCloudProcedures(env: Env, userId: string, deviceId: string, origin: string) {
   const server = serverRpc.context<GitSpaceRpcContext>();
   const projects = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(userId);
@@ -248,6 +252,27 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       return err(errors.OperationFailed({ operation: 'deleteGrant', message: error instanceof Error ? error.message : String(error) }));
     }
   });
+  const discover = server.implement(discoverProjectMcpToolsContract).handler(async ({ input, errors }) => {
+    try {
+      const canonical = await project(input.projectId);
+      const identity = RuntimeIdentitySchema.parse({ projectId: input.projectId, workspaceId: input.projectId });
+      const { authority } = await requireRuntimeAccess(env, userId, deviceId, identity, 'rpc.write');
+      const [all, grants] = await Promise.all([connections.list(userId), canonical.listMcpGrants()]);
+      const selected = all.filter(connection => connection.enabled && grants.some(grant => grant.connectionId === connection.id && grant.enabled && grant.projectSpaceEnabled)).sort((left, right) => left.id.localeCompare(right.id));
+      const discovered = [];
+      for (const [index, connection] of selected.entries()) {
+        const result = RuntimeToolResultSchema.parse(await authority.runtimeDiscoverMcp({ ...identity, requestId: `${input.requestId}:${index}`, args: { connectionId: connection.id } }));
+        if (result.status === 'failed') throw new Error(result.error.message);
+        if (result.status === 'interrupted') throw new Error('MCP discovery was interrupted; its effect outcome is uncertain');
+        const text = result.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+        const tools = z.array(z.object({ name: z.string(), description: z.string().optional(), inputSchema: z.record(z.string(), RuntimeJsonSchema), outputSchema: z.record(z.string(), RuntimeJsonSchema).optional(), annotations: z.object({ readOnlyHint: z.boolean().optional(), destructiveHint: z.boolean().optional(), idempotentHint: z.boolean().optional(), openWorldHint: z.boolean().optional() }).optional() })).parse(JSON.parse(text));
+        for (const tool of tools) discovered.push({ connectionId: connection.id, connectionLabel: connection.label, serverName: connection.id, name: tool.name, ompToolName: `${connection.id}.${tool.name}`, description: tool.description ?? null, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema ?? null, readOnly: tool.annotations?.readOnlyHint ?? null, destructive: tool.annotations?.destructiveHint ?? null, idempotent: tool.annotations?.idempotentHint ?? null, openWorld: tool.annotations?.openWorldHint ?? null });
+      }
+      return ok(discovered);
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'discover MCP tools', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   const catalog = server.implement(listComposioPluginCatalogContract).handler(async ({ errors }) => {
     try {
       return ok(await (await gateway()).catalog());
@@ -357,6 +382,6 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
     crons: { list: listCrons, create: createCron, update: updateCron, delete: deleteCron, runNow, history },
-    mcp: { connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
+    mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
   };
 }

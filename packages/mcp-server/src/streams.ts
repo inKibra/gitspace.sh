@@ -47,6 +47,20 @@ export async function readLivePage(options: {
       if (next.done) { reason = 'ended'; break; }
       if (next.value.status === 'error') throw new OperationFailure(next.value.error);
       const value = next.value.value as Record<string, unknown>;
+      if (path === 'runtime.watch') {
+        const snapshot = value.snapshot as Record<string, unknown> | undefined;
+        const nextCursor = value.type === 'delta' ? value.cursor : snapshot?.cursor;
+        if (!['snapshot', 'reset', 'delta'].includes(String(value.type)) || !Number.isSafeInteger(nextCursor) || Number(nextCursor) < 0) throw new StreamFailure('INVALID_STREAM_CURSOR');
+        if (value.type === 'delta' && (value.baseCursor !== cursor || Number(nextCursor) <= Number(cursor))) throw new StreamFailure('STREAM_CURSOR_GAP');
+        const encoded = encode(value);
+        const size = utf8.encode(JSON.stringify(encoded)).byteLength;
+        if (size > STREAM_LIMITS.bytes) throw new StreamFailure('STREAM_ITEM_TOO_LARGE');
+        if (bytes + size > STREAM_LIMITS.bytes) break;
+        items.push(encoded); bytes += size; cursor = Number(nextCursor);
+        // A reset includes the replacement state: resume from that state, not from null.
+        if (value.type === 'reset') { gap = true; reason = 'resync'; break; }
+        continue;
+      }
       if (path === 'subagents.events') {
         if (typeof value.data !== 'string' || typeof value.complete !== 'boolean') throw new StreamFailure('INVALID_TRANSCRIPT_FRAGMENT');
         fragmentBytes += utf8.encode(value.data).byteLength;

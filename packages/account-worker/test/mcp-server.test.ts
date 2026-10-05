@@ -65,6 +65,10 @@ describe('tenant MCP authority boundary', () => {
       expect(catalog.tools.some(tool => tool.name.startsWith('gitspace_providers_login_'))).toBe(false);
       expect(catalog.tools.some(tool => tool.name === 'gitspace_terminals_live')).toBe(false);
       await expect(value.client.callTool({ name: 'gitspace_terminals_live', arguments: { spaceId: 'workspace', name: 'life-private' } })).rejects.toMatchObject({ code: -32602 });
+      for (const name of ['gitspace_runtime_browser_trust', 'gitspace_runtime_browser_targets', 'gitspace_runtime_browser_select']) {
+        expect(catalog.tools.some(tool => tool.name === name)).toBe(false);
+        await expect(value.client.callTool({ name, arguments: { projectId: 'project', workspaceId: 'workspace', conversationId: 'conversation', questionId: 'approval:task', targetId: 'tab' } })).rejects.toMatchObject({ code: -32602 });
+      }
       const resources = await value.client.listResources();
       const skill = resources.resources.find(resource => resource.uri.startsWith('gitspace://skills/'));
       if (!skill) throw new Error('Expected an enabled built-in skill resource');

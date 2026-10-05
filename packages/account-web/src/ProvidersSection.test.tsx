@@ -8,12 +8,12 @@ const rejects = async (): Promise<never> => { throw new Error('not called during
 const noop = (): void => undefined;
 
 function provider(overrides: Partial<ProviderView> & Pick<ProviderView, 'id' | 'name'>): ProviderView {
-  return { credentialProvider: overrides.id, available: true, loginable: true, authKind: 'oauth', hasAuth: false, source: null, accounts: [], hasUsage: false, ...overrides };
+  return { credentialProvider: overrides.id, available: true, loginable: true, supportsOAuth: true, supportsApiKey: false, authKind: 'none', hasAuth: false, source: null, accounts: [], hasUsage: false, ...overrides };
 }
-const anthropic = provider({ id: 'anthropic', name: 'Anthropic', hasAuth: true, source: 'oauth', hasUsage: true, accounts: [{ id: 'cred-1', type: 'oauth', label: 'Claude Max', email: 'dev@example.com', disabled: false }] });
-const openai = provider({ id: 'openai', name: 'OpenAI', authKind: 'api_key', loginable: false });
+const anthropic = provider({ id: 'anthropic', name: 'Anthropic', authKind: 'oauth', supportsApiKey: true, hasAuth: true, source: 'oauth', hasUsage: true, accounts: [{ id: 'cred-1', type: 'oauth', label: 'Claude Max', email: 'dev@example.com', disabled: false }] });
+const openai = provider({ id: 'openai', name: 'OpenAI', supportsOAuth: false, supportsApiKey: true, loginable: false });
 const codex = provider({ id: 'openai-codex', name: 'OpenAI Codex' });
-const hidden = provider({ id: 'ollama', name: 'Ollama', available: false, loginable: false, authKind: 'none' });
+const hidden = provider({ id: 'ollama', name: 'Ollama', available: false, loginable: false, supportsOAuth: false });
 const usage: ProviderUsage = {
   generatedAt: '2026-09-01T10:00:00.000Z',
   reports: [{
@@ -59,6 +59,18 @@ describe('ProvidersSection', () => {
     expect(html).toContain('aria-label="Refresh usage"');
     expect(html).not.toContain('Ollama');
     expect(html).not.toContain('role="meter"');
+  });
+
+  it('offers supported authentication on empty profiles independently from connected auth kind', () => {
+    const fresh = provider({ id: 'anthropic', name: 'Anthropic', supportsApiKey: true });
+    const html = renderToStaticMarkup(<ProvidersSection {...props({ providers: [fresh] })} />);
+    expect(html).toContain('Sign in');
+    expect(html).toContain('Add API key');
+    expect(html).not.toContain('Replace API key');
+    const connected = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic] })} />);
+    expect(connected).toContain('Add account');
+    expect(connected).toContain('Add API key');
+    expect(connected).not.toContain('Replace API key');
   });
 
   it('shows shared credentials and usage once while keeping distinct accounts and providers', () => {

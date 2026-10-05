@@ -9,11 +9,11 @@
   },
   "scripts": {
     "start": "bun src/runtime.ts",
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "test": "bun ../../scripts/test-isolated.ts test"
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
+    "test": "bun ../../scripts/test-isolated.ts test",
+    "test:browser-relay:integration": "bun scripts/browser-relay-integration.ts"
   },
   "dependencies": {
-    "@gitspace/account-omp": "workspace:*",
     "@gitspace/blocks": "workspace:*",
     "@gitspace/core": "workspace:*",
     "@gitspace/deployment": "workspace:*",
@@ -21,12 +21,11 @@
     "@gitspace/protocol-agent": "workspace:*",
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
+    "@gitspace/protocol-runtime": "workspace:*",
+    "@gitspace/runtime-machine": "workspace:*",
+    "@gitspace/supervisor": "workspace:*",
     "@gitspace/protocol-sync": "workspace:*",
-    "@oh-my-pi/omptype": "18.2.11",
-    "@oh-my-pi/pi-ai": "18.2.11",
-    "@oh-my-pi/pi-coding-agent": "18.2.11",
-    "@oh-my-pi/pi-tui": "18.2.11",
-    "@oh-my-pi/pi-utils": "18.2.11",
+    "@modelcontextprotocol/sdk": "1.30.1",
     "aws4fetch": "1.0.20",
     "better-result": "3.0.1",
     "devalue": "5.8.2",

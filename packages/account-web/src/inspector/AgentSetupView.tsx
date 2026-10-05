@@ -10,6 +10,7 @@ export interface InspectorAgentSetupState {
   report: AgentSetupReport | null;
   status: 'idle' | 'loading' | 'ready' | 'error';
   error?: string;
+  persistence?: 'cloud' | 'working-tree';
   load(): void;
   refresh(): void;
   save(input: SaveAgentDefinitionInput): Promise<AgentSetupReport>;
@@ -46,6 +47,7 @@ export function AgentSetupView({ state, onDirtyChange }: { state: InspectorAgent
   const agents = state.report?.agents ?? [];
   const listedAgents = [...agents, ...Object.values(drafts).filter((draft) => !agents.some((agent) => agent.name === draft.definition.name)).map((draft) => draft.definition)];
   const selected = listedAgents.find((agent) => agent.name === selectedName) ?? listedAgents[0];
+  const cloud = state.persistence === 'cloud' || selected?.source === 'cloud';
   const draft = selected ? drafts[selected.name] : undefined;
   const latest = selected ? agents.find((agent) => agent.name === selected.name) : undefined;
   const changedOnDisk = !!draft && (draft.expectedRevision === null
@@ -72,7 +74,7 @@ export function AgentSetupView({ state, onDirtyChange }: { state: InspectorAgent
     try {
       await state.save({ path: draft.path, expectedRevision: draft.expectedRevision, content: draft.content });
       clearDraft(name);
-      setSaved(`${draft.path} saved to the working tree.`);
+      setSaved(`${draft.path} saved ${cloud ? 'to the cloud session' : 'to the working tree'}.`);
     } catch (error) {
       setSaveErrors((current) => ({ ...current, [name]: rpcErrorMessage(error, 'Save agent definition') }));
     } finally { setSaving(null); }
@@ -87,16 +89,16 @@ export function AgentSetupView({ state, onDirtyChange }: { state: InspectorAgent
     {state.status === 'loading' ? <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator />{state.report ? 'Refreshing current resolution; drafts are preserved.' : 'Reading resolved agent definitions…'}</p> : null}
     {state.error ? <div role="alert" className="flex flex-col gap-2 text-caption text-destructive"><span>{state.error}</span>{state.report ? <span>Showing the last loaded definitions. Refresh before saving.</span> : null}<Button variant="secondary" size="compact" type="button" onClick={state.refresh} disabled={state.status === 'loading'}>Retry agent setup</Button></div> : null}
     {!state.report && state.status === 'idle' ? <EmptyState title="Agent setup not loaded" description="Read the definitions discovered by this workspace’s running agent." action={<Button variant="secondary" type="button" onClick={state.load}>Load agent setup</Button>} /> : null}
-    {state.report && !listedAgents.length ? <EmptyState title="No resolved definitions" description="No agent definitions were discovered for this session. Add a definition in .omp/agents and refresh." /> : null}
+    {state.report && !listedAgents.length ? <EmptyState title="No resolved definitions" description={cloud ? 'No cloud agent definitions are saved for this session. Create a definition with runtime.session saveAgentDefinition using a path such as .agents/agents/reviewer.md, then refresh. This does not create a working-tree file.' : 'No agent definitions were discovered for this session. Add a definition in .omp/agents and refresh.'} /> : null}
     {selected ? <>
       <Select value={selected.name} onValueChange={(value) => setSelectedName(value)}><SelectTrigger aria-label="Agent definition" /><SelectContent>{listedAgents.map((agent, index) => <SelectItem key={agent.name} index={index} value={agent.name}>{agent.name}{drafts[agent.name] ? ' · Unsaved' : ''}</SelectItem>)}</SelectContent></Select>
       <Card className="border border-border">
         <CardHeader><CardTitle>{selected.name}</CardTitle><CardDescription>{selected.description}</CardDescription></CardHeader>
         <CardContent className="flex flex-col gap-3">
-          <div className="flex flex-wrap gap-2"><Badge size="compact" color={selected.editable ? 'green' : 'gray'}>{selected.editable ? 'Workspace file' : 'Inherited · read-only'}</Badge><Badge size="compact" color={draft ? 'amber' : 'gray'}>{draft ? 'Unsaved edits' : 'Saved definition'}</Badge></div>
+          <div className="flex flex-wrap gap-2"><Badge size="compact" color={selected.editable ? 'green' : 'gray'}>{selected.editable ? cloud ? 'Cloud definition' : 'Workspace file' : 'Inherited · read-only'}</Badge><Badge size="compact" color={draft ? 'amber' : 'gray'}>{draft ? 'Unsaved edits' : 'Saved definition'}</Badge></div>
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-caption">
             <dt className="text-muted-foreground">Source</dt><dd className="break-all">{selected.source}</dd>
-            <dt className="text-muted-foreground">File</dt><dd className="break-all font-mono">{selected.path}</dd>
+            <dt className="text-muted-foreground">{cloud ? 'Definition path' : 'File'}</dt><dd className="break-all font-mono">{selected.path}</dd>
             <dt className="text-muted-foreground">Revision</dt><dd className="truncate font-mono" title={selected.revision}>{selected.revision.slice(0, 12)}</dd>
             <dt className="text-muted-foreground">Selectors</dt><dd className="break-all font-mono">{selected.modelSelectors.join(', ') || 'None'}</dd>
             <dt className="text-muted-foreground">Current role</dt><dd>{selected.role ?? 'No role selected'}</dd>
@@ -104,15 +106,15 @@ export function AgentSetupView({ state, onDirtyChange }: { state: InspectorAgent
             <dt className="text-muted-foreground">Tools</dt><dd className="break-all font-mono">{selected.tools.join(', ') || 'Not specified'}</dd>
             <dt className="text-muted-foreground">Spawns</dt><dd className="break-all font-mono">{selected.spawns ?? 'Not specified'}</dd>
           </dl>
-          <p className="text-caption text-muted-foreground text-pretty">{selectionReason(selected)} This preview uses saved files and current settings, not unsaved edits or historical usage.</p>
+          <p className="text-caption text-muted-foreground text-pretty">{selectionReason(selected)} This preview uses saved definitions and current settings, not unsaved edits or historical usage.</p>
         </CardContent>
       </Card>
-      {!selected.editable && !draft ? <div className="flex flex-col gap-2"><p className="text-caption text-muted-foreground">Inspect the inherited file below, or copy it into this checkout. A workspace override takes precedence without modifying the inherited source or account Settings.</p><Button variant="secondary" type="button" disabled={!!saving || state.status === 'loading' || !!state.error} onClick={() => { setSaved(null); setDrafts((current) => ({ ...current, [selected.name]: { definition: selected, path: `.omp/agents/${selected.name}.md`, expectedRevision: null, content: selected.content } })); }}>Create workspace override</Button></div> : null}
+      {!selected.editable && !draft ? <div className="flex flex-col gap-2"><p className="text-caption text-muted-foreground">{cloud ? 'Inspect the inherited definition below, or create a cloud session override. The inherited source and account Settings are unchanged.' : 'Inspect the inherited file below, or copy it into this checkout. A workspace override takes precedence without modifying the inherited source or account Settings.'}</p><Button variant="secondary" type="button" disabled={!!saving || state.status === 'loading' || !!state.error} onClick={() => { setSaved(null); setDrafts((current) => ({ ...current, [selected.name]: { definition: selected, path: `${cloud ? '.agents' : '.omp'}/agents/${selected.name}.md`, expectedRevision: null, content: selected.content } })); }}>Create {cloud ? 'cloud' : 'workspace'} override</Button></div> : null}
       <section className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2"><label htmlFor="agent-definition-source" className="text-caption font-medium">{canEdit ? 'Definition source' : 'Inherited source'}</label><span className="break-all font-mono text-caption text-muted-foreground">{draft?.path ?? selected.path}</span></div>
         {/* FLUID-GAP: multi-line file editor — the registry has no textarea/code editor. */}
         <textarea id="agent-definition-source" aria-label="Agent definition source" aria-describedby="agent-save-semantics" rows={18} spellCheck={false} readOnly={!canEdit} disabled={!!saving} value={draft?.content ?? selected.content} onChange={(event) => edit(event.currentTarget.value)} className={`${shape.input} min-h-72 w-full resize-y border border-border bg-surface-1 p-3 font-mono text-caption leading-relaxed text-foreground outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)] disabled:opacity-60`} />
-        <p id="agent-save-semantics" className="text-caption text-muted-foreground">Save writes this file to the working tree; it does not stage or commit. The refreshed definition applies to future agent starts, not agents already running.</p>
+        <p id="agent-save-semantics" className="text-caption text-muted-foreground">{cloud ? 'Save stores this definition in the cloud session; it does not write, stage or commit a working-tree file.' : 'Save writes this file to the working tree; it does not stage or commit.'} The refreshed definition applies to future agent starts, not agents already running.</p>
       </section>
       {changedOnDisk ? <section role="alert" className="flex flex-col gap-2 text-caption"><p className="text-destructive">The resolved file changed since editing began. Your draft is preserved; review the latest source before saving.</p>{latest ? <details><summary className="cursor-pointer py-2">Compare latest saved source</summary><pre className={`${shape.input} max-h-80 overflow-auto border border-border bg-surface-1 p-3 font-mono whitespace-pre-wrap`}>{latest.content}</pre></details> : <p>The definition is no longer resolved. Refresh to check its source.</p>}{latest?.editable ? <Button variant="secondary" type="button" disabled={!!saving} onClick={() => { if (!window.confirm('Keep your edited text and use the latest file revision as its base? Review and merge any external changes before saving.')) return; setDrafts((current) => ({ ...current, [selected.name]: { definition: latest, path: latest.path, expectedRevision: latest.revision, content: draft!.content } })); }}>Keep draft against latest revision</Button> : null}</section> : null}
       {saveErrors[selected.name] ? <div role="alert" className="flex flex-col gap-2 text-caption text-destructive"><span>Save failed: {saveErrors[selected.name]}</span><span>Your edits have not been discarded. Refresh to check for external changes, or correct the file and retry.</span><Button variant="secondary" type="button" onClick={state.refresh} disabled={state.status === 'loading' || !!saving}>Refresh saved definition</Button></div> : null}

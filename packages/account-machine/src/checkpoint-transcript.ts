@@ -1,7 +1,7 @@
 import { parseWorkspaceCheckpoint, spaceOmpCheckpointKey, WorkspaceDomainError } from '@gitspace/protocol-workspace';
 import type { CanonicalSession } from '@gitspace/protocol';
 import type { SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
-import type { OmpTranscriptEvent } from './omp-runtime.js';
+import type { TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
 import type { CheckpointBlobStore } from './portable-space-lifecycle.js';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -23,7 +23,7 @@ export interface ClosedSpaceCheckpointMetadata {
 }
 
 export interface ClosedSpaceTranscript extends ClosedSpaceCheckpointMetadata {
-  events: OmpTranscriptEvent[];
+  events: TranscriptEvent[];
 }
 
 const CACHE_TTL_MS = 30_000;
@@ -33,8 +33,7 @@ interface IndexedCheckpoint {
   manifestHash: string;
   at: number;
   metadata: ClosedSpaceCheckpointMetadata;
-  ompKey: string;
-  ompHash: string;
+  source: { kind: 'legacy'; key: string; hash: string } | { kind: 'cloud'; sessionFile: string };
   indexKey: string;
 }
 
@@ -50,8 +49,9 @@ export class ClosedSpaceTranscriptReader {
     private readonly authority: CheckpointTranscriptAuthority,
     /** The same (encrypting) store the lifecycle writes checkpoints through. */
     private readonly blobs: CheckpointBlobStore,
-    private readonly project: (bytes: Uint8Array) => Promise<OmpTranscriptEvent[]>,
+    private readonly project: (bytes: Uint8Array) => Promise<TranscriptEvent[]>,
     private readonly indexRoot = join(tmpdir(), 'gitspace-transcript-checkpoints'),
+    private readonly cloudTranscript: (sessionFile: string) => Promise<TranscriptEvent[]>,
   ) {}
 
   /** Null when the space is not closed in the cloud or has no checkpoint yet. */
@@ -90,9 +90,12 @@ export class ClosedSpaceTranscriptReader {
       let pending = this.indexing.get(checkpoint.indexKey);
       if (!pending && !index.initialized) {
         pending = (async () => {
-          const bytes = await this.blobs.get(checkpoint.ompKey, checkpoint.ompHash);
-          if (!bytes) throw new Error(`Checkpoint object ${checkpoint.ompKey} is missing`);
-          index.seed(await this.project(bytes));
+          if (checkpoint.source.kind === 'cloud') index.seed(await this.cloudTranscript(checkpoint.source.sessionFile));
+          else {
+            const bytes = await this.blobs.get(checkpoint.source.key, checkpoint.source.hash);
+            if (!bytes) throw new Error(`Checkpoint object ${checkpoint.source.key} is missing`);
+            index.seed(await this.project(bytes));
+          }
         })();
         this.indexing.set(checkpoint.indexKey, pending);
         void pending.finally(() => this.indexing.delete(checkpoint.indexKey)).catch(() => undefined);
@@ -118,7 +121,7 @@ export class ClosedSpaceTranscriptReader {
     const manifest = parseWorkspaceCheckpoint(JSON.parse(new TextDecoder().decode(manifestBytes)));
     if (manifest.projectId !== projectId || manifest.spaceId !== spaceId) throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_CHECKPOINT_MISMATCH', message: 'Checkpoint manifest does not belong to this space', context: { projectId, spaceId } });
     const canonical = await this.authority.getCanonicalSession(projectId, manifest.agent.sessionId);
-    const checkpoint = {
+    const checkpoint: IndexedCheckpoint = {
       projectId,
       manifestHash: record.manifestHash,
       at: Date.now(),
@@ -127,9 +130,10 @@ export class ClosedSpaceTranscriptReader {
         generation: record.generation,
         lastMachineId: canonical?.machineId ?? null,
       },
-      ompKey: spaceOmpCheckpointKey(projectId, spaceId, manifest.revision),
-      ompHash: manifest.agent.ompCheckpointHash,
-      indexKey: createHash('sha256').update(JSON.stringify([projectId, spaceId, record.generation, manifest.agent.sessionId, manifest.agent.ompCheckpointHash])).digest('hex'),
+      source: manifest.agent.kind === 'cloud'
+        ? { kind: 'cloud', sessionFile: `cloud-session://${encodeURIComponent(projectId)}/${encodeURIComponent(spaceId)}/${encodeURIComponent(manifest.agent.conversationId)}` }
+        : { kind: 'legacy', key: spaceOmpCheckpointKey(projectId, spaceId, manifest.revision), hash: manifest.agent.ompCheckpointHash },
+      indexKey: createHash('sha256').update(JSON.stringify([projectId, spaceId, record.generation, manifest.agent])).digest('hex'),
     };
     this.cache.set(spaceId, checkpoint);
     return checkpoint;

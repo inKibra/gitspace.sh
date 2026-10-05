@@ -50,19 +50,17 @@ describe('ProjectCronsDO', () => {
     }))).rejects.toBeInstanceOf(ProjectCronRevisionConflictError);
   });
 
-  it('leaves runs pending for the machine that holds their target', async () => {
-    const stub = cronEnv.PROJECT_CRONS.getByName('placement');
+  it('deduplicates a retried manual request without admitting another run', async () => {
+    const stub = cronEnv.PROJECT_CRONS.getByName('request-identity');
     const now = Date.now() + 120_000;
-    const cron = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.create({ projectId: 'project-a', draft: draft({ target: { scope: 'workspace', projectId: 'project-a', spaceId: 'workspace-b' } }), now }));
-    const dueAt = cron.nextRunAt!.getTime();
-    await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.processDue({ projectId: 'project-a', now: dueAt }));
-    // Machine A holds only the base space: nothing to claim, the run stays pending.
-    expect(await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.claimNext({ projectId: 'project-a', claimedBy: 'machine-a', heldSpaceIds: ['project-a'], now: dueAt + 1 }))).toBeNull();
-    const claim = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.claimNext({ projectId: 'project-a', claimedBy: 'machine-b', heldSpaceIds: ['workspace-b'], now: dueAt + 2 }));
-    expect(claim?.run.state).toBe('running');
+    const cron = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.create({ projectId: 'project-a', draft: draft(), now }));
+    const first = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.runNow({ projectId: 'project-a', cronId: cron.id, requestId: 'request-a', now: now + 1 }));
+    const retry = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.runNow({ projectId: 'project-a', cronId: cron.id, requestId: 'request-a', now: now + 2 }));
+    expect(retry.id).toBe(first.id);
+    expect((await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.history({ projectId: 'project-a', cronId: cron.id }))).map(run => run.id)).toEqual([first.id]);
   });
 
-  it('materializes due runs once, claims atomically, and records resolved generation on completion', async () => {
+  it('materializes due runs once and blocks overlapping requests', async () => {
     const stub = cronEnv.PROJECT_CRONS.getByName('claim');
     const now = Date.now() + 120_000;
     const cron = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.create({ projectId: 'project-a', draft: draft(), now }));
@@ -75,15 +73,6 @@ describe('ProjectCronsDO', () => {
     expect(stacked).toEqual([]);
     await expect(runInDurableObject(stub, (instance: ProjectCronsDO) => instance.runNow({ projectId: 'project-a', cronId: cron.id, now: dueAt + 300_001 }))).rejects.toBeInstanceOf(ProjectCronAlreadyRunningError);
 
-    const claim = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.claimNext({ projectId: 'project-a', claimedBy: 'machine-a', now: dueAt + 1 }));
-    expect(claim?.run.state).toBe('running');
-    expect(await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.claimNext({ projectId: 'project-a', claimedBy: 'machine-b', now: dueAt + 2 }))).toBeNull();
-
-    const completed = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.completeRun({
-      projectId: 'project-a', runId: claim!.run.id, claimToken: claim!.claimToken,
-      state: 'succeeded', resolvedSpaceId: 'project-a', resolvedGeneration: 4, now: dueAt + 10,
-    }));
-    expect(completed).toMatchObject({ state: 'succeeded', resolvedSpaceId: 'project-a', resolvedGeneration: 4 });
   });
 
   it('expires stale pending locks honestly before scheduling another due run', async () => {
@@ -95,21 +84,34 @@ describe('ProjectCronsDO', () => {
     const replacement = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.processDue({ projectId: 'project-a', now: afterLock }));
     expect(replacement).toHaveLength(1);
     const history = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.history({ projectId: 'project-a', cronId: cron.id }));
-    expect(history.find((run) => run.id === manual.id)).toMatchObject({ state: 'failed', message: 'Run was not claimed within one hour' });
+    expect(history.find((run) => run.id === manual.id)?.state).toBe('blocked');
     expect(history.find((run) => run.id === replacement[0]!.id)?.state).toBe('pending');
   });
 
-  it('retains append-only run history after deleting a completed definition', async () => {
+  it('does not release an unresolved running claim when its old lease expires', async () => {
+    const stub = cronEnv.PROJECT_CRONS.getByName('uncertain-claim');
+    const now = Date.now() + 180_000;
+    const cron = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.create({ projectId: 'project-a', draft: draft(), now }));
+    const run = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.runNow({ projectId: 'project-a', cronId: cron.id, now: now + 1 }));
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE project_cron_runs SET state='running',claimed_at=?,claim_token='unresolved',claimed_by='old-machine' WHERE id=?", now + 2, run.id);
+    });
+    const afterExpiry = now + PROJECT_CRON_ACTIVE_LOCK_MS + 3;
+    expect(await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.processDue({ projectId: 'project-a', now: afterExpiry }))).toEqual([]);
+    await expect(runInDurableObject(stub, (instance: ProjectCronsDO) => instance.runNow({ projectId: 'project-a', cronId: cron.id, now: afterExpiry + 1 }))).rejects.toBeInstanceOf(ProjectCronAlreadyRunningError);
+    expect((await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.history({ projectId: 'project-a', cronId: cron.id })))[0]).toMatchObject({ id: run.id, state: 'running' });
+  });
+
+  it('retains append-only run history after deleting a blocked definition', async () => {
     const stub = cronEnv.PROJECT_CRONS.getByName('delete-history');
     const now = Date.now() + 240_000;
-    const cron = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.create({ projectId: 'project-a', draft: draft(), now }));
+    const cron = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.create({ projectId: 'project-a', draft: draft({ enabled: false }), now }));
     await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.runNow({ projectId: 'project-a', cronId: cron.id, now: now + 1 }));
-    const claim = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.claimNext({ projectId: 'project-a', claimedBy: 'machine-a', now: now + 2 }));
-    await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.completeRun({ projectId: 'project-a', runId: claim!.run.id, claimToken: claim!.claimToken, state: 'blocked', message: 'Workspace is closed', now: now + 3 }));
-    await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.delete({ projectId: 'project-a', cronId: cron.id, expectedRevision: 1, now: now + 4 }));
+    await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.processDue({ projectId: 'project-a', now: now + PROJECT_CRON_ACTIVE_LOCK_MS + 2 }));
+    await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.delete({ projectId: 'project-a', cronId: cron.id, expectedRevision: 1, now: now + PROJECT_CRON_ACTIVE_LOCK_MS + 3 }));
     expect(await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.list('project-a'))).toEqual([]);
     const history = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.history({ projectId: 'project-a', cronId: cron.id }));
     expect(history).toHaveLength(1);
-    expect(history[0]).toMatchObject({ state: 'blocked', message: 'Workspace is closed' });
+    expect(history[0]?.state).toBe('blocked');
   });
 });

@@ -4,7 +4,7 @@ import {
   executableManifestPath,
   parseExecutableArtifactManifest,
   validateExecutableArtifact,
-} from '@gitspace/account-omp/manifest';
+} from '@gitspace/deployment/manifest';
 import { alive, readJson, verifyMachine } from './machine-update.js';
 import type { MachineSelection } from './machine-update.js';
 
@@ -18,8 +18,6 @@ export async function startMachineHost(): Promise<void> {
   const bundleRoot = environment.GITSPACE_BUNDLE_ROOT ?? import.meta.dir;
   environment.GITSPACE_BUNDLE_ROOT = bundleRoot;
   environment.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH ??= process.env.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH;
-  environment.GITSPACE_OMP_MANIFEST_HASH ??= process.env.GITSPACE_INITIAL_OMP_MANIFEST_HASH;
-  environment.GITSPACE_OMP_RUNTIME_PATH ??= join(bundleRoot, 'omp', 'omp.js');
   const transaction = await readJson<{ pid: number; candidate: MachineSelection }>(join(root, 'machine-update.json'));
   if (transaction) {
     if (alive(transaction.pid)) return;

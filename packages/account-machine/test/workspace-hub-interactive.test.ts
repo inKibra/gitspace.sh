@@ -4,8 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
 import type { ProtectedTerminalEvent } from '@gitspace/protocol';
-import { closeDaemonClients, daemonClientForProject } from '@oh-my-pi/pi-coding-agent/launch/client';
-import { getDaemonRuntimeDir } from '@oh-my-pi/pi-utils';
+import { closeDaemonClients, daemonClientForProject, getDaemonRuntimeDir } from '@gitspace/supervisor';
 import { sql } from 'drizzle-orm';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 
@@ -34,6 +33,10 @@ function fixture(): Fixture {
 
 afterEach(async () => {
   for (const item of fixtures) await item.coordinator.stopOwned('workspace-a');
+  for (const item of fixtures) {
+    const client = await daemonClientForProject(item.workspace);
+    await client.request({ op: 'shutdown' });
+  }
   await closeDaemonClients();
   for (const item of fixtures.splice(0)) {
     item.database.close();
@@ -98,9 +101,9 @@ describe('protected interactive lifecycle terminals', () => {
     const observations = coordinator.events('workspace-a', terminal!.name, null, observerController.signal);
     await observations.next();
     observerController.abort();
-    await observations.return();
+    await observations.return(undefined);
     controller.abort();
-    await stream.return();
+    await stream.return(undefined);
 
     const reconnect = new AbortController();
     const resumed = coordinator.live('workspace-a', terminal!.name, reconnect.signal);
@@ -120,7 +123,7 @@ describe('protected interactive lifecycle terminals', () => {
     expect(finalEvents.at(-1)).toEqual({ type: 'complete', exitCode: 0 });
     const result = await execution;
     reconnect.abort();
-    await resumed.return();
+    await resumed.return(undefined);
     expect(result.exitCode).toBe(0);
     expect(result.steps.map((step) => ({ id: step.id, exitCode: step.exitCode }))).toEqual([{ id: 'auth', exitCode: 0 }]);
     expect(JSON.parse(readFileSync(bindingsPath, 'utf8'))).toEqual({ bindings: { resource: 'fixture-resource' } });
@@ -210,7 +213,7 @@ describe('protected interactive lifecycle terminals', () => {
     await coordinator.cancelLifecycleRun('workspace-a', 'life-protected-cancel');
     const result = await execution;
     controller.abort();
-    await stream.return();
+    await stream.return(undefined);
     expect(result.exitCode).not.toBe(0);
     expect(alive(child)).toBe(false);
     await expect(coordinator.send('workspace-a', 'life-protected-cancel', 'echo bypass\n')).rejects.toThrow();

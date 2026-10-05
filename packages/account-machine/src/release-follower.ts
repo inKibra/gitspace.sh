@@ -7,18 +7,16 @@ import {
   sha256,
   validateExecutableArtifact,
   type ExecutableArtifactManifest,
-} from '@gitspace/account-omp/manifest';
+} from '@gitspace/deployment/manifest';
 import type { DeploymentStatus, ReleaseArtifact, ReleaseRecord } from '@gitspace/protocol';
 import { z } from 'zod';
 import { environmentLaunchResponseSchema, environmentStatusSchema, type EnvironmentLaunchRequest, type EnvironmentStatus } from './replacement-environment.js';
-import type { OmpGenerationSelection } from './omp-runtime.js';
 import { readJson, requestMachineUpdate } from './machine-update.js';
 import type { MachineSelection } from './machine-update.js';
 
 /**
  * Convergence on the tenant's desired release. Executables are authenticated
- * complete trees. Machine/frontend replacement belongs to the stable host;
- * OMP activation belongs to the process runtime and stays pending while draining.
+ * complete trees. Machine/frontend replacement belongs to the stable host.
  */
 
 
@@ -33,27 +31,12 @@ export type FrontendManifest = z.infer<typeof frontendManifestSchema>;
 
 export interface ReleaseFollowerAuthority {
   deploymentStatus(): Promise<DeploymentStatus>;
-  reportMachineApplied(input: { sha: string; target: 'machine' | 'omp'; generation: string; status: 'applied' | 'failed'; error?: string }): Promise<ReleaseRecord>;
-  reportMachineChannelApplied(input: { target: 'machine' | 'omp'; generation: string }): Promise<void>;
+  reportMachineApplied(input: { sha: string; target: 'machine'; generation: string; status: 'applied' | 'failed'; error?: string }): Promise<ReleaseRecord>;
+  reportMachineChannelApplied(input: { target: 'machine'; generation: string }): Promise<void>;
 }
 
 export interface ReleaseBlobReader {
   get(key: string, expectedHash?: string): Promise<Uint8Array | null>;
-}
-
-export interface ReleaseFollowerOmpStatus {
-  sha: string | null;
-  hash: string;
-  draining: number;
-  pendingMachineCommit?: true;
-  failure?: { sha: string; error: string };
-}
-
-export interface ReleaseFollowerOmp {
-  activate(input: { path: string; hash: string; sha: string; manifestHash: string }): Promise<ReleaseFollowerOmpStatus>;
-  activateChannel(): Promise<ReleaseFollowerOmpStatus>;
-  commitInitialSelection(): Promise<void>;
-  status(): ReleaseFollowerOmpStatus;
 }
 
 export interface ReleaseFollowerOptions {
@@ -66,7 +49,6 @@ export interface ReleaseFollowerOptions {
   controlToken: string | null;
   /** Machine identity inherited from the stable replacement host. */
   runningMachineSha: string | null;
-  omp?: ReleaseFollowerOmp;
   /** `GITSPACE_GENERATION_HASH`. */
   generation: string | null;
   intervalMs?: number;
@@ -76,7 +58,6 @@ export interface ReleaseFollowerOptions {
 export interface ReleaseObjectKeys {
   worker: string;
   machine: string;
-  omp: string;
   frontendManifest: string;
   /** Prefix of the frontend tree; files live at `<frontend>/<path>`. */
   frontend: string;
@@ -86,7 +67,6 @@ export function releaseObjectKeys(sha: string): ReleaseObjectKeys {
   return {
     worker: `releases/${sha}/worker.mjs`,
     machine: `releases/${sha}/machine.manifest.json`,
-    omp: `releases/${sha}/omp.manifest.json`,
     frontendManifest: `releases/${sha}/frontend.manifest.json`,
     frontend: `releases/${sha}/frontend`,
   };
@@ -119,23 +99,11 @@ export class ReleaseFollower {
   private active: Promise<void> | null = null;
   private stopped = false;
   private readonly reportedFailures = new Set<string>();
-  private reportedOmp: string | null = null;
   private reportedMachine = false;
 
   constructor(private readonly options: ReleaseFollowerOptions) {}
 
-  /** Only the desired successor may boot with OMP bytes not yet saved for rollback. */
-  async initialOmpSelection(): Promise<OmpGenerationSelection | undefined> {
-    if (!this.options.runningMachineSha || !this.options.generation || !this.options.hostUrl || !this.options.controlToken) return;
-    const status = await this.options.authority.deploymentStatus();
-    if (this.options.runningMachineSha !== status.desired.machine) return;
-    const record = status.releases.find((release) => release.sha === status.desired.omp);
-    if (!record?.artifacts.omp) return;
-    const { path, manifest } = await this.downloadExecutable(record.artifacts.omp, 'omp');
-    return { path, hash: manifest.treeHash, sha: record.sha, manifestHash: record.artifacts.omp.hash };
-  }
-
-  /** Report only committed machine generations and independently drained OMP generations. */
+  /** Report only committed machine generations. */
   async start(): Promise<void> {
     if (this.timer) return;
     this.stopped = false;
@@ -162,7 +130,7 @@ export class ReleaseFollower {
     if (this.stopped) return;
     const status = await this.options.authority.deploymentStatus();
     // The child becomes healthy before its complete host is committed. It must not
-    // report success, commit staged OMP, or request another update in that window.
+    // report success or request another update in that window.
     if (await readJson(join(this.options.environmentRoot, 'machine-update.json'))) return;
     const updateFailure = await readJson<{ sha: string | null; hash: string; error: string }>(join(this.options.environmentRoot, 'machine-update-failure.json'));
     if (updateFailure?.sha) await this.reportFailure(updateFailure.sha, 'machine', updateFailure.error);
@@ -179,45 +147,14 @@ export class ReleaseFollower {
       }, this.options.hostUrl, this.options.controlToken);
       return;
     }
-    let host: EnvironmentStatus | undefined;
-    if (this.options.omp?.status().pendingMachineCommit) {
-      if (!this.options.hostUrl || !this.options.controlToken || !this.options.generation) return;
-      host = await this.hostStatus();
-      if (host.machineHash !== this.options.generation || host.machineReleaseSha !== this.options.runningMachineSha) return;
-      const committedHost = await readJson<MachineSelection>(join(this.options.environmentRoot, 'host-selection.json'));
-      if (process.env.GITSPACE_HOST_HASH !== this.options.generation || committedHost?.hash !== this.options.generation) return;
-      await this.options.omp.commitInitialSelection();
-    }
-    const failure = this.options.omp?.status().failure;
-    if (failure) await this.reportFailure(failure.sha, 'omp', failure.error);
-    await this.reportOmpApplied();
     const desired = status.desired;
-    const ompRecord = status.releases.find((release) => release.sha === desired.omp);
     const machineRecord = status.releases.find((release) => release.sha === desired.machine);
     const frontendRecord = status.releases.find((release) => release.sha === desired.frontend);
-    if (desired.omp === null && this.options.omp && this.options.omp.status().sha !== null) {
-      await this.options.omp.activateChannel();
-      await this.reportOmpApplied();
-    }
-    // OMP must converge even when this machine has no replacement host.
-    if (ompRecord?.artifacts.omp && this.options.omp
-      && ompRecord.status.omps[this.options.machineId] !== 'failed'
-      && this.options.omp.status().sha !== ompRecord.sha
-      && !this.reportedFailures.has(`omp:${ompRecord.sha}`)) {
-      try {
-        const { path, manifest } = await this.downloadExecutable(ompRecord.artifacts.omp, 'omp');
-        await this.options.omp.activate({ path, hash: manifest.treeHash, manifestHash: ompRecord.artifacts.omp.hash, sha: ompRecord.sha });
-        await this.reportOmpApplied();
-      } catch (error) {
-        await this.reportFailure(ompRecord.sha, 'omp', error instanceof Error ? error.message : String(error));
-        this.options.onError?.(error);
-      }
-    }
     if (!this.options.hostUrl || !this.options.controlToken) {
       await this.reportMachineApplied();
       return;
     }
-    host ??= await this.hostStatus();
+    const host = await this.hostStatus();
     await this.reportMachineApplied(host);
     if (desired.machine !== null && host.lastLaunch?.sha === desired.machine && host.lastLaunch.target === 'machine' && host.lastLaunch.status === 'failed') {
       await this.reportFailure(desired.machine, 'machine', host.lastLaunch.error ?? 'Host rolled the release back');
@@ -244,16 +181,6 @@ export class ReleaseFollower {
     }
   }
 
-  private async reportOmpApplied(): Promise<void> {
-    const running = this.options.omp?.status();
-    if (!running || running.pendingMachineCommit || running.draining !== 0) return;
-    const identity = `${running.sha ?? 'channel'}:${running.hash}`;
-    if (this.reportedOmp === identity) return;
-    if (running.sha === null) await this.options.authority.reportMachineChannelApplied({ target: 'omp', generation: running.hash });
-    else await this.options.authority.reportMachineApplied({ sha: running.sha, target: 'omp', generation: running.hash, status: 'applied' });
-    this.reportedOmp = identity;
-  }
-
   private async reportMachineApplied(host?: EnvironmentStatus): Promise<void> {
     const { runningMachineSha, generation } = this.options;
     if (!generation || this.reportedMachine) return;
@@ -269,7 +196,7 @@ export class ReleaseFollower {
 
   private async downloadExecutable(
     artifact: ReleaseArtifact,
-    target: 'machine' | 'omp',
+    target: 'machine',
   ): Promise<{ path: string; manifest: ExecutableArtifactManifest }> {
     const bytes = await this.options.blobs.get(artifact.key, artifact.hash);
     if (!bytes) throw new Error(`Executable manifest ${artifact.key} is missing`);
@@ -364,10 +291,10 @@ export class ReleaseFollower {
     }
   }
 
-  private async reportFailure(sha: string, target: 'machine' | 'omp', error: string): Promise<void> {
+  private async reportFailure(sha: string, target: 'machine', error: string): Promise<void> {
     const key = `${target}:${sha}`;
     if (this.reportedFailures.has(key)) return;
-    const generation = target === 'omp' ? this.options.omp?.status().hash : this.options.generation;
+    const generation = this.options.generation;
     console.error(`[gitspace-deploy] ${target} on ${this.options.machineId} failed release ${sha}: ${error}`);
     await this.options.authority.reportMachineApplied({ sha, target, generation: generation ?? 'unknown', status: 'failed', error });
     this.reportedFailures.add(key);

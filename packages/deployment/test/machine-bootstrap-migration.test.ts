@@ -28,7 +28,6 @@ async function fixture() {
     environmentRoot,
     candidatePath,
     initialMachineManifestHash: `sha256:${'1'.repeat(64)}`,
-    initialOmpManifestHash: `sha256:${'2'.repeat(64)}`,
   };
 }
 

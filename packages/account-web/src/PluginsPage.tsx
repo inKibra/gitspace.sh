@@ -51,7 +51,7 @@ export interface PluginsPageProps {
   connections: readonly McpConnectionRpcView[];
   grants: readonly ProjectMcpGrantRpcView[];
   projects: readonly { id: string; name: string }[];
-  onDiscover(projectId: string, machineId: string): Promise<readonly DiscoveredMcpToolRpcView[]>;
+  onDiscover(projectId: string): Promise<readonly DiscoveredMcpToolRpcView[]>;
   machines: readonly { id: string; label: string; state: string }[];
   composioCatalog: ComposioPluginCatalogRpcView;
   loading?: boolean;
@@ -144,7 +144,6 @@ export function PluginsPage(props: PluginsPageProps) {
   const [toolPolicy, setToolPolicy] = useState<ComposioToolPolicy>(DEFAULT_COMPOSIO_TOOL_POLICY);
   const [toolsLoading, setToolsLoading] = useState(false);
   const [diagnosticProjectId, setDiagnosticProjectId] = useState('');
-  const [diagnosticMachineId, setDiagnosticMachineId] = useState('');
   const [discoveredTools, setDiscoveredTools] = useState<readonly DiscoveredMcpToolRpcView[] | null>(null);
 
   const normalizedQuery = query.trim().toLowerCase();
@@ -272,9 +271,9 @@ export function PluginsPage(props: PluginsPageProps) {
     </TabsSubtlePanel>
     <section aria-label="Runtime diagnostics" className="mt-8 flex flex-col gap-3 border-t border-border pt-6">
       <h2 className="text-subtitle font-semibold">Runtime diagnostics</h2>
-      <p className="text-body text-muted-foreground">Explicitly discover tools for a project space on an online machine. This may start its MCP servers; it does not open a workspace or change grants.</p>
-      <div className="flex flex-wrap gap-3"><Select value={diagnosticProjectId} disabled={pending !== null} onValueChange={(id) => { setDiagnosticProjectId(id); setDiscoveredTools(null); }}><SelectTrigger aria-label="Diagnostic project" placeholder="Choose project" />{selectOptions(props.projects.map((project) => ({ value: project.id, label: project.name })))}</Select><Select value={diagnosticMachineId} disabled={pending !== null} onValueChange={(id) => { setDiagnosticMachineId(id); setDiscoveredTools(null); }}><SelectTrigger aria-label="Diagnostic machine" placeholder="Choose online machine" />{selectOptions(props.machines.filter((machine) => machine.state === 'online').map((machine) => ({ value: machine.id, label: machine.label })))}</Select><Button variant="secondary" disabled={pending !== null || !diagnosticProjectId || !diagnosticMachineId} loading={pending === 'discover'} onClick={() => void settle('discover', async () => { setDiscoveredTools(null); setDiscoveredTools(await props.onDiscover(diagnosticProjectId, diagnosticMachineId)); })}>Discover runtime tools</Button></div>
-      {discoveredTools ? <><p role="status" className="text-caption tabular-nums text-muted-foreground">{discoveredTools.length} discovered tools · project space {props.projects.find((project) => project.id === diagnosticProjectId)?.name} · {props.machines.find((machine) => machine.id === diagnosticMachineId)?.label}</p>{discoveredTools.map((tool) => <p key={tool.ompToolName} className="text-caption"><code>{tool.ompToolName}</code> · {tool.description ?? tool.name}</p>)}</> : <p className="text-caption text-muted-foreground">Not checked. Connections and assignments remain editable without a machine.</p>}
+      <p className="text-body text-muted-foreground">Discover granted tools for a project from the cloud. HTTP connections do not need a machine. Stdio servers use the project’s authorized machine placement; discovery may start those servers.</p>
+      <div className="flex flex-wrap gap-3"><Select value={diagnosticProjectId} disabled={pending !== null} onValueChange={(id) => { setDiagnosticProjectId(id); setDiscoveredTools(null); }}><SelectTrigger aria-label="Diagnostic project" placeholder="Choose project" />{selectOptions(props.projects.map((project) => ({ value: project.id, label: project.name })))}</Select><Button variant="secondary" disabled={pending !== null || !diagnosticProjectId} loading={pending === 'discover'} onClick={() => void settle('discover', async () => { setDiscoveredTools(null); setDiscoveredTools(await props.onDiscover(diagnosticProjectId)); })}>Discover runtime tools</Button></div>
+      {discoveredTools ? <><p role="status" className="text-caption tabular-nums text-muted-foreground">{discoveredTools.length} discovered tools · project space {props.projects.find((project) => project.id === diagnosticProjectId)?.name}</p>{discoveredTools.map((tool) => <p key={tool.ompToolName} className="text-caption"><code>{tool.ompToolName}</code> · {tool.description ?? tool.name}</p>)}</> : <p className="text-caption text-muted-foreground">Not checked. Connections and assignments remain editable without a machine.</p>}
     </section>
 
     {error ? <p role="alert" className="mt-4 text-body text-destructive">{error}</p> : null}

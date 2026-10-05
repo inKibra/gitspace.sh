@@ -1,11 +1,11 @@
 import { applyInferenceSettings, extractInferenceSettings, inferenceSettingSection, inferenceSettingsSchema, type InferenceProfile } from '@gitspace/protocol/inference';
-import type { OmpSettingValue } from '@gitspace/protocol';
-import type { OmpSettingView } from './SettingsPage.js';
+import type { RuntimeSettingValue } from '@gitspace/protocol';
+import type { RuntimeSettingView } from './SettingsPage.js';
 
 /** Never read shared account values as a profile fallback, even with an older metadata producer. */
-export function profileSettingViews(schema: readonly OmpSettingView[], profile: InferenceProfile): { items: OmpSettingView[]; missingDefaults: string[] } {
+export function profileSettingViews(schema: readonly RuntimeSettingView[], profile: InferenceProfile): { items: RuntimeSettingView[]; missingDefaults: string[] } {
   const config = applyInferenceSettings({}, profile.settings);
-  const items: OmpSettingView[] = [];
+  const items: RuntimeSettingView[] = [];
   const missingDefaults: string[] = [];
   const metadata = schema.some((item) => item.path === 'providers.models') ? schema : [...schema, {
     path: 'providers.models', tab: 'Providers', label: 'Custom provider models',
@@ -26,7 +26,7 @@ export function profileSettingViews(schema: readonly OmpSettingView[], profile: 
 }
 
 /** A schema-path edit replaces its subtree without losing custom siblings or retaining stale child overrides. */
-export function updatedProfileSettings(profile: InferenceProfile, path: string, value: OmpSettingValue): InferenceProfile['settings'] {
+export function updatedProfileSettings(profile: InferenceProfile, path: string, value: RuntimeSettingValue): InferenceProfile['settings'] {
   const settings = extractInferenceSettings(applyInferenceSettings({}, profile.settings));
   // First canonicalize subtrees, then apply the edited path so parent/child ordering is deterministic.
   for (const key of Object.keys(settings)) if (key === path || key.startsWith(`${path}.`)) delete settings[key];

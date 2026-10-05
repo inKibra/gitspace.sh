@@ -8,6 +8,30 @@ function source(values: RpcResult[]): Subscription {
 const event = (cursor: number, previous: number | null, value: unknown = cursor): Extract<RpcResult, { status: 'ok' }> => ({ status: 'ok', value: { type: previous === null ? 'snapshot' : 'change', resource: 'test', cursor, previous, revision: cursor, value } });
 
 describe('bounded live stream continuation', () => {
+  test('resumes Chord deltas after a bounded page and replaces state on reset', async () => {
+    const values: RpcResult[] = Array.from({ length: STREAM_LIMITS.items + 1 }, (_, index) => ({
+      status: 'ok', value: { type: 'delta', baseCursor: index, cursor: index + 1, ops: [] },
+    }));
+    const first = await readLivePage({ path: 'runtime.watch', input: { spaceId: 's', after: 0 }, stream: source(values), encode: value => value, signal: new AbortController().signal });
+    expect(first.nextInput).toEqual({ spaceId: 's', after: STREAM_LIMITS.items });
+    const second = await readLivePage({ path: 'runtime.watch', input: first.nextInput!, stream: source(values.slice(STREAM_LIMITS.items)), encode: value => value, signal: new AbortController().signal });
+    expect([...first.items, ...second.items]).toEqual(values.map(value => value.status === 'ok' ? value.value : null));
+    const reset = { type: 'reset', snapshot: { cursor: 90 }, reason: 'cursor-expired' };
+    const replacement = await readLivePage({ path: 'runtime.watch', input: { after: 1 }, stream: source([{ status: 'ok', value: reset }]), encode: value => value, signal: new AbortController().signal });
+    expect(replacement).toEqual({ items: [reset], nextInput: { after: 90 }, reason: 'resync', gap: true, complete: false });
+  });
+
+  test('rejects a Chord delta whose base is not the delivered state', async () => {
+    await expect(readLivePage({ path: 'runtime.watch', input: { after: 4 }, stream: source([{ status: 'ok', value: { type: 'delta', baseCursor: 5, cursor: 6, ops: [] } }]), encode: value => value, signal: new AbortController().signal })).rejects.toThrow('STREAM_CURSOR_GAP');
+  });
+
+  test('retains the Chord cursor preceding an over-budget delta', async () => {
+    const values: RpcResult[] = [1, 2].map(cursor => ({ status: 'ok', value: { type: 'delta', baseCursor: cursor - 1, cursor, ops: [['a', ['text'], 'a'.repeat(600_000)]] } }));
+    const page = await readLivePage({ path: 'runtime.watch', input: { after: 0 }, stream: source(values), encode: value => value, signal: new AbortController().signal });
+    expect(page.nextInput).toEqual({ after: 1 });
+    expect(page.items).toEqual([values[0]!.status === 'ok' ? values[0]!.value : null]);
+  });
+
   test('returns the original backend cursor without dropping the next page boundary', async () => {
     const values = Array.from({ length: STREAM_LIMITS.items + 2 }, (_, index) => event(index + 1, index === 0 ? null : index));
     const first = await readLivePage({ path: 'events', input: { after: null }, stream: source(values), encode: (value) => value, signal: new AbortController().signal });

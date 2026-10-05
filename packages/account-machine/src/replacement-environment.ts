@@ -18,7 +18,7 @@ import {
 } from '@gitspace/deployment';
 import { z } from 'zod';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
-import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
+import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { atomicJson, readJson, requestMachineUpdate } from './machine-update.js';
 import type { MachineSelection } from './machine-update.js';
 
@@ -53,7 +53,6 @@ export interface ReplacementEnvironmentOptions {
   webPort: number;
   machineId: string;
   artifactKey: Uint8Array;
-  ompAgentDir: string;
   controlToken: string;
   bootstrap?: ReplacementEnvironmentBootstrap;
   environment?: Record<string, string>;
@@ -63,7 +62,7 @@ export interface ReplacementEnvironmentOptions {
 export interface EnvironmentDeployment {
   artifacts: DeploymentArtifact[];
   releaseSha: string | null;
-  releaseTargets?: Array<'machine' | 'omp' | 'frontend'>;
+  releaseTargets?: Array<'machine' | 'frontend'>;
   revision: string;
   dirty: boolean;
 }
@@ -76,8 +75,8 @@ export interface EnvironmentDeploymentResult {
 /** `POST /__environment/launch`: a machine asks its host to swap one downloaded release target. */
 export const environmentLaunchRequestSchema = z.object({
   entrypoint: z.enum(['machine-daemon', 'frontend']),
-  target: z.enum(['machine', 'omp', 'frontend']),
-  applies: z.array(z.enum(['machine', 'omp', 'frontend'])).min(1),
+  target: z.enum(['machine', 'frontend']),
+  applies: z.array(z.enum(['machine', 'frontend'])).min(1),
   path: z.string().min(1),
   hash: z.templateLiteral(['sha256:', z.string().regex(/^[a-f0-9]{64}$/u)]),
   sha: z.string().min(1).max(160),
@@ -101,12 +100,11 @@ export const environmentStatusSchema = z.object({
   machineHash: z.string().nullable(),
   frontendHash: z.string().nullable(),
   machineReleaseSha: z.string().nullable(),
-  ompReleaseSha: z.string().nullable(),
   frontendReleaseSha: z.string().nullable(),
   lastLaunch: z.object({
     sha: z.string().nullable(),
     entrypoint: z.enum(['machine-daemon', 'frontend']),
-    target: z.enum(['machine', 'omp', 'frontend']),
+    target: z.enum(['machine', 'frontend']),
     status: z.enum(['applied', 'failed']),
     error: z.string().nullable(),
   }).nullable(),
@@ -244,7 +242,7 @@ class MachineHost implements MachineReplacementHost {
   private activeUrl: string | null = null;
   private readonly running = new Map<string, RunningGeneration>();
   private accepting = true;
-  /** Machine release identities inherited by a successor generation. OMP selects its own artifact. */
+  /** Machine release identities inherited by a successor generation. */
   readonly releaseShas = new Map<string, string | null>();
   successorReleaseSha: string | null = null;
   readonly proxy: ReturnType<typeof Bun.serve>;
@@ -449,7 +447,6 @@ class MachineHost implements MachineReplacementHost {
         GITSPACE_ENVIRONMENT_ROOT: this.options.root,
         GITSPACE_MACHINE_ID: this.options.machineId,
         GITSPACE_ARTIFACT_KEY: Buffer.from(this.options.artifactKey).toString('base64'),
-        GITSPACE_OMP_AGENT_DIR: this.options.ompAgentDir,
         GITSPACE_MIGRATIONS_FOLDER: join(pointer.artifactPath, 'drizzle'),
         GITSPACE_GENERATION_HASH: pointer.hash,
         GITSPACE_MACHINE_RUNTIME_PATH: pointer.artifactPath,
@@ -600,7 +597,6 @@ export class ReplacementEnvironment {
       machineHash: this.machineHash,
       frontendHash: this.frontendHash,
       machineReleaseSha: this.machineReleaseSha,
-      ompReleaseSha: null,
       frontendReleaseSha: this.frontendReleaseSha,
       lastLaunch: this.lastLaunch,
     };
@@ -663,7 +659,6 @@ export class ReplacementEnvironment {
   }
 
   private async replace(input: EnvironmentDeployment): Promise<EnvironmentDeploymentResult> {
-    if (input.releaseTargets?.includes('omp')) throw new Error('OMP releases must be activated by the OMP process runtime');
     const releaseTargets = input.releaseTargets ?? ['machine'];
     const nextMachineReleaseSha = releaseTargets.includes('machine') ? input.releaseSha : this.machineReleaseSha;
     const changed = input.artifacts.filter((artifact) => (
@@ -746,9 +741,6 @@ export class ReplacementEnvironment {
   private async launch(input: EnvironmentLaunchRequest): Promise<EnvironmentLaunchResponse> {
     return withDeploymentSqliteContext({ releaseSha: input.sha, target: input.target }, async (): Promise<EnvironmentLaunchResponse> => {
       try {
-        if (input.target === 'omp' || input.applies.includes('omp')) {
-          throw new Error('OMP releases must be activated by the OMP process runtime');
-        }
         if (input.target === 'machine' && process.env.GITSPACE_HOST_PID === String(process.pid)) {
           const update = this.queue.then(() => requestMachineUpdate({ version: 1, path: input.path, hash: input.hash, releaseSha: input.sha }, this.hostUrl, this.options.controlToken));
           this.queue = update.catch(() => undefined);

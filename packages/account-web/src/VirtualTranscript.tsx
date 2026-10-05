@@ -385,7 +385,7 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
       renderExecutionHistory={inline ? undefined : (block, state, onChange) => <ExecutionHistory key={block.executionId} block={block} parent={history} state={state} onStateChange={onChange} onAnswer={onAnswer} />}
     />;
   });
-  return <div ref={root} data-virtual-transcript className={inline ? 'min-w-0 w-full px-3 py-2' : 'mx-auto min-w-0 w-full max-w-3xl px-6 pb-[calc(var(--composer-overlay-height,0px)+1.5rem)] pt-6'} style={{ overflowAnchor: 'none' }}>
+  return <div ref={root} data-virtual-transcript className={`${inline ? 'min-w-0 w-full px-3 py-2' : 'mx-auto min-w-0 w-full max-w-3xl px-6 pb-[calc(var(--composer-overlay-height,0px)+1.5rem)] pt-6'} [overflow-anchor:none]`}>
     {transport.length ? <div className="mb-6 flex min-w-0 flex-col gap-1">{transport.map((block) => <TransportNotice block={block} key={block.id} />)}</div> : null}
     {inline && history.error ? <div role="alert" className="flex min-w-0 items-center gap-2 text-body text-destructive [overflow-wrap:anywhere]">{history.error}<Button variant="ghost" className="min-h-10 shrink-0" disabled={history.loading} onClick={history.refresh}>Retry history</Button></div> : null}
     <div className="flex h-12 items-center justify-center text-caption text-muted-foreground">

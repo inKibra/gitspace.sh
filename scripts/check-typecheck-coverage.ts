@@ -1,95 +1,97 @@
 #!/usr/bin/env bun
-/**
- * Fails when a source file is type-checked by NOBODY, or silences its own file.
- *
- * Two real holes this exists to close:
- *
- * 1. Coverage gap. The root tsconfig excludes `src/**\/*.web.ts(x)`, and the web
- *    project (web/tsconfig.app.json) only includes `main.tsx` — it reaches the
- *    rest transitively. A `.web.tsx` file that nothing imports therefore lands in
- *    neither program and is never checked. Four such files existed (1,276 lines,
- *    zero importers) and a deliberately broken type in one of them was reported
- *    by neither `tsgo` nor `tsc`.
- *
- * 2. Whole-file suppression. `@ts-nocheck` turns a file off entirely. It was on
- *    the 4,800-line machine daemon, where an undefined identifier typechecked
- *    clean and would only have surfaced as a runtime ReferenceError.
- *
- * Both failures are invisible: the suite is green, typecheck is green, and the
- * file is unchecked. Only an explicit inventory catches that.
- *
- * Usage: bun scripts/check-typecheck-coverage.ts
- */
-
+/** Inventory the programs invoked by root typecheck, including package tests. */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import ts from 'typescript';
 
-const ROOT = resolve(import.meta.dir, '..');
+interface Manifest {
+  workspaces?: string[] | { packages: string[] };
+  scripts?: Record<string, string>;
+}
 
-/** Every file a tsconfig's program actually contains, as repo-relative paths. */
-function programFiles(cwd: string, project: string): Set<string> {
-  const result = spawnSync('bunx', ['tsc', '-p', project, '--noEmit', '--listFiles'], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 256 * 1024 * 1024,
-  });
-  // tsc exits non-zero when the project has type errors; --listFiles output is
-  // still complete and is all this check needs.
+/** Fail closed if root typecheck stops invoking the entire workspace scope. */
+function assertWorkspaceTypecheck(scripts: Record<string, string>, name = 'typecheck', seen = new Set<string>()): void {
+  if (seen.has(name)) throw new Error(`Recursive root script: ${name}`);
+  seen.add(name);
+  const command = scripts[name];
+  if (command === 'bun run --workspaces --if-present typecheck') return;
+  const alias = command?.match(/^bun run ([\w:-]+)$/u);
+  if (alias) return assertWorkspaceTypecheck(scripts, alias[1]!, seen);
+  throw new Error(`Root ${name} must invoke bun run --workspaces --if-present typecheck`);
+}
+
+export function workspaceDirectories(root: string): string[] {
+  const rootManifest: Manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assertWorkspaceTypecheck(rootManifest.scripts ?? {});
+  const patterns = Array.isArray(rootManifest.workspaces) ? rootManifest.workspaces : rootManifest.workspaces?.packages;
+  if (!patterns?.length) throw new Error('Root package.json has no workspace scope');
+  const directories = new Set<string>();
+  const excluded = patterns.filter(pattern => pattern.startsWith('!')).map(pattern => new Bun.Glob(`${pattern.slice(1).replace(/\/$/u, '')}/package.json`));
+  for (const pattern of patterns.filter(pattern => !pattern.startsWith('!'))) {
+    for (const file of new Bun.Glob(`${pattern.replace(/\/$/u, '')}/package.json`).scanSync({ cwd: root, onlyFiles: true })) {
+      if (!excluded.some(glob => glob.match(file))) directories.add(resolve(root, file, '..'));
+    }
+  }
+  if (!directories.size) throw new Error('Root workspace scope contains no packages');
+  return [...directories].sort();
+}
+
+function programFiles(cwd: string, command: string): Set<string> {
   const files = new Set<string>();
-  for (const line of (result.stdout ?? '').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('/')) continue;
-    if (trimmed.includes('/node_modules/')) continue;
-    files.add(relative(ROOT, trimmed));
+  for (const step of command.split(/\s*&&\s*/u)) {
+    // Only actual compiler invocations count, not config names in arbitrary scripts.
+    const match = step.match(/^(?:tsgo|tsc) --noEmit -p ([\w./-]+)$/u);
+    if (!match) throw new Error(`Unsupported typecheck command in ${cwd}: ${step}`);
+    const configPath = resolve(cwd, match[1]!);
+    const config = ts.readConfigFile(configPath, ts.sys.readFile);
+    if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
+    const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, resolve(configPath, '..'), undefined, configPath);
+    if (parsed.errors.length) throw new Error(parsed.errors.map(error => ts.flattenDiagnosticMessageText(error.messageText, '\n')).join('\n'));
+    const program = ts.createProgram(parsed.fileNames, parsed.options);
+    for (const file of program.getSourceFiles()) files.add(resolve(file.fileName));
   }
   return files;
 }
 
-function sourceFiles(dir: string, out: string[]): void {
+const sourceDirectories = new Set(['src', 'test', 'tests', 'smoke', 'scripts']);
+function sourceFiles(dir: string, out: string[], packageRoot = false): void {
   for (const entry of readdirSync(dir)) {
     if (entry === 'node_modules' || entry === 'dist' || entry.startsWith('.')) continue;
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) {
-      sourceFiles(full, out);
-    } else if (/\.tsx?$/.test(entry) && !entry.endsWith('.d.ts')) {
-      out.push(relative(ROOT, full));
+      // Content archives are not application inputs. Check code roots and root configs.
+      if (!packageRoot || sourceDirectories.has(entry)) sourceFiles(full, out);
     }
+    else if (/\.[cm]?tsx?$/u.test(entry) && !/\.d\.[cm]?ts$/u.test(entry)) out.push(full);
   }
 }
 
-// Every project that contributes coverage. Keep in lockstep with the
-// `typecheck` script in package.json — a project missing here reports its files
-// as unchecked, and a project missing there leaves them genuinely unchecked.
-const covered = new Set<string>([
-  ...programFiles(ROOT, 'tsconfig.json'),
-  ...programFiles(join(ROOT, 'web'), 'tsconfig.app.json'),
-  ...programFiles(join(ROOT, 'web'), 'tsconfig.webtests.json'),
-]);
-
-const all: string[] = [];
-sourceFiles(join(ROOT, 'src'), all);
-
-const unchecked = all.filter((file) => !covered.has(file)).sort();
-const suppressed = all
-  .filter((file) => readFileSync(join(ROOT, file), 'utf8').includes('@ts-nocheck'))
-  .sort();
-
-if (unchecked.length > 0) {
-  console.error(`\n${unchecked.length} source file(s) are in NO typecheck program:`);
-  for (const file of unchecked) console.error(`  ${file}`);
-  console.error('\nEither import it from a checked entrypoint, add it to a tsconfig `include`,');
-  console.error('or delete it — an unchecked file is worse than no file.');
+export function checkTypecheckCoverage(root: string): { packages: number; files: number; unchecked: string[]; suppressed: string[] } {
+  const packages = workspaceDirectories(root);
+  const unchecked: string[] = [];
+  const suppressed: string[] = [];
+  let files = 0;
+  for (const cwd of packages) {
+    const all: string[] = [];
+    sourceFiles(cwd, all, true);
+    const packageManifest: Manifest = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'));
+    const command = packageManifest.scripts?.typecheck;
+    if (!command) throw new Error(`${relative(root, cwd)} has no typecheck command`);
+    const covered = programFiles(cwd, command);
+    files += all.length;
+    for (const file of all) {
+      if (!covered.has(file)) unchecked.push(relative(root, file));
+      if (readFileSync(file, 'utf8').includes('@ts-nocheck')) suppressed.push(relative(root, file));
+    }
+  }
+  return { packages: packages.length, files, unchecked: unchecked.sort(), suppressed: suppressed.sort() };
 }
 
-if (suppressed.length > 0) {
-  console.error(`\n${suppressed.length} source file(s) disable checking with @ts-nocheck:`);
-  for (const file of suppressed) console.error(`  ${file}`);
-  console.error('\nFix the underlying types instead; a whole-file opt-out hides every future error.');
+if (import.meta.main) {
+  const result = checkTypecheckCoverage(resolve(import.meta.dir, '..'));
+  for (const [kind, files] of [['in NO invoked typecheck program', result.unchecked], ['disabling checking with @ts-nocheck', result.suppressed]] as const) {
+    if (files.length) console.error(`\n${files.length} file(s) ${kind}:\n${files.map(file => `  ${file}`).join('\n')}`);
+  }
+  if (result.unchecked.length || result.suppressed.length) process.exit(1);
+  console.log(`workspace typecheck coverage OK — ${result.packages} packages, ${result.files} TypeScript source, test, script, and configuration files`);
 }
-
-if (unchecked.length > 0 || suppressed.length > 0) {
-  process.exit(1);
-}
-
-console.log(`typecheck coverage OK — ${all.length} source files, all in a program, no @ts-nocheck`);

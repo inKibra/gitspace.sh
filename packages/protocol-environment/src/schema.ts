@@ -4,6 +4,26 @@ import { EnvironmentError, EnvironmentFailureSchema } from './errors.js';
 const identifierSchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/u);
 const environmentNameSchema = z.string().min(1).max(128).regex(/^[A-Z][A-Z0-9_]*$/u);
 
+export const BrowserOriginPatternSchema = z.string().refine((pattern) => {
+  const host = pattern.startsWith('*.') ? pattern.slice(2) : pattern;
+  return pattern === '*' || browserOriginMatches(host, host);
+}, { message: 'Use a lowercase hostname, *.hostname, or *; URLs, paths, and ports are not allowed' });
+
+export function browserOriginMatches(pattern: string, hostname: string): boolean {
+  const validHost = (value: string): boolean => value.length > 0 && value.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/u.test(value);
+  if (pattern !== '*' && !validHost(pattern.startsWith('*.') ? pattern.slice(2) : pattern)) return false;
+  const host = hostname.toLowerCase();
+  if (!validHost(host)) return false;
+  if (pattern === '*') return true;
+  return pattern.startsWith('*.') ? host.endsWith(`.${pattern.slice(2)}`) : host === pattern;
+}
+
+export async function browserOriginHash(pattern: string): Promise<string> {
+  const canonical = BrowserOriginPatternSchema.parse(pattern);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`gitspace:browser-origin:v1\n${canonical}`)));
+  return `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
 export const BuiltInCheckDefinitionSchema = z.object({
   kind: z.literal('built-in'),
   check: identifierSchema,
@@ -44,6 +64,7 @@ export const EnvironmentBundleSchema = z.object({
   profiles: z.record(identifierSchema, EnvironmentProfileSchema),
   checks: z.record(identifierSchema, EnvironmentCheckDefinitionSchema).default({}),
   values: z.record(environmentNameSchema, EnvironmentValueDefinitionSchema).default({}),
+  browser: z.object({ origins: z.array(BrowserOriginPatternSchema).max(256).default([]) }).strict().default({ origins: [] }),
 }).strict().superRefine((bundle, context) => {
   if (!bundle.profiles.base) context.addIssue({ code: 'custom', path: ['profiles', 'base'], message: 'A reserved base profile is required' });
   if (!bundle.profiles[bundle.defaultProfile]) context.addIssue({ code: 'custom', path: ['defaultProfile'], message: 'Default profile must exist' });
@@ -214,11 +235,14 @@ export const LifecycleIncidentSchema = z.object({
   failure: EnvironmentFailureSchema.nullable(),
 }).strict();
 export type LifecycleIncident = z.infer<typeof LifecycleIncidentSchema>;
+export const LifecycleAttachmentSchema = z.object({ attachmentId: lifecycleIdSchema, generation: z.number().int().nonnegative() }).strict();
 export const LifecycleRunSchema = z.object({
   id: lifecycleIdSchema, projectId: lifecycleIdSchema, spaceId: lifecycleIdSchema,
   phase: LifecycleRunPhaseSchema, status: z.enum(['accepted', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'timed-out', 'interrupted']),
   interactive: z.boolean().optional(),
   profile: identifierSchema, machineId: lifecycleIdSchema, generation: z.number().int().nonnegative().nullable(),
+  attachment: LifecycleAttachmentSchema.optional(),
+  bindings: LifecycleBindingsSchema.optional(),
   executionHashes: z.array(executionHashSchema).max(128), terminalName: z.string().nullable(),
   results: lifecycleResultsSchema, output: z.string(), exitCode: z.number().int().nullable(),
   startedAt: z.string(), finishedAt: z.string().nullable(),
@@ -229,6 +253,7 @@ export const LifecycleStateSchema = z.object({
   revision: z.number().int().nonnegative(), projectId: lifecycleIdSchema, spaceId: lifecycleIdSchema,
   bundleJson: z.string().nullable(), selectedProfile: identifierSchema.nullable(),
   executions: z.array(LifecycleExecutionSchema).max(256),
+  browserOrigins: z.array(z.object({ pattern: BrowserOriginPatternSchema, hash: executionHashSchema }).strict()).max(256).default([]),
   values: z.object({ global: lifecycleValuesSchema, project: lifecycleValuesSchema, workspace: lifecycleValuesSchema }).strict(),
   approvals: z.array(LifecycleApprovalSchema), policy: z.object({ automatic: z.boolean() }).strict(),
   bindings: LifecycleBindingsSchema,
@@ -251,6 +276,7 @@ export const LifecycleMutationSchema = z.discriminatedUnion('op', [
   z.object({
     op: z.literal('claim'), runId: lifecycleIdSchema, phase: LifecycleRunPhaseSchema, profile: identifierSchema,
     executionHashes: z.array(executionHashSchema).max(128), generation: z.number().int().nonnegative().nullable(),
+    attachment: LifecycleAttachmentSchema.optional(),
     rerun: z.boolean(), deadlineAt: z.string().datetime().optional(), terminalName: z.string().max(256).nullable().optional(),
     interactive: z.boolean().optional(),
     ownershipToken: lifecycleIdSchema.optional(),

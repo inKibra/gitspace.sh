@@ -29,7 +29,7 @@ function dispatchFixture(tenant: string, route: 'tenant' | 'service' | 'applicat
     } as unknown as DispatchNamespace,
   };
   const hostname = route === 'tenant' ? `${tenant}-test.invalid` : route === 'application' ? `${tenant}.gitspace.sh` : `web--space-a--${tenant}-srv-test.invalid`;
-  const request = new Request(`https://${hostname}/health`, upgrade ? { headers: { upgrade: 'websocket' } } : undefined);
+  const request: Request = new Request(`https://${hostname}/health`, upgrade ? { headers: { upgrade: 'websocket' } } : undefined);
   return { bindings, request, pair };
 }
 
@@ -130,14 +130,14 @@ describe('dispatch without billing authorization', () => {
     try {
       for (const status of ['suspended', 'quarantined'] as const) {
         await env.TENANT_CONTROL.getByName(tenant).set({ status, reason: 'operator hold' });
-        const response = await worker.fetch(fixture.request.clone(), fixture.bindings, createExecutionContext());
+        const response = await worker.fetch(new Request(fixture.request), fixture.bindings, createExecutionContext());
         expect(response.status).toBe(423);
         expect(await response.json()).toMatchObject({ error: { code: `TENANT_${status.toUpperCase()}` } });
       }
       fixture.bindings.TENANT_CONTROL = {
         getByName() { return { async get() { throw new Error('Tenant control unavailable'); } }; },
       } as unknown as Env['TENANT_CONTROL'];
-      const unavailable = await worker.fetch(fixture.request.clone(), fixture.bindings, createExecutionContext());
+      const unavailable = await worker.fetch(new Request(fixture.request), fixture.bindings, createExecutionContext());
       expect(unavailable.status).toBe(503);
       expect(await unavailable.json()).toMatchObject({ error: { code: 'TENANT_AUTHORITY_UNAVAILABLE' } });
     } finally {

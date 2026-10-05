@@ -2,7 +2,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { mkdtemp, open, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { watch, type FSWatcher } from 'node:fs';
-import { getDaemonRuntimeDir } from '@oh-my-pi/pi-utils';
+import { getDaemonRuntimeDir } from '@gitspace/supervisor';
 import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
 import { TerminalSnapshotJournal, type TerminalSnapshot } from './terminal-stream.js';
 import { PROTECTED_LIFECYCLE_SOCKET, protectedLifecycleLive, protectedLifecycleWrapper, sendProtectedLifecycleInput } from './protected-lifecycle.js';
@@ -12,12 +12,13 @@ import { DEFAULT_LIFECYCLE_TIMEOUT_MS, LifecycleLogReader, type LifecycleRun, ty
 import {
   daemonClientForProject,
   type DaemonBrokerClient,
-} from '@oh-my-pi/pi-coding-agent/launch/client';
+} from '@gitspace/supervisor';
 import type {
   DaemonSnapshot,
   DaemonSpec,
+  DaemonStartSpec,
   DaemonState,
-} from '@oh-my-pi/pi-tui/tools/hub';
+} from '@gitspace/supervisor';
 
 export type WorkspaceTerminalKind = 'user' | 'agent' | 'lifecycle' | 'service';
 
@@ -102,6 +103,7 @@ function displayCommand(spec: DaemonSpec): string {
 export class WorkspaceHubTerminalCoordinator {
   private readonly terminalJournal: TerminalSnapshotJournal;
   private readonly terminalObservers = new Map<string, TerminalObserver>();
+  private readonly protectedSockets = new Map<string, string>();
   constructor(
     private readonly database: GitSpaceDatabase,
     private readonly machineId: string,
@@ -125,24 +127,24 @@ export class WorkspaceHubTerminalCoordinator {
     if (!entries.length) return;
     const client = await this.clientForProject(receipt.rootPath);
     const listed = await client.request({ op: 'list' });
-    if (listed.op !== 'list') throw new Error('OMP Hub returned an invalid list response');
+    if (listed.op !== 'list') throw new Error('Supervisor returned an invalid list response');
     if (listed.daemons.some((daemon) => !daemon.owner?.startsWith(`gitspace:${spaceId}:`))) return;
     if (listed.daemons.some((daemon) => daemon.state !== 'exited' && daemon.state !== 'failed')) {
       throw new Error(`Space ${spaceId} still has active terminal processes`);
     }
     const shutdown = await client.request({ op: 'shutdown' });
-    if (shutdown.op !== 'shutdown') throw new Error('OMP Hub did not confirm shutdown');
+    if (shutdown.op !== 'shutdown') throw new Error('Supervisor did not confirm shutdown');
     await rm(daemonsDir, { recursive: true, force: true });
   }
 
   async list(spaceId: string): Promise<WorkspaceTerminalView[]> {
     const scope = await this.scope(spaceId);
     const listed = await scope.client.request({ op: 'list' });
-    if (listed.op !== 'list') throw new Error('OMP Hub returned an invalid list response');
+    if (listed.op !== 'list') throw new Error('Supervisor returned an invalid list response');
     const activeDaemons = listed.daemons.filter((daemon) => daemon.state !== 'exited' && daemon.state !== 'failed');
     const terminals = await Promise.all(activeDaemons.map(async (daemon) => {
       const described = await scope.client.request({ op: 'describe', name: daemon.name });
-      if (described.op !== 'describe') throw new Error(`OMP Hub returned an invalid describe response for ${daemon.name}`);
+      if (described.op !== 'describe') throw new Error(`Supervisor returned an invalid describe response for ${daemon.name}`);
       return isInside(scope.space.rootPath, described.spec.cwd)
         ? this.view(spaceId, described.daemon, described.spec)
         : null;
@@ -267,7 +269,7 @@ export class WorkspaceHubTerminalCoordinator {
   async createShell(spaceId: string): Promise<WorkspaceTerminalView> {
     const scope = await this.scope(spaceId);
     const shell = process.env.SHELL || (process.platform === 'win32' ? process.env.COMSPEC : undefined) || '/bin/bash';
-    const spec: DaemonSpec = {
+    const spec: DaemonStartSpec = {
       name: `gitspace-${spaceId.slice(0, 8)}-${crypto.randomUUID().slice(0, 8)}`,
       application: shell,
       args: [],
@@ -279,8 +281,9 @@ export class WorkspaceHubTerminalCoordinator {
       detached: false,
     };
     const started = await scope.client.request({ op: 'start', spec, owner: ownerFor(spaceId, 'user') });
-    if (started.op !== 'start') throw new Error('OMP Hub returned an invalid start response');
-    return this.view(spaceId, started.daemon, spec);
+    if (started.op !== 'start') throw new Error('Supervisor returned an invalid start response');
+    const { env, ...configuration } = spec;
+    return this.view(spaceId, started.daemon, { ...configuration, envNames: Object.keys(env) });
   }
 
   async startService(
@@ -300,7 +303,7 @@ export class WorkspaceHubTerminalCoordinator {
         return this.view(spaceId, described.daemon, described.spec);
       }
     } catch { /* Service is not running yet. */ }
-    const spec: DaemonSpec = {
+    const spec: DaemonStartSpec = {
       name,
       application,
       args,
@@ -312,8 +315,9 @@ export class WorkspaceHubTerminalCoordinator {
       detached: false,
     };
     const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'service')}:${serviceName}` });
-    if (started.op !== 'start') throw new Error(`OMP Hub returned an invalid start response for service ${serviceName}`);
-    return this.view(spaceId, started.daemon, spec);
+    if (started.op !== 'start') throw new Error(`Supervisor returned an invalid start response for service ${serviceName}`);
+    const { env: bindings, ...configuration } = spec;
+    return this.view(spaceId, started.daemon, { ...configuration, envNames: Object.keys(bindings) });
   }
 
   async runLifecyclePlan(
@@ -387,7 +391,7 @@ export class WorkspaceHubTerminalCoordinator {
       closeSync(log);
       process.exit(code);
     `;
-    const spec: DaemonSpec = {
+    const spec: DaemonStartSpec = {
       name,
       application: process.execPath,
       args: ['-e', socketPath ? protectedLifecycleWrapper({ socketPath, spoolPath, cwd: scope.space.rootPath, deadline, envNames: Object.keys(env), steps }) : wrapper],
@@ -400,9 +404,10 @@ export class WorkspaceHubTerminalCoordinator {
       detached: false,
     };
     let finished = false;
+    if (socketPath) this.protectedSockets.set(name, socketPath);
     try {
       const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'lifecycle')}:${phase}` });
-      if (started.op !== 'start') throw new Error(`OMP Hub returned an invalid lifecycle start response for ${phase}`);
+      if (started.op !== 'start') throw new Error(`Supervisor returned an invalid lifecycle start response for ${phase}`);
       if (socketPath) {
         const ready = await scope.client.request({ op: 'wait', name, for: 'ready', timeoutMs: Math.max(1, deadline - Date.now()) });
         if (ready.op !== 'wait' || ready.timedOut || ready.daemon.state !== 'ready') throw new Error('Protected lifecycle terminal did not become ready');
@@ -458,6 +463,7 @@ export class WorkspaceHubTerminalCoordinator {
       if (socketPath && !output.includes('__GITSPACE_PROTECTED_CLEAN__')) throw new Error('Protected lifecycle process cleanup was not confirmed; explicit recovery is required');
       return { terminalName: name, exitCode: daemon.exitCode ?? 1, output, steps: scriptLog.results.map((step) => ({ ...step, output: step.output.trimEnd() })) };
     } finally {
+      this.protectedSockets.delete(name);
       await spool.close();
       if (ownSpool && finished) await rm(spoolRoot, { recursive: true, force: true });
       if (privateRoot && finished) await rm(privateRoot, { recursive: true, force: true });
@@ -481,7 +487,7 @@ export class WorkspaceHubTerminalCoordinator {
     }
     const verified = await client.request({ op: 'describe', name: terminalName });
     if (verified.op !== 'describe' || (verified.daemon.state !== 'exited' && verified.daemon.state !== 'failed')) throw new Error('Lifecycle runner is still active');
-    if (described.spec.env[PROTECTED_LIFECYCLE_SOCKET]) {
+    if (described.spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET)) {
       const logs = await client.request({ op: 'logs', name: terminalName, lines: 1_000, head: false, follow: false, renderTerminalRows: false, timeoutMs: 5_000 });
       if (logs.op !== 'logs' || !logs.text.includes('__GITSPACE_PROTECTED_CLEAN__')) throw new Error('Protected lifecycle process cleanup was not confirmed; explicit recovery is required');
     }
@@ -492,7 +498,7 @@ export class WorkspaceHubTerminalCoordinator {
     if (!space) throw new WorkspaceHubSpaceUnavailable(spaceId);
     const client = await this.clientForProject(space.rootPath);
     const listed = await client.request({ op: 'list' });
-    if (listed.op !== 'list') throw new Error('OMP Hub returned an invalid list response');
+    if (listed.op !== 'list') throw new Error('Supervisor returned an invalid list response');
     for (const daemon of listed.daemons) {
       if (daemon.state === 'exited' || daemon.state === 'failed') continue;
       const described = await client.request({ op: 'describe', name: daemon.name });
@@ -502,7 +508,7 @@ export class WorkspaceHubTerminalCoordinator {
         continue;
       }
       const stopped = await client.request({ op: 'stop', name: daemon.name, timeoutMs: 5_000 });
-      if (stopped.op !== 'stop') throw new Error(`OMP Hub returned an invalid stop response for ${daemon.name}`);
+      if (stopped.op !== 'stop') throw new Error(`Supervisor returned an invalid stop response for ${daemon.name}`);
       const verified = await client.request({ op: 'describe', name: daemon.name });
       if (verified.op !== 'describe' || (verified.daemon.state !== 'exited' && verified.daemon.state !== 'failed')) {
         throw new Error(`Terminal ${daemon.name} is still active`);
@@ -522,7 +528,7 @@ export class WorkspaceHubTerminalCoordinator {
       renderTerminalRows: false,
       timeoutMs: 30_000,
     });
-    if (result.op !== 'logs') throw new Error(`OMP Hub returned an invalid logs response for ${name}`);
+    if (result.op !== 'logs') throw new Error(`Supervisor returned an invalid logs response for ${name}`);
     return {
       spaceId,
       name,
@@ -534,22 +540,23 @@ export class WorkspaceHubTerminalCoordinator {
 
   async *live(spaceId: string, name: string, signal: AbortSignal): AsyncGenerator<ProtectedTerminalEvent> {
     const { spec } = await this.terminal(spaceId, name);
-    const path = spec.env[PROTECTED_LIFECYCLE_SOCKET];
-    if (!path) throw new Error('Terminal does not have a protected live stream');
+    const path = spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET) ? this.protectedSockets.get(name) : undefined;
+    if (!path) throw new Error('Protected live stream is unavailable; its owning lifecycle coordinator must still be running');
     yield* protectedLifecycleLive(path, signal);
   }
 
   async send(spaceId: string, name: string, data: string): Promise<WorkspaceTerminalView> {
     const { client, spec } = await this.terminal(spaceId, name);
-    const path = spec.env[PROTECTED_LIFECYCLE_SOCKET];
-    if (path) {
+    const path = this.protectedSockets.get(name);
+    if (spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET)) {
+      if (!path) throw new Error('Protected live stream is unavailable; its owning lifecycle coordinator must still be running');
       await sendProtectedLifecycleInput(path, data);
       const described = await client.request({ op: 'describe', name });
       if (described.op !== 'describe') throw new Error('Unable to confirm protected terminal identity');
       return this.view(spaceId, described.daemon, spec);
     }
     const result = await client.request({ op: 'send', name, data });
-    if (result.op !== 'send') throw new Error(`OMP Hub returned an invalid send response for ${name}`);
+    if (result.op !== 'send') throw new Error(`Supervisor returned an invalid send response for ${name}`);
     return this.view(spaceId, result.daemon, spec);
   }
 
@@ -560,7 +567,7 @@ export class WorkspaceHubTerminalCoordinator {
     if (described.op !== 'describe') throw new Error('Unable to confirm terminal ownership');
     if (terminalKind(spaceId, described.daemon.owner) === 'lifecycle') throw new Error('Lifecycle terminals must be cancelled through their environment run');
     const result = await client.request({ op: 'stop', name, timeoutMs: 5_000 });
-    if (result.op !== 'stop') throw new Error(`OMP Hub returned an invalid stop response for ${name}`);
+    if (result.op !== 'stop') throw new Error(`Supervisor returned an invalid stop response for ${name}`);
     return this.view(spaceId, result.daemon, spec);
   }
 
@@ -595,11 +602,11 @@ export class WorkspaceHubTerminalCoordinator {
       state: daemon.state,
       machineId: this.machineId,
       owner: daemon.owner ?? null,
-      command: spec.env[PROTECTED_LIFECYCLE_SOCKET] ? 'Protected lifecycle script' : displayCommand(spec),
+      command: spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET) ? 'Protected lifecycle script' : displayCommand(spec),
       cwd: spec.cwd,
       createdAt: new Date(daemon.createdAt),
       exitCode: daemon.exitCode ?? null,
-      ...(spec.env[PROTECTED_LIFECYCLE_SOCKET] ? { protected: true } : {}),
+      ...(spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET) ? { protected: true } : {}),
     };
   }
 }

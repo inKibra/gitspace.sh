@@ -9,8 +9,8 @@ const source = { projectId: 'gitspace', revision: 'abc123', dirty: false };
 
 function artifacts(): DeploymentArtifact[] {
   return [
-    { entrypoint: 'omp-worker', hash: hash('b'), path: '/artifacts/worker', dependsOn: [] },
-    { entrypoint: 'frontend', hash: hash('c'), path: '/artifacts/web', dependsOn: ['omp-worker'] },
+    { entrypoint: 'machine-daemon', hash: hash('b'), path: '/artifacts/machine', dependsOn: [] },
+    { entrypoint: 'frontend', hash: hash('c'), path: '/artifacts/web', dependsOn: ['machine-daemon'] },
   ];
 }
 
@@ -20,13 +20,13 @@ describe('deployment plans', () => {
       source,
       target: { environmentId: 'sandbox-b', kind: 'sandbox', expectedGeneration: 'gen-a' },
       candidateArtifacts: artifacts(),
-      currentHashes: { 'omp-worker': hash('a'), frontend: hash('c') },
+      currentHashes: { 'machine-daemon': hash('a'), frontend: hash('c') },
       authority: { kind: 'sandbox', environmentId: 'sandbox-b' },
       createdAt: '2026-08-27T00:00:00.000Z',
     });
     expect(result.status).toBe('ok');
     if (result.status === 'error') throw result.error;
-    expect(result.value.artifacts.map((artifact) => artifact.entrypoint)).toEqual(['omp-worker', 'frontend']);
+    expect(result.value.artifacts.map((artifact) => artifact.entrypoint)).toEqual(['machine-daemon', 'frontend']);
     expect((await verifyDeploymentPlan(result.value)).status).toBe('ok');
   });
 
@@ -35,7 +35,7 @@ describe('deployment plans', () => {
       source,
       target: { environmentId: 'current-a', kind: 'current', expectedGeneration: 'gen-a' },
       candidateArtifacts: artifacts(),
-      currentHashes: { 'omp-worker': hash('a'), frontend: hash('a') },
+      currentHashes: { 'machine-daemon': hash('a'), frontend: hash('a') },
       authority: { kind: 'promotion', rootPublicKey: publicKey, signingPrivateKey: privateKey },
       createdAt: '2026-08-27T00:00:00.000Z',
     });

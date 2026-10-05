@@ -7,7 +7,7 @@ import type { PortableSpaceDefinition } from './cloud-space-authority.js';
 import { CoordinatorPortableSpaceRuntime } from './coordinator-portable-runtime.js';
 import type { PortableSpaceDescriptor, PortableSpaceLifecycle } from './portable-space-lifecycle.js';
 import type { MachineSessionCoordinator } from './session-coordinator.js';
-import type { WalgitProjectBinding } from './walgit-supervisor.js';
+import type { ArtifactsRepositoryBinding } from './artifacts-git-remote.js';
 
 export interface SpaceLifecycleController {
   close(space: MaterializedSpace, expectedGeneration: number): Promise<void>;
@@ -26,7 +26,7 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
     private readonly sessions: MachineSessionCoordinator,
     private readonly lifecycle: PortableSpaceLifecycle,
     private readonly machineId: string,
-    private readonly binding: (projectId: string) => WalgitProjectBinding,
+    private readonly binding: (projectId: string, workspaceId: string) => ArtifactsRepositoryBinding,
     private readonly definition: (spaceId: string) => Promise<PortableSpaceDefinition | null>,
     private readonly managedSpaceRoot: string,
     private readonly portableUntrackedPaths: (space: MaterializedSpace) => string[] | undefined = () => undefined,
@@ -234,7 +234,7 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
       expectedGeneration,
       repositoryPath: space.rootPath,
       ...(portableUntrackedPaths ? { portableUntrackedPaths } : {}),
-      binding: this.binding(space.projectId),
+      binding: this.binding(space.projectId, space.id),
     };
   }
 }

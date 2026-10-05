@@ -75,12 +75,12 @@ export async function handleMcpRequest(
     // holder. Dispatch the already-signed request locally; all account access
     // checks still run. A Worker cannot fetch its own hostnames, so refuse any
     // other target instead of letting it fail as an opaque network error.
-    const signedFetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const signedFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const outgoing = new Request(input, init);
       const target = new URL(outgoing.url);
       if (target.origin === expectedOrigin && target.pathname === '/rpc') return dispatch(outgoing);
       return reject(500, 'MCP_RPC_TARGET_INVALID', `MCP dispatches RPC only to ${expectedOrigin}/rpc, not ${target.origin}${target.pathname}`);
-    }, { preconnect: globalThis.fetch.preconnect });
+    };
     const handler = createGitSpaceMcpHandler({
       key: access.key,
       fetch: signedFetch,

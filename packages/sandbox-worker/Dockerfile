@@ -1,21 +1,13 @@
-FROM rust:1.97.1-bullseye AS rust-toolchain
-
-# Build every native dependency on the sandbox's glibc, using the same maintained
-# pinned-source helper and authenticated machine tree as native distributions.
+# Package the authenticated machine tree using the sandbox's glibc and Bun ABI.
 FROM ubuntu:22.04 AS builder
-COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
-COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 COPY --from=oven/bun:1.4.0 /usr/local/bin/bun /usr/local/bin/bun
-ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git build-essential protobuf-compiler libprotobuf-dev cmake clang pkg-config libssl-dev binutils unzip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git git-lfs binutils unzip && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages ./packages
 COPY patches ./patches
-RUN bun install --filter @gitspace/account-machine --filter @gitspace/account-omp --filter @gitspace/deployment --frozen-lockfile
-# Cache is keyed by source pin, patch digest, toolchains, OS and architecture.
-# The binary and patch snapshot remain inside the authenticated machine tree.
-RUN --mount=type=cache,target=/native-cache GITSPACE_NATIVE_CACHE=/native-cache GITSPACE_RUNTIME_LAYER_COUNT=16 bun packages/sandbox-worker/scripts/build-runtime.ts
+RUN bun install --filter @gitspace/account-machine --filter @gitspace/deployment --frozen-lockfile
+RUN GITSPACE_RUNTIME_LAYER_COUNT=16 bun packages/sandbox-worker/scripts/build-runtime.ts
 
 FROM docker.io/cloudflare/sandbox:0.12.9
 USER root
@@ -40,5 +32,4 @@ COPY --from=builder /runtime-layers/14/ /opt/gitspace/
 COPY --from=builder /runtime-layers/15/ /opt/gitspace/
 # Native ABI compatibility includes the exact Bun version used by the builder.
 COPY --from=builder /usr/local/bin/bun /usr/local/bin/bun
-# No image-global WalGit: the selected machine owns native/walgit and its provenance.
-RUN /opt/gitspace/machine/native/walgit --version && /opt/gitspace/machine/native/walgit --help >/dev/null
+RUN bun /opt/gitspace/probe-image.js

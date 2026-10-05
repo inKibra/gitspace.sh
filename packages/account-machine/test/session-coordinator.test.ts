@@ -1,3 +1,4 @@
+import type { AgentRuntime, RuntimeEvent, RuntimeSession, SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -16,13 +17,8 @@ import { cloudWorkspaceDefinitionSchema } from '@gitspace/protocol';
 import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import { eq } from 'drizzle-orm';
 import { createSpaceWorkspaceControls } from '../src/space-workspace-controls.js';
-import { createSpaceEvalNamespace } from '../src/space-eval-sdk.js';
 import {
   MachineSessionCoordinator,
-  type OmpRuntime,
-  type OmpRuntimeEvent,
-  type OmpRuntimeSession,
-  type OmpSessionControlView,
 } from '../src/index.js';
 
 const roots: string[] = [];
@@ -30,7 +26,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-class FakeOmpRuntime implements OmpRuntime {
+class FakeOmpRuntime implements AgentRuntime {
   readonly created: string[] = [];
   readonly opened: string[] = [];
   readonly history: unknown[];
@@ -38,29 +34,30 @@ class FakeOmpRuntime implements OmpRuntime {
   messagesError: Error | null = null;
   leafId: string | null | undefined;
   private sessionActive = false;
-  private readonly handlers = new Set<(event: OmpRuntimeEvent) => void>();
+  private readonly handlers = new Set<(event: RuntimeEvent) => void>();
   private readonly activityHandlers = new Set<(activity: SessionActivity, failure: AgentFailure | null) => void>();
 
   constructor(history: unknown[] = [], private planning = false) {
     this.history = [...history];
   }
 
-  async create(input: { workingDirectory: string; sessionKey: string; artifactsDir: string }): Promise<OmpRuntimeSession> {
+  async create(input: { workingDirectory: string; sessionKey: string; artifactsDir: string }): Promise<RuntimeSession> {
     this.created.push(input.sessionKey);
     const sessionFile = join(dirname(input.artifactsDir), 'omp-a.jsonl');
     writeFileSync(sessionFile, [JSON.stringify({ type: 'session', version: 3, id: 'omp-a' }), ...this.durableEntries.map((entry) => JSON.stringify(entry)), ''].join('\n'));
     return this.session('omp-a', sessionFile, input.artifactsDir);
   }
 
-  async open(input: { workingDirectory: string; sessionKey: string; artifactsDir: string; sessionFile: string }): Promise<OmpRuntimeSession> {
+  async open(input: { workingDirectory: string; sessionKey: string; artifactsDir: string; sessionFile: string }): Promise<RuntimeSession> {
     this.opened.push(input.sessionFile);
     return this.session('omp-a', input.sessionFile, input.artifactsDir);
   }
 
   async transcript(): Promise<never> { throw new Error('Disk transcripts are not configured in this fixture'); }
   async checkpointTranscript(): Promise<never> { throw new Error('Checkpoint transcripts are not configured in this fixture'); }
+  async checkpointReference(): Promise<never> { throw new Error('Historical fixture does not contain a cloud conversation'); }
 
-  emit(event: OmpRuntimeEvent): void {
+  emit(event: RuntimeEvent): void {
     for (const handler of this.handlers) handler(event);
   }
 
@@ -68,7 +65,7 @@ class FakeOmpRuntime implements OmpRuntime {
     for (const handler of this.activityHandlers) handler(activity, failure);
   }
 
-  private session(id: string, sessionFile: string, artifactsDir: string): OmpRuntimeSession {
+  private session(id: string, sessionFile: string, artifactsDir: string): RuntimeSession {
     if (this.sessionActive) throw new Error('OMP session is already open');
     this.sessionActive = true;
     return {
@@ -117,6 +114,9 @@ class FakeOmpRuntime implements OmpRuntime {
       },
       activity: () => ({ activity: { active: false, reasons: [] }, failure: null }),
       persist: async () => undefined,
+      reloadSettings: async () => { throw new Error('Settings reload is not exercised by this fixture'); },
+      instructionsChanged: async () => { throw new Error('Instruction reload is not exercised by this fixture'); },
+      inferenceChanged: async () => { throw new Error('Inference reload is not exercised by this fixture'); },
       setWorkspacePhase: async (phase) => { this.planning = phase === 'plan'; },
       handoff: async () => false,
       resume: async () => undefined,
@@ -129,27 +129,28 @@ class FakeOmpRuntime implements OmpRuntime {
   }
 }
 
-class HandoffOmpRuntime implements OmpRuntime {
+class HandoffOmpRuntime implements AgentRuntime {
   readonly started = Promise.withResolvers<void>();
   readonly resumed = Promise.withResolvers<void>();
   resumeCalls = 0;
   private finishPrompt?: () => void;
 
-  async create(input: { artifactsDir: string }): Promise<OmpRuntimeSession> {
+  async create(input: { artifactsDir: string }): Promise<RuntimeSession> {
     const sessionFile = join(dirname(input.artifactsDir), 'omp-handoff.jsonl');
     writeFileSync(sessionFile, `${JSON.stringify({ type: 'session', version: 3, id: 'omp-handoff' })}\n`);
     return this.session(sessionFile);
   }
 
-  async open(input: { sessionFile: string }): Promise<OmpRuntimeSession> {
+  async open(input: { sessionFile: string }): Promise<RuntimeSession> {
     return this.session(input.sessionFile);
   }
 
   async transcript(): Promise<never> { throw new Error('Disk transcripts are not configured in this fixture'); }
   async checkpointTranscript(): Promise<never> { throw new Error('Checkpoint transcripts are not configured in this fixture'); }
+  async checkpointReference(): Promise<never> { throw new Error('Historical fixture does not contain a cloud conversation'); }
 
-  private session(sessionFile: string): OmpRuntimeSession {
-    const handlers = new Set<(event: OmpRuntimeEvent) => void>();
+  private session(sessionFile: string): RuntimeSession {
+    const handlers = new Set<(event: RuntimeEvent) => void>();
     return {
       id: 'omp-handoff',
       sessionFile,
@@ -183,6 +184,9 @@ class HandoffOmpRuntime implements OmpRuntime {
       subscribeActivity: (handler) => { handler({ active: false, reasons: [] }, null); return () => undefined; },
       activity: () => ({ activity: { active: false, reasons: [] }, failure: null }),
       persist: async () => undefined,
+      reloadSettings: async () => { throw new Error('Settings reload is not exercised by this fixture'); },
+      instructionsChanged: async () => { throw new Error('Instruction reload is not exercised by this fixture'); },
+      inferenceChanged: async () => { throw new Error('Inference reload is not exercised by this fixture'); },
       setWorkspacePhase: async () => undefined,
       handoff: async () => {
         this.finishPrompt?.();
@@ -278,7 +282,7 @@ describe('MachineSessionCoordinator', () => {
     database.possessWorkspace('workspace-a', 'machine-a');
     const runtime = new FakeOmpRuntime();
     const create = runtime.create.bind(runtime);
-    let predecessor: OmpRuntimeSession | undefined;
+    let predecessor: RuntimeSession | undefined;
     runtime.create = async (input) => {
       predecessor = await create(input);
       return { ...predecessor, handoff: async () => { throw new Error('Journal fsync failed'); } };
@@ -323,8 +327,8 @@ describe('MachineSessionCoordinator', () => {
     const runtime = new FakeOmpRuntime();
     const realOpen = runtime.open.bind(runtime);
     let calls = 0;
-    const boundedRuntime: OmpRuntime = Object.assign(runtime, {
-      open: async (input: Parameters<OmpRuntime['open']>[0], signal?: AbortSignal) => {
+    const boundedRuntime: AgentRuntime = Object.assign(runtime, {
+      open: async (input: Parameters<AgentRuntime['open']>[0], signal?: AbortSignal) => {
         calls += 1;
         if (calls > 1) return realOpen(input);
         await new Promise<void>((resolve) => {
@@ -398,7 +402,7 @@ describe('MachineSessionCoordinator', () => {
       const busy: SessionActivity = { active: true, reasons: [{ kind: 'turn' }] };
       runtime.emitActivity(busy);
       runtime.emitActivity(structuredClone(busy));
-      const failure: AgentFailure = { domain: 'agent', code: 'AGENT_RUNTIME_FAILED', message: 'Execution failed' };
+      const failure: AgentFailure = { domain: 'agent', code: 'AGENT_RUNTIME_FAILED', message: 'Execution failed', context: {} };
       runtime.emitActivity(busy, failure);
       runtime.emitActivity(structuredClone(busy), structuredClone(failure));
       runtime.emitActivity(busy);
@@ -636,12 +640,11 @@ describe('MachineSessionCoordinator', () => {
       spaces: {} as ControlsOptions['spaces'],
       environments: {} as ControlsOptions['environments'],
     });
-    const namespace = createSpaceEvalNamespace(authority, 'project-a', 'workspace-a', controls);
     try {
       expect((await sessions.prompt(created.value.id, 'blocked in plan')).status).toBe('error');
-      await namespace.call('setPhase', { expectedRevision: 1, phase: 'code' });
+      await controls.manage('setPhase', definition, { expectedRevision: 1, phase: 'code' });
       expect((await sessions.prompt(created.value.id, 'code-write')).status).toBe('ok');
-      await expect(namespace.call('setPhase', { expectedRevision: 1, phase: 'plan' })).rejects.toThrow('revision conflict');
+      await expect(controls.manage('setPhase', definition, { expectedRevision: 1, phase: 'plan' })).rejects.toThrow('revision conflict');
       expect(database.getWorkspace('workspace-a')?.phase).toBe('code');
       expect((await sessions.prompt(created.value.id, 'after-rejected-change')).status).toBe('ok');
       await sessions.close(created.value.id);
@@ -1188,11 +1191,11 @@ describe('MachineSessionCoordinator', () => {
   it('refuses provider checkpointing without consuming pending asks or queued prompts, and canceling that preparation is harmless', async () => {
     const { root, database, artifacts } = fixture();
     database.possessWorkspace('workspace-a', 'machine-a');
-    const controls: OmpSessionControlView = {
+    const controls: SessionControlView = {
       sessionId: 'omp-a', role: null, roleLabel: null, roles: [], provider: null, models: [],
       model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'always-ask', context: null,
       cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null,
-      pendingAsk: { id: 'pending-ask', questions: [] },
+      pendingAsk: { id: 'pending-ask', source: 'ask-tool', links: [], questions: [] },
     };
     let interruptions = 0;
     class PendingRuntime extends FakeOmpRuntime {
