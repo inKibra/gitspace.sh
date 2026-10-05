@@ -5,6 +5,7 @@ import { PhysicalMachineProvider } from '../src/machine-providers.js';
 import type { FleetMachineDefinition } from '../src/fleet-catalog.js';
 import { http } from 'msw';
 import { network } from './network.js';
+import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 
 function mockProvider(fetch: (request: Pick<Request, 'url'>) => Promise<Response>) {
   network.use(http.all(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/*`, ({ request }) => fetch(request)));
@@ -84,6 +85,7 @@ it('does not acknowledge resume from a stale online catalog entry', async () => 
 
 it('checkpoints an open workspace before stopping and preserves its restart checkpoint', async () => {
   const { userId, catalog, authority, identity } = await openSpaceMachine();
+  const manifest = await persistPortableCheckpoint(identity.projectId, identity.spaceId, 1);
   const actions: string[] = [];
   const service = { fetch: async (request: Pick<Request, 'url'>) => {
     const action = new URL(request.url).pathname.split('/').at(-1)!;
@@ -94,8 +96,7 @@ it('checkpoints an open workspace before stopping and preserves its restart chec
       if (checkpoint.status === 'error') throw new Error(checkpoint.failure.message);
       const closed = await authority.commitClosed({
         ...identity, expectedGeneration: 1, revision: checkpoint.value.revision,
-        manifestKey: 'projects/project-a/spaces/project-a/checkpoints/1/manifest.enc',
-        manifestHash: `sha256:${'a'.repeat(64)}`, resumeOnMachineRestart: true,
+        ...manifest, resumeOnMachineRestart: true,
       });
       if (closed.status === 'error') throw new Error(closed.failure.message);
       return Response.json({ prepared: true });
@@ -111,11 +112,12 @@ it('checkpoints an open workspace before stopping and preserves its restart chec
   const result = await controlFleetMachine(env, userId, sandbox.id, 'sleep');
   expect(result).toMatchObject({ state: 'offline', desiredState: 'offline', operationId: null, error: null });
   expect(actions).toEqual(['status', 'prepare-replacement', 'sleep']);
-  expect(await authority.get()).toMatchObject({ state: 'closed', resumeMachineId: sandbox.id, manifestHash: `sha256:${'a'.repeat(64)}` });
+  expect(await authority.get()).toMatchObject({ state: 'closed', resumeMachineId: sandbox.id, manifestHash: manifest.manifestHash });
 });
 
 it.each(['control', 'reconciliation'] as const)('restores admission after a failed checkpoint through %s without leaving a deferred stop', async (entry) => {
   const { userId, catalog, authority, identity } = await openSpaceMachine(entry === 'control' ? 'online' : 'offline');
+  const manifest = await persistPortableCheckpoint(identity.projectId, identity.spaceId, 1);
   let admitted = true;
   let stopped = false;
   const actions: string[] = [];
@@ -129,8 +131,7 @@ it.each(['control', 'reconciliation'] as const)('restores admission after a fail
       if (checkpoint.status === 'error') throw new Error(checkpoint.failure.message);
       const closed = await authority.commitClosed({
         ...identity, expectedGeneration: 1, revision: checkpoint.value.revision,
-        manifestKey: 'projects/project-a/spaces/project-a/checkpoints/1/manifest.enc',
-        manifestHash: `sha256:${'b'.repeat(64)}`, resumeOnMachineRestart: true,
+        ...manifest, resumeOnMachineRestart: true,
       });
       if (closed.status === 'error') throw new Error(closed.failure.message);
       return Response.json({ error: 'Checkpoint upload failed' }, { status: 503 });
@@ -155,7 +156,7 @@ it.each(['control', 'reconciliation'] as const)('restores admission after a fail
   else await reconcileFleetMachines(environment, userId, catalog);
   expect(await catalog.getMachine(sandbox.id)).toMatchObject({ state: 'online', desiredState: 'online', operationId: null, error: 'Checkpoint upload failed' });
   expect(admitted).toBe(true);
-  expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 3, publishedRevision: 1, manifestHash: `sha256:${'b'.repeat(64)}` });
+  expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 3, publishedRevision: 1, manifestHash: manifest.manifestHash });
   await reconcileFleetMachines(environment, userId, catalog);
   expect(stopped).toBe(false);
   expect(actions).toEqual(['status', 'prepare-replacement', 'cancel-replacement', 'status', 'status']);

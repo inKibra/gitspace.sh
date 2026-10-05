@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { GitLfsRestoredSchema } from '@gitspace/protocol-workspace';
 import { RuntimeAttachmentSchema, RuntimeAttachResultSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema } from './base.js';
 import { RuntimeGitCheckpointSchema } from './workspace-controls.js';
 
@@ -29,6 +30,7 @@ export const RuntimeAssignmentsResultSchema = z.object({ assignments: z.array(Ru
 export const RuntimeAttachmentReadyInputSchema = RuntimeIdentitySchema.extend({
   machineId: RuntimeMachineIdSchema, attachmentId: z.string().min(1), generation: z.number().int().nonnegative(),
   commit, prerequisitesComplete: z.literal(true), capabilities: z.array(z.string()),
+  lfsRestored: z.array(GitLfsRestoredSchema).optional(),
 });
 export const RuntimeAttachmentReadyResultSchema = RuntimeAttachmentRequestResultSchema;
 export type RuntimeAttachmentRequestInput = z.infer<typeof RuntimeAttachmentRequestInputSchema>;

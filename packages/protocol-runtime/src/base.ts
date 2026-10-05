@@ -1,6 +1,7 @@
 import { RuntimeExecutionObservationSchema } from './scheduling.js';
 import { z } from 'zod';
 import { RuntimeBrowserAuthorizationSchema, RuntimeBrowserApprovalCardSchema } from './browser.js';
+import { GitLfsRestoredSchema } from '@gitspace/protocol-workspace';
 
 export const RuntimeProjectIdSchema = z.string().min(1).brand<'ProjectId'>();
 export const RuntimeWorkspaceIdSchema = z.string().min(1).brand<'WorkspaceId'>();
@@ -13,7 +14,7 @@ export const RuntimeToolDispatchSchema = z.object({ version: z.literal(1), ...id
 const result = { requestId: z.string().min(1), attemptId: z.string().min(1), content: z.array(RuntimeContentSchema) };
 export const RuntimeToolResultSchema = z.discriminatedUnion('status', [z.object({ ...result, status: z.literal('completed') }), z.object({ ...result, status: z.literal('failed'), error: z.object({ code: z.string(), message: z.string() }) }), z.object({ ...result, status: z.literal('interrupted') })]);
 export const RuntimeCheckoutSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('shared'), branch: z.string().min(1) }), z.object({ kind: z.literal('snapshot'), commit: z.string().regex(/^[a-f0-9]{40,64}$/) }), z.object({ kind: z.literal('branch'), branch: z.string().min(1), commit: z.string().regex(/^[a-f0-9]{40,64}$/) })]);
-export const RuntimeAttachmentSchema = z.object({ ...identity, attachmentId: z.string().min(1), machineId: RuntimeMachineIdSchema, generation: z.number().int().nonnegative(), ownershipGeneration: z.number().int().nonnegative().optional(), role: z.enum(['primary', 'runner', 'delegate']), checkout: RuntimeCheckoutSchema, state: z.enum(['attaching', 'ready', 'draining', 'detached', 'lost']), capabilities: z.array(z.string()), updatedAt: z.iso.datetime(), executionObservation: RuntimeExecutionObservationSchema.optional() });
+export const RuntimeAttachmentSchema = z.object({ ...identity, attachmentId: z.string().min(1), machineId: RuntimeMachineIdSchema, generation: z.number().int().nonnegative(), ownershipGeneration: z.number().int().nonnegative().optional(), role: z.enum(['primary', 'runner', 'delegate']), checkout: RuntimeCheckoutSchema, state: z.enum(['attaching', 'ready', 'draining', 'detached', 'lost']), capabilities: z.array(z.string()), updatedAt: z.iso.datetime(), executionObservation: RuntimeExecutionObservationSchema.optional(), lfsRestored: z.array(GitLfsRestoredSchema).optional() });
 export const RuntimePlacementSchema = z.object({ attachmentId: z.string().min(1), generation: z.number().int().nonnegative() });
 export const RuntimeMessageSchema = z.object({ id: z.string(), role: z.enum(['user', 'assistant', 'tool', 'system']), content: z.array(RuntimeContentSchema), createdAt: z.iso.datetime() });
 export const RuntimeConversationSchema = z.object({ id: z.string(), parentId: z.string().nullable(), title: z.string(), status: z.enum(['idle', 'running', 'waiting', 'failed']), placement: RuntimePlacementSchema.nullable(), messages: z.array(RuntimeMessageSchema) });

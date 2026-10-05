@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { parseRuntimeSettings } from '@gitspace/protocol';
 import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
+import { createAccountGitLfsStore } from './git-lfs-store.js';
 
 /** Repository identities and origins come only from canonical project metadata.
  * Scratch projects have an initial commit; imported repositories retain their history. */
@@ -68,9 +69,15 @@ export async function createAccountWorkspaceRuntime(
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });
+  const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
   runtime = await createWorkspaceRuntime({
     ...inference,
     code,
+    lfs,
+    async retainLfs(checkpoint) {
+      await project.lfsRetain({ snapshotId: `runtime:${identity.workspaceId}:${checkpoint.worktreeCommit}`, workspaceId: identity.workspaceId, kind: 'runtime', objects: checkpoint.lfs?.objects ?? [] });
+      await lfs.releasePublication();
+    },
     initialCheckpoint: async () => {
       const branchRef = await ref();
       return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length));

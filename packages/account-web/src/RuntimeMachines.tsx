@@ -9,8 +9,9 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import { useAccountMachines } from './SynchronizationProvider.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
 import { RuntimeBrowserGroups } from './RuntimeBrowser.js';
+import { runtimeLfsHeldBack, useLfsTransition } from './LfsTransition.js';
 
-export function RuntimeMachines({ snapshot, conversationId, onSelectConversation }: { snapshot: RuntimeSnapshot; conversationId?: string; onSelectConversation(id: string): void }) {
+export function RuntimeMachines({ snapshot, conversationId, onSelectConversation, onCommitFirst }: { snapshot: RuntimeSnapshot; conversationId?: string; onSelectConversation(id: string): void; onCommitFirst?(): void | Promise<void> }) {
   const shape = useShape();
   const [pending, setPending] = useState(false);
   const busy = useRef(false);
@@ -22,6 +23,7 @@ export function RuntimeMachines({ snapshot, conversationId, onSelectConversation
   const [checkout, setCheckout] = useState<'primary' | 'snapshot' | 'branch'>('snapshot');
   const [branch, setBranch] = useState('');
   const checkpoint = RuntimeGitCheckpointSchema.safeParse(snapshot.documents['gitspace.code']);
+  const lfsTransition = useLfsTransition();
   const requestAttachment = async () => {
     if (busy.current || (checkout !== 'primary' && !checkpoint.success)) return;
     busy.current = true; setPending(true); setError(null);
@@ -37,6 +39,15 @@ export function RuntimeMachines({ snapshot, conversationId, onSelectConversation
   const detach = async (attachment: RuntimeSnapshot['attachments'][number]) => {
     if (busy.current) return;
     busy.current = true; setPending(true); setError(null);
+    try {
+      if (!await lfsTransition.confirm(runtimeLfsHeldBack(snapshot), () => {
+        if (onCommitFirst) return onCommitFirst();
+        const conversation = snapshot.conversations.find(item => item.id === conversationId) ?? snapshot.conversations.find(item => item.parentId === null);
+        if (conversation) onSelectConversation(conversation.id);
+      })) return;
+    } catch (cause) { setError(rpcErrorMessage(cause, 'Review local LFS changes')); return; }
+    finally { busy.current = false; setPending(false); }
+    busy.current = true; setPending(true);
     try {
       const result = await rpcClient.runtime.attachment.detach({ ...identity, machineId: attachment.machineId, attachmentId: attachment.attachmentId, generation: attachment.generation });
       if (result.status === 'error') throw result.error;
@@ -55,6 +66,7 @@ export function RuntimeMachines({ snapshot, conversationId, onSelectConversation
       <Button type="submit" variant="primary" disabled={pending || (checkout !== 'primary' && !checkpoint.success) || !machineId || (checkout === 'branch' && !branch.trim())} loading={pending}>Request attachment</Button>
     </form>
     <RuntimeBrowserGroups key={`${snapshot.projectId}:${snapshot.workspaceId}`} snapshot={snapshot} conversationId={conversationId} machines={machines ?? []} />
+    {lfsTransition.dialog}
     <section className={`${shape.container} bg-surface-2 p-4 shadow-surface-1`}><h3 className="mb-3 text-body font-medium">Conversation placement</h3><p className="text-caption text-muted-foreground">Assign one working copy before machine tools run. Existing placement stays fixed; use a new conversation for another working copy.</p>{snapshot.conversations.map((conversation) => <label key={conversation.id} className="my-3 flex flex-col gap-2 text-caption">{conversation.title || conversation.id}<select aria-label={`Working copy for ${conversation.title || conversation.id}`} className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={conversation.placement?.attachmentId ?? ''} disabled={pending || conversation.placement !== null || conversation.status === 'running' || conversation.status === 'waiting'} onChange={(event) => {
       const attachment = snapshot.attachments.find((item) => item.attachmentId === event.target.value && item.state === 'ready');
       if (!attachment || busy.current) return;

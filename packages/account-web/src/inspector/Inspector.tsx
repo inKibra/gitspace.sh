@@ -60,7 +60,7 @@ import type {
   WorkflowNode,
   WorkflowView,
 } from '@gitspace/protocol';
-import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
+import type { GitLfsHeldBack, WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import {
   AlertCircle,
   Archive,
@@ -141,6 +141,7 @@ export interface InspectorProps {
   stackStatus?: OverviewViewProps['stackStatus'];
   environment?: ReactNode;
   repositoryEntries: readonly RepositoryTreeEntry[];
+  lfsHeldBack?: readonly GitLfsHeldBack[];
   repositoryMode: RepositoryMode;
   onRepositoryModeChange(mode: RepositoryMode): void;
   repositoryFile: RepositoryFileView | null;
@@ -443,16 +444,18 @@ function RepositoryTree({ entries, changedOnly, onOpen }: { entries: readonly Re
   return <FileTree model={model} className="h-full" />;
 }
 
-function FilesSurface({ entries, mode, onModeChange, changedOnly, setChangedOnly, onOpen }: { entries: readonly RepositoryTreeEntry[]; mode: RepositoryMode; onModeChange: (mode: RepositoryMode) => void; changedOnly: boolean; setChangedOnly: (value: boolean) => void; onOpen: (entry: RepositoryTreeEntry) => void }) {
-  const changed = entries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length;
+export function FilesSurface({ entries, heldBack, mode, onModeChange, changedOnly, setChangedOnly, onOpen, onOpenHeldBack }: { entries: readonly RepositoryTreeEntry[]; heldBack: readonly GitLfsHeldBack[]; mode: RepositoryMode; onModeChange: (mode: RepositoryMode) => void; changedOnly: boolean; setChangedOnly: (value: boolean) => void; onOpen: (entry: RepositoryTreeEntry) => void; onOpenHeldBack(path: string): void }) {
+  const changed = new Set([...entries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').map(entry => entry.path), ...heldBack.map(item => item.path)]).size;
+  const ordinaryEntries = entries.filter(entry => !heldBack.some(item => item.path === entry.path));
   return <div className="flex min-h-0 flex-1 flex-col">
     <header className="flex flex-col gap-2 px-4 pb-2 pt-4">
-      <div className="flex items-center justify-between gap-2"><strong className="text-body font-medium text-foreground">Repository</strong><span className="text-caption text-muted-foreground tabular-nums">{entries[0] ? `generation ${entries[0].generation}` : 'No checkout'}</span></div>
+      <div className="flex items-center justify-between gap-2"><strong className="text-body font-medium text-foreground">Repository</strong><span className="text-caption text-muted-foreground tabular-nums">{entries[0] ? `generation ${entries[0].generation}` : heldBack.length ? 'Saved LFS changes' : 'No checkout'}</span></div>
       <Select value={mode} onValueChange={(value) => onModeChange(value as RepositoryMode)} size="compact"><SelectTrigger aria-label="Repository comparison" />{selectOptions(repositoryModes.map(({ id, label }) => ({ value: id, label })))}</Select>
       <TabsSubtle size="compact" selectedIndex={changedOnly ? 1 : 0} onSelect={(index) => setChangedOnly(index === 1)} aria-label="Repository filter"><TabsSubtleItem index={0} label="All" /><TabsSubtleItem index={1} label={`Changed · ${changed}`} /></TabsSubtle>
       <p className="text-caption text-muted-foreground">Choose any file from All, or focus the tree to paths changed in this workspace.</p>
     </header>
-    <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">{entries.length ? <RepositoryTree entries={entries} changedOnly={changedOnly} onOpen={onOpen} /> : <EmptyState icon={ic(File02, 20)} title="Repository unavailable" description="The current workspace generation has no repository tree." />}</div>
+    {heldBack.length ? <section className="flex flex-col gap-2 px-4 pb-3" aria-label="Machine-local LFS changes"><p className="text-caption text-muted-foreground">LFS changes leave this machine only after a commit</p><ul className="flex max-h-60 flex-col gap-1 overflow-auto">{heldBack.map(item => <li key={item.path} className="flex items-center justify-between gap-2"><Button variant="ghost" size="compact" className="min-w-0 justify-start" onClick={() => onOpenHeldBack(item.path)}><span className="truncate font-mono">{item.path}</span></Button><Badge color="amber">Only on this machine</Badge></li>)}</ul></section> : null}
+    <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">{ordinaryEntries.length ? <RepositoryTree entries={ordinaryEntries} changedOnly={changedOnly} onOpen={onOpen} /> : heldBack.length ? null : <EmptyState icon={ic(File02, 20)} title="Repository unavailable" description="The current workspace generation has no repository tree." />}</div>
   </div>;
 }
 
@@ -1123,9 +1126,9 @@ export function Inspector(props: InspectorProps) {
     <div className="flex min-h-0 flex-1 flex-col border-t border-border">{documentBody}{threadPanel}</div>
   </div> : <Padded><EmptyState icon={ic(File02, 22)} title="Document is no longer available" description="Close this tab or reopen its canonical record from the permanent Inspector surfaces." /></Padded>;
   const renderSurface = (id: InspectorPermanentView): ReactNode => {
-    if (!runtimeAvailable && runtimeViews[id]) return <Padded><EmptyState title="Live workspace unavailable" description={openWorkspaceFirst} /></Padded>;
+    if (!runtimeAvailable && runtimeViews[id] && id !== 'files') return <Padded><EmptyState title="Live workspace unavailable" description={openWorkspaceFirst} /></Padded>;
     const failure = props.sectionErrors?.[id];
-    if (failure && !failure.retained) {
+    if (failure && !failure.retained && !(id === 'files' && props.repositoryMode === 'working' && props.lfsHeldBack?.length)) {
       const label = permanentTabs.find((tab) => tab.id === id)!.label;
       return <Padded><div role="alert"><EmptyState icon={ic(AlertCircle, 22)} title={`${label} could not load`} description={failure.message} action={<Button variant="ghost" type="button" onClick={failure.retry}>Retry {label}</Button>} /></div></Padded>;
     }
@@ -1135,7 +1138,7 @@ export function Inspector(props: InspectorProps) {
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'agents': return null;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} />;
-      case 'files': return <FilesSurface entries={props.repositoryEntries.filter((entry) => entry.mode === props.repositoryMode)} mode={props.repositoryMode} onModeChange={props.onRepositoryModeChange} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, props.repositoryMode)} />;
+      case 'files': return <FilesSurface entries={props.repositoryEntries.filter((entry) => entry.mode === props.repositoryMode)} heldBack={props.repositoryMode === 'working' ? props.lfsHeldBack ?? [] : []} mode={props.repositoryMode} onModeChange={props.onRepositoryModeChange} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, props.repositoryMode)} onOpenHeldBack={path => openFile(path, 'working')} />;
       case 'artifacts': return <ArtifactsSurface references={artifacts} onOpen={(reference) => {
         if (reference.kind !== 'artifact') return;
         openDocument({ id: `artifact-current:${reference.url}`, kind: 'artifact', label: reference.label, target: `current:${reference.url}` });

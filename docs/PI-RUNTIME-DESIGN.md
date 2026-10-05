@@ -1,6 +1,6 @@
 # Pi Runtime: Durable Workspaces on Pi 1.0
 
-> **Status: Design with pass-6 owner decisions applied.** The browser, origin-grant, and machineless file rules below supersede earlier per-tab approvals and read-only cloud operation. Broader roadmap items remain proposals. Live Artifacts binding and LFS compatibility are unverified until the owner authorizes the opt-in check.
+> **Status: Design with pass-10 owner decisions applied.** The browser, origin-grant, machineless file, and LFS rules below supersede earlier behavior. Broader roadmap items remain proposals. The owner verified Artifacts binding reads and snapshot publication in the `gitspace-live-check` scratch namespace in the InKibra Corp account. Artifacts has no LFS endpoint; GitSpace stores committed local LFS objects in encrypted R2 storage instead.
 
 ## 1. Summary
 
@@ -346,6 +346,12 @@ Cloudflare Artifacts (open beta 2026-10-01; billing from 2026-10-14): git repos 
 
 Measured: inkibra-core 254 MB packed, gitspace-source 89 MB, deedible 59 MB, golconda 30 MB; no blob over 32 MB.
 
+The owner's live check confirmed `readCommit`, `readTree`, `readFile`, `readBlob`, and `info`, plus snapshot publication on top of an existing snapshot. The new commit had the expected parent; source HEAD, index, and branch stayed unchanged; Git `ls-remote` saw the checkpoint ref.
+
+Binding ref lookup differs from Git ref lookup. `repo.log({ ref })` accepts bare branch names and commit IDs. `repo.log()` without a ref reads HEAD's history. `HEAD`, `refs/heads/main`, `heads/main`, and custom checkpoint refs return an empty list even when the refs exist. Translate branch refs before binding lookup, use no-ref log for HEAD, and use the DO's stored commit IDs for snapshots. Never infer an empty repository from an unsupported ref query.
+
+The owner reran the unmodified Pass 10 check under Node 24 with fork `probe-fork-20261005035600-c`. Direct `ArtifactsCodeStore` checks confirmed full/bare branches, HEAD, feature branches, commit IDs, missing branches, `readFile`, rejected custom refs, and initial-checkpoint behavior. An existing matching-description scratch repository is now seeded only when no-ref history is empty, even if its requested branch is absent.
+
 ### 9.2 Layout
 
 - **Namespace per tenant**, bound to the tenant Worker by the platform deployer alongside the tenant's R2 bucket.
@@ -363,9 +369,29 @@ Measured: inkibra-core 254 MB packed, gitspace-source 89 MB, deedible 59 MB, gol
 
 ### 9.4 Git LFS
 
-Live LFS payload support is unverified. The cloud snapshot writer preserves raw LFS pointer bytes; that does not prove external payload upload/download. The opt-in `runtime-workspace-do` live check uploads synthetic LFS content, commits its pointer on top of an existing snapshot in an authorized disposable fork, downloads the payload, and compares SHA-256 and size. Unsupported LFS endpoints fail explicitly. No live check, migration, or deployment is authorized by this design update.
+Artifacts stores LFS pointers, not LFS payloads. The owner's live `POST <remote>/info/lfs/objects/batch` returned 404. Each repository keeps its configured LFS remote: origin or `lfs.url` in `.lfsconfig`. Only a deliberate Git push invokes git-lfs's normal origin pre-push hook; snapshot publication never pushes LFS objects to origin.
 
-The [current Workers binding reference](https://developers.cloudflare.com/artifacts/api/workers-binding/) lists `readFile`, `readTree`, `readCommit`, and `log`; the older [isomorphic-git example](https://developers.cloudflare.com/artifacts/examples/isomorphic-git/) contradicts it. The same opt-in check records actual binding results. Its runner is `packages/runtime-workspace-do/live-check/run.ts`; offline `--help` is safe. Running with `--authorize-live --input <authorization.json>` requires separate owner approval, repository identifiers, a complete prior checkpoint, and a known probe digest. It leaves the source repository/DO unchanged and retains the disposable fork for owner-directed cleanup.
+Every pointer in a published snapshot must refer to an object stored off the machine. When capture sees committed objects not on origin, it uploads their payloads to the account's encrypted R2 LFS store, keyed by oid, once per oid. Uncommitted or staged content is never uploaded, including during a deliberate detach or move.
+
+HEAD's `.gitattributes` decides which paths use LFS. Working-copy attribute edits cannot change that decision. Capture builds private index and worktree trees without changing the real index or working tree. It keeps a pointer only when the referenced object is already in R2 or positively confirmed by the origin LFS server. Otherwise it substitutes HEAD's pointer, or omits a path absent from HEAD. Deletes and renames of already-committed LFS files carry over.
+
+The checkpoint stores each held-back path and its kind (`modified`, `added`, or `staged`), plus the object inventory needed for retention. Incremental capture publishes held-back metadata changes even when the sanitized Git trees do not change. Restore looks in the local cache, then R2, then the configured origin. Missing objects fail explicitly rather than leaving a successful checkout with dangling pointers.
+
+Cloud reads return verified R2 content when available. An origin-only LFS file returns its size and a message that it needs a machine, not raw pointer text. Cloud write and edit refuse LFS-tracked paths because changing them needs a machine and a commit.
+
+Objects and encryption keys are project-scoped. A durable machine inventory covers committed history, including deleted-file pointers. Its HEAD boundary prevents repeated history walks; forward scans exclude the saved ancestor, while a rewrite triggers one complete rescan. Batched publication protection checks object metadata without downloading payloads.
+
+Origin ownership requires a successful authenticated LFS batch `download` response for the requested oid and size, with a download action. Native confirmation honors project Git credentials, Git URL rewrites, SSH `git-lfs-authenticate`, `lfs.url`, and committed `.lfsconfig`. Positive cache entries are scoped to repository and route identity; negatives and failures are retried. Signed project-scoped receipts let the cloud retain confirmation without storing machine credentials. Local `refs/remotes/origin/*` never prove payload availability.
+
+In-use roots are the current checkpoint and referenced portable revision of each nonarchived/nondeleted workspace, including closed/restorable workspaces; active attachment checkpoints; pending cloud publication predecessors; and unacknowledged accepted-retention outboxes. Historical rows alone are not roots. Accepted runtime checkpoints and their retention outbox are committed atomically after primary, generation, predecessor, and writer-lease validation. Retention acknowledgement releases the predecessor; recovery retries the outbox.
+
+An external-origin project can evict R2 only after positive origin confirmation and durable source transition of every affected snapshot. Origin metadata retains the confirmed endpoint, so later `.lfsconfig` changes do not misattribute ownership to a new server. Immutable portable manifests use an authoritative project source overlay at restore. Without an external origin, every object reachable through any branch or tag in canonical project/workspace Artifacts repositories remains protected. Unavailable inventory fails closed. Objects exclusive to archived/deleted workspace snapshots become eligible once attachment and publication pins are gone.
+
+Collection reconciles snapshot owners before its two-phase delete. A deletion marker fences new publications until object deletion and registry removal finish; publication pins never expire on a timer. Concurrent upload losers delete only their own randomized chunks after authenticating the winning manifest, never another publisher's chunks.
+
+Inspector's working comparison labels held-back paths **Only on this machine** and shows **LFS changes leave this machine only after a commit** above the list. These facts come from the saved checkpoint and remain visible offline. Move and deliberate-detach confirmation lists the paths and offers **Commit first** or **Continue without them**. After a move, the agent receives the paths restored to committed versions or omitted because their uncommitted changes stayed on the previous machine. There is no permanent header or sidebar LFS indicator.
+
+The opt-in Artifacts check runs under Node 24, not Bun: Wrangler's remote-binding proxy hangs under Bun. Repository handles use explicit disposal compatible with both workerd and the proxy. The check uses supported binding ref forms and verifies the published checkpoint ref through Git with a short-lived read token. It does not test R2 LFS storage. Offline help is safe; a live run still needs separate owner authorization and retains its disposable fork for owner-directed cleanup. Failure reports include a scrubbed reason, never tokens or credential-bearing URLs.
 
 ### 9.5 jj (Jujutsu)
 

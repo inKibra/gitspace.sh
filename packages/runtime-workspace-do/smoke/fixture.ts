@@ -38,6 +38,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
     this.runtime = createWorkspaceRuntime({
       storage: ctx.storage, identity, models, model: modelRef,
       code: { readFile: unsupported, writeSnapshot: unsupported },
+      lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: unsupported,
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported },
       operations: this.operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
       onReport: error => console.error('RUNTIME_REPORT', String(error)),

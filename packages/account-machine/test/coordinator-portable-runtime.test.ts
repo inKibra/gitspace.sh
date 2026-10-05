@@ -914,7 +914,6 @@ describe('CoordinatorPortableSpaceRuntime', () => {
         plaintext: process.env.GITSPACE_ARTIFACTS_TOKEN!,
         expiresAt: process.env.GITSPACE_ARTIFACTS_TOKEN_EXPIRES_AT!,
       }),
-      lfsEnvironment: async () => ({}),
     });
     const lifecycle = new PortableSpaceLifecycle(
       authority,

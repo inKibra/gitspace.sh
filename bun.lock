@@ -314,6 +314,7 @@
         "@gitspace/blocks": "workspace:*",
         "@gitspace/protocol-agent": "workspace:*",
         "@gitspace/protocol-environment": "workspace:*",
+        "@gitspace/protocol-workspace": "workspace:*",
         "zod": "^4.4.3",
       },
     },
@@ -381,6 +382,7 @@
         "@gitspace/blocks": "workspace:*",
         "@gitspace/protocol-agent": "workspace:*",
         "@gitspace/protocol-runtime": "workspace:*",
+        "@gitspace/protocol-workspace": "workspace:*",
         "@gitspace/runtime-core": "workspace:*",
         "@noble/hashes": "^2.2.0",
         "better-result": "^3.0.1",
@@ -390,7 +392,6 @@
       },
       "devDependencies": {
         "@earendil-works/pi-ai": "1.0.0",
-        "@gitspace/protocol-workspace": "workspace:*",
         "miniflare": "4.20260302.0",
       },
     },

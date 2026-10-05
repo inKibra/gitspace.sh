@@ -14,6 +14,7 @@ import {
 import { decryptArtifactBytes, encryptArtifactBytes } from '@gitspace/protocol';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import type { ArtifactsRepositoryBinding } from './artifacts-git-remote.js';
+import type { MachineGitLfs } from './git-lfs.js';
 
 export interface CheckpointBlobStore {
   put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`>;
@@ -150,6 +151,7 @@ export class PortableSpaceLifecycle {
     private readonly authority: SpaceCheckpointAuthority,
     private readonly blobs: CheckpointBlobStore,
     private readonly gitRemote: SpaceGitCheckpointRemote,
+    private readonly lfs?: (projectId: string, publicationId?: string) => Promise<MachineGitLfs>,
   ) {}
 
   /** Checkpoint, hand the space back to the cloud, and delete the local copy. */
@@ -168,6 +170,7 @@ export class PortableSpaceLifecycle {
     const identity = { projectId: space.projectId, spaceId: space.spaceId, machineId: space.machineId, expectedGeneration: space.expectedGeneration };
     const operation = await this.authority.beginClose(identity);
     let quiesced = false;
+    const lfs = await this.lfs?.(space.projectId, `portable:${space.spaceId}:${operation.revision}`);
     try {
       quiesced = true;
       await runtime.quiesce();
@@ -177,6 +180,7 @@ export class PortableSpaceLifecycle {
         spaceId: space.spaceId,
         revision: operation.revision,
         portableUntrackedPaths: space.portableUntrackedPaths,
+        lfs,
       });
       await this.gitRemote.publishCheckpoint({ binding: space.binding, repositoryPath: space.repositoryPath, checkpointRef: repository.checkpointRef });
       const [agent, artifacts] = await Promise.all([runtime.captureAgent(), runtime.captureArtifacts()]);
@@ -199,6 +203,7 @@ export class PortableSpaceLifecycle {
           branch: repository.branch,
           indexCommit: repository.indexCommit,
           worktreeCommit: repository.worktreeCommit,
+          lfs: repository.lfs,
         },
         agent: agentCheckpoint,
         artifacts: { manifestHash: artifactManifestHash, generation: artifacts.generation },
@@ -214,6 +219,7 @@ export class PortableSpaceLifecycle {
         manifestHash,
         resumeOnMachineRestart,
       });
+      await lfs?.releasePublication?.();
       return manifest;
     } catch (error) {
       const failures: unknown[] = [error];
@@ -243,6 +249,7 @@ export class PortableSpaceLifecycle {
         repositoryPath: space.repositoryPath,
         branch: manifest.repository.branch,
         checkpoint: manifest.repository,
+        lfs: await this.lfs?.(space.projectId),
       });
       const artifactManifest = await requiredBlob(this.blobs, spaceArtifactManifestKey(space.projectId, space.spaceId, manifest.revision, manifest.artifacts.generation), manifest.artifacts.manifestHash);
       const agent: PortableAgentSnapshot = manifest.agent.kind === 'cloud' ? manifest.agent : {

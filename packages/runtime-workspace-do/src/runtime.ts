@@ -17,7 +17,8 @@ import { createHistoryIndex } from './history-index.js';
 import { createReplicaStore } from './replica-store.js';
 import { CloudFileStore } from './cloud-files.js';
 import type { ArtifactsCodeStore } from './artifacts.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; modelProxy(input: { conversationId: string; operation: 'completion' | 'judge'; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; mcpProxy(input: { conversationId: string; attemptId: string; callId: string; method: RuntimeMcpInput['method']; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
+import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint']): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; modelProxy(input: { conversationId: string; operation: 'completion' | 'judge'; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; mcpProxy(input: { conversationId: string; attemptId: string; callId: string; method: RuntimeMcpInput['method']; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 type RuntimeBrowserService = NonNullable<SessionControlServices['browser']>;
 export type WorkspaceRuntime = {
@@ -37,6 +38,8 @@ export type WorkspaceRuntime = {
   discoverMcp(input: { requestId: string; args: JsonValue }): Promise<RuntimeToolResult>;
   qa(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted & { shareDraft?: string }>;
   snapshotCommit(input: RuntimeSnapshotCommitInput): Promise<RuntimeAccepted>;
+  lfsRoots(): RuntimeSnapshotCommitInput['checkpoint'][];
+  reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void>;
   cronSubmit(input: RuntimeCronInput): Promise<{ conversationId: string }>;
   requestStatus(requestId: string): Promise<RuntimeRequestStatus>;
   transcript(conversationId?: string): Promise<(TranscriptEvent & { sessionId: string })[]>;
@@ -49,7 +52,10 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const runtime = await createRuntimeHarness({ ...options, storage });
   const { harness } = runtime;
   const attachments = new AttachmentStore(options.storage, options.attachments);
-  const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.initialCheckpoint);
+  const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.lfs, async checkpoint => {
+    try { await options.retainLfs(checkpoint); }
+    catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
+  }, options.initialCheckpoint);
   async function recoverCloudFiles() {
     try { await cloudFiles.recover(); }
     catch (error) { options.onReport(error); await options.schedule(Date.now() + 5_000); }
@@ -349,13 +355,18 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         const attachment = attachments.list().find(item => item.attachmentId === input.attachmentId && item.generation === input.generation && item.role === 'primary' && (item.state === 'attaching' || item.state === 'ready' || item.state === 'draining'));
         if (!attachment) throw new Error('Snapshot publication requires the current primary');
         if (attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId) throw new Error('Snapshot identity mismatch');
-        if (attachment.state === 'attaching' && input.final) throw new Error('Attaching primary cannot publish a final checkpoint');
+        if (input.final && attachment.state !== 'draining') throw new Error('Final snapshot requires a draining primary');
         cloudFiles.commitMachine(input.checkpoint, input.previousWorktreeCommit, attachment.state === 'attaching');
-        if (input.final) attachments.recordPrimaryFlush(input.attachmentId, input.generation);
       });
+      try { await cloudFiles.flushRetention(); }
+      catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
+      if (input.final) attachments.recordPrimaryFlush(input.attachmentId, input.generation);
+      await options.storage.sync();
       publish(); await line;
       return { accepted: true, cursor: snapshot.cursor };
     },
+    lfsRoots: () => cloudFiles.lfsRoots(),
+    reconcileLfsSources: objects => cloudFiles.reconcileLfsSources(objects),
     async session(conversationId, command, canApprove = false) {
       const wakesTasks = !['control', 'agentSetup', 'historyAnchorId', 'messages', 'historyPage', 'persist', 'handoff', 'stop'].includes(command.type);
       if (wakesTasks) await options.schedule(Date.now() + 1000);
@@ -369,9 +380,14 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       const target = await conversation(conversationId);
       await target.commit(async tx => {
         const placement = await tx.doc(PlacementDoc, target.id);
+        if (placement.attachmentId === attachmentId && placement.generation === generation) return;
         if (placement.attachmentId !== null && (placement.attachmentId !== attachmentId || placement.generation !== generation)) {
           const prior = attachments.list().find(value => value.attachmentId === placement.attachmentId && value.generation === placement.generation);
           if (prior?.role !== 'primary' || prior.state !== 'detached' || attachment.role !== 'primary') throw new Error('Conversation placement is stable; fork a conversation to use another checkout');
+        }
+        if (attachment.lfsRestored?.length) {
+          const content = `LFS handoff to ${attachment.machineId}:\n${attachment.lfsRestored.map(file => `${file.path}: ${file.outcome === 'committed' ? 'restored committed content' : 'omitted (not committed)'}`).join('\n')}\nUncommitted LFS changes remain on the previous machine; they were not moved to this checkout.`;
+          await tx.appendEntry(target.id, { kind: 'gitspace.lfs-restored', data: { attachmentId, generation, files: attachment.lfsRestored }, model: [{ role: 'user', content, timestamp: Date.now() }] });
         }
         placement.attachmentId = attachmentId; placement.generation = generation;
       }, BACKGROUND_CONTEXT);

@@ -13,11 +13,13 @@ import type { ArtifactsGitRemote } from './artifacts-git-remote.js';
 import type { LocalAttachment, ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import { createArtifactsCredentialHelper } from './artifacts-credential-helper.js';
 import { daemonClientForProject } from '@gitspace/supervisor';
+import { checkoutGitLfs, gitLfsRestoreReceipt, hydrateGitLfs, restoredGitLfsPaths, type MachineGitLfs } from './git-lfs.js';
 
 export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; checkpointWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
 export async function createMachineExecutor(options: {
   environmentRoot: string; machineId: string; database: GitSpaceDatabase; artifacts: LocalArtifactResolver; cloud: CloudRuntimeClient;
   gitRemote: ArtifactsGitRemote;
+  lfs?: (projectId: string, publicationId?: string) => Promise<MachineGitLfs>;
   operations?: Record<string, ExecutorOperationHandler>;
   browser?: { enabled: boolean; relay?: RuntimeBrowserRelay };
   commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null, final?: boolean): Promise<void>;
@@ -43,6 +45,7 @@ export async function createMachineExecutor(options: {
       stream = new IncrementalGitSnapshots({
         repositoryPath: local.rootPath,
         spaceId: local.attachment.workspaceId,
+        lfs: options.lfs?.bind(undefined, local.attachment.projectId),
         allocateRevision: async () => {
           const row = snapshots.query<{ revision: number }, [string]>('UPDATE snapshots SET revision=revision+1 WHERE attachment=? RETURNING revision').get(key);
           if (!row) throw new Error('Snapshot journal row missing');
@@ -187,7 +190,7 @@ export async function createMachineExecutor(options: {
           if (!existing && assignment.checkpoint) {
             const checkpoint = assignment.checkpoint;
             await options.gitRemote.fetchCheckpoint({ binding: { projectId: attachment.projectId, repository: `workspace-${attachment.workspaceId}` }, repositoryPath: space.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit });
-            await restoreGitIntermediateCheckpoint({ repositoryPath: space.rootPath, checkpoint, branch: attachment.checkout.branch });
+            await restoreGitIntermediateCheckpoint({ repositoryPath: space.rootPath, checkpoint, branch: attachment.checkout.branch, lfs: await options.lfs?.(attachment.projectId) });
             snapshots.query('INSERT OR REPLACE INTO snapshots(attachment,revision,committed) VALUES(?,?,?)').run(`${attachment.attachmentId}:${attachment.generation}`, Date.now(), JSON.stringify(checkpoint));
           }
           const enrolled = await options.cloud.attach({ projectId: attachment.projectId, workspaceId: attachment.workspaceId, machineId: attachment.machineId, generation: attachment.generation, ownershipGeneration: attachment.ownershipGeneration, role: attachment.role, checkout: attachment.checkout, capabilities: [...attachment.capabilities.filter(capability => !isBrowserCapability(capability)), ...browserSupport] });
@@ -200,9 +203,11 @@ export async function createMachineExecutor(options: {
               projectId: attachment.projectId, workspaceId: attachment.workspaceId, machineId: options.machineId,
               attachmentId: attachment.attachmentId, generation: attachment.generation, commit: checkpoint.worktreeCommit,
               prerequisitesComplete: true, capabilities,
+              lfsRestored: await gitLfsRestoreReceipt(space.rootPath, 'read'),
             }, RuntimeAttachmentReadyResultSchema, stopping.signal);
             local = { ...local, attachment: ready.attachment };
             journal.installAttachment(local);
+            await gitLfsRestoreReceipt(space.rootPath, 'clear');
           }
           await capture(local);
           continue;
@@ -286,13 +291,9 @@ export async function createMachineExecutor(options: {
               },
             },
             hydrateLfs: async path => {
-              if (!await git(path, ['lfs', 'ls-files', '--all'])) return;
-              if (!source.origin) throw new Error('LFS source has no authorized project origin');
-              await git(path, ['config', 'remote.lfs-origin.url', source.origin]);
-              const originEnvironment = await options.originGitEnvironment(source.origin);
-              await git(path, ['lfs', 'fetch', '--all', 'lfs-origin', source.commit], originEnvironment);
-              await git(path, ['lfs', 'checkout'], originEnvironment);
-              await git(path, ['lfs', 'fsck', '--objects', source.commit], originEnvironment);
+              if (source.origin) await git(path, ['config', 'remote.origin.url', source.origin]);
+              await hydrateGitLfs(path, [source.commit], assignment.checkpoint?.lfs, await options.lfs?.(attachment.projectId));
+              await checkoutGitLfs(path, source.commit);
             },
           },
           prerequisites: options.prepareAttachment,
@@ -301,6 +302,7 @@ export async function createMachineExecutor(options: {
           projectId: attachment.projectId, workspaceId: attachment.workspaceId, machineId: options.machineId,
           attachmentId: attachment.attachmentId, generation: attachment.generation, commit: source.commit,
           prerequisitesComplete: true, capabilities,
+          lfsRestored: assignment.checkpoint ? await restoredGitLfsPaths(local.rootPath, source.commit, assignment.checkpoint.lfs) : undefined,
         }, RuntimeAttachmentReadyResultSchema, signal);
         journal.installAttachment({ ...local, attachment: ready.attachment });
       }

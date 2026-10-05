@@ -1,3 +1,4 @@
+import { LfsGallery } from './LfsGallery.js';
 import {
   AccordionContent, AccordionGroup, AccordionItem, AccordionTrigger,
   AskUserQuestions, Badge, Button,
@@ -699,6 +700,7 @@ export function DesignSystemGallery() {
       <AgentSection />
       <SurfacesSection />
       <SidebarSection />
+      <LfsGallery />
 
       <GallerySection id="markdown" index="07" title="Markdown" description="Streamdown inside the transcript: code, Mermaid, and KaTeX plugins load on demand; external links confirm before opening.">
         <Demo title="GitSpaceMarkdown">

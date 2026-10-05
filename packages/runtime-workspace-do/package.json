@@ -10,13 +10,14 @@
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.smoke.json && tsgo --noEmit -p tsconfig.artifacts.json",
     "test": "bun test smoke/artifacts-snapshot.test.ts smoke/artifacts-snapshot-race.test.ts smoke/artifacts-live-protocol.test.ts smoke/artifacts-worker.test.ts smoke/cloud-files.test.ts smoke/primary-checkpoint.test.ts && bun run smoke",
     "smoke": "bun smoke/run.ts",
-    "check:artifacts:live": "bun live-check/run.ts"
+    "check:artifacts:live": "node live-check/entry.mjs"
   },
   "dependencies": {
     "@gitspace/blocks": "workspace:*",
     "@gitspace/runtime-core": "workspace:*",
     "@gitspace/protocol-runtime": "workspace:*",
     "@gitspace/protocol-agent": "workspace:*",
+    "@gitspace/protocol-workspace": "workspace:*",
     "@noble/hashes": "^2.2.0",
     "@earendil-works/pi-durable": "1.0.0",
     "@earendil-works/chord": "1.0.0",
@@ -26,7 +27,6 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@gitspace/protocol-workspace": "workspace:*",
     "@earendil-works/pi-ai": "1.0.0",
     "miniflare": "4.20260302.0"
   }

@@ -5,6 +5,7 @@ import { canonicalJson, RuntimeAttachInputSchema, RuntimeAttachmentSchema, Runti
 import { CloudFileStore } from '../src/cloud-files.js';
 import { AttachmentStore } from '../src/attachments.js';
 import { ArtifactsSnapshotError, type WriteSnapshotInput } from '../src/artifacts.js';
+import { GitLfsObjectSchema, type GitLfsStore } from '@gitspace/protocol-workspace';
 
 const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/spaces/cloud/checkpoints', branch: 'main', headCommit: '1'.repeat(40), indexCommit: '2'.repeat(40), trackedWorktreeCommit: '3'.repeat(40), worktreeCommit: '4'.repeat(40), indexTree: '5'.repeat(40), worktreeTree: '6'.repeat(40) });
 export class CloudFilesProof extends DurableObject {
@@ -15,8 +16,22 @@ export class CloudFilesProof extends DurableObject {
     let loseResponse = false, rejectWrite = false;
     const published = new Map<string, typeof checkpoint>();
     const files = new Map<string, string>([['file.txt', 'one\ntwo\nthree'], ['repeat.txt', 'same same']]);
+    const headAttributes = new Map<string, string>();
+    const payloads = new Map<string, Uint8Array>();
+    const lfs: GitLfsStore = { has: async object => payloads.has(object.oid), get: async object => payloads.get(object.oid) ?? null, put: async (object, bytes) => { payloads.set(object.oid, bytes); } };
+    const retained = new Map<string, typeof checkpoint>();
+    let retentionUnavailable = false, retentionCalls = 0;
+    const retainLfs = async (value: typeof checkpoint) => {
+      retentionCalls++;
+      assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox WHERE commit_id=?', value.worktreeCommit).toArray().length, 1);
+      if (retentionUnavailable) throw new Error('Retention unavailable');
+      retained.set(value.worktreeCommit, value);
+    };
     const code = {
-      readFile: async (_repository: string, _commit: string, path: string) => files.has(path) ? new Blob([files.get(path)!]) : null,
+      readFile: async (_repository: string, commit: string, path: string) => {
+        const source = path.endsWith('.gitattributes') && commit === checkpoint.headCommit ? headAttributes : files;
+        return source.has(path) ? new Blob([source.get(path)!]) : null;
+      },
       writeSnapshot: async (input: WriteSnapshotInput) => {
         if (pause) { pause.entered.resolve(); await pause.release.promise; }
         const key = JSON.stringify([input.previous, input.mutations]);
@@ -36,7 +51,7 @@ export class CloudFilesProof extends DurableObject {
         return Result.ok(next);
       },
     };
-    const open = () => new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {});
+    const open = () => new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs);
     let store = open();
     const invoke = (tool: 'read' | 'write' | 'edit', args: unknown, id: string = crypto.randomUUID()) => store.execute({ tool, args, requestId: id, attemptId: id });
     assert.equal((await invoke('read', { path: 'file.txt' })).status, 'failed');
@@ -92,6 +107,21 @@ export class CloudFilesProof extends DurableObject {
     assert.equal((await invoke('write', { path: 'bad-tree.txt', content: 'reject' })).status, 'failed');
     rejectWrite = false;
     assert.equal((await invoke('write', { path: 'unblocked.txt', content: 'lease released' })).status, 'completed');
+    const beforeRetentionFailure = await store.snapshot();
+    retentionUnavailable = true;
+    await assert.rejects(invoke('write', { path: 'retention-recovery.txt', content: 'accepted before acknowledgement' }, 'retention-recovery'), /Retention unavailable/u);
+    const acceptedWithoutAck = await store.snapshot(); assert(acceptedWithoutAck);
+    assert.notEqual(acceptedWithoutAck.worktreeCommit, beforeRetentionFailure?.worktreeCommit);
+    assert(store.lfsRoots().some(root => root.worktreeCommit === beforeRetentionFailure?.worktreeCommit), 'Previous root survives pending acknowledgement');
+    const pushesBeforeRetentionRecovery = pushes;
+    store = open();
+    await assert.rejects(store.recover(), /Retention unavailable/u);
+    retentionUnavailable = false;
+    await store.recover();
+    assert.equal((await invoke('write', { path: 'retention-recovery.txt', content: 'accepted before acknowledgement' }, 'retention-recovery')).status, 'completed');
+    assert.equal(pushes, pushesBeforeRetentionRecovery, 'Cold recovery retries retention without republishing');
+    assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox').toArray().length, 0);
+    assert(!store.lfsRoots().some(root => root.worktreeCommit === beforeRetentionFailure?.worktreeCommit), 'Historical acceptance alone is not a restore root');
     const interrupted = { tool: 'write', args: { path: 'before-prepare.txt', content: 'recovered' }, requestId: 'before-prepare', attemptId: 'before-prepare' };
     this.ctx.storage.sql.exec('INSERT INTO runtime_cloud_files(id,input) VALUES(?,?)', interrupted.attemptId, canonicalJson(interrupted));
     this.ctx.storage.sql.exec('UPDATE runtime_cloud_writer SET fence=fence+1,attempt=? WHERE singleton=1', interrupted.attemptId);
@@ -100,8 +130,10 @@ export class CloudFilesProof extends DurableObject {
     pause = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
     const concurrent = invoke('write', { path: 'concurrent.txt', content: 'first' });
     await pause.entered.promise;
+    const callsBeforeConflict = retentionCalls;
     assert.equal((await invoke('write', { path: 'concurrent.txt', content: 'second' })).status, 'failed');
     await assert.rejects(attachments.attach(admission), /Cloud mutation/);
+    assert.equal(retentionCalls, callsBeforeConflict, 'Rejected cloud writers do not retain inventory');
     pause.release.resolve(); pause = undefined;
     assert.equal((await concurrent).status, 'completed');
     assert.equal(files.get('concurrent.txt'), 'first');
@@ -143,7 +175,7 @@ export class CloudFilesProof extends DurableObject {
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_snapshot');
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_commits');
     const seedEntered = Promise.withResolvers<void>(), seedRelease = Promise.withResolvers<void>();
-    const seedingStore = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, async () => { seedEntered.resolve(); await seedRelease.promise; return checkpoint; });
+    const seedingStore = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs, async () => { seedEntered.resolve(); await seedRelease.promise; return checkpoint; });
     assert.equal(await seedingStore.snapshot(), null, 'Reading runtime state must not initialize an Artifacts repository');
     const seed = seedingStore.execute({ tool: 'read', args: { path: 'file.txt' }, requestId: 'raced-seed', attemptId: 'raced-seed' });
     await seedEntered.promise;
@@ -151,14 +183,14 @@ export class CloudFilesProof extends DurableObject {
     seedRelease.resolve();
     assert.equal((await seed).status, 'failed');
     primary = [];
-    store = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, async () => checkpoint);
+    store = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs, async () => checkpoint);
     assert.equal((await invoke('read', { path: 'file.txt' })).status, 'completed');
     assert.equal((await store.snapshot())?.worktreeCommit, checkpoint.worktreeCommit);
     assert.equal((await invoke('write', { path: 'first-cloud.txt', content: 'without prior machine' })).status, 'completed');
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_snapshot');
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_commits');
     const unborn = { ...checkpoint, headCommit: null };
-    store = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, async () => unborn);
+    store = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs, async () => unborn);
     assert.equal((await invoke('write', { path: 'unborn.txt', content: 'cloud before attachment' })).status, 'completed');
     const unbornCloud = await store.snapshot(); assert(unbornCloud);
     assert.equal(unbornCloud.headCommit, null);
@@ -167,6 +199,63 @@ export class CloudFilesProof extends DurableObject {
     store.commitMachine({ ...unbornCloud, headCommit: 'a'.repeat(40), worktreeCommit: 'b'.repeat(40) }, unbornCloud.worktreeCommit);
     assert.equal((await invoke('edit', { path: 'unborn.txt', edits: [{ oldText: 'before', newText: 'after' }] })).status, 'completed');
     assert.equal((await store.snapshot())?.headCommit, 'a'.repeat(40));
+    const payload = new TextEncoder().encode('real LFS content\nsecond line');
+    const oid = [...new Uint8Array(await crypto.subtle.digest('SHA-256', payload))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const object = GitLfsObjectSchema.parse({ oid, size: payload.length });
+    const pointer = `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${payload.length}\n`;
+    files.set('asset.dat', pointer);
+    payloads.set(oid, payload);
+    const current = await store.snapshot(); assert(current);
+    store.commitMachine({ ...current, headCommit: checkpoint.headCommit, worktreeCommit: 'c'.repeat(40), lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [{ path: 'asset.dat', kind: 'modified' }] } }, current.worktreeCommit);
+    headAttributes.set('.gitattributes', '*.dat filter=lfs\n[attr]large filter=lfs\n*.large large\n"space name.bin" filter=lfs\nliteral\\*.bin filter=lfs\ndeep/**/object.bin filter=lfs\n');
+    headAttributes.set('nested/.gitattributes', '*.bin filter=lfs\nplain.dat -filter\n');
+    assert.deepEqual((await invoke('read', { path: 'asset.dat' })).content, [{ type: 'text', text: 'real LFS content\nsecond line' }]);
+    assert.deepEqual((await invoke('read', { path: 'asset.dat', offset: 2 })).content, [{ type: 'text', text: 'second line' }]);
+    payloads.delete(oid);
+    const unavailable = await invoke('read', { path: 'asset.dat' });
+    assert.equal(unavailable.status, 'failed');
+    assert.match(JSON.stringify(unavailable.content), new RegExp(`asset\\.dat.*${payload.length} bytes.*machine.*origin`, 'u'));
+    assert.doesNotMatch(JSON.stringify(unavailable.content), /oid sha256/u);
+    payloads.set(oid, new TextEncoder().encode('corrupt'));
+    assert.match(JSON.stringify((await invoke('read', { path: 'asset.dat' })).content), /verification failed/u);
+    payloads.set(oid, payload);
+    for (const path of ['asset.dat', 'new.dat', 'nested/new.bin', 'new.large', 'space name.bin', 'literal*.bin', 'deep/a/b/object.bin']) {
+      for (const tool of ['write', 'edit'] as const) {
+        const result = await invoke(tool, tool === 'write' ? { path, content: 'changed' } : { path, edits: [{ oldText: 'version', newText: 'changed' }] });
+        assert.equal(result.status, 'failed');
+        assert.match(JSON.stringify(result.content), /machine and commit/u);
+      }
+    }
+    assert.equal((await invoke('write', { path: 'nested/plain.dat', content: 'ordinary' })).status, 'completed');
+    assert.equal((await invoke('write', { path: '.gitattributes', content: '*.dat -filter\n*.txt filter=lfs' })).status, 'completed');
+    assert.equal((await invoke('write', { path: 'still-lfs.dat', content: 'blocked' })).status, 'failed');
+    assert.equal((await invoke('write', { path: 'still-normal.txt', content: 'allowed' })).status, 'completed');
+    const beforeFailure = await store.snapshot(); assert(beforeFailure?.lfs);
+    assert.deepEqual(beforeFailure.lfs.heldBack, [{ path: 'asset.dat', kind: 'modified' }]);
+    failPush = true;
+    await assert.rejects(invoke('write', { path: 'pending-retention.txt', content: 'pending' }, 'pending-retention'));
+    assert.deepEqual(retained.get(beforeFailure.worktreeCommit)?.lfs, beforeFailure.lfs);
+    assert.deepEqual((await store.snapshot())?.lfs, beforeFailure.lfs);
+    failPush = false; await store.recover();
+    retentionUnavailable = true;
+    await assert.rejects(invoke('write', { path: 'origin-outbox.txt', content: 'accepted with retention pending' }, 'origin-outbox'), /Retention unavailable/u);
+    const location = { origin: 'https://origin.example/repository.git', endpoint: 'https://origin.example/repository.git/info/lfs' };
+    await store.reconcileLfsSources([{ ...object, location }]);
+    const transitioned = await store.snapshot(); assert(transitioned);
+    assert.equal(transitioned.lfs?.objects[0]?.source, 'origin');
+    assert.deepEqual(transitioned.lfs?.objects[0]?.location, location);
+    const pendingOrigin = this.ctx.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_lfs_retention_outbox WHERE commit_id=?', transitioned.worktreeCommit).toArray()[0]; assert(pendingOrigin);
+    assert.deepEqual(RuntimeGitCheckpointSchema.parse(JSON.parse(pendingOrigin.checkpoint)).lfs?.objects[0], { ...object, source: 'origin', location });
+    retentionUnavailable = false;
+    store = open(); await store.recover();
+    assert.deepEqual(retained.get(transitioned.worktreeCommit)?.lfs?.objects[0], { ...object, source: 'origin', location });
+    assert.equal((await invoke('write', { path: 'after-origin-transition.txt', content: 'retains origin source' })).status, 'completed');
+    assert.equal((await store.snapshot())?.lfs?.objects[0]?.source, 'origin');
+    assert.deepEqual((await store.snapshot())?.lfs?.objects[0], { ...object, source: 'origin', location });
+    headAttributes.set('.gitattributes', '[[:alpha:]].bin filter=lfs\n');
+    const unsupportedPattern = await invoke('write', { path: 'a.bin', content: 'must not bypass LFS policy' });
+    assert.equal(unsupportedPattern.status, 'failed');
+    assert.match(JSON.stringify(unsupportedPattern.content), /Unsupported HEAD attribute.*machine/u);
     return Response.json({ passed: true });
   }
 }

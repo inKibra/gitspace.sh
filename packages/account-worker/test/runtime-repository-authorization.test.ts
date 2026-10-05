@@ -6,6 +6,7 @@ import { ArtifactsCodeStore, AttachmentStore, type AttachmentServices } from '@g
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { tenantRootPrivateKey } from './setup.js';
+import { RuntimeAttachmentController } from '../src/runtime-attachments.js';
 
 const projectId = 'repository-project';
 const workspaceId = 'repository-workspace';
@@ -48,6 +49,32 @@ async function fixture(capabilities: Array<'storage.access' | 'space.control'>) 
 }
 
 describe('signed repository credential authority', () => {
+  it('pins checkpoint attachments to the durable commit rather than resolving custom refs through the binding', async () => {
+    const f = await fixture(['space.control']);
+    await runInDurableObject(f.authority, async (_instance, state) => {
+      const commit = 'a'.repeat(40);
+      const tree = 'b'.repeat(40);
+      const checkpoint = { checkpointRef: `refs/gitspace/spaces/${workspaceId}/checkpoints`, branch: 'main', headCommit: commit, indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: tree, worktreeTree: tree };
+      const unsupported = async (): Promise<never> => { throw new Error('Unexpected binding operation'); };
+      const repo: ArtifactsRepo = {
+        [Symbol.dispose]() {}, info: unsupported, createToken: unsupported, revokeToken: unsupported, listTokens: unsupported, fork: unsupported, readBlob: unsupported, readFile: unsupported,
+        log: async () => [],
+        readCommit: async oid => oid === commit ? { hash: commit, treeHash: tree, parents: [], message: 'checkpoint', author: { name: 'Fixture', email: 'fixture@example.invalid' }, committer: { name: 'Fixture', email: 'fixture@example.invalid' }, authoredAt: 1, committedAt: 1 } : null,
+        readTree: async oid => oid === tree ? [] : null,
+      };
+      const code = new ArtifactsCodeStore({ get: async () => repo, create: unsupported, import: unsupported, list: unsupported, delete: unsupported });
+      const controller = new RuntimeAttachmentController({
+        attachments: new AttachmentStore(state.storage, { seal: async secret => secret, open: async secret => secret, dispatch: unsupported }),
+        code, publish() {}, snapshot: async () => checkpoint, origin: async () => null, lifecycle: unsupported, authorizeMachine: async () => {},
+      });
+      const request = { projectId, workspaceId, machineId: 'primary', requestId: 'checkpoint-pin', sourceRef: checkpoint.checkpointRef, checkout: { kind: 'snapshot', commit } };
+      await expect(controller.request({ ...request, checkout: { kind: 'snapshot', commit: 'c'.repeat(40) } })).rejects.toThrow();
+      await expect(controller.request({ ...request, sourceRef: 'refs/gitspace/spaces/foreign/checkpoints' })).rejects.toThrow();
+      const assigned = await controller.request(request);
+      expect(assigned.attachment.checkout).toEqual({ kind: 'snapshot', commit });
+    });
+  });
+
   it('does not grant repository credentials to a space-control-only device', async () => {
     const f = await fixture(['space.control']);
     const response = await f.request();

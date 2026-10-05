@@ -4,3 +4,5 @@ export * from './status.js';
 export * from './relations.js';
 export * from './dependency-graph.js';
 export * from './authority.js';
+export * from './lfs.js';
+export * from './lfs-origin.js';

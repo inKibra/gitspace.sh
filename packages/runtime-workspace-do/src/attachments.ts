@@ -219,8 +219,16 @@ export class AttachmentStore {
     const expected = attachment?.checkout.kind === 'shared' ? attachment.role === 'primary' ? primaryCommit : undefined : attachment?.checkout.commit;
     if (!attachment || attachment.machineId !== input.machineId || attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId || attachment.generation !== input.generation || expected === undefined || expected !== input.commit || !input.prerequisitesComplete) throw new Error('Attachment readiness proof does not match its admission');
     if (!attachment.capabilities.every(capability => input.capabilities.includes(capability))) throw new Error('Executor lacks assigned capabilities');
-    if (attachment.state === 'ready') return { attachment };
-    return { attachment: this.transition(attachment.attachmentId, attachment.generation, 'ready') };
+    if (attachment.state === 'ready') {
+      if (canonicalJson(attachment.lfsRestored ?? []) !== canonicalJson(input.lfsRestored ?? [])) throw new Error('Attachment readiness LFS proof changed');
+      return { attachment };
+    }
+    return this.storage.transactionSync(() => {
+      const ready = this.transition(attachment.attachmentId, attachment.generation, 'ready');
+      const next = { ...ready, ...(input.lfsRestored ? { lfsRestored: input.lfsRestored } : {}) };
+      this.storage.sql.exec('UPDATE runtime_attachments SET record=? WHERE id=?', JSON.stringify(next), attachment.attachmentId);
+      return { attachment: next };
+    });
   }
 
   heartbeat(lease: GrantScope & Pick<RuntimeAttachment, 'machineId'> & { executionObservation: RuntimeExecutionObservation; browserCapabilities?: string[] }): RuntimeAttachment {

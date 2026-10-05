@@ -16,6 +16,7 @@ import { serveArtifactShare } from './account-inspector-data.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
 import { mcpAccessStatusRequestSchema, mcpAccessChangeRequestSchema, mcpAccessEnableRequestSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
+import { GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot } from '@gitspace/protocol-workspace';
 import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
@@ -2289,6 +2290,17 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   if (authorized.status === 'error') return accountAccessResponse(authorized)!;
   if (diagnostics) diagnostics.stage = 'validate';
   const objectKey = dataObjectKey(signed.userId, signed.payload.key);
+  if (keyFromPath.startsWith('lfs/')) {
+    const lfs = /^lfs\/projects\/([^/\\]+)\/objects\/([a-f0-9]{64})(?:\.chunks\/[a-f0-9]{64})?$/u.exec(keyFromPath);
+    if (!lfs || signed.userId !== env.ACCOUNT_ID) throw new Error('LFS object scope is invalid');
+    projectStorageRoot(lfs[1]!);
+    const authority = env.PROJECT_AUTHORITY.getByName(`${signed.userId}:${lfs[1]}`);
+    const project = await authority.getProject();
+    if (!project || project.id !== lfs[1] || project.lifecycle === 'deleting') return new Response(null, { status: 403 });
+    if (operation === 'data.put' && !await authority.lfsObjectAccess(lfs[2]!)) {
+      return Response.json(publicError('LFS_PUBLICATION_REQUIRED', 'LFS upload requires a durable publication pin'), { status: 409 });
+    }
+  }
   if (operation === 'data.put') {
     const hash = signed.payload.hash;
     const size = signed.payload.size;
@@ -3142,6 +3154,7 @@ const worker = {
             || body.operation.startsWith('devices.')
             || body.operation.startsWith('deploy.')
             || body.operation === 'artifacts.key.get'
+            || body.operation.startsWith('lfs.')
             || body.operation.startsWith('project.environment.')
             || body.operation.startsWith('project.mcp.') ? 'space.control'
           : body.operation === 'storage.provision' ? 'storage.provision'
@@ -3170,6 +3183,36 @@ const worker = {
           }
         }
         if (diagnostics) diagnostics.stage = 'processing';
+        if (body.operation === 'lfs.originConfirmed' || body.operation === 'lfs.sources') {
+          const input = body.operation === 'lfs.originConfirmed'
+            ? { operation: body.operation, ...GitLfsOriginConfirmationSchema.extend({ projectId: z.string().min(1) }).strict().parse(body.payload) }
+            : { operation: body.operation, ...z.object({ projectId: z.string().min(1), objects: GitLfsSnapshotSchema.shape.objects }).strict().parse(body.payload) };
+          if (body.userId !== env.ACCOUNT_ID) throw new Error('LFS account identity mismatch');
+          projectStorageRoot(input.projectId);
+          const authority = env.PROJECT_AUTHORITY.getByName(`${body.userId}:${input.projectId}`);
+          const project = await authority.getProject();
+          if (!project || project.lifecycle === 'deleting') throw new Error('LFS project is unavailable');
+          if (input.operation === 'lfs.originConfirmed') {
+            await authority.lfsOriginConfirmed({ origin: input.origin, endpoint: input.endpoint, objects: input.objects });
+            return Response.json({ status: 'ok', value: null }, { headers: { 'cache-control': 'private, no-store' } });
+          }
+          return Response.json({ status: 'ok', value: await authority.lfsResolveSources(input.objects) }, { headers: { 'cache-control': 'private, no-store' } });
+        }
+        if (body.operation === 'lfs.pin' || body.operation === 'lfs.release') {
+          const identity = z.object({ projectId: z.string().min(1), publicationId: z.string().min(1).max(256) });
+          const input = body.operation === 'lfs.pin'
+            ? { operation: body.operation, ...identity.extend({ objects: z.array(GitLfsObjectSchema).max(10_000) }).strict().parse(body.payload) }
+            : { operation: body.operation, ...identity.strict().parse(body.payload) };
+          if (body.userId !== env.ACCOUNT_ID) throw new Error('LFS account identity mismatch');
+          projectStorageRoot(input.projectId);
+          const authority = env.PROJECT_AUTHORITY.getByName(`${body.userId}:${input.projectId}`);
+          const project = await authority.getProject();
+          if (!project || project.id !== input.projectId || project.lifecycle === 'deleting') throw new Error('LFS project is unavailable');
+          const publicationId = `${body.machineId}:${input.publicationId}`;
+          if (input.operation === 'lfs.pin') return Response.json({ status: 'ok', value: GitLfsProtectionSchema.parse({ objects: await authority.lfsProtect({ publicationId, objects: input.objects }) }) }, { headers: { 'cache-control': 'private, no-store' } });
+          await authority.lfsReleasePublication(publicationId);
+          return Response.json({ status: 'ok', value: null }, { headers: { 'cache-control': 'private, no-store' } });
+        }
         if (body.operation.startsWith('inference.')) {
           const vault = credentialVault(env, body.userId);
           let value: unknown;

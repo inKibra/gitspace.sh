@@ -91,6 +91,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
     this.runtime = createWorkspaceRuntime({
       storage: ctx.storage, identity, models, model: reference,
       code: { readFile: unsupported, writeSnapshot: unsupported },
+      lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: unsupported,
       tools: { prepareBrowser: unsupported, invoke: async input => {
         if (input.tool !== 'read') return unsupported();
         const grant = RuntimeAttachResultSchema.parse(await ctx.storage.get('proof-grant'));

@@ -5,6 +5,7 @@ import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, RuntimeSnapshotCommi
 import { bootstrapSpaceAuthority } from '@gitspace/protocol-workspace';
 import { SpaceAuthorityDO } from '../../account-worker/src/space-authority.js';
 import { createWorkspaceRuntime } from '../src/runtime.js';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 
 const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
 const unsupported = async (): Promise<never> => { throw new Error('External service forbidden in checkpoint proof'); };
@@ -15,6 +16,7 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
     const state = bootstrapSpaceAuthority(null, { projectId: identity.projectId, spaceId: identity.workspaceId, machineId: 'machine' }, new Date().toISOString());
     this.ctx.storage.sql.exec('INSERT OR REPLACE INTO space_authority(id,project_id,space_id,record_json) VALUES(1,?,?,?)', identity.projectId, identity.workspaceId, JSON.stringify(state));
     let sourceReads = 0;
+    let retentionCalls = 0, rejectRetention = false;
     const models = createModels();
     models.setProvider({
       id: 'fixture', name: 'Checkpoint proof', auth: { apiKey: { name: 'Fixture', resolve: async () => ({ auth: { apiKey: 'fixture-only' } }) } },
@@ -25,6 +27,14 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
     const runtime = await createWorkspaceRuntime({
       storage: this.ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
       code: { readFile: unsupported, writeSnapshot: unsupported },
+      lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async value => {
+        retentionCalls++;
+        const accepted = this.ctx.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
+        assert(accepted);
+        assert.equal(RuntimeGitCheckpointSchema.parse(JSON.parse(accepted.checkpoint)).worktreeCommit, value.worktreeCommit);
+        assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox WHERE commit_id=?', value.worktreeCommit).toArray().length, 1);
+        if (rejectRetention) throw new Error('Retention temporarily unavailable');
+      },
       initialCheckpoint: async () => { sourceReads++; return empty ? null : checkpoint; },
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => '', authorizeCronTool: unsupported },
       operations: { execute: unsupported, reconcile: unsupported, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, wakeAt: unsupported },
@@ -48,14 +58,43 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       const publication = RuntimeSnapshotCommitInputSchema.parse({ ...identity, attachmentId: result.attachment.attachmentId, generation: result.attachment.generation, checkpoint, previousWorktreeCommit: null });
       await assert.rejects(runtime.snapshotCommit({ ...publication, generation: publication.generation + 1 }));
       await assert.rejects(runtime.snapshotCommit({ ...publication, previousWorktreeCommit: checkpoint.worktreeCommit }));
+      assert.equal(retentionCalls, 0, 'Rejected generations and predecessors must not retain inventory');
+      this.ctx.storage.sql.exec("UPDATE runtime_cloud_writer SET attempt='lease-conflict' WHERE singleton=1");
+      await assert.rejects(runtime.snapshotCommit(publication), /writer lease/u);
+      assert.equal(retentionCalls, 0, 'Cloud lease conflict must not retain inventory');
+      this.ctx.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1');
+      rejectRetention = true;
+      await assert.rejects(runtime.snapshotCommit(publication), /Retention temporarily unavailable/u);
+      assert.deepEqual(await runtime.cloudFiles.snapshot(), checkpoint, 'Acceptance survives retention failure');
+      assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox').toArray().length, 1);
+      rejectRetention = false;
       await runtime.snapshotCommit(publication);
       await runtime.snapshotCommit(publication);
+      assert.equal(retentionCalls, 2, 'Accepted retry drains once; acknowledged replay does not retain again');
+      assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox').toArray().length, 0);
       await assert.rejects(runtime.snapshotCommit({ ...publication, checkpoint: { ...checkpoint, worktreeCommit: 'f'.repeat(40) }, previousWorktreeCommit: checkpoint.worktreeCommit }));
     } else assert.deepEqual(assignment.checkpoint, checkpoint, 'First assignment must restore canonical source without prior cloud file execution');
-    const ready = { ...identity, machineId: 'machine', attachmentId: result.attachment.attachmentId, generation: result.attachment.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true, capabilities: result.attachment.capabilities };
+    const lfsRestored = [{ path: 'modified.bin', outcome: 'committed' as const }, { path: 'added.bin', outcome: 'omitted' as const }];
+    const ready = { ...identity, machineId: 'machine', attachmentId: result.attachment.attachmentId, generation: result.attachment.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true, capabilities: result.attachment.capabilities, lfsRestored };
     await assert.rejects(this.runtimeAttachmentReady({ ...ready, commit: 'f'.repeat(40) }));
     assert.equal((await this.runtimeAttachmentReady(ready)).attachment.state, 'ready');
     assert.deepEqual(await runtime.cloudFiles.snapshot(), checkpoint);
+    const rootHandle = await runtime.harness.root(BACKGROUND_CONTEXT);
+    const pivot = await rootHandle.commit(tx => tx.appendEntry(rootHandle.id, { kind: 'proof.before-handoff' }), BACKGROUND_CONTEXT);
+    const otherConversation = await rootHandle.fork(pivot.id, { ownership: { kind: 'ownerless' } }, BACKGROUND_CONTEXT);
+    const root = (await runtime.snapshot()).conversations.find(item => item.parentId === null); assert(root);
+    await runtime.assignPlacement(root.id, ready.attachmentId, ready.generation);
+    await runtime.assignPlacement(root.id, ready.attachmentId, ready.generation);
+    await this.runtimeAttachmentReady(ready);
+    await runtime.assignPlacement(root.id, ready.attachmentId, ready.generation);
+    const messages = (await runtime.transcript(root.id)).filter(event => JSON.stringify(event.payload).includes('LFS handoff'));
+    assert.equal(messages.length, 1);
+    assert.match(JSON.stringify(messages[0]!.payload), /modified\.bin: restored committed content/u);
+    assert.match(JSON.stringify(messages[0]!.payload), /added\.bin: omitted/u);
+    assert.match(JSON.stringify(messages[0]!.payload), /remain on the previous machine/u);
+    await assert.rejects(this.runtimeAttachmentReady({ ...ready, lfsRestored: [] }), /proof changed/u);
+    const otherEntries = await otherConversation.entries({}, 100, undefined, BACKGROUND_CONTEXT);
+    assert.equal(otherEntries.items.some(entry => entry.kind === 'gitspace.lfs-restored'), false);
     return Response.json({ passed: true });
   }
 }

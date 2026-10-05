@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { WorkspaceDomainError } from './errors.js';
+import { GitLfsSnapshotSchema } from './lfs.js';
 
 export const SPACE_CHECKPOINT_VERSION = 1 as const;
 const storageIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/u).refine((value) => value !== '.' && value !== '..');
@@ -37,6 +38,7 @@ export const spaceCheckpointManifestSchema = z.object({
     branch: z.string().min(1).max(255),
     indexCommit: gitObjectIdSchema,
     worktreeCommit: gitObjectIdSchema,
+    lfs: GitLfsSnapshotSchema.optional(),
   }),
   agent: z.union([z.object({
     kind: z.literal('cloud'),

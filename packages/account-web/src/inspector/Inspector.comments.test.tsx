@@ -118,3 +118,21 @@ describe('Inspector independent reads', () => {
     expect(container.textContent).toContain('Loading repository view');
   });
 });
+
+it('shows saved held-back paths while offline even when the sanitized working diff has no files', async () => {
+  const open = vi.fn();
+  props = { ...props, initialView: 'files', runtimeAvailable: false, repositoryMode: 'working', repositoryEntries: [], lfsHeldBack: [{ path: 'assets/offline.psd', kind: 'modified' }], onRequestRepositoryDiff: open };
+  await render();
+  expect(container.textContent).toContain('assets/offline.psd');
+  expect(container.textContent).toContain('Only on this machine');
+  expect(container.textContent).toContain('LFS changes leave this machine only after a commit');
+  await click('assets/offline.psd');
+  expect(open).toHaveBeenCalledWith('assets/offline.psd', 'working');
+});
+
+it('does not label committed comparisons as machine-local changes', async () => {
+  props = { ...props, initialView: 'files', repositoryMode: 'base', lfsHeldBack: [{ path: 'assets/offline.psd', kind: 'staged' }] };
+  await render();
+  expect(container.textContent).not.toContain('Only on this machine');
+  expect(container.textContent).not.toContain('assets/offline.psd');
+});

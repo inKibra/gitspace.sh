@@ -2,8 +2,6 @@ export type ArtifactsRepositoryBinding = { projectId: string; repository: string
 export type ArtifactsRepositoryCredentials = { remote: string; plaintext: string; expiresAt: string };
 export type ArtifactsGitRemoteOptions = {
   credentials(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write'): Promise<ArtifactsRepositoryCredentials>;
-  /** Origin-backed Git LFS retains its own project credential authority. */
-  lfsEnvironment(repositoryPath: string): Promise<Record<string, string>>;
 };
 
 export class ArtifactsGitError extends Error {
@@ -26,15 +24,8 @@ export class ArtifactsGitRemote {
 
   async publishCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string }): Promise<void> {
     this.checkRef(input.checkpointRef);
-    // Upload every LFS object reachable through the checkpoint's HEAD/index/worktree chain.
-    // git-lfs is mandatory for repositories with LFS pointers; origin auth stays separate.
-    const lfs = await git(input.repositoryPath, ['lfs', 'ls-files', '--all']);
-    if (lfs) {
-      await git(input.repositoryPath, ['lfs', 'fsck', '--objects', input.checkpointRef]);
-      await git(input.repositoryPath, ['lfs', 'push', '--all', 'origin', input.checkpointRef], await this.options.lfsEnvironment(input.repositoryPath));
-    }
     const auth = await this.auth(input.binding, 'write');
-    await git(input.repositoryPath, ['push', auth.remote, `${input.checkpointRef}:${input.checkpointRef}`], auth.environment);
+    await git(input.repositoryPath, ['-c', 'core.hooksPath=/dev/null', 'push', auth.remote, `${input.checkpointRef}:${input.checkpointRef}`], { ...auth.environment, GIT_LFS_SKIP_PUSH: '1' });
   }
 
   async fetchCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string; commit?: string }): Promise<void> {
@@ -42,11 +33,6 @@ export class ArtifactsGitRemote {
     if (input.commit !== undefined && !/^[0-9a-f]{40}$/u.test(input.commit)) throw new ArtifactsGitError('checkpoint', 'Invalid immutable checkpoint commit');
     const auth = await this.auth(input.binding, 'read');
     await git(input.repositoryPath, ['fetch', '--no-write-fetch-head', auth.remote, `${input.commit ?? input.checkpointRef}:${input.checkpointRef}`], { ...auth.environment, GIT_LFS_SKIP_SMUDGE: '1' });
-    const lfs = await git(input.repositoryPath, ['lfs', 'ls-files', '--all']);
-    if (lfs) {
-      await git(input.repositoryPath, ['lfs', 'fetch', '--all', 'origin', input.checkpointRef], await this.options.lfsEnvironment(input.repositoryPath));
-      await git(input.repositoryPath, ['lfs', 'fsck', '--objects', input.checkpointRef]);
-    }
   }
 
   private checkRef(ref: string): void {

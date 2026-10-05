@@ -1,3 +1,5 @@
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { runtimeLfsHeldBack, useLfsTransition, type ConfirmLfsTransition } from './LfsTransition.js';
 import { executionAgentId, type ExecutionBlock, type SideAgentBlock, type TurnBlock } from '@gitspace/blocks';
 import type { InspectorView, RuntimeSettingValue, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import { DEFAULT_INFERENCE_PROFILE_ID, inferenceSettingMetadata } from '@gitspace/protocol/inference';
@@ -89,7 +91,7 @@ function optionalQueryParameter(name: string): string | null {
 const CONFIGURE_ENVIRONMENT_PROMPT = 'Use the workspace-lifecycle skill to help me configure this repository. Inspect the repository and our shared environment ledger, then discuss the local preparation and cloud resources this project needs. Propose the five lifecycle phases and profiles. Do not edit files or run lifecycle scripts until I review the plan; approval to edit is not approval to execute.';
 
 
-function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, generation, machineId, runtimeAvailable, onAskAgent }: { projectName: string; workspaceName: string; spaceId: string; workspace: boolean; generation: number; machineId?: string; runtimeAvailable: boolean; onAskAgent?: (text: string) => Promise<void> }) {
+function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, workspace, generation, machineId, runtimeAvailable, onAskAgent }: { projectId: string; projectName: string; workspaceName: string; spaceId: string; workspace: boolean; generation: number; machineId?: string; runtimeAvailable: boolean; onAskAgent?: (text: string) => Promise<void> }) {
   const query = useResultQuery(rpcClient.environment.get, { spaceId });
   const machines = useAccountMachines();
   const retained = useRetainedRead(query, JSON.stringify([spaceId, generation, machineId]));
@@ -102,6 +104,7 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
   const [readingEvidence, setReadingEvidence] = useState(false);
   const [evidence, setEvidence] = useState<{ title: string; output: string; approvalHash?: string } | null>(null);
   const [logSelection, setLogSelection] = useState<{ runId: string; script: { id: string; label: string } } | null>(null);
+  const lfsTransition = useLfsTransition();
   if (!read.value) return read.error ? <div className="flex flex-col gap-2 p-4"><p role="alert" className="text-caption text-destructive">{rpcErrorMessage(read.error, 'environment.get')}</p><Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry environment</Button></div> : <p className="p-4 text-caption text-muted-foreground" role="status">Loading environment…</p>;
   const runners = (machineValues ?? []).filter((candidate) => candidate.state === 'online' && candidate.desiredState === 'online' && candidate.rpcEndpoint);
   const runner = runners.find((candidate) => candidate.id === runnerId) ?? runners[0];
@@ -237,6 +240,10 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
       onRunChecks={() => mutate(async () => { const result = await rpcClient.environment.runChecks({ spaceId, runId: crypto.randomUUID() }); if (result.status === 'error') throw result.error; })}
       onOpenLifecycleOutput={(scriptId) => { const execution = remote.executions.find((item) => item.id === scriptId); const run = execution && latestExecutionRun(remote.lifecycle, execution.hash, { profile: remote.selectedProfile, machineId }); if (run && execution) openRunLog(run.id, { id: execution.id, label: execution.label }); }}
       onRunLifecycle={(phase: LifecyclePhase, options) => mutate(async () => {
+        if (phase === 'workspace/dematerialize') {
+          const snapshot = await configurationResult(rpcClient.runtime.snapshot(RuntimeIdentitySchema.parse({ projectId, workspaceId: spaceId })));
+          if (!await lfsTransition.confirm(runtimeLfsHeldBack(snapshot), () => onAskAgent ? onAskAgent('Help me review and commit the uncommitted Git LFS changes before removing this checkout.') : selectInspection(projectId, workspace ? spaceId : null))) return;
+        }
         if (phase === 'cloud/destroy' && !options?.retire) throw new Error('Explicit human retirement confirmation is required.');
         const client = runtimeAvailable ? rpcClient : runner?.rpcEndpoint ? createGitSpaceBrowserClient({ url: runner.rpcEndpoint }) : null;
         if (!client) throw new Error('Choose an online cloud lifecycle runner.');
@@ -245,6 +252,7 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
         if (result.status === 'error') throw result.error;
       })}
     />
+    {lfsTransition.dialog}
     {selectedLogRun && logSelection ? <LifecycleLogDialog key={`${spaceId}:${selectedLogRun.id}:${logSelection.script.id}`} run={selectedLogRun} script={logSelection.script} revision={remote.lifecycle.revision} loadPage={async (runId, offset, signal) => { const result = await rpcClient.environment.runLog({ spaceId, runId, offset }, { signal }); if (result.status === 'error') throw result.error; return result.value; }} onClose={() => setLogSelection(null)} /> : null}
     <Dialog open={evidence !== null} onOpenChange={(open) => { if (!open) setEvidence(null); }}>
       <DialogContent size="sm"><DialogHeader><DialogTitle>{evidence?.approvalHash ? 'Review environment permission' : evidence?.title}</DialogTitle><DialogDescription>{evidence?.approvalHash ? 'Approves only this exact item. Changed content requires a new approval. This does not execute commands or authorize retirement.' : 'Saved lifecycle evidence. Logs remain available after a checkout is removed.'}</DialogDescription></DialogHeader>
@@ -462,11 +470,12 @@ export function LiveInspector({
     }, { spaceId, projectId, generation, sessionId, runtimeAvailable }, uri, signal)}
     scope={scope}
     workspaces={workspaces}
-    environment={<LiveEnvironment projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} generation={generation} machineId={scope?.holder.kind === 'held' ? scope.holder.machineId : undefined} runtimeAvailable={runtimeAvailable} onAskAgent={onAskAgent} />}
+    environment={<LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} generation={generation} machineId={scope?.holder.kind === 'held' ? scope.holder.machineId : undefined} runtimeAvailable={runtimeAvailable} onAskAgent={onAskAgent} />}
     onSelectWorkspace={onSelectWorkspace}
     onSetRelations={onSetRelations}
     stackStatus={stackValue ?? null}
     repositoryEntries={repositoryValue ?? []}
+    lfsHeldBack={runtimeLfsHeldBack(runtimeContext?.snapshot)}
     repositoryMode={repositoryMode}
     onRepositoryModeChange={setRepositoryMode}
     repositoryFile={repositoryFile}
@@ -723,7 +732,8 @@ function AccountFrame({ children }: { children: ReactNode }) {
     loading: projects.state === 'pending' && projectValues.length === 0,
     refresh: refreshInspection,
   }), [projectValues, directory, acceptRuntime, projects.state]);
-  const actions = useAccountWorkActions(accountDirectory);
+  const lfsTransition = useLfsTransition();
+  const actions = useAccountWorkActions(accountDirectory, lfsTransition.confirm);
   const runSidebarAction = async (operation: () => void | Promise<void>): Promise<void> => {
     setSidebarActionError(null);
     try { await operation(); }
@@ -756,6 +766,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         {projects.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>{rpcErrorMessage(projects.error, 'Load project directory')}</span><Button variant="ghost" size="compact" onClick={() => void projects.refetch()}>Retry</Button></div> : null}
         {sidebarActionError ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>Workspace action: {sidebarActionError}</span><Button variant="ghost" size="compact" onClick={() => setSidebarActionError(null)}>Dismiss</Button></div> : null}
         {children}
+        {lfsTransition.dialog}
       </SidebarInset>
       <CreateWorkspaceDialog key={newWorkspaceProject ?? 'closed'} projectId={newWorkspaceProject} workspaces={sidebarProjects.flatMap((project) => project.workspaces.map((workspace) => ({ ...workspace, phase: workspace.definition?.phase ?? workspace.runtime?.phase ?? null })))} pending={createPending} error={createError} onOpenChange={(open) => { if (!open && !createPendingRef.current) { setNewWorkspaceProject(null); setCreateError(null); } }} onSubmit={async (input) => {
         if (createPendingRef.current) return;
@@ -1394,7 +1405,7 @@ const accountSecretsApi: Omit<ProjectSecretsProps, 'projects'> = {
   deleteValue: async (target, name) => { await configurationResult(rpcClient.configuration.values.delete({ ...target, name })); },
 };
 
-function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDirectoryContext>>): AccountWorkActions {
+function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDirectoryContext>>, confirmLfs: ConfirmLfsTransition): AccountWorkActions {
   const openingSpaces = useRef(new Map<string, Promise<void>>());
   const uncertainOpenings = useRef(new Set<string>());
 
@@ -1402,6 +1413,11 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     const project = account.projects.find((candidate) => candidate.id === spaceId || account.directory[candidate.id]?.workspaces.some((workspace) => workspace.id === spaceId));
     if (!project) throw new Error('This workspace is no longer in the account directory. Refresh before retrying.');
     return configurationResult(rpcClient.inspector.view({ projectId: project.id, workspaceId: spaceId === project.id ? null : spaceId }));
+  };
+  const confirmLeaving = async (canonical: InspectorView): Promise<boolean> => {
+    const identity = RuntimeIdentitySchema.parse({ projectId: canonical.workspace.projectId, workspaceId: canonical.workspace.id });
+    const snapshot = await configurationResult(rpcClient.runtime.snapshot(identity));
+    return confirmLfs(runtimeLfsHeldBack(snapshot), () => selectInspection(identity.projectId, canonical.workspace.id === canonical.workspace.projectId ? null : identity.workspaceId));
   };
   const mutate = async <T,>(request: Promise<{ status: 'ok'; value: T } | { status: 'error'; error: Error }>): Promise<T> => {
     try { return await configurationResult(request); }
@@ -1456,12 +1472,14 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
         account.refresh();
         throw new Error('This workspace is no longer open. Its account state has been refreshed.');
       }
+      if (!await confirmLeaving(canonical)) return;
       await mutate(rpcClient.space.close({ spaceId, expectedGeneration: canonical.placement.generation }));
     },
     onReopenSpace: (spaceId) => claimSpace(spaceId, null),
     onClaimWorkspace: claimSpace,
     onArchiveWorkspace: async (spaceId) => {
       const canonical = await inspectTarget(spaceId);
+      if (canonical.placement?.state === 'open' && !await confirmLeaving(canonical)) return;
       await mutate(rpcClient.workspace.archive({
         projectId: canonical.workspace.projectId, spaceId,
         expectedRevision: canonical.workspace.revision, expectedGeneration: canonical.placement?.generation ?? null,
@@ -1471,7 +1489,11 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     onRestoreProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.restore({ projectId, expectedRevision })); },
     onSetProjectBaseBranch: async (projectId, expectedRevision, baseBranch) => { await mutate(rpcClient.project.setBaseBranch({ projectId, expectedRevision, baseBranch })); },
     onDeleteProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.delete({ projectId, expectedRevision })); },
-    onDeleteWorkspace: async (workspaceId) => { await mutate(rpcClient.workspace.delete({ workspaceId })); },
+    onDeleteWorkspace: async (workspaceId) => {
+      const canonical = await inspectTarget(workspaceId);
+      if (!await confirmLeaving(canonical)) return;
+      await mutate(rpcClient.workspace.delete({ workspaceId }));
+    },
     onSetWorkspaceRelations: async (workspaceId, relations) => {
       await mutate(rpcClient.workspace.setRelations({ workspaceId, dependsOn: [...relations.dependsOn], relatedTo: [...relations.relatedTo], stackedOn: relations.stackedOn }));
     },

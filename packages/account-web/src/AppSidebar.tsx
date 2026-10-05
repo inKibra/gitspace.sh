@@ -1,3 +1,8 @@
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { rpcClient } from './rpc-client.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
+import { runtimeLfsHeldBack, useLfsTransition } from './LfsTransition.js';
+import { navigateProductUrl, setProductRoute } from './routes.js';
 import type { DeploymentStatusView } from '@gitspace/protocol';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import type { IconComponentProps } from '@gitspace/ui';
@@ -158,6 +163,27 @@ function launchedFrom(deployment: SidebarDeploymentProps | null | undefined, wor
 }
 
 function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployment, onClose, closePendingSpaceId, onReopen, onArchive, onRestore, onMove, onInspect, onNewWorkspace, onOpenProjectSettings, triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; runtime?: AgentScopeView; summary?: SidebarSpaceSummary; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; triggerClassName?: string } & Pick<AppSidebarProps, 'machines' | 'deployment' | 'onClose' | 'closePendingSpaceId' | 'onReopen' | 'onArchive' | 'onRestore' | 'onMove'>) {
+  const lfsTransition = useLfsTransition();
+  const [movePending, setMovePending] = useState(false);
+  const [moveError, setMoveError] = useState<string | null>(null);
+  const move = async (machine: AppSidebarProps['machines'][number]) => {
+    if (movePending || !runtime) return;
+    if (!window.confirm(`Move ${space.name} to ${machine.label}? Ignored files and machine-local secrets will not move.`)) return;
+    setMovePending(true); setMoveError(null);
+    try {
+      const identity = RuntimeIdentitySchema.parse({ projectId: runtime.projectId, workspaceId: space.id });
+      const result = await rpcClient.runtime.snapshot(identity);
+      if (result.status === 'error') throw result.error;
+      if (!await lfsTransition.confirm(runtimeLfsHeldBack(result.value), () => {
+        const url = setProductRoute(new URL(window.location.href), 'agent');
+        url.searchParams.set('project', identity.projectId);
+        url.searchParams.set('workspace', identity.workspaceId);
+        navigateProductUrl(url);
+      })) return;
+      await onMove?.(space.id, machine.id);
+    } catch (cause) { setMoveError(rpcErrorMessage(cause, 'Move workspace')); }
+    finally { setMovePending(false); }
+  };
   const archived = !!summary?.closedAt;
   const released = !archived && summary?.holder.kind === 'released';
   const active = !!runtime && !archived && summary?.holder.kind === 'held';
@@ -171,7 +197,7 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
   if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !canReopen && !canClose && !canRestore && !canArchive && !canMove && !launchable) return null;
   const launching = deployment?.launch?.status === 'running';
   let index = 0;
-  return <DropdownMenu>
+  return <>{lfsTransition.dialog}{moveError ? <p role="alert" className="text-caption text-destructive">{moveError}</p> : null}<DropdownMenu>
     <DropdownTrigger render={<SidebarMenuAction className={triggerClassName} aria-label={`Space actions for ${space.name}`}><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></SidebarMenuAction>} />
     <DropdownContent className="min-w-[240px] w-[240px]" align="start" sideOffset={4}>
       {onInspect ? <MenuItem index={index++} icon={ProjectGlyph} label="Open project" onSelect={onInspect} /> : null}
@@ -181,14 +207,11 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
       {canClose ? <MenuItem index={index++} icon={CloseGlyph} label={closePendingSpaceId === space.id ? outstanding ? 'Stopping agent…' : 'Closing space…' : outstanding ? 'Stop and close' : 'Close space'} disabled={closePendingSpaceId !== null && closePendingSpaceId !== undefined} onSelect={() => void onClose?.(space.id)} /> : null}
       {canRestore ? <MenuItem index={index++} icon={ReopenGlyph} label="Restore workspace" onSelect={() => void onRestore?.(space.id)} /> : null}
       {canArchive ? <MenuItem index={index++} icon={ArchiveGlyph} label="Archive workspace" onSelect={() => void onArchive?.(space.id)} /> : null}
-      {canMove ? machines.map((machine) => <MenuItem key={machine.id} index={index++} icon={MachineGlyph} label={`Move to ${machine.label}`} onSelect={() => {
-        if (!window.confirm(`Move ${space.name} to ${machine.label}? Ignored files and machine-local secrets will not move.`)) return;
-        void onMove?.(space.id, machine.id);
-      }} />) : null}
+      {canMove ? machines.map((machine) => <MenuItem key={machine.id} index={index++} icon={MachineGlyph} label={`Move to ${machine.label}`} disabled={movePending} onSelect={() => void move(machine)} />) : null}
       {launchable && deployment ? <MenuItem index={index++} icon={LaunchGlyph} label="Launch GitSpace from here" disabled={launching} onSelect={() => void deployment.onLaunch(space.id)} /> : null}
       {launchable && deployment && launchedFrom(deployment, space.id) ? <MenuItem index={index++} icon={ReopenGlyph} label="Back to stable" disabled={launching} onSelect={() => void deployment.onRevert()} /> : null}
     </DropdownContent>
-  </DropdownMenu>;
+  </DropdownMenu></>;
 }
 
 function LaunchedGlyph() {

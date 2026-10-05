@@ -85,9 +85,23 @@ Session history loads only when you open it. The explorer reads up to 200 entrie
 
 Cloud machines are temporary. In **Settings > Machines**, **Stop** saves supported workspace state before stopping the machine. If saving fails, the machine stays online. **Start** runs a fresh machine environment and restores saved workspaces, not the old machine disk.
 
-Workspace checkpoints save the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, and GitSpace artifacts, with references to the durable cloud conversation. They do not save installed packages, machine-local configuration, ignored files, or arbitrary files elsewhere on the machine, including its home directory. Ask a normal workspace agent to install tools as needed; those changes are temporary. Code repositories use Artifacts; encrypted `local://` evidence remains a separate store.
+Workspace checkpoints save the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, and GitSpace artifacts, with references to the durable cloud conversation. Uncommitted LFS changes are an exception: they stay on the machine until committed, even during a move or detach. Checkpoints do not save installed packages, machine-local configuration, ignored files, or arbitrary files elsewhere on the machine, including its home directory. Ask a normal workspace agent to install tools as needed; those changes are temporary. Code repositories use Artifacts; encrypted `local://` evidence remains a separate store.
 
 Projects created from scratch by GitSpace start with a real initial commit. Imported empty repositories can remain unborn: checkpoints preserve their symbolic branch, staged and unstaged files, and portable untracked files without inventing a HEAD commit. Cloud edits and machine handoffs preserve that state. The first real commit becomes HEAD in the next checkpoint.
+
+Artifacts stores LFS pointers but has no LFS endpoint. Snapshots upload newly committed local LFS objects to encrypted account R2 storage, once per oid. They never push to origin. Each repository keeps its normal LFS remote, including `lfs.url` in `.lfsconfig`; a deliberate `git push` uses git-lfs's normal pre-push hook.
+
+HEAD's `.gitattributes` controls checkpoint LFS tracking. Editing attributes in the working copy does not change it. Staged or unstaged LFS content whose object is not already off the machine stays behind: the snapshot keeps the committed pointer, or omits a new path. Deletes and renames of already-committed LFS files carry over. Capture never changes the real index or working tree.
+
+Inspector's working comparison marks these paths **Only on this machine** and explains **LFS changes leave this machine only after a commit**. The saved checkpoint supplies the list, including while the machine is offline. Move and detach confirmation offers **Commit first** or **Continue without them**. After a move, the agent receives the list of files restored to committed versions or omitted.
+
+Restore looks for LFS content in the local cache, then R2, then the confirmed origin endpoint. Missing objects fail explicitly. Cloud reads can return R2 content; origin-only files report their size and that they need a machine. Cloud edits and writes to LFS-tracked paths require a machine and a commit.
+
+R2 retention is project-scoped. In-use snapshots include the current checkpoint and portable revision of a nonarchived workspace (including a closed workspace), active attachment checkpoints, and pending publication predecessors. Historical rows alone are not restore roots. Publication pins do not expire on a timer. Archiving or deleting a workspace releases its snapshot owners, not live attachment or publication pins.
+
+With an external origin, R2 eviction requires a successful authenticated LFS batch `download` confirmation for the exact oid and size. Snapshot metadata records the confirmed endpoint before deletion; stale remote-tracking refs are not evidence. Without an external origin, objects reachable through any branch or tag in the canonical project and workspace Artifacts repositories remain protected. Collection fails closed when it cannot inspect those roots. Deletion fences new publications until it finishes.
+
+Committed pointer inventories are cached on disk by HEAD. Unchanged captures reuse the inventory; forward history scans stop at the saved ancestor. A rewritten history requires one rescan.
 
 Closing a workspace, stopping a cloud machine, and destroying a machine are different operations. Controlled workspace close, Stop, and provider replacement publish durable checkpoints before releasing ownership. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
 
@@ -167,13 +181,15 @@ The normal `runtime-workspace-do` test command runs this smoke. `protocol-runtim
 
 ### Opt-in live Artifacts check
 
-The live check is prepared but has not been run. It is not part of `bun run test`. It checks binding `readFile`, `readTree`, `readCommit`, and `log`, pushes a snapshot on top of an existing one in a disposable fork, and verifies a real LFS upload/download by SHA-256 and byte length. It leaves the source repository and workspace DO unchanged. Missing LFS support is a failure, not a skipped check.
+The owner ran this check in the `gitspace-live-check` scratch namespace in the InKibra Corp account. Binding `readCommit`, `readTree`, `readFile`, `readBlob`, and `info` worked. Snapshot publication preserved the source HEAD, index, and branch, used the expected parent, and exposed the new ref through Git `ls-remote`. Artifacts' LFS batch endpoint returned 404; Artifacts has no LFS payload store.
 
-Offline help: `bun run --cwd packages/runtime-workspace-do check:artifacts:live --help`.
+Run this check under **Node 24**, not Bun. Wrangler's remote bindings proxy hangs under Bun. Offline help from the repository root: `node packages/runtime-workspace-do/live-check/entry.mjs --help`.
 
-After separate owner authorization, the command is `bun run --cwd packages/runtime-workspace-do check:artifacts:live --authorize-live --input /absolute/path/authorization.json`. The input must contain `authorize: "create-disposable-fork-and-upload-lfs"`, the namespace, source repository, a distinct new fork repository name, the full canonical checkpoint, an existing probe path, and its expected SHA-256. Use existing Wrangler authentication or account/API-token environment credentials. The check prints evidence and the retained fork's identity, never tokens; the owner decides when to delete the fork.
+After separate owner authorization, run `node packages/runtime-workspace-do/live-check/entry.mjs --authorize-live --input /absolute/path/authorization.json`. The input must contain `authorize: "create-disposable-fork-and-push-snapshot"`, the namespace, source repository, a distinct new fork repository name, the full canonical checkpoint, an existing probe path, and its expected SHA-256. Use existing Wrangler authentication or account/API-token environment credentials. Repository handles use explicit disposal compatible with the proxy and workerd. The check leaves the source repository and workspace DO unchanged, prints evidence and scrubbed failure reasons without tokens or credential-bearing URLs, and retains the disposable fork for owner-directed cleanup.
 
-Cloudflare's current [binding reference](https://developers.cloudflare.com/artifacts/api/workers-binding/) documents file reads, while its [isomorphic-git example](https://developers.cloudflare.com/artifacts/examples/isomorphic-git/) says the binding cannot read files. Binding-read compatibility and LFS payload support remain unverified until this authorized check runs. Local tests verify Git object, pointer, and snapshot behavior without contacting Artifacts.
+The binding resolves bare branch names and commit IDs in `repo.log({ ref })`. Use `repo.log()` without a ref for HEAD. Literal `HEAD`, `refs/heads/main`, `heads/main`, and custom checkpoint refs return empty results even when Git can see those refs. Production branch lookup translates full branch refs; snapshot reads use commit IDs stored by the DO. The live check verifies checkpoint refs through Git rather than binding lookup and does not exercise the separate R2 LFS store.
+
+The owner reran the unmodified check under Node 24 for Pass 10 using fork `probe-fork-20261005035600-c`. Direct `ArtifactsCodeStore` checks passed for full and bare branch names, HEAD, feature branches, commit IDs, missing branches, and `readFile`. They rejected custom checkpoint refs and returned no initial checkpoint for a populated repository whose requested branch was missing. Pass 11 adds the same no-ref history guard when reusing a matching-description scratch repository; it does not seed a missing branch in a populated repository.
 
 Two opt-in browser checks use private local Chrome profiles, not your logged-in browser. Set `GITSPACE_BROWSER_PROOF_EXECUTABLE` to a Chrome executable and run:
 
@@ -191,7 +207,7 @@ These checks exercise real headless control, profile recovery, masked output, an
 
 Recovery requires authenticated terminal output or matching evidence from a single supervised command. A missing receipt does not authorize another unsafe launch. Rule-triggered continuations and background Job completions retain inference admission; stopping a conversation does not start a replacement generation.
 
-Local runtime checks do not prove a live deployment. Artifacts bindings are remote-only; the Worker test configuration disables remote bindings. Real provider egress, Artifacts repository/LFS/FUSE behavior, native predecessor migration, tenant activation, and sustained-operation checks require their own authorized environment and observed results.
+Local runtime checks do not prove a live deployment. Artifacts bindings are remote-only; the Worker test configuration disables remote bindings. The owner's binding-read and snapshot-publication findings above are live evidence, not evidence of tenant activation or the new R2 LFS path. Real provider egress, R2 LFS operation, FUSE behavior, native predecessor migration, tenant activation, and sustained-operation checks need their own authorized environment and observed results.
 
 ### Rolling runtime diagnostics
 

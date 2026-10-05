@@ -164,6 +164,6 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     />
     {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open} onOpenChange={launch.setOpen} onRetry={() => perform(() => launch.start(launch.launch!.workspaceId, launch.launch!.targets))} /> : null}
     {launch.revertProgress ? <RevertSheet progress={launch.revertProgress} open={launch.open} onOpenChange={launch.setOpen} onRetry={() => perform(launch.revert)} /> : null}
-    <Dialog open={machinesOpen} onOpenChange={setMachinesOpen}><DialogContent className="flex max-h-[85dvh] max-w-3xl flex-col overflow-hidden"><DialogHeader><DialogTitle>Workspace machines</DialogTitle></DialogHeader><RuntimeMachines snapshot={snapshot} conversationId={conversationId} onSelectConversation={id => { setSelected(id); setMachinesOpen(false); }} /></DialogContent></Dialog>
+    <Dialog open={machinesOpen} onOpenChange={setMachinesOpen}><DialogContent className="flex max-h-[85dvh] max-w-3xl flex-col overflow-hidden"><DialogHeader><DialogTitle>Workspace machines</DialogTitle></DialogHeader><RuntimeMachines snapshot={snapshot} conversationId={conversationId} onCommitFirst={() => { setMachinesOpen(false); return perform(() => ask('Help me review and commit the uncommitted Git LFS changes before detaching or moving this workspace.')); }} onSelectConversation={id => { setSelected(id); setMachinesOpen(false); }} /></DialogContent></Dialog>
   </>;
 }

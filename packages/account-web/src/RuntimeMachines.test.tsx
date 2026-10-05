@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeMachines } from './RuntimeMachines.js';
 
 const rpc = vi.hoisted(() => ({ request: vi.fn(), primary: vi.fn(), detach: vi.fn(), placement: vi.fn() }));
@@ -79,4 +80,31 @@ it('requests fenced detach and retains the working copy until the runtime confir
   attachment.state = 'draining';
   await act(() => root.render(<RuntimeMachines snapshot={{ ...snapshot, cursor: 2 }} onSelectConversation={() => {}} />));
   expect([...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Detaching…')?.disabled).toBe(true);
+});
+
+it('requires explicit LFS consent on a lost machine and cancels detach when committing first', async () => {
+  const snapshot = fixture();
+  const checkpoint = RuntimeGitCheckpointSchema.parse(snapshot.documents['gitspace.code']);
+  snapshot.documents['gitspace.code'] = { ...checkpoint, lfs: { objects: [], heldBack: [{ path: 'assets/local.psd', kind: 'modified' }] } };
+  snapshot.attachments.push(RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'fixed', machineId: 'runner', generation: 4, role: 'runner', checkout: { kind: 'snapshot', commit }, state: 'lost', capabilities: [], updatedAt: stamp }));
+  const commitFirst = vi.fn();
+  await act(() => root.render(<RuntimeMachines snapshot={snapshot} onSelectConversation={() => {}} onCommitFirst={commitFirst} />));
+  const click = async (text: string) => {
+    const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === text);
+    expect(button).toBeDefined();
+    await act(() => button!.click());
+  };
+  await click('Detach');
+  expect(document.body.textContent).toContain('assets/local.psd');
+  expect(rpc.detach).not.toHaveBeenCalled();
+  await click('Cancel');
+  expect(rpc.detach).not.toHaveBeenCalled();
+  await click('Detach');
+  await click('Commit first');
+  expect(commitFirst).toHaveBeenCalledTimes(1);
+  expect(rpc.detach).not.toHaveBeenCalled();
+  await click('Detach');
+  await click('Continue without them');
+  expect(rpc.detach).toHaveBeenCalledTimes(1);
+  expect(rpc.detach).toHaveBeenCalledWith({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'fixed', machineId: 'runner', generation: 4 });
 });

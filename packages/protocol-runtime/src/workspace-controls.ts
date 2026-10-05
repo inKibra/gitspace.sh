@@ -1,8 +1,9 @@
 import { z } from 'zod';
+import { GitLfsSnapshotSchema } from '@gitspace/protocol-workspace';
 import { RuntimeIdentitySchema, RuntimePlacementSchema, RuntimeActionResultSchema } from './base.js';
 export const RuntimeQaActionResultSchema = RuntimeActionResultSchema.extend({ shareDraft: z.url().optional() });
 const gitObjectId = z.string().regex(/^[0-9a-f]{40}$/u);
-export const RuntimeGitCheckpointSchema = z.object({ checkpointRef: z.string().regex(/^refs\/gitspace\/[A-Za-z0-9._/-]+$/u), headCommit: gitObjectId.nullable(), branch: z.string().min(1), indexCommit: gitObjectId, trackedWorktreeCommit: gitObjectId, worktreeCommit: gitObjectId, indexTree: gitObjectId, worktreeTree: gitObjectId });
+export const RuntimeGitCheckpointSchema = z.object({ checkpointRef: z.string().regex(/^refs\/gitspace\/[A-Za-z0-9._/-]+$/u), headCommit: gitObjectId.nullable(), branch: z.string().min(1), indexCommit: gitObjectId, trackedWorktreeCommit: gitObjectId, worktreeCommit: gitObjectId, indexTree: gitObjectId, worktreeTree: gitObjectId, lfs: GitLfsSnapshotSchema.optional() });
 export const RuntimeSnapshotCommitInputSchema = RuntimeIdentitySchema.extend({ attachmentId: z.string(), generation: z.number().int().nonnegative(), checkpoint: RuntimeGitCheckpointSchema, previousWorktreeCommit: gitObjectId.nullable(), final: z.boolean().default(false) });
 export const RuntimePlacementInputSchema = RuntimeIdentitySchema.extend({ conversationId: z.string(), placement: RuntimePlacementSchema });
 export const RuntimeCreationSchema = z.object({ state: z.enum(['pending', 'forking', 'checkout', 'materializing', 'ready', 'failed']), taskId: z.string().nullable(), message: z.string().nullable() });

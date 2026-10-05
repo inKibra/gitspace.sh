@@ -5,12 +5,9 @@ import { validateSnapshotPath, type ArtifactsFetch } from '../src/artifacts-snap
 
 const repository = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 export const authorizationSchema = z.object({
-  authorize: z.literal('create-disposable-fork-and-upload-lfs'),
-  namespace: z.string().min(1),
-  sourceRepository: repository,
-  forkRepository: repository,
-  checkpoint: RuntimeGitCheckpointSchema,
-  probePath: z.string().min(1),
+  authorize: z.literal('create-disposable-fork-and-push-snapshot'),
+  namespace: z.string().min(1), sourceRepository: repository, forkRepository: repository,
+  checkpoint: RuntimeGitCheckpointSchema, probePath: z.string().min(1),
   probeSha256: z.string().regex(/^[0-9a-f]{64}$/u),
 }).superRefine((value, context) => {
   if (value.sourceRepository === value.forkRepository) context.addIssue({ code: 'custom', message: 'Fork must differ from source' });
@@ -22,14 +19,12 @@ export type Authorization = z.infer<typeof authorizationSchema>;
 /** The callback is the first point at which bindings, Wrangler or network may be touched. */
 export async function authorized<T>(optIn: boolean, input: unknown, run: (authorization: Authorization) => Promise<T>): Promise<T> {
   if (!optIn) throw new Error('Explicit --authorize-live flag is required');
-  return run(authorizationSchema.parse(input));
+  const parsed = authorizationSchema.safeParse(input);
+  if (!parsed.success) throw new Error('Invalid live-check authorization');
+  return run(parsed.data);
 }
-
 export const maxBytes = 1024 * 1024;
 export function sha256(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex'); }
-export function lfsPointer(bytes: Uint8Array): string {
-  return `version https://git-lfs.github.com/spec/v1\noid sha256:${sha256(bytes)}\nsize ${bytes.byteLength}\n`;
-}
 export function httpsURL(value: string): URL {
   const url = new URL(value);
   if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw new Error('Unsafe HTTPS action URL');
@@ -59,8 +54,7 @@ export async function boundedBody(response: Response, limit = maxBytes): Promise
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   return bytes;
 }
-
-/** Reject all redirects, including same-origin ones: credentials can never follow a redirect. */
+/** Reject all redirects: credentials can never follow a redirect. */
 export function boundedFetch(request: ArtifactsFetch): ArtifactsFetch {
   return async (input, init) => {
     httpsURL(input);
@@ -72,60 +66,50 @@ export function boundedFetch(request: ArtifactsFetch): ArtifactsFetch {
   };
 }
 
-const actionSchema = z.object({ href: z.string(), header: z.record(z.string(), z.string()).optional() });
-const batchSchema = z.object({
-  transfer: z.literal('basic').optional(),
-  objects: z.array(z.object({
-    oid: z.string(), size: z.number().int().nonnegative(),
-    error: z.object({ code: z.number(), message: z.string() }).optional(),
-    actions: z.object({ upload: actionSchema.optional(), download: actionSchema.optional(), verify: actionSchema.optional() }).optional(),
-  })).length(1),
-});
-
-export async function lfsRoundTrip(remoteValue: string, token: string, bytes: Uint8Array<ArrayBuffer>, request: ArtifactsFetch = fetch) {
-  if (!bytes.byteLength || bytes.byteLength > maxBytes) throw new Error('Invalid LFS payload size');
-  const remote = httpsURL(remoteValue);
+/** Git smart HTTP v0 upload-pack discovery is the wire equivalent of ls-remote. */
+export async function verifyPublishedRef(repo: Pick<ArtifactsRepo, 'info' | 'createToken' | 'revokeToken'>, ref: string, commit: string, rememberSecret: (value: string) => void, request: ArtifactsFetch = fetch): Promise<void> {
+  const remote = httpsURL((await repo.info()).remote);
   if (remote.search) throw new Error('Git remote must not contain a query');
-  const endpoint = `${remote.href.replace(/\/$/u, '')}/info/lfs/objects/batch`;
-  const oid = sha256(bytes);
-  const size = bytes.byteLength;
-  const send = boundedFetch(request);
-  const batch = async (operation: 'upload' | 'download') => {
-    const response = await send(endpoint, {
-      method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.git-lfs+json', 'Content-Type': 'application/vnd.git-lfs+json' },
-      body: JSON.stringify({ operation, transfers: ['basic'], objects: [{ oid, size }] }),
+  const token = await repo.createToken('read', 60);
+  rememberSecret(token.plaintext);
+  rememberSecret(token.id);
+  try {
+    const response = await boundedFetch(request)(`${remote.href.replace(/\/$/u, '')}/info/refs?service=git-upload-pack`, {
+      headers: { Authorization: `Bearer ${token.plaintext}`, Accept: 'application/x-git-upload-pack-advertisement' },
     });
-    if (!response.ok) throw new Error(`LFS ${operation} batch failed (${response.status})`);
-    const parsed = batchSchema.safeParse(await response.json());
-    if (!parsed.success) throw new Error('Invalid or unsupported LFS batch response');
-    const object = parsed.data.objects[0]!;
-    if (object.error) throw new Error(`LFS object rejected (${object.error.code})`);
-    if (object.oid !== oid || object.size !== size) throw new Error('LFS batch identity mismatch');
-    return object.actions;
-  };
-  const perform = async (action: z.infer<typeof actionSchema>, method: 'PUT' | 'GET' | 'POST', body?: Uint8Array<ArrayBuffer> | string) => {
-    const target = httpsURL(action.href);
-    if (target.origin !== remote.origin && decodeURIComponent(target.href).includes(token)) throw new Error('Repository token cannot cross origins');
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(action.header ?? {})) {
-      if (/^(host|cookie|proxy-authorization|connection|transfer-encoding|content-length)$/iu.test(name)) throw new Error('Unsafe LFS action header');
-      if (target.origin !== remote.origin && value.includes(token)) throw new Error('Repository token cannot cross origins');
-      headers.set(name, value);
+    if (!response.ok) throw new Error(`Git ls-remote failed (${response.status})`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const decoder = new TextDecoder();
+    let found: string | undefined;
+    let service = false;
+    for (let offset = 0; offset < bytes.length;) {
+      const prefix = decoder.decode(bytes.subarray(offset, offset + 4));
+      if (!/^[0-9a-f]{4}$/u.test(prefix)) throw new Error('Invalid Git ls-remote packet');
+      const size = Number.parseInt(prefix, 16);
+      offset += 4;
+      if (size === 0) continue;
+      if (size < 4 || offset + size - 4 > bytes.length) throw new Error('Truncated Git ls-remote packet');
+      const line = decoder.decode(bytes.subarray(offset, offset + size - 4));
+      offset += size - 4;
+      if (line === '# service=git-upload-pack\n') { service = true; continue; }
+      const advertised = /^([0-9a-f]{40}) ([^\0\n]+)(?:\0[^\n]*)?\n?$/u.exec(line);
+      if (!advertised) throw new Error('Invalid Git ls-remote advertisement');
+      if (advertised[2] === ref) found = advertised[1];
     }
-    // Action-specific credentials are authoritative; never inherit repository credentials.
-    if (method === 'POST') headers.set('Content-Type', 'application/vnd.git-lfs+json');
-    const response = await send(target.href, { method, headers, body });
-    if (!response.ok) throw new Error(`LFS ${method} action failed (${response.status})`);
-    return response;
-  };
-  const upload = await batch('upload');
-  // Synthetic random content must actually upload; missing support is not a pass.
-  if (!upload?.upload) throw new Error('LFS upload action missing');
-  await perform(upload.upload, 'PUT', bytes);
-  if (upload.verify) await perform(upload.verify, 'POST', JSON.stringify({ oid, size }));
-  const download = await batch('download');
-  if (!download?.download) throw new Error('LFS download action missing');
-  const downloaded = await boundedBody(await perform(download.download, 'GET'));
-  if (downloaded.byteLength !== size || sha256(downloaded) !== oid) throw new Error('LFS downloaded payload digest or size mismatch');
-  return { oid, size, downloadedSha256: sha256(downloaded), downloadedSize: downloaded.byteLength, uploaded: true, verified: upload.verify !== undefined };
+    if (!service || found !== commit) throw new Error('Published checkpoint ref differs or is absent');
+  } finally {
+    if (!await repo.revokeToken(token.id)) throw new Error('Git verification token revocation failed');
+  }
+}
+
+export function scrubFailure(error: unknown, secrets: Iterable<string> = []): string {
+  let message = error instanceof Error ? error.message : 'Unknown live-check failure';
+  for (const secret of secrets) {
+    if (secret) for (const value of [secret, encodeURIComponent(secret)]) message = message.split(value).join('[redacted]');
+  }
+  return message
+    .replace(/https?:\/\/[^\s<>"']+/giu, '[redacted-url]')
+    .replace(/\b(?:Bearer|Basic)\s+[^\s,;]+/giu, '[redacted-authorization]')
+    .replace(/\b(?:token|password|secret|authorization)\s*[:=]\s*[^\s,;]+/giu, '[redacted-credential]')
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 1000);
 }

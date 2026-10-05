@@ -3,8 +3,8 @@ import { abortSpaceClose, beginSpaceClose, beginSpaceOpen, bootstrapSpaceAuthori
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
-import { RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeAttachInputSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeAttachInputSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeGitCheckpointSchema, RuntimePlacementInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
@@ -13,6 +13,10 @@ import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema, RuntimeModelInpu
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
 import { requireRuntimeIdentity } from './runtime-access.js';
 import { z } from 'zod';
+import { credentialProtocolBase64 } from '@gitspace/protocol';
+import { parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type GitLfsConfirmedObject } from '@gitspace/protocol-workspace';
+import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
+import { readEncryptedCheckpoint } from './git-lfs-store.js';
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
@@ -33,6 +37,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         record_json TEXT NOT NULL
       )`);
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_recovery_receipts(operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)');
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS portable_lfs_outbox(snapshot_id TEXT PRIMARY KEY,inventory TEXT NOT NULL)');
+      this.ctx.waitUntil(this.flushPortableLfs());
       this.directoryOutbox.kick();
     });
   }
@@ -56,6 +62,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     await this.directoryOutbox.flush();
+    await this.flushPortableLfs();
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
     if (wake && wake.timestamp <= Date.now()) {
       await this.scheduleAlarm('runtime', null);
@@ -231,6 +238,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (input.state === 'detached') await runtime.attachments.reconcileDetach(input);
     const attachment = runtime.attachments.detach(input);
     runtime.publish();
+    this.ctx.waitUntil(this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${input.projectId}`).lfsCollect());
     return { attachment };
   }
 
@@ -311,8 +319,61 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  commitClosed(input: SpaceAuthorityMutation & { revision: number; manifestKey: string; manifestHash: string; resumeOnMachineRestart?: boolean }): SpaceAuthorityResult<void> {
-    return this.commit(() => this.save(commitSpaceClosed(this.get(), input, new Date().toISOString())));
+  async commitClosed(input: SpaceAuthorityMutation & { revision: number; manifestKey: string; manifestHash: string; resumeOnMachineRestart?: boolean }): Promise<SpaceAuthorityResult<void>> {
+    // Validate the ownership fence before reading or retaining publisher-controlled inventory.
+    try { commitSpaceClosed(this.get(), input, new Date().toISOString()); }
+    catch (error) {
+      if (error instanceof WorkspaceDomainError) return { status: 'error', failure: error.toJSON() };
+      throw error;
+    }
+    const expectedKey = spaceCheckpointManifestKey(input.projectId, input.spaceId, input.revision);
+    if (input.manifestKey !== expectedKey) throw new Error('Portable checkpoint manifest scope mismatch');
+    const key = credentialProtocolBase64.decode(await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).artifactKey(this.env.ACCOUNT_ID));
+    const bytes = await readEncryptedCheckpoint(this.env.DATA, `users/${this.env.ACCOUNT_ID}/${expectedKey}`, key, input.manifestHash);
+    if (!bytes) throw new Error('Portable checkpoint manifest is missing');
+    const manifest = parseWorkspaceCheckpoint(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), { projectId: input.projectId, spaceId: input.spaceId, revision: input.revision });
+    const retained = { snapshotId: `portable:${input.spaceId}:${input.revision}`, workspaceId: input.spaceId, kind: 'portable' as const, objects: manifest.repository.lfs?.objects ?? [] };
+    const accepted = this.commit(() => {
+      this.save(commitSpaceClosed(this.get(), input, new Date().toISOString()));
+      this.ctx.storage.sql.exec('INSERT OR REPLACE INTO portable_lfs_outbox VALUES(?,?)', retained.snapshotId, JSON.stringify(retained));
+    });
+    if (accepted.status === 'ok') { await this.ctx.storage.sync(); await this.flushPortableLfs(); }
+    return accepted;
+  }
+
+  private async flushPortableLfs(): Promise<void> {
+    const state = this.get();
+    if (!state) return;
+    for (const row of this.ctx.storage.sql.exec<{ snapshot_id: string; inventory: string }>('SELECT snapshot_id,inventory FROM portable_lfs_outbox').toArray()) {
+      try {
+        await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${state.projectId}`).lfsRetain(RetainedLfsSnapshotSchema.parse(JSON.parse(row.inventory)));
+        this.ctx.storage.sql.exec('DELETE FROM portable_lfs_outbox WHERE snapshot_id=?', row.snapshot_id);
+        await this.ctx.storage.sync();
+      } catch (error) { await this.scheduleAlarm('lfs', Date.now() + 1_000); throw error; }
+    }
+    await this.scheduleAlarm('lfs', null);
+  }
+
+  async lfsRoots() {
+    await readCurrentCheckpoint(this.ctx.storage);
+    const attachmentTable = this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_attachments'").toArray().length > 0;
+    const active = attachmentTable && this.ctx.storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments').toArray().some(row => ['attaching', 'ready', 'draining'].includes(RuntimeAttachmentSchema.parse(JSON.parse(row.record)).state));
+    const state = this.get();
+    return {
+      checkpoints: readRuntimeLfsRoots(this.ctx.storage),
+      pendingRuntime: ['runtime_cloud_files', 'runtime_lfs_retention_outbox'].some(table => {
+        if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", table).toArray().length) return false;
+        return this.ctx.storage.sql.exec(table === 'runtime_cloud_files' ? 'SELECT 1 FROM runtime_cloud_files WHERE pending IS NOT NULL LIMIT 1' : 'SELECT 1 FROM runtime_lfs_retention_outbox LIMIT 1').toArray().length > 0;
+      }),
+      active,
+      portableRevision: state?.publishedRevision ?? null,
+      pending: this.ctx.storage.sql.exec<{ snapshot_id: string }>('SELECT snapshot_id FROM portable_lfs_outbox').toArray().map(row => row.snapshot_id),
+    };
+  }
+
+  async reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void> {
+    await readCurrentCheckpoint(this.ctx.storage);
+    await reconcileRuntimeLfsSources(this.ctx.storage, objects);
   }
 
   abortClose(input: SpaceAuthorityMutation & { revision: number; message: string }): SpaceAuthorityResult<void> {

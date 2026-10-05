@@ -45,6 +45,8 @@ import { CloudArtifactObjectStore } from './cloud-artifact-object-store.js';
 import { ArtifactUploads } from './artifact-uploads.js';
 import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
 import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
+import { createCloudGitLfsStore } from './cloud-lfs-store.js';
+import type { MachineGitLfs } from './git-lfs.js';
 import { createPublishedSpaceHeadResolver } from './inspector-base.js';
 import type { SpaceWorkspaceControls } from './space-workspace-controls.js';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
@@ -367,15 +369,27 @@ export async function startMachineRuntime() {
   const repositoryCredentialsSchema = z.object({ remote: z.url(), plaintext: z.string().min(1), expiresAt: z.iso.datetime() });
   const gitRemote = new ArtifactsGitRemote({
     credentials: (binding, scope) => cloudRuntime.call('runtime.repository.credentials', { ...binding, scope }, repositoryCredentialsSchema),
-    lfsEnvironment: async (repositoryPath) => {
-      const origin = Bun.spawn(['git', 'remote', 'get-url', 'origin'], { cwd: repositoryPath, stdout: 'pipe', stderr: 'pipe' });
-      const [code, url, error] = await Promise.all([origin.exited, new Response(origin.stdout).text(), new Response(origin.stderr).text()]);
-      if (code !== 0) throw new Error(`LFS origin is unavailable: ${error}`);
-      return gitIdentity.gitEnvironment(url.trim());
-    },
   });
+  const lfs = async (projectId: string, publicationId?: string): Promise<MachineGitLfs> => {
+    const project = await authority.getProject(projectId);
+    if (!project) throw new Error('LFS project is unavailable');
+    const store = await createCloudGitLfsStore({ projectId, publicationId, blobs: checkpointBlobs, encryptionKey, controlOptions });
+    return {
+      store,
+      canonicalOrigin: project.repositoryReference,
+      confirmOrigin: confirmation => store.confirmOrigin(confirmation),
+      resolveSources: objects => store.resolveSources(objects),
+      releasePublication: () => store.releasePublication(),
+      originEnvironment: async repositoryPath => {
+        const origin = Bun.spawn(['git', 'remote', 'get-url', 'origin'], { cwd: repositoryPath, stdout: 'pipe', stderr: 'pipe' });
+        const [code, url, error] = await Promise.all([origin.exited, new Response(origin.stdout).text(), new Response(origin.stderr).text()]);
+        if (code !== 0) throw new Error(`LFS origin is unavailable: ${error}`);
+        return gitIdentity.gitEnvironment(url.trim());
+      },
+    };
+  };
   const encryptedCheckpointBlobs = new EncryptedCheckpointBlobStore(checkpointBlobs, encryptionKey);
-  const lifecycle = new PortableSpaceLifecycle(authority, encryptedCheckpointBlobs, gitRemote);
+  const lifecycle = new PortableSpaceLifecycle(authority, encryptedCheckpointBlobs, gitRemote, lfs);
   const closedSpaceTranscripts = new ClosedSpaceTranscriptReader(authority, encryptedCheckpointBlobs, async (bytes) => readLegacyTranscriptBytes(bytes), join(environmentRoot, 'runtime', 'transcript-checkpoints'), sessionFile => agentRuntime.transcript(sessionFile));
   const terminals = new WorkspaceHubTerminalCoordinator(database, machineId);
   const environments = new WorkspaceEnvironmentManager(database, authority, terminals, authority, {
@@ -414,7 +428,7 @@ export async function startMachineRuntime() {
           if (originExit !== 0) throw new Error(`Unable to restore canonical origin: ${originError}`);
         }
         await gitRemote.fetchCheckpoint({ binding: gitBinding(definition.projectId, spaceId), repositoryPath: directory, checkpointRef: manifest.repository.checkpointRef });
-        await restoreGitIntermediateCheckpoint({ repositoryPath: directory, branch: manifest.repository.branch, checkpoint: manifest.repository });
+        await restoreGitIntermediateCheckpoint({ repositoryPath: directory, branch: manifest.repository.branch, checkpoint: manifest.repository, lfs: await lfs(definition.projectId) });
         return directory;
       } catch (error) {
         await rm(directory, { recursive: true, force: true });
@@ -842,7 +856,7 @@ export async function startMachineRuntime() {
     },
   });
   executorRuntime = await createMachineExecutor({
-    environmentRoot, machineId, database, artifacts, cloud: cloudRuntime, gitRemote,
+    environmentRoot, machineId, database, artifacts, cloud: cloudRuntime, gitRemote, lfs,
     browser: { enabled: browserEnabled, relay: browserRelay },
     prepareAttachment: (local, signal) => environments.prepareAttachment(local, signal),
     originGitEnvironment: async (origin) => gitIdentity.gitEnvironment(origin),

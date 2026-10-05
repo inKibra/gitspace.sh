@@ -23,7 +23,9 @@ export class RuntimeAttachmentController {
     const input = RuntimeAttachmentRequestInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
     const repository = `workspace-${input.workspaceId}`;
-    const resolved = await this.options.code.resolveRef(repository, input.sourceRef);
+    const checkpoint = input.sourceRef.startsWith('refs/gitspace/') ? await this.options.snapshot() : null;
+    if (input.sourceRef.startsWith('refs/gitspace/') && checkpoint?.checkpointRef !== input.sourceRef) throw new Error('Selected checkpoint ref is not canonical');
+    const resolved = await this.options.code.resolveRef(repository, checkpoint?.worktreeCommit ?? input.sourceRef);
     if (resolved !== input.checkout.commit) throw new Error('Assigned source ref no longer resolves to the selected commit');
     const metadata = await this.options.code.readCommit(repository, resolved);
     if (!metadata) throw new Error('Selected snapshot commit is unavailable');

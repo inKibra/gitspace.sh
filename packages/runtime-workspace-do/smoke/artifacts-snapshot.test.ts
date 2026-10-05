@@ -9,9 +9,9 @@ import { ArtifactsCodeStore } from '../src/artifacts.js';
 
 const text = new TextEncoder();
 const author = { name: 'Fixture', email: 'fixture@example.invalid', timestamp: 1, timezoneOffset: 0 };
-async function fixture() {
+async function fixture(defaultBranch = 'main') {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-snapshot-'));
-  await git.init({ fs, dir });
+  await git.init({ fs, dir, defaultBranch });
   const write = async (value: Uint8Array) => git.writeBlob({ fs, dir, blob: value });
   const lfs = text.encode(`version https://git-lfs.github.com/spec/v1\noid sha256:${'a'.repeat(64)}\nsize 999\n`);
   const nested = await git.writeTree({ fs, dir, tree: [{ mode: '100644', path: 'untouched', oid: await write(text.encode('large remote subtree')), type: 'blob' }] });
@@ -22,8 +22,8 @@ async function fixture() {
     { mode: '040000', path: 'nested', oid: nested, type: 'tree' },
   ] });
   const commit = await git.writeCommit({ fs, dir, commit: { tree, parent: [], author, committer: author, message: 'base\n' } });
-  await git.writeRef({ fs, dir, ref: 'refs/heads/main', value: commit });
-  const previous: RuntimeGitCheckpoint = { checkpointRef: 'refs/gitspace/spaces/workspace/checkpoints', headCommit: commit, branch: 'main', indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: tree, worktreeTree: tree };
+  await git.writeRef({ fs, dir, ref: `refs/heads/${defaultBranch}`, value: commit });
+  const previous: RuntimeGitCheckpoint = { checkpointRef: 'refs/gitspace/spaces/workspace/checkpoints', headCommit: commit, branch: defaultBranch, indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: tree, worktreeTree: tree };
   await git.writeRef({ fs, dir, ref: previous.checkpointRef, value: commit });
   const fetched: string[] = [];
   let minted = 0; let revoked = 0;
@@ -36,14 +36,26 @@ async function fixture() {
       fetched.push(oid);
       return (await git.readTree({ fs, dir, oid })).tree.map(entry => ({ name: entry.path, hash: entry.oid, mode: entry.mode, type: entry.type === 'tree' ? 'tree' : entry.type === 'commit' ? 'gitlink' : entry.mode === '120000' ? 'symlink' : entry.mode === '100755' ? 'exec' : 'blob' }));
     },
-    async info(): Promise<ArtifactsRepoInfo> { return { id: 'fixture', name: 'fixture', description: null, defaultBranch: 'main', createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false, remote: 'https://fixture.invalid/repo.git' }; },
+    async info(): Promise<ArtifactsRepoInfo> { return { id: 'fixture', name: 'fixture', description: null, defaultBranch, createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false, remote: 'https://fixture.invalid/repo.git' }; },
     async createToken(): Promise<ArtifactsCreateTokenResult> { minted++; return { id: 'lease', plaintext: 'secret', scope: 'write', expiresAt: '' }; },
     async revokeToken() { revoked++; return true; },
+    async log(options?: Parameters<ArtifactsRepo['log']>[0]): Promise<ArtifactsCommitMetadata[]> {
+      const ref = options?.ref;
+      const commitId = ref !== undefined && /^[0-9a-f]{40}$/u.test(ref);
+      if (ref !== undefined && !commitId && (ref === 'HEAD' || ref.startsWith('refs/') || !(await git.listBranches({ fs, dir })).includes(ref))) return [];
+      try {
+        const oid = await git.resolveRef({ fs, dir, ref: ref === undefined ? 'HEAD' : commitId ? ref : `refs/heads/${ref}` });
+        return [await repo.readCommit(oid)];
+      } catch (error) {
+        if (error instanceof git.Errors.NotFoundError) return [];
+        throw error;
+      }
+    },
   };
   const request: ArtifactsFetch = async (input, init) => {
     const url = String(input);
     const advertise = url.includes('/info/refs');
-    const child = Bun.spawn(['git', 'receive-pack', '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), dir], { stdin: advertise ? 'ignore' : new Response(init?.body).body, stdout: 'pipe', stderr: 'pipe' });
+    const child = Bun.spawn(['git', '-c', 'core.bare=true', 'receive-pack', '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), dir], { stdin: advertise ? 'ignore' : new Response(init?.body).body, stdout: 'pipe', stderr: 'pipe' });
     const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
     const stderr = await new Response(child.stderr).text();
     if (await child.exited !== 0) throw new Error(stderr);
@@ -135,12 +147,6 @@ for (const interrupted of [false, true]) test(`scratch initialization publishes 
   const repo: ArtifactsRepo = {
     ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readBlob: unsupported, readFile: unsupported, fork: unsupported,
     info: async () => { if (!metadata) throw new Error('Repository absent'); return metadata; },
-    log: async options => {
-      const branches = await git.listBranches({ fs, dir: f.dir });
-      const branch = (options?.ref ?? 'HEAD').replace(/^refs\/heads\//u, '');
-      if (!branches.includes(branch)) return [];
-      return [await f.repo.readCommit(await git.resolveRef({ fs, dir: f.dir, ref: options?.ref ?? 'HEAD' }))];
-    },
   };
   const binding: Artifacts = {
     get: async () => repo, import: unsupported, delete: unsupported,
@@ -153,7 +159,7 @@ for (const interrupted of [false, true]) test(`scratch initialization publishes 
   };
   try {
     await rm(join(f.dir, '.git'), { recursive: true, force: true });
-    await git.init({ fs, dir: f.dir });
+    await git.init({ fs, dir: f.dir, defaultBranch: 'main' });
     const code = new ArtifactsCodeStore(binding);
     if (interrupted) {
       await expect(code.ensureEmptyProject('scratch', 'main')).rejects.toThrow('offline push interruption');
@@ -217,12 +223,6 @@ for (const empty of [false, true]) test(`initial checkpoint distinguishes ${empt
   const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
   const repo: ArtifactsRepo = {
     ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readBlob: unsupported, readFile: unsupported, fork: unsupported,
-    log: async options => {
-      const ref = options?.ref ?? 'HEAD';
-      const branch = ref === 'HEAD' ? 'main' : ref.replace(/^refs\/heads\//u, '');
-      if (!(await git.listBranches({ fs, dir: f.dir })).includes(branch)) return [];
-      return [await f.repo.readCommit(await git.resolveRef({ fs, dir: f.dir, ref: `refs/heads/${branch}` }))];
-    },
   };
   const code = new ArtifactsCodeStore({ get: async () => repo, create: unsupported, import: unsupported, delete: unsupported, list: unsupported });
   try {
@@ -250,4 +250,75 @@ for (const empty of [false, true]) test(`initial checkpoint distinguishes ${empt
       expect(await git.listBranches({ fs, dir: f.dir })).toEqual([]);
     }
   } finally { request.mockRestore(); await f.close(); }
+});
+
+test('committed sources resolve observed branch and HEAD forms without treating populated history as unborn', async () => {
+  const f = await fixture();
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  const repo: ArtifactsRepo = {
+    ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readBlob: unsupported, readFile: unsupported, fork: unsupported,
+  };
+  const code = new ArtifactsCodeStore({ get: async () => repo, create: unsupported, import: unsupported, delete: unsupported, list: unsupported });
+  try {
+    await git.writeRef({ fs, dir: f.dir, ref: 'refs/heads/feature/nested', value: f.previous.worktreeCommit });
+    expect(await code.resolveRef('fixture', 'refs/heads/main')).toBe(f.previous.headCommit);
+    expect(await code.resolveRef('fixture', 'feature/nested')).toBe(f.previous.headCommit);
+    expect(await code.resolveRef('fixture', 'HEAD')).toBe(f.previous.headCommit);
+    expect(await code.resolveRef('fixture', f.previous.worktreeCommit)).toBe(f.previous.worktreeCommit);
+    expect(await code.resolveRef('fixture', 'refs/heads/missing')).toBeNull();
+    expect((await code.log('fixture', f.previous.worktreeCommit))[0]?.hash).toBe(f.previous.worktreeCommit);
+    const checkpoint = await code.initialCheckpoint('fixture', 'workspace', 'main');
+    expect(checkpoint?.headCommit).toBe(f.previous.headCommit);
+    expect(checkpoint?.worktreeTree).toBe(f.previous.worktreeTree);
+    for (const ref of [f.previous.checkpointRef, 'refs/tags/v1', 'refs/remotes/origin/main', 'HEAD~1', 'main..other', 'refs/heads/', 'main.lock']) {
+      await expect(code.resolveRef('fixture', ref)).rejects.toThrow();
+    }
+  } finally { await f.close(); }
+});
+
+test('repository operations support proxy handles without disposal and release workerd handles on failure', async () => {
+  const f = await fixture();
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  let disposed = 0;
+  const repo: ArtifactsRepo = {
+    ...f.repo, [Symbol.dispose]() { disposed++; }, listTokens: unsupported, readBlob: unsupported, readFile: unsupported, fork: unsupported, log: unsupported,
+  };
+  const code = new ArtifactsCodeStore({ get: async () => repo, create: unsupported, import: unsupported, delete: unsupported, list: unsupported });
+  try {
+    await expect(code.readFile('fixture', f.previous.worktreeCommit, 'script')).rejects.toThrow('Unexpected repository operation');
+    expect(disposed).toBe(1);
+    Reflect.deleteProperty(repo, Symbol.dispose);
+    expect((await code.readCommit('fixture', f.previous.worktreeCommit))?.treeHash).toBe(f.previous.worktreeTree);
+  } finally { await f.close(); }
+});
+
+test('scratch recovery never seeds a missing branch when actual default HEAD has history', async () => {
+  const f = await fixture('trunk');
+  const metadata = { ...await f.repo.info(), name: 'project-scratch', description: 'GitSpace scratch project scratch (main)' };
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => f.request(String(input), init), { preconnect: fetch.preconnect }));
+  const repo: ArtifactsRepo = { ...f.repo, [Symbol.dispose]() {}, info: async () => metadata, listTokens: unsupported, readBlob: unsupported, readFile: unsupported, fork: unsupported };
+  const code = new ArtifactsCodeStore({ get: async () => repo, list: async () => ({ repos: [metadata], total: 1 }), create: unsupported, import: unsupported, delete: unsupported });
+  try {
+    await code.ensureEmptyProject('scratch', 'main');
+    expect(await git.listBranches({ fs, dir: f.dir })).toEqual(['trunk']);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: 'HEAD' })).toBe(f.previous.worktreeCommit);
+    expect(f.credentials()).toEqual({ minted: 0, revoked: 0 });
+  } finally { request.mockRestore(); await f.close(); }
+});
+
+test('binding fake resolves omitted refs through actual HEAD without accepting full ref syntax', async () => {
+  const f = await fixture('trunk');
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  const repo: ArtifactsRepo = { ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readBlob: unsupported, readFile: unsupported, fork: unsupported };
+  const code = new ArtifactsCodeStore({ get: async () => repo, list: unsupported, create: unsupported, import: unsupported, delete: unsupported });
+  try {
+    expect(await git.listBranches({ fs, dir: f.dir })).toEqual(['trunk']);
+    expect((await repo.log({ limit: 1 }))[0]?.hash).toBe(f.previous.worktreeCommit);
+    expect((await repo.log({ ref: 'trunk' }))[0]?.hash).toBe(f.previous.worktreeCommit);
+    expect((await repo.log({ ref: f.previous.worktreeCommit }))[0]?.hash).toBe(f.previous.worktreeCommit);
+    for (const ref of ['HEAD', 'main', 'refs/heads/trunk', 'heads/trunk', f.previous.checkpointRef]) expect(await repo.log({ ref })).toEqual([]);
+    expect(await code.resolveRef('fixture', 'HEAD')).toBe(f.previous.headCommit);
+    expect(await code.initialCheckpoint('fixture', 'missing-workspace', 'missing')).toBeNull();
+  } finally { await f.close(); }
 });

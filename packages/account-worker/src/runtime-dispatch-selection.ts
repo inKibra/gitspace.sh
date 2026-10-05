@@ -62,8 +62,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
         state.checkpointRef = checkpoint.checkpointRef;
       } else {
         const source = selection.at!;
-        const ref = /^[0-9a-f]{40}$/u.test(source) || source.startsWith('refs/') ? source : `refs/heads/${source}`;
-        const commit = await code.resolveRef(repository, ref);
+        const commit = await code.resolveRef(repository, source);
         if (!commit || !await code.readCommit(repository, commit)) throw new Error('Selected source does not exist in the canonical repository');
         state.commit = commit;
       }

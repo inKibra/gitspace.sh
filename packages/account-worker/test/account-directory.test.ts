@@ -10,6 +10,7 @@ import { DirectoryOutbox, type DirectoryPublication, type DirectorySource } from
 import { DurableChangeLog } from '../src/durable-stream.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
+import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 
 const timestamp = '2026-09-01T00:00:00.000Z';
 const project: CloudProjectSummary = { id: 'directory-project', name: 'Directory', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, archivedAt: null, updatedAt: timestamp, role: null, source: null };
@@ -124,7 +125,7 @@ describe('account directory projection', () => {
     expect(activity.projectRevisions[project.id]).toBeGreaterThan(initial.projectRevisions[project.id]!);
     expect(activity.workspaces).toEqual(initial.workspaces);
     await space.beginClose({ ...identity, expectedGeneration: 1 });
-    await space.commitClosed({ ...identity, expectedGeneration: 1, revision: 1, manifestKey: `projects/${project.id}/spaces/${workspace.id}/checkpoints/1/manifest.enc`, manifestHash: `sha256:${'a'.repeat(64)}` });
+    await space.commitClosed({ ...identity, expectedGeneration: 1, revision: 1, ...await persistPortableCheckpoint(project.id, workspace.id, 1) });
     await runInDurableObject(space, (instance) => instance.alarm());
     expect((await index.directorySnapshot()).placements).toMatchObject([{ holderId: 'unassigned', generation: 2, state: 'closed', endpoint: null }]);
     await space.beginOpen({ ...identity, machineId: 'machine-b', expectedGeneration: 2 });

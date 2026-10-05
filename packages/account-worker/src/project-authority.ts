@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { Result } from 'better-result';
 import { cloudWorkspaceDefinitionSchema, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, RPC_DEVICE_HEADER, type GitSpaceSourceProvenance } from '@gitspace/protocol';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 import type {
@@ -17,7 +18,7 @@ import type {
   ProjectOperationState,
 } from '@gitspace/protocol';
 import { ProjectEnvironmentStore } from './project-environment.js';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { LifecycleMutationSchema, environmentFailure, type LifecycleActor, type EnvironmentFailure, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
@@ -28,6 +29,11 @@ import { activeAccount, accountAccessResponse } from './account-access.js';
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
+import { GitLfsSnapshotSchema, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject } from '@gitspace/protocol-workspace';
+import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
+import { canonicalLfsObjects } from './git-lfs-reachability.js';
+import { confirmCloudOrigin } from './git-lfs-origin.js';
+import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
 
 interface DirectorySocketAttachment {
   version: 1;
@@ -641,11 +647,13 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
   private readonly directoryOutbox: DirectoryOutbox;
   private readonly environment: ProjectEnvironmentStore;
+  private readonly lfs: GitLfsRetention;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
     this.directoryOutbox = new DirectoryOutbox(ctx, env);
     this.environment = new ProjectEnvironmentStore(ctx.storage);
+    this.lfs = new GitLfsRetention(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.environment.initialize();
       this.ctx.storage.sql.exec(`
@@ -783,8 +791,120 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN project_space_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN workspaces_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS deleted_workspaces(workspace_id TEXT PRIMARY KEY)');
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS lfs_origin_confirmations(origin TEXT NOT NULL,endpoint TEXT NOT NULL,oid TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(origin,endpoint,oid))');
+      this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
       this.directoryOutbox.kick();
     });
+  }
+
+  lfsPin(input: { publicationId: string; objects: GitLfsObject[] }): void {
+    const project = this.requireProject();
+    if (project.lifecycle === 'deleting') throw new Error('LFS project is unavailable');
+    this.lfs.retain(`publication:${input.publicationId}`, input.objects);
+  }
+
+  async lfsProtect(input: { publicationId: string; objects: GitLfsObject[] }): Promise<GitLfsObject[]> {
+    this.lfsPin(input);
+    const project = this.requireProject();
+    const present: GitLfsObject[] = [];
+    for (const object of input.objects) if (await this.env.DATA.head(`users/${this.env.ACCOUNT_ID}/${gitLfsObjectKey(project.id, object.oid)}`)) present.push(object);
+    return present;
+  }
+
+  async lfsRetain(input: RetainedLfsSnapshot): Promise<void> {
+    const project = this.requireProject();
+    if (project.lifecycle === 'deleting') throw new Error('LFS project is unavailable');
+    this.lfs.snapshot(input);
+    await this.ctx.storage.sync();
+    this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
+  }
+
+  async lfsOriginConfirmed(input: { origin: string; endpoint: string; objects: GitLfsObject[] }): Promise<void> {
+    const project = this.requireProject();
+    if (!project.repositoryReference || input.origin !== project.repositoryReference || project.lifecycle === 'deleting') throw new Error('LFS origin identity changed');
+    const endpoint = new URL(input.endpoint);
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.hash) throw new Error('Invalid LFS origin endpoint');
+    for (const object of input.objects) this.ctx.storage.sql.exec('INSERT INTO lfs_origin_confirmations VALUES(?,?,?,?) ON CONFLICT(origin,endpoint,oid) DO UPDATE SET size=excluded.size', input.origin, endpoint.href, object.oid, object.size);
+    await this.ctx.storage.sync();
+  }
+
+  lfsResolveSources(objects: GitLfsSnapshot['objects']) {
+    return this.lfs.resolve(GitLfsSnapshotSchema.shape.objects.parse(objects), this.requireProject().repositoryReference);
+  }
+
+  lfsObjectAccess(oid: string): boolean {
+    return this.requireProject().lifecycle !== 'deleting'
+      && this.ctx.storage.sql.exec('SELECT 1 FROM lfs_references WHERE oid=? LIMIT 1', oid).toArray().length > 0;
+  }
+
+  async lfsReleasePublication(publicationId: string): Promise<void> {
+    this.lfs.release(`publication:${publicationId}`);
+    try { await this.lfsCollect(); }
+    catch { await this.ctx.storage.setAlarm(Date.now() + 1_000); }
+  }
+
+
+  async lfsCollect(): Promise<void> {
+    const result = await this.ctx.blockConcurrencyWhile(() => Result.tryPromise(async () => {
+      const project = this.getProject();
+      if (!project || this.lfs.objects().length === 0) return;
+      const inventories = this.lfs.snapshots();
+      const workspaceIds = new Set([...this.listWorkspaces().map(workspace => workspace.id), ...inventories.map(snapshot => snapshot.workspaceId)]);
+      const roots = new Set<string>();
+      const spaces = [];
+      const cloudConfirmed: GitLfsConfirmedObject[] = [];
+      for (const workspaceId of workspaceIds) {
+        const authority = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`);
+        const state = await authority.lfsRoots();
+        spaces.push(authority);
+        const workspace = this.listWorkspaces().find(item => item.id === workspaceId);
+        const live = project.lifecycle !== 'archived' && project.lifecycle !== 'deleting' && workspace !== undefined && workspace.lifecycle !== 'archived' && workspace.lifecycle !== 'deleting';
+        for (const id of state.pending) roots.add(id);
+        if (live || state.active || state.pendingRuntime) {
+          for (const checkpoint of state.checkpoints) roots.add(`runtime:${workspaceId}:${checkpoint.worktreeCommit}`);
+          if (state.portableRevision) roots.add(`portable:${workspaceId}:${state.portableRevision}`);
+        }
+        if (project.repositoryReference) for (const checkpoint of state.checkpoints) {
+          cloudConfirmed.push(...await confirmCloudOrigin({ code: new ArtifactsCodeStore(this.env.ARTIFACTS), repository: artifactsWorkspaceRepository(workspaceId), commit: checkpoint.worktreeCommit, origin: project.repositoryReference, objects: checkpoint.lfs?.objects ?? [] }));
+        }
+      }
+      this.lfs.reconcile(roots);
+      if (project.repositoryReference) {
+        this.ctx.storage.sql.exec('DELETE FROM lfs_origin_confirmations WHERE origin<>?', project.repositoryReference);
+        const confirmations = this.ctx.storage.sql.exec<{ oid: string; size: number; origin: string; endpoint: string }>('SELECT oid,size,origin,endpoint FROM lfs_origin_confirmations WHERE origin=?', project.repositoryReference).toArray();
+        const confirmed: GitLfsConfirmedObject[] = [];
+        for (const object of this.lfs.objects()) {
+          const receipt = confirmations.find(row => row.oid === object.oid && row.size === object.size);
+          const cloud = cloudConfirmed.find(row => row.oid === object.oid && row.size === object.size);
+          if (receipt) confirmed.push({ ...object, location: { origin: receipt.origin, endpoint: receipt.endpoint } });
+          else if (cloud) confirmed.push(cloud);
+        }
+        // All mutable restore records change before the project's authoritative
+        // override, and before a single encrypted R2 byte can be removed.
+        for (const space of spaces) await space.reconcileLfsSources(confirmed);
+        this.lfs.origin(confirmed);
+        await this.ctx.storage.sync();
+        for (const object of this.lfs.candidates()) {
+          if (!confirmed.some(item => item.oid === object.oid && item.size === object.size)) continue;
+          if (!this.lfs.beginDelete(object)) continue;
+          await deleteGitLfsObject(this.env.DATA, this.env.ACCOUNT_ID, project.id, object);
+          this.lfs.forget(object);
+          this.ctx.storage.sql.exec('DELETE FROM lfs_origin_confirmations WHERE oid=?', object.oid);
+        }
+      } else {
+        const candidates = this.lfs.candidates();
+        if (candidates.length === 0) return;
+        const reachable = await canonicalLfsObjects(this.env.ARTIFACTS, [artifactsProjectRepository(project.id), ...[...workspaceIds].map(artifactsWorkspaceRepository)]);
+        const protectedOids = new Set(reachable.map(object => object.oid));
+        for (const object of candidates) {
+          if (protectedOids.has(object.oid) || !this.lfs.beginDelete(object)) continue;
+          await deleteGitLfsObject(this.env.DATA, this.env.ACCOUNT_ID, project.id, object);
+          this.lfs.forget(object);
+        }
+      }
+    }));
+    // A failed scan must fail closed, not break the Durable Object input gate.
+    if (result.isErr()) throw result.error;
   }
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'project' }> | null {
@@ -792,7 +912,11 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return project ? { source: 'project', cursor: this.directoryOutbox.head(), project, workspaces: this.listWorkspaces() } : null;
   }
 
-  async alarm(): Promise<void> { await this.directoryOutbox.flush(); }
+  async alarm(): Promise<void> {
+    await this.directoryOutbox.flush();
+    try { await this.lfsCollect(); }
+    catch { await this.ctx.storage.setAlarm(Date.now() + 1_000); }
+  }
 
   watch(after: number | null): DurableStreamSubscription {
     const resource = `project:${this.requireProject().id}`;
@@ -816,6 +940,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
     this.directoryOutbox.kick();
     this.changes.wake();
+    this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
     return result;
   }
 

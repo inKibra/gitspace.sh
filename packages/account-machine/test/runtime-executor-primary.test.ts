@@ -79,7 +79,7 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
       environmentRoot: join(root, 'runtime'), machineId: 'machine', database,
       artifacts: new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32)),
       cloud: new LocalCloud({ baseUrl: 'https://proof.invalid', userId: 'account', machineId: 'machine', signingPrivateKey: new Uint8Array(32) }),
-      gitRemote: new LocalGitRemote({ credentials: unavailable, lfsEnvironment: unavailable }),
+      gitRemote: new LocalGitRemote({ credentials: unavailable }),
       prepareAttachment: unavailable, originGitEnvironment: unavailable,
       commitSnapshot: async (local, checkpoint, previous) => {
         expect(local.attachment.attachmentId).toBe(attachment.attachmentId);

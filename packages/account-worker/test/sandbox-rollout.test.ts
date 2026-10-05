@@ -4,6 +4,7 @@ import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { controlFleetMachine, reconcileFleetMachines } from '../src/application.js';
 import type { FleetMachineDefinition } from '../src/fleet-catalog.js';
+import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 
 const originalImage = `docker.io/example/original@sha256:${'a'.repeat(64)}`;
 const selectedImage = `ghcr.io/tenant/independent-base@sha256:${'b'.repeat(64)}`;
@@ -41,7 +42,7 @@ async function fixture() {
       if (placement?.state === 'open') {
         const closing = await authority.beginClose({ ...identity, expectedGeneration: placement.generation });
         if (closing.status === 'error') throw new Error(closing.failure.message);
-        const closed = await authority.commitClosed({ ...identity, expectedGeneration: placement.generation, revision: closing.value.revision, manifestKey: `projects/project-a/spaces/space-a/checkpoints/${closing.value.revision}/manifest.enc`, manifestHash: `sha256:${'c'.repeat(64)}`, resumeOnMachineRestart: true });
+        const closed = await authority.commitClosed({ ...identity, expectedGeneration: placement.generation, revision: closing.value.revision, ...await persistPortableCheckpoint(identity.projectId, identity.spaceId, closing.value.revision), resumeOnMachineRestart: true });
         if (closed.status === 'error') throw new Error(closed.failure.message);
       }
       return faults.checkpoint ? HttpResponse.json({ error: 'Writer flush failed after checkpoint' }, { status: 503 }) : HttpResponse.json({ prepared: true });
