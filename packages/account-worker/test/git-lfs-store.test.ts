@@ -1,3 +1,4 @@
+import { lfsBytes, readLfs } from './git-lfs-fixture.js';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { deriveArtifactScopeKey } from '@gitspace/protocol';
 import { CHECKPOINT_CHUNK_BYTES, GitLfsObjectSchema } from '@gitspace/protocol-workspace';
@@ -6,6 +7,7 @@ import { AccountGitLfsStore, gitLfsObjectKey } from '../src/git-lfs-store.js';
 import { GitLfsRetention } from '../src/git-lfs-retention.js';
 import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 import { ProjectAuthorityDO } from '../src/project-authority.js';
+import { SpaceAuthorityDO } from '../src/space-authority.js';
 
 async function objectFor(bytes: Uint8Array) {
   const oid = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes))), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -27,43 +29,43 @@ describe('account encrypted LFS ownership', () => {
     const { store, projectId, key, authority, publicationId } = await fixture();
     const bytes = new TextEncoder().encode('private binary payload\u0000with bytes');
     const object = await objectFor(bytes);
-    await store.put(object, bytes);
+    await store.put(object, lfsBytes(bytes));
     const path = `users/${env.ACCOUNT_ID}/${gitLfsObjectKey(projectId, object.oid)}`;
     const first = await env.DATA.get(path);
     expect(new Uint8Array(await first!.arrayBuffer())).not.toEqual(bytes);
-    expect(await store.get(object)).toEqual(bytes);
-    await store.put(object, bytes);
+    expect(await readLfs(store, object)).toEqual(bytes);
+    await store.put(object, lfsBytes(bytes));
     expect((await env.DATA.head(path))!.etag).toBe(first!.etag);
-    await expect(store.put({ ...object, size: object.size + 1 }, bytes)).rejects.toThrow('oid/size');
-    await expect(store.put(object, new Uint8Array(bytes.length))).rejects.toThrow('oid/size');
-    await expect(store.get({ ...object, size: object.size + 1 })).rejects.toThrow('oid/size');
+    await expect(store.put({ ...object, size: object.size + 1 }, lfsBytes(bytes))).rejects.toThrow();
+    await expect(store.put(object, lfsBytes(new Uint8Array(bytes.length)))).rejects.toThrow('oid/size');
+    await expect(readLfs(store, { ...object, size: object.size + 1 })).rejects.toThrow('oid/size');
     const noPin = async () => {};
     expect(await new AccountGitLfsStore(env.DATA, env.ACCOUNT_ID, crypto.randomUUID(), key, noPin).get(object)).toBeNull();
     expect(await new AccountGitLfsStore(env.DATA, 'another-account', projectId, key, noPin).get(object)).toBeNull();
     await expect(new AccountGitLfsStore(env.DATA, env.ACCOUNT_ID, projectId, new Uint8Array(32), noPin).get(object)).rejects.toThrow();
     await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
     await authority.lfsReleasePublication(publicationId);
-    expect(await store.get(object)).toBeNull();
+    expect(await readLfs(store, object)).toBeNull();
   });
 
   it('keeps unconfirmed objects when historical snapshot owners are released', async () => {
     const { store, authority, publicationId } = await fixture();
     const bytes = new TextEncoder().encode('same object in two retained snapshots');
     const object = await objectFor(bytes);
-    await store.put(object, bytes);
+    await store.put(object, lfsBytes(bytes));
     await authority.lfsRetain({ snapshotId: 'runtime:workspace:old-commit', workspaceId: 'workspace', kind: 'runtime', objects: [{ ...object, source: 'r2' }] });
     await authority.lfsRetain({ snapshotId: 'portable:workspace:1', workspaceId: 'workspace', kind: 'portable', objects: [{ ...object, source: 'r2' }] });
     await authority.lfsReleasePublication(publicationId);
     await authority.lfsPin({ publicationId: 'new-publication', objects: [object] });
     await authority.lfsReleasePublication('new-publication');
-    expect(await store.get(object)).toEqual(bytes);
+    expect(await readLfs(store, object)).toEqual(bytes);
     // Publication release never shares the snapshot namespace, even with a forged name.
     await authority.lfsReleasePublication('snapshot:runtime:workspace:old-commit');
-    expect(await store.get(object)).toEqual(bytes);
+    expect(await readLfs(store, object)).toEqual(bytes);
     const location = { origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs' };
     await authority.lfsOriginConfirmed({ ...location, objects: [object] });
     await authority.lfsCollect();
-    expect(await store.get(object)).toBeNull();
+    expect(await readLfs(store, object)).toBeNull();
     expect(await authority.lfsResolveSources([{ ...object, source: 'r2' }])).toEqual([{ ...object, source: 'origin', location }]);
     await runInDurableObject(authority, (_instance, state) => {
       const recovered = new GitLfsRetention(state.storage);
@@ -76,34 +78,61 @@ describe('account encrypted LFS ownership', () => {
     const { store, authority, publicationId } = await fixture();
     const bytes = new TextEncoder().encode('upload finished, snapshot commit interrupted');
     const object = await objectFor(bytes);
-    await store.put(object, bytes);
+    await store.put(object, lfsBytes(bytes));
     await authority.lfsReleasePublication('unrelated-failed-publication');
-    expect(await store.get(object)).toEqual(bytes);
+    expect(await readLfs(store, object)).toEqual(bytes);
     await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
     await authority.lfsReleasePublication(publicationId);
 
-    expect(await store.get(object)).toBeNull();
+    expect(await readLfs(store, object)).toBeNull();
   });
-  it('retains the portable manifest inventory before releasing the actual capture publication', async () => {
+  it('recovers portable acceptance and releases the real capture pin without machine cleanup', async () => {
     const { store, authority, projectId, publicationId } = await fixture();
     const bytes = new TextEncoder().encode('portable only object');
     const object = await objectFor(bytes);
-    await store.put(object, bytes);
+    await store.put(object, lfsBytes(bytes));
     const identity = { projectId, spaceId: crypto.randomUUID(), machineId: 'portable-machine' };
+    const captureId = `${identity.machineId}:portable:${identity.spaceId}:1`;
+    await authority.lfsPin({ publicationId: captureId, objects: [object] });
+    await authority.lfsReleasePublication(publicationId);
     const placement = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.spaceId}`);
     await placement.bootstrap(identity);
     await placement.beginClose({ ...identity, expectedGeneration: 1 });
     const manifest = await persistPortableCheckpoint(projectId, identity.spaceId, 1, { objects: [{ ...object, source: 'r2' }], heldBack: [] });
-    expect(await placement.commitClosed({ ...identity, expectedGeneration: 1, revision: 1, ...manifest })).toEqual({ status: 'ok', value: undefined });
-    await authority.lfsReleasePublication(publicationId);
-    expect(await store.get(object)).toEqual(bytes);
+    const input = { ...identity, expectedGeneration: 1, revision: 1, ...manifest };
+    expect((await placement.commitClosed({ ...input, machineId: 'other-machine' })).status).toBe('error');
+    const retain = vi.spyOn(ProjectAuthorityDO.prototype, 'lfsRetain').mockRejectedValueOnce(new Error('Retain interrupted'));
+    const release = vi.spyOn(ProjectAuthorityDO.prototype, 'lfsReleasePublication').mockRejectedValueOnce(new Error('Release interrupted'));
+    try {
+      await runInDurableObject(placement, async instance => {
+        await expect(instance.commitClosed(input)).rejects.toThrow('Retain interrupted');
+      });
+      expect(await readLfs(store, object)).toEqual(bytes);
+      await runInDurableObject(placement, async instance => {
+        await expect(instance.alarm()).rejects.toThrow('Release interrupted');
+      });
+      await runInDurableObject(authority, (_instance, state) => {
+        const ledger = new GitLfsRetention(state.storage);
+        ledger.reconcile(new Set());
+        expect(ledger.candidates()).toEqual([]);
+      });
+      // A cold authority retries the persisted acceptance; no machine callback or release is made.
+      await runInDurableObject(placement, async (_instance, state) => {
+        const recovered = new SpaceAuthorityDO(state, env);
+        await recovered.alarm();
+      });
+      expect(await readLfs(store, object)).toEqual(bytes);
+      await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
+      await authority.lfsCollect();
+      expect(await readLfs(store, object)).toBeNull();
+    } finally { retain.mockRestore(); release.mockRestore(); }
   });
 
   it('fences interrupted collection until deletion is retried, before admitting another publisher', async () => {
     const { store, authority, publicationId } = await fixture();
     const bytes = new TextEncoder().encode('interrupted delete');
     const object = await objectFor(bytes);
-    await store.put(object, bytes);
+    await store.put(object, lfsBytes(bytes));
     await runInDurableObject(authority, (_instance, state) => {
       const ledger = new GitLfsRetention(state.storage);
       ledger.release(`publication:${publicationId}`);
@@ -114,7 +143,7 @@ describe('account encrypted LFS ownership', () => {
     });
     await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
     await authority.lfsReleasePublication(publicationId);
-    expect(await store.get(object)).toBeNull();
+    expect(await readLfs(store, object)).toBeNull();
     await authority.lfsPin({ publicationId: 'racing-publisher', objects: [object] });
   });
 
@@ -122,8 +151,8 @@ describe('account encrypted LFS ownership', () => {
     const { store, authority, publicationId, projectId } = await fixture();
     const bytes = new Uint8Array(CHECKPOINT_CHUNK_BYTES + 17).fill(39);
     const object = await objectFor(bytes);
-    await store.put(object, bytes);
-    const restored = await store.get(object);
+    await store.put(object, lfsBytes(bytes));
+    const restored = await readLfs(store, object);
     if (!restored) throw new Error('Chunked LFS object is missing');
     expect(await objectFor(restored)).toEqual(object);
     const path = `users/${env.ACCOUNT_ID}/${gitLfsObjectKey(projectId, object.oid)}`;
@@ -131,7 +160,7 @@ describe('account encrypted LFS ownership', () => {
     expect(chunks.objects).toHaveLength(2);
     const first = chunks.objects[0]!;
     await env.DATA.put(first.key, new Uint8Array(first.size));
-    await expect(store.get(object)).rejects.toThrow('integrity');
+    await expect(readLfs(store, object)).rejects.toThrow('integrity');
     await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
     await authority.lfsReleasePublication(publicationId);
     expect(await env.DATA.head(path)).toBeNull();
@@ -148,7 +177,7 @@ describe('account encrypted LFS ownership', () => {
     const tagBytes = new TextEncoder().encode('tag payload');
     const archivedBytes = new TextEncoder().encode('archived private checkpoint payload');
     const branch = await objectFor(branchBytes), tag = await objectFor(tagBytes), archived = await objectFor(archivedBytes);
-    for (const [object, bytes] of [[branch, branchBytes], [tag, tagBytes], [archived, archivedBytes]] as const) await store.put(object, bytes);
+    for (const [object, bytes] of [[branch, branchBytes], [tag, tagBytes], [archived, archivedBytes]] as const) await store.put(object, lfsBytes(bytes));
     await authority.lfsRetain({ snapshotId: 'runtime:archived:old', workspaceId: 'archived', kind: 'runtime', objects: [branch, tag, archived].map(object => ({ ...object, source: 'r2' })) });
     const branchCommit = '1'.repeat(40), tagCommit = '2'.repeat(40);
     const unsupported = async (): Promise<never> => { throw new Error('Unexpected canonical binding operation'); };
@@ -172,8 +201,8 @@ describe('account encrypted LFS ownership', () => {
         await new ProjectAuthorityDO(state, { ...env, ARTIFACTS: binding }).lfsCollect();
       });
     } finally { request.mockRestore(); }
-    expect(await store.get(branch)).toEqual(branchBytes);
-    expect(await store.get(tag)).toEqual(tagBytes);
-    expect(await store.get(archived)).toBeNull();
+    expect(await readLfs(store, branch)).toEqual(branchBytes);
+    expect(await readLfs(store, tag)).toEqual(tagBytes);
+    expect(await readLfs(store, archived)).toBeNull();
   });
 });

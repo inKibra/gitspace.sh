@@ -5,7 +5,11 @@ export const GitLfsObjectSchema = z.object({
   size: z.number().int().nonnegative().safe(),
 });
 export type GitLfsObject = z.infer<typeof GitLfsObjectSchema>;
-export const GitLfsLocationSchema = z.object({ origin: z.string().min(1), endpoint: z.url() });
+export const GitLfsEndpointSchema = z.url().refine(value => {
+  const url = new URL(value);
+  return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
+}, 'LFS provenance endpoints must not contain credentials, query or fragment');
+export const GitLfsLocationSchema = z.object({ origin: z.string().min(1), endpoint: GitLfsEndpointSchema });
 export type GitLfsLocation = z.infer<typeof GitLfsLocationSchema>;
 export const GitLfsConfirmedObjectSchema = GitLfsObjectSchema.extend({ location: GitLfsLocationSchema });
 export type GitLfsConfirmedObject = z.infer<typeof GitLfsConfirmedObjectSchema>;
@@ -38,8 +42,8 @@ export type GitLfsStore = {
   has(object: GitLfsObject): Promise<boolean>;
   /** Pins this publication before checking existence, without downloading payloads. */
   protect?(objects: readonly GitLfsObject[]): Promise<GitLfsObject[]>;
-  put(object: GitLfsObject, bytes: Uint8Array): Promise<void>;
-  get(object: GitLfsObject): Promise<Uint8Array | null>;
+  put(object: GitLfsObject, source: AsyncIterable<Uint8Array>): Promise<void>;
+  get(object: GitLfsObject): Promise<AsyncIterable<Uint8Array> | null>;
 };
 
 /** Git LFS pointers are small ASCII blobs, never payloads. */

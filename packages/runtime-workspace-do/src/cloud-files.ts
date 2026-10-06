@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { TaggedError } from 'better-result';
 import { canonicalJson, RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeToolResultSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
-import { parseGitLfsPointer, type GitLfsConfirmedObject, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { collectBytes, parseGitLfsPointer, type GitLfsConfirmedObject, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import type { AttachmentStore } from './attachments.js';
@@ -15,6 +15,13 @@ const EditSchema = PathSchema.extend({ edits: z.array(z.object({ oldText: z.stri
 type Checkpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 type Invocation = z.infer<typeof InvocationSchema>;
 const PendingSchema = z.object({ input: InvocationSchema, previous: RuntimeGitCheckpointSchema, path: z.string(), content: z.string(), fence: z.number().int().positive() });
+const RetentionCheckpointSchema = RuntimeGitCheckpointSchema.extend({ publicationId: z.string().optional(), acceptedPublicationIds: z.array(z.string()).optional() });
+const CLOUD_FILE_READ_LIMIT = 8 * 1024 * 1024;
+const LFS_POINTER_LIMIT = 1024;
+
+function assertCloudReadSize(size: number, path: string): void {
+  if (size > CLOUD_FILE_READ_LIMIT) throw new Error(`File ${path} (${size} bytes) exceeds the 8 MiB cloud read limit; use a machine to read its content.`);
+}
 
 const checkpointIdentity = (checkpoint: Checkpoint) => canonicalJson({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(({ oid, size }) => ({ oid, size })) } } : {}) });
 export class CloudPublicationUncertain extends TaggedError('CloudPublicationUncertain')<{ attemptId: string; message: string }> {}
@@ -34,7 +41,7 @@ export async function readCurrentCheckpoint(storage: DurableObjectStorage): Prom
 export class CloudFileStore {
   private readonly running = new Map<string, Promise<RuntimeToolResult>>();
   private retaining: Promise<void> | undefined;
-  constructor(private readonly storage: DurableObjectStorage, private readonly attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot'>, private readonly workspaceId: string, private readonly publish: () => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
+  constructor(private readonly storage: DurableObjectStorage, private readonly attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot'>, private readonly workspaceId: string, private readonly publish: () => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_writer(singleton INTEGER PRIMARY KEY CHECK(singleton=1), fence INTEGER NOT NULL, attempt TEXT)');
     storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_writer(singleton,fence,attempt) VALUES(1,0,NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
@@ -68,7 +75,7 @@ export class CloudFileStore {
     return accepted;
   }
   /** Caller verifies the primary attachment/generation and immutable object availability. */
-  commitMachine(checkpoint: Checkpoint, previous: string | null, initialOnly = false): void {
+  commitMachine(checkpoint: Checkpoint, previous: string | null, machineId: string, initialOnly = false): void {
     this.storage.transactionSync(() => {
       if (this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt) throw new Error('Cloud publication holds the writer lease');
       const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
@@ -77,12 +84,13 @@ export class CloudFileStore {
       if (current && checkpointIdentity(current) === checkpointIdentity(checkpoint)) {
         const accepted = this.storage.sql.exec<{ predecessor: string | null }>('SELECT predecessor FROM runtime_code_commits WHERE commit_id=?', checkpoint.worktreeCommit).toArray()[0];
         if (!accepted || accepted.predecessor !== previous) throw new Error('Snapshot publication has a stale predecessor');
+        this.enqueueMachineRetention(checkpoint, current, machineId);
         return;
       }
       if (initialOnly && current !== null) throw new Error('Attaching primary may only publish its initial checkpoint');
       if ((current?.worktreeCommit ?? null) !== previous) throw new Error('Snapshot publication has a stale predecessor');
       this.recordCommit(checkpoint, previous);
-      this.enqueueRetention(checkpoint, current);
+      this.enqueueMachineRetention(checkpoint, current, machineId);
       this.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
     });
     this.publish();
@@ -146,18 +154,32 @@ export class CloudFileStore {
       const read = async () => {
         const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), previous.worktreeCommit, path);
         if (!blob) throw new Error(`File not found: ${args.path}`);
+        assertCloudReadSize(blob.size, path);
         return new Uint8Array(await blob.arrayBuffer());
       };
       if (input.tool === 'read') {
         const parsed = ReadSchema.parse(input.args);
         let bytes: Uint8Array = await read();
-        const pointer = parseGitLfsPointer(bytes);
+        const pointer = bytes.byteLength <= LFS_POINTER_LIMIT ? parseGitLfsPointer(bytes) : null;
         if (pointer) {
+          assertCloudReadSize(pointer.size, path);
           const payload = await this.lfs.get(pointer);
           if (!payload) throw new Error(`LFS file ${path} (${pointer.size} bytes) needs a machine to download its content from origin.`);
-          const digest = bytesToHex(sha256(payload));
-          if (payload.byteLength !== pointer.size || digest !== pointer.oid) throw new Error(`LFS content verification failed for ${path}`);
-          bytes = payload;
+          const hash = sha256.create();
+          const expected = pointer;
+          async function* verified(source: AsyncIterable<Uint8Array>) {
+            let size = 0;
+            for await (const chunk of source) {
+              signal?.throwIfAborted();
+              size += chunk.byteLength;
+              if (size > expected.size) throw new Error(`LFS content verification failed for ${path}`);
+              hash.update(chunk);
+              yield chunk;
+            }
+            signal?.throwIfAborted();
+            if (size !== expected.size || bytesToHex(hash.digest()) !== expected.oid) throw new Error(`LFS content verification failed for ${path}`);
+          }
+          bytes = await collectBytes(verified(payload), expected.size);
         } else if (trackedLfs) throw new Error(`LFS file ${path} needs a machine to restore committed content.`);
         const prefix = new TextDecoder().decode(bytes.subarray(0, 12));
         const mimeType = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 ? 'image/png' : bytes[0] === 0xff && bytes[1] === 0xd8 ? 'image/jpeg' : prefix.startsWith('GIF8') ? 'image/gif' : prefix.startsWith('RIFF') && prefix.slice(8, 12) === 'WEBP' ? 'image/webp' : null;
@@ -226,7 +248,7 @@ export class CloudFileStore {
   }
   private async hasLfsPointer(checkpoint: Checkpoint, path: string): Promise<boolean> {
     const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), checkpoint.worktreeCommit, path);
-    return blob !== null && parseGitLfsPointer(new Uint8Array(await blob.arrayBuffer())) !== null;
+    return blob !== null && blob.size <= LFS_POINTER_LIMIT && parseGitLfsPointer(new Uint8Array(await blob.arrayBuffer())) !== null;
   }
   private async isLfsPath(checkpoint: Checkpoint, path: string): Promise<boolean> {
     if (!checkpoint.headCommit) return false;
@@ -237,6 +259,7 @@ export class CloudFileStore {
       const directory = parts.slice(0, depth).join('/');
       const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), checkpoint.headCommit, `${directory ? `${directory}/` : ''}.gitattributes`);
       if (!blob) continue;
+      assertCloudReadSize(blob.size, `${directory ? `${directory}/` : ''}.gitattributes`);
       for (const line of (await blob.text()).split(/\r?\n/u)) {
         const tokens = attributeTokens(line);
         const pattern = tokens.shift();
@@ -267,8 +290,17 @@ export class CloudFileStore {
     }
     this.storage.sql.exec('INSERT INTO runtime_code_commits(commit_id,predecessor,checkpoint) VALUES(?,?,?)', checkpoint.worktreeCommit, predecessor, encoded);
   }
-  private enqueueRetention(checkpoint: Checkpoint, previous: Checkpoint | null): void {
-    this.storage.sql.exec('INSERT OR IGNORE INTO runtime_lfs_retention_outbox(commit_id,checkpoint,previous) VALUES(?,?,?)', checkpoint.worktreeCommit, JSON.stringify(checkpoint), previous ? JSON.stringify(previous) : null);
+  private enqueueMachineRetention(checkpoint: Checkpoint, previous: Checkpoint | null, machineId: string): void {
+    const publicationId = `${machineId}:${checkpoint.checkpointRef}`;
+    const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_commits WHERE commit_id=?', checkpoint.worktreeCommit).toArray()[0];
+    if (!row) throw new Error('Machine retention requires an accepted checkpoint');
+    const accepted = RetentionCheckpointSchema.parse(JSON.parse(row.checkpoint));
+    if (accepted.acceptedPublicationIds?.includes(publicationId)) return;
+    this.storage.sql.exec('UPDATE runtime_code_commits SET checkpoint=? WHERE commit_id=?', JSON.stringify({ ...accepted, acceptedPublicationIds: [...(accepted.acceptedPublicationIds ?? []), publicationId] }), checkpoint.worktreeCommit);
+    this.enqueueRetention(checkpoint, previous, publicationId);
+  }
+  private enqueueRetention(checkpoint: Checkpoint, previous: Checkpoint | null, publicationId?: string): void {
+    this.storage.sql.exec('INSERT OR IGNORE INTO runtime_lfs_retention_outbox(commit_id,checkpoint,previous) VALUES(?,?,?)', publicationId ? `${checkpoint.worktreeCommit}:${publicationId}` : checkpoint.worktreeCommit, JSON.stringify({ ...checkpoint, ...(publicationId ? { publicationId } : {}) }), previous ? JSON.stringify(previous) : null);
   }
   async flushRetention(): Promise<void> {
     do {
@@ -281,7 +313,8 @@ export class CloudFileStore {
     for (;;) {
       const row = this.storage.sql.exec<{ commit_id: string; checkpoint: string }>('SELECT commit_id,checkpoint FROM runtime_lfs_retention_outbox ORDER BY rowid LIMIT 1').toArray()[0];
       if (!row) return;
-      await this.retainLfs(RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)));
+      const { publicationId, acceptedPublicationIds: _acceptedPublicationIds, ...checkpoint } = RetentionCheckpointSchema.parse(JSON.parse(row.checkpoint));
+      await this.retainLfs(checkpoint, publicationId);
       this.storage.sql.exec('DELETE FROM runtime_lfs_retention_outbox WHERE commit_id=? AND checkpoint=?', row.commit_id, row.checkpoint);
       await this.storage.sync();
     }
@@ -321,7 +354,7 @@ export async function reconcileRuntimeLfsSources(storage: DurableObjectStorage, 
   const tables = new Set(storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table'").toArray().map(row => row.name));
   const confirmed = new Map(objects.map(object => [object.oid, object]));
   const transition = (checkpoint: Checkpoint): Checkpoint => ({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(object => { const origin = confirmed.get(object.oid); return origin?.size === object.size ? { ...object, source: 'origin' as const, location: origin.location } : object; }) } } : {}) });
-  const encoded = (value: string) => JSON.stringify(transition(RuntimeGitCheckpointSchema.parse(JSON.parse(value))));
+  const encoded = (value: string) => JSON.stringify(transition(RetentionCheckpointSchema.parse(JSON.parse(value))));
   storage.transactionSync(() => {
     if (tables.has('runtime_code_snapshot')) for (const row of storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot').toArray()) storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', encoded(row.checkpoint));
     if (tables.has('runtime_code_commits')) for (const row of storage.sql.exec<{ commit_id: string; checkpoint: string }>('SELECT commit_id,checkpoint FROM runtime_code_commits').toArray()) storage.sql.exec('UPDATE runtime_code_commits SET checkpoint=? WHERE commit_id=?', encoded(row.checkpoint), row.commit_id);

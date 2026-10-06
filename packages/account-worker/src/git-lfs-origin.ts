@@ -27,5 +27,7 @@ export async function confirmCloudOrigin(input: { code: ArtifactsCodeStore; repo
       try { endpoint = new URL(configured, origin).href; } catch { return []; }
     }
   }
-  return (await confirmGitLfsObjects({ endpoint, objects: input.objects, fetcher: input.fetcher, signal: AbortSignal.timeout(30_000) })).map(object => ({ ...object, location: { origin: input.origin, endpoint } }));
+  const provenance = new URL(endpoint);
+  if (provenance.protocol !== 'https:' || provenance.username || provenance.password || provenance.search || provenance.hash) return [];
+  return (await confirmGitLfsObjects({ endpoint, objects: input.objects, fetcher: input.fetcher, signal: AbortSignal.timeout(10_000) })).map(object => ({ ...object, location: { origin: input.origin, endpoint } }));
 }

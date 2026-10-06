@@ -34,6 +34,9 @@ import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.j
 import { canonicalLfsObjects } from './git-lfs-reachability.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
+import { z } from 'zod';
+
+const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 
 interface DirectorySocketAttachment {
   version: 1;
@@ -823,9 +826,10 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     const project = this.requireProject();
     if (!project.repositoryReference || input.origin !== project.repositoryReference || project.lifecycle === 'deleting') throw new Error('LFS origin identity changed');
     const endpoint = new URL(input.endpoint);
-    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.hash) throw new Error('Invalid LFS origin endpoint');
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error('Invalid LFS origin endpoint');
     for (const object of input.objects) this.ctx.storage.sql.exec('INSERT INTO lfs_origin_confirmations VALUES(?,?,?,?) ON CONFLICT(origin,endpoint,oid) DO UPDATE SET size=excluded.size', input.origin, endpoint.href, object.oid, object.size);
     await this.ctx.storage.sync();
+    this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
   }
 
   lfsResolveSources(objects: GitLfsSnapshot['objects']) {
@@ -853,6 +857,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       const roots = new Set<string>();
       const spaces = [];
       const cloudConfirmed: GitLfsConfirmedObject[] = [];
+      const recheck = LfsRecheckSchema.parse(await this.ctx.storage.get('lfs-origin-recheck') ?? { after: 0, cursor: '' });
+      const candidates = new Map<string, { object: GitLfsObject; repository: string; commit: string }>();
       for (const workspaceId of workspaceIds) {
         const authority = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`);
         const state = await authority.lfsRoots();
@@ -864,12 +870,30 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
           for (const checkpoint of state.checkpoints) roots.add(`runtime:${workspaceId}:${checkpoint.worktreeCommit}`);
           if (state.portableRevision) roots.add(`portable:${workspaceId}:${state.portableRevision}`);
         }
-        if (project.repositoryReference) for (const checkpoint of state.checkpoints) {
-          cloudConfirmed.push(...await confirmCloudOrigin({ code: new ArtifactsCodeStore(this.env.ARTIFACTS), repository: artifactsWorkspaceRepository(workspaceId), commit: checkpoint.worktreeCommit, origin: project.repositoryReference, objects: checkpoint.lfs?.objects ?? [] }));
+        if (project.repositoryReference && Date.now() >= recheck.after) for (const checkpoint of state.checkpoints) {
+          for (const object of checkpoint.lfs?.objects ?? []) {
+            if (object.source === 'r2' && !candidates.has(object.oid)) candidates.set(object.oid, { object, repository: artifactsWorkspaceRepository(workspaceId), commit: checkpoint.worktreeCommit });
+          }
         }
       }
       this.lfs.reconcile(roots);
       if (project.repositoryReference) {
+        const ordered = [...candidates.keys()].sort();
+        const next = ordered.findIndex(oid => oid > recheck.cursor);
+        const rotated = next < 0 ? ordered : [...ordered.slice(next), ...ordered.slice(0, next)];
+        const batch: GitLfsObject[] = [];
+        const first = rotated[0] ? candidates.get(rotated[0]) : undefined;
+        if (first) {
+          for (const oid of rotated) {
+            const candidate = candidates.get(oid);
+            if (!candidate || candidate.repository !== first.repository || candidate.commit !== first.commit || batch.length === 64) break;
+            batch.push(candidate.object);
+          }
+          await this.ctx.storage.put('lfs-origin-recheck', { after: Date.now() + 60_000, cursor: batch.at(-1)?.oid ?? recheck.cursor });
+          cloudConfirmed.push(...await confirmCloudOrigin({ code: new ArtifactsCodeStore(this.env.ARTIFACTS), repository: first.repository, commit: first.commit, origin: project.repositoryReference, objects: batch }));
+        }
+        const alarm = await this.ctx.storage.getAlarm();
+        if (alarm === null || alarm > Date.now() + 60_000) await this.ctx.storage.setAlarm(Date.now() + 60_000);
         this.ctx.storage.sql.exec('DELETE FROM lfs_origin_confirmations WHERE origin<>?', project.repositoryReference);
         const confirmations = this.ctx.storage.sql.exec<{ oid: string; size: number; origin: string; endpoint: string }>('SELECT oid,size,origin,endpoint FROM lfs_origin_confirmations WHERE origin=?', project.repositoryReference).toArray();
         const confirmed: GitLfsConfirmedObject[] = [];

@@ -1,5 +1,5 @@
 import { createSignedControlRequest, deriveArtifactScopeKey } from '@gitspace/protocol';
-import { GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot, type GitLfsObject, type GitLfsOriginConfirmation, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { collectBytes, streamBytes, GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot, type GitLfsObject, type GitLfsOriginConfirmation, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { EncryptedCheckpointBlobStore, type CheckpointBlobStore } from './portable-space-lifecycle.js';
 import { z } from 'zod';
 
@@ -23,8 +23,12 @@ export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): 
   const control = async <S extends z.ZodType>(operation: Extract<Parameters<typeof createSignedControlRequest>[0]['operation'], `lfs.${string}`>, payload: Record<string, unknown>, schema: S): Promise<z.output<S>> => {
     const request = createSignedControlRequest({ ...options.controlOptions, operation, payload: { projectId: options.projectId, ...payload } });
     const response = await (options.controlOptions.fetcher ?? fetch)(new URL('/v1/control', options.controlOptions.baseUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
-    if (!response.ok) throw new Error(`LFS publication ${operation} failed with ${response.status}`);
-    const envelope = z.object({ status: z.literal('ok'), value: z.unknown() }).parse(await response.json());
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`LFS publication ${operation} failed with ${response.status}`);
+    }
+    const bytes = response.body ? await collectBytes(streamBytes(response.body), 64 * 1024 * 1024) : new Uint8Array();
+    const envelope = z.object({ status: z.literal('ok'), value: z.unknown() }).parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
     return schema.parse(envelope.value);
   };
   const pin = async (object: GitLfsObject) => {
@@ -33,13 +37,27 @@ export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): 
     await control('lfs.pin', { publicationId: options.publicationId, objects: [object] }, GitLfsProtectionSchema);
     pinned.add(object.oid);
   };
-  const verify = (object: GitLfsObject, bytes: Uint8Array) => {
-    if (bytes.byteLength !== object.size || new Bun.CryptoHasher('sha256').update(bytes).digest('hex') !== object.oid) throw new Error('LFS object failed oid/size verification');
+  const verify = async function* (object: GitLfsObject, source: AsyncIterable<Uint8Array>) {
+    const hash = new Bun.CryptoHasher('sha256');
+    let size = 0;
+    for await (const bytes of source) {
+      size += bytes.byteLength;
+      if (size > object.size) throw new Error('LFS object failed oid/size verification');
+      hash.update(bytes);
+      yield bytes;
+    }
+    if (size !== object.size || hash.digest('hex') !== object.oid) throw new Error('LFS object failed oid/size verification');
   };
   const get = async (object: GitLfsObject) => {
-    const bytes = await encrypted.get(objectKey(object));
-    if (bytes) verify(object, bytes);
-    return bytes;
+    GitLfsObjectSchema.parse(object);
+    const source = await encrypted.getStream(objectKey(object), undefined, object.size);
+    return source === null ? null : verify(object, source);
+  };
+  const has = async (object: GitLfsObject) => {
+    const source = await get(object);
+    if (source === null) return false;
+    for await (const _chunk of source) { /* Exhaustion verifies the complete object. */ }
+    return true;
   };
   return {
     get,
@@ -52,18 +70,24 @@ export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): 
       for (const object of requested) pinned.add(object.oid);
       return result.objects;
     },
-    async has(object) { await pin(object); return await get(object) !== null; },
-    async put(object, bytes) {
+    async has(object) { await pin(object); return has(object); },
+    async put(object, source) {
       GitLfsObjectSchema.parse(object);
-      verify(object, bytes);
       if (!options.publicationId) throw new Error('LFS upload requires a durable publication identity');
       await pin(object);
-      if (await get(object)) return;
-      try { await encrypted.put(objectKey(object), bytes); }
+      if (await has(object)) {
+        for await (const _chunk of verify(object, source)) { /* Verify even a deduplicated source. */ }
+        return;
+      }
+      let sourceVerified = false;
+      const verified = (async function* () {
+        yield* verify(object, source);
+        sourceVerified = true;
+      })();
+      try { await encrypted.putStream(objectKey(object), verified, object.size); }
       catch (error) {
-        // Immutable transport rejects different randomized ciphertext if another publisher won.
-        // Accept that race only after decrypting and verifying the complete winning object.
-        if (!await get(object)) throw error;
+        // Only a fully verified upload may accept independently encrypted winning bytes.
+        if (!sourceVerified || !await has(object)) throw error;
       }
     },
     async releasePublication() {

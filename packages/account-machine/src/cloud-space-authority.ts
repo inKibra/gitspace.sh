@@ -8,7 +8,7 @@ import {
   type InferenceAssignInput,
 } from '@gitspace/protocol';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
-import { SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
+import { collectBytes, streamBytes, SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import {
   createSignedControlRequest,
   type AppendJournalEntryInput,
@@ -322,7 +322,7 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
     }
   }
 
-  async get(key: string, expectedHash?: string): Promise<Uint8Array | null> {
+  async get(key: string, expectedHash?: string, maxBytes = 64 * 1024 * 1024): Promise<Uint8Array | null> {
     for (let resigned = false; ; resigned = true) {
       const request = signedRequest(this.options, 'data.get', { key, ...(expectedHash ? { hash: expectedHash } : {}) });
       try {
@@ -345,7 +345,12 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
             );
           }
           diagnostics.stage = 'response-body';
-          const bytes = new Uint8Array(await response.arrayBuffer());
+          const declaredSize = response.headers.get('content-length');
+          if (declaredSize !== null && Number(declaredSize) > maxBytes) {
+            await response.body?.cancel();
+            throw new Error('Checkpoint ciphertext exceeds byte limit');
+          }
+          const bytes = response.body ? await collectBytes(streamBytes(response.body), maxBytes) : new Uint8Array();
           diagnostics.stage = 'integrity';
           if (expectedHash && hashBytes(bytes) !== expectedHash) throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} failed integrity verification`);
           return bytes;

@@ -18,7 +18,7 @@ import { createReplicaStore } from './replica-store.js';
 import { CloudFileStore } from './cloud-files.js';
 import type { ArtifactsCodeStore } from './artifacts.js';
 import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint']): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; modelProxy(input: { conversationId: string; operation: 'completion' | 'judge'; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; mcpProxy(input: { conversationId: string; attemptId: string; callId: string; method: RuntimeMcpInput['method']; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; modelProxy(input: { conversationId: string; operation: 'completion' | 'judge'; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; mcpProxy(input: { conversationId: string; attemptId: string; callId: string; method: RuntimeMcpInput['method']; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 type RuntimeBrowserService = NonNullable<SessionControlServices['browser']>;
 export type WorkspaceRuntime = {
@@ -52,8 +52,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const runtime = await createRuntimeHarness({ ...options, storage });
   const { harness } = runtime;
   const attachments = new AttachmentStore(options.storage, options.attachments);
-  const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.lfs, async checkpoint => {
-    try { await options.retainLfs(checkpoint); }
+  const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.lfs, async (checkpoint, publicationId) => {
+    try { await options.retainLfs(checkpoint, publicationId); }
     catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
   }, options.initialCheckpoint);
   async function recoverCloudFiles() {
@@ -356,7 +356,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         if (!attachment) throw new Error('Snapshot publication requires the current primary');
         if (attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId) throw new Error('Snapshot identity mismatch');
         if (input.final && attachment.state !== 'draining') throw new Error('Final snapshot requires a draining primary');
-        cloudFiles.commitMachine(input.checkpoint, input.previousWorktreeCommit, attachment.state === 'attaching');
+        cloudFiles.commitMachine(input.checkpoint, input.previousWorktreeCommit, attachment.machineId, attachment.state === 'attaching');
       });
       try { await cloudFiles.flushRetention(); }
       catch (error) { await options.schedule(Date.now() + 5_000); throw error; }

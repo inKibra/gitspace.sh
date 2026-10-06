@@ -2,21 +2,39 @@ import { DurableObject } from 'cloudflare:workers';
 import { strict as assert } from 'node:assert';
 import { createModels } from '@earendil-works/pi-ai';
 import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime';
-import { bootstrapSpaceAuthority } from '@gitspace/protocol-workspace';
+import { bootstrapSpaceAuthority, GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 import { SpaceAuthorityDO } from '../../account-worker/src/space-authority.js';
 import { createWorkspaceRuntime } from '../src/runtime.js';
+import { CloudFileStore } from '../src/cloud-files.js';
+import { GitLfsRetention } from '../../account-worker/src/git-lfs-retention.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 
 const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
 const unsupported = async (): Promise<never> => { throw new Error('External service forbidden in checkpoint proof'); };
 export class PrimaryCheckpointProof extends SpaceAuthorityDO {
   async fetch(request: Request): Promise<Response> {
-    const checkpoint = RuntimeGitCheckpointSchema.parse(await request.json());
+    const supplied = RuntimeGitCheckpointSchema.parse(await request.json());
     const empty = new URL(request.url).pathname === '/empty';
+    const object = GitLfsObjectSchema.parse({ oid: '1'.repeat(64), size: 17 });
+    const otherObject = GitLfsObjectSchema.parse({ oid: '2'.repeat(64), size: 23 });
+    const checkpoint = empty ? RuntimeGitCheckpointSchema.parse({ ...supplied, lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [] } }) : supplied;
     const state = bootstrapSpaceAuthority(null, { projectId: identity.projectId, spaceId: identity.workspaceId, machineId: 'machine' }, new Date().toISOString());
     this.ctx.storage.sql.exec('INSERT OR REPLACE INTO space_authority(id,project_id,space_id,record_json) VALUES(1,?,?,?)', identity.projectId, identity.workspaceId, JSON.stringify(state));
     let sourceReads = 0;
-    let retentionCalls = 0, rejectRetention = false;
+    let retentionCalls = 0, rejectRetention = false, rejectRelease = false;
+    const ledger = new GitLfsRetention(this.ctx.storage);
+    const uploader = `machine:${checkpoint.checkpointRef}`;
+    if (empty) {
+      ledger.retain(`publication:${uploader}`, [object]);
+      ledger.retain(`publication:other-machine:${checkpoint.checkpointRef}`, [otherObject]);
+    }
+    const retainLfs = async (value: typeof checkpoint, publicationId?: string) => {
+      retentionCalls++;
+      if (rejectRetention) throw new Error('Retention temporarily unavailable');
+      ledger.snapshot({ snapshotId: `runtime:${identity.workspaceId}:${value.worktreeCommit}`, workspaceId: identity.workspaceId, kind: 'runtime', objects: value.lfs?.objects ?? [] });
+      if (rejectRelease) throw new Error('Publication release temporarily unavailable');
+      ledger.release(`publication:${publicationId ?? `runtime:${identity.workspaceId}`}`);
+    };
     const models = createModels();
     models.setProvider({
       id: 'fixture', name: 'Checkpoint proof', auth: { apiKey: { name: 'Fixture', resolve: async () => ({ auth: { apiKey: 'fixture-only' } }) } },
@@ -27,14 +45,7 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
     const runtime = await createWorkspaceRuntime({
       storage: this.ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
       code: { readFile: unsupported, writeSnapshot: unsupported },
-      lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async value => {
-        retentionCalls++;
-        const accepted = this.ctx.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
-        assert(accepted);
-        assert.equal(RuntimeGitCheckpointSchema.parse(JSON.parse(accepted.checkpoint)).worktreeCommit, value.worktreeCommit);
-        assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox WHERE commit_id=?', value.worktreeCommit).toArray().length, 1);
-        if (rejectRetention) throw new Error('Retention temporarily unavailable');
-      },
+      lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs,
       initialCheckpoint: async () => { sourceReads++; return empty ? null : checkpoint; },
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => '', authorizeCronTool: unsupported },
       operations: { execute: unsupported, reconcile: unsupported, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, wakeAt: unsupported },
@@ -59,6 +70,8 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       await assert.rejects(runtime.snapshotCommit({ ...publication, generation: publication.generation + 1 }));
       await assert.rejects(runtime.snapshotCommit({ ...publication, previousWorktreeCommit: checkpoint.worktreeCommit }));
       assert.equal(retentionCalls, 0, 'Rejected generations and predecessors must not retain inventory');
+      ledger.reconcile(new Set());
+      assert.deepEqual(ledger.candidates(), [], 'Rejected snapshots must not release either publisher');
       this.ctx.storage.sql.exec("UPDATE runtime_cloud_writer SET attempt='lease-conflict' WHERE singleton=1");
       await assert.rejects(runtime.snapshotCommit(publication), /writer lease/u);
       assert.equal(retentionCalls, 0, 'Cloud lease conflict must not retain inventory');
@@ -66,12 +79,28 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       rejectRetention = true;
       await assert.rejects(runtime.snapshotCommit(publication), /Retention temporarily unavailable/u);
       assert.deepEqual(await runtime.cloudFiles.snapshot(), checkpoint, 'Acceptance survives retention failure');
-      assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox').toArray().length, 1);
       rejectRetention = false;
+      rejectRelease = true;
+      const recover = () => new CloudFileStore(this.ctx.storage, runtime.attachments, { readFile: unsupported, writeSnapshot: unsupported }, identity.workspaceId, () => {}, { has: unsupported, get: unsupported, put: unsupported }, retainLfs);
+      await assert.rejects(recover().recover(), /Publication release temporarily unavailable/u);
+      ledger.reconcile(new Set());
+      assert.deepEqual(ledger.candidates(), [], 'Failed release keeps the real uploader pinned');
+      rejectRelease = false;
+      // Reconstruct without a machine retry: acceptance followed by response loss must drain on its own.
+      await recover().recover();
+      assert.deepEqual(ledger.candidates(), [], 'Snapshot takes ownership before the uploader is released');
       await runtime.snapshotCommit(publication);
       await runtime.snapshotCommit(publication);
-      assert.equal(retentionCalls, 2, 'Accepted retry drains once; acknowledged replay does not retain again');
-      assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox').toArray().length, 0);
+      assert.equal(retentionCalls, 3, 'Acknowledged replay does not repeat completed retention');
+      ledger.reconcile(new Set());
+      assert.deepEqual(ledger.candidates(), [object], 'Owner release permits collection without machine cleanup; the other publisher stays pinned');
+      ledger.retain(`publication:second-machine:${checkpoint.checkpointRef}`, [object]);
+      const duplicate = recover();
+      duplicate.commitMachine(checkpoint, null, 'second-machine', true);
+      duplicate.commitMachine(checkpoint, null, 'second-machine', true);
+      await recover().recover();
+      ledger.reconcile(new Set());
+      assert.deepEqual(ledger.candidates(), [object], 'A different accepted publisher of the same checkpoint releases its own pin exactly');
       await assert.rejects(runtime.snapshotCommit({ ...publication, checkpoint: { ...checkpoint, worktreeCommit: 'f'.repeat(40) }, previousWorktreeCommit: checkpoint.worktreeCommit }));
     } else assert.deepEqual(assignment.checkpoint, checkpoint, 'First assignment must restore canonical source without prior cloud file execution');
     const lfsRestored = [{ path: 'modified.bin', outcome: 'committed' as const }, { path: 'added.bin', outcome: 'omitted' as const }];

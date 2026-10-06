@@ -21,9 +21,9 @@ afterEach(() => {
 class ObservedFileCheckpointBlobStore extends FileCheckpointBlobStore {
   readonly reads: string[] = [];
 
-  override get(key: string, expectedHash?: string): Promise<Uint8Array | null> {
+  override get(key: string, expectedHash?: string, maxBytes?: number): Promise<Uint8Array | null> {
     this.reads.push(key);
-    return super.get(key, expectedHash);
+    return super.get(key, expectedHash, maxBytes);
   }
 }
 
@@ -147,5 +147,20 @@ describe('EncryptedCheckpointBlobStore', () => {
 
     await expect(store.get(checkpointKey, rootHash)).rejects.toThrow();
     expect(inner.reads).toEqual([checkpointKey, chunkKey]);
+  });
+
+  it('rejects a canonical inventory that disagrees with the expected LFS size before reading chunks', async () => {
+    const { inner, store } = fixture();
+    await inner.put(checkpointKey, await sealedManifest(canonicalManifest));
+    const source = await store.getStream(checkpointKey, undefined, CHECKPOINT_CHUNK_BYTES + 2);
+    if (!source) throw new Error('Missing inventory');
+    await expect((async () => { for await (const _chunk of source) { throw new Error('Unexpected plaintext'); } })()).rejects.toThrow('inventory size');
+    expect(inner.reads).toEqual([checkpointKey]);
+  });
+
+  it('bounds file ciphertext before reading an oversized object', async () => {
+    const { inner } = fixture();
+    await inner.put(checkpointKey, new Uint8Array(1024));
+    await expect(inner.get(checkpointKey, undefined, 16)).rejects.toThrow('byte limit');
   });
 });

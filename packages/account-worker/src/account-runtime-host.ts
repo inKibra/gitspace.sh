@@ -74,9 +74,10 @@ export async function createAccountWorkspaceRuntime(
     ...inference,
     code,
     lfs,
-    async retainLfs(checkpoint) {
+    async retainLfs(checkpoint, publicationId) {
       await project.lfsRetain({ snapshotId: `runtime:${identity.workspaceId}:${checkpoint.worktreeCommit}`, workspaceId: identity.workspaceId, kind: 'runtime', objects: checkpoint.lfs?.objects ?? [] });
-      await lfs.releasePublication();
+      if (publicationId) await project.lfsReleasePublication(publicationId);
+      else await lfs.releasePublication();
     },
     initialCheckpoint: async () => {
       const branchRef = await ref();

@@ -5,7 +5,7 @@ import { canonicalJson, RuntimeAttachInputSchema, RuntimeAttachmentSchema, Runti
 import { CloudFileStore } from '../src/cloud-files.js';
 import { AttachmentStore } from '../src/attachments.js';
 import { ArtifactsSnapshotError, type WriteSnapshotInput } from '../src/artifacts.js';
-import { GitLfsObjectSchema, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { collectBytes, GitLfsObjectSchema, type GitLfsStore } from '@gitspace/protocol-workspace';
 
 const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/spaces/cloud/checkpoints', branch: 'main', headCommit: '1'.repeat(40), indexCommit: '2'.repeat(40), trackedWorktreeCommit: '3'.repeat(40), worktreeCommit: '4'.repeat(40), indexTree: '5'.repeat(40), worktreeTree: '6'.repeat(40) });
 export class CloudFilesProof extends DurableObject {
@@ -17,18 +17,40 @@ export class CloudFilesProof extends DurableObject {
     const published = new Map<string, typeof checkpoint>();
     const files = new Map<string, string>([['file.txt', 'one\ntwo\nthree'], ['repeat.txt', 'same same']]);
     const headAttributes = new Map<string, string>();
+    const blobs = new Map<string, Blob>();
+    let blobReads = 0;
+    class UnreadBlob extends Blob {
+      override async arrayBuffer(): Promise<ArrayBuffer> { blobReads++; throw new Error('Unexpected Blob materialization'); }
+      override async text(): Promise<string> { blobReads++; throw new Error('Unexpected Blob materialization'); }
+    }
     const payloads = new Map<string, Uint8Array>();
-    const lfs: GitLfsStore = { has: async object => payloads.has(object.oid), get: async object => payloads.get(object.oid) ?? null, put: async (object, bytes) => { payloads.set(object.oid, bytes); } };
+    let payloadGets = 0;
+    let payloadStream: (() => AsyncIterable<Uint8Array>) | undefined;
+    async function* chunks(bytes: Uint8Array) {
+      yield bytes.subarray(0, Math.floor(bytes.byteLength / 2));
+      yield bytes.subarray(Math.floor(bytes.byteLength / 2));
+    }
+    const lfs: GitLfsStore = {
+      has: async object => payloads.has(object.oid),
+      get: async object => {
+        payloadGets++;
+        if (payloadStream) return payloadStream();
+        const bytes = payloads.get(object.oid);
+        return bytes ? chunks(bytes) : null;
+      },
+      put: async (object, source) => { payloads.set(object.oid, await collectBytes(source, object.size)); },
+    };
     const retained = new Map<string, typeof checkpoint>();
     let retentionUnavailable = false, retentionCalls = 0;
     const retainLfs = async (value: typeof checkpoint) => {
       retentionCalls++;
-      assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox WHERE commit_id=?', value.worktreeCommit).toArray().length, 1);
       if (retentionUnavailable) throw new Error('Retention unavailable');
       retained.set(value.worktreeCommit, value);
     };
     const code = {
       readFile: async (_repository: string, commit: string, path: string) => {
+        const blob = blobs.get(path);
+        if (blob) return blob;
         const source = path.endsWith('.gitattributes') && commit === checkpoint.headCommit ? headAttributes : files;
         return source.has(path) ? new Blob([source.get(path)!]) : null;
       },
@@ -68,7 +90,7 @@ export class CloudFilesProof extends DurableObject {
     await assert.rejects(invoke('write', { path: 'new.txt', content: 'different' }, 'write-once'));
     const first = await store.snapshot(); assert(first);
     assert.equal(first.headCommit, checkpoint.headCommit); assert.equal(first.indexCommit, checkpoint.indexCommit);
-    assert.throws(() => store.commitMachine(checkpoint, 'f'.repeat(40)), /stale predecessor/);
+    assert.throws(() => store.commitMachine(checkpoint, 'f'.repeat(40), 'machine'), /stale predecessor/);
     const ancestry = () => this.ctx.storage.sql.exec('SELECT * FROM runtime_code_commits ORDER BY commit_id').toArray();
     const beforeNoop = ancestry();
     for (const [tool, args] of [
@@ -196,7 +218,7 @@ export class CloudFilesProof extends DurableObject {
     assert.equal(unbornCloud.headCommit, null);
     assert.equal(unbornCloud.indexCommit, unborn.indexCommit);
     assert.deepEqual((await invoke('read', { path: 'unborn.txt' })).content, [{ type: 'text', text: 'cloud before attachment' }]);
-    store.commitMachine({ ...unbornCloud, headCommit: 'a'.repeat(40), worktreeCommit: 'b'.repeat(40) }, unbornCloud.worktreeCommit);
+    store.commitMachine({ ...unbornCloud, headCommit: 'a'.repeat(40), worktreeCommit: 'b'.repeat(40) }, unbornCloud.worktreeCommit, 'machine');
     assert.equal((await invoke('edit', { path: 'unborn.txt', edits: [{ oldText: 'before', newText: 'after' }] })).status, 'completed');
     assert.equal((await store.snapshot())?.headCommit, 'a'.repeat(40));
     const payload = new TextEncoder().encode('real LFS content\nsecond line');
@@ -206,11 +228,46 @@ export class CloudFilesProof extends DurableObject {
     files.set('asset.dat', pointer);
     payloads.set(oid, payload);
     const current = await store.snapshot(); assert(current);
-    store.commitMachine({ ...current, headCommit: checkpoint.headCommit, worktreeCommit: 'c'.repeat(40), lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [{ path: 'asset.dat', kind: 'modified' }] } }, current.worktreeCommit);
+    store.commitMachine({ ...current, headCommit: checkpoint.headCommit, worktreeCommit: 'c'.repeat(40), lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [{ path: 'asset.dat', kind: 'modified' }] } }, current.worktreeCommit, 'machine');
     headAttributes.set('.gitattributes', '*.dat filter=lfs\n[attr]large filter=lfs\n*.large large\n"space name.bin" filter=lfs\nliteral\\*.bin filter=lfs\ndeep/**/object.bin filter=lfs\n');
     headAttributes.set('nested/.gitattributes', '*.bin filter=lfs\nplain.dat -filter\n');
     assert.deepEqual((await invoke('read', { path: 'asset.dat' })).content, [{ type: 'text', text: 'real LFS content\nsecond line' }]);
     assert.deepEqual((await invoke('read', { path: 'asset.dat', offset: 2 })).content, [{ type: 'text', text: 'second line' }]);
+    files.set('oversized.dat', `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${8 * 1024 * 1024 + 1}\n`);
+    const getsBeforeOversized = payloadGets;
+    const oversized = await invoke('read', { path: 'oversized.dat' });
+    assert.equal(oversized.status, 'failed');
+    assert.match(JSON.stringify(oversized.content), /8 MiB.*machine/u);
+    assert.equal(payloadGets, getsBeforeOversized, 'Declared oversize must fail before asking the LFS store for a payload');
+    let streamedChunks = 0, streamClosed = false;
+    payloadStream = async function* () {
+      try {
+        streamedChunks++; yield payload;
+        streamedChunks++; yield new Uint8Array([1]);
+        streamedChunks++; yield payload;
+      } finally { streamClosed = true; }
+    };
+    const overflow = await invoke('read', { path: 'asset.dat' });
+    assert.equal(overflow.status, 'failed');
+    assert.match(JSON.stringify(overflow.content), /verification failed/u);
+    assert.doesNotMatch(JSON.stringify(overflow.content), /real LFS content/u);
+    assert.equal(streamedChunks, 2, 'Size violation must stop consumption before later payload chunks');
+    assert.equal(streamClosed, true, 'Size violation must close the source');
+    payloadStream = undefined;
+    assert.deepEqual((await invoke('read', { path: 'asset.dat' })).content, [{ type: 'text', text: 'real LFS content\nsecond line' }]);
+    const oversizedBlob = new UnreadBlob([new Uint8Array(8 * 1024 * 1024 + 1)]);
+    blobs.set('large.txt', oversizedBlob);
+    const largeArtifact = await invoke('read', { path: 'large.txt' });
+    assert.equal(largeArtifact.status, 'failed');
+    assert.match(JSON.stringify(largeArtifact.content), /8 MiB.*machine/u);
+    blobs.set('not-a-pointer.txt', new UnreadBlob([new Uint8Array(1025)]));
+    assert.equal((await invoke('write', { path: 'not-a-pointer.txt', content: 'replacement' })).status, 'completed');
+    blobs.set('.gitattributes', oversizedBlob);
+    const largeAttributes = await invoke('read', { path: 'asset.dat' });
+    assert.equal(largeAttributes.status, 'failed');
+    assert.match(JSON.stringify(largeAttributes.content), /8 MiB.*machine/u);
+    assert.equal(blobReads, 0, 'Oversized Artifacts and non-candidate pointers must not be materialized');
+    blobs.clear();
     payloads.delete(oid);
     const unavailable = await invoke('read', { path: 'asset.dat' });
     assert.equal(unavailable.status, 'failed');

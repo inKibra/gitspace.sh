@@ -95,13 +95,15 @@ HEAD's `.gitattributes` controls checkpoint LFS tracking. Editing attributes in 
 
 Inspector's working comparison marks these paths **Only on this machine** and explains **LFS changes leave this machine only after a commit**. The saved checkpoint supplies the list, including while the machine is offline. Move and detach confirmation offers **Commit first** or **Continue without them**. After a move, the agent receives the list of files restored to committed versions or omitted.
 
-Restore looks for LFS content in the local cache, then R2, then the confirmed origin endpoint. Missing objects fail explicitly. Cloud reads can return R2 content; origin-only files report their size and that they need a machine. Cloud edits and writes to LFS-tracked paths require a machine and a commit.
+Restore looks for LFS content in the local cache, then R2, then the confirmed origin endpoint. Downloads stream into a temporary file beside the cache. Restore stops on excess bytes and requires the exact size and SHA-256 before an atomic rename; failures and aborts remove the temporary file. R2 transfers process fixed 32 MiB encryption chunks rather than buffering a complete multi-chunk object. Missing objects fail explicitly. Cloud file reads have an 8 MiB limit and can return verified R2 content within that limit; larger or origin-only files require a machine. Cloud edits and writes to LFS-tracked paths require a machine and a commit.
 
 R2 retention is project-scoped. In-use snapshots include the current checkpoint and portable revision of a nonarchived workspace (including a closed workspace), active attachment checkpoints, and pending publication predecessors. Historical rows alone are not restore roots. Publication pins do not expire on a timer. Archiving or deleting a workspace releases its snapshot owners, not live attachment or publication pins.
 
 With an external origin, R2 eviction requires a successful authenticated LFS batch `download` confirmation for the exact oid and size. Snapshot metadata records the confirmed endpoint before deletion; stale remote-tracking refs are not evidence. Without an external origin, objects reachable through any branch or tag in the canonical project and workspace Artifacts repositories remain protected. Collection fails closed when it cannot inspect those roots. Deletion fences new publications until it finishes.
 
-Committed pointer inventories are cached on disk by HEAD. Unchanged captures reuse the inventory; forward history scans stop at the saved ancestor. A rewritten history requires one rescan.
+Committed pointer inventories are cached on disk by HEAD. Unchanged captures reuse the inventory; forward history scans stop at the saved ancestor. Capture checks newly discovered objects against origin and remembers negative results. Later-push checks run in bounded maintenance batches, not on each snapshot. A rewritten history requires one rescan.
+
+Origin receipts and snapshot endpoint metadata contain no URL userinfo, query, or fragment. Restore gets endpoint credentials from matching machine Git configuration or credential helpers. Accepted runtime and portable snapshots persist the real uploader's publication identity; their retention outbox releases that pin after retention succeeds, even if the machine never receives the response.
 
 Closing a workspace, stopping a cloud machine, and destroying a machine are different operations. Controlled workspace close, Stop, and provider replacement publish durable checkpoints before releasing ownership. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
 
@@ -190,6 +192,8 @@ After separate owner authorization, run `node packages/runtime-workspace-do/live
 The binding resolves bare branch names and commit IDs in `repo.log({ ref })`. Use `repo.log()` without a ref for HEAD. Literal `HEAD`, `refs/heads/main`, `heads/main`, and custom checkpoint refs return empty results even when Git can see those refs. Production branch lookup translates full branch refs; snapshot reads use commit IDs stored by the DO. The live check verifies checkpoint refs through Git rather than binding lookup and does not exercise the separate R2 LFS store.
 
 The owner reran the unmodified check under Node 24 for Pass 10 using fork `probe-fork-20261005035600-c`. Direct `ArtifactsCodeStore` checks passed for full and bare branch names, HEAD, feature branches, commit IDs, missing branches, and `readFile`. They rejected custom checkpoint refs and returned no initial checkpoint for a populated repository whose requested branch was missing. Pass 11 adds the same no-ref history guard when reusing a matching-description scratch repository; it does not seed a missing branch in a populated repository.
+
+For Pass 12, the owner reports that the real-service lookup checks and live check still pass with fork `probe-fork-20261005035600-d`. This is owner-provided evidence; the local review fixes do not rerun or extend that live check.
 
 Two opt-in browser checks use private local Chrome profiles, not your logged-in browser. Set `GITSPACE_BROWSER_PROOF_EXECUTABLE` to a Chrome executable and run:
 

@@ -3,9 +3,9 @@ import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync,
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { confirmGitLfsObjects, GitLfsObjectSchema, type GitLfsOriginConfirmation, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { collectBytes, confirmGitLfsObjects, GitLfsObjectSchema, type GitLfsOriginConfirmation, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, IncrementalGitSnapshots, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
-import { restoredGitLfsPaths } from '../src/git-lfs.js';
+import { recheckGitLfsOrigin, restoredGitLfsPaths } from '../src/git-lfs.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { committedLfsInventory } from '../src/git-lfs-inventory.js';
 const fetchImplementation = (implementation: (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>) => Object.assign(implementation, { preconnect: fetch.preconnect });
@@ -24,7 +24,11 @@ function fixture() {
   git(root, 'config', 'filter.lfs.process', ''); git(root, 'config', 'filter.lfs.clean', 'cat'); git(root, 'config', 'filter.lfs.smudge', 'cat'); git(root, 'config', 'filter.lfs.required', 'false');
   writeFileSync(join(root, '.gitattributes'), '*.bin filter=lfs\n');
   const objects = new Map<string, Uint8Array>(); const uploads: string[] = [];
-  const store: GitLfsStore = { has: async object => objects.has(object.oid), get: async object => objects.get(object.oid) ?? null, put: async (object, bytes) => { uploads.push(object.oid); objects.set(object.oid, bytes); } };
+  const store: GitLfsStore = {
+    has: async object => objects.has(object.oid),
+    get: async object => { const bytes = objects.get(object.oid); return bytes ? (async function* () { yield bytes; })() : null; },
+    put: async (object, source) => { uploads.push(object.oid); objects.set(object.oid, await collectBytes(source, object.size)); },
+  };
   const lfs = { store, originEnvironment: async () => ({ GIT_TERMINAL_PROMPT: '0' }) };
   function pointer(value: string) {
     const bytes = new TextEncoder().encode(value); const object = GitLfsObjectSchema.parse({ oid: createHash('sha256').update(bytes).digest('hex'), size: bytes.length });
@@ -172,7 +176,7 @@ it('never treats stale or old-origin remote refs as server availability', async 
   } finally { request.mockRestore(); }
 });
 
-it('confirms exact objects through committed config and endpoint-scoped project credentials, retries negatives and invalidates changed origin', async () => {
+it('confirms exact objects with scoped credentials, remembers negatives and invalidates changed origin', async () => {
   const f = fixture();
   git(f.root, 'config', 'remote.origin.url', 'https://git.invalid/repo.git');
   writeFileSync(join(f.root, '.lfsconfig'), '[lfs]\nurl = https://lfs.invalid/project\n');
@@ -198,12 +202,12 @@ it('confirms exact objects through committed config and endpoint-scoped project 
   try {
     expect((await f.capture(1)).lfs?.objects[0]?.source).toBe('r2');
     present = true;
-    expect((await f.capture(2)).lfs?.objects[0]?.source).toBe('origin');
-    await f.capture(3); expect(calls).toHaveLength(2);
+    expect((await f.capture(2)).lfs?.objects[0]?.source).toBe('r2');
+    await f.capture(3); expect(calls).toHaveLength(1);
     git(f.root, 'config', 'remote.origin.url', 'https://other.invalid/repo.git');
     present = false;
     expect((await f.capture(4)).lfs?.objects[0]?.source).toBe('r2');
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(2);
   } finally { request.mockRestore(); }
 });
 
@@ -304,11 +308,12 @@ it('drops discarded rewritten-history pointers but retains reachable deleted-fil
 
 it('hydrates a transitioned portable object from its confirmed endpoint after route changes', async () => {
   const f = fixture();
-  writeFileSync(join(f.root, '.lfsconfig'), '[lfs]\nurl = https://new.invalid/lfs\n');
+  writeFileSync(join(f.root, '.lfsconfig'), '[lfs]\nurl = https://new.invalid/lfs?token=new-secret\n');
   git(f.root, 'add', '.lfsconfig'); git(f.root, 'commit', '-m', 'changed endpoint');
   const checkpoint = await f.capture(1);
   const target = mkdtempSync(join(tmpdir(), 'gitspace-lfs-provenance-')); roots.push(target);
   git(target, 'init', '-b', 'main'); git(target, 'fetch', f.root, `${checkpoint.checkpointRef}:${checkpoint.checkpointRef}`);
+  git(target, 'config', 'lfs.url', 'https://new.invalid/lfs?token=local-secret');
   const bin = join(target, 'tools'); mkdirSync(bin);
   const executable = join(bin, 'git-lfs');
   writeFileSync(executable, '#!/bin/sh\n[ "$1" = smudge ] || exit 10\n[ "$(git config lfs.url)" = "https://confirmed.invalid/lfs" ] || exit 11\ncat >/dev/null\nprintf "committed bytes"\n');
@@ -319,7 +324,7 @@ it('hydrates a transitioned portable object from its confirmed endpoint after ro
     resolveSources: async objects => objects.map(object => ({ ...object, source: 'origin', location: { origin: 'https://origin.invalid/repo.git', endpoint: 'https://confirmed.invalid/lfs' } })),
   } });
   expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('committed bytes');
-  expect(readFileSync(join(target, '.lfsconfig'), 'utf8')).toBe('[lfs]\nurl = https://new.invalid/lfs\n');
+  expect(readFileSync(join(target, '.lfsconfig'), 'utf8')).toBe('[lfs]\nurl = https://new.invalid/lfs?token=new-secret\n');
 });
 
 it('unchanged capture launches no committed-history scan after durable inventory recovery', async () => {
@@ -333,4 +338,113 @@ it('unchanged capture launches no committed-history scan after durable inventory
     expect(historyWalks).toHaveLength(0);
     expect(f.uploads).toEqual([f.base.object.oid]);
   } finally { processes.mockRestore(); }
+});
+
+it('persists negative discovery across origin helpers and checks only newly discovered oids', async () => {
+  const f = fixture();
+  git(f.root, 'config', 'lfs.url', 'https://lfs.invalid/repo');
+  git(f.root, 'config', 'remote.origin.url', 'https://origin.invalid/repo.git');
+  const next = f.pointer('new discovery');
+  const batches: unknown[] = [];
+  const request = spyOn(globalThis, 'fetch').mockImplementation(fetchImplementation(async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    batches.push(body.objects);
+    return Response.json({ objects: body.objects.map((object: typeof f.base.object) => ({ ...object, error: { code: 404 } })) });
+  }));
+  try {
+    await f.capture(1);
+    await f.capture(2);
+    expect(batches).toEqual([[f.base.object]]);
+    // A new helper reads disk each time: no process-local cache supplies these classifications.
+    writeFileSync(join(f.root, 'next.bin'), next.text); git(f.root, 'add', 'next.bin'); git(f.root, 'commit', '-m', 'new oid');
+    await f.capture(3); await f.capture(4);
+    expect(batches).toEqual([[f.base.object], [next.object]]);
+  } finally { request.mockRestore(); }
+});
+
+it('does not repeat a failed origin batch for unchanged HEAD', async () => {
+  const f = fixture();
+  git(f.root, 'config', 'lfs.url', 'https://lfs.invalid/repo');
+  const request = spyOn(globalThis, 'fetch').mockImplementation(fetchImplementation(async () => new Response(null, { status: 404 })));
+  try {
+    await f.capture(1); await f.capture(2); await f.capture(3);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(f.uploads).toEqual([f.base.object.oid]);
+  } finally { request.mockRestore(); }
+});
+
+for (const configuration of ['local', 'committed']) it(`keeps ${configuration} query credentials out of receipts while native hydration retains them`, async () => {
+  const f = fixture();
+  const configured = 'https://machine:password@lfs.invalid/repo?token=machine-secret#private';
+  git(f.root, 'config', 'remote.origin.url', 'https://user:origin-secret@origin.invalid/repo.git?token=origin-query#private');
+  if (configuration === 'local') git(f.root, 'config', 'lfs.url', configured);
+  else {
+    writeFileSync(join(f.root, '.lfsconfig'), `[lfs]\nurl = "${configured}"\n`);
+    git(f.root, 'add', '.lfsconfig'); git(f.root, 'commit', '-m', 'committed credentials');
+  }
+  const receipts: GitLfsOriginConfirmation[] = [];
+  const request = spyOn(globalThis, 'fetch').mockImplementation(fetchImplementation(async (input, init) => {
+    if (String(input) === 'https://cdn.invalid/object') {
+      expect(new Headers(init?.headers).has('authorization')).toBe(false);
+      return new Response(f.base.bytes);
+    }
+    expect(new Headers(init?.headers).get('authorization')).toBe(`Basic ${Buffer.from('machine:password').toString('base64')}`);
+    expect(new URL(String(input)).search).toBe('?token=machine-secret');
+    return Response.json({ objects: [{ ...f.base.object, actions: { download: { href: 'https://cdn.invalid/object' } } }] });
+  }));
+  try {
+    const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: f.root, spaceId: 'space', revision: 1, lfs: { ...f.lfs, confirmOrigin: async receipt => { receipts.push(receipt); } } });
+    const location = { origin: 'https://origin.invalid/repo.git', endpoint: 'https://lfs.invalid/repo' };
+    expect(receipts).toEqual([{ ...location, objects: [f.base.object] }]);
+    expect(checkpoint.lfs?.objects).toEqual([{ ...f.base.object, source: 'origin', location }]);
+    expect(readFileSync(join(f.root, '.git/gitspace-lfs-origin-inventory.json'), 'utf8')).not.toContain('machine-secret');
+    const target = mkdtempSync(join(tmpdir(), 'gitspace-lfs-secret-route-')); roots.push(target);
+    git(target, 'init', '-b', 'main'); git(target, 'fetch', f.root, `${checkpoint.checkpointRef}:${checkpoint.checkpointRef}`);
+    if (configuration === 'local') git(target, 'config', 'lfs.url', configured);
+    await restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint, branch: 'main', lfs: f.lfs });
+    expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('committed bytes');
+  } finally { request.mockRestore(); }
+});
+
+it('rotates bounded authenticated retention rechecks without retrying negative captures', async () => {
+  const f = fixture();
+  git(f.root, 'config', 'remote.origin.url', 'https://origin.invalid/repo.git');
+  git(f.root, 'config', 'lfs.url', 'https://lfs.invalid/repo?token=private');
+  const objects = [f.base.object];
+  for (let i = 0; i < 69; i++) {
+    const next = f.pointer(`retained payload ${i}`);
+    objects.push(next.object);
+    writeFileSync(join(f.root, `${i}.bin`), next.text);
+  }
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'retained inventory');
+  let present = false;
+  const batches: Array<Array<typeof f.base.object>> = [];
+  const receipts: GitLfsOriginConfirmation[] = [];
+  const access = { ...f.lfs, confirmOrigin: async (receipt: GitLfsOriginConfirmation) => { receipts.push(receipt); } };
+  const capture = (revision: number) => createGitIntermediateCheckpoint({ repositoryPath: f.root, spaceId: 'space', revision, lfs: access });
+  const request = spyOn(globalThis, 'fetch').mockImplementation(fetchImplementation(async (input, init) => {
+    expect(new URL(String(input)).search).toBe('?token=private');
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    const requested = GitLfsObjectSchema.array().parse(JSON.parse(String(init?.body)).objects);
+    batches.push(requested);
+    return Response.json({ objects: requested.map(object => ({ ...object, ...(present ? { actions: { download: { href: 'https://cdn.invalid/payload' } } } : { error: { code: 404 } }) })) });
+  }));
+  try {
+    await capture(1); await capture(2);
+    expect(batches.map(batch => batch.length)).toEqual([70]);
+    await recheckGitLfsOrigin(f.root, access);
+    expect(batches.map(batch => batch.length)).toEqual([70, 64]);
+    present = true;
+    await recheckGitLfsOrigin(f.root, access);
+    expect(batches[2]?.slice(0, 6)).toEqual([...objects].sort((a, b) => a.oid.localeCompare(b.oid)).slice(64));
+    await recheckGitLfsOrigin(f.root, access);
+    expect(batches.map(batch => batch.length)).toEqual([70, 64, 64, 6]);
+    expect(receipts.flatMap(receipt => receipt.objects).map(object => object.oid).sort()).toEqual(objects.map(object => object.oid).sort());
+    expect(receipts.every(receipt => receipt.endpoint === 'https://lfs.invalid/repo')).toBe(true);
+    const confirmed = await capture(3);
+    expect(confirmed.lfs?.objects.every(object => object.source === 'origin')).toBe(true);
+    expect(batches).toHaveLength(4);
+    await recheckGitLfsOrigin(f.root, access);
+    expect(batches).toHaveLength(4);
+  } finally { request.mockRestore(); }
 });

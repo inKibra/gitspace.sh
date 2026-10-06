@@ -17,6 +17,7 @@ import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type GitLfsConfirmedObject } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { readEncryptedCheckpoint } from './git-lfs-store.js';
+const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
@@ -332,7 +333,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const bytes = await readEncryptedCheckpoint(this.env.DATA, `users/${this.env.ACCOUNT_ID}/${expectedKey}`, key, input.manifestHash);
     if (!bytes) throw new Error('Portable checkpoint manifest is missing');
     const manifest = parseWorkspaceCheckpoint(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), { projectId: input.projectId, spaceId: input.spaceId, revision: input.revision });
-    const retained = { snapshotId: `portable:${input.spaceId}:${input.revision}`, workspaceId: input.spaceId, kind: 'portable' as const, objects: manifest.repository.lfs?.objects ?? [] };
+    const retained = { snapshotId: `portable:${input.spaceId}:${input.revision}`, workspaceId: input.spaceId, kind: 'portable' as const, objects: manifest.repository.lfs?.objects ?? [], publicationId: `${input.machineId}:portable:${input.spaceId}:${input.revision}` };
     const accepted = this.commit(() => {
       this.save(commitSpaceClosed(this.get(), input, new Date().toISOString()));
       this.ctx.storage.sql.exec('INSERT OR REPLACE INTO portable_lfs_outbox VALUES(?,?)', retained.snapshotId, JSON.stringify(retained));
@@ -346,8 +347,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (!state) return;
     for (const row of this.ctx.storage.sql.exec<{ snapshot_id: string; inventory: string }>('SELECT snapshot_id,inventory FROM portable_lfs_outbox').toArray()) {
       try {
-        await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${state.projectId}`).lfsRetain(RetainedLfsSnapshotSchema.parse(JSON.parse(row.inventory)));
-        this.ctx.storage.sql.exec('DELETE FROM portable_lfs_outbox WHERE snapshot_id=?', row.snapshot_id);
+        const retained = PortableLfsRetentionSchema.parse(JSON.parse(row.inventory));
+        const project = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${state.projectId}`);
+        await project.lfsRetain(retained);
+        if (retained.publicationId) await project.lfsReleasePublication(retained.publicationId);
+        this.ctx.storage.sql.exec('DELETE FROM portable_lfs_outbox WHERE snapshot_id=? AND inventory=?', row.snapshot_id, row.inventory);
         await this.ctx.storage.sync();
       } catch (error) { await this.scheduleAlarm('lfs', Date.now() + 1_000); throw error; }
     }

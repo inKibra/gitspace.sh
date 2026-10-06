@@ -46,7 +46,7 @@ import { ArtifactUploads } from './artifact-uploads.js';
 import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
 import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import { createCloudGitLfsStore } from './cloud-lfs-store.js';
-import type { MachineGitLfs } from './git-lfs.js';
+import { recheckGitLfsOrigin, type MachineGitLfs } from './git-lfs.js';
 import { createPublishedSpaceHeadResolver } from './inspector-base.js';
 import type { SpaceWorkspaceControls } from './space-workspace-controls.js';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
@@ -876,8 +876,27 @@ export async function startMachineRuntime() {
     },
   });
 
+  let lfsRecheck: Promise<void> | undefined;
+  let lfsRecheckAfter = Date.now() + 60_000;
+  let lfsRecheckCursor = '';
   const publicationReplayTimer = setInterval(() => {
-    if (startupCommitted && !preparingReplacement) canonicalSessionWriter.replayInBackground(machineId, heldSession);
+    if (!startupCommitted || preparingReplacement) return;
+    canonicalSessionWriter.replayInBackground(machineId, heldSession);
+    if (lfsRecheck || Date.now() < lfsRecheckAfter) return;
+    lfsRecheckAfter = Date.now() + 60_000;
+    const candidates = database.listProjects().flatMap(project => database.listSpaces(project.id))
+      .filter(space => space.holderId === machineId && space.placementState === 'open')
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const space = candidates.find(space => space.id > lfsRecheckCursor) ?? candidates[0];
+    if (!space) return;
+    lfsRecheckCursor = space.id;
+    lfsRecheck = (async () => {
+      const placement = await authority.getSpace(space.projectId, space.id);
+      if (placement?.state !== 'open' || placement.machineId !== machineId || placement.generation !== space.generation) return;
+      await recheckGitLfsOrigin(space.rootPath, await lfs(space.projectId));
+    })().catch(() => {
+      console.warn('[gitspace-lfs] Origin recheck failed; retry remains scheduled', space.id);
+    }).finally(() => { lfsRecheck = undefined; });
   }, 5_000);
 
   await authority.putMachineDefinition({
@@ -899,6 +918,7 @@ export async function startMachineRuntime() {
     stopping = true;
     preparingReplacement = true;
     clearInterval(publicationReplayTimer);
+    await lfsRecheck;
     artifactUploads.close();
     if (bootstrapProjectId) {
       await authority.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: bootstrapProjectId,

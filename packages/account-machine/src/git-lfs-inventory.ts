@@ -31,3 +31,35 @@ export async function committedLfsInventory(root: string, head: string | null, g
   await rename(temporary, path);
   return objects;
 }
+
+const OriginInventory = z.object({
+  version: z.literal(1),
+  identity: z.string(),
+  attempted: z.array(GitLfsObjectSchema),
+  confirmed: z.array(GitLfsObjectSchema),
+  cursor: z.string().optional(),
+});
+
+/** Local discovery classifications survive process restarts; only acknowledged positives are saved. */
+export async function originLfsInventory(root: string, identity: string, git: Git) {
+  const path = resolve(root, new TextDecoder().decode(await git(root, ['rev-parse', '--git-path', 'gitspace-lfs-origin-inventory.json'])).trim());
+  let previous: z.infer<typeof OriginInventory> | undefined;
+  try {
+    const parsed = OriginInventory.safeParse(JSON.parse(await readFile(path, 'utf8')));
+    if (parsed.success && parsed.data.identity === identity) previous = parsed.data;
+  } catch (error) {
+    if (!(error instanceof SyntaxError) && !(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+  }
+  const attempted = new Map(previous?.attempted.map(object => [object.oid, object]) ?? []);
+  const confirmed = new Map(previous?.confirmed.map(object => [object.oid, object]) ?? []);
+  return {
+    attempted, confirmed,
+    cursor: previous?.cursor,
+    async save() {
+      await mkdir(dirname(path), { recursive: true });
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      await writeFile(temporary, JSON.stringify({ version: 1, identity, attempted: [...attempted.values()], confirmed: [...confirmed.values()], cursor: this.cursor }));
+      await rename(temporary, path);
+    },
+  };
+}
