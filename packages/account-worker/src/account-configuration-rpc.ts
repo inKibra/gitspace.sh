@@ -33,6 +33,7 @@ import {
   updateProjectCronContract,
   deleteProjectCronContract,
   runProjectCronNowContract,
+  cancelProjectCronRunContract,
   projectCronHistoryContract,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
@@ -369,6 +370,14 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       return err(errors.OperationFailed({ operation: 'runNow', message: error instanceof Error ? error.message : String(error) }));
     }
   });
+  const cancelRun = server.implement(cancelProjectCronRunContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      return ok(await env.PROJECT_CRONS.getByName(JSON.stringify([userId, input.projectId])).cancelRun(input));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'cancelRun', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   const history = server.implement(projectCronHistoryContract).handler(async ({ input, errors }) => {
     try {
       await project(input.projectId); return ok(await (env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>).getByName(JSON.stringify([userId, input.projectId])).history(input));
@@ -381,7 +390,7 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret, account: { list: listAccountSecrets, put: putAccountSecret, delete: deleteAccountSecret, grant: grantAccountSecret, revoke: revokeAccountSecret } },
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
-    crons: { list: listCrons, create: createCron, update: updateCron, delete: deleteCron, runNow, history },
+    crons: { list: listCrons, create: createCron, update: updateCron, delete: deleteCron, runNow, cancelRun, history },
     mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
   };
 }

@@ -15,7 +15,7 @@ async function fixture(runCommand: RunExecutorCommand) {
   const unexpected = (): never => { throw new Error('Unexpected external operation'); };
   const executor = new MachineExecutor({ machineId: 'machine', journal, runCommand, artifacts: unexpected, cloudModel: unexpected, cloudMcp: unexpected });
   const { attachmentId, projectId, workspaceId, machineId, generation } = attachment;
-  const dispatch = (code: string) => RuntimeToolDispatchSchema.parse({ version: 1, attachmentId, projectId, workspaceId, machineId, generation, conversationId: 'conversation', taskId: 'task', requestId: 'request', attemptId: 'attempt', tool: 'codemode', args: { code }, deadlineAt: new Date(Date.now() + 10_000).toISOString(), replay: 'unsafe' });
+  const dispatch = (code: string) => RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, attachmentId, projectId, workspaceId, machineId, generation, conversationId: 'conversation', taskId: 'task', requestId: 'request', attemptId: 'attempt', tool: 'codemode', args: { code }, deadlineAt: new Date(Date.now() + 10_000).toISOString(), replay: 'unsafe' });
   return { journal, executor, dispatch, close: async () => { journal.close(); await rm(root, { recursive: true, force: true }); } };
 }
 

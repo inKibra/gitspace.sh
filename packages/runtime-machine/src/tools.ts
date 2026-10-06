@@ -6,7 +6,7 @@ import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import { RuntimeContentSchema, RuntimeJsonSchema, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
-import { ApplyPatchArgumentsSchema, prepareV4APatch, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeBashArgumentsSchema, RuntimeFindArgumentsSchema, RuntimeGrepArgumentsSchema, RuntimeAstGrepArgumentsSchema, RuntimeAstEditArgumentsSchema, RuntimeAstResolveArgumentsSchema, RuntimeCodemodeArgumentsSchema } from '@gitspace/protocol-runtime';
+import { ApplyPatchArgumentsSchema, prepareV4APatch, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeBashCommandArgumentsSchema, RuntimeFindArgumentsSchema, RuntimeGrepArgumentsSchema, RuntimeAstGrepArgumentsSchema, RuntimeAstEditArgumentsSchema, RuntimeAstResolveArgumentsSchema, RuntimeCodemodeArgumentsSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment, ExecutorJournal } from './journal.js';
 import { proposalPath, stageProposal, resolveProposal } from './ast-proposals.js';
 import { ExecutorEffectUncertain, type RunExecutorCommand } from './commands.js';
@@ -111,7 +111,12 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
       return text(changes.map(change => `${change.after === null ? 'Deleted' : change.before === null ? 'Added' : 'Updated'} ${change.destination ?? change.path}`).join('\n'));
     }
     case 'bash': {
-      const args = RuntimeBashArgumentsSchema.parse(dispatch.args);
+      if (dispatch.args && typeof dispatch.args === 'object' && !Array.isArray(dispatch.args) && 'op' in dispatch.args) {
+        const operation = options.operations?.bash;
+        if (!operation) throw new Error('Background command controls are unavailable');
+        return operation(dispatch, local, signal);
+      }
+      const args = RuntimeBashCommandArgumentsSchema.parse(dispatch.args);
       const result = await command('/bin/bash', ['-c', args.command], args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath);
       return text(`Exit code: ${result.exitCode}\n${result.output}`);
     }

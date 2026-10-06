@@ -67,11 +67,9 @@ test('cleanup refuses unresolved effects and forged primary scope', async () => 
     await writeFile(join(f.root, 'work'), 'keep');
     const input = { attachment: { ...f.local.attachment, state: 'draining' as const }, checkoutRoot: f.directory, signal: f.signal, stopAndVerify: async () => {}, verifyUnmounted: async () => {} };
     await expect(cleanupMachineAttachment(f.journal, { ...input, attachment: { ...input.attachment, role: 'primary' } })).rejects.toThrow();
-    f.journal.begin(RuntimeToolDispatchSchema.parse({
-      version: 1, projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'runner', generation: 1,
-      conversationId: 'conversation', taskId: 'task', requestId: 'request', attemptId: 'attempt', tool: 'bash', args: { command: 'effect' },
-      deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe',
-    }));
+    f.journal.begin(RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'runner', generation: 1,
+    conversationId: 'conversation', taskId: 'task', requestId: 'request', attemptId: 'attempt', tool: 'bash', args: { command: 'effect' },
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe', }));
     await expect(cleanupMachineAttachment(f.journal, input)).rejects.toThrow('unresolved');
     expect(await readFile(join(f.root, 'work'), 'utf8')).toBe('keep');
   } finally { await f.close(); }

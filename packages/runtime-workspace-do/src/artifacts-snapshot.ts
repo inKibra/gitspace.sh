@@ -3,7 +3,7 @@ import { Volume, createFsFromVolume } from 'memfs';
 import { Result, TaggedError } from 'better-result';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { z } from 'zod';
-import { isCleanSnapshotContent } from './artifacts-merge.js';
+import { hasSnapshotConflictMarkers, isCleanSnapshotContent, isSnapshotTextEntry, readSnapshotText } from './artifacts-merge.js';
 
 export type RuntimeGitCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?: string; oid?: string; type?: 'blob' | 'commit' };
@@ -90,7 +90,7 @@ export async function initializeArtifactsRepository(repo: Pick<ArtifactsRepo, 'i
   return { indexCommit, trackedWorktreeCommit, worktreeCommit, tree };
 }
 
-export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readCommit' | 'readTree' | 'info' | 'createToken' | 'revokeToken'>, input: WriteSnapshotInput, request: ArtifactsFetch = fetch): Promise<Result<RuntimeGitCheckpoint, ArtifactsSnapshotError>> {
+export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readCommit' | 'readTree' | 'readBlob' | 'info' | 'createToken' | 'revokeToken'>, input: WriteSnapshotInput, request: ArtifactsFetch = fetch): Promise<Result<RuntimeGitCheckpoint, ArtifactsSnapshotError>> {
   let certainty: ArtifactsSnapshotError['certainty'] = 'not-published';
   return Result.tryPromise({ try: async () => {
     input.signal?.throwIfAborted();
@@ -147,7 +147,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
         if (direct) {
           const path = prefix + direct.path;
           if (!input.machine && !direct.oid && path !== 'HEAD') {
-            if (direct.content !== null && !isCleanSnapshotContent(direct.content)) markerConflicts.add(path);
+            if (direct.content !== null && isSnapshotTextEntry({ type: direct.type ?? 'blob', mode: direct.mode ?? existing?.mode ?? '100644' }) && !isCleanSnapshotContent(direct.content)) markerConflicts.add(path);
             else markerConflicts.delete(path);
           }
           if (direct.content === null && !direct.oid) {
@@ -175,9 +175,33 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
       }
       const tree = await git.writeTree({ fs, dir, tree: [...entries.values()] });
       if (tree !== oid) oids.add(tree);
+      if (input.machine && input.conflicts === undefined) trees.set(tree, [...entries.values()].map(entry => ({ name: entry.path, hash: entry.oid, mode: entry.mode, type: entry.type === 'commit' ? 'gitlink' : entry.type })));
       return tree;
     };
     const worktreeTree = await editTree(previous.worktreeTree, mutations, false);
+    // Unmerged initial/recovery publications have no planner-derived marker
+    // inventory. Inspect their complete worktree, including unchanged blobs.
+    if (input.machine && input.conflicts === undefined) {
+      const scan = async (tree: string, prefix: string, ancestors: Set<string>): Promise<void> => {
+        if (ancestors.has(tree) || ancestors.size > 128) throw new Error('Invalid snapshot tree depth');
+        ancestors.add(tree);
+        try {
+          for (const entry of await loadTree(tree)) {
+            const path = prefix + entry.name;
+            if (entry.type === 'tree') { await scan(entry.hash, `${path}/`, ancestors); continue; }
+            if (path === 'HEAD' || !isSnapshotTextEntry({ type: entry.type === 'gitlink' ? 'commit' : 'blob', mode: entry.mode })) continue;
+            input.signal?.throwIfAborted();
+            const blob = oids.has(entry.hash)
+              ? new Blob([Uint8Array.from((await git.readBlob({ fs, dir, oid: entry.hash })).blob)])
+              : await repo.readBlob(entry.hash);
+            if (!blob) throw new Error(`Missing snapshot blob ${entry.hash}`);
+            const content = await readSnapshotText(blob);
+            if (content !== null && hasSnapshotConflictMarkers(content)) markerConflicts.add(path);
+          }
+        } finally { ancestors.delete(tree); }
+      };
+      await scan(worktreeTree, '', new Set());
+    }
     const conflicts = [...markerConflicts].sort();
     const conflictsChanged = JSON.stringify(conflicts ?? []) !== JSON.stringify(previous.conflicts ?? []);
     if (worktreeTree === previous.worktreeTree && !input.machine && !input.forcePublication && !conflictsChanged) return previous;

@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
-  PROJECT_CRON_ACTIVE_LOCK_MS,
+  PROJECT_CRON_OVERDUE_MS,
+  PROJECT_CRON_MAX_QUEUE_MS,
   nextProjectCronRunAt,
   parseProjectCronSchedule,
   type ProjectCronDraft,
@@ -428,8 +429,8 @@ export class ProjectCronsDO extends DurableObject<Env> {
       ).toArray()[0];
       if (!candidate) return false;
       return this.ctx.storage.sql.exec<{ id: string }>(
-        "UPDATE project_cron_runs SET state='running',claimed_at=?,started_at=?,claim_token=?,claimed_by=? WHERE id=? AND project_id=? AND state='pending' RETURNING id",
-        now, now, crypto.randomUUID(), `cloud:${projectId}`, candidate.id, projectId,
+        "UPDATE project_cron_runs SET state='running',claimed_at=?,claim_token=?,claimed_by=? WHERE id=? AND project_id=? AND state='pending' RETURNING id",
+        now, crypto.randomUUID(), `cloud:${projectId}`, candidate.id, projectId,
       ).toArray().length === 1;
     });
   }
@@ -480,6 +481,7 @@ export class ProjectCronsDO extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const identity = this.ctx.storage.sql.exec<{ project_id: string }>('SELECT project_id FROM project_cron_identity WHERE id = 1').toArray()[0];
     if (!identity) return;
+    await this.dispatchCloudRuns(identity.project_id);
     await this.processDue({ projectId: identity.project_id });
     await this.dispatchCloudRuns(identity.project_id);
   }
@@ -499,23 +501,61 @@ export class ProjectCronsDO extends DurableObject<Env> {
       const requestId = `cron:${row.id}`;
       try {
         let receipt = await runtime.runtimeRequestStatus({ ...identity, requestId });
+        const expiresAt = row.created_at + Math.min(parseProjectCronSchedule(row.schedule)!, PROJECT_CRON_MAX_QUEUE_MS);
+        if ((receipt.state === 'pending' || receipt.state === 'queued') && Date.now() >= expiresAt) {
+          receipt = await runtime.runtimeCronWithdraw({ ...identity, requestId });
+          if (receipt.state === 'withdrawn') {
+            await this.completeRun({ projectId, runId: row.id, claimToken: row.claim_token, state: 'blocked', message: 'Skipped: workspace busy' });
+            return;
+          }
+        }
         if (receipt.state === 'pending') {
           await runtime.runtimeCronSubmit({ ...identity, requestId, text: row.prompt, readScopes: parseStringArray(row.read_scopes_json), writeScopes: parseStringArray(row.write_scopes_json) });
           receipt = await runtime.runtimeRequestStatus({ ...identity, requestId });
         }
-        if (receipt.state === 'succeeded' || receipt.state === 'failed' || receipt.state === 'interrupted') {
-          await this.completeRun({ projectId, runId: row.id, claimToken: row.claim_token, state: receipt.state === 'succeeded' ? 'succeeded' : 'failed', message: receipt.message });
-        } else if (Date.now() - row.created_at >= PROJECT_CRON_ACTIVE_LOCK_MS && receipt.conversationId !== null) {
-          await runtime.runtimeCancel({ ...identity, conversationId: receipt.conversationId });
-          this.ctx.storage.sql.exec("UPDATE project_cron_runs SET message='Deadline elapsed; cancellation requested, awaiting terminal cloud receipt' WHERE id=? AND claim_token=?", row.id, row.claim_token);
+        if (receipt.startedAt !== undefined) this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=COALESCE(started_at,?) WHERE id=? AND claim_token=?', receipt.startedAt, row.id, row.claim_token);
+        if (receipt.state === 'pending' || receipt.state === 'queued') this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=NULL WHERE id=? AND claim_token=?', row.id, row.claim_token);
+        if (receipt.state === 'succeeded' || receipt.state === 'failed' || receipt.state === 'interrupted' || receipt.state === 'withdrawn') {
+          const message = row.message?.startsWith('Overdue:') ? `${row.message}\n${receipt.message ?? `Completed: ${receipt.state}`}` : receipt.message;
+          await this.completeRun({ projectId, runId: row.id, claimToken: row.claim_token, state: receipt.state === 'succeeded' ? 'succeeded' : receipt.state === 'withdrawn' ? 'blocked' : 'failed', message });
+        } else if (receipt.state === 'running') {
+          const startedAt = receipt.startedAt ?? row.started_at ?? Date.now();
+          this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=COALESCE(started_at,?) WHERE id=? AND claim_token=?', startedAt, row.id, row.claim_token);
+          if (Date.now() - startedAt >= PROJECT_CRON_OVERDUE_MS) {
+            this.ctx.storage.sql.exec("UPDATE project_cron_runs SET message='Overdue: running for more than one hour; workspace agent continues' WHERE id=? AND claim_token=?", row.id, row.claim_token);
+            await runtime.runtimeCronNotifyOverdue({ ...identity, requestId });
+          }
         }
       } catch (error) {
-        // Transport failure is not terminal proof. Keep the canonical claim and
-        // retry status/re-submit with the identical id, never issue a fresh run.
-        this.ctx.storage.sql.exec('UPDATE project_cron_runs SET message=? WHERE id=? AND claim_token=?', `Cloud dispatch unresolved: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4000), row.id, row.claim_token);
+        // Transport failure is not terminal proof. Preserve a recorded overdue notice.
+        if (!this.requiredRun(projectId, row.id).message?.startsWith('Overdue:')) this.ctx.storage.sql.exec('UPDATE project_cron_runs SET message=? WHERE id=? AND claim_token=?', `Cloud dispatch unresolved: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4000), row.id, row.claim_token);
       }
     }));
     await this.refreshAlarm(Date.now());
+  }
+
+  async cancelRun(input: { projectId: string; runId: string; confirmStopWorkspaceAgent: boolean }): Promise<ProjectCronRunView> {
+    const projectId = this.ensureProject(input.projectId);
+    const row = this.requiredRun(projectId, input.runId);
+    if (row.state !== 'pending' && row.state !== 'running') return runView(row);
+    if (row.state === 'pending') {
+      this.ctx.storage.sql.exec("UPDATE project_cron_runs SET state='blocked',completed_at=?,message='Cancelled: queued submission withdrawn' WHERE id=? AND state='pending'", Date.now(), row.id);
+      return runView(this.requiredRun(projectId, row.id));
+    }
+    const target = parseTarget(row.target_json);
+    const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: target.scope === 'project' ? projectId : target.spaceId });
+    const runtime = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.workspaceId}`);
+    let receipt = await runtime.runtimeCronWithdraw({ ...identity, requestId: `cron:${row.id}` });
+    if (receipt.state === 'running') {
+      this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=COALESCE(started_at,?) WHERE id=? AND claim_token=?', receipt.startedAt ?? Date.now(), row.id, row.claim_token);
+      if (input.confirmStopWorkspaceAgent !== true) throw new ProjectCronValidationError('confirmStopWorkspaceAgent', 'This cron is running. Explicit confirmation is required to Stop workspace agent and its child agents.');
+      receipt = await runtime.runtimeCronCancel({ ...identity, requestId: `cron:${row.id}`, confirmStopWorkspaceAgent: true });
+    }
+    if (receipt.state === 'withdrawn' && row.claim_token) {
+      return this.completeRun({ projectId, runId: row.id, claimToken: row.claim_token, state: 'blocked', message: 'Cancelled: queued submission withdrawn' });
+    }
+    await this.refreshAlarm(Date.now());
+    return runView(this.requiredRun(projectId, row.id));
   }
 
   private ensureProject(projectIdInput: string): string {
@@ -575,12 +615,11 @@ export class ProjectCronsDO extends DurableObject<Env> {
   }
 
   private expireStaleRuns(now: number): void {
-    const cutoff = now - PROJECT_CRON_ACTIVE_LOCK_MS;
-    this.ctx.storage.sql.exec(`
-      UPDATE project_cron_runs SET state = 'blocked', completed_at = ?, claim_token = NULL,
-        message = 'Run was not admitted within one hour'
-      WHERE state = 'pending' AND created_at <= ?
-    `, now, cutoff);
+    const pending = this.ctx.storage.sql.exec<RunRow>("SELECT * FROM project_cron_runs WHERE state='pending'").toArray();
+    for (const row of pending) {
+      if (now - row.created_at < Math.min(parseProjectCronSchedule(row.schedule)!, PROJECT_CRON_MAX_QUEUE_MS)) continue;
+      this.ctx.storage.sql.exec("UPDATE project_cron_runs SET state='blocked',completed_at=?,message='Skipped: workspace busy' WHERE id=? AND state='pending'", now, row.id);
+    }
   }
 
   private async refreshAlarm(now: number): Promise<void> {

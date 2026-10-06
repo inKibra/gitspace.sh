@@ -13,7 +13,7 @@ import { useInference } from './InferenceContext.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient, createGitSpaceBrowserClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
-import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
+import { runtimeScope, runtimeTurns, runtimeSubagentRecords } from './runtime-shell-adapter.js';
 import { RuntimeMachines } from './RuntimeMachines.js';
 import { BrowserApprovalCard } from './RuntimeBrowser.js';
 import { RELEASE_TARGETS } from './release.js';
@@ -97,6 +97,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const transcript = useTranscriptHistory(transcriptSource);
   const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null);
   const controls: SessionControlsProps | undefined = value ? {
+    selectionReadOnly: runtimeSubagentRecords(snapshot).some(record => record.conversationId === conversationId),
     value: value.pendingAsk || !question || question.browser ? value : { ...value, pendingAsk: { id: question.id, source: 'gitspace', links: [], questions: [{ id: question.id, question: question.prompt, header: question.kind === 'approval' ? 'Approval required' : null, multi: false, recommended: null, options: (question.kind === 'approval' ? ['Approve', 'Reject'] : question.choices).map(label => ({ label, description: null, preview: null })) }] } },
     onCycleRole: async direction => { await run({ type: 'cycleRole', direction }); },
     onSetModel: async (provider, model) => { await run({ type: 'setModel', provider, model }); },

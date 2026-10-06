@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor';
+import { daemonClientForProject, type DaemonRequest, type DaemonResponse } from '@gitspace/supervisor';
 import { checkoutPath, mergeDelegateCommit, runSupervisorCommand, ExecutorEffectUncertain, type ExecutorJournal, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
@@ -12,7 +12,13 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MachineMcpCoordinator } from './local-mcp.js';
-import { RuntimeJobRunArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeDelegateExportArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeAgentLifecycleRunArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeBashCommandArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeDelegateExportArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeAgentLifecycleRunArgumentsSchema } from '@gitspace/protocol-runtime';
+import { PROTECTED_LIFECYCLE_SOCKET } from './protected-lifecycle.js';
+
+export async function workspaceProcessVisible(root: string, process: Extract<DaemonResponse, { op: 'describe' }>): Promise<boolean> {
+  if (process.spec.visibility === 'private' || process.spec.inheritEnv === false || process.spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET)) return false;
+  try { await checkoutPath(root, process.spec.cwd); return true; } catch { return false; }
+}
 
 export function machineOperationalTools(options: { environments: WorkspaceEnvironmentManager; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; controls: SpaceWorkspaceControls; artifacts: LocalArtifactResolver; mcp: MachineMcpCoordinator; journal: () => ExecutorJournal }): Record<string, ExecutorOperationHandler> {
   return {
@@ -84,13 +90,13 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       const result = args.op === 'list' ? await options.services.list(dispatch.workspaceId) : args.op === 'start' ? await options.services.start(dispatch.workspaceId, args.name) : await options.services.stop(dispatch.workspaceId, args.name);
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
-    jobs: async (dispatch, local, signal) => {
-      const args = z.discriminatedUnion('op', [
-        RuntimeJobRunArgumentsSchema,
-        z.object({ op: z.enum(['logs', 'cancel']), attemptId: z.string().min(1) }).strict(),
+    bash: async (dispatch, local, signal) => {
+      const args = z.union([
+        RuntimeBashCommandArgumentsSchema,
+        z.object({ op: z.enum(['logs', 'cancel']), attemptId: z.string().min(1), lines: z.number().int().positive().max(10_000).optional(), head: z.boolean().optional(), cursor: z.number().int().nonnegative().optional() }).strict(),
       ]).parse(dispatch.args);
-      if (args.op === 'run') {
-        const result = await runSupervisorCommand({ application: args.application, args: args.args, cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, attemptId: dispatch.attemptId, sequence: 0, deadlineAt: dispatch.deadlineAt, signal });
+      if ('command' in args) {
+        const result = await runSupervisorCommand({ application: '/bin/bash', args: ['-c', args.command], cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, attemptId: dispatch.attemptId, sequence: 0, deadlineAt: dispatch.deadlineAt, signal });
         return [{ type: 'text', text: JSON.stringify(result) }];
       }
       const control = options.journal().jobControl(dispatch);
@@ -102,10 +108,10 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       const described = await client.request({ op: 'describe', name }, signal);
       // Match the same immutable command evidence required by executor recovery.
       if (described.op !== 'describe' || described.daemon.owner !== control.attemptId || described.daemon.name !== name || described.daemon.restartCount !== 0
-        || described.spec.application !== job.application || JSON.stringify(described.spec.args) !== JSON.stringify(job.args) || described.spec.cwd !== cwd
+        || described.spec.application !== '/bin/bash' || JSON.stringify(described.spec.args) !== JSON.stringify(['-c', job.command]) || described.spec.cwd !== cwd
         || described.spec.restart !== 'no' || described.spec.pty || described.spec.inheritEnv !== false || !described.spec.persist || described.spec.detached) throw new Error('Supervisor evidence does not match immutable job admission');
       const result = args.op === 'cancel' ? await client.request({ op: 'stop', name, timeoutMs: 5000 }, signal)
-        : await client.request({ op: 'logs', name, lines: 1000 }, signal);
+        : await client.request({ op: 'logs', name, lines: args.lines, head: args.head, cursor: args.cursor }, signal);
       const confirmed = await client.request({ op: 'describe', name }, signal);
       if (confirmed.op !== 'describe' || confirmed.daemon.id !== described.daemon.id || confirmed.daemon.restartCount !== 0
         || (result.op !== 'logs' && result.op !== 'stop')
@@ -115,25 +121,46 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
     proc: async (dispatch, local, signal) => {
       const args = RuntimeProcArgumentsSchema.parse(dispatch.args);
       const client = await daemonClientForProject(local.rootPath);
-      if (args.op === 'shutdown') throw new Error('Agent cannot shut down the machine supervisor');
-      const owner = `runtime:${dispatch.attachmentId}:${dispatch.generation}`;
+      const owner = `workspace:${dispatch.projectId}:${dispatch.workspaceId}`;
       const mutate = async (request: DaemonRequest) => {
         try { return await client.request(request, signal); }
         catch (error) { throw new ExecutorEffectUncertain('Supervisor mutation outcome requires reconciliation', { cause: error }); }
       };
       if (args.op === 'start') {
-        const spec = { ...args.spec, cwd: await checkoutPath(local.rootPath, args.spec.cwd) };
+        const processes = await client.request({ op: 'list' }, signal);
+        if (processes.op !== 'list') throw new Error('Invalid supervisor list response');
+        if (processes.daemons.some(process => process.name === args.spec.name)) {
+          const existing = await client.request({ op: 'describe', name: args.spec.name }, signal);
+          if (existing.op !== 'describe' || !await workspaceProcessVisible(local.rootPath, existing)) throw new Error('Process name belongs to a private or out-of-workspace process');
+        }
+        const spec = { ...args.spec, cwd: args.spec.cwd ? await checkoutPath(local.rootPath, args.spec.cwd) : local.rootPath };
         const result = await mutate({ op: 'start', spec, owner });
+        if (result.op !== 'start') throw new Error('Invalid supervisor start response');
+        if (spec.ready) {
+          const readiness = await client.request({ op: 'wait', name: spec.name, for: 'ready', timeoutMs: spec.ready.timeoutMs ?? 30_000 }, signal);
+          if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id) throw new ExecutorEffectUncertain('Process identity changed while observing readiness');
+          return [{ type: 'text', text: JSON.stringify({ op: 'start', daemon: readiness.daemon }) }];
+        }
         return [{ type: 'text', text: JSON.stringify(result) }];
       }
       if (args.op === 'list') {
         const result = await client.request(args, signal);
         if (result.op !== 'list') throw new Error('Invalid supervisor list response');
-        return [{ type: 'text', text: JSON.stringify(result.daemons.filter(process => process.owner === owner)) }];
+        const visible = [];
+        for (const process of result.daemons) {
+          const described = await client.request({ op: 'describe', name: process.name }, signal);
+          if (described.op === 'describe' && await workspaceProcessVisible(local.rootPath, described)) visible.push(process);
+        }
+        return [{ type: 'text', text: JSON.stringify(visible) }];
       }
-      const existing = await client.request({ op: 'describe', name: args.name }, signal);
-      if (existing.op !== 'describe' || existing.daemon.owner !== owner) throw new Error('Process does not belong to this attachment; private lifecycle processes are not accessible');
-      const result = args.op === 'send' || args.op === 'stop' || args.op === 'restart' ? await mutate(args) : await client.request(args, signal);
+      const existing = await client.request({ op: 'describe', name: args.name, ...(args.op === 'status' || args.op === 'describe' || args.op === 'stop' ? { instanceId: args.instanceId, restartCount: args.restartCount } : {}) }, signal);
+      if (existing.op !== 'describe' || !await workspaceProcessVisible(local.rootPath, existing)) throw new Error('Private or out-of-workspace processes are not accessible');
+      const result = args.op === 'send' || args.op === 'stop' || args.op === 'restart' ? await mutate(args) : args.op === 'status' || args.op === 'describe' ? existing : await client.request(args, signal);
+      if (args.op === 'restart' && result.op === 'restart' && existing.spec.ready) {
+        const readiness = await client.request({ op: 'wait', name: args.name, for: 'ready', timeoutMs: existing.spec.ready.timeoutMs ?? 30_000 }, signal);
+        if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id) throw new ExecutorEffectUncertain('Process identity changed while observing readiness');
+        return [{ type: 'text', text: JSON.stringify({ op: 'restart', daemon: readiness.daemon }) }];
+      }
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     delegate_export: async (dispatch, local, signal) => {

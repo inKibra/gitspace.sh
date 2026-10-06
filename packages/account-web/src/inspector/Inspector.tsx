@@ -3,7 +3,9 @@ import { parsePatchFiles, type DiffLineAnnotation, type FileDiffOptions, type Se
 import { FileTree, useFileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from '@xyflow/react';
-import type { ExecutionBlock, SideAgentBlock } from '@gitspace/blocks';
+import type { ExecutionBlock } from '@gitspace/blocks';
+import type { RuntimeSideAgentBlock } from '../runtime-shell-adapter.js';
+import { TranscriptItemView } from '../TurnTranscript.js';
 import {
   Accordion,
   AccordionContent,
@@ -149,7 +151,7 @@ export interface InspectorProps {
   journalEntries: readonly JournalEntryView[];
   threads: readonly ReviewThreadView[];
   services: readonly ServiceView[];
-  subagents: readonly (ExecutionBlock | SideAgentBlock)[];
+  subagents: readonly (ExecutionBlock | RuntimeSideAgentBlock)[];
   usage: InspectorUsageState;
   agentSetup: InspectorAgentSetupState;
   onRequestArtifact(reference: Extract<EvidenceReference, { kind: 'artifact' }>, signal?: AbortSignal): Promise<InspectorArtifactContent>;
@@ -668,11 +670,20 @@ function ArtifactsSurface({ references, onOpen, actions, uploads }: { references
   </div></ScrollArea></div>;
 }
 
-function SubagentsSurface({ subagents }: { subagents: readonly (ExecutionBlock | SideAgentBlock)[] }) {
+function SubagentsSurface({ subagents }: { subagents: readonly (ExecutionBlock | RuntimeSideAgentBlock)[] }) {
   if (!subagents.length) return <Padded><EmptyState icon={ic(Users01, 22)} title="No delegated work" description="Subagents from the canonical agent transcript appear here while they run and after they yield." /></Padded>;
   return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="p-4"><CardGroup border="outlined">{subagents.map((agent) => <Card key={agent.id}>
     <CardHeader><CardMedia icon={UsersGlyph} /><CardTitle>{agent.label}</CardTitle><CardDescription>{[agent.agent ?? 'subagent', agent.model, agent.status].filter(Boolean).join(' · ')}</CardDescription><CardAction className="flex flex-wrap gap-1"><Tone value={agent.status} />{agent.type === 'execution' && agent.hasFailures && agent.status !== 'failed' ? <Badge variant="dot" color="red">Failure in history</Badge> : null}</CardAction></CardHeader>
     {agent.summary ? <CardContent><GitSpaceMarkdown>{agent.summary}</GitSpaceMarkdown></CardContent> : null}
+    {agent.type === 'side-agent' && agent.runtime ? <CardContent>
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-caption">
+        <dt className="text-muted-foreground">Selected role</dt><dd>{agent.runtime.role ?? 'No role selected'}</dd>
+        <dt className="text-muted-foreground">Admitted model</dt><dd className="break-all font-mono">{agent.model ?? 'No model admitted'}</dd>
+        {agent.runtime.definition ? <><dt className="text-muted-foreground">Definition revision</dt><dd className="break-all font-mono">{agent.runtime.definition.revision}</dd></> : null}
+      </dl>
+      {agent.runtime.definition ? <details><summary className="min-h-10 cursor-pointer py-2 text-caption">Retained definition · read-only</summary><p className="mb-2 break-all font-mono text-caption text-muted-foreground">{agent.runtime.definition.path}</p><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{agent.runtime.definition.content}</pre></details> : null}
+    </CardContent> : null}
+    {agent.type === 'side-agent' && agent.messages?.length ? <CardContent><details><summary className="min-h-10 cursor-pointer py-2 text-caption">Conversation history</summary><div className="flex min-w-0 flex-col gap-2">{agent.messages.map(message => <TranscriptItemView key={message.id} item={message} active={false} />)}</div></details></CardContent> : null}
   </Card>)}</CardGroup></div></ScrollArea>;
 }
 function ServicesSurface({ services, onOpenTerminal, onStart, onStop }: {

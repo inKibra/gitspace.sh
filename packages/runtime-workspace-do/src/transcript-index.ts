@@ -80,6 +80,7 @@ export function createTranscriptIndex(durable: DurableObjectStorage, storage: St
             projector.apply({ sessionId: `pi:${id}`, ordinal: ordinal++, kind: 'message_end', payload: { message } });
           }
           if (entry.kind === 'gitspace.model-fallback') projector.apply({ sessionId: `pi:${id}`, ordinal, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.model-fallback', display: true, content: typeof entry.data === 'object' && entry.data !== null && 'message' in entry.data ? String(entry.data.message) : '' } } });
+          if (entry.kind === 'gitspace.cron-overdue') projector.apply({ sessionId: `pi:${id}`, ordinal, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.cron-overdue', display: true, content: typeof entry.data === 'object' && entry.data !== null && 'text' in entry.data ? String(entry.data.text) : '' } } });
           projector.flush();
           sql.exec('INSERT OR REPLACE INTO runtime_transcript_state VALUES(?,?,?,?)', id, String(entry.id), projector.checkpoint(), revision);
           sql.exec('DELETE FROM runtime_transcript_pending WHERE conversation=? AND entry=?', id, next.entry);

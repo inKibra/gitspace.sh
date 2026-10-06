@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { canonicalJson, dispatchIdentity, receiptDigest, sealReceipt, RuntimeReceiptTransportSchema, RuntimeReceiptControlSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, RuntimeGitCheckpointSchema, type RuntimeReceiptTransport, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeBashCommandArgumentsSchema, isSubagentToolCallAllowed, runtimeOperationIsReadOnly } from '@gitspace/protocol-runtime';
 import { ExecutorJournal, dispatchFingerprint, type LocalAttachment } from './journal.js';
 import { checkoutPath, executeMachineTool, type ExecutorContent, type MachineToolOptions } from './tools.js';
 import { z } from 'zod';
@@ -70,6 +71,7 @@ export class MachineExecutor {
     } catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
   }
   private authorize(dispatch: RuntimeToolDispatch, recovery: boolean): LocalAttachment {
+    if (dispatch.conversationKind === 'subagent' && !isSubagentToolCallAllowed(dispatch.tool, dispatch.args)) throw new Error('Subagent execution is read-only');
     const local = this.options.journal.attachment(dispatch.attachmentId);
     if (!local || dispatch.machineId !== this.options.machineId || local.attachment.machineId !== dispatch.machineId || local.attachment.workspaceId !== dispatch.workspaceId || local.attachment.projectId !== dispatch.projectId || local.attachment.generation !== dispatch.generation) throw new Error('Execution attachment is stale or unauthorized');
     if (local.attachment.state !== 'ready' && !(recovery && ['draining', 'lost', 'detached'].includes(local.attachment.state))) throw new Error('Attachment is not accepting execution');
@@ -99,14 +101,15 @@ export class MachineExecutor {
       const result = await this.withCheckout(local, () => this.finishMutation(local, dispatch, RuntimeToolResultSchema.parse(staged)));
       return this.options.journal.saveReceipt(dispatch, await sealReceipt(dispatch, result, local.executionSecret));
     }
-    if (attempt?.state === 'running' && !this.active.has(dispatch.attemptId) && (dispatch.tool === 'bash' || dispatch.tool === 'jobs')) {
+    if (attempt?.state === 'running' && !this.active.has(dispatch.attemptId) && dispatch.tool === 'bash') {
       try {
-        const args = z.object({ command: z.string().optional(), application: z.string().optional(), args: z.array(z.string()).default([]), cwd: z.string().optional(), op: z.string().optional() }).parse(dispatch.args);
-        if ((dispatch.tool === 'bash' && args.command !== undefined) || (dispatch.tool === 'jobs' && args.op === 'run' && args.application !== undefined)) {
+        const parsed = RuntimeBashCommandArgumentsSchema.safeParse(dispatch.args);
+        if (parsed.success) {
+          const args = parsed.data;
           const cancelRequested = cancel || attempt.cancelRequested === true;
-          const recovered = await reconcileSupervisorCommand({ application: dispatch.tool === 'bash' ? '/bin/bash' : args.application!, args: dispatch.tool === 'bash' ? ['-c', args.command!] : args.args, cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, attemptId: dispatch.attemptId, sequence: 0 }, cancelRequested);
+          const recovered = await reconcileSupervisorCommand({ application: '/bin/bash', args: ['-c', args.command], cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, attemptId: dispatch.attemptId, sequence: 0 }, cancelRequested);
           if (recovered) {
-            const outcome: RuntimeToolResult = { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: cancelRequested ? 'interrupted' : 'completed', content: [{ type: 'text', text: dispatch.tool === 'bash' ? `Exit code: ${recovered.exitCode}\n${recovered.output}` : JSON.stringify(recovered) }] };
+            const outcome: RuntimeToolResult = { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: cancelRequested ? 'interrupted' : 'completed', content: [{ type: 'text', text: `Exit code: ${recovered.exitCode}\n${recovered.output}` }] };
             const result = await this.withCheckout(local, () => this.finishMutation(local, dispatch, outcome));
             return this.options.journal.saveReceipt(dispatch, await sealReceipt(dispatch, result, local.executionSecret));
           }
@@ -127,7 +130,7 @@ export class MachineExecutor {
     const local = this.authorize(dispatch, false);
     if (!local.prerequisitesComplete) throw new Error('Executor checkout prerequisites have not completed');
     if (!local.attachment.capabilities.includes(dispatch.tool)) throw new Error('Attachment does not permit this tool');
-    if (!['read', 'grep', 'find', 'ast_grep', 'rule_match_ast'].includes(dispatch.tool) && dispatch.replay !== 'unsafe') throw new Error('Effectful tools require unsafe replay classification');
+    if (!runtimeOperationIsReadOnly(dispatch.tool, dispatch.args) && dispatch.tool !== 'rule_match_ast' && dispatch.replay !== 'unsafe') throw new Error('Effectful tools require unsafe replay classification');
     const previous = this.options.journal.attempt(dispatch.attemptId);
     if (previous?.result) return previous.result;
     const running = this.active.get(dispatch.attemptId);

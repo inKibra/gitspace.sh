@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { canonicalJson, RuntimeJobRunArgumentsSchema, RuntimeReceiptTransportSchema, RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeReceiptTransport } from '@gitspace/protocol-runtime';
+import { canonicalJson, RuntimeBashCommandArgumentsSchema, RuntimeReceiptTransportSchema, RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeReceiptTransport } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 
 const LocalAttachmentSchema = z.object({ attachment: RuntimeAttachmentSchema, rootPath: z.string().min(1), executionSecret: z.string().min(1), prerequisitesComplete: z.boolean(), checkoutPrepared: z.boolean().optional() });
@@ -63,17 +63,17 @@ export class ExecutorJournal {
   }
   saveProposal(id: string, value: unknown): void { this.database.query('INSERT INTO executor_proposals(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(id, JSON.stringify(value)); }
   jobControl(dispatch: RuntimeToolDispatch) {
-    if (dispatch.tool !== 'jobs') return null;
-    const control = z.object({ op: z.enum(['logs', 'cancel']), attemptId: z.string().min(1) }).strict().safeParse(dispatch.args);
+    if (dispatch.tool !== 'bash') return null;
+    const control = z.object({ op: z.enum(['logs', 'cancel']), attemptId: z.string().min(1), lines: z.number().int().positive().max(10_000).optional(), head: z.boolean().optional(), cursor: z.number().int().nonnegative().optional() }).strict().safeParse(dispatch.args);
     if (!control.success) return null;
     const attempt = this.attempt(control.data.attemptId);
     if (!attempt || attempt.fingerprint !== dispatchFingerprint(attempt.dispatch)
-      || attempt.dispatch.tool !== 'jobs' || !['running', 'settled'].includes(attempt.state)
+      || attempt.dispatch.tool !== 'bash' || !['running', 'settled'].includes(attempt.state)
       || attempt.dispatch.projectId !== dispatch.projectId || attempt.dispatch.workspaceId !== dispatch.workspaceId
       || attempt.dispatch.machineId !== dispatch.machineId || attempt.dispatch.attachmentId !== dispatch.attachmentId
       || attempt.dispatch.generation !== dispatch.generation || attempt.dispatch.conversationId !== dispatch.conversationId
       || attempt.dispatch.taskId !== dispatch.taskId) throw new Error('Job does not belong to this admitted execution');
-    const job = RuntimeJobRunArgumentsSchema.parse(attempt.dispatch.args);
+    const job = RuntimeBashCommandArgumentsSchema.parse(attempt.dispatch.args);
     return { ...control.data, dispatch: attempt.dispatch, job };
   }
   fence(dispatch: RuntimeToolDispatch): boolean {

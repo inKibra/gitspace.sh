@@ -108,6 +108,7 @@ export interface ArtifactView {
 
 export interface SessionControlsProps {
   value: RuntimeSessionControlView;
+  selectionReadOnly?: boolean;
   onCycleRole(direction: 'forward' | 'backward'): Promise<void>;
   onSetModel(provider: string, model: string): Promise<void>;
   onSetThinking(thinking: string | null): Promise<void>;

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { RuntimeExecutorReceiptSchema, RuntimeJobObservationSchema, RuntimeReceiptAcknowledgementSchema, RuntimeRuleInterruptionSchema, RuntimeScopedDispatchSchema } from './index.js';
 import { LifecycleRunRequestSchema } from '@gitspace/protocol-environment';
-import { RuntimeEnvironmentArgumentsSchema } from './tool-arguments.js';
+import { RuntimeEnvironmentArgumentsSchema, RuntimeBashArgumentsSchema, RuntimeAgentsArgumentsSchema, runtimeOperationIsReadOnly } from './tool-arguments.js';
 import { RuntimeDispatchSelectionSchema } from './scheduling.js';
 
 const timestamp = '2026-10-03T00:00:00.000Z';
@@ -13,12 +13,35 @@ const terminal = { ...receipt, state: 'terminal', completedAt: timestamp, result
 const job = { projectId: 'project', workspaceId: 'workspace', jobId: 'job', taskId: 'task', conversationId: 'conversation', requestId: 'request' };
 const interruption = { version: 1, kind: 'rule-interruption', projectId: 'project', workspaceId: 'workspace', conversationId: 'conversation', taskId: 'task', runId: 'run', generationId: 'generation', interruptionId: 'interruption', ruleId: 'rule', ruleRevision: digest, provenance: { source: 'project-rule', path: '.gitspace/rules/no-secrets.md', matcher: 'text', output: 'tool', outputOrdinal: 2, matchedDigest: digest, observedAt: timestamp }, instruction: 'Do not reveal secrets', discard: { state: 'discarded', generationId: 'generation', toolCalls: 'not-dispatched' }, state: 'pending', continuation: { state: 'pending' } };
 
+test('bash preserves background admission and exposes bounded durable controls', () => {
+  expect(RuntimeBashArgumentsSchema.parse({ command: 'printf complete', background: true })).toEqual({ command: 'printf complete', background: true });
+  expect(RuntimeBashArgumentsSchema.safeParse({ op: 'logs', job, lines: 2, head: true, cursor: 0 }).success).toBe(true);
+  expect(RuntimeBashArgumentsSchema.safeParse({ op: 'run', application: '/bin/sh', args: ['-c', 'true'] }).success).toBe(false);
+});
+
+test('agent selection is explicit and addressing does not select a model', () => {
+  expect(RuntimeAgentsArgumentsSchema.safeParse({ op: 'spawn', task: 'inspect', name: 'scout' }).success).toBe(false);
+  expect(RuntimeAgentsArgumentsSchema.safeParse({ op: 'spawn', task: 'inspect', role: 'fast', name: 'worker' }).success).toBe(true);
+  expect(RuntimeAgentsArgumentsSchema.safeParse({ op: 'spawn', task: 'inspect', agent: 'scout', role: 'fast' }).success).toBe(false);
+  expect(RuntimeAgentsArgumentsSchema.safeParse({ op: 'send', to: 'worker', message: 'continue' }).success).toBe(true);
+  expect(RuntimeAgentsArgumentsSchema.safeParse({ op: 'send', id: 'worker', message: 'continue' }).success).toBe(false);
+});
+
+test('process and durable command observations are readonly but controls are mutations', () => {
+  for (const tool of ['bash', 'proc']) {
+    for (const op of ['list', 'status', 'logs', 'wait']) expect(runtimeOperationIsReadOnly(tool, { op })).toBe(true);
+    for (const op of ['start', 'stop', 'restart', 'send', 'cancel']) expect(runtimeOperationIsReadOnly(tool, { op })).toBe(false);
+  }
+  expect(runtimeOperationIsReadOnly('bash', { command: 'true', background: true })).toBe(false);
+});
+
 describe('scoped executor contracts', () => {
   test('requires the full scoped dispatch while retaining current tool wire fields', () => {
     const { fingerprint: _, ...scope } = dispatch;
-    const input = { ...scope, version: 1, tool: 'bash', args: { command: 'true' }, replay: 'unsafe', deadlineAt: timestamp };
+    const input = { ...scope, version: 1, conversationKind: 'main', tool: 'bash', args: { command: 'true' }, replay: 'unsafe', deadlineAt: timestamp };
     expect(RuntimeScopedDispatchSchema.safeParse(input).success).toBe(true);
     expect(RuntimeScopedDispatchSchema.safeParse({ ...input, conversationId: undefined }).success).toBe(false);
+    expect(RuntimeScopedDispatchSchema.safeParse({ ...input, conversationKind: undefined }).success).toBe(false);
     expect(RuntimeScopedDispatchSchema.safeParse({ ...input, deadlineAt: 'tomorrow' }).success).toBe(false);
   });
 

@@ -25,15 +25,38 @@ const stream: StreamFunction = (_model, context, options) => {
     catch { return null; }
   })();
   let content: AssistantMessage['content'];
-  if (last?.role === 'user' && text === 'run background job') content = [{ type: 'toolCall', id: 'reused-provider-call', name: 'jobs', arguments: { op: 'run', application: 'sh', args: ['-c', 'printf "launch\\n" >> launches; printf "job-live-log-marker\\n"; while [ ! -f release ]; do sleep 0.05; done; printf "finished\\n"'] } }];
+  if (last?.role === 'user' && text === 'run background job') content = [{ type: 'toolCall', id: 'reused-provider-call', name: 'bash', arguments: { background: true, command: 'printf "launch\\n" >> launches; printf "job-live-log-marker\\n"; while [ ! -f release ]; do sleep 0.05; done; printf "finished\\n"' } }];
+  else if (last?.role === 'user' && text === 'spawn three blocked children') content = [1, 2, 3].map(index => ({ type: 'toolCall', id: `spawn-child-${index}`, name: 'agents', arguments: { op: 'spawn', role: 'fixture', name: `Child${index}`, task: 'hold child', background: true } }));
+  else if (last?.role === 'user' && text === 'hold child') content = [{ type: 'toolCall', id: 'child-ready', name: 'agents', arguments: { op: 'send', to: 'parent', message: 'Ready; waiting for Stop.' } }];
   else if (last?.role === 'user' && text === 'foreground probe') content = [{ type: 'toolCall', id: crypto.randomUUID(), name: 'todo', arguments: { items: [{ id: 'probe', text: 'Foreground remains available', status: 'completed' }] } }];
   else if (last?.role === 'user' && text === 'read large tool result') content = [{ type: 'toolCall', id: 'large-read', name: 'read', arguments: { path: 'large-output' } }];
-  else if (last?.role === 'user' && text.startsWith('job-control:')) content = [{ type: 'toolCall', id: crypto.randomUUID(), name: 'jobs', arguments: JSON.parse(text.slice('job-control:'.length)) }];
+  else if (last?.role === 'user' && text.startsWith('job-control:')) content = [{ type: 'toolCall', id: crypto.randomUUID(), name: 'bash', arguments: JSON.parse(text.slice('job-control:'.length)) }];
   else if (notification?.success) content = [{ type: 'text', text: `Consumed job receipt ${notification.data.job.jobId}` }];
   else content = [{ type: 'text', text: 'execution fixture foreground complete' }];
   const usesTool = content.some(part => part.type === 'toolCall');
   const message: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: reference.modelId, content, stopReason: usesTool ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { ...cost, total: 0 } } };
   output.push({ type: 'start', partial: message });
+  if (last?.role === 'user' && text === 'hold child') {
+    const offered = context.messages.flatMap(message => message.role === 'system' ? message.toolsAdded ?? [] : []);
+    const names = offered.map(tool => tool.name);
+    if (!names.includes('agents') || names.some(name => !['read', 'find', 'grep', 'ast_grep', 'history_search', 'history_read', 'web_search', 'todo', 'browser', 'agents'].includes(name))) throw new Error(`Child received invalid tool registration: ${JSON.stringify(names)}`);
+    const messaging = offered.findLast(tool => tool.name === 'agents');
+    if (!messaging || JSON.stringify(messaging.parameters).includes('"spawn"')) throw new Error('Child was offered nested spawn');
+    const browser = offered.findLast(tool => tool.name === 'browser');
+    if (!browser || JSON.stringify(browser.parameters).includes('"relay"')) throw new Error('Child was offered the user relay browser');
+  }
+  if (last?.role === 'toolResult' && last.toolCallId === 'child-ready') {
+    if (last.isError) throw new Error(`Child messaging failed: ${text}`);
+    const finish = () => {
+      options?.signal?.removeEventListener('abort', finish);
+      const stopped = { ...message, stopReason: 'aborted' as const };
+      output.push({ type: 'error', reason: 'aborted', error: stopped });
+      output.end(stopped);
+    };
+    options?.signal?.addEventListener('abort', finish, { once: true });
+    if (options?.signal?.aborted) finish();
+    return output;
+  }
   if (last?.role === 'user' && text === 'hold foreground') {
     const finish = () => {
       finishForeground = null;
@@ -70,12 +93,14 @@ export class ExecutionSmoke extends DurableObject<Environment> {
     };
     const operations: OperationalServices = {
       jobScope: () => identity,
+      observeProcess: unsupported,
+      stopProcess: unsupported,
       controlJob: async input => {
         const original = saved(input.attemptId);
         if (!original) throw new Error('Job has no admitted executor');
         if (input.op === 'cancel') throw new Error('Cancellation uses the admitted receipt control');
         const id = `logs:${crypto.randomUUID()}`;
-        return (await this.runtime).attachments.execute({ ...original, requestId: id, attemptId: id, args: { op: 'logs', attemptId: original.attemptId }, deadlineAt: new Date(Date.now() + 5_000).toISOString() }, AbortSignal.timeout(5_000));
+        return (await this.runtime).attachments.execute({ ...original, requestId: id, attemptId: id, args: { op: 'logs', attemptId: original.attemptId, ...(input.lines !== undefined ? { lines: input.lines } : {}), ...(input.head !== undefined ? { head: input.head } : {}), ...(input.cursor !== undefined ? { cursor: input.cursor } : {}) }, deadlineAt: new Date(Date.now() + 5_000).toISOString() }, AbortSignal.timeout(5_000));
       },
       wakeAt: timestamp => ctx.storage.setAlarm(timestamp),
       reconcile: async id => { const dispatch = saved(id); return dispatch ? (await this.runtime).attachments.reconcile(dispatch) : null; },
@@ -83,7 +108,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
       execute: async input => {
         if (input.kind !== 'Job') throw new Error('Unexpected operational kind');
         const grant = RuntimeAttachResultSchema.parse(await ctx.storage.get('proof-grant'));
-        const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, deadlineAt: input.deadlineAt, replay: input.replay, tool: 'jobs', machineId: grant.attachment.machineId, attachmentId: grant.attachment.attachmentId, generation: grant.attachment.generation });
+        const dispatch = RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, ...identity, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, deadlineAt: input.deadlineAt, replay: input.replay, tool: 'bash', machineId: grant.attachment.machineId, attachmentId: grant.attachment.attachmentId, generation: grant.attachment.generation });
         save(dispatch);
         return (await this.runtime).attachments.execute(dispatch, input.signal);
       },
@@ -93,9 +118,10 @@ export class ExecutionSmoke extends DurableObject<Environment> {
       code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: unsupported },
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: unsupported,
       tools: { prepareBrowser: unsupported, invoke: async input => {
+        if (input.tool === 'agents') return (await this.runtime).invokeConversationTool(input);
         if (input.tool !== 'read') return unsupported();
         const grant = RuntimeAttachResultSchema.parse(await ctx.storage.get('proof-grant'));
-        const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: input.replay, tool: input.tool, machineId: grant.attachment.machineId, attachmentId: grant.attachment.attachmentId, generation: grant.attachment.generation });
+        const dispatch = RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, ...identity, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: input.replay, tool: input.tool, machineId: grant.attachment.machineId, attachmentId: grant.attachment.attachmentId, generation: grant.attachment.generation });
         save(dispatch);
         return (await this.runtime).attachments.execute(dispatch, input.signal ?? AbortSignal.timeout(30_000));
       }, instructions: async () => 'Offline execution proof', authorizeCronTool: unsupported },
@@ -103,7 +129,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
       onReport: error => console.error('EXECUTION_PROOF_REPORT', String(error)),
       admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return reference; },
       bindInferenceConversation: async (conversationId, _signal, _submissions, requests) => { for (const requestId of requests) if (await ctx.storage.get(`admission:${requestId}`) !== conversationId) throw new Error('Missing durable inference admission'); },
-      session: { catalog: async () => ({ models: [{ provider: 'fixture', id: reference.modelId, name: 'Proof', contextWindow: 8192 }], roles: [] }), reload: unsupported },
+      session: { catalog: async () => ({ models: [{ provider: 'fixture', id: reference.modelId, name: 'Proof', contextWindow: 8192 }], roles: [{ id: 'fixture', label: 'Proof child', provider: 'fixture', model: reference.modelId, thinking: null, current: false }] }), reload: unsupported },
       qa: { list: async () => [], act: unsupported }, modelProxy: unsupported, mcpProxy: unsupported,
       attachments: {
         // The isolated fixture does not exercise vault wrapping; actual receipt encryption/authentication remains enabled.
@@ -175,7 +201,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
         });
       }
       if (path === '/setup') {
-        const grant = await runtime.attachments.attach({ ...identity, machineId: RuntimeMachineIdSchema.parse('proof-machine'), generation: 7, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['jobs', 'bash', 'write', 'read', 'proc'] });
+        const grant = await runtime.attachments.attach({ ...identity, machineId: RuntimeMachineIdSchema.parse('proof-machine'), generation: 7, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash', 'write', 'read', 'proc'] });
         if (grant.attachment.state === 'attaching') grant.attachment = runtime.attachments.transition(grant.attachment.attachmentId, grant.attachment.generation, 'ready');
         await this.ctx.storage.put('proof-grant', grant);
         await root.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'yolo'; }, BACKGROUND_CONTEXT);
@@ -195,15 +221,23 @@ export class ExecutionSmoke extends DurableObject<Environment> {
         return Response.json(await runtime.submit({ ...identity, ...input }));
       }
       if (path === '/foreground-idle') { await root.waitForIdle(BACKGROUND_CONTEXT); return Response.json({ idle: true }); }
-      if (path === '/abort') { await root.abort(BACKGROUND_CONTEXT, { background: true }); return Response.json({ accepted: true }); }
-      if (path === '/task-failures') return Response.json(this.ctx.storage.sql.exec("SELECT * FROM tasks WHERE status='terminal' ORDER BY id DESC LIMIT 5").toArray());
+      if (path === '/abort') return Response.json(await runtime.cancel({ ...identity, conversationId: String(root.id) }));
+      if (path === '/task-failures') return Response.json(this.ctx.storage.sql.exec("SELECT * FROM tasks WHERE status='terminal' AND json_extract(record,'$.state.outcome.status')='failed' ORDER BY id DESC LIMIT 5").toArray());
       if (path === '/state') {
         runtime.harness.resume();
         const jobs = await runtime.harness.snapshot(DurableJobsDoc, root.id, BACKGROUND_CONTEXT);
         const todos = await runtime.harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT);
         const transcript = await runtime.transcript(String(root.id));
         const entries = (await root.entries({}, 100, undefined, BACKGROUND_CONTEXT)).items;
-        const completions = entries.filter(entry => entry.kind === 'gitspace.job-completed').map(entry => String(entry.id));
+        const completions = entries.flatMap(entry => (entry.model ?? []).flatMap(message => {
+          if (message.role !== 'user' || typeof message.content !== 'string') return [];
+          const start = message.content.indexOf('{');
+          if (start < 0) return [];
+          try {
+            const parsed = RuntimeJobObservationSchema.safeParse(JSON.parse(message.content.slice(start)));
+            return parsed.success ? [parsed.data.job.jobId] : [];
+          } catch { return []; }
+        }));
         const toolResults = entries.flatMap(entry => entry.model ?? []).filter(message => message.role === 'toolResult');
         const toolErrors = toolResults.filter(message => message.isError).length;
         return Response.json({ jobs: RuntimeJsonSchema.parse(jobs ?? { records: {} }), todos: todos ?? null, transcript, completions, toolErrors, toolResults: toolResults.map(message => message.content), holding: finishForeground !== null, snapshot: await runtime.snapshot() });

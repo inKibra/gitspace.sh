@@ -262,6 +262,21 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return (await this.getRuntime(input)).requestStatus(input.requestId);
   }
 
+  async runtimeCronWithdraw(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1) }).parse(raw);
+    return (await this.getRuntime(input)).cronWithdraw(input.requestId);
+  }
+
+  async runtimeCronCancel(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), confirmStopWorkspaceAgent: z.boolean() }).parse(raw);
+    return (await this.getRuntime(input)).cronCancel(input.requestId, input.confirmStopWorkspaceAgent);
+  }
+
+  async runtimeCronNotifyOverdue(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1) }).parse(raw);
+    return (await this.getRuntime(input)).cronNotifyOverdue(input.requestId);
+  }
+
   async runtimeTranscript(raw: unknown): Promise<Response> {
     const input = RuntimeIdentitySchema.extend({ conversationId: z.string().optional() }).parse(raw);
     return Response.json(await (await this.getRuntime(input)).transcript(input.conversationId));

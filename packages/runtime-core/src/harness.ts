@@ -5,11 +5,16 @@ import { createRuntimeTools, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
-import { BackgroundAgentTask } from './background-agents.js';
+import { createBackgroundAgentTask } from './background-agents.js';
 import { createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
 import { ruleGenerationRegistry } from './rule-generations.js';
-import { createJobTask, type JobServices } from './jobs.js';
-import type { RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { createJobTask, createProcessExitTask, type JobServices } from './jobs.js';
+import { RuntimeBrowserArgumentsSchema, RuntimeChildAgentsArgumentsSchema, isSubagentReadonlyTool, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
+import { z } from 'zod';
+import { AgentDefinitionContextDoc } from './subagent-state.js';
+import { ConversationLifecycleDoc, createConversationLifecycle, type ConversationLifecycle } from './conversation-lifecycle.js';
+import { bindCronGeneration } from './cron.js';
 const ModelNoticesDoc = defineDoc<{ delivered: string[] }>({ kind: 'gitspace.model-notices', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ delivered: [] }) });
 export type RuntimeHarnessOptions = {
   identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
@@ -22,11 +27,14 @@ export type RuntimeHarnessOptions = {
   retainedRules: RetainedRuleServices;
   editTool(model: ModelRef): 'edit' | 'apply_patch';
   onReport(error: unknown): void;
-  admitInference: JobServices['admitInference'];
+  admitInference(input: { conversationId: string; requestId: string; parentConversationId?: string; selection?: ModelSelectionIntent }): Promise<ModelRef>;
   bindInferenceConversation(conversationId: string, signal: AbortSignal, submissionIds: readonly string[], requestIds: readonly string[], flags: { fastMode: boolean }): Promise<void | Array<{ requestId: string; message: string }>>;
 };
 export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
-  const jobs: JobServices = { ...options.operations, admitInference: options.admitInference };
+  const lifecycleReady = Promise.withResolvers<ConversationLifecycle>();
+  const deliver: ConversationLifecycle['deliver'] = async input => (await lifecycleReady.promise).deliver(input);
+  const jobs: JobServices = { ...options.operations, deliverConversationEvent: deliver };
+  const backgroundAgentTask = createBackgroundAgentTask(deliver);
   const tools = createRuntimeTools({ ...options.tools, async question(id, api, context) {
     const watch = await api.watchDoc(QuestionsDoc, context);
     if (!watch) throw new Error('Question document missing');
@@ -43,11 +51,14 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     try { return await waiting.promise; }
     finally { context.abortSignal?.removeEventListener('abort', abort); await watch.stop(); }
   } }, jobs);
-  const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), BackgroundAgentTask, createJobTask(jobs)], sections: [{ key: 'gitspace', async render(input, context) {
+  const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), backgroundAgentTask, createJobTask(jobs), createProcessExitTask(jobs)], sections: [{ key: 'gitspace', async render(input, context) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
+    const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
     const extra = await options.tools.instructions(String(input.conversationId), context);
-    return [workspace?.instructions, workspace?.goal, workspace?.phase === 'plan' ? 'Read-only planning. Do not perform effects without explicit plan approval. Conversational replies do not require a plan.' : '', extra].filter(Boolean).join('\n\n');
+    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'Read-only planning. Do not perform effects without explicit plan approval. Conversational replies do not require a plan.' : '', extra].filter(Boolean).join('\n\n');
   } }], hooks: [hook(GenerationTask, { async beforeRequest(_input, runtime, context) {
+    if ((await runtime.snapshot(ConversationLifecycleDoc, runtime.conversationId, context))?.stopped) throw new Error('Conversation is stopped; only an explicit user message may resume it');
+    await bindCronGeneration(harness, runtime, context);
     const live = await runtime.snapshot(LiveDoc, runtime.conversationId, context);
     const ids = live?.run?.inputs ?? [];
     const requests = new Map<string, string>();
@@ -83,16 +94,37 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     if (!summary.trim()) throw new Error('Compaction returned no summary');
     return { summary };
   } })] });
+  const [firstBrowserAction, ...otherBrowserActions] = RuntimeBrowserArgumentsSchema.options;
+  const headlessSource = { source: z.literal('headless').default('headless') };
+  const headlessBrowser = z.discriminatedUnion('action', [firstBrowserAction.extend(headlessSource), ...otherBrowserActions.map(option => option.extend(headlessSource))]);
+  const childExtension = defineExtension({ name: 'gitspace.child-tools', tools: tools.filter(tool => tool.name === 'agents' || tool.name === 'browser').map(tool => {
+    const schema = tool.name === 'agents' ? RuntimeChildAgentsArgumentsSchema : headlessBrowser;
+    return {
+      ...tool,
+      description: tool.name === 'agents'
+        ? 'Message parent or a named sibling, inspect agents, or wait for the next event. Subagents cannot spawn or stop agents.'
+        : 'Use the headless browser. Subagents cannot access the user relay browser.',
+      parameters: { ...z.toJSONSchema(schema, { io: 'input' }), type: 'object' },
+      prepareArguments: (input: unknown) => schema.parse(input),
+    };
+  }) });
   const registry = createRegistry();
-  registry.install(createRetainedRulesExtension(options.retainedRules, () => harness, options.identity));
+  registry.install(createRetainedRulesExtension(options.retainedRules, () => harness, options.identity, (name, args) => tools.find(tool => tool.name === name)?.prepareArguments?.(args) ?? args));
   registry.install(extension);
   registry.install(sessionControlsExtension);
-  const harness = await Harness.open(options.storage, { models: options.models, registry: ruleGenerationRegistry(registry), settings: options.settings, onReport: options.onReport }, BACKGROUND_CONTEXT);
-  const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: options.model, tools: tools.filter(tool => tool.name !== (options.editTool(options.model) === 'edit' ? 'apply_patch' : 'edit')) } });
-  await harness.commit(async tx => { await tx.doc(WorkspaceDoc); await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
-  return { harness, root, registry, async configureModel(conversationId: ConversationId, model: ModelRef) {
+  registry.install(childExtension);
+  const harness = await Harness.open(options.storage, { models: options.models, registry: ruleGenerationRegistry(registry), settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name), followUpMode: 'one-at-a-time' }, onReport: options.onReport }, BACKGROUND_CONTEXT);
+  const modelTools = (model: ModelRef) => tools.filter(tool => tool.name !== (options.editTool(model) === 'edit' ? 'apply_patch' : 'edit'));
+  const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: options.model, tools: modelTools(options.model) } });
+  const configureModel = async (conversationId: ConversationId, model: ModelRef) => {
     const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
     if (!conversation) throw new Error('Conversation not found');
-    await conversation.configure({ model, tools: tools.filter(tool => tool.name !== (options.editTool(model) === 'edit' ? 'apply_patch' : 'edit')) }, BACKGROUND_CONTEXT);
-  } };
+    const child = (await harness.snapshot(AgentDefinitionContextDoc, conversationId, BACKGROUND_CONTEXT))?.child;
+    const selected = child ? modelTools(model).filter(tool => isSubagentReadonlyTool(tool.name) && child.tools.includes(tool.name)) : modelTools(model);
+    await conversation.configure({ model, tools: selected, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
+  };
+  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, async wake() { await options.operations.wakeAt(Date.now() + 1000); harness.resume(); } });
+  lifecycleReady.resolve(lifecycle);
+  await harness.commit(async tx => { await tx.doc(WorkspaceDoc); await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
+  return { harness, root, registry, configureModel, lifecycle, backgroundAgentTask };
 }

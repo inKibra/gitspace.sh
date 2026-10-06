@@ -49,7 +49,7 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs,
       initialCheckpoint: async () => { sourceReads++; return empty ? null : checkpoint; },
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => '', authorizeCronTool: unsupported },
-      operations: { execute: unsupported, reconcile: unsupported, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, wakeAt: unsupported },
+      operations: { execute: unsupported, reconcile: unsupported, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: unsupported },
       retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
       onReport: error => { throw error; }, admitInference: unsupported, bindInferenceConversation: async () => [],
       session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported },

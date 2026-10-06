@@ -57,11 +57,14 @@ describe('runtime to existing shell adapter', () => {
     expect(refreshed.workspaces[0]?.stack.blockedBy).toEqual([]);
   });
 
-  it('projects subagent status and report content into the existing Inspector blocks', () => {
+  it('shows incoming sender-labelled messages before a child has answered', () => {
     const snapshot = fixture();
-    snapshot.conversations.push({ id: 'child', parentId: 'root', title: 'Security review', status: 'waiting', messages: [{ id: 'report', role: 'assistant', createdAt: stamp, content: [{ type: 'text', text: 'Waiting for approval' }] }] });
-    expect(runtimeSubagents(snapshot)).toEqual([{ id: 'agent:child', type: 'side-agent', agentId: 'child', label: 'Security review', status: 'blocked', summary: 'Waiting for approval' }]);
-    expect(runtimeTurns(snapshot, 'root').at(-1)?.sideAgents).toEqual(runtimeSubagents(snapshot));
-    expect(runtimeTurns(snapshot, 'child').flatMap(turn => turn.items)).toMatchObject([{ type: 'message', text: 'Waiting for approval' }]);
+    const incoming = 'Message from Parent (root):\nPlease review the changed contract.';
+    snapshot.conversations.push({ id: 'child', parentId: 'root', title: 'Security review', status: 'waiting', messages: [{ id: 'incoming', role: 'user', createdAt: stamp, content: [{ type: 'text', text: incoming }] }] });
+    expect(runtimeSubagents(snapshot)[0]?.summary).toBe(incoming);
+    expect(runtimeTurns(snapshot, 'child')[0]?.user?.text).toBe(incoming);
+    snapshot.conversations[1]?.messages.push({ id: 'answer', role: 'assistant', createdAt: stamp, content: [{ type: 'text', text: 'Review complete.' }] });
+    expect(runtimeSubagents(snapshot)[0]?.summary).toBe('Review complete.');
+    expect(runtimeSubagents(snapshot)[0]?.messages?.[0]?.text).toBe(incoming);
   });
 });

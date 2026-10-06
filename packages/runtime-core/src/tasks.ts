@@ -9,7 +9,9 @@ export type OperationalServices = {
   reconcile(attemptId: string): Promise<RuntimeToolResult | RuntimeExecutorReceipt | null>;
   cancel(attemptId: string): Promise<void>;
   jobScope(args: JsonValue): { projectId: string; workspaceId: string } | Promise<{ projectId: string; workspaceId: string }>;
-  controlJob(input: { attemptId: string; op: 'logs' | 'cancel' }): Promise<RuntimeToolResult>;
+  controlJob(input: { attemptId: string; op: 'logs' | 'cancel'; lines?: number; head?: boolean; cursor?: number }): Promise<RuntimeToolResult>;
+  observeProcess(input: { originAttemptId: string; conversationId: string; taskId: string; requestId: string; attemptId: string; args: JsonValue }): Promise<RuntimeToolResult>;
+  stopProcess(input: { originAttemptId: string; conversationId: string; taskId: string; requestId: string; attemptId: string; args: JsonValue }): Promise<RuntimeToolResult>;
   wakeAt(timestamp: number): Promise<void>;
 };
 export function terminalResult(receipt: RuntimeToolResult | RuntimeExecutorReceipt | null): RuntimeToolResult | null {

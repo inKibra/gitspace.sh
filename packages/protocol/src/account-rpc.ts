@@ -35,7 +35,7 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'secrets.account.grant': true, 'secrets.account.revoke': true,
   'configuration.values.get': true, 'configuration.values.put': true, 'configuration.values.delete': true,
   'crons.list': true, 'crons.create': true, 'crons.update': true, 'crons.delete': true,
-  'crons.runNow': true, 'crons.history': true,
+  'crons.runNow': true, 'crons.cancelRun': true, 'crons.history': true,
   'inspector.view': true,
   'inspector.transcript': true,
   'inspector.transcriptPage': true,

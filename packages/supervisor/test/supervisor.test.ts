@@ -95,19 +95,21 @@ test('native inherited control pipes are separate from public process input and 
   expect(stopped.daemon.pid).toBeNull();
   expect(() => supervisor.privatePipe('private-pipe')).toThrow('unavailable');
 }, 15000);
-test('readiness failure terminates the effect and is observable rather than reporting ready', async () => {
+test('readiness timeout leaves the process alive for inspection and explicit stop', async () => {
   const supervisor = await fixture();
-  await supervisor.request({ op: 'start', spec: { ...spec('never-ready', 'sleep 300'), ready: { log: '^missing$', timeoutMs: 50 } } });
-  const waited = await supervisor.request({ op: 'wait', name: 'never-ready', for: 'exit', timeoutMs: 5000 });
-  expect(waited.op).toBe('wait');
+  await supervisor.request({ op: 'start', spec: { ...spec('never-ready', 'read line; printf "received:%s\\n" "$line"; sleep 30'), ready: { log: '^missing$', timeoutMs: 50 } } });
+  const waited = await supervisor.request({ op: 'wait', name: 'never-ready', for: 'ready', timeoutMs: 150 });
   if (waited.op !== 'wait') throw new Error('Unexpected response');
-  expect(waited.timedOut).toBe(false);
-  expect(waited.daemon.state).toBe('failed');
-  expect(waited.daemon.failure).toContain('Readiness');
-  // Shutdown is the cleanup barrier, including readiness's final persistence after process exit.
-  await supervisor.request({ op: 'shutdown' });
-  await rm(supervisor.root, { recursive: true, force: true });
-}, 10000);
+  expect(waited.timedOut).toBe(true);
+  expect(waited.daemon.state).toBe('running');
+  await supervisor.request({ op: 'send', name: 'never-ready', data: 'alive\n' });
+  const output = await supervisor.request({ op: 'wait', name: 'never-ready', pattern: 'received:alive', timeoutMs: 1000 });
+  if (output.op !== 'wait') throw new Error('Unexpected response');
+  expect(output.timedOut).toBe(false);
+  const stopped = await supervisor.request({ op: 'stop', name: 'never-ready', timeoutMs: 1000 });
+  if (stopped.op !== 'stop') throw new Error('Unexpected response');
+  expect(stopped.daemon.state).toBe('exited');
+}, 5000);
 test('bounded logs identify an expired cursor and preserve the final output', async () => {
   const supervisor = await fixture();
   await supervisor.request({ op: 'start', spec: { ...spec('large', ''), application: process.execPath, args: ['-e', 'process.stdout.write("x".repeat(1100000) + "\\ncomplete\\n")'] } });
@@ -352,3 +354,42 @@ test('detached execution rejects PTYs, has no input, and survives shutdown with 
   await recovered.request({ op: 'stop', name: 'detached', timeoutMs: 20 });
   await recovered.request({ op: 'shutdown' });
 }, 10000);
+
+test('interactive text enters by default, keys stay ordered, and matched logs are observable', async () => {
+  const supervisor = await fixture();
+  await supervisor.request({ op: 'start', spec: { ...spec('interactive', 'printf "READY 4321\\n"; read line; printf "answer:%s\\n" "$line"; read line; printf "second:%s\\n" "$line"'), ready: { log: 'READY \\d+', timeoutMs: 1000 } } });
+  const ready = await supervisor.request({ op: 'wait', name: 'interactive', for: 'ready', timeoutMs: 1000 });
+  if (ready.op !== 'wait') throw new Error('Unexpected response');
+  expect(ready.daemon.readiness).toEqual({ timedOut: false, matched: 'READY 4321' });
+  await supervisor.request({ op: 'send', name: 'interactive', text: 'first' });
+  const first = await supervisor.request({ op: 'wait', name: 'interactive', pattern: 'answer:first', timeoutMs: 1000 });
+  if (first.op !== 'wait') throw new Error('Unexpected response');
+  expect(first.matched).toBe('answer:first');
+  await supervisor.request({ op: 'send', name: 'interactive', text: 'last', enter: false, keys: ['TAB'] });
+  await supervisor.request({ op: 'send', name: 'interactive', text: 'value' });
+  await supervisor.request({ op: 'wait', name: 'interactive', for: 'exit', timeoutMs: 1000 });
+  const logs = await supervisor.request({ op: 'logs', name: 'interactive', grep: '^(answer|second):', head: true, lines: 2 });
+  if (logs.op !== 'logs') throw new Error('Unexpected response');
+  expect(logs.text).toBe('answer:first\nsecond:last\tvalue');
+  const empty = await supervisor.request({ op: 'logs', name: 'interactive', cursor: logs.cursor });
+  if (empty.op !== 'logs') throw new Error('Unexpected response');
+  expect(empty.text).toBe('');
+}, 5000);
+
+test('completed process identity survives replacement and supervisor recovery', async () => {
+  const supervisor = await fixture();
+  const first = await supervisor.request({ op: 'start', spec: spec('reused-name', 'exit 7') });
+  if (first.op !== 'start') throw new Error('Unexpected response');
+  await supervisor.request({ op: 'wait', name: 'reused-name', for: 'exit', timeoutMs: 1000 });
+  await supervisor.request({ op: 'start', spec: spec('reused-name', 'exit 0') });
+  await supervisor.request({ op: 'wait', name: 'reused-name', for: 'exit', timeoutMs: 1000 });
+  await supervisor.request({ op: 'shutdown' });
+  const recovered = new ProcessSupervisor(supervisor.root);
+  await recovered.recover();
+  try {
+    const previous = await recovered.request({ op: 'describe', name: 'reused-name', instanceId: first.daemon.id, restartCount: 0 });
+    if (previous.op !== 'describe') throw new Error('Unexpected response');
+    expect(previous.daemon.id).toBe(first.daemon.id);
+    expect(previous.daemon.exitCode).toBe(7);
+  } finally { await recovered.request({ op: 'shutdown' }); }
+}, 5000);

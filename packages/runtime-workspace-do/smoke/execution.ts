@@ -80,7 +80,7 @@ export async function runExecutionProof(): Promise<void> {
     const grant = RuntimeAttachResultSchema.parse(await request('/setup'));
     journal.installAttachment({ ...grant, rootPath: checkout, prerequisitesComplete: true });
     const root = z.object({ conversationId: z.string() }).parse(await request('/root'));
-    const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, projectId: grant.attachment.projectId, workspaceId: grant.attachment.workspaceId, machineId: grant.attachment.machineId, attachmentId: grant.attachment.attachmentId, generation: grant.attachment.generation, conversationId: root.conversationId, taskId: 'receipt-task', requestId: 'receipt-request', attemptId: 'receipt-attempt', tool: 'bash', args: { command: 'printf "one\\n" >> receipt-launches; printf "receipt output\\n"' }, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' });
+    const dispatch = RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, projectId: grant.attachment.projectId, workspaceId: grant.attachment.workspaceId, machineId: grant.attachment.machineId, attachmentId: grant.attachment.attachmentId, generation: grant.attachment.generation, conversationId: root.conversationId, taskId: 'receipt-task', requestId: 'receipt-request', attemptId: 'receipt-attempt', tool: 'bash', args: { command: 'printf "one\\n" >> receipt-launches; printf "receipt output\\n"' }, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' });
     const completed = RuntimeToolResultSchema.parse(await request('/execute', dispatch));
     assert.equal(completed.status, 'completed');
     assert.equal(await readFile(join(checkout, 'receipt-launches'), 'utf8'), 'one\n');
@@ -208,7 +208,7 @@ export async function runExecutionProof(): Promise<void> {
         if (latest.snapshot.tasks.some(task => task.kind === 'pi.generation' && task.state === 'failed')) throw new Error(`Generation failed: ${JSON.stringify(await request('/task-failures'))}`);
         await Bun.sleep(25);
       } while (Date.now() < deadline);
-      throw new Error(`Execution proof state timeout: ${JSON.stringify(latest)}`);
+      throw new Error(`Execution proof state timeout: ${JSON.stringify({ jobs: latest?.jobs, tasks: latest?.snapshot.tasks, toolErrors: latest?.toolErrors, lastTool: JSON.stringify(latest?.toolResults[0]).slice(0, 1500) })}`);
     };
     await request('/submit', { text: 'read large tool result', requestId: 'large-tool-materialization' });
     await until(value => value.snapshot.tasks.some(task => task.kind === 'pi.tool' && task.state === 'completed'));
@@ -292,12 +292,23 @@ export async function runExecutionProof(): Promise<void> {
     const stopLaunch = Date.now() + 10_000;
     while ((await readFile(join(checkout, 'launches'), 'utf8')).split('\n').length < 5 && Date.now() < stopLaunch) await Bun.sleep(25);
     assert.equal(await readFile(join(checkout, 'launches'), 'utf8'), 'launch\nlaunch\nlaunch\nlaunch\n');
+    await request('/submit', { text: 'spawn three blocked children', requestId: 'three-running-children' });
+    await until(value => value.snapshot.conversations.filter(item => item.parentId !== null && item.status === 'running').length === 3);
+    await until(value => ['Child1', 'Child2', 'Child3'].every(name => JSON.stringify(value.transcript).includes(`Message from ${name}`)));
     await request('/foreground-idle');
     const generationsBeforeStop = (await state()).snapshot.tasks.filter(task => task.kind === 'pi.generation').length;
     await request('/abort', {});
     const stopped = await until(value => Object.values(value.jobs.records).every(record => record.delivered) && value.snapshot.tasks.some(task => task.id === stoppedJob.acceptance.job.taskId && task.state === 'interrupted'));
     assert.equal(stopped.snapshot.tasks.filter(task => task.kind === 'pi.generation').length, generationsBeforeStop, 'Stopping the conversation must not admit a new generation');
-    console.log('PASS async Job acceptance, live logs, admitted idle/busy completion, cold recovery, scoped controls, running cancellation and whole-conversation stop');
+    assert.equal(stopped.snapshot.conversations.filter(item => item.parentId !== null).length, 3);
+    assert.equal(stopped.snapshot.conversations.some(item => item.status === 'running'), false, 'Stop must abort actual children, not just tracking tasks');
+    assert.equal(stopped.completions.includes(stoppedJob.acceptance.job.jobId), false, 'Stopped command completion must remain queued');
+    await worker.dispose(); worker = new Miniflare(options);
+    const stoppedCold = await state();
+    assert.equal(stoppedCold.snapshot.tasks.filter(task => task.kind === 'pi.generation').length, generationsBeforeStop, 'Cold recovery must preserve the Stop latch');
+    await request('/submit', { text: 'Resume after stop', requestId: 'explicit-user-resume' });
+    await until(value => value.completions.includes(stoppedJob.acceptance.job.jobId));
+    console.log('PASS async bash acceptance, live logs, idle/busy completion, cold recovery, scoped controls, cancellation, three-child plus real-command Stop and explicit-user queue resume');
   } finally {
     try {
       if (brokerStarted) await (await daemonClientForProject(checkout)).request({ op: 'shutdown' });

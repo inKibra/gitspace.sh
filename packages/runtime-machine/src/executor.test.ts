@@ -16,10 +16,20 @@ async function fixture(onRun?: () => Promise<void>, hooks: Pick<MachineExecutorO
   journal.installAttachment({ attachment, rootPath: root, executionSecret: Buffer.alloc(32, 7).toString('base64url'), prerequisitesComplete: true });
   let launches = 0;
   const executor = new MachineExecutor({ machineId: 'machine', journal, ...hooks, runCommand: async () => { launches++; await onRun?.(); return { exitCode: 0, output: 'effect' }; }, artifacts: () => ({ read: async () => [], write: async () => {} }), cloudModel: async () => null, cloudMcp: async () => { throw new Error('MCP is not part of this executor fixture'); } });
-  const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 7, requestId: 'request', attemptId: 'attempt', tool: 'bash', args: { command: 'effect' }, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' });
+  const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, conversationKind: 'main', conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 7, requestId: 'request', attemptId: 'attempt', tool: 'bash', args: { command: 'effect' }, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' });
   return { root, journal, executor, dispatch, launches: () => launches, close: async () => { journal.close(); await rm(root, { recursive: true, force: true }); } };
 }
 describe('executor effect ownership', () => {
+  test('subagent dispatch cannot write or execute commands even with attachment capability', async () => {
+    const f = await fixture();
+    try {
+      const write = { ...f.dispatch, conversationKind: 'subagent' as const, tool: 'write', args: { path: 'forged.txt', content: 'unauthorized' } };
+      await expect(f.executor.execute(write)).rejects.toThrow('Subagent');
+      expect(await Bun.file(join(f.root, 'forged.txt')).exists()).toBe(false);
+      await expect(f.executor.execute({ ...f.dispatch, conversationKind: 'subagent' as const })).rejects.toThrow('Subagent');
+      expect(f.launches()).toBe(0);
+    } finally { await f.close(); }
+  }, 5000);
   test('checkpoint executes inside the checkout queue and returns only accepted evidence', async () => {
     const admitted = Promise.withResolvers<void>();
     const accepted = Promise.withResolvers<void>();

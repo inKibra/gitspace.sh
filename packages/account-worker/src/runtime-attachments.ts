@@ -3,7 +3,7 @@ import type { RuntimeAttachment, RuntimeSnapshotCommitInput } from '@gitspace/pr
 import type { AttachmentStore, ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import type { LifecycleState } from '@gitspace/protocol-environment';
 
-export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'codemode', 'jobs', 'proc', 'browser'];
+export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'codemode', 'proc', 'browser'];
 
 /** Invoked behind canonical project/workspace and enrolled-machine authorization. */
 export class RuntimeAttachmentController {

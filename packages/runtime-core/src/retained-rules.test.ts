@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
-import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, GenerationTask, hook, LiveDoc } from '@earendil-works/pi-durable';
+import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, GenerationTask, hook, LiveDoc, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Type } from 'typebox';
 import { RuntimeIdentitySchema, RuntimeRuleInterruptionSchema } from '@gitspace/protocol-runtime';
@@ -8,6 +8,8 @@ import { createRetainedRulesExtension, parseRetainedRule, interceptRuntimeModelS
 import { ruleGenerationRegistry, RuleInterruptionsDoc } from './rule-generations.js';
 import { createRunModelsRouter } from './inference/run-models.js';
 import { createConversationTools } from './conversation-tools.js';
+import { createConversationLifecycle, type ConversationLifecycle } from './conversation-lifecycle.js';
+import { createBackgroundAgentTask } from './background-agents.js';
 
 const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
 const model: Model<Api> = { id: 'controlled', name: 'Controlled', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
@@ -24,6 +26,15 @@ async function fixture(mode: 'text' | 'delta' | 'tool' | 'cancel' | 'recover' | 
   const aborted: boolean[] = [];
   let effects = 0;
   let harness: Harness;
+  let lifecycle: ConversationLifecycle;
+  const admitInference = async () => ({ provider: model.provider, modelId: model.id });
+  const configureModel = async (id: ConversationId, selected: ModelRef) => {
+    const conversation = await harness.conversation(id, BACKGROUND_CONTEXT);
+    if (!conversation) throw new Error('Conversation missing');
+    await conversation.configure({ model: selected, tools: [] }, BACKGROUND_CONTEXT);
+  };
+  const backgroundAgentTask = createBackgroundAgentTask(event => lifecycle.deliver(event));
+  const catalog = async () => ({ models: [], roles: [{ id: 'sub', label: 'Sub', provider: model.provider, model: model.id, thinking: null, current: false }] });
   const entered = Promise.withResolvers<void>();
   const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input, options) {
     requests.push(JSON.stringify(input));
@@ -49,7 +60,7 @@ async function fixture(mode: 'text' | 'delta' | 'tool' | 'cancel' | 'recover' | 
   } };
   const effect = defineTool({ name: mode === 'patch' ? 'apply_patch' : mode === 'write' ? 'write' : mode === 'spawn' ? 'spawn' : 'effect', description: 'Record an effect', parameters: Type.Object({ command: Type.Optional(Type.String()), patch: Type.Optional(Type.String()), path: Type.Optional(Type.String()), content: Type.Optional(Type.String()) }), async execute(_args, api) {
     effects++;
-    if (mode === 'spawn') return createConversationTools({ harness, storage, admitInference: async () => ({ provider: model.provider, modelId: model.id }) })({ tool: 'agents', args: { op: 'spawn', task: 'Child task' }, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: 'spawn-request', attemptId: 'spawn-attempt', replay: 'unsafe', signal: AbortSignal.timeout(30_000) }).then(result => ({ content: result.status === 'completed' ? result.content : [{ type: 'text' as const, text: 'Spawn failed' }] }));
+    if (mode === 'spawn') return createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog })({ tool: 'agents', args: { op: 'spawn', role: 'sub', task: 'Child task' }, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: 'spawn-request', attemptId: 'spawn-attempt', replay: 'unsafe', signal: AbortSignal.timeout(30_000) }).then(result => ({ content: result.status === 'completed' ? result.content : [{ type: 'text' as const, text: 'Spawn failed' }] }));
     return { content: [{ type: 'text', text: 'executed' }] };
   } });
   const open = async () => {
@@ -59,9 +70,10 @@ async function fixture(mode: 'text' | 'delta' | 'tool' | 'cancel' | 'recover' | 
       async judge() { return {}; },
       async matchAst(_conversationId, _content, paths) { if (!paths.length) throw new Error('AST matching requires a file path'); return false; },
       ...overrides,
-    }, () => harness, identity));
-    registry.install(defineExtension({ name: 'effects', tools: [effect] }));
+    }, () => harness, identity, (_name, args) => args));
+    registry.install(defineExtension({ name: 'effects', tools: [effect], tasks: [backgroundAgentTask] }));
     harness = await Harness.open(storage, { registry: ruleGenerationRegistry(registry), models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
+    lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, wake: async () => {} });
     return harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools: [effect] } });
   };
   const root = await open();
@@ -185,7 +197,7 @@ describe('durable rule generation discard', () => {
       expect((await f.harness().snapshot(RuleInterruptionsDoc, f.root.id, BACKGROUND_CONTEXT))?.active ?? null).toBeNull();
     } finally { warning.mockRestore(); await f.harness().close(BACKGROUND_CONTEXT); }
   });
-  it('gives unnamed spawned conversations sub-only instructions rather than main-only instructions', async () => {
+  it('gives an explicit-role child its role-scoped rules rather than main-only instructions', async () => {
     const f = await fixture('spawn', { async loadRules() { return [
       parseRetainedRule('main.md', '---\nagents: main\nalwaysApply: true\n---\nMAIN-ONLY-INSTRUCTION'),
       parseRetainedRule('sub.md', '---\nagents: sub\nalwaysApply: true\n---\nSUB-ONLY-INSTRUCTION'),
@@ -279,7 +291,7 @@ describe('durable rule generation discard', () => {
       registry.install(createRetainedRulesExtension({
         async loadRules() { return [parseRetainedRule('rule.md', '---\ncondition: [FORBIDDEN]\nrepeatMode: once\n---\nUse the safe alternative.')]; },
         async judge() { return {}; }, async matchAst() { return false; },
-      }, () => harness, identity));
+      }, () => harness, identity, (_name, args) => args));
       registry.install(defineExtension({ name: 'durable-inference-scope', hooks: [hook(GenerationTask, {
         async beforeRequest(_input, api, context) {
           const live = await api.snapshot(LiveDoc, api.conversationId, context);

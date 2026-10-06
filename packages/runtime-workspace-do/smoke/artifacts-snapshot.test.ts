@@ -32,6 +32,9 @@ async function fixture(defaultBranch = 'main') {
   const fetched: string[] = [];
   let minted = 0; let revoked = 0;
   const repo = {
+    async readBlob(oid: string): Promise<Blob> {
+      return new Blob([Uint8Array.from((await git.readBlob({ fs, dir, oid })).blob)]);
+    },
     async readCommit(oid: string): Promise<ArtifactsCommitMetadata> {
       const value = (await git.readCommit({ fs, dir, oid })).commit;
       return { hash: oid, treeHash: value.tree, parents: value.parent, message: value.message, author: value.author, committer: value.committer, authoredAt: value.author.timestamp, committedAt: value.committer.timestamp };
@@ -405,7 +408,7 @@ for (const resolution of ['replica', 'cloud'] as const) for (const replacement o
     const executor = new MachineExecutor({ machineId: 'machine', journal, onMutationSettled: async () => accepted, runCommand: async () => { throw new Error('Checkpoint must not launch a command'); }, artifacts: () => ({ read: async () => [], write: async () => {} }), cloudModel: async () => null, cloudMcp: async () => { throw new Error('Live MCP forbidden'); } });
     const agentResult = async (checkpoint: RuntimeGitCheckpoint) => {
       accepted = checkpoint;
-      return executor.execute(RuntimeToolDispatchSchema.parse({ version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, requestId: checkpoint.worktreeCommit, attemptId: checkpoint.worktreeCommit, tool: 'checkpoint', args: {}, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' }));
+      return executor.execute(RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, requestId: checkpoint.worktreeCommit, attemptId: checkpoint.worktreeCommit, tool: 'checkpoint', args: {}, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' }));
     };
     const initialNotice = (await agentResult(conflicted.value)).content.slice(1);
     expect(initialNotice).toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('resolved') })]);
@@ -465,7 +468,7 @@ for (const publication of ['cloud', 'replica'] as const) test(`${publication} pu
       expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: result.value.worktreeCommit, filepath: 'script' })).blob)).toBe(content);
       return result.value;
     };
-    const marked = await publish(f.previous, '\0binary prefix\n<<<<<<< cloud\nours\n||||||| base\nbefore\n=======\ntheirs\n>>>>>>> machine\n');
+    const marked = await publish(f.previous, 'text prefix\n<<<<<<< cloud\nours\n||||||| base\nbefore\n=======\ntheirs\n>>>>>>> machine\n');
     expect(marked.conflicts).toEqual(['script']);
     const partial = await publish(marked, 'ours\n>>>>>>> machine\n');
     expect(partial.conflicts).toEqual(['script']);
@@ -495,3 +498,77 @@ test('first machine publication creates the canonical ref even when all uploaded
     expect(replay.value).toEqual(accepted.value);
   } finally { await f.close(); }
 });
+
+for (const publication of ['initial', 'recovery'] as const) test(`${publication} machine publication discovers unchanged conflict markers without metadata`, async () => {
+  const f = await fixture();
+  try {
+    const markers = '<<<<<<< cloud\nours\n=======\ntheirs\n>>>>>>> machine\n';
+    const blob = await git.writeBlob({ fs, dir: f.dir, blob: text.encode(markers) });
+    const nested = await git.writeTree({ fs, dir: f.dir, tree: [{ path: 'conflict', mode: '100644', type: 'blob', oid: blob }] });
+    const tree = await git.writeTree({ fs, dir: f.dir, tree: [{ path: 'nested', mode: '040000', type: 'tree', oid: nested }] });
+    const commit = await git.writeCommit({ fs, dir: f.dir, commit: { tree, parent: [f.previous.worktreeCommit], author, committer: author, message: 'Existing markers without metadata\n' } });
+    const checkpoint = { ...f.previous, worktreeCommit: commit, trackedWorktreeCommit: commit, worktreeTree: tree, conflicts: [] };
+    await git.writeRef({ fs, dir: f.dir, ref: checkpoint.checkpointRef, value: commit, force: true });
+    const plan = publication === 'initial'
+      ? { machine: checkpoint, mutations: [], forcePublication: true }
+      : await planSnapshotMerge(f.repo, checkpoint, checkpoint, checkpoint, { forcePublication: true });
+    const input = { repository: 'fixture', workspaceId: 'workspace', previous: checkpoint, ...plan };
+    const accepted = await writeArtifactsSnapshot(f.repo, input, f.request);
+    if (accepted.isErr()) throw accepted.error;
+    expect(accepted.value.conflicts).toEqual(['nested/conflict']);
+    expect(accepted.value.worktreeTree).toBe(tree);
+    expect(accepted.value.headCommit).toBe(checkpoint.headCommit);
+    expect(accepted.value.indexCommit).toBe(checkpoint.indexCommit);
+    const replay = await writeArtifactsSnapshot(f.repo, input, f.request);
+    if (replay.isErr()) throw replay.error;
+    expect(replay.value).toEqual(accepted.value);
+  } finally { await f.close(); }
+}, 5000);
+
+test('ordinary marker scanning reads only the changed blob in a large tree', async () => {
+  const f = await fixture();
+  try {
+    const unchanged = await git.writeBlob({ fs, dir: f.dir, blob: text.encode('unchanged\n') });
+    const changed = await git.writeBlob({ fs, dir: f.dir, blob: text.encode('<<<<<<< cloud\nchanged\n') });
+    const entries = Array.from({ length: 1000 }, (_, index) => ({ path: `file-${index}`, mode: '100644', type: 'blob' as const, oid: unchanged }));
+    const tree = await git.writeTree({ fs, dir: f.dir, tree: entries });
+    const nextTree = await git.writeTree({ fs, dir: f.dir, tree: entries.map(entry => entry.path === 'file-0' ? { ...entry, oid: changed } : entry) });
+    const base = { ...f.previous, worktreeTree: tree };
+    const reads: string[] = [];
+    const reader = { ...f.repo, readBlob: async (oid: string) => { reads.push(oid); return f.repo.readBlob(oid); } };
+    const plan = await planSnapshotMerge(reader, base, base, { ...base, worktreeTree: nextTree });
+    expect(plan.conflicts).toEqual(['file-0']);
+    expect(reads).toEqual([changed]);
+  } finally { await f.close(); }
+});
+
+for (const publication of ['cloud', 'replica', 'initial', 'recovery'] as const) test(`${publication} marker scanning ignores non-text marker-like objects`, async () => {
+  const f = await fixture();
+  try {
+    const marker = '<<<<<<< cloud\nours\n=======\ntheirs\n>>>>>>> machine\n';
+    const oversized = new Uint8Array(8 * 1024 * 1024 + 1).fill(97);
+    oversized.set(text.encode(marker));
+    const mutations = [
+      { path: 'binary', content: text.encode(`\0\n${marker}`) },
+      { path: 'invalid-utf8', content: new Uint8Array([255, 10, ...text.encode(marker)]) },
+      { path: 'lfs', content: text.encode(`version https://git-lfs.github.com/spec/v1\noid sha256:${'a'.repeat(64)}\nsize 123\n${marker}`) },
+      { path: 'oversized', content: oversized },
+      { path: 'symlink', content: text.encode(marker), mode: '120000' },
+      { path: 'real-text', content: text.encode(marker) },
+    ];
+    const entries = await Promise.all(mutations.map(async mutation => ({ path: mutation.path, mode: mutation.mode ?? '100644', type: 'blob' as const, oid: await git.writeBlob({ fs, dir: f.dir, blob: mutation.content }) })));
+    const tree = await git.writeTree({ fs, dir: f.dir, tree: entries });
+    const machine = { ...f.previous, worktreeTree: tree };
+    if (publication === 'recovery') {
+      const recovered = await planSnapshotMerge(f.repo, machine, machine, machine, { forcePublication: true });
+      expect(recovered.conflicts).toEqual(['real-text']);
+      return;
+    }
+    const plan = publication === 'replica'
+      ? await planSnapshotMerge(f.repo, f.previous, f.previous, machine)
+      : publication === 'initial' ? { machine, mutations } : { mutations };
+    const result = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: f.previous, ...plan }, f.request);
+    if (result.isErr()) throw result.error;
+    expect(result.value.conflicts).toEqual(['real-text']);
+  } finally { await f.close(); }
+}, 10000);

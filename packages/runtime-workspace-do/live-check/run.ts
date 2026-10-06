@@ -63,7 +63,7 @@ export async function probe(binding: Pick<Artifacts, 'get'>, authorization: Auth
         const minted = new Set<string>();
         try {
           const result = await writeArtifactsSnapshot({
-            readCommit: oid => repo.readCommit(oid), readTree: oid => repo.readTree(oid), info: () => repo.info(),
+            readCommit: oid => repo.readCommit(oid), readTree: oid => repo.readTree(oid), readBlob: oid => repo.readBlob(oid), info: () => repo.info(),
             createToken: async (scope, ttl) => { const token = await repo.createToken(scope, ttl); rememberSecret(token.plaintext); rememberSecret(token.id); minted.add(token.id); return token; },
             revokeToken: async id => { const revoked = await repo.revokeToken(id); if (!revoked) throw new Error('Writer token revocation failed'); minted.delete(id); return revoked; },
           }, { repository: fork.name, workspaceId: `probe-${randomUUID()}`, previous: checkpoint, mutations: [{ path: probePath, content: new TextEncoder().encode(content) }], signal: AbortSignal.timeout(120_000) }, boundedFetch(request));

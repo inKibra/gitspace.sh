@@ -1657,6 +1657,7 @@ function AccountCrons({ projects, projectsLoading }: { projects: readonly Config
     onDeleteCron={async (projectId, cronId, expectedRevision) => { await configurationResult(rpcClient.crons.delete({ projectId, cronId, expectedRevision })); }}
     onRunNow={(projectId, cronId) => configurationResult(rpcClient.crons.runNow({ projectId, cronId }))}
     onListRuns={(projectId, cronId) => configurationResult(rpcClient.crons.history({ projectId, cronId }))}
+    onCancelRun={(projectId, runId, confirmStopWorkspaceAgent) => configurationResult(rpcClient.crons.cancelRun({ projectId, runId, confirmStopWorkspaceAgent }))}
   /></>;
 }
 

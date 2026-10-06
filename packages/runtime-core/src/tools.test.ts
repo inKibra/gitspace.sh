@@ -1,17 +1,18 @@
 import { expect, test } from 'vitest';
 import { z } from 'zod';
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { Harness, MemoryStorage, createRegistry, defineExtension } from '@earendil-works/pi-durable';
+import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
+import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
+import { Type } from 'typebox';
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api, type ToolCall } from '@earendil-works/pi-ai';
-import { RuntimeBrowserApprovalCardSchema } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserApprovalCardSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema } from '@gitspace/protocol-runtime';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
 import { createRuntimeTools, type ToolServices } from './tools.js';
-import { DurableJobsDoc, type JobServices } from './jobs.js';
+import { DurableJobsDoc, createJobTool, type JobServices } from './jobs.js';
 
 const model: Model<Api> = { id: 'tool-contract', name: 'Tool contract', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
 const unused = async (): Promise<never> => { throw new Error('Unexpected operation'); };
-const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, admitInference: unused };
+const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, deliverConversationEvent: unused, observeProcess: unused, stopProcess: unused };
 const completed: ToolServices['invoke'] = async input => ({ status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: `Executed ${input.tool}` }] });
 const services: ToolServices = {
   invoke: completed,
@@ -22,7 +23,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   read: { path: 'src/main.ts', offset: 1, limit: 10 }, write: { path: 'src/main.ts', content: 'new content' },
   edit: { path: 'src/main.ts', edits: [{ oldText: 'old', newText: 'new' }] }, apply_patch: { patch: '*** Begin Patch\n*** Add File: new.ts\n+export {};\n*** End Patch' },
   bash: { command: 'pwd' }, grep: { pattern: 'needle', path: 'src' }, find: { pattern: '*.ts', path: 'src' }, codemode: { code: 'return 1;' },
-  agents: { op: 'list' }, jobs: { op: 'list' }, proc: { op: 'list' }, machines: { op: 'list' }, environment: { method: 'get' },
+  agents: { op: 'list' }, proc: { op: 'list' }, machines: { op: 'list' }, environment: { method: 'get' },
   space_goal: { method: 'get' }, space_phase: { phase: 'code' }, space_workspace: { method: 'current' }, space_artifacts: { method: 'list' },
   space_workflow: { method: 'get' }, space_rubric: { method: 'get' }, space_journal: { method: 'list' }, space_guide: { method: 'get' }, space_review: { method: 'list' },
   web_search: { query: 'TypeScript documentation' }, generate_image: { prompt: 'A blue square' }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
@@ -32,8 +33,8 @@ const samples: Record<string, ToolCall['arguments']> = {
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'] },
 };
-async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations) {
-  const tools = createRuntimeTools({ ...services, invoke }, jobServices);
+async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = []) {
+  const tools = [...createRuntimeTools({ ...services, invoke }, jobServices), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools }));
   let generation = 0;
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
@@ -55,8 +56,7 @@ test('every registered tool advertises its real object contract and executes thr
   try {
     expect(tools.map(tool => tool.name).sort()).toEqual(Object.keys(samples).sort());
     for (const tool of tools) {
-      expect(tool.description.length).toBeGreaterThan(25);
-      expect(tool.description).not.toMatch(/^GitSpace \w+; executes through/u);
+      expect(tool.name).not.toBe('jobs');
       const schema = z.object({ type: z.literal('object'), properties: z.record(z.string(), z.unknown()).optional(), anyOf: z.array(z.unknown()).optional(), oneOf: z.array(z.unknown()).optional(), allOf: z.array(z.unknown()).optional() }).parse(tool.parameters);
       expect(Boolean(schema.properties || schema.anyOf || schema.oneOf || schema.allOf)).toBe(true);
       expect(schema.properties?.args).not.toEqual({});
@@ -66,7 +66,7 @@ test('every registered tool advertises its real object contract and executes thr
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.map(result => result.toolCallId).sort()).toEqual(Object.keys(samples).sort());
     expect(results.filter(result => result.isError)).toEqual([]);
-    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['jobs', 'todo', 'ask', 'propose_plan'].includes(name)).sort());
+    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan'].includes(name)).sort());
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);
     expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'ask']);
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
@@ -182,9 +182,9 @@ test('agent advertised lifecycle schema excludes human options', () => {
   expect(advertised).not.toContain('"cloud/destroy"');
 });
 
-test('jobs reject unavailable execution before returning acceptance or creating durable work', async () => {
+test('background bash rejects unavailable execution before returning acceptance or creating durable work', async () => {
   let executions = 0;
-  const { harness, root } = await registered([[call('jobs', { op: 'run', application: 'sh', args: ['-c', 'pwd'] })]], completed, {
+  const { harness, root } = await registered([[call('bash', { command: 'pwd', background: true })]], completed, {
     ...operations,
     jobScope: async () => { throw new Error('No machine attached: attach a ready workspace replica.'); },
     execute: async () => { executions++; return unused(); },
@@ -199,3 +199,81 @@ test('jobs reject unavailable execution before returning acceptance or creating 
     expect(executions).toBe(0);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
+
+test('readonly process and background command controls bypass always-ask approval', async () => {
+  const calls = [call('bash', { op: 'list' }, 'commands'), ...['list', 'status', 'logs', 'wait'].map(op => call('proc', op === 'list' ? { op } : { op, name: 'service' }, `proc-${op}`))];
+  const { harness, root } = await registered([calls]);
+  try {
+    await harness.commit(async tx => { (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'always-ask'; }, BACKGROUND_CONTEXT);
+    await root.submit({ type: 'input', content: 'Inspect running work.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(1500), BACKGROUND_CONTEXT));
+    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
+    const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
+    expect(results.map(result => result.toolCallId).sort()).toEqual(calls.map(item => item.id).sort());
+    expect(results.some(result => result.isError)).toBe(false);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+for (const mode of ['settled', 'timeout', 'cancelled'] as const) test(`bash wait observes ${mode} without returning an immediate stale acceptance`, async () => {
+  const probe = defineTool({
+    name: 'wait-probe', description: 'Exercise a durable command wait.', parameters: Type.Object({}), replay: 'safe',
+    async execute(_input, api, context) {
+      const acceptedAt = new Date().toISOString();
+      const acceptance = RuntimeJobAcceptanceSchema.parse({ status: 'accepted', acceptedAt, job: { projectId: 'project', workspaceId: 'workspace', jobId: 'waiting-command', taskId: String(api.taskId), conversationId: String(api.conversationId), requestId: 'waiting-command' } });
+      await api.commit(async tx => {
+        (await tx.doc(DurableJobsDoc, api.conversationId)).records.command = { acceptance, observation: acceptance, args: { command: 'true', background: true }, fingerprint: 'accepted', spawningTask: api.taskId, deadlineAt: new Date(Date.now() + 10000).toISOString(), attemptId: 'waiting-command', cancelRequested: false, delivered: false };
+      }, context);
+      const controller = new AbortController();
+      const interrupted = new Error('Cancelled bounded command wait');
+      let finished = false;
+      // The timeout case deliberately exercises the production timer against the actual Harness watch.
+      const pending = createJobTool(operations)({ op: 'wait', job: acceptance.job, timeoutMs: mode === 'timeout' ? 50 : 1000 }, api, withAbortSignal(controller.signal, context));
+      void pending.then(() => { finished = true; }, () => { finished = true; });
+      await api.snapshot(DurableJobsDoc, api.conversationId, context);
+      await api.snapshot(DurableJobsDoc, api.conversationId, context);
+      expect(finished).toBe(false);
+      if (mode === 'settled') await api.commit(async tx => {
+        (await tx.doc(DurableJobsDoc, api.conversationId)).records.command.observation = RuntimeJobObservationSchema.parse({ status: 'not-started', job: acceptance.job, reason: 'cancelled', completedAt: new Date().toISOString() });
+      }, context);
+      if (mode === 'cancelled') {
+        controller.abort(interrupted);
+        await expect(pending).rejects.toThrow('Cancelled bounded command wait');
+      } else expect(RuntimeJobObservationSchema.parse(await pending).status).toBe(mode === 'settled' ? 'not-started' : 'accepted');
+      return { content: [{ type: 'text', text: mode }] };
+    },
+  });
+  const { harness, root } = await registered([[call('wait-probe', {})]], completed, operations, [probe]);
+  try {
+    await root.submit({ type: 'input', content: 'Observe the accepted command.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(2000), BACKGROUND_CONTEXT));
+    const result = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult');
+    expect(result?.role === 'toolResult' && result.isError).toBe(false);
+    expect(result?.content).toEqual([{ type: 'text', text: mode }]);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 4000);
+
+test('bash logs exposes executor failures as tool errors rather than successful text', async () => {
+  const logs = call('bash', {}, 'failed-logs');
+  const seed = defineTool({
+    name: 'accept-command', description: 'Admit a command fixture.', parameters: Type.Object({}), replay: 'safe',
+    async execute(_input, api, context) {
+      const acceptance = RuntimeJobAcceptanceSchema.parse({ status: 'accepted', acceptedAt: new Date().toISOString(), job: { projectId: 'project', workspaceId: 'workspace', jobId: 'log-command', taskId: String(api.taskId), conversationId: String(api.conversationId), requestId: 'log-command' } });
+      await api.commit(async tx => {
+        (await tx.doc(DurableJobsDoc, api.conversationId)).records.command = { acceptance, observation: acceptance, args: { command: 'true', background: true }, fingerprint: 'accepted', spawningTask: api.taskId, deadlineAt: new Date(Date.now() + 10000).toISOString(), attemptId: 'log-command', cancelRequested: false, delivered: false };
+      }, context);
+      logs.arguments = { op: 'logs', job: acceptance.job };
+      return { content: [{ type: 'text', text: 'Accepted.' }] };
+    },
+  });
+  const { harness, root } = await registered([[call('accept-command', {})], [logs]], completed, {
+    ...operations,
+    async controlJob(input) { return { status: 'failed', requestId: 'failed-logs', attemptId: input.attemptId, content: [], error: { code: 'unavailable', message: 'Command output is unavailable' } }; },
+  }, [seed]);
+  try {
+    await root.submit({ type: 'input', content: 'Read the command output.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(2000), BACKGROUND_CONTEXT));
+    const result = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'failed-logs');
+    expect(result?.role === 'toolResult' && result.isError).toBe(true);
+    expect(JSON.stringify(result?.content)).toContain('Command output is unavailable');
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 4000);

@@ -3,6 +3,8 @@ import type { InspectorView } from '@gitspace/protocol';
 import type { SpaceViewCodec } from '@gitspace/protocol/rpc-contract';
 import type { InputOf } from 'result-rpc';
 import type { RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeSubagentRecordSchema, type RuntimeSubagentRecord } from '@gitspace/protocol-runtime/session-controls';
+import { z } from 'zod';
 import { deriveWorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { AgentScopeView, ProjectAgentView, WorkspaceView } from './GitSpaceShell.js';
 
@@ -24,8 +26,35 @@ export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<Inspect
   return { baseSpace, workspaces, relationsReady, workspace: inspection.workspace.kind === 'base' ? baseSpace : workspaces.find(item => item.id === inspection.workspace.id)! };
 }
 
-export function runtimeSubagents(snapshot: RuntimeSnapshot): SideAgentBlock[] {
-  return snapshot.conversations.filter(item => item.parentId !== null).map(item => ({ id: `agent:${item.id}`, type: 'side-agent', agentId: item.id, label: item.title || item.id, status: item.status === 'idle' ? 'done' : item.status === 'waiting' ? 'blocked' : item.status, summary: item.messages.flatMap(message => message.role === 'assistant' ? message.content.flatMap(content => content.type === 'text' ? [content.text] : []) : []).at(-1) }));
+const runtimeAgentsDocumentSchema = RuntimeSubagentRecordSchema.extend({ conversationId: z.string() }).array();
+export type RuntimeSideAgentBlock = SideAgentBlock & { runtime?: RuntimeSubagentRecord; messages?: MessageBlock[] };
+
+export function runtimeSubagentRecords(snapshot: RuntimeSnapshot) {
+  const document = snapshot.documents['gitspace.agents'];
+  return document === undefined ? [] : runtimeAgentsDocumentSchema.parse(document);
+}
+
+function runtimeMessages(conversation: RuntimeSnapshot['conversations'][number]): MessageBlock[] {
+  return conversation.messages.flatMap<MessageBlock>(message => message.role === 'user' || message.role === 'assistant' ? [{
+    id: message.id, type: 'message', role: message.role,
+    text: message.content.flatMap(content => content.type === 'text' ? [content.text] : []).join(''),
+    images: message.content.flatMap<MessageImage>(content => content.type === 'image' && (content.mimeType === 'image/png' || content.mimeType === 'image/jpeg' || content.mimeType === 'image/webp') ? [{ data: content.data, mimeType: content.mimeType }] : []),
+  }] : []);
+}
+
+export function runtimeSubagents(snapshot: RuntimeSnapshot): RuntimeSideAgentBlock[] {
+  const records = runtimeSubagentRecords(snapshot);
+  return snapshot.conversations.filter(item => item.parentId !== null).map(item => {
+    const runtime = records.find(record => record.conversationId === item.id);
+    const messages = runtimeMessages(item);
+    return {
+      id: `agent:${item.id}`, type: 'side-agent', agentId: item.id, label: runtime?.name ?? (item.title || item.id),
+      status: item.status === 'idle' ? 'done' : item.status === 'waiting' ? 'blocked' : item.status,
+      summary: messages.findLast(message => message.text.length > 0)?.text,
+      messages,
+      ...(runtime ? { runtime, agent: runtime.role ?? runtime.definition?.name, model: runtime.model ? `${runtime.model.provider} / ${runtime.model.modelId}` : undefined } : {}),
+    };
+  });
 }
 
 /** A snapshot immediately paints the existing transcript while its bounded history loads. */

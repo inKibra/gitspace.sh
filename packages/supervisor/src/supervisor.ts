@@ -24,13 +24,14 @@ const finished = (run: Running) => run.stored.daemon.state === 'exited' || run.s
 
 export class ProcessSupervisor {
   private readonly runs = new Map<string, Running>();
+  private readonly completions = new Map<string, Extract<DaemonResponse, { op: 'describe' }>>();
   private closing = false;
   private readonly privatePipes = new Set<string>();
   /** Native authority only: deliberately absent from the broker request schema. */
   async startPrivatePipe(request: Extract<DaemonRequest, { op: 'start' }>): Promise<DaemonResponse> {
     if (request.spec.pty || request.spec.detached || request.spec.restart !== 'no') throw new Error('Private pipes require a non-restarting owned process');
     this.privatePipes.add(request.spec.name);
-    try { return await this.request(request); } finally { this.privatePipes.delete(request.spec.name); }
+    try { return await this.request({ ...request, spec: { ...request.spec, visibility: 'private' } }); } finally { this.privatePipes.delete(request.spec.name); }
   }
   privatePipe(name: string): { input: Duplex; output: Duplex } {
     const run = this.runs.get(name);
@@ -58,6 +59,12 @@ export class ProcessSupervisor {
     try { return !await sameProcess(stored.identity); } catch { return false; }
   }
   async recover(): Promise<void> {
+    await mkdir(join(this.root, 'completions'), { recursive: true, mode: 0o700 });
+    for (const file of await readdir(join(this.root, 'completions'))) {
+      if (!file.endsWith('.json')) continue;
+      const record = StoredDaemonSchema.parse(JSON.parse(await readFile(join(this.root, 'completions', file), 'utf8')));
+      this.completions.set(`${record.daemon.id}:${record.daemon.restartCount}`, { op: 'describe', daemon: record.daemon, spec: record.spec });
+    }
     await mkdir(join(this.root, 'daemons'), { recursive: true, mode: 0o700 });
     for (const directory of await readdir(join(this.root, 'daemons'), { withFileTypes: true })) {
       if (!directory.isDirectory()) continue;
@@ -76,6 +83,7 @@ export class ProcessSupervisor {
           stored.daemon.failure = 'Supervisor restarted; surviving execution requires explicit stop before restart';
         } else {
           stored.daemon.state = 'failed'; stored.daemon.pid = null;
+          delete stored.daemon.nextRestartCount;
           stored.daemon.failure = 'Execution interrupted: recorded execution no longer exists; no automatic replay';
         }
       }
@@ -86,6 +94,7 @@ export class ProcessSupervisor {
     }
   }
   private persist(run: Running): Promise<void> {
+    if (finished(run)) this.completions.set(`${run.stored.daemon.id}:${run.stored.daemon.restartCount}`, { op: 'describe', daemon: structuredClone(run.stored.daemon), spec: structuredClone(run.stored.spec) });
     if (!run.stored.spec.persist || run.released) return Promise.resolve();
     run.dirty = true;
     if (run.writing) return run.writes;
@@ -99,6 +108,12 @@ export class ProcessSupervisor {
         // Detached children own their log descriptor; never replace that inode.
         // Other output and its cursor share one atomic recovery record.
         const body = JSON.stringify({ ...run.stored, output: text, ...(run.stored.spec.detached ? { outputOffset: run.outputOffset ?? 0 } : {}) });
+        if (finished(run)) {
+          const completion = join(this.root, 'completions', `${run.stored.daemon.id}:${run.stored.daemon.restartCount}.json`);
+          await mkdir(join(this.root, 'completions'), { recursive: true, mode: 0o700 });
+          await writeFile(`${completion}.next`, JSON.stringify(run.stored), { mode: 0o600 });
+          await rename(`${completion}.next`, completion);
+        }
         if (!run.stored.spec.detached) {
           await writeFile(join(directory, 'output.log.next'), text, { mode: 0o600 });
           await rename(join(directory, 'output.log.next'), join(directory, 'output.log'));
@@ -155,7 +170,8 @@ export class ProcessSupervisor {
       throw new Error('Process environment bindings are unavailable; supply a fresh start after confirmed cleanup');
     }
     run.stopping = false; run.recovered = false; run.stoppingTask = undefined;
-    daemon.state = 'starting'; daemon.exitCode = null; delete daemon.failure;
+    daemon.state = 'starting'; daemon.exitCode = null; delete daemon.failure; delete daemon.readiness; delete daemon.nextRestartCount;
+    const readinessCursor = run.stored.cursor;
     // Commit an unresolved claim before spawn. Recovery never replays this claim.
     run.stored.claimBoot = await bootIdentity();
     run.stored.identity = null;
@@ -199,7 +215,7 @@ export class ProcessSupervisor {
       if (!finished(run)) daemon.state = spec.ready ? 'running' : 'ready';
       await this.persist(run); this.changed(run);
       if (spec.ready && !finished(run) && !run.stopping) {
-        run.readinessTask = this.readiness(run).catch(error => { run.backgroundFailure = error instanceof Error ? error : new Error(String(error)); });
+        run.readinessTask = this.readiness(run, readinessCursor).catch(error => { run.backgroundFailure = error instanceof Error ? error : new Error(String(error)); });
       }
     } catch {
       daemon.state = 'failed'; daemon.failure = 'Process launch failed'; daemon.pid = null;
@@ -220,9 +236,12 @@ export class ProcessSupervisor {
     run.stored.daemon.pid = null;
     run.stored.identity = null;
     run.stored.daemon.state = run.stored.daemon.failure ? 'failed' : 'exited';
-    await this.persist(run); this.changed(run);
     const { restart } = run.stored.spec;
-    if (!this.closing && !run.stopping && (restart === 'always' || (restart === 'on-failure' && code !== 0))) {
+    const restarting = !this.closing && !run.stopping && (restart === 'always' || (restart === 'on-failure' && code !== 0));
+    if (restarting) run.stored.daemon.nextRestartCount = run.stored.daemon.restartCount + 1;
+    else delete run.stored.daemon.nextRestartCount;
+    await this.persist(run); this.changed(run);
+    if (restarting) {
       run.stored.daemon.state = 'restarting';
       run.stored.daemon.restartCount++;
       await this.persist(run); this.changed(run);
@@ -232,12 +251,13 @@ export class ProcessSupervisor {
       }, Math.min(30_000, 250 * 2 ** Math.min(run.stored.daemon.restartCount, 7)));
     }
   }
-  private async readiness(run: Running): Promise<void> {
+  private async readiness(run: Running, cursor: number): Promise<void> {
     const ready = run.stored.spec.ready!;
     const deadline = Date.now() + (ready.timeoutMs ?? 30_000);
     const pattern = ready.log ? new RegExp(ready.log, 'u') : null;
     while (!finished(run) && !run.stopping && run.stored.daemon.state !== 'restarting') {
-      const logReady = !pattern || pattern.test(run.text);
+      const matched = pattern?.exec(run.text.slice(Math.max(0, cursor - run.stored.base)))?.[0];
+      const logReady = !pattern || matched !== undefined;
       let portReady = !ready.port;
       if (ready.port) {
         const connected = Promise.withResolvers<boolean>();
@@ -247,10 +267,10 @@ export class ProcessSupervisor {
         portReady = await connected.promise;
       }
       if (run.stopping || finished(run) || this.closing) return;
-      if (logReady && portReady) { run.stored.daemon.state = 'ready'; await this.persist(run); this.changed(run); return; }
+      if (logReady && portReady) { run.stored.daemon.state = 'ready'; run.stored.daemon.readiness = { timedOut: false, ...(matched === undefined ? {} : { matched }) }; await this.persist(run); this.changed(run); return; }
       if (Date.now() >= deadline) {
-        run.stored.daemon.failure = 'Readiness deadline expired';
-        await this.stop(run, 1000); run.stored.daemon.state = 'failed'; await this.persist(run); this.changed(run); return;
+        run.stored.daemon.readiness = { timedOut: true, ...(matched === undefined ? {} : { matched }) };
+        await this.persist(run); this.changed(run); return;
       }
       await Bun.sleep(50);
     }
@@ -284,6 +304,7 @@ export class ProcessSupervisor {
     if (run.recovered) delete run.stored.daemon.failure;
     run.stored.daemon.state = run.stored.daemon.failure ? 'failed' : 'exited';
     run.stored.daemon.pid = null; run.stored.identity = null;
+    delete run.stored.daemon.nextRestartCount;
     await this.persist(run); this.changed(run);
   }
   private async drain(run: Running): Promise<void> {
@@ -330,6 +351,10 @@ export class ProcessSupervisor {
       return { op: 'shutdown' };
     }
     if (this.closing) throw new Error('Supervisor is shutting down');
+    if ((request.op === 'describe' || request.op === 'stop') && request.instanceId !== undefined && request.restartCount !== undefined) {
+      const completion = this.completions.get(`${request.instanceId}:${request.restartCount}`);
+      if (completion && completion.daemon.name === request.name) return request.op === 'describe' ? structuredClone(completion) : { op: 'stop', daemon: structuredClone(completion.daemon) };
+    }
     if (request.op === 'start') {
       if (request.spec.detached && !request.spec.persist) throw new SupervisorRequestError('DETACHED_REQUIRES_PERSISTENCE', 'Detached processes require persist:true; transient execution cannot retain detached output or recovery records');
       if (request.spec.ready?.log) new RegExp(request.spec.ready.log, 'u');
@@ -351,7 +376,13 @@ export class ProcessSupervisor {
       return { op: 'start', daemon: { ...stored.daemon } };
     }
     const run = this.runs.get(request.name);
+    if ((request.op === 'describe' || request.op === 'stop') && request.instanceId !== undefined && request.restartCount === undefined && run?.stored.daemon.id !== request.instanceId) {
+      let latest: Extract<DaemonResponse, { op: 'describe' }> | undefined;
+      for (const completion of this.completions.values()) if (completion.daemon.id === request.instanceId && completion.daemon.name === request.name && (!latest || latest.daemon.restartCount < completion.daemon.restartCount)) latest = completion;
+      if (latest) return request.op === 'describe' ? structuredClone(latest) : { op: 'stop', daemon: structuredClone(latest.daemon) };
+    }
     if (!run) throw new Error(`Unknown process ${request.name}`);
+    if ((request.op === 'describe' || request.op === 'stop') && (request.instanceId !== undefined && request.instanceId !== run.stored.daemon.id || request.restartCount !== undefined && request.restartCount !== run.stored.daemon.restartCount)) throw new Error('Process instance no longer matches the requested execution');
     switch (request.op) {
       case 'describe': return { op: 'describe', daemon: { ...run.stored.daemon }, spec: structuredClone(run.stored.spec) };
       case 'stop': await this.stop(run, request.timeoutMs ?? 5000); await this.drain(run); return { op: 'stop', daemon: { ...run.stored.daemon } };
@@ -360,18 +391,21 @@ export class ProcessSupervisor {
           throw new Error('Process environment bindings are unavailable; supply a fresh start after confirmed cleanup');
         }
         await this.stop(run, request.timeoutMs ?? 5000); await this.drain(run);
+        run.stored.daemon.restartCount++;
         run.launching = this.launch(run); await run.launching;
         return { op: 'restart', daemon: { ...run.stored.daemon } };
       case 'send': {
         if (run.recovered || finished(run)) throw new Error('Process input is unavailable');
-        if (run.stored.spec.detached && (request.data !== undefined || request.cols !== undefined || request.rows !== undefined)) throw new Error('Detached processes have no interactive input');
+        const keys = { ENTER: '\r', TAB: '\t', ESCAPE: '\x1b', CTRL_C: '\x03', CTRL_D: '\x04', UP: '\x1b[A', DOWN: '\x1b[B', LEFT: '\x1b[D', RIGHT: '\x1b[C' } as const;
+        const data = (request.data ?? '') + (request.text === undefined ? '' : request.text + (request.enter === false ? '' : '\n')) + (request.keys ?? []).map(key => keys[key]).join('');
+        if (run.stored.spec.detached && (data || request.cols !== undefined || request.rows !== undefined)) throw new Error('Detached processes have no interactive input');
         if (request.signal && run.stored.identity) await signalIdentity(run.stored.identity, request.signal);
         if (request.cols && request.rows) run.terminal?.resize(request.cols, request.rows);
-        if (request.data !== undefined) {
-          if (run.terminal) run.terminal.write(request.data);
+        if (data) {
+          if (run.terminal) run.terminal.write(data);
           else if (run.pipe?.stdin) {
             const written = Promise.withResolvers<void>();
-            run.pipe.stdin.write(request.data, error => error ? written.reject(error) : written.resolve());
+            run.pipe.stdin.write(data, error => error ? written.reject(error) : written.resolve());
             await written.promise;
           }
           else throw new Error('Process has no writable input');
@@ -380,14 +414,16 @@ export class ProcessSupervisor {
       }
       case 'wait': {
         const regex = request.pattern ? new RegExp(request.pattern, 'u') : null;
-        const observed = await this.wait(run, () => finished(run) || (regex ? regex.test(run.text) : request.for === 'ready' && run.stored.daemon.state === 'ready'), request.timeoutMs ?? 30_000, signal);
-        return { op: 'wait', daemon: { ...run.stored.daemon }, timedOut: !observed };
+        const observed = await this.wait(run, () => finished(run) || (regex ? regex.test(run.text) : request.for === 'ready' && (run.stored.daemon.state === 'ready' || run.stored.daemon.readiness?.timedOut === true)), request.timeoutMs ?? 30_000, signal);
+        const matched = regex?.exec(run.text)?.[0];
+        return { op: 'wait', daemon: { ...run.stored.daemon }, timedOut: !observed || (!regex && request.for === 'ready' && run.stored.daemon.readiness?.timedOut === true), ...(matched === undefined ? {} : { matched }) };
       }
       case 'logs': {
         if (request.follow && request.cursor === run.stored.cursor && !finished(run)) await this.wait(run, () => run.stored.cursor !== request.cursor || finished(run), request.timeoutMs ?? 30_000, signal);
         const resync = request.cursor !== undefined && request.cursor < run.stored.base ? 'cursor-expired' : request.cursor !== undefined && request.cursor > run.stored.cursor ? 'cursor-ahead' : undefined;
         const offset = request.cursor === undefined || resync ? 0 : request.cursor - run.stored.base;
-        const lines = run.text.slice(offset).split('\n');
+        const pattern = request.grep ? new RegExp(request.grep, 'u') : null;
+        const lines = run.text.slice(offset).split('\n').filter(line => !pattern || pattern.test(line));
         const count = request.lines ?? 1000;
         return { op: 'logs', state: run.stored.daemon.state, text: (request.head ? lines.slice(0, count) : lines.slice(-count)).join('\n'), cursor: run.stored.cursor, ...(resync ? { resync } : {}), ...(request.renderTerminalRows ? { terminalText: run.projection.text() } : {}) };
       }

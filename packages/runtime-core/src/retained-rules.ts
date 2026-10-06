@@ -2,8 +2,8 @@ import { createAssistantMessageEventStream, type AssistantMessageEventStream, ty
 import { defineDoc, defineExtension, GenerationTask, LiveDoc, ToolTask, hook, type Harness } from '@earendil-works/pi-durable';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
-import { AgentDefinitionContextDoc } from './conversation-tools.js';
-import { RuntimeRuleInterruptionSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { AgentDefinitionContextDoc } from './subagent-state.js';
+import { canonicalJson, RuntimeRuleInterruptionSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuleGenerationDiscard, RuleInterruptionsDoc } from './rule-generations.js';
 import type { Context } from '@earendil-works/chord';
 async function digest(value: string): Promise<string> {
@@ -155,15 +155,15 @@ function toolOutput(name: string, raw: Record<string, unknown>): Output {
 function outputs(message: AssistantMessage): Output[] {
   return message.content.map((part, ordinal) => part.type === 'text' ? { source: 'text' as const, text: part.text, paths: [], ordinal } : part.type === 'thinking' ? { source: 'thinking' as const, text: part.thinking, paths: [], ordinal } : { ...toolOutput(part.name, part.arguments), ordinal });
 }
-export function createRetainedRulesExtension(services: RetainedRuleServices, getHarness: () => Harness, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>) {
+export function createRetainedRulesExtension(services: RetainedRuleServices, getHarness: () => Harness, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, prepareArguments: (name: string, args: Record<string, unknown>) => unknown) {
   return defineExtension({ name: 'gitspace.retained-rules', sections: [{ key: 'project-rules', async render(input, context) {
     const definition = await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context);
-    const rules = (await services.loadRules(String(input.conversationId))).filter(rule => rule.enabled && (!rule.agents.length || rule.agents.some(pattern => glob(pattern.toLowerCase(), (definition?.name ?? 'main').toLowerCase()))));
+    const rules = (await services.loadRules(String(input.conversationId))).filter(rule => rule.enabled && (!rule.agents.length || rule.agents.some(pattern => glob(pattern.toLowerCase(), (definition?.child?.definition?.name ?? definition?.child?.role ?? 'main').toLowerCase()))));
     return rules.map(rule => rule.alwaysApply ? rule.content : `Rule ${rule.name}: ${rule.description || 'Project instruction'} (read rule://${rule.name})`).join('\n\n');
   } }], hooks: [hook(GenerationTask, {
     async beforeRequest(_request, api, context) {
       const definition = await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context);
-      const rules = (await services.loadRules(String(api.conversationId))).filter(rule => rule.enabled && (!rule.agents.length || rule.agents.some(pattern => glob(pattern.toLowerCase(), (definition?.name ?? 'main').toLowerCase()))));
+      const rules = (await services.loadRules(String(api.conversationId))).filter(rule => rule.enabled && (!rule.agents.length || rule.agents.some(pattern => glob(pattern.toLowerCase(), (definition?.child?.definition?.name ?? definition?.child?.role ?? 'main').toLowerCase()))));
       const compiled = rules.map(rule => ({ rule, patterns: rule.condition.flatMap(pattern => {
         try { return [compileCondition(pattern)]; }
         catch (error) { console.warn(`Invalid condition in rule ${rule.path}: ${pattern}`, error); return []; }
@@ -240,7 +240,14 @@ export function createRetainedRulesExtension(services: RetainedRuleServices, get
       }
       const interruption = await api.snapshot(RuleInterruptionsDoc, api.conversationId, context);
       if (interruption?.active?.state === 'pending' && interruption.active.taskId === String(api.taskId)) return;
-      const approved = await Promise.all(message.content.flatMap(part => part.type === 'toolCall' ? [digest(JSON.stringify([part.name, part.arguments])).then(hash => [part.id, hash] as const)] : []));
+      const approved: [string, string][] = [];
+      for (const part of message.content) {
+        if (part.type !== 'toolCall') continue;
+        let args: unknown;
+        try { args = prepareArguments(part.name, part.arguments); }
+        catch { continue; } // Invalid arguments remain unadmitted; the tool parser reports the error.
+        approved.push([part.id, await digest(canonicalJson([part.name, args]))]);
+      }
       await getHarness().commit(async tx => {
         const state = await tx.doc(RuleState, api.conversationId); state.turn++;
         const admission = await tx.doc(RuleToolAdmissions, api.conversationId);
@@ -271,7 +278,7 @@ export function createRetainedRulesExtension(services: RetainedRuleServices, get
     const admission = await api.snapshot(RuleToolAdmissions, api.conversationId, context);
     const interruption = await api.snapshot(RuleInterruptionsDoc, api.conversationId, context);
     if (interruption?.active?.state === 'pending') return { block: 'Generation discarded by project rule' };
-    if (!admission || admission.generation !== String(live?.run?.taskId) || admission.calls[call.id] !== await digest(JSON.stringify([call.name, call.arguments]))) return { block: 'Tool call lacks durable rule admission for this generation' };
+    if (!admission || admission.generation !== String(live?.run?.taskId) || admission.calls[call.id] !== await digest(canonicalJson([call.name, call.arguments]))) return { block: 'Tool call lacks durable rule admission for this generation' };
   } })] });
 }
 export function interceptRuntimeModelStream(stream: AssistantMessageEventStream, signal: AbortSignal | undefined, controller: AbortController): AssistantMessageEventStream {

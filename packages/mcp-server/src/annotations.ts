@@ -484,6 +484,12 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": false,
     "openWorldHint": true
   },
+  "crons.cancelRun": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
   "crons.history": {
     "readOnlyHint": true,
     "openWorldHint": false

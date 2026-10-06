@@ -3,7 +3,7 @@ import type { InspectorProps } from './inspector/Inspector.js';
 import type { RuntimeInspectorContext } from './RuntimeWorkspace.js';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
-import { runtimeSubagents } from './runtime-shell-adapter.js';
+import { runtimeSubagents, runtimeSubagentRecords } from './runtime-shell-adapter.js';
 import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime';
 
 type ReadState<T> = { report: T | null; status: 'idle' | 'loading' | 'ready' | 'error'; error?: string };
@@ -41,9 +41,10 @@ export function useRuntimeInspectorState(context: RuntimeInspectorContext | unde
   };
   useEffect(() => { if (usage.status === 'ready') void loadUsage(); }, [context?.snapshot.cursor]);
   if (!context) return null;
+  const immutable = runtimeSubagentRecords(context.snapshot).some(record => record.conversationId === context.conversationId);
   return {
     subagents: runtimeSubagents(context.snapshot),
     usage: { ...usage, sessionId: context.sessionId, load: () => { void loadUsage(); }, refresh: () => { void loadUsage(); } },
-    agentSetup: { ...setup, persistence: 'cloud', sessionId: context.sessionId, load: () => { void loadSetup(); }, refresh: () => { void loadSetup(); }, save: async input => { const result = await session({ type: 'saveAgentDefinition', ...input }); if (!result.setup) throw new Error('The runtime did not return saved agent definitions.'); setSetup({ report: result.setup, status: 'ready' }); return result.setup; } },
+    agentSetup: { ...setup, immutable, persistence: 'cloud', sessionId: context.sessionId, load: () => { void loadSetup(); }, refresh: () => { void loadSetup(); }, save: async input => { if (immutable) throw new Error('A child’s retained definition is read-only.'); const result = await session({ type: 'saveAgentDefinition', ...input }); if (!result.setup) throw new Error('The runtime did not return saved agent definitions.'); setSetup({ report: result.setup, status: 'ready' }); return result.setup; } },
   };
 }

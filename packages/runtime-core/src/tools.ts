@@ -5,9 +5,12 @@ import type { JsonValue, Context } from '@earendil-works/chord';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
 import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserArgumentsSchema, receiptDigest, type RuntimeBrowserApprovalCard, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
-import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc, CronScopeDoc } from './documents.js';
+import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc } from './documents.js';
+import { cronToolScopes } from './cron.js';
 import { enforceSessionApproval } from './session-controls.js';
-import { createJobTool, type JobServices } from './jobs.js';
+import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
+import { AgentDefinitionContextDoc } from './subagent-state.js';
+import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 export type ToolServices = {
   invoke(input: { tool: string; args: JsonValue; conversationId: string; taskId: string; requestId: string; attemptId: string; replay: 'safe' | 'unsafe'; signal?: AbortSignal }): Promise<RuntimeToolResult>;
   prepareBrowser(input: Parameters<ToolServices['invoke']>[0]): Promise<RuntimeBrowserApprovalCard>;
@@ -37,13 +40,12 @@ const contracts = {
   write: contract(Arguments.RuntimeWriteArgumentsSchema, 'Create or overwrite a file in the cloud-owned shared working copy. Prefer edit for surgical changes; write for new files or complete replacements. Artifact URI writes are not supported.'),
   edit: contract(Arguments.RuntimeEditArgumentsSchema, 'Replace exact text in the shared working copy. Each oldText must occur exactly once in the original file; edits must not overlap. Read the relevant text first. All edits are validated before writing.'),
   apply_patch: contract(Arguments.ApplyPatchArgumentsSchema, 'Apply a V4A patch to the shared working copy. Use *** Begin Patch / *** End Patch with Add File, Delete File, or Update File headers; optional Move to follows Update File. Update hunks start @@ and use space context, - removals, + additions. Context must match exactly and unambiguously; all operations validate before effects. Do not use hashline syntax.'),
-  bash: contract(Arguments.RuntimeBashArgumentsSchema, 'Run a finite bash command on the selected execution-machine replica after synchronization. on selects a machine or resource requirements; at selects an immutable source. Omit both for the configured default replica. Set cwd instead of cd. Use proc for services or interactive programs. Returns exit code and combined output.'),
+  bash: contract(Arguments.RuntimeBashArgumentsSchema, 'Run a finite bash command. Set background:true for a durable immediate job handle and automatic completion delivery. Use op list/status/wait/logs/cancel with the returned job handle to control background commands; logs accepts lines/head/cursor. on selects a machine; at pins immutable source. cwd defaults to repository root. Use proc for services and interactive programs.'),
   grep: contract(Arguments.RuntimeGrepArgumentsSchema, 'Search file content with a regular expression on an execution replica. Narrow path and optionally filter files with glob. on overrides the execution machine; at pins an immutable source. Returns matching lines. Use instead of shell grep.'),
   find: contract(Arguments.RuntimeFindArgumentsSchema, 'Find file paths matching the pattern glob beneath path (workspace root by default), including hidden files. This is filename matching, not semantic search; glob is only used by grep.'),
   codemode: contract(Arguments.RuntimeCodemodeArgumentsSchema, 'Execute JavaScript in an isolated machine sandbox. Compose read, write, edit, apply_patch, bash, grep and find tools; completion/judge and mcp.list/search/describe/call use cloud-authorized proxies. Await effects before returning; uncertain child effects require reconciliation.'),
-  agents: contract(Arguments.RuntimeAgentsArgumentsSchema, 'Spawn a task-owned child conversation, send a message, stop an agent, or inspect agent tasks. Spawn requires a complete task; optional agent selects a granted definition. background lets the child outlive the foreground turn. Children do not own the shared working copy.'),
-  jobs: contract(Arguments.RuntimeJobsArgumentsSchema, 'Run a durable finite command without blocking the foreground conversation, or list/status/wait/logs/cancel an accepted job. Keep the complete returned job handle for controls. wait returns a bounded observation; completion is delivered automatically. on selects a machine; at pins an immutable source.'),
-  proc: contract(Arguments.RuntimeProcArgumentsSchema, 'Supervise long-running processes on the selected replica. on selects a machine; at pins an immutable source. start needs a complete spec; list is attachment-scoped. describe/logs/wait inspect owned processes; send writes stdin, signals or resizes; stop/restart control them. Observe readiness, not only creation. Supervisor shutdown is forbidden.'),
+  agents: contract(Arguments.RuntimeAgentsArgumentsSchema, 'Spawn an agent using exactly one granted agent definition or configured model role plus a complete task. name is only an address. Send to an address, wait for events, stop a child, or list/status. background lets a child outlive the foreground turn.'),
+  proc: contract(Arguments.RuntimeProcArgumentsSchema, 'Supervise workspace processes across generations, terminals and services. start spec needs name/application; args/env default empty, cwd repository root, pty true. on selects machine; at pins immutable source. list/status/describe/logs/wait are readonly. Readiness timeout leaves the process live; inspect timedOut and matched. logs accepts lines/head/cursor/grep. send accepts text with enter default true, keys, signal or resize. stop/restart mutate. Private or out-of-workspace processes are inaccessible. Agent-started process exits are delivered automatically.'),
   machines: contract(Arguments.RuntimeMachinesArgumentsSchema, 'List workspace execution replicas and pinned attachments, setDefault to an explicit machineId (null restores automatic first-ready selection), or detach one exact attachmentId and generation. An unavailable explicit default fails rather than silently falling back. These operations never move conversation ownership or grant shared-copy writer ownership.'),
   environment: contract(Arguments.RuntimeEnvironmentArgumentsSchema, 'Inspect workspace lifecycle configuration, read a run log, run checks or a lifecycle phase, change profile or project/workspace values, or cancel a run. Reuse runId to reconcile admission. Human-only approvals, interactive runs and cloud destruction are unavailable.'),
   space_goal: contract(spaceSchemas.space_goal, 'Read or update the workspace goal and attach requirement evidence. Mutations require the current expectedRevision. describe returns an operation schema. Omit workspaceId for this workspace.'),
@@ -70,13 +72,6 @@ const contracts = {
   mcp_invoke: contract(Arguments.RuntimeMcpInvokeArgumentsSchema, 'Invoke a discovered tool by connectionId and name, with its schema-conforming arguments object. Credentials remain in the authorized host. Invocation can have external effects and cannot be blindly replayed.'),
   browser: contract(RuntimeBrowserArgumentsSchema, 'Browser defaults to headless with a persistent workspace-isolated profile and no approval prompts in any mode. Use source:"relay" explicitly only when the task needs the user’s logged-in Chrome; relay is main-agent-only. One named workspace Chrome group limits visible and controllable tabs. open {url?,targetId?,source?}; tabs {source?}; other actions require targetId and the same source: navigate {url}, observe {screenshot?,offset?,limit?}, act {ref,operation:click|fill|press,value?}, screenshot, evaluate {expression}, close. Re-observe stale refs. Relay group creation asks once outside yolo; approved environment browser.origins govern all relay navigation and actions. Missing access requires proposing .gitspace/bundle.json browser.origins changes for human environment approval, even in yolo. JavaScript and screenshots need no extra grant. Tabs dragged out of the group become inaccessible. Human group revocation is not a model tool.'),
 };
-function readOnly(name: string, args: JsonValue): boolean {
-  if (['read', 'grep', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover'].includes(name)) return true;
-  if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
-  if (name === 'machines' || name === 'agents' || name === 'jobs' || name === 'proc') return ['list', 'status', 'describe', 'logs', 'wait'].includes(String(args.op));
-  if (name.startsWith('space_') || name === 'environment') return ['get', 'current', 'list', 'operations', 'describe', 'read', 'readCode', 'listScopes', 'listPromotions', 'runLog', 'log'].includes(String(args.method));
-  return false;
-}
 export function createRuntimeTools(services: ToolServices, operations: JobServices): ToolRegistration[] {
   const jobs = createJobTool(operations);
   // One queue per conversation, shared by every registered mutator and every tool round.
@@ -97,26 +92,28 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     parameters: { ...z.toJSONSchema(contract.schema, { io: 'input' }), type: 'object' },
     // Preserve the owner parser's rejection semantics instead of generic model-argument coercion.
     prepareArguments: input => contract.schema.parse(input),
-    executionMode: 'parallel', replay: ['read', 'grep', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'jobs'].includes(name) ? 'safe' : 'unsafe',
+    executionMode: 'parallel', replay: ['read', 'grep', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'bash'].includes(name) ? 'safe' : 'unsafe',
     async execute(input, api, context) {
       const args = RuntimeJsonSchema.parse(contract.schema.parse(input));
-      const safe = readOnly(name, args);
+      const safe = Arguments.runtimeOperationIsReadOnly(name, args);
+      const child = (await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child;
+      if (child && !isSubagentToolCallAllowed(name, args)) throw new Error('Subagent tools are read-only');
       const run = async () => {
         context.abortSignal?.throwIfAborted();
         const phase = await api.snapshot(WorkspaceDoc, context);
-        if (phase?.phase === 'plan' && !safe) return { isError: true, content: [{ type: 'text' as const, text: 'Plan mode is read-only. Propose a plan and wait for human approval before effects.' }] };
-        const scope = await api.snapshot(CronScopeDoc, api.conversationId, context);
-        if (scope?.constrained) await services.authorizeCronTool({ tool: name, args, readScopes: scope.readScopes, writeScopes: scope.writeScopes });
+        if (phase?.phase === 'plan' && !safe && !child) return { isError: true, content: [{ type: 'text' as const, text: 'Plan mode is read-only. Propose a plan and wait for human approval before effects.' }] };
+        for (const scope of await cronToolScopes(api, context)) await services.authorizeCronTool({ tool: name, args, ...scope });
         const attemptId = await api.memo('gitspace.attempt', `tool:${api.taskId}`, context);
         const invocation = { tool: name, args, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: api.callId, attemptId, replay: safe ? 'safe' as const : 'unsafe' as const, signal: context.abortSignal };
         const browser = name === 'browser' ? await services.prepareBrowser(invocation) : undefined;
         if (!await enforceSessionApproval(api, context, name, args, browser)) return { isError: true, content: [{ type: 'text' as const, text: 'The requested operation was not approved.' }] };
-        if (name === 'jobs') {
+        if (name === 'bash' && args && typeof args === 'object' && !Array.isArray(args) && (args.background === true || typeof args.op === 'string')) {
           const value = await jobs(args, api, context);
           const result = RuntimeToolResultSchema.safeParse(value);
-          return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], ...(result.success ? { details: { executorResultReference: { attemptId: result.data.attemptId, sha256: await receiptDigest(result.data) } } } : {}) };
+          return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], ...(result.success ? { isError: result.data.status !== 'completed', details: { executorResultReference: { attemptId: result.data.attemptId, sha256: await receiptDigest(result.data) } } } : {}) };
         }
         const result = await services.invoke(invocation);
+        if (name === 'proc') await watchProcessExit(operations, args, result, api, context);
         return { content: result.content, isError: result.status !== 'completed', details: { executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
       };
       return safe ? run() : serialized(String(api.conversationId), run);

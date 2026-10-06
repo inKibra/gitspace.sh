@@ -3,7 +3,7 @@ import type { ConversationId, Cursor, EntryRecord, Harness, TaskId, EntryId, Com
 import { defineDoc } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, PlanDoc, QuestionsDoc, WorkspaceDoc, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, PlanDoc, QuestionsDoc, WorkspaceDoc, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeWatchInput } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, type AttachmentServices } from './attachments.js';
@@ -46,6 +46,9 @@ export type WorkspaceRuntime = {
   reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void>;
   cronSubmit(input: RuntimeCronInput): Promise<{ conversationId: string }>;
   requestStatus(requestId: string): Promise<RuntimeRequestStatus>;
+  cronWithdraw(requestId: string): Promise<RuntimeRequestStatus>;
+  cronCancel(requestId: string, confirmStopWorkspaceAgent: boolean): Promise<RuntimeRequestStatus>;
+  cronNotifyOverdue(requestId: string): Promise<void>;
   transcript(conversationId?: string): Promise<(TranscriptEvent & { sessionId: string })[]>;
   model(input: RuntimeModelInput, machineId: string): Promise<JsonValue>;
   mcp(input: RuntimeMcpInput, machineId: string): Promise<JsonValue>;
@@ -69,8 +72,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const history = createHistoryIndex(options.storage, storage, (reference, conversationId) => attachments.historyResult(reference, conversationId));
   await history.refresh();
   const controls = createSessionControls({ ...runtime, ...options.session, browser: options.browser, history: history.service, admitInference: options.admitInference });
-  const invokeConversationTool = createConversationTools({ ...options, harness, storage });
-  const cron = createCronRuntime({ ...options, harness, storage, async wake() { await options.schedule(Date.now() + 1000); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
+  const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog });
+  const cron = createCronRuntime({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { await options.schedule(Date.now() + 1000); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
   options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_management(request_id TEXT PRIMARY KEY, input TEXT NOT NULL, result TEXT)');
   // Only committed task outcomes and tool/history entries prove materialization.
@@ -95,7 +98,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     if (entry.kind === 'gitspace.executor-results' && entry.data && typeof entry.data === 'object' && !Array.isArray(entry.data) && Array.isArray(entry.data.results)) {
       for (const reference of entry.data.results) materializeReference(reference, String(entry.conversationId));
     }
-    if (entry.kind === 'gitspace.job-completed') materializeValue(entry.data, String(entry.conversationId));
     if (entry.kind !== 'pi.tool-result') return;
     for (const message of entry.model ?? []) {
       if (message.role !== 'toolResult') continue;
@@ -104,7 +106,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         materializeReference(details.executorResultReference, String(entry.conversationId));
       }
       materializeValue(message.details, String(entry.conversationId));
-      if (message.toolName === 'jobs') for (const block of message.content) {
+      if (message.toolName === 'bash') for (const block of message.content) {
         if (block.type !== 'text') continue;
         let value: unknown;
         try { value = JSON.parse(block.text); } catch { continue; }
@@ -200,6 +202,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const conversationIds = new Map<string, ConversationId>();
   async function rebuild() {
     const conversations: RuntimeSnapshot['conversations'] = [];
+    const subagents: JsonValue[] = [];
     let cursor: Cursor | undefined;
     const inspection = await harness.inspect(BACKGROUND_CONTEXT);
     do {
@@ -211,7 +214,10 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         // Pi scans fork-aware entries newest-first; one bounded page includes inherited history.
         const entries = [...(await conversation.entries({}, 256, undefined, BACKGROUND_CONTEXT)).items].reverse();
         const parentId = record.parent?.conversationId ?? record.owner?.conversationId;
+        const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
+        if (child) subagents.push({ conversationId: String(record.id), ...child });
         conversations.push({ id: String(record.id), parentId: parentId === undefined ? null : String(parentId), title: record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`, status: inspection.tasks.some(task => task.record.conversationId === record.id && task.state.kind === 'running') ? 'running' : 'idle', messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))) });
+        if (child) conversations[conversations.length - 1]!.title = child.name;
       }
       cursor = page.next;
     } while (cursor);
@@ -238,7 +244,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     const workspace = await harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT);
     const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
-    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.execution': execution } });
+    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.execution': execution } });
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops: diffRevisions(snapshot, next) });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
@@ -276,8 +282,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   await rebuild();
   async function conversation(id?: string) {
     if (id === undefined) return runtime.root;
-    const canonical = conversationIds.get(id);
-    if (canonical === undefined) throw new Error('Unknown runtime conversation');
+    const canonical = conversationIds.get(id) ?? await history.service.conversation(id);
     const value = await harness.conversation(canonical, BACKGROUND_CONTEXT);
     if (!value) throw new Error('Runtime conversation no longer exists');
     return value;
@@ -306,8 +311,11 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       await collectReceipts();
       return result;
     },
-    cronSubmit: cron.submit,
+    cronSubmit: input => runtime.lifecycle.runWhileActive(String(runtime.root.id), () => cron.submit(input)),
     requestStatus: cron.status,
+    cronWithdraw: cron.withdraw,
+    cronCancel: cron.cancel,
+    cronNotifyOverdue: cron.notifyOverdue,
     async model(raw, machineId) {
       const input = RuntimeModelInputSchema.parse(raw);
       const attempt = attachments.getAttempt(input.dispatch.attemptId);
@@ -422,15 +430,18 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     async submit(input: RuntimeSubmitInput) {
       const target = await conversation(input.conversationId);
       await options.schedule(Date.now() + 1000);
-      const selection = (await harness.snapshot(SessionControlsDoc, target.id, BACKGROUND_CONTEXT))?.selection ?? { kind: 'default' as const };
-      const admitted = await options.admitInference({ conversationId: String(target.id), requestId: input.requestId, selection });
-      await runtime.configureModel(target.id, admitted);
-      await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, BACKGROUND_CONTEXT);
+      await runtime.lifecycle.userInput(String(target.id), async () => {
+        const child = (await harness.snapshot(AgentDefinitionContextDoc, target.id, BACKGROUND_CONTEXT))?.child;
+        const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, target.id, BACKGROUND_CONTEXT))?.selection ?? { kind: 'default' as const };
+        const admitted = await options.admitInference({ conversationId: String(target.id), requestId: input.requestId, selection });
+        await runtime.configureModel(target.id, admitted);
+        await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, BACKGROUND_CONTEXT);
+      });
       options.waitUntil(target.waitForIdle(BACKGROUND_CONTEXT));
       await line;
       return { accepted: true as const, cursor: snapshot.cursor, conversationId: String(target.id) };
     },
-    async cancel(input: RuntimeCancelInput) { await (await conversation(input.conversationId)).abort(BACKGROUND_CONTEXT, { background: true }); await line; return { accepted: true as const, cursor: snapshot.cursor }; },
+    async cancel(input: RuntimeCancelInput) { await runtime.lifecycle.stop(String((await conversation(input.conversationId)).id)); await line; return { accepted: true as const, cursor: snapshot.cursor }; },
     async answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }) {
       await options.schedule(Date.now() + 1000);
       await harness.commit(async tx => {
@@ -472,7 +483,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       }, cancel() { listeners.delete(controller); } }, { highWaterMark: 257 });
       return new Response(stream, { headers: { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' } });
     },
-    async wake() { await recoverCloudFiles(); await collectReceipts(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); },
+    async wake() { await recoverCloudFiles(); await collectReceipts(); await runtime.lifecycle.recover(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); },
     publish,
   };
 }

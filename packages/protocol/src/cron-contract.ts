@@ -1,6 +1,7 @@
 import { defineErrors, type InputOf } from 'result-rpc'; import { wire } from './json-wire.js'
 
-export const PROJECT_CRON_ACTIVE_LOCK_MS = 60 * 60_000;
+export const PROJECT_CRON_OVERDUE_MS = 60 * 60_000;
+export const PROJECT_CRON_MAX_QUEUE_MS = 24 * 60 * 60_000;
 export const PROJECT_CRON_SCHEDULE_HELP = "Schedules are 'every N minutes/hours/days' — for example 'every 5m', 'every 6h', or 'every 1d'.";
 
 export function parseProjectCronSchedule(schedule: string): number | null {

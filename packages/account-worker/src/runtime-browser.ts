@@ -71,7 +71,8 @@ export function createRuntimeBrowserAuthority(options: { storage: BrowserStorage
   }
   async function signed(input: Input, placement: { machineId: string; attachmentId: string; generation: number }, command: RuntimeBrowserAuthorizationBody['command'], expiresAt: string): Promise<RuntimeToolDispatch> {
     const scope = { ...identity, machineId: placement.machineId, attachmentId: placement.attachmentId, generation: placement.generation, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId };
-    const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...scope, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}), tool: command.type === 'execute' ? 'browser' : 'browser_control', args: input.args, deadlineAt: expiresAt, replay: input.replay });
+    const conversation = await options.runtime().browserConversation(input.conversationId);
+    const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...scope, conversationKind: conversation.root ? 'main' : 'subagent', ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}), tool: command.type === 'execute' ? 'browser' : 'browser_control', args: input.args, deadlineAt: expiresAt, replay: input.replay });
     const { privateKey, authority, issuedAt } = await signing();
     dispatch.browserAuthorization = await signRuntimeBrowserAuthorization({ scope, issuedAt, expiresAt, dispatch: { version: 1, tool: command.type === 'execute' ? 'browser' : 'browser_control', deadlineAt: expiresAt, replay: input.replay, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}) }, command }, privateKey, authority);
     return dispatch;

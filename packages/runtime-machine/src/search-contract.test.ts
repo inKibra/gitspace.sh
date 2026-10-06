@@ -22,7 +22,7 @@ test('search advertised file filters change real search results and find rejects
   const local = { attachment, rootPath, executionSecret: 'unused', prerequisitesComplete: true };
   const options: MachineToolOptions = { runCommand: async command => { const result = await exec(command.application, command.args, { cwd: command.cwd, env: { ...process.env, PATH: searchPath } }); return { exitCode: 0, output: result.stdout }; }, artifacts: () => ({ read: unused, write: unused }), cloudModel: unused, cloudMcp: unused };
   const search = async (tool: 'find' | 'grep', args: Record<string, string>) => {
-    const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, requestId: 'request', attemptId: 'attempt', tool, args, deadlineAt: new Date(Date.now() + 60000).toISOString(), replay: 'safe' });
+    const dispatch = RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, requestId: 'request', attemptId: 'attempt', tool, args, deadlineAt: new Date(Date.now() + 60000).toISOString(), replay: 'safe' });
     const content = await executeMachineTool(dispatch, local, new AbortController().signal, options);
     return content.flatMap(item => item.type === 'text' ? item.text.trim().split('\n') : []).map(line => line.replace(`${rootPath}/`, '')).sort();
   };

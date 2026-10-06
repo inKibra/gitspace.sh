@@ -41,7 +41,7 @@ test('cloud file ownership survives attached replicas; machine calls select the 
     try {
       const missing = await invoke('bash', { command: 'pwd' });
       expect(missing.status).toBe('failed'); expect(text(missing)).toContain('No machine attached');
-      await expect(services.operations.jobScope({ op: 'run', application: 'sh', args: ['-c', 'pwd'] })).rejects.toThrow('No machine attached');
+      await expect(services.operations.jobScope({ command: 'pwd', background: true })).rejects.toThrow('No machine attached');
       seed(a); seed(b);
       expect((await invoke('write', { path: 'hello.txt', content: 'cloud write\n' })).status).toBe('completed');
       expect((await invoke('edit', { path: 'hello.txt', edits: [{ oldText: 'write', newText: 'edit' }] })).status).toBe('completed');
@@ -52,6 +52,13 @@ test('cloud file ownership survives attached replicas; machine calls select the 
       expect(text(await invoke('find', { pattern: '*.md', path: 'src' }))).toBe('src/nested/b.md');
       expect(text(await invoke('find', { pattern: '*.ts', path: 'other' }))).toBe('other/c.ts');
       expect((await invoke('find', { pattern: '*.ts', glob: '*.md' })).status).toBe('failed');
+      const childId = await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT);
+      for (const tool of ['write', 'edit', 'apply_patch', 'bash', 'proc', 'environment', 'codemode']) {
+        const result = await services.tools.invoke({ tool, args: { path: 'hello.txt', content: 'forged write', command: 'touch forged' }, conversationId: String(childId), taskId: 'forged', requestId: crypto.randomUUID(), attemptId: crypto.randomUUID(), replay: 'unsafe', signal: AbortSignal.timeout(500) });
+        expect(result.status).toBe('failed');
+        expect(text(result)).toContain('Subagent');
+      }
+      expect(text(await invoke('read', { path: 'hello.txt' }))).toContain('cloud edit');
       expect(machine).not.toHaveBeenCalled();
       const current = await runtime.cloudFiles.snapshot();
       expect(text(await invoke('bash', { command: 'pwd' }))).toBe(`a:${current?.worktreeCommit}`);
@@ -90,6 +97,24 @@ test('cloud file ownership survives attached replicas; machine calls select the 
       const explicitMissing = await invoke('bash', { command: 'pwd', on: 'b', at: 'current' });
       expect(explicitMissing.status).toBe('failed');
       expect(text(explicitMissing)).toContain('No machine attached');
+      const admitted = await invoke('proc', { op: 'start', spec: { name: 'survivor', application: '/bin/sleep', args: ['30'] }, on: 'a' });
+      const instanceId = crypto.randomUUID();
+      seed({ ...a, state: 'lost' });
+      const replacement = RuntimeAttachmentSchema.parse({ ...a, attachmentId: 'a-next', generation: 3, capabilities: ['bash', 'proc'] });
+      seed(replacement);
+      const control = { originAttemptId: admitted.attemptId, conversationId: String(root.id), taskId: 'process-watch', requestId: 'observe-next-generation', attemptId: 'observe-next-generation', args: { op: 'status', name: 'survivor', instanceId, restartCount: 0 } };
+      await services.operations.observeProcess(control);
+      expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ machineId: a.machineId, attachmentId: replacement.attachmentId, generation: replacement.generation, args: control.args });
+      seed({ ...replacement, state: 'lost' });
+      const beforeOffline = machine.mock.calls.length;
+      await expect(services.operations.observeProcess({ ...control, requestId: 'offline-observation', attemptId: 'offline-observation' })).rejects.toThrow(/unreachable/i);
+      expect(machine.mock.calls).toHaveLength(beforeOffline);
+      seed({ ...replacement, generation: 4 });
+      await services.operations.observeProcess(control);
+      expect(machine.mock.calls.at(-1)?.[0].generation).toBe(3);
+      await services.operations.stopProcess({ ...control, requestId: 'stop-after-reattach', attemptId: 'stop-after-reattach', args: { op: 'stop', name: 'survivor', instanceId, timeoutMs: 5000 } });
+      expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ machineId: a.machineId, generation: 4, args: { op: 'stop', instanceId } });
+      seed({ ...replacement, state: 'lost' });
       seed({ ...a, state: 'lost' });
       const onlyRunners = await invoke('bash', { command: 'pwd', at: 'current' });
       expect(onlyRunners.status).toBe('failed');

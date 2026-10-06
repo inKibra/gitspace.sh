@@ -1,22 +1,40 @@
 import { defineDoc, type Harness, type Storage, type ConversationId, type Cursor, type EntryRecord } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { z } from 'zod';
+import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, SUBAGENT_READONLY_TOOLS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
 import type { ToolServices } from './tools.js';
 import { CronScopeDoc } from './documents.js';
-import { SessionControlsDoc, parseCloudAgentDefinition } from './session-controls.js';
-import { BackgroundAgentsDoc, BackgroundAgentTask } from './background-agents.js';
-import type { JobServices } from './jobs.js';
-import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
+import { cronTaskScopes } from './cron.js';
+import { SessionControlsDoc, parseCloudAgentDefinition, type SessionControlServices } from './session-controls.js';
+import { BackgroundAgentsDoc, type BackgroundAgentTask } from './background-agents.js';
+import { AgentDefinitionContextDoc, type SubagentMetadata } from './subagent-state.js';
+import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
 const Anchors = defineDoc<{ entries: Record<string, string>; children: Record<string, string> }>({ kind: 'gitspace.context-anchors', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ entries: {}, children: {} }) });
-export const AgentDefinitionContextDoc = defineDoc<{ name: string | null; spawns: string[] | null }>({ kind: 'gitspace.agent-definition', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ name: null, spawns: null }) });
-export type ConversationToolOptions = { harness: Harness; storage: Storage } & Pick<JobServices, 'admitInference'>;
+const ThinkingSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).nullable();
+export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask } & Pick<SessionControlServices, 'admitInference' | 'configureModel' | 'catalog'>;
 export function createConversationTools(options: ConversationToolOptions) {
   const { harness, storage } = options;
   const context = BACKGROUND_CONTEXT;
+  async function records() {
+    const result = []; let cursor: Cursor | undefined;
+    do { const page = await storage.scanConversations({}, 128, cursor, context); result.push(...page.items); cursor = page.next; } while (cursor);
+    return result;
+  }
   async function resolve(id: string) {
-    let cursor: Cursor | undefined;
-    do { const page = await storage.scanConversations({}, 128, cursor, context); const record = page.items.find(item => String(item.id) === id); if (record) { const conversation = await harness.conversation(record.id, context); if (conversation) return conversation; } cursor = page.next; } while (cursor);
-    throw new Error('Conversation not found');
+    const record = (await records()).find(item => String(item.id) === id);
+    const conversation = record && await harness.conversation(record.id, context);
+    if (!conversation) throw new Error('Conversation not found');
+    return conversation;
+  }
+  async function family(id: ConversationId) {
+    const self = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child;
+    const parentId = self?.parentId ?? String(id);
+    const members = [{ id: parentId, name: 'parent', child: null as SubagentMetadata | null }];
+    for (const record of await records()) {
+      const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, context))?.child;
+      if (child?.parentId === parentId) members.push({ id: String(record.id), name: child.name, child });
+    }
+    return { self, members };
   }
   async function entries(id: ConversationId) {
     const result: EntryRecord[] = []; let cursor: Cursor | undefined;
@@ -28,52 +46,87 @@ export function createConversationTools(options: ConversationToolOptions) {
     let output: string;
     if (input.tool === 'agents') {
       const args = RuntimeAgentsArgumentsSchema.parse(input.args);
+      const group = await family(target.id);
       if (args.op === 'spawn') {
-        if (!args.task) throw new Error('Subagent task is required');
+        if (group.self) throw new Error('Subagents cannot spawn nested agents');
+        const previousId = (await harness.snapshot(Anchors, target.id, context))?.children[input.attemptId];
+        const previous = previousId ? (await harness.snapshot(AgentDefinitionContextDoc, (await resolve(previousId)).id, context))?.child : null;
         const definitions = await harness.snapshot(SessionControlsDoc, target.id, context);
-        const definition = args.agent ? definitions?.definitions.find(value => value.name === args.agent) : undefined;
-        if (args.agent && !definition) throw new Error('Requested agent definition not found');
-        const parentDefinition = await harness.snapshot(AgentDefinitionContextDoc, target.id, context);
-        if (parentDefinition?.spawns && !parentDefinition.spawns.includes('*') && (!args.agent || !parentDefinition.spawns.includes(args.agent))) throw new Error('Parent agent definition does not permit this subagent');
-        const parentAgent = await target.agent(context);
-        if (definition?.tools.some(name => !parentAgent.tools.some(tool => tool.name === name))) throw new Error('Agent definition requests a tool not granted to its parent');
-        const selection: ModelSelectionIntent | undefined = definition?.role ? { kind: 'role', role: definition.role } : definition?.provider && definition.model ? { kind: 'explicit', provider: definition.provider, modelId: definition.model } : undefined;
+        const agentSelector = 'agent' in args ? args.agent : undefined;
+        const definition = previous ? previous.definition : agentSelector ? definitions?.definitions.find(value => value.name === agentSelector || value.path === agentSelector) : undefined;
+        if (!previous && agentSelector && !definition) throw new Error('Requested agent definition not found');
+        const parsed = definition ? parseCloudAgentDefinition(definition.path, definition.content) : null;
+        const catalog = await options.catalog();
+        const roleId = 'role' in args ? args.role : definition?.role;
+        const role = roleId ? catalog.roles.find(value => value.id === roleId) : undefined;
+        if (!previous && roleId && !role) throw new Error('Requested inference role not found');
+        const selection: ModelSelectionIntent = previous?.selection ?? (role ? { kind: 'role', role: role.id } : definition?.provider && definition.model ? { kind: 'explicit', provider: definition.provider, modelId: definition.model } : { kind: 'default' });
+        const thinking = previous ? previous.thinking : ThinkingSchema.parse(parsed?.thinking ?? definition?.thinking ?? role?.thinking ?? null);
+        const narrowedTools = parsed?.toolsSpecified ? parsed.tools : [...SUBAGENT_READONLY_TOOLS];
+        const tools = previous?.tools ?? (narrowedTools.includes('agents') ? narrowedTools : [...narrowedTools, 'agents']);
+        const name = previous?.name ?? args.name ?? `${definition?.name ?? role?.id}-${input.attemptId}`;
+        if (name === 'parent') throw new Error('The parent address is reserved');
         const childId = await target.commit(async tx => {
+          if ((await tx.doc(ConversationLifecycleDoc, target.id)).stopped) throw new Error('Conversation is stopped; only an explicit user message may resume it');
+          const anchors = await tx.doc(Anchors, target.id);
+          const existing = anchors.children[input.attemptId];
+          if (existing) return existing;
+          let siblingsCursor: Cursor | undefined;
+          do {
+            const page = await tx.scanConversations({}, 128, siblingsCursor);
+            for (const sibling of page.items) {
+              const metadata = (await tx.doc(AgentDefinitionContextDoc, sibling.id)).child;
+              if (metadata?.parentId === input.conversationId && metadata.name === name) throw new Error('Agent name is already in use by a sibling');
+            }
+            siblingsCursor = page.next;
+          } while (siblingsCursor);
           let cursor: Cursor | undefined;
           let owner;
           do { const page = await tx.scanTasks({ conversationId: target.id }, 128, cursor); owner = page.items.find(task => String(task.id) === input.taskId); cursor = page.next; } while (!owner && cursor);
           if (!owner) throw new Error('Subagent spawning task not found');
-          const anchors = await tx.doc(Anchors, target.id);
-          const existing = anchors.children[input.attemptId];
-          if (existing) return existing;
-          const anchorTask = args.background ? await tx.createTask(BackgroundAgentTask, { spawningTask: owner.id, attemptId: input.attemptId }, { ownership: { kind: 'conversation' }, conversationId: target.id, background: true }) : owner.id;
+          const inheritedScopes = await cronTaskScopes(tx, target.id, owner.id);
+          const anchorTask = args.background ? await tx.createTask(options.backgroundAgentTask, { spawningTask: owner.id, attemptId: input.attemptId }, { ownership: { kind: 'conversation' }, conversationId: target.id, background: true }) : owner.id;
           const created = await tx.createConversation({ ownership: { kind: 'task', taskId: anchorTask } });
-          if (args.background) { const background = await tx.doc(BackgroundAgentsDoc, target.id); background.children[input.attemptId] = { conversationId: created.id, owner: anchorTask }; }
-          const parentScope = await tx.doc(CronScopeDoc, target.id);
-          const childScope = await tx.doc(CronScopeDoc, created.id); childScope.constrained = parentScope.constrained; childScope.readScopes = [...parentScope.readScopes]; childScope.writeScopes = [...parentScope.writeScopes];
+          if (args.background) (await tx.doc(BackgroundAgentsDoc, target.id)).children[input.attemptId] = { conversationId: created.id, owner: anchorTask };
+          (await tx.doc(CronScopeDoc, created.id)).inherited = inheritedScopes;
           const childControls = await tx.doc(SessionControlsDoc, created.id);
-          if (definitions) { childControls.definitions = [...definitions.definitions]; childControls.approvalMode = definitions.approvalMode; childControls.fastMode = definitions.fastMode; childControls.role = definition?.role ?? definitions.role; childControls.selection = selection ?? definitions.selection; }
+          childControls.role = role?.id ?? null;
+          childControls.selection = selection;
           const definitionContext = await tx.doc(AgentDefinitionContextDoc, created.id);
-          definitionContext.name = definition?.name ?? 'sub';
-          definitionContext.spawns = definition?.spawns === null || definition?.spawns === undefined ? null : definition.spawns.split(',').map(name => name.trim()).filter(Boolean);
+          definitionContext.child = { parentId: input.conversationId, name, attemptId: input.attemptId, definition: definition ?? null, selection, role: role?.id ?? null, thinking, tools, model: null };
           anchors.children[input.attemptId] = String(created.id);
           return String(created.id);
         }, context);
         const child = await resolve(childId);
-        const model = await options.admitInference({ conversationId: childId, requestId: input.attemptId, parentConversationId: input.conversationId, ...(selection ? { selection } : {}) });
-        await child.configure({ model, thinkingLevel: parentAgent.thinkingLevel, instructions: definition ? parseCloudAgentDefinition(definition.path, definition.content).instructions : parentAgent.instructions, tools: definition?.tools.length ? parentAgent.tools.filter(tool => definition.tools.includes(tool.name)) : parentAgent.tools }, context);
-        const submission = await child.submit({ type: 'input', content: args.task, requestId: input.attemptId }, context);
-        output = JSON.stringify({ conversationId: childId, submissionId: String(submission.id) });
+        const metadata = (await harness.snapshot(AgentDefinitionContextDoc, child.id, context))?.child;
+        if (!metadata) throw new Error('Child metadata missing');
+        const submission = await options.lifecycle.runWhileActive(childId, async () => {
+          input.signal?.throwIfAborted();
+          const model = await options.admitInference({ conversationId: childId, requestId: input.attemptId, parentConversationId: input.conversationId, selection: metadata.model ? { kind: 'explicit', ...metadata.model } : metadata.selection });
+          await child.commit(async tx => { const childState = await tx.doc(AgentDefinitionContextDoc, child.id); if (childState.child && !childState.child.model) childState.child.model = model; }, context);
+          await options.configureModel(child.id, model);
+          const instructions = metadata.definition ? parseCloudAgentDefinition(metadata.definition.path, metadata.definition.content).instructions : '';
+          await child.configure({ thinkingLevel: metadata.thinking, instructions: `${instructions}\n\nYou are ${metadata.name} (${childId}), a read-only subagent. Your parent is available at parent (${metadata.parentId}). Use agents list to discover sibling names and ids, agents send to message parent or siblings, and agents wait for events. You cannot spawn or stop agents.` }, context);
+          input.signal?.throwIfAborted();
+          return child.submit({ type: 'input', content: args.task, requestId: input.attemptId }, context);
+        });
+        output = JSON.stringify({ conversationId: childId, name: metadata.name, submissionId: String(submission.id) });
       } else if (args.op === 'send') {
-        if (!args.id || !args.message) throw new Error('Agent id and message required');
-        const child = await resolve(args.id);
-        const selection = (await harness.snapshot(SessionControlsDoc, child.id, context))?.selection;
-        const model = await options.admitInference({ conversationId: args.id, requestId: input.attemptId, parentConversationId: input.conversationId, ...(selection ? { selection } : {}) });
-        await child.configure({ model }, context);
-        const submission = await child.submit({ type: 'input', content: args.message, requestId: input.attemptId, whenBusy: 'steer' }, context);
-        output = 'Message admitted';
-      } else if (args.op === 'stop') { if (!args.id) throw new Error('Agent id required'); await (await resolve(args.id)).abort(context, { background: true }); output = 'Agent stopped'; }
-      else { const inspection = await harness.inspect(context); output = JSON.stringify(inspection.tasks.map(task => ({ id: String(task.record.id), conversationId: String(task.record.conversationId), kind: task.record.kind, state: task.record.state.status }))); }
+        const recipient = group.members.find(member => member.id === args.to || member.name === args.to);
+        if (!recipient) throw new Error('Agent address is not a parent or sibling in this conversation family');
+        await options.lifecycle.deliver({ conversationId: recipient.id, requestId: input.attemptId, kind: 'agent-message', sender: { id: input.conversationId, name: group.self?.name ?? 'parent' }, text: args.message });
+        output = 'Message durably admitted';
+      } else if (args.op === 'wait') {
+        output = JSON.stringify(await options.lifecycle.wait(input.conversationId, { timeoutMs: args.timeoutMs, ...(input.signal ? { signal: input.signal } : {}) }));
+      } else if (args.op === 'stop') {
+        if (group.self) throw new Error('Subagents cannot stop agents');
+        const child = group.members.find(member => member.id === args.id && member.child);
+        if (!child) throw new Error('Child agent not found');
+        await options.lifecycle.stop(child.id); output = 'Agent stopped';
+      } else {
+        const inspection = await harness.inspect(context);
+        output = JSON.stringify(group.members.map(member => ({ id: member.id, name: member.name, parentId: member.child?.parentId ?? null, tasks: inspection.tasks.filter(task => String(task.record.conversationId) === member.id).map(task => ({ id: String(task.record.id), kind: task.record.kind, state: task.record.state.status })) })));
+      }
     } else if (input.tool === 'checkpoint') {
       const args = RuntimeCheckpointArgumentsSchema.parse(input.args);
       const anchor = await target.commit(async tx => { const anchors = await tx.doc(Anchors, target.id); if (anchors.entries[input.attemptId]) return anchors.entries[input.attemptId]; const entry = await tx.appendEntry(target.id, { kind: 'gitspace.checkpoint', data: { goal: args.goal } }); anchors.entries[input.attemptId] = String(entry.id); return String(entry.id); }, context);

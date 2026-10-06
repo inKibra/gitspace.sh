@@ -21,7 +21,7 @@ for (const approvalMode of ['write', 'always-ask'] as const) test(`registered br
     async invoke() { invocations++; if (rejected) afterRejection.push('invoke'); throw new Error('Browser effect must never run after rejection'); },
     question: unused, instructions: async () => '', authorizeCronTool: unused,
   };
-  const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, admitInference: unused };
+  const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, deliverConversationEvent: unused, observeProcess: unused, stopProcess: unused };
   const tools = createRuntimeTools(services, operations);
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registered-browser-proof', tools }));
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
@@ -82,7 +82,7 @@ for (const { name, args, approvalMode } of automaticCases) test(`${name} does no
     },
     question: unused, instructions: async () => '', authorizeCronTool: unused,
   };
-  const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, admitInference: unused };
+  const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, deliverConversationEvent: unused, observeProcess: unused, stopProcess: unused };
   const tools = createRuntimeTools(services, operations);
   const registry = createRegistry(); registry.install(defineExtension({ name: 'automatic-browser-proof', tools }));
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {

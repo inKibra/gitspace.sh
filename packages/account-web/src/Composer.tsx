@@ -210,7 +210,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       onStop={controls ? () => runControl(controls.onStop()) : undefined}
       leftSlot={({ openFilePicker }) => <>
         <Button variant="ghost" size="icon-compact" type="button" aria-label="Attach files" onClick={() => openFilePicker()}><Attachment01 width={16} height={16} strokeWidth={1.5} /></Button>
-        {controls ? <>
+        {controls?.selectionReadOnly ? <span className="text-caption text-muted-foreground" title="This child’s admitted selection is read-only">{controls.value.roleLabel ?? controls.value.role ?? 'No role'} · {selectedModelKey} · {controls.value.thinking ?? 'auto'}</span> : controls ? <>
           <ModelCombobox size="compact" variant="borderless" side="top" icon={glyph(CpuChip01)} ariaLabel="Model" value={selectedModelKey}
             options={[...(invalidModel ? [{ value: selectedModelKey, label: `${selectedModelKey} · unavailable` }] : []), ...modelOptions(controls.value.models)]}
             onValueChange={(value) => { const selected = controls.value.models.find((model) => `${model.provider}/${model.id}` === value); if (selected) runControl(controls.onSetModel(selected.provider, selected.id)); }} />
@@ -224,13 +224,13 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         <DropdownMenu size="compact">
           <DropdownTrigger render={<Button variant="ghost" size="icon-compact" type="button" aria-label="More agent controls"><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></Button>} />
           <DropdownContent align="end" side="top" sideOffset={6} className="min-w-[240px] w-[240px]">
-            <MenuItem index={0} icon={icons.user} label={`Role: ${controls.value.roleLabel ?? 'Default'}`} onSelect={() => void controls.onCycleRole('forward')} closeOnClick={false} />
+            <MenuItem index={0} icon={icons.user} label={`Role: ${controls.value.roleLabel ?? 'Default'}`} disabled={controls.selectionReadOnly} onSelect={() => void controls.onCycleRole('forward')} closeOnClick={false} />
             <MenuItem index={1} icon={glyph(Zap)} label="Fast mode" checked={controls.value.fastMode} onSelect={() => void controls.onSetFast(!controls.value.fastMode)} />
             <MenuItem index={2} icon={icons.shield} label={`Approval: ${{ 'always-ask': 'Always ask', write: 'Ask for writes', yolo: 'Auto-approve' }[controls.value.approvalMode]}`} onSelect={() => { const order: SessionControlView['approvalMode'][] = ['always-ask', 'write', 'yolo']; void controls.onSetApproval(order[(order.indexOf(controls.value.approvalMode) + 1) % order.length]); }} closeOnClick={false} />
             {workspace.kind === 'workspace' && workspace.phase === 'code' ? <MenuItem index={3} icon={icons.rocket} label="Goal mode" checked={!!controls.value.goal} onSelect={() => void controls.onSetGoal(!controls.value.goal)} /> : null}
             <MenuItem index={4} icon={icons['rotate-ccw']} label="Compact context" onSelect={() => void controls.onCompact()} />
             <MenuItem index={5} icon={icons.clock} label="Session history" disabled={!controls.onReadHistory} onSelect={() => setShowHistory((value) => !value)} />
-            <MenuItem index={6} icon={icons.brain} label={`Thinking: ${controls.value.thinking ?? 'auto'}`} onSelect={() => { const next = thinkingLevels[(thinkingLevels.indexOf(controls.value.thinking ?? 'auto') + 1) % thinkingLevels.length]; void controls.onSetThinking(next === 'auto' ? null : next); }} closeOnClick={false} className="md:hidden" />
+            <MenuItem index={6} icon={icons.brain} label={`Thinking: ${controls.value.thinking ?? 'auto'}`} disabled={controls.selectionReadOnly} onSelect={() => { const next = thinkingLevels[(thinkingLevels.indexOf(controls.value.thinking ?? 'auto') + 1) % thinkingLevels.length]; void controls.onSetThinking(next === 'auto' ? null : next); }} closeOnClick={false} className="md:hidden" />
           </DropdownContent>
         </DropdownMenu>
       </> : null}

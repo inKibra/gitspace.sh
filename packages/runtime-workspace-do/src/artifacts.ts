@@ -41,7 +41,7 @@ export class ArtifactsCodeStore {
     if (opened.isErr()) return opened;
     const repo = opened.value;
     try {
-      const plan = await Result.tryPromise({ try: () => planSnapshotMerge(repo, input.base, input.previous, input.machine), catch: error => new ArtifactsSnapshotError({ operation: 'mergeSnapshot', certainty: 'not-published', message: String(error) }) });
+      const plan = await Result.tryPromise({ try: () => planSnapshotMerge(repo, input.base, input.previous, input.machine, input), catch: error => new ArtifactsSnapshotError({ operation: 'mergeSnapshot', certainty: 'not-published', message: String(error) }) });
       if (plan.isErr()) return plan;
       return await writeArtifactsSnapshot(repo, { ...input, ...plan.value });
     } finally { await disposeArtifactsRepository(repo); }

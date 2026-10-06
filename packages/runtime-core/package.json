@@ -11,12 +11,13 @@
     "./history": "./src/history.ts"
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
     "test": "bun ../../scripts/test-isolated.ts src"
   },
   "dependencies": {
     "@gitspace/blocks": "workspace:*",
     "@gitspace/protocol-runtime": "workspace:*",
+    "@gitspace/supervisor": "workspace:*",
     "@gitspace/protocol": "workspace:*",
     "@gitspace/protocol-agent": "workspace:*",
     "@gitspace/catalog": "workspace:*",

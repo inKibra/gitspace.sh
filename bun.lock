@@ -353,6 +353,7 @@
         "@gitspace/protocol-agent": "workspace:*",
         "@gitspace/protocol-runtime": "workspace:*",
         "@gitspace/provider-auth": "workspace:*",
+        "@gitspace/supervisor": "workspace:*",
         "typebox": "1.3.27",
         "yaml": "^2.9.0",
         "zod": "^4.4.3",

@@ -1588,6 +1588,13 @@ export const runProjectCronNowContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, CronAlreadyRunning: projectCronErrors.cronAlreadyRunning, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+export const cancelProjectCronRunContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, runId: wire.string, confirmStopWorkspaceAgent: wire.boolean }))
+  .output(ProjectCronRunViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
 export const projectCronHistoryContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, cronId: wire.string, limit: wire.optional(wire.integer({ min: 1, max: 200 })) }))
@@ -2278,6 +2285,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     update: updateProjectCronContract,
     delete: deleteProjectCronContract,
     runNow: runProjectCronNowContract,
+    cancelRun: cancelProjectCronRunContract,
     history: projectCronHistoryContract,
   },
   skills: { list: listSkillsContract, update: updateSkillContract },

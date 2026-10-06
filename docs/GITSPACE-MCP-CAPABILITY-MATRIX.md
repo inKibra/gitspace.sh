@@ -246,6 +246,9 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | `crons.create` | `rpc.write` | F | F | F | F | Tool | Adds a scheduled agent job; its later runs can modify the workspace and external systems. |
 | `crons.update`<br>`crons.delete` | `rpc.write` | F | T | T | F | Tool | Replaces or removes a schedule, changing delayed effects. Deleting a schedule does not imply a running job stopped. |
 | `crons.runNow` | `rpc.write` | F | T | F | T | Tool | Queues a manual agent run that can modify the workspace and external systems. Returns a run record, not completed output. |
+| `crons.cancelRun` | `rpc.write` | F | T | T | F | Tool | Withdraws only the selected queued submission. If the cron has started, requires `confirmStopWorkspaceAgent: true` to stop the shared workspace agent and its children. Never auto-confirm after a queue-to-running race. |
+
+Only one run per cron may be queued or running. Queue time does not count as execution time. A queued run expires after the shorter of its schedule interval and 24 hours; the scheduler withdraws that submission and records “Skipped: workspace busy.” After one hour of execution, it records an overdue notice in history and the workspace transcript without stopping the agent. The eventual terminal receipt supplies the final outcome.
 
 ### skills
 

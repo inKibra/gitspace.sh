@@ -1,4 +1,4 @@
-import type { RuntimeGitCheckpoint, SnapshotMutation } from './artifacts-snapshot.js';
+import type { RuntimeGitCheckpoint, SnapshotMutation, WriteSnapshotInput } from './artifacts-snapshot.js';
 import { parseGitLfsPointer } from '@gitspace/protocol-workspace';
 
 type Reader = Pick<ArtifactsRepo, 'readTree' | 'readBlob' | 'readCommit'>;
@@ -67,28 +67,40 @@ export function hasSnapshotConflictMarkers(text: string): boolean {
   return /^(?:<<<<<<< cloud|\|\|\|\|\|\|\| base|>>>>>>> machine)\r?$/mu.test(text);
 }
 
-export function isCleanSnapshotContent(bytes: Uint8Array): boolean {
-  return !hasSnapshotConflictMarkers(new TextDecoder().decode(bytes));
+const snapshotTextLimit = 8 * 1024 * 1024;
+export function isSnapshotTextEntry(entry: Pick<Entry, 'type' | 'mode'>): boolean {
+  return entry.type === 'blob' && (entry.mode === '100644' || entry.mode === '100755');
 }
 
-export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint, cloud: RuntimeGitCheckpoint, machine: RuntimeGitCheckpoint) {
+function snapshotText(bytes: Uint8Array): string | null {
+  if (bytes.byteLength > snapshotTextLimit || bytes.includes(0) || parseGitLfsPointer(bytes)) return null;
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return null; }
+}
+
+export async function readSnapshotText(blob: Blob): Promise<string | null> {
+  if (blob.size > snapshotTextLimit) return null;
+  return snapshotText(new Uint8Array(await blob.arrayBuffer()));
+}
+
+export function isCleanSnapshotContent(bytes: Uint8Array): boolean {
+  const text = snapshotText(bytes);
+  return text === null || !hasSnapshotConflictMarkers(text);
+}
+
+export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint, cloud: RuntimeGitCheckpoint, machine: RuntimeGitCheckpoint, options: Pick<WriteSnapshotInput, 'forcePublication'> = {}) {
   const conflicts = new Set(cloud.conflicts ?? []);
   const resolved = new Set<string>(), introduced = new Set<string>();
   const inventories = new Map<string, Promise<Map<string, Entry>>>();
   const inventory = (tree: string) => { let promise = inventories.get(tree); if (!promise) { promise = snapshotEntries(repo, tree); inventories.set(tree, promise); } return promise; };
   const text = async (entry: Entry | undefined): Promise<string | null> => {
     if (!entry) return '';
-    if (entry.type !== 'blob' || !['100644', '100755'].includes(entry.mode)) return null;
+    if (!isSnapshotTextEntry(entry)) return null;
     const blob = await repo.readBlob(entry.oid); if (!blob) throw new Error(`Missing merge blob ${entry.oid}`);
-    if (blob.size > 8 * 1024 * 1024) return null;
-    const bytes = new Uint8Array(await blob.arrayBuffer()); if (bytes.includes(0) || parseGitLfsPointer(bytes)) return null;
-    try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return null; }
+    return readSnapshotText(blob);
   };
   const entryHasMarkers = async (entry: Entry | undefined): Promise<boolean> => {
-    if (!entry || entry.type !== 'blob') return false;
-    const blob = await repo.readBlob(entry.oid);
-    if (!blob) throw new Error(`Missing merge blob ${entry.oid}`);
-    return hasSnapshotConflictMarkers(await blob.text());
+    const content = await text(entry);
+    return content !== null && hasSnapshotConflictMarkers(content);
   };
   const layer = async (baseTree: string, cloudTree: string, machineTree: string, worktree = false): Promise<SnapshotMutation[]> => {
     const [original, current, incoming] = await Promise.all([inventory(baseTree), inventory(cloudTree), inventory(machineTree)]);
@@ -106,7 +118,10 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
     };
     for (const path of [...paths].sort()) {
       const a = original.get(path), b = current.get(path), c = incoming.get(path);
-      if (same(a, c)) continue;
+      if (same(a, c)) {
+        if (options.forcePublication && worktree && path !== 'HEAD' && await entryHasMarkers(b)) introduced.add(path);
+        continue;
+      }
       if (same(b, c)) { if (worktree) updateMarkers(path, await entryHasMarkers(c)); continue; }
       const structural = [...current.keys()].some(other => other !== path && (other.startsWith(`${path}/`) || path.startsWith(`${other}/`)) && !(same(original.get(other), current.get(other)) && !incoming.has(other)));
       if (same(a, b) && !structural) { mutations.push({ path, content: null, ...(c ?? {}) }); if (worktree) updateMarkers(path, await entryHasMarkers(c)); continue; }

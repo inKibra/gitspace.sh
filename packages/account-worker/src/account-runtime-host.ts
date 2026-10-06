@@ -125,5 +125,6 @@ export async function createAccountWorkspaceRuntime(
       },
     },
   });
+  ctx.waitUntil(runtime.wake());
   return runtime;
 }

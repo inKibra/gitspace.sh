@@ -135,11 +135,9 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
       expect(await git(checkout, 'rev-parse', 'HEAD')).toBe(head);
     }
     expect(await Bun.file(join(checkout, 'tracked.txt')).text()).toBe(initial === 'published unborn' ? 'stale local contents\n' : 'initial dirty workspace\n');
-    const dispatch = (tool: string, args: Record<string, unknown>) => RuntimeToolDispatchSchema.parse({
-      version: 1, projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: attachment.attachmentId, generation: attachment.generation,
-      conversationId: 'proof', taskId: 'proof', requestId: crypto.randomUUID(), attemptId: crypto.randomUUID(), tool, args,
-      replay: tool === 'read' ? 'safe' : 'unsafe', deadlineAt: new Date(Date.now() + 10_000).toISOString(), snapshot: authority.checkpoint,
-    });
+    const dispatch = (tool: string, args: Record<string, unknown>) => RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: attachment.attachmentId, generation: attachment.generation,
+    conversationId: 'proof', taskId: 'proof', requestId: crypto.randomUUID(), attemptId: crypto.randomUUID(), tool, args,
+    replay: tool === 'read' ? 'safe' : 'unsafe', deadlineAt: new Date(Date.now() + 10_000).toISOString(), snapshot: authority.checkpoint, });
     const beforeNoop = authority.checkpoint;
     expect((await runtime.executor.execute(dispatch('checkpoint', {}))).status).toBe('completed');
     expect(authority.checkpoint).toEqual(beforeNoop);

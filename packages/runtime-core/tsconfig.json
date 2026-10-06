@@ -15,5 +15,6 @@
   },
   "include": [
     "src/**/*.ts"
-  ]
+  ],
+  "exclude": ["src/process-exits.test.ts"]
 }

@@ -72,6 +72,7 @@ export interface ProjectCronsPageProps {
   onDeleteCron(projectId: string, cronId: string, expectedRevision: number): Promise<void>;
   onRunNow(projectId: string, cronId: string): Promise<ProjectCronRunView>;
   onListRuns(projectId: string, cronId: string): Promise<readonly ProjectCronRunView[]>;
+  onCancelRun(projectId: string, runId: string, confirmStopWorkspaceAgent: boolean): Promise<ProjectCronRunView>;
 }
 
 export function projectCronTargetKey(target: ProjectCronTarget): string {
@@ -241,21 +242,22 @@ function CronEditor({
   </>;
 }
 
-function CronRunHistory({ runs }: { runs: readonly ProjectCronRunView[] }): ReactElement {
+function CronRunHistory({ runs, onCancel, busy }: { runs: readonly ProjectCronRunView[]; onCancel(run: ProjectCronRunView): void; busy: boolean }): ReactElement {
   if (runs.length === 0) return <p className="py-3 text-caption text-muted-foreground">No runs yet. Scheduled and manual runs appear here.</p>;
   return <Table size="compact">
-    <TableHeader><TableRow><TableHead>State</TableHead><TableHead>Trigger</TableHead><TableHead>Target</TableHead><TableHead className="text-right">When</TableHead></TableRow></TableHeader>
+    <TableHeader><TableRow><TableHead>State</TableHead><TableHead>Trigger</TableHead><TableHead>Target</TableHead><TableHead className="text-right">When</TableHead><TableHead>Action</TableHead></TableRow></TableHeader>
     <TableBody>
       {runs.map((run, index) => {
         const at = run.completedAt ?? run.startedAt ?? run.scheduledFor;
         return <TableRow key={run.id} index={index}>
-          <TableCell><Badge variant="dot" size="compact" color={RUN_STATE_COLOR[run.state]}>{run.state}</Badge></TableCell>
+          <TableCell><Badge variant="dot" size="compact" color={RUN_STATE_COLOR[run.state]}>{(run.state === 'pending' || run.state === 'running') && run.startedAt === null ? 'queued' : run.message?.startsWith('Overdue:') && run.state === 'running' ? 'overdue' : run.state}</Badge></TableCell>
           <TableCell className="text-muted-foreground">{run.trigger} · <span className="tabular-nums">{formatProjectCronTime(run.scheduledFor)}</span></TableCell>
           <TableCell className="max-w-0">
             <span className="block truncate">{run.resolvedSpaceId ? `${run.resolvedSpaceId} · generation ${run.resolvedGeneration}` : 'Target not resolved'}</span>
             {run.message ? <span className="block truncate text-caption text-muted-foreground">{run.message}</span> : null}
           </TableCell>
           <TableCell className="text-right"><time className="tabular-nums text-muted-foreground" dateTime={at.toISOString()}>{formatProjectCronTime(at)}</time></TableCell>
+          <TableCell>{run.state === 'pending' || run.state === 'running' ? <Button variant="secondary" size="compact" disabled={busy} onClick={() => onCancel(run)}>{run.startedAt === null ? 'Cancel queued run' : 'Stop workspace agent'}</Button> : null}</TableCell>
         </TableRow>;
       })}
     </TableBody>
@@ -282,6 +284,21 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
   const [historyByCron, setHistoryByCron] = useState<Map<string, readonly ProjectCronRunView[]>>(() => new Map());
   const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmStop, setConfirmStop] = useState<ProjectCronRunView | null>(null);
+  const cancelRun = async (run: ProjectCronRunView, confirmed: boolean): Promise<void> => {
+    setBusyId(run.cronId);
+    setActionError(null);
+    try {
+      await props.onCancelRun(run.projectId, run.id, confirmed);
+      const runs = await props.onListRuns(run.projectId, run.cronId);
+      setHistoryByCron(current => new Map(current).set(run.cronId, runs));
+      setConfirmStop(null);
+    } catch (cause) {
+      handleError(cause);
+      const runs = await props.onListRuns(run.projectId, run.cronId).catch(() => null);
+      if (runs) setHistoryByCron(current => new Map(current).set(run.cronId, runs));
+    } finally { setBusyId(null); }
+  };
   // The dialog keeps rendering its last editor while it animates closed.
   const lastEditor = useRef<EditorState>({ kind: 'create' });
   if (editor) lastEditor.current = editor;
@@ -477,12 +494,25 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
               </CardFooter>
               {historyOpen ? <section aria-label={`${cron.name} run history`} className="flex flex-col gap-2 px-4 pt-3">
                 <div className="flex items-center justify-between gap-3"><strong className="text-body font-semibold text-foreground">Run history</strong><span className="text-caption text-muted-foreground">Append-only project authority</span></div>
-                {historyLoadingId === cron.id ? <p className="py-3 text-caption text-muted-foreground">Loading run history…</p> : <CronRunHistory runs={historyByCron.get(cron.id) ?? []} />}
+                {historyLoadingId === cron.id ? <p className="py-3 text-caption text-muted-foreground">Loading run history…</p> : <CronRunHistory runs={historyByCron.get(cron.id) ?? []} busy={busy} onCancel={run => { if (run.startedAt === null) void cancelRun(run, false); else setConfirmStop(run); }} />}
               </section> : null}
             </Card>;
           })}
         </CardGroup> : <p className="text-caption text-muted-foreground">No schedules for this project.</p>}</section>)}
     </section>
+
+    <Dialog open={confirmStop !== null} onOpenChange={open => { if (!open) setConfirmStop(null); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Stop workspace agent?</DialogTitle>
+          <DialogDescription>This cron is already running on the shared workspace agent. Stopping it interrupts the workspace agent and its child agents, including other work in progress. Cancelling a queued cron only withdraws that queued submission.</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => setConfirmStop(null)}>Keep running</Button>
+          <Button variant="primary" loading={busyId !== null} onClick={() => { if (confirmStop) void cancelRun(confirmStop, true); }}>Confirm Stop workspace agent</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog open={editor !== null} onOpenChange={(open) => { if (!open) setEditor(null); }}>
       <DialogContent size="lg">

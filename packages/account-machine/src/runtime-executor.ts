@@ -431,7 +431,7 @@ export async function createMachineExecutor(options: {
                 const client = await daemonClientForProject(checkoutRoot);
                 await client.request({ op: 'start', owner: attachment.attachmentId, spec: {
                   name: `artifactfs-${name}`, application: spec.binary, args: spec.args, cwd: checkoutRoot,
-                  inheritEnv: true, env: spec.env, pty: false, restart: 'on-failure', persist: true, detached: false,
+                  inheritEnv: true, visibility: 'private', env: spec.env, pty: false, restart: 'on-failure', persist: true, detached: false,
                 } });
               },
             },

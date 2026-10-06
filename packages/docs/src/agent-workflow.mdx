@@ -15,7 +15,7 @@ Start with the **Goal**. Record the outcome, constraints, and observable require
 
 Use the **Workflow** when the workspace needs an explicit execution contract. Use the **Rubric** to make review criteria concrete before judging the result.
 
-An agent's default plan file is `local://workspace/PLAN.md`, or `local://base/PLAN.md` for a project agent. New sessions keep that artifact scope. Subagents receive the selected approved plan when it exists; they do not load an unrelated default plan or treat an active draft as approved. No plan file is required to start work.
+An agent's default plan file is `local://workspace/PLAN.md`, or `local://base/PLAN.md` for a project agent. New root sessions keep that artifact scope. Subagents do not inherit the parent's selected plan. No plan file is required to start work.
 
 ## Build with context
 
@@ -37,13 +37,67 @@ The session's compact action asks Pi to summarize a conversation prefix. It uses
 
 Compaction runs in the cloud and follows Pi's task lifecycle. It does not require the conversation's machine checkout to be online.
 
+### Delegate read-only work
+
+Use `agents` with `op: 'spawn'`, a complete `task`, and exactly one selector: `agent` for a granted agent-file name or path, or `role` for a configured model role. Optional `name` sets the child's address, not its model or definition. Set `background: true` when the child must outlive the foreground turn.
+
+```json
+{ "op": "spawn", "role": "review", "name": "Reviewer", "task": "Review the changed API for compatibility." }
+```
+
+The selected file or role supplies the child's own settings. A child inherits repository instructions and rules, not the parent's plan, skills, or execution settings. GitSpace records the exact definition content and revision, selection, role, admitted model, and address at spawn. Editing the source file does not change an existing child. Its definition view is read-only.
+
+Session controls for a child conversation support inspection only. Send workspace changes, browser controls, and other mutating session commands to the workspace's root conversation.
+
+Children can use `read`, `find`, `grep`, `ast_grep`, `history_search`, `history_read`, `web_search`, `todo`, the headless browser, and agent messaging. They cannot access the user's relay browser. A definition can narrow this allowlist, but cannot grant writes or nested spawning. Children can message their parent and siblings; they cannot spawn or stop agents.
+
+Use `agents` with `{ "op": "send", "to": "Reviewer", "message": "Focus on removed fields." }`. Addresses can be names or conversation IDs; children can use `parent`. `list` and `status` show the conversation family. Messages enter durable history with the sender's name and ID.
+
+`{ "op": "wait", "timeoutMs": 30000 }` returns the first pending event, a timeout, or a stopped result. It does not wait for every child. Messages, command completions, and process exits can each wake a wait.
+
+**Stop** stops the selected conversation and its descendant tree, including owned background commands and supervised processes. It does not stop unrelated workspace processes. Events that arrive while stopped remain queued. Only an explicit user message resumes delivery.
+
+### Run commands and processes
+
+Use `bash` for finite commands. `cwd` defaults to the repository root. A background command returns a durable `job` handle immediately and delivers its completion automatically.
+
+```json
+{ "command": "bun run build", "background": true }
+```
+
+Use the same `bash` tool with `op: 'list'` to discover this conversation's background commands. Pass the returned `job` object unchanged to `status`, `wait`, `logs`, or `cancel`. `wait` accepts `timeoutMs`; `logs` accepts `lines`, `head`, and `cursor`. There is no separate `jobs` tool.
+
+Use `proc` for services and interactive programs. A start request takes a typed `spec` with `name` and `application`; put arguments in `spec.args`, not in a shell command string.
+
+```json
+{
+  "op": "start",
+  "spec": {
+    "name": "web",
+    "application": "bun",
+    "args": ["run", "dev"],
+    "ready": { "port": 5173, "timeoutMs": 30000 }
+  }
+}
+```
+
+The spec defaults to the repository root for `cwd`, `pty: true`, empty `args` and `env`, `restart: 'no'`, `persist: true`, and `detached: false`. Readiness can check `log`, `port`, and optional `host`. A readiness timeout leaves the process alive; inspect `timedOut` and `matched` before claiming it is ready.
+
+Address later `proc` operations by `name`. Use `list`, `status`, and `describe` to inspect processes; `wait` accepts `for: 'ready'` or `'exit'`, an optional `pattern`, and `timeoutMs`. `logs` supports `lines`, `head`, `grep`, `cursor`, `follow`, and `timeoutMs`.
+
+Send terminal input with `op: 'send'`, `text`, and optional `enter` (default `true`) or `keys`. The same operation accepts `signal`, or `cols` and `rows` for resizing. Use `stop` or `restart` to change process state. Exits of agent-started processes produce durable notifications.
+
+Process visibility spans the workspace, not just the current conversation. Private processes and processes outside that workspace stay inaccessible. Read-only controls (`list`, `status`, `describe`, `logs`, and `wait`) do not require approval. Mutating operations follow the session's normal plan and approval rules.
+
+Exit tracking and conversation Stop keep the original process identity. They use that machine's current ready attachment and remain pending while it is unreachable.
+
 ## Configure account and project access
 
 **Skills**, **Plugins**, **Secrets**, and **Crons** are account pages. You can manage them with no workspace open and no machine online. Selecting a project does not change an account-level write into a project-level write.
 
 **Inference** loads provider and model catalogs for the selected profile. Until the model catalog is ready, saved model choices stay visible but cannot be changed in the model picker. A loading catalog does not mean that a model or provider is missing.
 
-Skills have account defaults and per-project assignments. Set their use in the project's main space separately from their use in its workspaces. Agent sessions refresh those assignments before their next prompt or provider request. A settings change does not wake an idle agent or erase instructions already in its conversation. Existing subagents keep their copied skill lists; new subagents inherit the refreshed list.
+Skills have account defaults and per-project assignments. Set their use in the project's main space separately from their use in its workspaces. Root agent sessions refresh those assignments before their next prompt or provider request. A settings change does not wake an idle agent or erase instructions already in its conversation. Subagents do not copy the parent's skill assignments.
 
 Plugins keep connections in the account library. Grant each connection to the projects that need it, with separate project-space and workspace access. Connecting or enabling a plugin does not grant every project access. Tool calls check current grants, connection settings, and secret access, including calls through a cached tool handle. If those checks cannot reach the account, the call fails rather than using stale permission.
 
@@ -52,6 +106,14 @@ Account secrets are shared only through explicit project grants. Each grant choo
 Use account values for non-secret defaults and project values for overrides. Lifecycle values resolve from bundle default to account, project, then workspace value. See [Lifecycle reference](/lifecycle-reference) for profile requirements and secret resolution.
 
 Crons list schedules across the account. Choose the owning project when creating one. You can manage schedules and read their history without opening that project; execution still needs an eligible online runner.
+
+A cron submits its prompt to the existing root conversation, not a new conversation for each run. Scheduled prompts run one at a time. The schedule's read and write scopes constrain its own turns and work spawned from them, not unrelated user turns.
+
+Queue time does not count toward the one-hour runtime warning. A run that waits longer than one schedule interval or 24 hours, whichever is shorter, is withdrawn and recorded as **Skipped: workspace busy**. The next due run starts fresh.
+
+After an hour of execution, GitSpace marks the run **overdue** and posts a notice without stopping the workspace agent. History records the real result when the turn ends.
+
+In **Run history**, **Cancel queued run** withdraws only that submission. For a running cron, **Stop workspace agent** requires confirmation because it also interrupts child agents and other workspace work.
 
 ## Manage workspaces from an agent
 
