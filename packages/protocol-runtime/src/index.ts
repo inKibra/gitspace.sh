@@ -8,3 +8,5 @@ export * from './execution-contracts.js';
 export * from './rule-interruptions.js';
 export * from './receipt-transport.js';
 export * from './browser.js';
+export * from './tool-arguments.js';
+export * from './apply-patch.js';

@@ -11,7 +11,7 @@ const stamp = '2026-10-03T00:00:00.000Z';
 const project = cloudProjectSummarySchema.parse({ id: 'project', name: 'GitSpace', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, archivedAt: null, updatedAt: stamp });
 const workspace = cloudWorkspaceDefinitionSchema.parse({ id: 'workspace', projectId: project.id, kind: 'worktree', name: 'Runtime restoration', branch: 'runtime', phase: 'review', sourceKind: 'base', sourceRef: 'main', lifecycle: 'active', goalId: null, revision: 1, archivedAt: null, createdAt: stamp, updatedAt: stamp });
 function fixture() {
-  return RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 3, attachments: [], tasks: [], questions: [], documents: {}, conversations: [{ id: 'root', parentId: null, title: 'Main agent', status: 'idle', placement: null, messages: [{ id: 'user-1', role: 'user', content: [{ type: 'text', text: 'Keep working without a machine' }], createdAt: stamp }, { id: 'answer-1', role: 'assistant', content: [{ type: 'text', text: 'The cloud conversation remains available.' }], createdAt: stamp }] }] });
+  return RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 3, attachments: [], tasks: [], questions: [], documents: {}, conversations: [{ id: 'root', parentId: null, title: 'Main agent', status: 'idle', messages: [{ id: 'user-1', role: 'user', content: [{ type: 'text', text: 'Keep working without a machine' }], createdAt: stamp }, { id: 'answer-1', role: 'assistant', content: [{ type: 'text', text: 'The cloud conversation remains available.' }], createdAt: stamp }] }] });
 }
 const inspection = { project, workspace, workspaces: [workspace], machines: [], placement: null };
 
@@ -59,7 +59,7 @@ describe('runtime to existing shell adapter', () => {
 
   it('projects subagent status and report content into the existing Inspector blocks', () => {
     const snapshot = fixture();
-    snapshot.conversations.push({ id: 'child', parentId: 'root', title: 'Security review', status: 'waiting', placement: null, messages: [{ id: 'report', role: 'assistant', createdAt: stamp, content: [{ type: 'text', text: 'Waiting for approval' }] }] });
+    snapshot.conversations.push({ id: 'child', parentId: 'root', title: 'Security review', status: 'waiting', messages: [{ id: 'report', role: 'assistant', createdAt: stamp, content: [{ type: 'text', text: 'Waiting for approval' }] }] });
     expect(runtimeSubagents(snapshot)).toEqual([{ id: 'agent:child', type: 'side-agent', agentId: 'child', label: 'Security review', status: 'blocked', summary: 'Waiting for approval' }]);
     expect(runtimeTurns(snapshot, 'root').at(-1)?.sideAgents).toEqual(runtimeSubagents(snapshot));
     expect(runtimeTurns(snapshot, 'child').flatMap(turn => turn.items)).toMatchObject([{ type: 'message', text: 'Waiting for approval' }]);

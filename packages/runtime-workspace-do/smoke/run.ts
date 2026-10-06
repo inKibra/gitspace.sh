@@ -97,7 +97,7 @@ try {
   }
   console.log('PASS cold ask recovery, both answer surfaces, idle watch, approval authority and canonical phase');
   console.log('PASS browser approval binds displayed resolved preparation', await request('/browser-approval-proof'));
-  console.log('PASS stable placement permits only detached-primary handoff', await request('/placement-handoff-proof'));
+  console.log('PASS workspace execution selection requires a ready replica', await request('/execution-machine-proof'));
   console.log('PASS bounded tasks and full receipts', await request('/burst'));
 
   const seeded = z.object({ conversationId: z.string(), ids: z.array(z.string()), pivot: z.string(), branches: z.array(z.string()) }).parse(await request('/history-seed'));

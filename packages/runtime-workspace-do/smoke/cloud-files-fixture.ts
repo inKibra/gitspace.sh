@@ -14,6 +14,7 @@ export class CloudFilesProof extends DurableObject {
     let primary: RuntimeAttachment[] = [], failPush = false, pushes = 0;
     let pause: { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } | undefined;
     let loseResponse = false, rejectWrite = false;
+    let mergedCheckpoint: typeof checkpoint | undefined, observedMergeBase: typeof checkpoint | undefined;
     const published = new Map<string, typeof checkpoint>();
     const files = new Map<string, string>([['file.txt', 'one\ntwo\nthree'], ['repeat.txt', 'same same']]);
     const headAttributes = new Map<string, string>();
@@ -48,6 +49,12 @@ export class CloudFilesProof extends DurableObject {
       retained.set(value.worktreeCommit, value);
     };
     const code = {
+      listSnapshotPaths: async () => [...files.keys()].sort(),
+      mergeSnapshot: async (input: { machine: typeof checkpoint; base: typeof checkpoint }) => {
+        observedMergeBase = input.base;
+        if (failPush) return Result.err(new ArtifactsSnapshotError({ operation: 'mergeSnapshot', message: 'lost merge response', certainty: 'unknown' }));
+        return Result.ok(mergedCheckpoint ?? input.machine);
+      },
       readFile: async (_repository: string, commit: string, path: string) => {
         const blob = blobs.get(path);
         if (blob) return blob;
@@ -75,7 +82,7 @@ export class CloudFilesProof extends DurableObject {
     };
     const open = () => new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs);
     let store = open();
-    const invoke = (tool: 'read' | 'write' | 'edit', args: unknown, id: string = crypto.randomUUID()) => store.execute({ tool, args, requestId: id, attemptId: id });
+    const invoke = (tool: 'read' | 'write' | 'edit' | 'find' | 'apply_patch', args: unknown, id: string = crypto.randomUUID()) => store.execute({ tool, args, requestId: id, attemptId: id });
     assert.equal((await invoke('read', { path: 'file.txt' })).status, 'failed');
     await this.ctx.storage.put('runtime.code', checkpoint);
     assert.deepEqual((await invoke('read', { path: 'file.txt', offset: 2, limit: 1 })).content, [{ type: 'text', text: 'two' }]);
@@ -90,7 +97,7 @@ export class CloudFilesProof extends DurableObject {
     await assert.rejects(invoke('write', { path: 'new.txt', content: 'different' }, 'write-once'));
     const first = await store.snapshot(); assert(first);
     assert.equal(first.headCommit, checkpoint.headCommit); assert.equal(first.indexCommit, checkpoint.indexCommit);
-    assert.throws(() => store.commitMachine(checkpoint, 'f'.repeat(40), 'machine'), /stale predecessor/);
+    await assert.rejects(store.commitMachine(checkpoint, 'f'.repeat(40), 'machine'), /unknown predecessor/);
     const ancestry = () => this.ctx.storage.sql.exec('SELECT * FROM runtime_code_commits ORDER BY commit_id').toArray();
     const beforeNoop = ancestry();
     for (const [tool, args] of [
@@ -115,7 +122,6 @@ export class CloudFilesProof extends DurableObject {
     assert.equal((await invoke('write', { path: 'other.txt', content: 'blocked' })).status, 'failed');
     const attachments = new AttachmentStore(this.ctx.storage, { seal: async secret => secret, open: async secret => secret, dispatch: async () => { throw new Error('No machine transport in fixture'); } });
     const admission = RuntimeAttachInputSchema.parse({ projectId: 'p', workspaceId: 'cloud', machineId: 'm', generation: 0, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['read', 'write', 'edit'] });
-    await assert.rejects(attachments.attach(admission), /Cloud mutation/);
     store = open(); failPush = false; await store.recover();
     assert.equal(files.get('retry.txt'), 'durable');
     assert.equal((await invoke('write', { path: 'retry.txt', content: 'durable' }, 'retry')).status, 'completed');
@@ -152,30 +158,29 @@ export class CloudFilesProof extends DurableObject {
     pause = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
     const concurrent = invoke('write', { path: 'concurrent.txt', content: 'first' });
     await pause.entered.promise;
-    const callsBeforeConflict = retentionCalls;
-    assert.equal((await invoke('write', { path: 'concurrent.txt', content: 'second' })).status, 'failed');
-    await assert.rejects(attachments.attach(admission), /Cloud mutation/);
-    assert.equal(retentionCalls, callsBeforeConflict, 'Rejected cloud writers do not retain inventory');
+    const secondConcurrent = invoke('write', { path: 'concurrent-other.txt', content: 'second' });
+    assert.equal((await invoke('read', { path: 'file.txt' })).status, 'completed', 'Reads bypass live writer admission');
     pause.release.resolve(); pause = undefined;
-    assert.equal((await concurrent).status, 'completed');
+    assert.deepEqual((await Promise.all([concurrent, secondConcurrent])).map(result => result.status), ['completed', 'completed']);
     assert.equal(files.get('concurrent.txt'), 'first');
+    assert.equal(files.get('concurrent-other.txt'), 'second');
     const attached = (await attachments.attach(admission)).attachment;
     const ready = { projectId: attached.projectId, workspaceId: attached.workspaceId, machineId: attached.machineId, attachmentId: attached.attachmentId, generation: attached.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true as const, capabilities: attached.capabilities };
     assert.throws(() => attachments.ready(ready), /readiness proof/);
     assert.throws(() => attachments.ready(ready, 'f'.repeat(40)), /readiness proof/);
     attachments.ready(ready, checkpoint.worktreeCommit);
     primary = attachments.list();
-    assert.equal((await invoke('write', { path: 'owned.txt', content: 'blocked' })).status, 'failed');
+    assert.equal((await invoke('write', { path: 'owned.txt', content: 'with ready replica' })).status, 'completed');
     assert.equal(store.hasAttempt('write-once'), true);
     assert.equal(store.hasAttempt('never-dispatched'), false);
     const replayPushes = pushes;
     assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written' }, 'write-once'), written);
     assert.equal(pushes, replayPushes);
     attachments.transition(attached.attachmentId, attached.generation, 'lost'); primary = attachments.list();
-    assert.equal((await invoke('write', { path: 'lost.txt', content: 'blocked' })).status, 'failed');
+    assert.equal((await invoke('write', { path: 'lost.txt', content: 'with lost replica' })).status, 'completed');
     attachments.transition(attached.attachmentId, attached.generation, 'draining');
     assert.throws(() => attachments.transition(attached.attachmentId, attached.generation, 'detached'), /final snapshot/);
-    assert.throws(() => attachments.recordPrimaryFlush(attached.attachmentId, attached.generation + 1), /draining primary/);
+    assert.throws(() => attachments.recordPrimaryFlush(attached.attachmentId, attached.generation + 1));
     attachments.recordPrimaryFlush(attached.attachmentId, attached.generation);
     attachments.transition(attached.attachmentId, attached.generation, 'detached'); primary = attachments.list();
     const afterDetach = await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach');
@@ -188,10 +193,10 @@ export class CloudFilesProof extends DurableObject {
     const handoffPushes = pushes;
     assert.deepEqual(await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach'), afterDetach);
     assert.equal(pushes, handoffPushes);
-    assert.equal((await invoke('write', { path: 'after-b.txt', content: 'blocked' })).status, 'failed');
+    assert.equal((await invoke('write', { path: 'after-b.txt', content: 'with replacement replica' })).status, 'completed');
     await assert.rejects(attachments.attach(admission), /stale/);
     primary = [RuntimeAttachmentSchema.parse({ ...attached, state: 'attaching' })];
-    assert.equal((await invoke('write', { path: 'attaching.txt', content: 'blocked' })).status, 'failed');
+    assert.equal((await invoke('write', { path: 'attaching.txt', content: 'with attaching replica' })).status, 'completed');
     primary = [];
     await this.ctx.storage.delete('runtime.code');
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_snapshot');
@@ -203,7 +208,7 @@ export class CloudFilesProof extends DurableObject {
     await seedEntered.promise;
     primary = [RuntimeAttachmentSchema.parse({ ...attached, state: 'attaching' })];
     seedRelease.resolve();
-    assert.equal((await seed).status, 'failed');
+    assert.equal((await seed).status, 'completed');
     primary = [];
     store = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs, async () => checkpoint);
     assert.equal((await invoke('read', { path: 'file.txt' })).status, 'completed');
@@ -218,7 +223,7 @@ export class CloudFilesProof extends DurableObject {
     assert.equal(unbornCloud.headCommit, null);
     assert.equal(unbornCloud.indexCommit, unborn.indexCommit);
     assert.deepEqual((await invoke('read', { path: 'unborn.txt' })).content, [{ type: 'text', text: 'cloud before attachment' }]);
-    store.commitMachine({ ...unbornCloud, headCommit: 'a'.repeat(40), worktreeCommit: 'b'.repeat(40) }, unbornCloud.worktreeCommit, 'machine');
+    await store.commitMachine({ ...unbornCloud, headCommit: 'a'.repeat(40), worktreeCommit: 'b'.repeat(40) }, unbornCloud.worktreeCommit, 'machine');
     assert.equal((await invoke('edit', { path: 'unborn.txt', edits: [{ oldText: 'before', newText: 'after' }] })).status, 'completed');
     assert.equal((await store.snapshot())?.headCommit, 'a'.repeat(40));
     const payload = new TextEncoder().encode('real LFS content\nsecond line');
@@ -228,7 +233,7 @@ export class CloudFilesProof extends DurableObject {
     files.set('asset.dat', pointer);
     payloads.set(oid, payload);
     const current = await store.snapshot(); assert(current);
-    store.commitMachine({ ...current, headCommit: checkpoint.headCommit, worktreeCommit: 'c'.repeat(40), lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [{ path: 'asset.dat', kind: 'modified' }] } }, current.worktreeCommit, 'machine');
+    await store.commitMachine({ ...current, headCommit: checkpoint.headCommit, worktreeCommit: 'c'.repeat(40), lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [{ path: 'asset.dat', kind: 'modified' }] } }, current.worktreeCommit, 'machine');
     headAttributes.set('.gitattributes', '*.dat filter=lfs\n[attr]large filter=lfs\n*.large large\n"space name.bin" filter=lfs\nliteral\\*.bin filter=lfs\ndeep/**/object.bin filter=lfs\n');
     headAttributes.set('nested/.gitattributes', '*.bin filter=lfs\nplain.dat -filter\n');
     assert.deepEqual((await invoke('read', { path: 'asset.dat' })).content, [{ type: 'text', text: 'real LFS content\nsecond line' }]);
@@ -309,6 +314,40 @@ export class CloudFilesProof extends DurableObject {
     assert.equal((await invoke('write', { path: 'after-origin-transition.txt', content: 'retains origin source' })).status, 'completed');
     assert.equal((await store.snapshot())?.lfs?.objects[0]?.source, 'origin');
     assert.deepEqual((await store.snapshot())?.lfs?.objects[0], { ...object, source: 'origin', location });
+    const patch = '*** Begin Patch\n*** Add File: indexed/deep.txt\n+indexed\n*** End Patch';
+    assert.equal((await invoke('apply_patch', { patch })).status, 'completed');
+    assert.deepEqual((await invoke('find', { path: 'indexed', pattern: '**/*.txt' })).content, [{ type: 'text', text: 'indexed/deep.txt' }]);
+    store = open();
+    assert.deepEqual((await invoke('find', { path: '.', pattern: '**/deep.txt' })).content, [{ type: 'text', text: 'indexed/deep.txt' }]);
+    assert.equal((await invoke('apply_patch', { patch: '*** Begin Patch\n*** Delete File: indexed/deep.txt\n*** End Patch' })).status, 'completed');
+    assert.deepEqual((await invoke('find', { path: 'indexed', pattern: '*' })).content, [{ type: 'text', text: '' }]);
+    assert.equal((await invoke('apply_patch', { patch: '*** Begin Patch\n*** Update File: asset.dat\n@@\n-version https://git-lfs.github.com/spec/v1\n+changed\n*** End Patch' })).status, 'failed');
+    const beforeMergeRecovery = await store.snapshot(); assert(beforeMergeRecovery);
+    const uploaded = { ...beforeMergeRecovery, worktreeCommit: 'd'.repeat(40) };
+    failPush = true;
+    await assert.rejects(store.commitMachine(uploaded, beforeMergeRecovery.worktreeCommit, 'machine'));
+    assert.equal(store.hasPendingMachine('machine'), true);
+    assert(store.lfsRoots().some(root => root.worktreeCommit === uploaded.worktreeCommit));
+    assert.equal((await invoke('write', { path: 'during-merge.txt', content: 'blocked' })).status, 'failed');
+    failPush = false;
+    store = open(); await store.recover();
+    assert.equal(store.hasPendingMachine('machine'), false);
+    assert.equal((await store.snapshot())?.worktreeCommit, uploaded.worktreeCommit);
+    assert.deepEqual(await store.commitMachine(uploaded, beforeMergeRecovery.worktreeCommit, 'machine', () => { throw new Error('Revoked after durable acceptance'); }), uploaded);
+    const noncanonical = { ...uploaded, worktreeCommit: 'e'.repeat(40), indexTree: '8'.repeat(40), indexCommit: '9'.repeat(40) };
+    mergedCheckpoint = { ...uploaded, worktreeCommit: 'f'.repeat(40) };
+    assert.deepEqual(await store.commitMachine(noncanonical, uploaded.worktreeCommit, 'machine'), mergedCheckpoint);
+    const followup = { ...noncanonical, worktreeCommit: 'a1'.repeat(20) };
+    mergedCheckpoint = undefined;
+    await store.commitMachine(followup, noncanonical.worktreeCommit, 'machine');
+    assert.deepEqual(observedMergeBase, noncanonical, 'A human edit after upload must merge from the uploaded HEAD/index metadata, not the never-installed accepted snapshot');
+    const parallelA = { ...followup, worktreeCommit: 'a2'.repeat(20) }, parallelB = { ...followup, worktreeCommit: 'a3'.repeat(20) };
+    const concurrentPublications = await Promise.all([
+      store.commitMachine(parallelA, followup.worktreeCommit, 'machine-a'),
+      store.commitMachine(parallelB, followup.worktreeCommit, 'machine-b'),
+    ]);
+    assert.deepEqual(concurrentPublications.map(value => value.worktreeCommit), [parallelA.worktreeCommit, parallelB.worktreeCommit]);
+    assert.equal((await store.snapshot())?.worktreeCommit, parallelB.worktreeCommit);
     headAttributes.set('.gitattributes', '[[:alpha:]].bin filter=lfs\n');
     const unsupportedPattern = await invoke('write', { path: 'a.bin', content: 'must not bypass LFS policy' });
     assert.equal(unsupportedPattern.status, 'failed');

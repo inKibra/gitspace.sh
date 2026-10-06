@@ -8,7 +8,7 @@ vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: { session: vi.fn() } }
 let root: Root;
 let container: HTMLDivElement;
 const request = (): RuntimeBrowserApprovalCard => ({
-  id: 'preparation', groupId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', projectId: 'project', workspaceId: 'workspace', conversationId: 'conversation', machineId: 'machine', attachmentId: 'attachment', generation: 1,
+  id: 'preparation', groupId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1,
   groupName: '<script>workspace</script>', origins: ['example.test'], source: 'relay', expiresAt: new Date(Date.now() + 60_000).toISOString(), action: 'open', requiresApproval: true,
 });
 beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); container = document.createElement('div'); document.body.append(container); root = createRoot(container); });

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { collectBytes, confirmGitLfsObjects, GitLfsObjectSchema, type GitLfsOriginConfirmation, type GitLfsStore } from '@gitspace/protocol-workspace';
-import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, IncrementalGitSnapshots, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
+import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitReplicaCheckpoint, IncrementalGitSnapshots, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
 import { recheckGitLfsOrigin, restoredGitLfsPaths } from '../src/git-lfs.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { committedLfsInventory } from '../src/git-lfs-inventory.js';
@@ -40,6 +40,30 @@ function fixture() {
   return { root, base, pointer, lfs, uploads, objects, capture };
 }
 
+it('applies committed LFS deltas to hydrated replicas without replacing later held-back bytes', async () => {
+  const f = fixture();
+  const base = await f.capture(1);
+  const target = mkdtempSync(join(tmpdir(), 'gitspace-lfs-replica-')); roots.push(target);
+  git(target, 'init', '-b', 'main');
+  git(target, 'fetch', f.root, `${base.checkpointRef}:${base.checkpointRef}`);
+  await restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint: base, branch: 'main', lfs: f.lfs });
+  const next = f.pointer('new committed payload');
+  writeFileSync(join(f.root, 'asset.bin'), next.text);
+  git(f.root, 'add', 'asset.bin'); git(f.root, 'commit', '-m', 'new payload');
+  const incoming = await f.capture(2);
+  git(target, 'fetch', f.root, `${incoming.checkpointRef}:${incoming.checkpointRef}`);
+  await applyGitReplicaCheckpoint({ repositoryPath: target, previous: base, checkpoint: incoming, lfs: f.lfs });
+  expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('new committed payload');
+  expect(git(target, 'write-tree')).toBe(incoming.indexTree);
+  if (incoming.headCommit === null) throw new Error('Committed LFS fixture lost HEAD');
+  expect(git(target, 'rev-parse', 'HEAD')).toBe(incoming.headCommit);
+  writeFileSync(join(target, 'asset.bin'), 'private newer bytes');
+  const held = await createGitIntermediateCheckpoint({ repositoryPath: target, spaceId: 'replica', revision: 3, lfs: f.lfs });
+  await applyGitReplicaCheckpoint({ repositoryPath: target, previous: held, checkpoint: incoming, lfs: f.lfs });
+  expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('private newer bytes');
+  expect(f.uploads).not.toContain(createHash('sha256').update('private newer bytes').digest('hex'));
+});
+
 it('holds edited and staged payloads using HEAD nested attributes without touching local state', async () => {
   const f = fixture(); mkdirSync(join(f.root, 'nested')); writeFileSync(join(f.root, 'nested/.gitattributes'), '*.dat filter=lfs\n'); writeFileSync(join(f.root, 'nested/a.dat'), f.base.text); git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'nested');
   writeFileSync(join(f.root, '.gitattributes'), '*.bin -filter\n'); writeFileSync(join(f.root, 'nested/.gitattributes'), '*.dat -filter\n');
@@ -67,7 +91,7 @@ it('only uploads committed objects, dedupes oids and retains history across dele
 
 it('publishes heldBack transitions even when sanitized trees are identical', async () => {
   const f = fixture(); let revision = 0; let committed: GitIntermediateCheckpoint | null = null; const publications: GitIntermediateCheckpoint[] = [];
-  const snapshots = new IncrementalGitSnapshots({ repositoryPath: f.root, spaceId: 'space', lfs: async () => f.lfs, allocateRevision: async () => ++revision, loadPending: async () => null, loadCommitted: async () => committed, savePending: async () => {}, publish: async value => { publications.push(value); }, commit: async value => { committed = value; } });
+  const snapshots = new IncrementalGitSnapshots({ repositoryPath: f.root, spaceId: 'space', lfs: async () => f.lfs, allocateRevision: async () => ++revision, loadPending: async () => null, loadCommitted: async () => committed, savePending: async () => {}, publish: async value => { publications.push(value); }, commit: async value => { committed = value; return value; } });
   const clean = await snapshots.capture(); writeFileSync(join(f.root, 'asset.bin'), 'held edit'); const held = await snapshots.capture();
   expect(held.indexTree).toBe(clean.indexTree); expect(held.worktreeTree).toBe(clean.worktreeTree); expect(publications).toEqual([clean, held]);
 });

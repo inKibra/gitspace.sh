@@ -7,25 +7,30 @@ import { RuntimeJsonSchema, RuntimeGitCheckpointSchema, RuntimeAssignmentsResult
 import type { GitSpaceDatabase, LocalArtifactResolver } from '@gitspace/core';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
-import { IncrementalGitSnapshots, restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
+import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, completeGitCheckpoint, restoreGitIntermediateCheckpoint, applyGitReplicaCheckpoint, gitCheckpointIncludes, readGitCheckpointHead, readGitReplicaBase, saveGitReplicaBase } from './git-checkpoint.js';
 import type { GitIntermediateCheckpoint } from './git-checkpoint.js';
 import type { ArtifactsGitRemote } from './artifacts-git-remote.js';
+import type { SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { LocalAttachment, ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import { createArtifactsCredentialHelper } from './artifacts-credential-helper.js';
 import { daemonClientForProject } from '@gitspace/supervisor';
 import { checkoutGitLfs, gitLfsRestoreReceipt, hydrateGitLfs, restoredGitLfsPaths, type MachineGitLfs } from './git-lfs.js';
+import { gitWorktreeClock, gitWorktreeEvents, watchGitWorktree, type GitWorktreeClock, type GitWorktreeEvents } from './git-worktree-watch.js';
 
-export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; checkpointWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
+export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
 export async function createMachineExecutor(options: {
   environmentRoot: string; machineId: string; database: GitSpaceDatabase; artifacts: LocalArtifactResolver; cloud: CloudRuntimeClient;
   gitRemote: ArtifactsGitRemote;
   lfs?: (projectId: string, publicationId?: string) => Promise<MachineGitLfs>;
   operations?: Record<string, ExecutorOperationHandler>;
   browser?: { enabled: boolean; relay?: RuntimeBrowserRelay };
-  commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null, final?: boolean): Promise<void>;
+  commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null, final?: boolean): Promise<GitIntermediateCheckpoint>;
+  restoredBase?(projectId: string, workspaceId: string): Promise<SpaceCheckpointManifest['repository'] | null>;
   prepareAttachment(local: LocalAttachment, signal: AbortSignal): Promise<void>;
   originGitEnvironment(origin: string): Promise<Record<string, string>>;
   artifactFsBinary?: string;
+  checkpointClock?: GitWorktreeClock;
+  checkpointEvents?: GitWorktreeEvents;
 }): Promise<MachineExecutorRuntime> {
   const directory = join(options.environmentRoot, 'executor');
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -36,8 +41,23 @@ export async function createMachineExecutor(options: {
   const snapshots = new Database(join(directory, 'snapshots.sqlite'));
   snapshots.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS snapshots (attachment TEXT PRIMARY KEY, revision INTEGER NOT NULL, pending TEXT, committed TEXT)');
   const captures = new Map<string, IncrementalGitSnapshots>();
+  const clock = options.checkpointClock ?? gitWorktreeClock;
+  const watchers = new Map<string, { close(): void }>();
+  const subscriptions = new Map<string, { controller: AbortController; settled: Promise<void> }>();
+  const install = async (local: LocalAttachment, previous: GitIntermediateCheckpoint, checkpoint: GitIntermediateCheckpoint, incoming = false) => {
+    await options.gitRemote.fetchCheckpoint({ binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` }, repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit });
+    if (incoming && await gitCheckpointIncludes(local.rootPath, previous, checkpoint)) return false;
+    if (local.attachment.role === 'replica' && local.attachment.checkout.kind === 'branch' && (await readGitCheckpointHead(local.rootPath)).branch === local.attachment.checkout.branch) {
+      const branch = local.attachment.checkout.branch;
+      checkpoint = { ...checkpoint, branch: checkpoint.branch === previous.branch ? branch : checkpoint.branch };
+      previous = { ...previous, branch };
+    }
+    await applyGitReplicaCheckpoint({ repositoryPath: local.rootPath, previous, checkpoint, lfs: await options.lfs?.(local.attachment.projectId) });
+    return true;
+  };
   const capture = async (local: LocalAttachment): Promise<GitIntermediateCheckpoint | null> => {
-    if (local.attachment.role !== 'primary' || !['attaching', 'ready', 'draining'].includes(local.attachment.state)) return null;
+    if (!['primary', 'replica'].includes(local.attachment.role) || !['attaching', 'ready', 'draining'].includes(local.attachment.state)) return null;
+    stopping.signal.throwIfAborted();
     const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
     let stream = captures.get(key);
     if (!stream) {
@@ -45,7 +65,15 @@ export async function createMachineExecutor(options: {
       stream = new IncrementalGitSnapshots({
         repositoryPath: local.rootPath,
         spaceId: local.attachment.workspaceId,
+        captureId: `replica-${createHash('sha256').update(`${options.machineId}:${key}`).digest('hex')}`,
         lfs: options.lfs?.bind(undefined, local.attachment.projectId),
+        // One full second of stable dirty-path metadata coalesces editor bursts,
+        // including pauses beyond the old 200ms debounce. Longer pauses can be
+        // separate edits; no timestamp policy proves an arbitrary writer done.
+        settleWindowMs: 1000,
+        clock: options.checkpointClock,
+        signal: stopping.signal,
+        normalizeBranch: (branch, committed) => local.attachment.role === 'replica' && local.attachment.checkout.kind === 'branch' && branch === local.attachment.checkout.branch ? committed?.branch ?? branch : branch,
         allocateRevision: async () => {
           const row = snapshots.query<{ revision: number }, [string]>('UPDATE snapshots SET revision=revision+1 WHERE attachment=? RETURNING revision').get(key);
           if (!row) throw new Error('Snapshot journal row missing');
@@ -67,13 +95,102 @@ export async function createMachineExecutor(options: {
         commit: async checkpoint => {
           const prior = snapshots.query<{ committed: string | null }, [string]>('SELECT committed FROM snapshots WHERE attachment=?').get(key);
           const previous = prior?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(prior.committed)) : null;
-          await options.commitSnapshot(local, checkpoint, previous?.worktreeCommit ?? null);
-          snapshots.query('UPDATE snapshots SET pending=NULL, committed=? WHERE attachment=?').run(JSON.stringify(checkpoint), key);
+          const accepted = await options.commitSnapshot(local, checkpoint, previous?.worktreeCommit ?? null);
+          if (accepted.worktreeCommit !== checkpoint.worktreeCommit) {
+            try { await install(local, checkpoint, accepted); }
+            catch (error) {
+              // Preserve human edits made during fetch/apply against the actual
+              // uploaded base, not the accepted tree we could not install.
+              // Leave the changed worktree for the same settling/capture boundary
+              // on retry; taking a raw pending snapshot here would bypass it.
+              snapshots.query('UPDATE snapshots SET pending=NULL, committed=? WHERE attachment=?').run(JSON.stringify(checkpoint), key);
+              throw error;
+            }
+          }
+          snapshots.query('UPDATE snapshots SET pending=NULL, committed=? WHERE attachment=?').run(JSON.stringify(accepted), key);
+          await saveGitReplicaBase(local.rootPath, accepted);
+          return accepted;
         },
       });
       captures.set(key, stream);
     }
     return stream.capture();
+  };
+  const reconcile = async (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null) => {
+    if (!['primary', 'replica'].includes(local.attachment.role)) return;
+    const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
+    const base = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
+    if (!base?.committed && !base?.pending && incoming) throw new Error('Replica reconciliation requires its durable applied base');
+    const before = base?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(base.committed)) : null;
+    const accepted = await capture(local);
+    // A publication races against the cloud tip inside the cloud merge owner.
+    // Only a no-op capture may use the bounded subscription's incoming tip.
+    if (incoming && accepted && before?.worktreeCommit === accepted.worktreeCommit && incoming.worktreeCommit !== accepted.worktreeCommit) {
+      if (await install(local, accepted, incoming, true)) {
+        snapshots.query('UPDATE snapshots SET committed=? WHERE attachment=?').run(JSON.stringify(incoming), key);
+        await saveGitReplicaBase(local.rootPath, incoming);
+      }
+    }
+  };
+  const subscribe = (local: LocalAttachment) => {
+    const { attachment } = local;
+    const key = `${attachment.attachmentId}:${attachment.generation}`;
+    if (!['primary', 'replica'].includes(attachment.role) || subscriptions.has(key)) return;
+    const controller = new AbortController();
+    const signal = AbortSignal.any([stopping.signal, controller.signal]);
+    const settled = (async () => {
+      while (!signal.aborted) {
+        const current = journal.attachment(attachment.attachmentId);
+        if (current?.attachment.generation !== attachment.generation || current.attachment.state !== 'ready') return;
+        const row = snapshots.query<{ committed: string | null }, [string]>('SELECT committed FROM snapshots WHERE attachment=?').get(key);
+        if (!row?.committed) return;
+        const checkpoint = RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed));
+        try {
+          const result = await options.cloud.call('runtime.assignments', {
+            machineId: options.machineId,
+            workspace: { projectId: attachment.projectId, workspaceId: attachment.workspaceId },
+            afterSnapshot: checkpoint.worktreeCommit,
+          }, RuntimeAssignmentsResultSchema, signal);
+          const assignment = result.assignments.find(item => item.grant.attachment.attachmentId === attachment.attachmentId && item.grant.attachment.generation === attachment.generation);
+          if (!assignment || assignment.grant.attachment.state !== 'ready') return;
+          await executor.withCheckout(current, async () => {
+            const latest = journal.attachment(attachment.attachmentId);
+            if (latest?.attachment.generation === attachment.generation && latest.attachment.state === 'ready' && !journal.hasRunningCheckout(latest.rootPath)) await reconcile(latest, assignment.checkpoint);
+          });
+        } catch (error) {
+          if (signal.aborted) return;
+          console.error('[runtime-replica-follow]', error instanceof Error ? error.message : String(error));
+          await new Promise<void>(resolve => {
+            const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); };
+            const timer = setTimeout(finish, 1000);
+            signal.addEventListener('abort', finish, { once: true });
+            if (signal.aborted) finish();
+          });
+        }
+      }
+    })().finally(() => { if (subscriptions.get(key)?.controller === controller) subscriptions.delete(key); });
+    subscriptions.set(key, { controller, settled });
+  };
+  const follow = async (local: LocalAttachment) => {
+    if (!['primary', 'replica'].includes(local.attachment.role) || watchers.has(local.rootPath)) return;
+    let cancel: (() => void) | undefined;
+    const watcher = await watchGitWorktree({
+      root: local.rootPath, clock, events: options.checkpointEvents ?? gitWorktreeEvents,
+      changed: () => {
+        if (stopping.signal.aborted) return;
+        cancel?.();
+        cancel = clock.schedule(200, () => {
+          cancel = undefined;
+          void executor.withCheckout(local, async () => {
+            const current = journal.attachment(local.attachment.attachmentId);
+            if (!stopping.signal.aborted && current?.attachment.state === 'ready' && !journal.hasRunningCheckout(local.rootPath)) await reconcile(current);
+          }).catch(error => console.error('[runtime-replica]', error instanceof Error ? error.message : String(error)));
+        });
+      },
+      failed: error => console.error('[runtime-replica-watch]', error.message),
+    });
+    if (stopping.signal.aborted) { watcher.close(); cancel?.(); return; }
+    watchers.set(local.rootPath, { close() { cancel?.(); watcher.close(); } });
   };
   const trustedBrowserKeys = new Map<string, Promise<CryptoKey>>();
   const browserDirectory = join(homedir(), '.gitspace-browser-profiles', createHash('sha256').update(options.machineId).digest('hex'));
@@ -100,6 +217,7 @@ export async function createMachineExecutor(options: {
   const executor = new MachineExecutor({
     machineId: options.machineId, journal, runCommand: runSupervisorCommand,
     onMutationSettled: capture,
+    onBeforeExecute: async (local, dispatch) => { await reconcile(local, dispatch.snapshot); },
     operations: { ...options.operations, browser: (dispatch, local, signal) => browser.execute(dispatch, local, signal), browser_control: (dispatch, local, signal) => browser.execute(dispatch, local, signal) },
     artifacts: local => {
       const capability = { kind: 'workspace' as const, projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId };
@@ -121,7 +239,7 @@ export async function createMachineExecutor(options: {
     cloudModel: input => options.cloud.call('runtime.model', { dispatch: input.dispatch, operation: input.operation, args: input.args }, RuntimeJsonSchema, input.signal),
     cloudMcp: input => options.cloud.call('runtime.mcp', { dispatch: input.dispatch, callId: input.callId, method: input.method, args: input.args }, RuntimeJsonSchema, input.signal),
   });
-  const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'codemode', ...Object.keys(options.operations ?? {})];
+  const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'codemode', 'checkpoint', ...Object.keys(options.operations ?? {})];
   const browserCapabilities = async (): Promise<string[]> => {
     if (options.browser?.enabled !== true) return [];
     const relayConnected = await options.browser.relay?.status().then(status => status.connected, () => false) ?? false;
@@ -143,6 +261,9 @@ export async function createMachineExecutor(options: {
         }
       }
       const assignments = await options.cloud.call('runtime.assignments', { machineId: options.machineId }, RuntimeAssignmentsResultSchema, stopping.signal);
+      for (const [key, subscription] of subscriptions) {
+        if (!assignments.assignments.some(item => `${item.grant.attachment.attachmentId}:${item.grant.attachment.generation}` === key && item.grant.attachment.state === 'ready')) subscription.controller.abort();
+      }
       for (const assignment of assignments.assignments) {
         if (stopped) return;
         const { attachment } = assignment.grant;
@@ -187,10 +308,25 @@ export async function createMachineExecutor(options: {
           }
           if (!ownsCheckout) throw new Error('Primary assignment requires materialized canonical checkout ownership');
           if (!attachment.capabilities.filter(capability => !isBrowserCapability(capability)).every(capability => capabilities.includes(capability))) throw new Error('Executor lacks assigned primary capabilities');
-          if (!existing && assignment.checkpoint) {
-            const checkpoint = assignment.checkpoint;
+          const snapshotKey = `${attachment.attachmentId}:${attachment.generation}`;
+          const durableSnapshot = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(snapshotKey);
+          if (!durableSnapshot?.committed && !durableSnapshot?.pending && assignment.checkpoint) {
+            let checkpoint = await readGitReplicaBase(space.rootPath);
+            if (!checkpoint) {
+              const restored = await options.restoredBase?.(attachment.projectId, attachment.workspaceId);
+              if (restored) {
+                await options.gitRemote.fetchCheckpoint({ binding: { projectId: attachment.projectId, repository: `workspace-${attachment.workspaceId}` }, repositoryPath: space.rootPath, checkpointRef: restored.checkpointRef, commit: restored.worktreeCommit });
+                checkpoint = await completeGitCheckpoint(space.rootPath, restored);
+              }
+            }
+            if (!checkpoint) {
+              const observed = await createGitIntermediateCheckpoint({ repositoryPath: space.rootPath, spaceId: attachment.workspaceId, captureId: `admission-${createHash('sha256').update(attachment.attachmentId).digest('hex')}`, revision: Date.now(), lfs: await options.lfs?.(attachment.projectId) });
+              const cloud = assignment.checkpoint;
+              if (observed.headCommit !== cloud.headCommit || observed.branch !== cloud.branch || observed.indexTree !== cloud.indexTree || observed.worktreeTree !== cloud.worktreeTree) throw new Error('Shared replica lacks a durable applied base; refusing to overwrite or publish unbased local edits');
+              checkpoint = cloud;
+            }
+            await saveGitReplicaBase(space.rootPath, checkpoint);
             await options.gitRemote.fetchCheckpoint({ binding: { projectId: attachment.projectId, repository: `workspace-${attachment.workspaceId}` }, repositoryPath: space.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit });
-            await restoreGitIntermediateCheckpoint({ repositoryPath: space.rootPath, checkpoint, branch: attachment.checkout.branch, lfs: await options.lfs?.(attachment.projectId) });
             snapshots.query('INSERT OR REPLACE INTO snapshots(attachment,revision,committed) VALUES(?,?,?)').run(`${attachment.attachmentId}:${attachment.generation}`, Date.now(), JSON.stringify(checkpoint));
           }
           const enrolled = await options.cloud.attach({ projectId: attachment.projectId, workspaceId: attachment.workspaceId, machineId: attachment.machineId, generation: attachment.generation, ownershipGeneration: attachment.ownershipGeneration, role: attachment.role, checkout: attachment.checkout, capabilities: [...attachment.capabilities.filter(capability => !isBrowserCapability(capability)), ...browserSupport] });
@@ -209,7 +345,9 @@ export async function createMachineExecutor(options: {
             journal.installAttachment(local);
             await gitLfsRestoreReceipt(space.rootPath, 'clear');
           }
-          await capture(local);
+          await follow(local);
+          await executor.withCheckout(local, () => reconcile(local, assignment.checkpoint));
+          subscribe(local);
           continue;
         }
         if (attachment.checkout.kind === 'shared' || !assignment.source) throw new Error('Private assignment requires an immutable source');
@@ -238,6 +376,11 @@ export async function createMachineExecutor(options: {
                 const verified = await client.request({ op: 'list' }, stopping.signal);
                 if (verified.op !== 'list' || verified.daemons.some(daemon => !['exited', 'failed'].includes(daemon.state))) throw new Error('Cleanup has live supervisor processes');
               }
+              if (attachment.role === 'replica') {
+                const checkpoint = await executor.withCheckout(owned, () => capture({ ...owned, attachment: { ...owned.attachment, state: 'draining' } }));
+                if (!checkpoint) throw new Error('Replica cleanup requires an accepted final checkpoint');
+                await options.commitSnapshot(owned, checkpoint, checkpoint.worktreeCommit, true);
+              }
             },
             verifyUnmounted: async root => {
               if (process.platform !== 'linux') throw new Error('Checkout cleanup mount verification requires Linux');
@@ -264,6 +407,8 @@ export async function createMachineExecutor(options: {
           continue;
         }
         const source = assignment.source;
+        const sourceCheckpoint = assignment.sourceCheckpoint ?? (assignment.checkpoint?.worktreeCommit === source.commit ? assignment.checkpoint : undefined);
+        if (attachment.role === 'replica' && sourceCheckpoint?.worktreeCommit !== source.commit) throw new Error('Replica source metadata does not match its admitted commit');
         if (!source.remote) throw new Error('Attachment preparation requires an authorized repository remote');
         const env = credentialHelper.environment(grant, source.remote);
         const signal = AbortSignal.any([stopping.signal, AbortSignal.timeout(30 * 60_000)]);
@@ -292,19 +437,36 @@ export async function createMachineExecutor(options: {
             },
             hydrateLfs: async path => {
               if (source.origin) await git(path, ['config', 'remote.origin.url', source.origin]);
-              await hydrateGitLfs(path, [source.commit], assignment.checkpoint?.lfs, await options.lfs?.(attachment.projectId));
+              await hydrateGitLfs(path, [source.commit], sourceCheckpoint?.lfs, await options.lfs?.(attachment.projectId));
               await checkoutGitLfs(path, source.commit);
+              if (attachment.role === 'replica' && !sourceCheckpoint) throw new Error('Replica preparation requires the admitted source checkpoint');
             },
           },
-          prerequisites: options.prepareAttachment,
+          prerequisites: async (prepared, prepareSignal) => {
+            if (attachment.role === 'replica') {
+              if (!sourceCheckpoint || attachment.checkout.kind !== 'branch') throw new Error('Replica requires a branch and source checkpoint');
+              const key = `${attachment.attachmentId}:${attachment.generation}`;
+              if (!snapshots.query('SELECT attachment FROM snapshots WHERE attachment=?').get(key)) {
+                await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: sourceCheckpoint, branch: attachment.checkout.branch, lfs: await options.lfs?.(attachment.projectId) });
+                snapshots.query('INSERT INTO snapshots(attachment,revision,committed) VALUES(?,?,?)').run(key, Date.now(), JSON.stringify(sourceCheckpoint));
+              }
+            }
+            await options.prepareAttachment(prepared, prepareSignal);
+          },
         });
         const ready = await options.cloud.call('runtime.attachment.ready', {
           projectId: attachment.projectId, workspaceId: attachment.workspaceId, machineId: options.machineId,
           attachmentId: attachment.attachmentId, generation: attachment.generation, commit: source.commit,
           prerequisitesComplete: true, capabilities,
-          lfsRestored: assignment.checkpoint ? await restoredGitLfsPaths(local.rootPath, source.commit, assignment.checkpoint.lfs) : undefined,
+          lfsRestored: sourceCheckpoint ? await restoredGitLfsPaths(local.rootPath, source.commit, sourceCheckpoint.lfs) : undefined,
         }, RuntimeAttachmentReadyResultSchema, signal);
         journal.installAttachment({ ...local, attachment: ready.attachment });
+        if (attachment.role === 'replica') {
+          const readyLocal = { ...local, attachment: ready.attachment };
+          await follow(readyLocal);
+          await executor.withCheckout(readyLocal, () => reconcile(readyLocal, assignment.checkpoint));
+          subscribe(readyLocal);
+        }
       }
     })().finally(() => { syncing = null; });
     return syncing;
@@ -344,10 +506,6 @@ export async function createMachineExecutor(options: {
   void sync().catch(error => console.error('[runtime-attachments]', error instanceof Error ? error.message : String(error)));
   const timer = setInterval(() => { void sync().catch(error => console.error('[runtime-attachments]', error instanceof Error ? error.message : String(error))); }, 10_000);
   return { executor, journal, sync,
-    checkpointWorkspace: async workspaceId => {
-      const local = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.role === 'primary' && item.attachment.state === 'ready');
-      if (!local || !await capture(local)) throw new Error('Checkpoint requires the current ready primary');
-    },
     drainWorkspace: async workspaceId => {
       await syncing;
       for (const local of journal.attachments()) {
@@ -363,8 +521,9 @@ export async function createMachineExecutor(options: {
     stopping.abort();
     clearInterval(timer);
     clearInterval(heartbeatTimer);
+    for (const entry of watchers.values()) entry.close();
     try {
-      await Promise.allSettled([syncing, heartbeating, ...[...captures.values()].map(capture => capture.settle())]);
+      await Promise.allSettled([syncing, heartbeating, ...[...subscriptions.values()].map(subscription => subscription.settled), ...[...captures.values()].map(capture => capture.settle())]);
       await browser.close();
     } finally {
       await credentialHelper.close();

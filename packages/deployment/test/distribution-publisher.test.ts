@@ -15,7 +15,7 @@ async function fixture(clientBytes = new Uint8Array([1, 2, 3])) {
   const files = [
     'host.js', 'rpc-probe.js', 'bin/bun',
     'machine/machine.js', 'machine/machine-worker.js', 'machine/host-runtime.js', 'machine/machine-update.js', 'machine/machine-bootstrap.js', 'machine/machine-native.json',
-    'machine/native/git-lfs.json', 'machine/native/bin/git-lfs',
+    'machine/native/git-lfs.json', 'machine/native/bin/git-lfs', 'machine/native/ripgrep.json', 'machine/native/bin/rg',
     'machine.manifest.json',
   ];
   const fileBytes = Buffer.from('fixture');
@@ -27,7 +27,7 @@ async function fixture(clientBytes = new Uint8Array([1, 2, 3])) {
     runtime: {
       sha256: createHash('sha256').update(runtime).digest('hex'), size: runtime.byteLength,
       files: files.map(path => ({ path, sha256: createHash('sha256').update(fileBytes).digest('hex'), size: fileBytes.byteLength,
-        mode: ['bin/bun', 'machine/native/bin/git-lfs'].includes(path) ? 0o755 : 0o644 })),
+        mode: ['bin/bun', 'machine/native/bin/git-lfs', 'machine/native/bin/rg'].includes(path) ? 0o755 : 0o644 })),
     },
     provenance: { sha256: createHash('sha256').update(provenance).digest('hex'), size: provenance.byteLength },
   };

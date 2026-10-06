@@ -43,7 +43,7 @@ async function pair(relay: BrowserRelaySupervisor, who: PairingIdentity, code?: 
 // The transport fixture acknowledges authorization; cryptographic grant verification is exercised by the real-extension integration.
 function authorization(grant: RuntimeBrowserSignedGrant): RuntimeBrowserAuthorization {
   const body = grant.body;
-  return { body: { scope: { projectId: body.projectId, workspaceId: body.workspaceId, conversationId: body.conversationId, machineId: body.machineId, attachmentId: body.attachmentId, generation: body.generation, taskId: 'task', requestId: 'request', attemptId: crypto.randomUUID() }, issuedAt: new Date().toISOString(), expiresAt: body.expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: body.expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'open', source: 'relay', targetId: 'target-a' }, grant } }, signature: 'AA==', authority: grant.authority };
+  return { body: { scope: { projectId: body.projectId, workspaceId: body.workspaceId, conversationId: 'conversation', machineId: body.machineId, attachmentId: body.attachmentId, generation: body.generation, taskId: 'task', requestId: 'request', attemptId: crypto.randomUUID() }, issuedAt: new Date().toISOString(), expiresAt: body.expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: body.expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'open', source: 'relay', targetId: 'target-a' }, grant } }, signature: 'AA==', authority: grant.authority };
 }
 describe('BrowserRelaySupervisor security boundary', () => {
   it('forgets the durable pin, disconnects the old identity and pairs a reinstalled extension', async () => {
@@ -111,7 +111,7 @@ describe('BrowserRelaySupervisor security boundary', () => {
       else if (message.operation === 'prepare') client.send(JSON.stringify({ id: message.id, result: { title: 'Approved', url: 'https://example.com/' } }));
       else if (message.operation === 'command') { received.resolve(); client.close(); }
     });
-    const body = { projectId: 'p', workspaceId: 'w', conversationId: 'c', machineId: 'm', attachmentId: 'a', generation: 1, groupId: crypto.randomUUID(), groupName: 'Workspace', origins: ['example.com'], source: 'relay' as const, expiresAt: new Date(Date.now() + 60000).toISOString() };
+    const body = { projectId: 'p', workspaceId: 'w', machineId: 'm', attachmentId: 'a', generation: 1, groupId: crypto.randomUUID(), groupName: 'Workspace', origins: ['example.com'], source: 'relay' as const, expiresAt: new Date(Date.now() + 60000).toISOString() };
     const grant: RuntimeBrowserSignedGrant = { body, signature:'AA==', authority: {body:{accountId:'account',projectId:'p',workspaceId:'w',publicKey:'AA==',issuedAt:new Date().toISOString(),expiresAt:body.expiresAt},signature:'AA=='} };
     const signal = new AbortController().signal;
     const args = { action:'open' as const, source:'relay' as const, targetId:'target-a' };

@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { Result } from 'better-result';
 import { ArtifactsSnapshotError, initializeArtifactsRepository, validateSnapshotPath, writeArtifactsSnapshot, type WriteSnapshotInput } from './artifacts-snapshot.js';
+import { planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
+import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
 
 const commitSchema = z.string().regex(/^[0-9a-f]{40}$/u);
@@ -31,6 +33,23 @@ export class ArtifactsCodeStore {
     if (opened.isErr()) return opened;
     const repo = opened.value;
     try { return await writeArtifactsSnapshot(repo, input); }
+    finally { await disposeArtifactsRepository(repo); }
+  }
+
+  async mergeSnapshot(input: { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; base: RuntimeGitCheckpoint; machine: RuntimeGitCheckpoint; forcePublication?: boolean }) {
+    const opened = await Result.tryPromise({ try: () => this.binding.get(repositorySchema.parse(input.repository)), catch: error => new ArtifactsSnapshotError({ operation: 'mergeSnapshot', certainty: 'not-published', message: String(error) }) });
+    if (opened.isErr()) return opened;
+    const repo = opened.value;
+    try {
+      const plan = await Result.tryPromise({ try: () => planSnapshotMerge(repo, input.base, input.previous, input.machine), catch: error => new ArtifactsSnapshotError({ operation: 'mergeSnapshot', certainty: 'not-published', message: String(error) }) });
+      if (plan.isErr()) return plan;
+      return await writeArtifactsSnapshot(repo, { ...input, ...plan.value });
+    } finally { await disposeArtifactsRepository(repo); }
+  }
+
+  async listSnapshotPaths(repository: string, tree: string): Promise<string[]> {
+    const repo = await this.binding.get(repositorySchema.parse(repository));
+    try { return [...(await snapshotEntries(repo, tree)).keys()].sort(); }
     finally { await disposeArtifactsRepository(repo); }
   }
 

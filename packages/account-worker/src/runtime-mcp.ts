@@ -3,7 +3,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker-provider.js';
 import { z } from 'zod';
-import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
+import { RuntimeMcpDiscoverArgumentsSchema, RuntimeMcpInvokeArgumentsSchema, RuntimeJsonSchema } from '@gitspace/protocol-runtime';
 import type { UserMcpConnectionsDO } from './local-mcp.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
 import type { CredentialVaultDO } from './application.js';
@@ -11,7 +11,7 @@ import { ComposioPluginGateway } from './composio-plugins.js';
 import type { RuntimeIdentity } from './runtime-services.js';
 type RuntimeJson = z.infer<typeof RuntimeJsonSchema>;
 
-const request = z.object({ connectionId: z.string().min(1), name: z.string().min(1).optional(), arguments: z.record(z.string(), RuntimeJsonSchema).optional() }).strict();
+const request = z.union([RuntimeMcpInvokeArgumentsSchema, RuntimeMcpDiscoverArgumentsSchema.options[1]]);
 function redacted(value: unknown, secrets: string[]): RuntimeJson {
   const text = JSON.stringify(value, (_key, child: unknown) => {
     if (typeof child !== 'string') return child;
@@ -33,7 +33,8 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     return { connection, scope };
   }
   async function execute(raw: RuntimeJson, invoke: boolean, signal?: AbortSignal): Promise<RuntimeJson> {
-    const args = request.parse(raw);
+    const invocation = invoke ? RuntimeMcpInvokeArgumentsSchema.parse(raw) : null;
+    const args = invocation ?? RuntimeMcpDiscoverArgumentsSchema.options[1].parse(raw);
     const { connection, scope } = await admitted(args.connectionId);
     if (connection.transport.type === 'stdio') throw new Error('Stdio MCP requires an assigned machine effect');
     let headers: Record<string, string>;
@@ -62,7 +63,7 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     const client = new Client({ name: 'gitspace-cloud', version: '1.0.0' }, { capabilities: {}, jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
     const transport = type === 'http' ? new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } }) : new SSEClientTransport(new URL(url), { requestInit: { headers }, eventSourceInit: { fetch: (input, init) => fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }) } });
     const audit = async (outcome: 'started' | 'succeeded' | 'failed' | 'canceled') => {
-      await connections.appendAudit({ principalId: env.ACCOUNT_ID, projectId: identity.projectId, connectionId: connection.id, machineId: null, type: 'tool-invocation', toolName: args.name ?? null, outcome, message: null });
+      await connections.appendAudit({ principalId: env.ACCOUNT_ID, projectId: identity.projectId, connectionId: connection.id, machineId: null, type: 'tool-invocation', toolName: invocation?.name ?? null, outcome, message: null });
     };
     let observedRevision = connection.revision;
     const observe = async (status: 'ready' | 'failed', message: string | null) => {
@@ -84,12 +85,12 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
         cursor = page.nextCursor;
       } while (cursor);
       await observe('ready', null);
-      if (!invoke) return redacted(tools.map(tool => ({ ...tool, connectionId: connection.id, connectionLabel: connection.label })), secrets);
-      if (!args.name || !tools.some(tool => tool.name === args.name)) throw new Error('MCP tool is not exposed by the granted connection');
+      if (invocation === null) return redacted(tools.map(tool => ({ ...tool, connectionId: connection.id, connectionLabel: connection.label })), secrets);
+      if (!tools.some(tool => tool.name === invocation.name)) throw new Error('MCP tool is not exposed by the granted connection');
       const latest = await admitted(connection.id);
       if (JSON.stringify(latest.connection.transport) !== JSON.stringify(connection.transport)) throw new Error('MCP configuration changed before invocation');
       await audit('started');
-      const result = await client.callTool({ name: args.name, arguments: args.arguments ?? {} }, undefined, { timeout, signal });
+      const result = await client.callTool({ name: invocation.name, arguments: invocation.arguments ?? {} }, undefined, { timeout, signal });
       await audit(result.isError ? 'failed' : 'succeeded');
       return redacted(result, secrets);
     } catch (error) {
@@ -102,8 +103,8 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
   return {
     async isStdio(raw: RuntimeJson): Promise<boolean> { return (await admitted(request.parse(raw).connectionId)).connection.transport.type === 'stdio'; },
     async discover(args: RuntimeJson, signal?: AbortSignal): Promise<RuntimeJson> {
-      if (args && typeof args === 'object' && !Array.isArray(args) && 'connectionId' in args) return execute(args, false, signal);
-      z.object({}).strict().parse(args);
+      const parsed = RuntimeMcpDiscoverArgumentsSchema.parse(args);
+      if ('connectionId' in parsed) return execute(parsed, false, signal);
       const [all, grants, workspace] = await Promise.all([connections.list(env.ACCOUNT_ID), authority.listMcpGrants(), authority.listWorkspaces().then(workspaces => workspaces.find(workspace => workspace.id === identity.workspaceId))]);
       if (!workspace) throw new Error('MCP workspace is unavailable');
       return RuntimeJsonSchema.parse(all.filter(connection => connection.enabled && grants.some(grant => grant.connectionId === connection.id && grant.enabled && (workspace.kind === 'base' ? grant.projectSpaceEnabled : grant.workspacesEnabled))).map(connection => ({ connectionId: connection.id, label: connection.label, transport: connection.transport.type, machineId: connection.target.kind === 'machine' ? connection.target.machineId : null })));

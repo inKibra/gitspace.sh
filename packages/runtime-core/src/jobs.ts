@@ -1,7 +1,6 @@
 import { defineDoc, defineTask, GenerationTask, InboxDoc, LiveDoc, type ModelRef, type TaskId, type TaskRuntime, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { Context, JsonValue } from '@earendil-works/chord';
-import { RuntimeDispatchSelectionSchema, RuntimeJobAcceptanceSchema, RuntimeJobHandleSchema, RuntimeJobObservationSchema, type RuntimeJobAcceptance, type RuntimeJobObservation, type RuntimeExecutorReceipt } from '@gitspace/protocol-runtime';
-import { z } from 'zod';
+import { RuntimeJobRunArgumentsSchema, RuntimeJobControlArgumentsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, type RuntimeJobAcceptance, type RuntimeJobObservation, type RuntimeExecutorReceipt } from '@gitspace/protocol-runtime';
 import type { OperationalServices } from './tasks.js';
 import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
 
@@ -13,8 +12,6 @@ type JobRecord = { acceptance: RuntimeJobAcceptance; observation: RuntimeJobObse
 type JobInput = { key: string; spawningTask: TaskId };
 type JobState = { phase: 'execute'; poll: number };
 export const DurableJobsDoc = defineDoc<{ records: Record<string, JobRecord> }>({ kind: 'gitspace.durable-jobs', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ records: {} }) });
-const runSchema = RuntimeDispatchSelectionSchema.extend({ op: z.literal('run'), application: z.string().min(1), args: z.array(z.string()), cwd: z.string().optional(), deadlineAt: z.iso.datetime().optional() }).strict();
-const controlSchema = z.discriminatedUnion('op', [z.object({ op: z.literal('list') }).strict(), z.object({ op: z.enum(['status', 'wait', 'logs', 'cancel']), job: RuntimeJobHandleSchema }).strict()]);
 export function createJobTask(services: JobServices) {
   async function drive(key: string, runtime: TaskRuntime<JobInput, JobState, RuntimeJobObservation, {}>, context: Context, aborting: boolean) {
     for (;;) {
@@ -114,10 +111,16 @@ export function createJobTool(services: JobServices) {
   const task = createJobTask(services);
   return async (input: JsonValue, api: ToolExecutionApi, context: Context): Promise<JsonValue> => {
     if (input && typeof input === 'object' && !Array.isArray(input) && input.op === 'run') {
-      const args = runSchema.parse(input);
+      const args = RuntimeJobRunArgumentsSchema.parse(input);
       const fingerprint = JSON.stringify(args);
-      const scope = services.jobScope();
       const admissionId = String(api.taskId);
+      const prior = (await api.snapshot(DurableJobsDoc, api.conversationId, context))?.records[admissionId];
+      if (prior) {
+        if (prior.fingerprint !== fingerprint) throw new Error('Job admission request changed');
+        await services.wakeAt(Date.now());
+        return prior.acceptance;
+      }
+      const scope = await services.jobScope(args);
       const acceptance = await api.commit(async tx => {
         const doc = await tx.doc(DurableJobsDoc, api.conversationId);
         const existing = doc.records[admissionId];
@@ -130,7 +133,7 @@ export function createJobTool(services: JobServices) {
       await services.wakeAt(Date.now());
       return acceptance;
     }
-    const args = controlSchema.parse(input);
+    const args = RuntimeJobControlArgumentsSchema.parse(input);
     const document = await api.snapshot(DurableJobsDoc, api.conversationId, context);
     const records = Object.values(document?.records ?? {}).filter(record => record.acceptance.job.conversationId === String(api.conversationId));
     if (args.op === 'list') return records.slice(-100).map(record => RuntimeJobObservationSchema.parse(record.observation));

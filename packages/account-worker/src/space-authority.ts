@@ -7,7 +7,7 @@ import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeSubmitInputSchem
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeGitCheckpointSchema, RuntimePlacementInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeGitCheckpointSchema, RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimePrimaryAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema, RuntimeModelInputSchema, RuntimeMcpInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
@@ -135,11 +135,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return { algorithm, publicKey };
   }
 
-  async runtimePlacement(raw: unknown) {
-    const input = RuntimePlacementInputSchema.parse(raw);
+  async runtimeExecutionMachine(raw: unknown) {
+    const input = RuntimeExecutionMachineInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
-    await runtime.assignPlacement(input.conversationId, input.placement.attachmentId, input.placement.generation);
-    runtime.publish();
+    await runtime.setExecutionMachine(input.machineId);
     return { accepted: true as const, cursor: (await runtime.snapshot()).cursor };
   }
 
@@ -213,12 +212,19 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const identity = RuntimeIdentitySchema.parse(raw);
     const input = RuntimeAssignmentsInputSchema.parse(raw);
     if (await this.ctx.storage.get('runtime.identity') === undefined) return { assignments: [] };
+    if (input.afterSnapshot !== undefined) {
+      const runtime = await this.getRuntime(identity);
+      if (!runtime.attachments.list().some(item => item.machineId === input.machineId && (item.role === 'primary' || item.role === 'replica') && ['attaching', 'ready', 'draining'].includes(item.state))) throw new Error('Snapshot wait requires an active replica');
+      await runtime.waitForSnapshot(input.afterSnapshot);
+    }
     return (await this.attachmentController(identity)).assignments(input);
   }
 
   async runtimeAttachmentReady(raw: unknown) {
     const input = RuntimeAttachmentReadyInputSchema.parse(raw);
-    return (await this.attachmentController(input)).ready(input);
+    const result = await (await this.attachmentController(input)).ready(input);
+    await (await this.getRuntime(input)).replicaReady(input.attachmentId, input.generation);
+    return result;
   }
 
   async runtimeHeartbeat(raw: unknown) {
@@ -236,6 +242,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeDetach(raw: unknown) {
     const input = RuntimeDetachInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
+    if (input.state === 'detached' && runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents replica detach');
     if (input.state === 'detached') await runtime.attachments.reconcileDetach(input);
     const attachment = runtime.attachments.detach(input);
     runtime.publish();

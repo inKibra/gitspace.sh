@@ -2,7 +2,7 @@ import { deviceCanAdminister, type DeviceCapability, type GitSpaceRpcContext } f
 import {
   runtimeSnapshotContract, runtimeSubmitContract, runtimeCancelContract,
   runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract,
-  runtimePlacementContract, runtimeQaContract, runtimeAttachmentRequestContract, runtimePrimaryAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
+  runtimeExecutionMachineContract, runtimeQaContract, runtimeAttachmentRequestContract, runtimePrimaryAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
   runtimeBrowserTrustContract,
 } from '@gitspace/protocol/rpc-contract';
 import { RuntimeIdentitySchema, RuntimeWatchEventSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
@@ -105,11 +105,11 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession(input, { canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin') })).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control cloud session', message: message(error) })); }
   });
-  const placement = server.implement(runtimePlacementContract).handler(async ({ input, errors }) => {
+  const executionMachine = server.implement(runtimeExecutionMachineContract).handler(async ({ input, errors }) => {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
-      return ok(await authority.runtimePlacement(input));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'place cloud conversation', message: message(error) })); }
+      return ok(await authority.runtimeExecutionMachine(input));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'set workspace execution machine', message: message(error) })); }
   });
   const qa = server.implement(runtimeQaContract).handler(async ({ input, errors }) => {
     try {
@@ -147,5 +147,5 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'watch cloud runtime', message: message(error) }));
     }
   });
-  return { snapshot, submit, cancel, answer, browserTrust, session, placement, qa, attachment: { request: requestAttachment, primary: { request: requestPrimaryAttachment }, detach: detachAttachment }, watch };
+  return { snapshot, submit, cancel, answer, browserTrust, session, executionMachine, qa, attachment: { request: requestAttachment, primary: { request: requestPrimaryAttachment }, detach: detachAttachment }, watch };
 }

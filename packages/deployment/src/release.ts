@@ -137,7 +137,7 @@ export async function buildDistribution(options: { release: string; output: stri
   requireBun();
   const platform = currentDistributionPlatform();
   if (options.platform && options.platform !== platform) {
-    throw new Error(`Cannot build ${options.platform} on ${platform}: Git LFS and Bun must match the native runner. Use macos-15 (darwin-arm64), macos-15-intel (darwin-x64), ubuntu-24.04 (linux-x64), or ubuntu-24.04-arm (linux-arm64).`);
+    throw new Error(`Cannot build ${options.platform} on ${platform}: Git LFS, ripgrep and Bun must match the native runner. Use macos-15 (darwin-arm64), macos-15-intel (darwin-x64), ubuntu-24.04 (linux-x64), or ubuntu-24.04-arm (linux-arm64).`);
   }
   if (platform.startsWith('linux-')) currentGlibcVersion();
   const release = distributionReleaseSchema.parse(options.release);
@@ -173,6 +173,7 @@ export async function buildDistribution(options: { release: string; output: stri
       sourceLock: await digest(join(ROOT, 'bun.lock')),
       native: JSON.parse(await readFile(join(runtime, 'machine/machine-native.json'), 'utf8')) as unknown,
       gitLfs: JSON.parse(await readFile(join(runtime, 'machine/native/git-lfs.json'), 'utf8')) as unknown,
+      ripgrep: JSON.parse(await readFile(join(runtime, 'machine/native/ripgrep.json'), 'utf8')) as unknown,
       machine: { treeHash: initial.machine.hash, manifestHash: initial.machine.manifestHash },
     };
     await writeFile(join(artifacts, 'provenance.json'), JSON.stringify(provenance));

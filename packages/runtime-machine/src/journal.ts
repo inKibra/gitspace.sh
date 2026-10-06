@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { canonicalJson, RuntimeDispatchSelectionSchema, RuntimeReceiptTransportSchema, RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeReceiptTransport } from '@gitspace/protocol-runtime';
+import { canonicalJson, RuntimeJobRunArgumentsSchema, RuntimeReceiptTransportSchema, RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeReceiptTransport } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 
 const LocalAttachmentSchema = z.object({ attachment: RuntimeAttachmentSchema, rootPath: z.string().min(1), executionSecret: z.string().min(1), prerequisitesComplete: z.boolean(), checkoutPrepared: z.boolean().optional() });
@@ -73,7 +73,7 @@ export class ExecutorJournal {
       || attempt.dispatch.machineId !== dispatch.machineId || attempt.dispatch.attachmentId !== dispatch.attachmentId
       || attempt.dispatch.generation !== dispatch.generation || attempt.dispatch.conversationId !== dispatch.conversationId
       || attempt.dispatch.taskId !== dispatch.taskId) throw new Error('Job does not belong to this admitted execution');
-    const job = RuntimeDispatchSelectionSchema.extend({ op: z.literal('run'), application: z.string().min(1), args: z.array(z.string()), cwd: z.string().optional(), deadlineAt: z.iso.datetime().optional() }).strict().parse(attempt.dispatch.args);
+    const job = RuntimeJobRunArgumentsSchema.parse(attempt.dispatch.args);
     return { ...control.data, dispatch: attempt.dispatch, job };
   }
   fence(dispatch: RuntimeToolDispatch): boolean {

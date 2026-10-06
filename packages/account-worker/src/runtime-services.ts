@@ -1,17 +1,18 @@
 import { z } from 'zod';
 import { canonicalJson, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeTranscriptSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
-import { LifecycleMutationSchema, LifecycleRunRequestSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
+import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, CloudPublicationUncertain, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
-import { routeRepositoryFile, selectConversationAttachment } from './runtime-file-routing.js';
+import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
 import { createCloudRuntimeMcp, invokeMcpNamespace } from './runtime-mcp.js';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { RuntimeHistoryIndex, type HistoryDocument } from '@gitspace/runtime-core/history';
 import type { RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
 import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
-import { createDispatchSelector, SourceCheckpointIncomplete } from './runtime-dispatch-selection.js';
+import { createDispatchSelector } from './runtime-dispatch-selection.js';
 import { invokeRuntimeSpaceTool, runtimeSpaceToolNames } from './runtime-space-tools.js';
 import { createRuntimeBrowserAuthority, type RuntimeBrowserAuthority } from './runtime-browser.js';
 
@@ -36,12 +37,11 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const completed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
 const interrupted = (input: Pick<Invocation, 'requestId' | 'attemptId'>, text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text }] });
 const failed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, error: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: message(error) }], error: { code: 'HOST_OPERATION_FAILED', message: message(error) } });
-const machineTools: Record<string, true | undefined> = { read: true, write: true, edit: true, apply_patch: true, bash: true, grep: true, find: true, codemode: true, ast_grep: true, ast_edit: true, ast_resolve: true, jobs: true, proc: true, lifecycle: true, create: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
+const machineTools: Record<string, true | undefined> = { bash: true, grep: true, codemode: true, ast_grep: true, ast_edit: true, ast_resolve: true, jobs: true, proc: true, lifecycle: true, create: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
 machineTools.browser = true;
-const qaSchema = z.object({ message: z.string().min(1).max(16384), tool: z.string().max(160).optional(), model: z.string().max(256).optional(), reference: z.string().max(2048).optional() });
 
 /** QA is written to the existing project event authority; nothing is sent externally. */
-export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: string, report: z.infer<typeof qaSchema>) {
+export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: string, report: z.infer<typeof RuntimeReportIssueArgumentsSchema>) {
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   const item = RuntimeQaItemSchema.parse({ id, title: report.message.split('\n')[0]!.slice(0, 160), description: report.message, historyRef: report.reference ?? `history://${identity.workspaceId}`, tool: report.tool ?? null, model: report.model ?? 'unattributed', runtimeVersion: 'pi-1.0', state: 'open', duplicateOf: null, createdAt: new Date().toISOString() });
   const event = projectEventSchema.parse(await (await authority.appendEvent({ eventId: `qa:${id}`, scope: 'workspace', entity: 'qa', entityId: id, revision: 1, operation: 'created', payload: { item, workspaceId: identity.workspaceId } })).json());
@@ -138,6 +138,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   const source = () => readInspectorContext(env, env.ACCOUNT_ID, identity.workspaceId, identity.projectId);
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
+    selectExecution: (args, candidates) => selections.replica(args, candidates),
     approvedOrigins: async () => approvedBrowserOrigins(await authority.refreshBrowserOrigins(identity.workspaceId)),
     groupName: async () => {
       const project = await authority.getProject();
@@ -203,37 +204,27 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     try {
       if (!dispatch) {
         const args = object.parse(input.args);
-        const explicit = (input.tool === 'jobs' || input.tool === 'proc') && (args.on !== undefined || args.at !== undefined);
-        const conversation = (await options.runtime().snapshot()).conversations.find(item => item.id === input.conversationId);
-        if (!conversation) throw new Error('Conversation is not owned by this workspace');
-        if (parent && explicit) throw new Error('Nested machine dispatch cannot change the parent placement');
-        let selected = explicit ? await selections.select(input, selection, controller.signal) : undefined;
-        while (!selected) {
-          controller.signal.throwIfAborted();
-          const placement = parent ?? conversation.placement;
-          selected = selectConversationAttachment({ attachments: options.runtime().attachments.list(), placement, parent: parent !== null });
-          if (selected) {
-            if (!parent && (!placement || selected.attachmentId !== placement.attachmentId || selected.generation !== placement.generation)) await options.runtime().assignPlacement(input.conversationId, selected.attachmentId, selected.generation);
-            break;
-          }
-          await selections.pause(controller.signal);
-        }
+        const explicit = args.on !== undefined || args.at !== undefined;
+        const runtime = options.runtime();
+        if (!(await runtime.snapshot()).conversations.some(item => item.id === input.conversationId)) throw new Error('Conversation is not owned by this workspace');
+        if (parent && explicit) throw new Error('Nested machine dispatch cannot change its admitted execution machine');
+        const selected = parent
+          ? runtime.attachments.list().find(item => item.attachmentId === parent.attachmentId && item.generation === parent.generation && item.machineId === parent.machineId && item.state === 'ready')
+          : await selections.select(input, selection, controller.signal);
+        if (!selected) throw new Error('No machine attached: the admitted execution replica is unavailable.');
+        const snapshot = selected.role === 'primary' || selected.role === 'replica' ? await runtime.cloudFiles.initializeSnapshot() : undefined;
+        if ((selected.role === 'primary' || selected.role === 'replica') && !snapshot) throw new Error('Cloud working copy is unavailable');
         const tool = input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool;
-        dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, taskId: input.taskId, machineId: selected.machineId, attachmentId: selected.attachmentId, generation: selected.generation, requestId: input.requestId, attemptId: input.attemptId, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}), tool, args: input.args, deadlineAt: deadline, replay: input.replay });
+        dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, taskId: input.taskId, machineId: selected.machineId, attachmentId: selected.attachmentId, generation: selected.generation, requestId: input.requestId, attemptId: input.attemptId, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}), ...(snapshot ? { snapshot } : {}), tool, args: input.args, deadlineAt: deadline, replay: input.replay });
         ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(dispatch));
       } else if (dispatch.requestId !== input.requestId || dispatch.conversationId !== input.conversationId || dispatch.taskId !== input.taskId || dispatch.replay !== input.replay || dispatch.parentAttemptId !== input.parentAttemptId || dispatch.tool !== (input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool) || canonicalJson(dispatch.args) !== canonicalJson(input.args)) {
         throw new Error('Attempt identity was reused for a different operation');
       }
       return settle(await options.runtime().attachments.execute(dispatch, controller.signal));
     } catch (error) {
-      if (error instanceof SourceCheckpointIncomplete && error.status === 'interrupted') return settle(interrupted(input, error.message));
       if (controller.signal.aborted) {
         const saved = savedDispatch(input.attemptId);
         if (saved) await controlAttempt(saved.attemptId, 'runtime_cancel').catch(() => null);
-        const checkpoint = selection.checkpointDispatch;
-        if (checkpoint && !selection.commit) {
-          await options.runtime().attachments.cancel(checkpoint, AbortSignal.timeout(30_000)).catch(() => null);
-        }
         if (saved) throw error;
         return settle(interrupted(input, 'Execution cancelled before dispatch.'));
       }
@@ -251,12 +242,12 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     return tool === 'runtime_cancel' ? options.runtime().attachments.cancel(original) : options.runtime().attachments.reconcile(original);
   }
   async function cancelLifecycle(dispatch: RuntimeToolDispatch) {
-    const request = LifecycleRunRequestSchema.parse(dispatch.args);
+    const request = RuntimeAgentLifecycleRunArgumentsSchema.parse(dispatch.args);
     const result = await authority.mutateLifecycleState(identity.workspaceId, { op: 'cancel', runId: request.runId }, { machineId: dispatch.machineId, actorId: `task:${dispatch.attemptId}`, kind: 'client', lifecycleControl: false });
     if (result.status === 'error') throw new Error(result.failure.message);
   }
   async function awaitLifecycle(dispatch: RuntimeToolDispatch, signal?: AbortSignal): Promise<RuntimeToolResult> {
-    const request = LifecycleRunRequestSchema.parse(dispatch.args);
+    const request = RuntimeAgentLifecycleRunArgumentsSchema.parse(dispatch.args);
     const controller = new AbortController();
     const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', abort, { once: true });
@@ -284,15 +275,15 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     } finally { signal?.removeEventListener('abort', abort); active.delete(dispatch.attemptId); }
   }
   async function environment(input: Invocation) {
-    const args = object.parse(input.args);
-    const method = methodSchema.parse(args).method;
+    const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);
+    const method = args.method;
     if (method === 'get') {
       const lifecycle = await authority.refreshBrowserOrigins(identity.workspaceId);
       lifecycle.values.global = await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).getEnvironmentValues();
       return completed(input, projectEnvironmentState(lifecycle));
     }
     if (method === 'runLog' || method === 'log') {
-      const request = z.object({ runId: idSchema, offset: z.number().int().nonnegative().optional() }).parse(args);
+      const request = args;
       const state = await authority.getLifecycleState(identity.workspaceId);
       const run = state.runs.find(entry => entry.id === request.runId);
       if (!run) throw new Error('Run does not belong to this workspace');
@@ -301,12 +292,11 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     }
     if (method === 'runPhase' || method === 'runChecks') {
       const { method: ignored, ...candidate } = args;
-      const request = LifecycleRunRequestSchema.parse({ ...candidate, phase: method === 'runChecks' ? 'checks' : candidate.phase });
-      if (request.phase === 'cloud/destroy' || request.interactive) throw new Error('This lifecycle operation requires human control');
+      const request = RuntimeAgentLifecycleRunArgumentsSchema.parse({ ...candidate, phase: args.method === 'runChecks' ? 'checks' : args.phase });
       return executeMachine({ ...input, tool: 'lifecycle', args: RuntimeJsonSchema.parse(request), replay: 'unsafe' }, request.deadlineAt);
     }
     if (method === 'setProfile' || method === 'putValue' || method === 'deleteValue' || method === 'cancelRun') {
-      const mutation = LifecycleMutationSchema.parse(method === 'setProfile' ? { op: 'profile', profile: args.profile } : method === 'cancelRun' ? { op: 'cancel', runId: args.runId } : { op: 'value', scope: args.scope, name: args.name, value: method === 'deleteValue' ? null : args.value });
+      const mutation = LifecycleMutationSchema.parse(args.method === 'setProfile' ? { op: 'profile', profile: args.profile } : args.method === 'cancelRun' ? { op: 'cancel', runId: args.runId } : { op: 'value', scope: args.scope, name: args.name, value: args.method === 'deleteValue' ? null : args.value });
       if (mutation.op === 'value' && mutation.scope === 'global') throw new Error('Agent values are restricted to project/workspace scope');
       // A cloud actor has no machine claim and cannot approve, abandon or recover runs.
       const result = await authority.mutateLifecycleState(identity.workspaceId, mutation, { machineId: `cloud:${identity.workspaceId}`, actorId: `conversation:${input.conversationId}`, kind: 'client', lifecycleControl: false });
@@ -326,7 +316,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         return completed(input, input.tool === 'mcp_discover' ? await mcp.discover(input.args, input.signal) : await mcp.invoke(input.args, input.signal));
       }
       if (input.tool === 'read') {
-        const args = object.parse(input.args);
+        const args = RuntimeReadArgumentsSchema.parse(input.args);
         if (typeof args.path === 'string' && /^(?:skill|rule):\/\//u.test(args.path)) {
           const uri = new URL(args.path);
           if (uri.protocol === 'skill:' && DEFAULT_SKILLS[uri.hostname] !== undefined) {
@@ -338,23 +328,27 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         }
       }
       if (input.tool === 'machines') {
-        const args = object.parse(input.args);
+        const args = RuntimeMachinesArgumentsSchema.parse(input.args);
         if (args.op === 'detach') {
-          const request = z.object({ attachmentId: idSchema, generation: z.number().int().nonnegative() }).parse(args);
+          const request = args;
           const attachment = options.runtime().attachments.list().find(item => item.attachmentId === request.attachmentId && item.generation === request.generation);
           if (!attachment) throw new Error('Attachment authority does not match cleanup request');
           return completed(input, options.runtime().attachments.detach({ ...attachment, state: 'draining' }));
+        }
+        if (args.op === 'setDefault') {
+          await options.runtime().setExecutionMachine(args.machineId);
+          return completed(input, { defaultMachineId: options.runtime().defaultExecutionMachine() });
         }
         return completed(input, options.runtime().attachments.list());
       }
       if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind') return options.runtime().invokeConversationTool(input);
       if (input.tool === 'environment') return environment(input);
       if (input.tool === 'generate_image') return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: await options.generateImage(input) };
-      if (input.tool === 'report_issue') return completed(input, await appendRuntimeQa(env, identity, input.attemptId, qaSchema.parse(input.args)));
+      if (input.tool === 'report_issue') return completed(input, await appendRuntimeQa(env, identity, input.attemptId, RuntimeReportIssueArgumentsSchema.parse(input.args)));
       if (runtimeSpaceToolNames.includes(input.tool)) return completed(input, await invokeRuntimeSpaceTool(env, identity, input));
       if (input.tool === 'space_workspace') {
-        const args = object.parse(input.args);
-        switch (methodSchema.parse(args).method) {
+        const args = RuntimeWorkspaceArgumentsSchema.parse(input.args);
+        switch (args.method) {
           case 'get': case 'current': return completed(input, identity.workspaceId === baseWorkspaceId ? await authority.getProject() : (await source()).workspace);
           case 'list': return completed(input, await authority.listWorkspaces());
           case 'operations': return completed(input, await authority.listOperations());
@@ -363,15 +357,15 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if (input.tool === 'space_phase') return executeMachine({ ...input, tool: 'workspace_phase', replay: 'unsafe' });
       if (input.tool === 'space_artifacts') {
-        const args = object.parse(input.args);
+        const args = RuntimeSpaceArtifactsArgumentsSchema.parse(input.args);
         const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source());
-        switch (methodSchema.parse(args).method) {
+        switch (args.method) {
           case 'list': return completed(input, await artifacts.list());
           case 'listScopes': return completed(input, await authority.listArtifactScopes());
           case 'listPromotions': return completed(input, await authority.listArtifactPromotions());
-          case 'read': return completed(input, await artifacts.read(idSchema.parse(args.url)));
+          case 'read': return completed(input, await artifacts.read(args.url));
           case 'readCode': {
-            const request = z.object({ path: idSchema, commit: z.string().regex(/^[a-f0-9]{40,64}$/u) }).parse(args);
+            const request = args;
             const blob = await new ArtifactsCodeStore(env.ARTIFACTS).readFile(artifactsWorkspaceRepository(identity.workspaceId), request.commit, request.path);
             if (!blob) throw new Error('File is absent at the requested commit');
             return completed(input, { ...request, content: await blob.text() });
@@ -385,11 +379,11 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (input.tool === 'history_search' || input.tool === 'history_read') {
         const args = object.parse(input.args);
         if (input.tool === 'history_read') {
-          const request = z.object({ conversationId: idSchema, offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(200).default(50) }).parse(args);
+          const request = RuntimeHistoryReadArgumentsSchema.parse(args);
           const events = await options.runtime().transcript(request.conversationId);
           return completed(input, events.slice(request.offset, request.offset + request.limit));
         }
-        const request = z.object({ query: z.string().min(1), scope: z.enum(['workspace', 'project']).default('workspace') }).parse(args);
+        const request = RuntimeHistorySearchArgumentsSchema.parse(args);
         const workspaceIds = request.scope === 'workspace' ? [identity.workspaceId]
           : [...new Set([identity.projectId, ...(await authority.listWorkspaces()).map(workspace => workspace.id)])];
         for (const workspaceId of workspaceIds) {
@@ -405,7 +399,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         return completed(input, await history.search(request.query, workspaceIds, (state, questions) => options.judge(input.conversationId, state, questions)));
       }
       if (input.tool === 'web_search') {
-        const query = z.object({ query: z.string().min(1).max(2048) }).parse(input.args).query;
+        const query = RuntimeWebSearchArgumentsSchema.parse(input.args).query;
         const url = new URL('https://www.bing.com/search');
         url.searchParams.set('q', query); url.searchParams.set('format', 'rss');
         const response = await fetch(url, { signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) });
@@ -416,19 +410,15 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (!xml.includes('<rss')) throw new Error('Search service did not return a result feed');
         return completed(input, { query, results });
       }
-      if (input.tool === 'read' || input.tool === 'edit' || input.tool === 'write') {
+      if (input.tool === 'read' || input.tool === 'edit' || input.tool === 'write' || input.tool === 'apply_patch' || input.tool === 'find') {
         const runtime = options.runtime();
-        const args = object.parse(input.args);
-        const repositoryPath = typeof args.path === 'string' && !args.path.includes('://');
-        const conversation = (await runtime.snapshot()).conversations.find(item => item.id === input.conversationId);
-        if (!conversation) throw new Error('Conversation is not owned by this workspace');
-        if (routeRepositoryFile({ attachments: runtime.attachments.list(), placement: conversation.placement, parent: !!input.parentAttemptId, repositoryPath, cloudAttempt: runtime.cloudFiles.hasAttempt(input.attemptId), machineAttempt: savedDispatch(input.attemptId) !== null }) === 'cloud') {
-          try { return await runtime.cloudFiles.execute({ ...input, tool: input.tool }, input.signal); }
-          catch (error) {
-            if (!CloudPublicationUncertain.is(error)) throw error;
-            await options.schedule(Date.now() + 1_000);
-            return interrupted(input, `Snapshot publication is awaiting durable recovery. Do not repeat the mutation as a new attempt. ${error.message}`);
-          }
+        const conversation = await runtime.browserConversation(input.conversationId);
+        if (!conversation.root && input.tool !== 'read' && input.tool !== 'find') throw new Error('Only the main workspace conversation can mutate the cloud working copy');
+        try { return await runtime.cloudFiles.execute({ ...input, tool: input.tool }, input.signal); }
+        catch (error) {
+          if (!CloudPublicationUncertain.is(error)) throw error;
+          await options.schedule(Date.now() + 1_000);
+          return interrupted(input, `Snapshot publication is awaiting durable recovery. Do not repeat the mutation as a new attempt. ${error.message}`);
         }
       }
       if (machineTools[input.tool]) return executeMachine(input);
@@ -444,10 +434,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         return completed(input, receipt);
       }
       const tool = { CreateWorkspace: 'create', Checkpoint: 'checkpoint_code', LifecycleRun: 'lifecycle', Job: 'jobs', Service: 'service', Merge: 'merge' }[input.kind];
-      if (input.kind === 'LifecycleRun') {
-        const request = LifecycleRunRequestSchema.parse(input.args);
-        if (request.interactive || request.phase === 'cloud/destroy') throw new Error('Lifecycle operation requires human control');
-      }
+      if (input.kind === 'LifecycleRun') RuntimeAgentLifecycleRunArgumentsSchema.parse(input.args);
       const args = input.kind === 'CreateWorkspace' ? { ...object.parse(input.args), method: 'create' }
         : input.kind === 'Job' ? { ...object.parse(input.args), op: 'run' } : input.args;
       const result = await executeMachine({ ...input, args, tool }, input.deadlineAt);
@@ -500,7 +487,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     } },
     operations: {
       execute,
-      jobScope: () => identity,
+      async jobScope(args) { await selections.replica(args); return identity; },
       async controlJob(input) {
         const dispatch = savedDispatch(input.attemptId);
         if (!dispatch || dispatch.tool !== 'jobs') throw new Error('Job has no admitted executor');

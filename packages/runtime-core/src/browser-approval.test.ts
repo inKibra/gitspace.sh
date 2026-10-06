@@ -16,7 +16,7 @@ for (const approvalMode of ['write', 'always-ask'] as const) test(`registered br
   const services: ToolServices = {
     async prepareBrowser(input) {
       preparations++; if (rejected) afterRejection.push('prepare');
-      return RuntimeBrowserApprovalCardSchema.parse({ id: 'preparation', projectId: 'project', workspaceId: 'workspace', conversationId: input.conversationId, machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: ['example.com'], source: 'relay', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'open', requiresApproval: true });
+      return RuntimeBrowserApprovalCardSchema.parse({ id: 'preparation', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: ['example.com'], source: 'relay', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'open', requiresApproval: true });
     },
     async invoke() { invocations++; if (rejected) afterRejection.push('invoke'); throw new Error('Browser effect must never run after rejection'); },
     question: unused, instructions: async () => '', authorizeCronTool: unused,
@@ -26,7 +26,7 @@ for (const approvalMode of ['write', 'always-ask'] as const) test(`registered br
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registered-browser-proof', tools }));
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
     generations++;
-    const reply: AssistantMessage = { role: 'assistant', content: generations === 1 ? [{ type: 'toolCall', id: 'browser-call', name: 'browser', arguments: { args: { action: 'open', source: 'relay', url: 'https://example.com/' } } }] : [{ type: 'text', text: 'Rejected; no browser operation performed.' }], api: model.api, provider: model.provider, model: model.id, stopReason: generations === 1 ? 'toolUse' : 'stop', timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    const reply: AssistantMessage = { role: 'assistant', content: generations === 1 ? [{ type: 'toolCall', id: 'browser-call', name: 'browser', arguments: { action: 'open', source: 'relay', url: 'https://example.com/' } }] : [{ type: 'text', text: 'Rejected; no browser operation performed.' }], api: model.api, provider: model.provider, model: model.id, stopReason: generations === 1 ? 'toolUse' : 'stop', timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
   } };
   const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
@@ -68,7 +68,7 @@ for (const { name, args, approvalMode } of automaticCases) test(`${name} does no
       const parsed = RuntimeBrowserArgumentsSchema.parse(input.args);
       const card = RuntimeBrowserApprovalCardSchema.parse({
         id: `preparation:${input.attemptId}`, projectId: 'project', workspaceId: 'workspace',
-        conversationId: input.conversationId, machineId: 'machine', attachmentId: 'attachment', generation: 1,
+        machineId: 'machine', attachmentId: 'attachment', generation: 1,
         groupId, groupName: 'Workspace', origins: parsed.source === 'relay' ? ['example.com'] : [], source: parsed.source,
         expiresAt: new Date(Date.now() + 60_000).toISOString(), action: parsed.action, requiresApproval: parsed.source === 'relay' && parsed.action === 'open',
       });
@@ -87,7 +87,7 @@ for (const { name, args, approvalMode } of automaticCases) test(`${name} does no
   const registry = createRegistry(); registry.install(defineExtension({ name: 'automatic-browser-proof', tools }));
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
     generations++;
-    const reply: AssistantMessage = { role: 'assistant', content: generations === 1 ? [{ type: 'toolCall', id: 'browser-call', name: 'browser', arguments: { args } }] : [{ type: 'text', text: 'Completed.' }], api: model.api, provider: model.provider, model: model.id, stopReason: generations === 1 ? 'toolUse' : 'stop', timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    const reply: AssistantMessage = { role: 'assistant', content: generations === 1 ? [{ type: 'toolCall', id: 'browser-call', name: 'browser', arguments: args }] : [{ type: 'text', text: 'Completed.' }], api: model.api, provider: model.provider, model: model.id, stopReason: generations === 1 ? 'toolUse' : 'stop', timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
   } };
   const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);

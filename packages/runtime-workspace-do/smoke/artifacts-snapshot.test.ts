@@ -6,6 +6,10 @@ import git from 'isomorphic-git';
 import fs from 'node:fs';
 import { writeArtifactsSnapshot, type ArtifactsFetch, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
 import { ArtifactsCodeStore } from '../src/artifacts.js';
+import { planSnapshotMerge } from '../src/artifacts-merge.js';
+import { RuntimeAttachmentSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
+import { ExecutorJournal } from '../../runtime-machine/src/journal.js';
+import { MachineExecutor } from '../../runtime-machine/src/executor.js';
 
 const text = new TextEncoder();
 const author = { name: 'Fixture', email: 'fixture@example.invalid', timestamp: 1, timezoneOffset: 0 };
@@ -320,5 +324,174 @@ test('binding fake resolves omitted refs through actual HEAD without accepting f
     for (const ref of ['HEAD', 'main', 'refs/heads/trunk', 'heads/trunk', f.previous.checkpointRef]) expect(await repo.log({ ref })).toEqual([]);
     expect(await code.resolveRef('fixture', 'HEAD')).toBe(f.previous.headCommit);
     expect(await code.initialCheckpoint('fixture', 'missing-workspace', 'missing')).toBeNull();
+  } finally { await f.close(); }
+});
+
+test('machine deltas merge onto cloud files and index with clean text merges, explicit conflicts and deterministic retry', async () => {
+  const f = await fixture();
+  try {
+    const reader = { ...f.repo, readBlob: async (oid: string) => new Blob([Uint8Array.from((await git.readBlob({ fs, dir: f.dir, oid })).blob)]) };
+    const snapshot = async (files: Record<string, string>, staged: Record<string, string> = files): Promise<RuntimeGitCheckpoint> => {
+      const tree = async (entries: Record<string, string>) => git.writeTree({ fs, dir: f.dir, tree: await Promise.all(Object.entries(entries).map(async ([path, value]) => ({ path, mode: '100644', type: 'blob' as const, oid: await git.writeBlob({ fs, dir: f.dir, blob: text.encode(value) }) }))) });
+      const worktreeTree = await tree(files), indexTree = await tree(staged);
+      const commit = async (tree: string, message: string) => git.writeCommit({ fs, dir: f.dir, commit: { tree, parent: [f.previous.worktreeCommit], author, committer: author, message } });
+      const indexCommit = await commit(indexTree, 'index\n'), worktreeCommit = await commit(worktreeTree, 'worktree\n');
+      return { ...f.previous, worktreeTree, indexTree, indexCommit, worktreeCommit, trackedWorktreeCommit: worktreeCommit };
+    };
+    const baseFiles = { shared: 'one\ntwo\nthree\n', cloud: 'old cloud\n', machine: 'old machine\n' };
+    const base = await snapshot(baseFiles);
+    const cloud = await snapshot({ ...baseFiles, shared: 'ONE\ntwo\nthree\n', cloud: 'cloud edit\n' }, { ...baseFiles, cloud: 'cloud staged\n' });
+    const machine = await snapshot({ ...baseFiles, shared: 'one\ntwo\nTHREE\n', machine: 'machine edit\n' }, { ...baseFiles, machine: 'machine staged\n' });
+    await git.writeRef({ fs, dir: f.dir, ref: cloud.checkpointRef, value: cloud.worktreeCommit, force: true });
+    const plan = await planSnapshotMerge(reader, base, cloud, machine);
+    const input = { repository: 'fixture', workspaceId: 'workspace', previous: cloud, ...plan };
+    const merged = await writeArtifactsSnapshot(f.repo, input, f.request);
+    if (merged.isErr()) throw merged.error;
+    const read = async (commit: string, path: string) => new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: commit, filepath: path })).blob);
+    expect(await read(merged.value.worktreeCommit, 'shared')).toBe('ONE\ntwo\nTHREE\n');
+    expect(await read(merged.value.worktreeCommit, 'cloud')).toBe('cloud edit\n');
+    expect(await read(merged.value.worktreeCommit, 'machine')).toBe('machine edit\n');
+    expect(await read(merged.value.indexCommit, 'cloud')).toBe('cloud staged\n');
+    expect(await read(merged.value.indexCommit, 'machine')).toBe('machine staged\n');
+    expect(merged.value.headCommit).toBe(base.headCommit);
+    expect(merged.value.conflicts).toEqual([]);
+    const retry = await writeArtifactsSnapshot(f.repo, input, f.request);
+    if (retry.isErr()) throw retry.error;
+    expect(retry.value).toEqual(merged.value);
+    const conflictMachine = await snapshot({ ...baseFiles, shared: 'DIFFERENT\ntwo\nthree\n' });
+    const conflictPlan = await planSnapshotMerge(reader, base, merged.value, conflictMachine);
+    const conflict = await writeArtifactsSnapshot(f.repo, { ...input, previous: merged.value, ...conflictPlan }, f.request);
+    if (conflict.isErr()) throw conflict.error;
+    expect(conflict.value.conflicts).toContain('shared');
+    const conflictText = await read(conflict.value.worktreeCommit, 'shared');
+    expect(conflictText).toContain('<<<<<<< cloud\nONE');
+    expect(conflictText).toContain('=======\nDIFFERENT');
+    const noopPlan = await planSnapshotMerge(reader, conflict.value, conflict.value, conflict.value);
+    const noop = await writeArtifactsSnapshot(f.repo, { ...input, previous: conflict.value, ...noopPlan }, f.request);
+    if (noop.isErr()) throw noop.error;
+    expect(noop.value).toEqual(conflict.value);
+    const pointer = (oid: string) => `version https://git-lfs.github.com/spec/v1\noid sha256:${oid.repeat(64)}\nsize 10\n`;
+    const lfsBase = await snapshot({ asset: pointer('a') }), lfsCloud = await snapshot({ asset: pointer('b') }), lfsMachine = await snapshot({ asset: pointer('c') });
+    const lfsPlan = await planSnapshotMerge(reader, lfsBase, lfsCloud, lfsMachine);
+    expect(lfsPlan.conflicts).toContain('asset');
+    expect(lfsPlan.mutations.some(mutation => mutation.path === 'asset')).toBe(false);
+    const preserved = lfsPlan.mutations.find(mutation => mutation.path.startsWith('asset.gitspace-machine-'));
+    expect(preserved?.oid).toBeDefined();
+    if (!preserved?.oid) throw new Error('Incoming LFS pointer was not preserved');
+    expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: preserved.oid })).blob)).toBe(pointer('c'));
+  } finally { await f.close(); }
+});
+
+for (const resolution of ['replica', 'cloud'] as const) for (const replacement of ['text', 'delete', 'binary'] as const) test(`${resolution} ${replacement} clean publication clears resolved conflicts while retaining untouched markers`, async () => {
+  const f = await fixture();
+  const journal = new ExecutorJournal(join(f.dir, 'executor.sqlite'));
+  try {
+    const reader = { ...f.repo, readBlob: async (oid: string) => new Blob([Uint8Array.from((await git.readBlob({ fs, dir: f.dir, oid })).blob)]) };
+    const snapshot = async (files: Record<string, string>): Promise<RuntimeGitCheckpoint> => {
+      const tree = await git.writeTree({ fs, dir: f.dir, tree: await Promise.all(Object.entries(files).map(async ([path, value]) => ({ path, mode: '100644', type: 'blob' as const, oid: await git.writeBlob({ fs, dir: f.dir, blob: text.encode(value) }) }))) });
+      const commit = await git.writeCommit({ fs, dir: f.dir, commit: { tree, parent: [f.previous.worktreeCommit], author, committer: author, message: 'conflict fixture\n' } });
+      return { ...f.previous, worktreeTree: tree, worktreeCommit: commit, trackedWorktreeCommit: commit };
+    };
+    const base = await snapshot({ resolved: 'base\n', untouched: 'base\n' });
+    const cloud = await snapshot({ resolved: 'cloud\n', untouched: 'cloud\n' });
+    const machine = await snapshot({ resolved: 'machine\n', untouched: 'machine\n' });
+    await git.writeRef({ fs, dir: f.dir, ref: cloud.checkpointRef, value: cloud.worktreeCommit, force: true });
+    const conflicted = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: cloud, ...await planSnapshotMerge(reader, base, cloud, machine) }, f.request);
+    if (conflicted.isErr()) throw conflicted.error;
+    expect(conflicted.value.conflicts).toEqual(['resolved', 'untouched']);
+    let accepted = conflicted.value;
+    const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['checkpoint'], updatedAt: new Date().toISOString() });
+    journal.installAttachment({ attachment, rootPath: f.dir, executionSecret: Buffer.alloc(32, 7).toString('base64url'), prerequisitesComplete: true });
+    const executor = new MachineExecutor({ machineId: 'machine', journal, onMutationSettled: async () => accepted, runCommand: async () => { throw new Error('Checkpoint must not launch a command'); }, artifacts: () => ({ read: async () => [], write: async () => {} }), cloudModel: async () => null, cloudMcp: async () => { throw new Error('Live MCP forbidden'); } });
+    const agentResult = async (checkpoint: RuntimeGitCheckpoint) => {
+      accepted = checkpoint;
+      return executor.execute(RuntimeToolDispatchSchema.parse({ version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, requestId: checkpoint.worktreeCommit, attemptId: checkpoint.worktreeCommit, tool: 'checkpoint', args: {}, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' }));
+    };
+    const initialNotice = (await agentResult(conflicted.value)).content.slice(1);
+    expect(initialNotice).toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('resolved') })]);
+    expect(initialNotice).toEqual([expect.objectContaining({ text: expect.stringContaining('untouched') })]);
+    const read = async (checkpoint: RuntimeGitCheckpoint, path: string) => new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: checkpoint.worktreeCommit, filepath: path })).blob);
+    const markers = await read(conflicted.value, 'untouched');
+    expect(markers).toContain('<<<<<<< cloud\n');
+    const clean = replacement === 'binary' ? '\0resolved\u00ff' : 'resolved\n';
+    const publish = async (previous: RuntimeGitCheckpoint, path: string) => {
+      const files: Record<string, string> = { untouched: await read(previous, 'untouched') };
+      if (replacement !== 'delete' || path === 'resolved') files.resolved = await read(previous, 'resolved');
+      const entries = Object.fromEntries(Object.entries(files).filter(([name]) => replacement !== 'delete' || name !== path).map(([name, content]) => [name, name === path ? clean : content]));
+      const plan = resolution === 'replica'
+        ? await planSnapshotMerge(reader, previous, previous, await snapshot(entries))
+        : { mutations: [{ path, content: replacement === 'delete' ? null : text.encode(clean) }] };
+      const result = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous, ...plan }, f.request);
+      if (result.isErr()) throw result.error;
+      return result.value;
+    };
+    const partial = await publish(conflicted.value, 'resolved');
+    if (replacement === 'delete') await expect(read(partial, 'resolved')).rejects.toThrow();
+    else expect(await read(partial, 'resolved')).toBe(clean);
+    expect(await read(partial, 'untouched')).toBe(markers);
+    expect(partial.conflicts).toEqual(['untouched']);
+    expect(partial.headCommit).toBe(base.headCommit);
+    const partialNotice = (await agentResult(partial)).content.slice(1);
+    expect(partialNotice).toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('untouched') })]);
+    expect(partialNotice).toEqual([expect.objectContaining({ text: expect.not.stringContaining('resolved') })]);
+    const resolved = await publish(partial, 'untouched');
+    const safety = { ...resolved, conflicts: ['HEAD', 'resolved'] };
+    const untouched = await planSnapshotMerge(reader, safety, safety, safety);
+    expect(untouched.conflicts).toEqual(['HEAD', 'resolved']);
+    const explicit = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: safety, mutations: [{ path: 'resolved', content: text.encode('resolved\n') }] }, f.request);
+    if (explicit.isErr()) throw explicit.error;
+    expect(explicit.value.conflicts).toEqual(['HEAD']);
+    expect(explicit.value.headCommit).toBe(base.headCommit);
+    expect(resolved.conflicts).toEqual([]);
+    expect(resolved.headCommit).toBe(base.headCommit);
+    expect((await agentResult(resolved)).content).toEqual([{ type: 'text', text: JSON.stringify({ checkpoint: resolved }) }]);
+  } finally { journal.close(); await f.close(); }
+});
+
+for (const publication of ['cloud', 'replica'] as const) test(`${publication} publication introduces conflict flags for marker content and clears them only after resolution`, async () => {
+  const f = await fixture();
+  try {
+    const reader = { ...f.repo, readBlob: async (oid: string) => new Blob([Uint8Array.from((await git.readBlob({ fs, dir: f.dir, oid })).blob)]) };
+    const publish = async (previous: RuntimeGitCheckpoint, content: string) => {
+      const mutations = [{ path: 'script', content: text.encode(content) }];
+      const blob = await git.writeBlob({ fs, dir: f.dir, blob: text.encode(content) });
+      const entries = (await git.readTree({ fs, dir: f.dir, oid: previous.worktreeTree })).tree.map(entry => entry.path === 'script' ? { ...entry, oid: blob } : entry);
+      const tree = await git.writeTree({ fs, dir: f.dir, tree: entries });
+      const commit = await git.writeCommit({ fs, dir: f.dir, commit: { tree, parent: [previous.worktreeCommit], author, committer: author, message: 'replica edit\n' } });
+      const machine = { ...previous, worktreeTree: tree, worktreeCommit: commit, trackedWorktreeCommit: commit };
+      const plan = publication === 'replica' ? await planSnapshotMerge(reader, previous, previous, machine) : { mutations };
+      const result = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous, ...plan }, f.request);
+      if (result.isErr()) throw result.error;
+      expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: result.value.worktreeCommit, filepath: 'script' })).blob)).toBe(content);
+      return result.value;
+    };
+    const marked = await publish(f.previous, '\0binary prefix\n<<<<<<< cloud\nours\n||||||| base\nbefore\n=======\ntheirs\n>>>>>>> machine\n');
+    expect(marked.conflicts).toEqual(['script']);
+    const partial = await publish(marked, 'ours\n>>>>>>> machine\n');
+    expect(partial.conflicts).toEqual(['script']);
+    const clean = await publish(partial, 'resolved\n');
+    expect(clean.conflicts).toEqual([]);
+    expect(clean.headCommit).toBe(f.previous.headCommit);
+    expect(clean.indexCommit).toBe(f.previous.indexCommit);
+  } finally { await f.close(); }
+});
+
+test('first machine publication creates the canonical ref even when all uploaded trees are unchanged', async () => {
+  const f = await fixture();
+  try {
+    await git.deleteRef({ fs, dir: f.dir, ref: f.previous.checkpointRef });
+    const machine = { ...f.previous, checkpointRef: 'refs/gitspace/machines/replica/checkpoints' };
+    await git.writeRef({ fs, dir: f.dir, ref: machine.checkpointRef, value: machine.worktreeCommit });
+    const input = { repository: 'fixture', workspaceId: 'workspace', previous: machine, machine, mutations: [], forcePublication: true };
+    const accepted = await writeArtifactsSnapshot(f.repo, input, f.request);
+    if (accepted.isErr()) throw accepted.error;
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: f.previous.checkpointRef })).toBe(accepted.value.worktreeCommit);
+    expect(accepted.value.checkpointRef).toBe(f.previous.checkpointRef);
+    expect(accepted.value.worktreeTree).toBe(machine.worktreeTree);
+    expect(accepted.value.headCommit).toBe(machine.headCommit);
+    expect(accepted.value.indexCommit).toBe(machine.indexCommit);
+    const replay = await writeArtifactsSnapshot(f.repo, input, f.request);
+    if (replay.isErr()) throw replay.error;
+    expect(replay.value).toEqual(accepted.value);
   } finally { await f.close(); }
 });

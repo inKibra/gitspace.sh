@@ -1,12 +1,14 @@
 import { z } from 'zod';
 import { BrowserOriginPatternSchema, browserOriginMatches } from '@gitspace/protocol-environment';
+import { RuntimeDispatchSelectionSchema } from './scheduling.js';
 
 const id = z.string().min(1).max(256);
 const source = z.enum(['relay', 'headless']).default('headless');
-const tab = { source, targetId: id };
+const selection = { source, on: RuntimeDispatchSelectionSchema.shape.on };
+const tab = { ...selection, targetId: id };
 export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
-  z.strictObject({ action: z.literal('open'), source, targetId: id.optional(), url: z.string().max(8192).optional() }),
-  z.strictObject({ action: z.literal('tabs'), source }),
+  z.strictObject({ action: z.literal('open'), ...selection, targetId: id.optional(), url: z.string().max(8192).optional() }),
+  z.strictObject({ action: z.literal('tabs'), ...selection }),
   z.strictObject({ action: z.literal('navigate'), ...tab, url: z.string().max(8192) }),
   z.strictObject({ action: z.literal('observe'), ...tab, screenshot: z.boolean().default(false), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(200).default(100) }),
   z.strictObject({ action: z.literal('act'), ...tab, ref: id, operation: z.enum(['click', 'fill', 'press']), value: z.string().max(16384).optional() }),
@@ -15,8 +17,8 @@ export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('close'), ...tab }),
 ]);
 export type RuntimeBrowserArguments = z.infer<typeof RuntimeBrowserArgumentsSchema>;
-const placement = { projectId: id, workspaceId: id, conversationId: id, machineId: id, attachmentId: id, generation: z.number().int().nonnegative() };
-export const RuntimeBrowserGrantSchema = z.strictObject({ ...placement, groupId: z.string().uuid(), groupName: id, source: z.enum(['relay', 'headless']), origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime() });
+const executionScope = { projectId: id, workspaceId: id, machineId: id, attachmentId: id, generation: z.number().int().nonnegative() };
+export const RuntimeBrowserGrantSchema = z.strictObject({ ...executionScope, groupId: z.string().uuid(), groupName: id, source: z.enum(['relay', 'headless']), origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime() });
 export type RuntimeBrowserGrant = z.infer<typeof RuntimeBrowserGrantSchema>;
 export const RuntimeBrowserPreparationSchema = RuntimeBrowserGrantSchema.extend({ id, action: z.enum(['open', 'tabs', 'navigate', 'observe', 'act', 'evaluate', 'screenshot', 'close']), requiresApproval: z.boolean() });
 export type RuntimeBrowserPreparation = z.infer<typeof RuntimeBrowserPreparationSchema>;
@@ -35,7 +37,7 @@ export type RuntimeBrowserAuthorityCertificate = z.infer<typeof RuntimeBrowserAu
 export const RuntimeBrowserSignedGrantSchema = z.strictObject({ body: RuntimeBrowserGrantSchema, signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/).max(128), authority: RuntimeBrowserAuthorityCertificateSchema });
 export type RuntimeBrowserSignedGrant = z.infer<typeof RuntimeBrowserSignedGrantSchema>;
 export const RuntimeBrowserAuthorizationBodySchema = z.strictObject({
-  scope: z.strictObject({ ...placement, taskId: id, requestId: id, attemptId: id }),
+  scope: z.strictObject({ ...executionScope, conversationId: id, taskId: id, requestId: id, attemptId: id }),
   issuedAt: z.iso.datetime(), expiresAt: z.iso.datetime(),
   dispatch: z.strictObject({ version: z.literal(1), tool: z.enum(['browser', 'browser_control']), deadlineAt: z.iso.datetime(), replay: z.enum(['safe', 'unsafe']), parentAttemptId: id.optional() }),
   command: z.discriminatedUnion('type', [
@@ -125,7 +127,7 @@ export async function verifyRuntimeBrowserAuthorization(authorization: unknown, 
   if (body.command.type === 'execute') {
     const grant = await verifyRuntimeBrowserGrant(body.command.grant, trustedKey, now);
     if (body.command.grant.authority.body.accountId !== authority.body.accountId) throw new Error('Browser grant account mismatch');
-    for (const key of ['projectId', 'workspaceId', 'conversationId', 'machineId', 'attachmentId', 'generation'] as const) if (grant[key] !== body.scope[key]) throw new Error('Browser grant scope mismatch');
+    for (const key of ['projectId', 'workspaceId', 'machineId', 'attachmentId', 'generation'] as const) if (grant[key] !== body.scope[key]) throw new Error('Browser grant scope mismatch');
     if (Date.parse(body.expiresAt) > Date.parse(grant.expiresAt)) throw new Error('Browser grant expired');
     const args = body.command.args;
     if (args.source !== grant.source) throw new Error('Browser grant source mismatch');

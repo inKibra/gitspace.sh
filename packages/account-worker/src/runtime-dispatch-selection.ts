@@ -1,16 +1,10 @@
 import { z } from 'zod';
-import { RuntimeDispatchSelectionSchema, RuntimeToolDispatchSchema, type RuntimeAttachment } from '@gitspace/protocol-runtime';
-import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeDispatchSelectionSchema, RuntimeMachineIdSchema, type RuntimeAttachment } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { RuntimeAttachmentController } from './runtime-attachments.js';
 
-const selectionState = z.object({ fingerprint: z.string(), deadline: z.string(), machineId: z.string().optional(), commit: z.string().optional(), checkpointRef: z.string().optional(), checkpointDispatch: RuntimeToolDispatchSchema.optional(), attachmentId: z.string().optional(), result: z.unknown().optional() });
+const selectionState = z.object({ fingerprint: z.string(), deadline: z.string(), machineId: z.string().optional(), commit: z.string().optional(), attachmentId: z.string().optional(), result: z.unknown().optional() });
 export type DispatchSelectionState = z.infer<typeof selectionState>;
-export class SourceCheckpointIncomplete extends Error {
-  constructor(readonly status: 'failed' | 'interrupted') {
-    super(`Source checkpoint ${status}; unresolved effects are not replayed`);
-  }
-}
 
 export function createDispatchSelector(options: { storage: DurableObjectStorage; env: Env; identity: { projectId: string; workspaceId: string }; runtime(): WorkspaceRuntime }) {
   const { storage, env, identity } = options;
@@ -31,6 +25,41 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
       if (!machine || machine.desiredState === 'removed' || !await env.CREDENTIALS.getByName(env.ACCOUNT_ID).hasRuntimeMachine(machineId)) throw new Error('Attachment target is not an enrolled account machine');
     },
   });
+  async function replica(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
+    const selection = RuntimeDispatchSelectionSchema.parse(args);
+    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => item.state === 'ready' && (item.role === 'primary' || item.role === 'replica'));
+    const selector = selection.on;
+    if (typeof selector === 'string') {
+      let machineId = candidates.find(item => item.machineId === selector)?.machineId;
+      if (!machineId) {
+        const fleet = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).listMachines();
+        const named = fleet.filter(item => item.id === selector || item.label === selector);
+        if (named.length > 1) throw new Error('Machine label is ambiguous; use its id');
+        machineId = named[0] ? RuntimeMachineIdSchema.parse(named[0].id) : undefined;
+      }
+      candidates = candidates.filter(item => item.machineId === machineId);
+    } else if (selector) {
+      if (selector.needs) candidates = candidates.filter(item => selector.needs!.every(need => item.capabilities.includes(need)));
+      if (selector.profile) {
+        const lifecycle = await authority.getLifecycleState(identity.workspaceId);
+        candidates = candidates.filter(item => ['machine/prepare', 'checks'].every(phase => lifecycle.runs.some(run => run.machineId === item.machineId && run.profile === selector.profile && run.phase === phase && run.status === 'succeeded')));
+      }
+      if (selector.prefer === 'idle') {
+        const idle = (item: RuntimeAttachment) => {
+          const observation = item.executionObservation;
+          const age = observation ? Date.now() - Date.parse(observation.observedAt) : Infinity;
+          return observation && age >= -5000 && age <= 30000 && observation.activeExecutions === 0 ? 1 : 0;
+        };
+        candidates.sort((a, b) => idle(b) - idle(a));
+      }
+    } else {
+      const preferred = options.runtime().defaultExecutionMachine();
+      if (preferred !== null) candidates = candidates.filter(item => item.machineId === preferred);
+    }
+    const selected = candidates[0];
+    if (!selected) throw new Error('No machine attached: attach a ready workspace replica or choose an available execution machine.');
+    return selected;
+  }
   async function pause(signal: AbortSignal) {
     signal.throwIfAborted();
     await new Promise<void>((resolve, reject) => {
@@ -39,30 +68,18 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
       signal.addEventListener('abort', cancel, { once: true });
     });
   }
-  async function select(input: { requestId: string; attemptId: string; conversationId: string; taskId: string; args: unknown }, state: DispatchSelectionState, signal: AbortSignal): Promise<RuntimeAttachment> {
+  async function select(input: { requestId: string; attemptId: string; args: unknown }, state: DispatchSelectionState, signal: AbortSignal): Promise<RuntimeAttachment> {
     const selection = RuntimeDispatchSelectionSchema.parse(input.args);
-    const repository = artifactsWorkspaceRepository(identity.workspaceId);
-    // Pin the source before assignment. An unsafe unresolved checkpoint is never resubmitted.
+    if (selection.at === undefined) return replica(input.args);
+    if (!state.machineId) { state.machineId = (await replica(input.args)).machineId; save(input.attemptId, state); }
     if (!state.commit) {
-      if ((selection.at ?? 'current') === 'current') {
-        while (!state.checkpointDispatch) {
-          signal.throwIfAborted();
-          const primary = options.runtime().attachments.list().find(item => item.role === 'primary' && item.state === 'ready');
-          if (!primary) { await pause(signal); continue; }
-          state.checkpointDispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, taskId: input.taskId, machineId: primary.machineId, attachmentId: primary.attachmentId, generation: primary.generation, requestId: `source:${input.requestId}`, attemptId: `source:${input.attemptId}`, tool: 'checkpoint', args: {}, deadlineAt: state.deadline, replay: 'unsafe' });
-          save(input.attemptId, state);
-        }
-        const prior = options.runtime().attachments.getAttempt(state.checkpointDispatch.attemptId);
-        const receipt = prior?.result ?? await options.runtime().attachments.execute(state.checkpointDispatch, signal);
-        if (receipt.status !== 'completed') throw new SourceCheckpointIncomplete(receipt.status);
-        const text = receipt.content.find(item => item.type === 'text');
-        if (!text || text.type !== 'text') throw new Error('Source checkpoint did not return exact commit evidence');
-        const checkpoint = z.object({ checkpoint: RuntimeGitCheckpointSchema }).parse(JSON.parse(text.text)).checkpoint;
+      if (selection.at === 'current') {
+        const checkpoint = await options.runtime().cloudFiles.initializeSnapshot();
+        if (!checkpoint) throw new Error('Cloud working copy is unavailable');
         state.commit = checkpoint.worktreeCommit;
-        state.checkpointRef = checkpoint.checkpointRef;
       } else {
-        const source = selection.at!;
-        const commit = await code.resolveRef(repository, source);
+        const repository = artifactsWorkspaceRepository(identity.workspaceId);
+        const commit = await code.resolveRef(repository, selection.at);
         if (!commit || !await code.readCommit(repository, commit)) throw new Error('Selected source does not exist in the canonical repository');
         state.commit = commit;
       }
@@ -71,63 +88,17 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
     while (true) {
       signal.throwIfAborted();
       const attachments = options.runtime().attachments.list();
-      if (!state.machineId) {
-        const fleet = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).listMachines();
-        const selector = selection.on;
-        let candidates = fleet.filter(machine => machine.desiredState !== 'removed');
-        if (typeof selector === 'string') {
-          const exact = candidates.find(machine => machine.id === selector);
-          candidates = exact ? [exact] : candidates.filter(machine => machine.label === selector);
-          if (candidates.length > 1) throw new Error('Machine label is ambiguous; use its id');
-          if (!candidates.length) throw new Error('Selected machine is not enrolled');
-        } else {
-          const lifecycle = selector?.profile ? await authority.getLifecycleState(identity.workspaceId) : null;
-          candidates = candidates.filter(machine => {
-            const available = attachments.filter(item => item.machineId === machine.id && item.state === 'ready');
-            if (selector?.needs?.some(need => !available.some(item => item.capabilities.includes(need)))) return false;
-            // Profiles are proven by successful canonical preparation/check receipts, not names or notes.
-            if (selector?.profile && !['machine/prepare', 'checks'].every(phase => lifecycle?.runs.some(run => run.machineId === machine.id && run.profile === selector.profile && run.phase === phase && run.status === 'succeeded'))) return false;
-            return machine.state === 'online' && machine.desiredState === 'online';
-          });
-          if (selector?.prefer === 'idle') {
-            const idle = (machineId: string) => {
-              const observations = attachments.filter(item => item.machineId === machineId && item.state === 'ready').map(item => item.executionObservation);
-              return observations.length > 0 && observations.every(observation => {
-                if (!observation) return false;
-                const age = Date.now() - Date.parse(observation.observedAt);
-                return age >= -5000 && age <= 30000 && observation.activeExecutions === 0;
-              });
-            };
-            candidates.sort((a, b) => Number(idle(b.id)) - Number(idle(a.id)) || a.id.localeCompare(b.id));
-          }
-        }
-        if (!candidates.length) { await pause(signal); continue; }
-        state.machineId = candidates[0]!.id;
-        save(input.attemptId, state);
-      }
       let attachment = state.attachmentId ? attachments.find(item => item.attachmentId === state.attachmentId) : attachments.find(item => item.machineId === state.machineId && item.role === 'runner' && item.state === 'ready' && item.checkout.kind === 'snapshot' && item.checkout.commit === state.commit);
       if (!attachment) {
-        const assigned = await attachmentController().request({ ...identity, requestId: `selection:${input.attemptId}`, machineId: state.machineId, sourceRef: state.commit, checkout: { kind: 'snapshot', commit: state.commit } });
-        attachment = assigned.attachment;
+        if (state.attachmentId) throw new Error('Selected runner is no longer attached');
+        attachment = (await attachmentController().request({ ...identity, requestId: `selection:${input.attemptId}`, machineId: state.machineId, sourceRef: state.commit, checkout: { kind: 'snapshot', commit: state.commit } })).attachment;
       }
       state.attachmentId = attachment.attachmentId;
       save(input.attemptId, state);
-      if (attachment.state === 'ready') {
-        if (typeof selection.on === 'object') {
-          if (selection.on.needs?.some(need => !attachment.capabilities.includes(need))) throw new Error('Ready attachment does not satisfy requested capabilities');
-          if (selection.on.profile) {
-            const lifecycle = await authority.getLifecycleState(identity.workspaceId);
-            for (const phase of ['machine/prepare', 'checks', 'workspace/materialize']) {
-              const receipt = lifecycle.runs.find(run => run.id === `attachment:${attachment.attachmentId}:${attachment.generation}:${phase}`);
-              if (!receipt || receipt.status !== 'succeeded' || receipt.profile !== selection.on.profile) throw new Error('Ready attachment does not satisfy the requested environment profile');
-            }
-          }
-        }
-        return attachment;
-      }
+      if (attachment.state === 'ready') return attachment;
       if (attachment.state !== 'attaching') throw new Error(`Selected attachment is ${attachment.state}; no replacement was launched`);
       await pause(signal);
     }
   }
-  return { load, save, select, pause };
+  return { load, save, select, replica };
 }

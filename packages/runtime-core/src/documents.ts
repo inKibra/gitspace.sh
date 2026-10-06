@@ -2,7 +2,6 @@ import type { RuntimeBrowserApprovalCard } from '@gitspace/protocol-runtime';
 import { defineDoc } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
-export const PlacementDoc = defineDoc<{ attachmentId: string | null; generation: number }>({ kind: 'gitspace.placement', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ attachmentId: null, generation: 0 }) });
 export const WorkspaceDoc = defineDoc<{ phase: 'plan' | 'code' | 'review' | 'ship'; instructions: string; goal: string; creation: string }>({ kind: 'gitspace.workspace', version: 1, scope: 'session', initial: () => ({ phase: 'code', instructions: '', goal: '', creation: 'pending' }) });
 export const MachinesDoc = defineDoc<{ attachments: RuntimeAttachment[] }>({ kind: 'gitspace.machines', version: 1, scope: 'session', initial: () => ({ attachments: [] }) });
 export const TodosDoc = defineDoc<{ items: { id: string; text: string; status: 'pending' | 'active' | 'completed' }[] }>({ kind: 'gitspace.todos', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ items: [] }) });

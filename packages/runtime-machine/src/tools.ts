@@ -6,10 +6,11 @@ import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import { RuntimeContentSchema, RuntimeJsonSchema, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
-import { ApplyPatchArgumentsSchema, prepareV4APatch } from './apply-patch.js';
+import { ApplyPatchArgumentsSchema, prepareV4APatch, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeBashArgumentsSchema, RuntimeFindArgumentsSchema, RuntimeGrepArgumentsSchema, RuntimeAstGrepArgumentsSchema, RuntimeAstEditArgumentsSchema, RuntimeAstResolveArgumentsSchema, RuntimeCodemodeArgumentsSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment, ExecutorJournal } from './journal.js';
 import { proposalPath, stageProposal, resolveProposal } from './ast-proposals.js';
 import { ExecutorEffectUncertain, type RunExecutorCommand } from './commands.js';
+import { machineRipgrepPath } from '../../deployment/src/native-runtime.js';
 
 export type ExecutorContent = z.infer<typeof RuntimeContentSchema>[];
 export type ExecutorArtifactAccess = { read(uri: string, signal: AbortSignal): Promise<ExecutorContent>; write(uri: string, content: string, signal: AbortSignal): Promise<void> };
@@ -17,13 +18,6 @@ export type ExecutorCloudModelProxy = (input: { dispatch: RuntimeToolDispatch; o
 export type ExecutorCloudMcpProxy = (input: { dispatch: RuntimeToolDispatch; callId: string; method: 'list' | 'search' | 'describe' | 'call'; args: z.infer<typeof RuntimeJsonSchema>; signal: AbortSignal }) => Promise<z.infer<typeof RuntimeJsonSchema>>;
 export type ExecutorOperationHandler = (dispatch: RuntimeToolDispatch, local: LocalAttachment, signal: AbortSignal) => Promise<ExecutorContent>;
 export type MachineToolOptions = { journal?: ExecutorJournal; runCommand: RunExecutorCommand; artifacts: (attachment: LocalAttachment) => ExecutorArtifactAccess; cloudModel: ExecutorCloudModelProxy; cloudMcp: ExecutorCloudMcpProxy; operations?: Record<string, ExecutorOperationHandler> };
-const PathArgs = z.object({ path: z.string().min(1) });
-const WriteArgs = PathArgs.extend({ content: z.string() });
-const EditArgs = PathArgs.extend({ edits: z.array(z.object({ oldText: z.string().min(1), newText: z.string() })).min(1) });
-const BashArgs = z.object({ command: z.string().min(1), cwd: z.string().optional() });
-const SearchArgs = z.object({ pattern: z.string(), path: z.string().default('.'), glob: z.string().optional() });
-const AstArgs = z.object({ ops: z.array(z.object({ pat: z.string().min(1), out: z.string() })).min(1), paths: z.array(z.string().min(1)).min(1), language: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/u) });
-const ResolveArgs = z.object({ proposalId: z.string().min(1), action: z.enum(['apply', 'reject']) });
 const ProposalSchema = z.object({ changes: z.array(z.object({ path: z.string(), before: z.string(), after: z.string() })) });
 
 export async function checkoutPath(root: string, path: string): Promise<string> {
@@ -67,7 +61,7 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
   };
   switch (dispatch.tool) {
     case 'read': {
-      const args = PathArgs.extend({ offset: z.number().int().positive().optional(), limit: z.number().int().positive().optional() }).parse(dispatch.args);
+      const args = RuntimeReadArgumentsSchema.parse(dispatch.args);
       if (args.path.startsWith('local://') || args.path.startsWith('artifact://')) return options.artifacts(local).read(args.path, signal);
       const path = await checkoutPath(local.rootPath, args.path);
       const binary = await env.readBinaryFile(path, context);
@@ -81,13 +75,13 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
       return text(content.split('\n').slice(start, args.limit === undefined ? undefined : start + args.limit).join('\n'));
     }
     case 'write': {
-      const args = WriteArgs.parse(dispatch.args);
+      const args = RuntimeWriteArgumentsSchema.parse(dispatch.args);
       if (args.path.startsWith('local://') || args.path.startsWith('artifact://')) await options.artifacts(local).write(args.path, args.content, signal);
       else await write(args.path, args.content);
       return text(`Wrote ${args.path}`);
     }
     case 'edit': {
-      const args = EditArgs.parse(dispatch.args);
+      const args = RuntimeEditArgumentsSchema.parse(dispatch.args);
       const original = await read(args.path);
       const replacements = args.edits.map(edit => {
         const index = original.indexOf(edit.oldText);
@@ -117,20 +111,27 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
       return text(changes.map(change => `${change.after === null ? 'Deleted' : change.before === null ? 'Added' : 'Updated'} ${change.destination ?? change.path}`).join('\n'));
     }
     case 'bash': {
-      const args = BashArgs.parse(dispatch.args);
+      const args = RuntimeBashArgumentsSchema.parse(dispatch.args);
       const result = await command('/bin/bash', ['-c', args.command], args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath);
       return text(`Exit code: ${result.exitCode}\n${result.output}`);
     }
-    case 'grep': case 'find': {
-      const args = SearchArgs.parse(dispatch.args);
+    case 'grep': {
+      const args = RuntimeGrepArgumentsSchema.parse(dispatch.args);
       const path = await checkoutPath(local.rootPath, args.path);
-      const argv = dispatch.tool === 'grep' ? ['--line-number', '--no-heading', ...(args.glob ? ['--glob', args.glob] : []), '--', args.pattern, path] : ['--files', '--hidden', '--glob', args.pattern, '--', path];
-      const result = await command('rg', argv);
+      const result = await command(machineRipgrepPath(), ['--line-number', '--no-heading', ...(args.glob ? ['--glob', args.glob] : []), '--', args.pattern, path]);
+      if (result.exitCode > 1) throw new Error(result.output);
+      return text(result.output);
+    }
+    case 'find': {
+      const args = RuntimeFindArgumentsSchema.parse(dispatch.args);
+      const path = await checkoutPath(local.rootPath, args.path);
+      const argv = ['--files', '--hidden', '--glob', args.pattern, '--', path];
+      const result = await command(machineRipgrepPath(), argv);
       if (result.exitCode > 1) throw new Error(result.output);
       return text(result.output);
     }
     case 'ast_grep': {
-      const args = z.object({ pattern: z.string().min(1), path: z.string().default('.'), language: z.string().optional() }).parse(dispatch.args);
+      const args = RuntimeAstGrepArgumentsSchema.parse(dispatch.args);
       const result = await command('ast-grep', ['run', '--json', '--pattern', args.pattern, ...(args.language ? ['--lang', args.language] : []), await checkoutPath(local.rootPath, args.path)]);
       if (result.exitCode > 1) throw new Error(result.output);
       return text(result.output);
@@ -159,7 +160,7 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
     }
     case 'ast_edit': {
       if (!options.journal) throw new Error('AST proposals require durable executor storage');
-      const args = AstArgs.parse(dispatch.args);
+      const args = RuntimeAstEditArgumentsSchema.parse(dispatch.args);
       const changes: z.infer<typeof ProposalSchema>['changes'] = [];
       const directory = await mkdtemp(join(tmpdir(), 'gitspace-ast-'));
       try {
@@ -181,11 +182,11 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
     }
     case 'ast_resolve': {
       if (!options.journal) throw new Error('AST proposals require durable executor storage');
-      const args = ResolveArgs.parse(dispatch.args);
+      const args = RuntimeAstResolveArgumentsSchema.parse(dispatch.args);
       return text(`Proposal ${await resolveProposal(options.journal, local, args.proposalId, args.action, signal)}`);
     }
     case 'codemode': {
-      const args = z.object({ code: z.string() }).parse(dispatch.args);
+      const args = RuntimeCodemodeArgumentsSchema.parse(dispatch.args);
       const pending = new Set<Promise<unknown>>();
       let uncertain: ExecutorEffectUncertain | undefined;
       const track = <T>(operation: () => Promise<T>, mutationProxy = false): Promise<T> => {

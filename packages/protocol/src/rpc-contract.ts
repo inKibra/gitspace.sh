@@ -5,7 +5,7 @@ import {
   RuntimeWatchEventSchema, RuntimeActionResultSchema,
 } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimePlacementInputSchema, RuntimeQaActionInputSchema, RuntimeQaActionResultSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeQaActionResultSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentRequestResultSchema, RuntimePrimaryAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { EnvironmentFailureSchema, LifecycleRunSchema, LifecycleStateSchema, type EnvironmentFailure, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
 import {
@@ -589,8 +589,8 @@ export const runtimeSessionContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeSessionInputSchema, 'gitspace/runtime-session-input/v1'))
   .output(runtimeWire(RuntimeSessionResultSchema, 'gitspace/runtime-session-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
-export const runtimePlacementContract = gitspaceRpc.procedure()
-  .input(runtimeWire(RuntimePlacementInputSchema, 'gitspace/runtime-placement-input/v1'))
+export const runtimeExecutionMachineContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeExecutionMachineInputSchema, 'gitspace/runtime-execution-machine-input/v1'))
   .output(runtimeWire(RuntimeActionResultSchema, 'gitspace/runtime-action-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const runtimeQaContract = gitspaceRpc.procedure()
@@ -2173,7 +2173,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     browserTrust: runtimeBrowserTrustContract,
     watch: runtimeWatchContract,
     session: runtimeSessionContract,
-    placement: runtimePlacementContract,
+    executionMachine: runtimeExecutionMachineContract,
     qa: runtimeQaContract,
     attachment: { request: runtimeAttachmentRequestContract, primary: { request: runtimePrimaryAttachmentRequestContract }, detach: runtimeAttachmentDetachRequestContract },
   },

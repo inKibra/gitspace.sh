@@ -315,6 +315,7 @@
         "@gitspace/protocol-agent": "workspace:*",
         "@gitspace/protocol-environment": "workspace:*",
         "@gitspace/protocol-workspace": "workspace:*",
+        "@gitspace/supervisor": "workspace:*",
         "zod": "^4.4.3",
       },
     },

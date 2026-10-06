@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import type { InspectorView } from '@gitspace/protocol';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gitspace/protocol/project-authority';
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
@@ -39,6 +40,7 @@ const render = () => root.render(<RuntimeWorkspaceShell projectId={project.id} w
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   mocks.setRelations.mockReset(); mocks.refresh.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false;
+  snapshot.documents = {};
   mocks.saved = { workspaces: [{ id: workspace.id, relations: { dependsOn: ['parent'], relatedTo: [], stackedOn: 'parent' }, stack: { blockedBy: ['parent'], blocking: [], findings: [] } }] };
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
@@ -92,4 +94,19 @@ it('retains the accepted graph read-only and rejects stale edit callbacks during
   expect(container.textContent).toContain('parent');
   await expect(stale(workspace.id, { dependsOn: [], relatedTo: [], stackedOn: null })).rejects.toThrow('finish loading');
   expect(mocks.setRelations).not.toHaveBeenCalled();
+});
+
+it('announces persistent cloud merge conflicts while the machines dialog is closed', async () => {
+  const commit = 'a'.repeat(40);
+  snapshot.documents['gitspace.code'] = { checkpointRef: 'refs/gitspace/checkpoint', headCommit: commit, branch: 'main', indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: commit, worktreeTree: commit, conflicts: ['src/shared.ts', 'assets/config.json'] };
+  await act(render);
+  const alert = container.querySelector('[role="alert"][aria-label="Workspace merge conflicts"]');
+  expect(alert?.textContent).toContain('src/shared.ts');
+  expect(alert?.textContent).toContain('assets/config.json');
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  await act(render);
+  expect(container.querySelector('[aria-label="Workspace merge conflicts"]')).not.toBeNull();
+  snapshot.documents['gitspace.code'] = { ...RuntimeGitCheckpointSchema.parse(snapshot.documents['gitspace.code']), conflicts: [] };
+  await act(render);
+  expect(container.querySelector('[aria-label="Workspace merge conflicts"]')).toBeNull();
 });

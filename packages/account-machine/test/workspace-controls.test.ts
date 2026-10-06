@@ -9,14 +9,15 @@ describe('Machine workspace control admission', () => {
   function machine() {
     let creations = 0;
     let lifecycleRuns = 0;
+    let managementCalls = 0;
     const options = {
-      controls: { create: async () => { creations += 1; return { workspace: { id: 'new', projectId: 'project-a' }, operation: {} }; }, instructionsChanged: async () => undefined },
-      authority: { putInspectorGoal: async () => ({ id: 'goal', revision: 1 }), appendProjectEvent: async () => undefined, putInspectorWorkflow: async () => { throw new Error('Workflow authority unavailable'); } },
+      controls: { create: async () => { creations += 1; return { workspace: { id: 'new', projectId: 'project-a' }, operation: {} }; }, manage: async () => { managementCalls += 1; }, instructionsChanged: async () => undefined },
+      authority: { listProjectWorkspaces: async () => [{ id: 'workspace-a', projectId: 'project-a' }], putInspectorGoal: async () => ({ id: 'goal', revision: 1 }), appendProjectEvent: async () => undefined, putInspectorWorkflow: async () => { throw new Error('Workflow authority unavailable'); } },
       environments: { acceptRun: async () => { lifecycleRuns += 1; } },
     } as unknown as Parameters<typeof machineOperationalTools>[0];
     const tools = machineOperationalTools(options);
     const run = (tool: string, args: RuntimeToolDispatch['args']) => tools[tool]!({ projectId: 'project-a', workspaceId: 'workspace-a', args } as RuntimeToolDispatch, { attachment: { role: 'primary' } } as Parameters<typeof tools[string]>[1], new AbortController().signal);
-    return { run, creations: () => creations, lifecycleRuns: () => lifecycleRuns };
+    return { run, creations: () => creations, lifecycleRuns: () => lifecycleRuns, managementCalls: () => managementCalls };
   }
   it('validates every draft before workspace creation', async () => {
     const { run, creations } = machine();
@@ -32,10 +33,12 @@ describe('Machine workspace control admission', () => {
     expect(creations()).toBe(1);
   });
   it('rejects self-close and protected lifecycle effects before execution', async () => {
-    const { run, lifecycleRuns } = machine();
-    for (const method of ['close', 'archive']) await expect(run('create', { method, expectedRevision: 1, expectedGeneration: 1 })).rejects.toThrow('own workspace');
+    const { run, creations, lifecycleRuns, managementCalls } = machine();
+    for (const method of ['close', 'archive']) await expect(run('create', { method, expectedRevision: 1, expectedGeneration: 1 })).rejects.toThrow();
     await expect(run('lifecycle', { runId: 'destroy', phase: 'cloud/destroy' })).rejects.toThrow();
     await expect(run('lifecycle', { runId: 'private', phase: 'machine/prepare', interactive: true })).rejects.toThrow();
     expect(lifecycleRuns()).toBe(0);
+    expect(creations()).toBe(0);
+    expect(managementCalls()).toBe(0);
   });
 });

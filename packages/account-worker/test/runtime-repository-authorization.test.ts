@@ -139,7 +139,7 @@ describe('signed repository credential authority', () => {
     expect((await f.request(assigned)).status).toBe(400);
   });
 
-  it('primary requests retain their lease identity, require a completed drain, and do not reattach on assignment polling', async () => {
+  it('independent machine replicas coexist while the same shared checkout requires a completed drain before replacement', async () => {
     const f = await fixture(['space.control']);
     await runInDurableObject(f.authority, async (_instance, state) => {
       const store = new AttachmentStore(state.storage, {
@@ -152,6 +152,9 @@ describe('signed repository credential authority', () => {
       expect((await store.requestPrimary(input)).attachment.attachmentId).toBe(first.attachment.attachmentId);
       await expect(store.requestPrimary({ ...input, ownershipGeneration: 2 })).rejects.toThrow();
       await expect(store.requestPrimary({ ...input, requestId: 'premature' })).rejects.toThrow();
+      const other = await store.requestPrimary({ ...RuntimeAttachInputSchema.parse({ ...admission, machineId: 'other' }), requestId: 'other-machine' });
+      expect((await store.assignments(other.attachment.machineId))[0]?.grant.attachment.attachmentId).toBe(other.attachment.attachmentId);
+      expect(other.attachment.machineId).not.toBe(first.attachment.machineId);
       expect((await store.assignments(admission.machineId))[0]?.grant.attachment.state).toBe('attaching');
       expect(() => store.detach({ ...first.attachment, generation: first.attachment.generation + 1, state: 'draining' })).toThrow();
       expect(() => store.detach({ ...first.attachment, state: 'detached' })).toThrow();

@@ -441,7 +441,7 @@ class MachineHost implements MachineReplacementHost {
       cwd: this.options.repositoryRoot,
       env: processEnvironment({
         ...this.options.environment,
-        // Machine git and agent children resolve the generation's bundled git-lfs first.
+        // Machine children use this generation's bundled Git LFS and explicit verified ripgrep path.
         ...machineToolEnvironment({ ...globalThis.process.env, ...this.options.environment }, native),
         GITSPACE_ENVIRONMENT_ID: this.options.id,
         GITSPACE_ENVIRONMENT_ROOT: this.options.root,

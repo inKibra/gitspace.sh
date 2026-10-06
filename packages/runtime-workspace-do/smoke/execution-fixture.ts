@@ -25,10 +25,10 @@ const stream: StreamFunction = (_model, context, options) => {
     catch { return null; }
   })();
   let content: AssistantMessage['content'];
-  if (last?.role === 'user' && text === 'run background job') content = [{ type: 'toolCall', id: 'reused-provider-call', name: 'jobs', arguments: { args: { op: 'run', application: 'sh', args: ['-c', 'printf "launch\\n" >> launches; printf "job-live-log-marker\\n"; while [ ! -f release ]; do sleep 0.05; done; printf "finished\\n"'] } } }];
+  if (last?.role === 'user' && text === 'run background job') content = [{ type: 'toolCall', id: 'reused-provider-call', name: 'jobs', arguments: { op: 'run', application: 'sh', args: ['-c', 'printf "launch\\n" >> launches; printf "job-live-log-marker\\n"; while [ ! -f release ]; do sleep 0.05; done; printf "finished\\n"'] } }];
   else if (last?.role === 'user' && text === 'foreground probe') content = [{ type: 'toolCall', id: crypto.randomUUID(), name: 'todo', arguments: { items: [{ id: 'probe', text: 'Foreground remains available', status: 'completed' }] } }];
-  else if (last?.role === 'user' && text === 'read large tool result') content = [{ type: 'toolCall', id: 'large-read', name: 'read', arguments: { args: { path: 'large-output' } } }];
-  else if (last?.role === 'user' && text.startsWith('job-control:')) content = [{ type: 'toolCall', id: crypto.randomUUID(), name: 'jobs', arguments: { args: JSON.parse(text.slice('job-control:'.length)) } }];
+  else if (last?.role === 'user' && text === 'read large tool result') content = [{ type: 'toolCall', id: 'large-read', name: 'read', arguments: { path: 'large-output' } }];
+  else if (last?.role === 'user' && text.startsWith('job-control:')) content = [{ type: 'toolCall', id: crypto.randomUUID(), name: 'jobs', arguments: JSON.parse(text.slice('job-control:'.length)) }];
   else if (notification?.success) content = [{ type: 'text', text: `Consumed job receipt ${notification.data.job.jobId}` }];
   else content = [{ type: 'text', text: 'execution fixture foreground complete' }];
   const usesTool = content.some(part => part.type === 'toolCall');
@@ -90,7 +90,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
     };
     this.runtime = createWorkspaceRuntime({
       storage: ctx.storage, identity, models, model: reference,
-      code: { readFile: unsupported, writeSnapshot: unsupported },
+      code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: unsupported },
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: unsupported,
       tools: { prepareBrowser: unsupported, invoke: async input => {
         if (input.tool !== 'read') return unsupported();

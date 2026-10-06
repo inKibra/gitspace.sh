@@ -1,9 +1,8 @@
 import { defineDoc, type Harness, type Storage, type ConversationId, type Cursor, type EntryRecord } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { z } from 'zod';
-import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { ToolServices } from './tools.js';
-import { PlacementDoc, CronScopeDoc } from './documents.js';
+import { CronScopeDoc } from './documents.js';
 import { SessionControlsDoc, parseCloudAgentDefinition } from './session-controls.js';
 import { BackgroundAgentsDoc, BackgroundAgentTask } from './background-agents.js';
 import type { JobServices } from './jobs.js';
@@ -28,7 +27,7 @@ export function createConversationTools(options: ConversationToolOptions) {
     const target = await resolve(input.conversationId);
     let output: string;
     if (input.tool === 'agents') {
-      const args = z.object({ op: z.enum(['spawn', 'send', 'stop', 'list', 'status']), id: z.string().optional(), task: z.string().optional(), message: z.string().optional(), name: z.string().optional(), agent: z.string().optional(), background: z.boolean().default(false) }).parse(input.args);
+      const args = RuntimeAgentsArgumentsSchema.parse(input.args);
       if (args.op === 'spawn') {
         if (!args.task) throw new Error('Subagent task is required');
         const definitions = await harness.snapshot(SessionControlsDoc, target.id, context);
@@ -50,8 +49,6 @@ export function createConversationTools(options: ConversationToolOptions) {
           const anchorTask = args.background ? await tx.createTask(BackgroundAgentTask, { spawningTask: owner.id, attemptId: input.attemptId }, { ownership: { kind: 'conversation' }, conversationId: target.id, background: true }) : owner.id;
           const created = await tx.createConversation({ ownership: { kind: 'task', taskId: anchorTask } });
           if (args.background) { const background = await tx.doc(BackgroundAgentsDoc, target.id); background.children[input.attemptId] = { conversationId: created.id, owner: anchorTask }; }
-          const parentPlacement = await tx.doc(PlacementDoc, target.id);
-          const placement = await tx.doc(PlacementDoc, created.id); placement.attachmentId = parentPlacement.attachmentId; placement.generation = parentPlacement.generation;
           const parentScope = await tx.doc(CronScopeDoc, target.id);
           const childScope = await tx.doc(CronScopeDoc, created.id); childScope.constrained = parentScope.constrained; childScope.readScopes = [...parentScope.readScopes]; childScope.writeScopes = [...parentScope.writeScopes];
           const childControls = await tx.doc(SessionControlsDoc, created.id);
@@ -78,11 +75,11 @@ export function createConversationTools(options: ConversationToolOptions) {
       } else if (args.op === 'stop') { if (!args.id) throw new Error('Agent id required'); await (await resolve(args.id)).abort(context, { background: true }); output = 'Agent stopped'; }
       else { const inspection = await harness.inspect(context); output = JSON.stringify(inspection.tasks.map(task => ({ id: String(task.record.id), conversationId: String(task.record.conversationId), kind: task.record.kind, state: task.record.state.status }))); }
     } else if (input.tool === 'checkpoint') {
-      const args = z.object({ goal: z.string() }).parse(input.args);
+      const args = RuntimeCheckpointArgumentsSchema.parse(input.args);
       const anchor = await target.commit(async tx => { const anchors = await tx.doc(Anchors, target.id); if (anchors.entries[input.attemptId]) return anchors.entries[input.attemptId]; const entry = await tx.appendEntry(target.id, { kind: 'gitspace.checkpoint', data: { goal: args.goal } }); anchors.entries[input.attemptId] = String(entry.id); return String(entry.id); }, context);
       output = JSON.stringify({ checkpoint: anchor });
     } else if (input.tool === 'rewind') {
-      const args = z.object({ checkpoint: z.string(), report: z.string() }).parse(input.args);
+      const args = RuntimeRewindArgumentsSchema.parse(input.args);
       const all = await entries(target.id); const index = all.findIndex(entry => String(entry.id) === args.checkpoint && entry.kind === 'gitspace.checkpoint');
       if (index < 0) throw new Error('Context checkpoint not found');
       await target.commit(tx => tx.appendEntry(target.id, { kind: 'gitspace.rewind', edits: all.slice(index + 1).map(entry => ({ target: entry.id, action: 'omit' as const })), model: [{ role: 'user', content: args.report, timestamp: Date.now() }] }), context);

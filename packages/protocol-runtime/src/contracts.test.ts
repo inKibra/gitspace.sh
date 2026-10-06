@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { RuntimeExecutorReceiptSchema, RuntimeJobObservationSchema, RuntimeReceiptAcknowledgementSchema, RuntimeRuleInterruptionSchema, RuntimeScopedDispatchSchema } from './index.js';
+import { LifecycleRunRequestSchema } from '@gitspace/protocol-environment';
+import { RuntimeEnvironmentArgumentsSchema } from './tool-arguments.js';
+import { RuntimeDispatchSelectionSchema } from './scheduling.js';
 
 const timestamp = '2026-10-03T00:00:00.000Z';
 const digest = 'a'.repeat(64);
@@ -73,4 +76,25 @@ describe('durable rule interruption contract', () => {
     expect(RuntimeRuleInterruptionSchema.safeParse({ ...interruption, continuation }).success).toBe(false);
     expect(RuntimeRuleInterruptionSchema.safeParse({ ...interruption, state: 'continuing', continuation: { ...continuation, generationId: interruption.generationId } }).success).toBe(false);
   });
+});
+
+test('agent lifecycle boundary excludes interactive and destruction without narrowing human lifecycle requests', () => {
+  for (const interactive of [true, false]) {
+    expect(RuntimeEnvironmentArgumentsSchema.safeParse({ method: 'runChecks', runId: 'checks', interactive }).success).toBe(false);
+    expect(RuntimeEnvironmentArgumentsSchema.safeParse({ method: 'runPhase', runId: 'prepare', phase: 'machine/prepare', interactive }).success).toBe(false);
+  }
+  expect(RuntimeEnvironmentArgumentsSchema.safeParse({ method: 'runPhase', runId: 'destroy', phase: 'cloud/destroy' }).success).toBe(false);
+  expect(LifecycleRunRequestSchema.safeParse({ runId: 'human-destroy', phase: 'cloud/destroy', interactive: true }).success).toBe(true);
+});
+
+test('agent lifecycle advertised fields exhaust the lifecycle and dispatch owner contracts', () => {
+  const lifecycleKeys = Object.keys(LifecycleRunRequestSchema.shape).filter(key => key !== 'interactive');
+  const dispatchKeys = Object.keys(RuntimeDispatchSelectionSchema.shape);
+  for (const schema of RuntimeEnvironmentArgumentsSchema.options) {
+    const method = schema.shape.method;
+    if (!method.safeParse('runChecks').success && !method.safeParse('runPhase').success) continue;
+    const isChecks = method.safeParse('runChecks').success;
+    const consumed = [...lifecycleKeys.filter(key => !isChecks || key !== 'phase'), ...dispatchKeys, 'method'];
+    expect(Object.keys(schema.shape).sort()).toEqual(consumed.sort());
+  }
 });

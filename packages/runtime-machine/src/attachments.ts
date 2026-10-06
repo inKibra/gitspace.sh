@@ -73,7 +73,7 @@ export async function prepareMachineAttachment(journal: ExecutorJournal, options
     const commit = await run(['rev-parse', '--verify', `${attachment.checkout.commit}^{commit}`], rootPath);
     if (commit !== attachment.checkout.commit) throw new Error('Attachment source commit does not match requested immutable commit');
     if (attachment.checkout.kind === 'branch') {
-      if (attachment.role !== 'delegate') throw new Error('Only delegates may acquire branch checkouts');
+      if (attachment.role !== 'delegate' && attachment.role !== 'replica') throw new Error('Only delegates and replicas may acquire branch checkouts');
       await run(['check-ref-format', '--branch', attachment.checkout.branch], rootPath);
       if (options.source.kind === 'artifacts') await run(['checkout', '-B', attachment.checkout.branch, commit], rootPath);
       else await run(['checkout', '-b', attachment.checkout.branch, commit], rootPath);

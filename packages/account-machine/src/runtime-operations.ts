@@ -1,22 +1,20 @@
 import { z } from 'zod';
-import { LifecycleRunRequestSchema } from '@gitspace/protocol-environment';
-import { DaemonRequestSchema, daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor';
+import { daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor';
 import { checkoutPath, mergeDelegateCommit, runSupervisorCommand, ExecutorEffectUncertain, type ExecutorJournal, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
 import { createHash } from 'node:crypto';
 import { type SpaceWorkspaceControls } from './space-workspace-controls.js';
-import { goalDraftSchema, workflowDraftSchema, rubricDraftSchema } from '@gitspace/protocol';
+import { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
-import { WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
 import type { LocalArtifactResolver } from '@gitspace/core';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MachineMcpCoordinator } from './local-mcp.js';
-import { RuntimeDispatchSelectionSchema } from '@gitspace/protocol-runtime';
+import { RuntimeJobRunArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeDelegateExportArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeAgentLifecycleRunArgumentsSchema } from '@gitspace/protocol-runtime';
 
-export function machineOperationalTools(options: { environments: WorkspaceEnvironmentManager; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; controls: SpaceWorkspaceControls; artifacts: LocalArtifactResolver; mcp: MachineMcpCoordinator; journal: () => ExecutorJournal; checkpoint(spaceId: string): Promise<void> }): Record<string, ExecutorOperationHandler> {
+export function machineOperationalTools(options: { environments: WorkspaceEnvironmentManager; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; controls: SpaceWorkspaceControls; artifacts: LocalArtifactResolver; mcp: MachineMcpCoordinator; journal: () => ExecutorJournal }): Record<string, ExecutorOperationHandler> {
   return {
     mcp_discover: async (dispatch, local, signal) => {
       const workspace = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId);
@@ -32,18 +30,11 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
     },
     create: async (dispatch, local) => {
       if (local.attachment.role !== 'primary') throw new Error('Workspace changes require the primary attachment');
-      const { method, workspaceId, ...args } = z.object({ method: z.enum(['create', 'open', 'close', 'archive', 'restore', 'setRelations']), workspaceId: z.string().optional() }).passthrough().parse(dispatch.args);
-      if (workspaceId !== undefined && workspaceId !== dispatch.workspaceId) throw new Error('Workspace target is outside this dispatch');
-      if (method === 'close' || method === 'archive') throw new Error('An agent cannot close or archive its own workspace; use the browser controls');
+      const request = RuntimeWorkspaceMutationArgumentsSchema.parse(dispatch.args);
+      if (request.workspaceId !== undefined && request.workspaceId !== dispatch.workspaceId) throw new Error('Workspace target is outside this dispatch');
       let result: unknown;
-      if (method === 'create') {
-        const { goal, workflow, rubric, ...workspace } = z.object({
-          name: z.string().trim().min(1).max(160), branch: z.string().min(1).max(512),
-          phase: WorkspacePhaseSchema.default('plan'),
-          sourceKind: z.enum(['base', 'branch', 'workspace', 'pull-request']), sourceRef: z.string(),
-          dependsOn: z.array(z.string().min(1)).optional(),
-          goal: goalDraftSchema.optional(), workflow: workflowDraftSchema.optional(), rubric: rubricDraftSchema.optional(),
-        }).strict().parse(args);
+      if (request.method === 'create') {
+        const { method: _method, workspaceId: _workspaceId, on: _on, at: _at, goal, workflow, rubric, ...workspace } = request;
         const created = await options.controls.create({ ...workspace, projectId: dispatch.projectId });
         const identity = { projectId: dispatch.projectId, spaceId: created.workspace.id };
         const initialized: string[] = [];
@@ -69,13 +60,13 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       } else {
         const definition = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId && workspace.projectId === dispatch.projectId);
         if (!definition) throw new Error('Workspace does not exist in the current project');
-        result = await options.controls.manage(method, definition, args);
+        result = await options.controls.manage(request.method, definition, request);
       }
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     workspace_phase: async (dispatch, local) => {
       if (local.attachment.role !== 'primary') throw new Error('Phase changes require the primary attachment');
-      const { phase } = z.object({ phase: WorkspacePhaseSchema }).parse(dispatch.args);
+      const { phase } = RuntimeSpacePhaseArgumentsSchema.parse(dispatch.args);
       const definition = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId && workspace.projectId === dispatch.projectId);
       if (!definition || definition.kind === 'base') throw new Error('Phase changes require a workspace in the current project');
       await options.controls.manage('setPhase', definition, { expectedRevision: definition.revision, phase });
@@ -83,15 +74,9 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
     },
     lifecycle: async (dispatch, local) => {
       if (local.attachment.role !== 'primary') throw new Error('Lifecycle requires primary attachment');
-      const args = LifecycleRunRequestSchema.parse(dispatch.args);
-      if (args.interactive || args.phase === 'cloud/destroy') throw new Error('Agent dispatch cannot access private interactive lifecycle or cloud destruction');
+      const { on: _on, at: _at, ...args } = RuntimeAgentLifecycleRunArgumentsSchema.parse(dispatch.args);
       const accepted = await options.environments.acceptRun(dispatch.workspaceId, args);
       return [{ type: 'text', text: JSON.stringify(accepted) }];
-    },
-    checkpoint: async (dispatch, local) => {
-      if (local.attachment.role !== 'primary') throw new Error('Only the primary may publish checkpoints');
-      await options.checkpoint(dispatch.workspaceId);
-      return [{ type: 'text', text: 'Checkpoint published' }];
     },
     service: async (dispatch, local) => {
       if (local.attachment.role !== 'primary') throw new Error('Services require primary attachment');
@@ -101,7 +86,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
     },
     jobs: async (dispatch, local, signal) => {
       const args = z.discriminatedUnion('op', [
-        RuntimeDispatchSelectionSchema.extend({ op: z.literal('run'), application: z.string().min(1), args: z.array(z.string()), cwd: z.string().optional(), deadlineAt: z.iso.datetime().optional() }).strict(),
+        RuntimeJobRunArgumentsSchema,
         z.object({ op: z.enum(['logs', 'cancel']), attemptId: z.string().min(1) }).strict(),
       ]).parse(dispatch.args);
       if (args.op === 'run') {
@@ -128,7 +113,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     proc: async (dispatch, local, signal) => {
-      const args = DaemonRequestSchema.parse(dispatch.args);
+      const args = RuntimeProcArgumentsSchema.parse(dispatch.args);
       const client = await daemonClientForProject(local.rootPath);
       if (args.op === 'shutdown') throw new Error('Agent cannot shut down the machine supervisor');
       const owner = `runtime:${dispatch.attachmentId}:${dispatch.generation}`;
@@ -153,7 +138,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
     },
     delegate_export: async (dispatch, local, signal) => {
       if (local.attachment.role !== 'delegate' || local.attachment.checkout.kind !== 'branch') throw new Error('Only delegated branches may export integration commits');
-      const args = z.object({ commit: z.string().regex(/^[a-f0-9]{40,64}$/u) }).parse(dispatch.args);
+      const args = RuntimeDelegateExportArgumentsSchema.parse(dispatch.args);
       const directory = await mkdtemp(join(tmpdir(), 'gitspace-delegate-'));
       let sequence = 0;
       const run = async (args: string[]) => {

@@ -146,11 +146,11 @@ export class AttachmentStore {
   async attach(input: RuntimeAttachInput, assignment?: { requestId: string; source: RuntimeAttachmentSource | null }) {
     if (input.role === 'runner' && input.checkout.kind !== 'snapshot') throw new Error('Runner requires an exact snapshot');
     if (input.role === 'delegate' && input.checkout.kind !== 'branch') throw new Error('Delegate requires a private branch');
+    if (input.role === 'replica' && input.checkout.kind !== 'branch') throw new Error('Replica requires a private branch');
     const candidate = RuntimeAttachmentSchema.parse({ ...input, attachmentId: crypto.randomUUID(), state: 'attaching', updatedAt: new Date().toISOString() });
     const candidateSecret = encode(crypto.getRandomValues(new Uint8Array(32)));
     const ciphertext = await this.services.seal(candidateSecret, candidate);
     const attachment = this.storage.transactionSync(() => {
-      if (input.role === 'primary' && this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt) throw new Error('Cloud mutation must finish before primary attachment');
       const current = this.list();
       const existing = current.find(a => a.machineId === input.machineId && a.generation === input.generation && a.state !== 'detached');
       if (existing) {
@@ -165,7 +165,7 @@ export class AttachmentStore {
         return existing;
       }
       if (current.some(a => a.machineId === input.machineId && a.generation >= input.generation)) throw new Error('Attachment generation is stale');
-      if (input.role === 'primary' && current.some(a => a.role === 'primary' && a.state !== 'detached')) throw new Error('Previous primary must complete a fencing barrier');
+      if (input.role === 'primary' && current.some(a => a.machineId === input.machineId && a.role === 'primary' && a.state !== 'detached')) throw new Error('Previous attachment of this shared checkout must complete its fencing barrier');
       this.storage.sql.exec('INSERT INTO runtime_attachments(id,record,secret,request_id,source) VALUES(?,?,?,?,?)', candidate.attachmentId, JSON.stringify(candidate), ciphertext, assignment?.requestId ?? null, assignment ? JSON.stringify(assignment.source) : null);
       return candidate;
     });
@@ -180,12 +180,12 @@ export class AttachmentStore {
     if (prior) {
       const attachment = RuntimeAttachmentSchema.parse(JSON.parse(prior.record));
       const saved = RuntimeAttachmentSourceSchema.parse(JSON.parse(prior.source));
-      if (attachment.machineId !== input.machineId || attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId || JSON.stringify(attachment.checkout) !== JSON.stringify(input.checkout) || JSON.stringify(saved) !== JSON.stringify(source)) throw new Error('Attachment request identity changed');
+      if (attachment.role !== (input.role ?? (input.checkout.kind === 'snapshot' ? 'runner' : 'delegate')) || attachment.machineId !== input.machineId || attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId || JSON.stringify(attachment.checkout) !== JSON.stringify(input.checkout) || JSON.stringify(saved) !== JSON.stringify(source)) throw new Error('Attachment request identity changed');
       return { attachment };
     }
     const generation = Math.max(-1, ...this.list().filter(attachment => attachment.machineId === input.machineId).map(attachment => attachment.generation)) + 1;
     const { attachment } = await this.attach({ projectId: input.projectId, workspaceId: input.workspaceId, machineId: input.machineId, generation,
-      role: input.checkout.kind === 'snapshot' ? 'runner' : 'delegate', checkout: input.checkout, capabilities,
+      role: input.role ?? (input.checkout.kind === 'snapshot' ? 'runner' : 'delegate'), checkout: input.checkout, capabilities,
     }, { requestId: input.requestId, source });
     return { attachment };
   }
@@ -276,7 +276,7 @@ export class AttachmentStore {
   }
   recordPrimaryFlush(attachmentId: string, generation: number): void {
     const attachment = this.list().find(item => item.attachmentId === attachmentId && item.generation === generation);
-    if (!attachment || attachment.role !== 'primary' || attachment.state !== 'draining') throw new Error('Final snapshot requires a draining primary');
+    if (!attachment || (attachment.role !== 'primary' && attachment.role !== 'replica') || attachment.state !== 'draining') throw new Error('Final snapshot requires a draining replica');
     this.storage.sql.exec('INSERT OR REPLACE INTO runtime_primary_flush(attachment,generation) VALUES(?,?)', attachmentId, generation);
   }
   transition(attachmentId: string, generation: number, state: RuntimeAttachment['state']): RuntimeAttachment {
@@ -286,7 +286,7 @@ export class AttachmentStore {
       const permitted: Record<RuntimeAttachment['state'], readonly RuntimeAttachment['state'][]> = { attaching: ['ready', 'lost', 'draining'], ready: ['draining', 'lost'], draining: ['detached', 'lost'], lost: ['draining'], detached: [] };
       if (!permitted[attachment.state].includes(state)) throw new Error('Invalid attachment transition');
       if (state === 'detached' && this.storage.sql.exec<{ dispatch: string }>("SELECT dispatch FROM runtime_attempts WHERE status='dispatched'").toArray().some(row => RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)).attachmentId === attachmentId)) throw new Error('Unresolved execution prevents detach');
-      if (attachment.role === 'primary' && state === 'detached' && !this.storage.sql.exec('SELECT attachment FROM runtime_primary_flush WHERE attachment=? AND generation=?', attachmentId, generation).toArray().length) throw new Error('Primary must publish its final snapshot before releasing the writer');
+      if ((attachment.role === 'primary' || attachment.role === 'replica') && state === 'detached' && !this.storage.sql.exec('SELECT attachment FROM runtime_primary_flush WHERE attachment=? AND generation=?', attachmentId, generation).toArray().length) throw new Error('Replica must publish its final snapshot before detaching');
       const next = { ...attachment, state, updatedAt: new Date().toISOString() };
       this.storage.sql.exec('UPDATE runtime_attachments SET record=? WHERE id=?', JSON.stringify(next), attachmentId);
       return next;

@@ -1,14 +1,15 @@
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import type { ConversationId, Cursor, EntryRecord, Harness, TaskId, EntryId, CommitPublication } from '@earendil-works/pi-durable';
+import { defineDoc } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, PlanDoc, QuestionsDoc, PlacementDoc, WorkspaceDoc, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, PlanDoc, QuestionsDoc, WorkspaceDoc, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeWatchInput } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, type AttachmentServices } from './attachments.js';
 import { createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeSessionCommand, RuntimeSessionResult, TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
+import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, RuntimeExecutionDocumentSchema, RuntimeMachineIdSchema, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { createCronRuntime, type RuntimeCronInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord';
@@ -18,7 +19,7 @@ import { createReplicaStore } from './replica-store.js';
 import { CloudFileStore } from './cloud-files.js';
 import type { ArtifactsCodeStore } from './artifacts.js';
 import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; modelProxy(input: { conversationId: string; operation: 'completion' | 'judge'; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; mcpProxy(input: { conversationId: string; attemptId: string; callId: string; method: RuntimeMcpInput['method']; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; modelProxy(input: { conversationId: string; operation: 'completion' | 'judge'; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; mcpProxy(input: { conversationId: string; attemptId: string; callId: string; method: RuntimeMcpInput['method']; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 type RuntimeBrowserService = NonNullable<SessionControlServices['browser']>;
 export type WorkspaceRuntime = {
@@ -33,11 +34,14 @@ export type WorkspaceRuntime = {
   watch(input: RuntimeWatchInput): Promise<Response>;
   wake(): Promise<void>;
   session(conversationId: string | undefined, command: RuntimeSessionCommand, canApprove?: boolean): Promise<RuntimeSessionResult>;
-  assignPlacement(conversationId: string, attachmentId: string, generation: number): Promise<void>;
+  setExecutionMachine(machineId: string | null): Promise<void>;
+  defaultExecutionMachine(): string | null;
+  waitForSnapshot(commit: string): Promise<void>;
+  replicaReady(attachmentId: string, generation: number): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
   discoverMcp(input: { requestId: string; args: JsonValue }): Promise<RuntimeToolResult>;
   qa(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted & { shareDraft?: string }>;
-  snapshotCommit(input: RuntimeSnapshotCommitInput): Promise<RuntimeAccepted>;
+  snapshotCommit(input: RuntimeSnapshotCommitInput): Promise<RuntimeSnapshotCommitResult>;
   lfsRoots(): RuntimeSnapshotCommitInput['checkpoint'][];
   reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void>;
   cronSubmit(input: RuntimeCronInput): Promise<{ conversationId: string }>;
@@ -47,11 +51,13 @@ export type WorkspaceRuntime = {
   mcp(input: RuntimeMcpInput, machineId: string): Promise<JsonValue>;
   publish(): void;
 };
+const ReplicaNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }) });
 export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): Promise<WorkspaceRuntime> {
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
   const runtime = await createRuntimeHarness({ ...options, storage });
   const { harness } = runtime;
   const attachments = new AttachmentStore(options.storage, options.attachments);
+  const execution = RuntimeExecutionDocumentSchema.parse(await options.storage.get('runtime.execution') ?? { defaultMachineId: null });
   const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.lfs, async (checkpoint, publicationId) => {
     try { await options.retainLfs(checkpoint, publicationId); }
     catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
@@ -185,6 +191,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     queueMicrotask(() => { options.waitUntil(collectReceipts().catch(options.onReport)); });
   }
   const listeners = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  const snapshotWaiters = new Set<() => void>();
   const encoder = new TextEncoder();
   let line = Promise.resolve();
   let publicationPending = false;
@@ -203,8 +210,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         if (!conversation) continue;
         // Pi scans fork-aware entries newest-first; one bounded page includes inherited history.
         const entries = [...(await conversation.entries({}, 256, undefined, BACKGROUND_CONTEXT)).items].reverse();
-        const placement = await harness.snapshot(PlacementDoc, record.id, BACKGROUND_CONTEXT);
-        conversations.push({ id: String(record.id), parentId: record.parent ? String(record.parent.conversationId) : null, title: record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`, status: inspection.tasks.some(task => task.record.conversationId === record.id && task.state.kind === 'running') ? 'running' : 'idle', placement: placement?.attachmentId ? { attachmentId: placement.attachmentId, generation: placement.generation } : null, messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))) });
+        const parentId = record.parent?.conversationId ?? record.owner?.conversationId;
+        conversations.push({ id: String(record.id), parentId: parentId === undefined ? null : String(parentId), title: record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`, status: inspection.tasks.some(task => task.record.conversationId === record.id && task.state.kind === 'running') ? 'running' : 'idle', messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))) });
       }
       cursor = page.next;
     } while (cursor);
@@ -231,11 +238,12 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     const workspace = await harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT);
     const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
-    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null } });
+    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.execution': execution } });
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops: diffRevisions(snapshot, next) });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
     snapshot = next;
+    for (const notify of snapshotWaiters) notify();
     const bytes = encoder.encode(encodedEvent + '\n');
     for (const listener of listeners) {
       if ((listener.desiredSize ?? 0) <= 0) { listener.error(new Error('Runtime subscription exceeded bounded queue; reconnect for reset')); listeners.delete(listener); }
@@ -350,20 +358,21 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     },
     async snapshotCommit(raw) {
       const input = RuntimeSnapshotCommitInputSchema.parse(raw);
-      await cloudFiles.snapshot();
-      options.storage.transactionSync(() => {
-        const attachment = attachments.list().find(item => item.attachmentId === input.attachmentId && item.generation === input.generation && item.role === 'primary' && (item.state === 'attaching' || item.state === 'ready' || item.state === 'draining'));
-        if (!attachment) throw new Error('Snapshot publication requires the current primary');
+      const authorize = () => {
+        const attachment = attachments.list().find(item => item.attachmentId === input.attachmentId && item.generation === input.generation && (item.role === 'primary' || item.role === 'replica') && ['attaching', 'ready', 'draining'].includes(item.state));
+        if (!attachment) throw new Error('Snapshot publication requires an authorized replica');
         if (attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId) throw new Error('Snapshot identity mismatch');
-        if (input.final && attachment.state !== 'draining') throw new Error('Final snapshot requires a draining primary');
-        cloudFiles.commitMachine(input.checkpoint, input.previousWorktreeCommit, attachment.machineId, attachment.state === 'attaching');
-      });
+        if (input.final && attachment.state !== 'draining') throw new Error('Final snapshot requires a draining replica');
+        return attachment;
+      };
+      const attachment = authorize();
+      const checkpoint = await cloudFiles.commitMachine(input.checkpoint, input.previousWorktreeCommit, attachment.machineId, authorize);
       try { await cloudFiles.flushRetention(); }
       catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
       if (input.final) attachments.recordPrimaryFlush(input.attachmentId, input.generation);
       await options.storage.sync();
       publish(); await line;
-      return { accepted: true, cursor: snapshot.cursor };
+      return { accepted: true, cursor: snapshot.cursor, checkpoint };
     },
     lfsRoots: () => cloudFiles.lfsRoots(),
     reconcileLfsSources: objects => cloudFiles.reconcileLfsSources(objects),
@@ -374,23 +383,40 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       if (wakesTasks) { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); }
       return result;
     },
-    async assignPlacement(conversationId, attachmentId, generation) {
-      const attachment = attachments.list().find(value => value.attachmentId === attachmentId && value.generation === generation && value.state === 'ready');
-      if (!attachment) throw new Error('Placement requires a ready attachment generation');
-      const target = await conversation(conversationId);
-      await target.commit(async tx => {
-        const placement = await tx.doc(PlacementDoc, target.id);
-        if (placement.attachmentId === attachmentId && placement.generation === generation) return;
-        if (placement.attachmentId !== null && (placement.attachmentId !== attachmentId || placement.generation !== generation)) {
-          const prior = attachments.list().find(value => value.attachmentId === placement.attachmentId && value.generation === placement.generation);
-          if (prior?.role !== 'primary' || prior.state !== 'detached' || attachment.role !== 'primary') throw new Error('Conversation placement is stable; fork a conversation to use another checkout');
-        }
-        if (attachment.lfsRestored?.length) {
-          const content = `LFS handoff to ${attachment.machineId}:\n${attachment.lfsRestored.map(file => `${file.path}: ${file.outcome === 'committed' ? 'restored committed content' : 'omitted (not committed)'}`).join('\n')}\nUncommitted LFS changes remain on the previous machine; they were not moved to this checkout.`;
-          await tx.appendEntry(target.id, { kind: 'gitspace.lfs-restored', data: { attachmentId, generation, files: attachment.lfsRestored }, model: [{ role: 'user', content, timestamp: Date.now() }] });
-        }
-        placement.attachmentId = attachmentId; placement.generation = generation;
+    defaultExecutionMachine: () => execution.defaultMachineId,
+    async replicaReady(attachmentId, generation) {
+      const attachment = attachments.list().find(item => item.attachmentId === attachmentId && item.generation === generation && item.state === 'ready');
+      if (!attachment?.lfsRestored?.length) return;
+      await harness.commit(async tx => {
+        const seen = await tx.doc(ReplicaNoticesDoc);
+        const key = `${attachmentId}:${generation}`;
+        if (seen.seen[key]) return;
+        const text = `LFS handoff to ${attachment.machineId}:\n${attachment.lfsRestored!.map(item => `${item.path}: ${item.outcome === 'committed' ? 'restored committed content' : 'omitted'}`).join('\n')}\nHeld-back local changes remain on the previous machine.`;
+        await tx.appendEntry(runtime.root.id, { kind: 'gitspace.lfs-restored', model: [{ role: 'user', content: text, timestamp: Date.now() }] });
+        seen.seen[key] = true;
       }, BACKGROUND_CONTEXT);
+      publish(); await line;
+    },
+    async waitForSnapshot(commit) {
+      await line;
+      if ((await cloudFiles.snapshot())?.worktreeCommit !== commit) return;
+      await new Promise<void>(resolve => {
+        const finish = () => { clearTimeout(timeout); snapshotWaiters.delete(changed); resolve(); };
+        const changed = () => {
+          const code = snapshot.documents['gitspace.code'];
+          if (code && typeof code === 'object' && !Array.isArray(code) && code.worktreeCommit !== commit) finish();
+        };
+        const timeout = setTimeout(finish, 25_000);
+        snapshotWaiters.add(changed);
+        changed();
+      });
+    },
+    async setExecutionMachine(machineId) {
+      const selected = machineId === null ? null : RuntimeMachineIdSchema.parse(machineId);
+      if (selected !== null && !attachments.list().some(item => item.machineId === selected && (item.role === 'primary' || item.role === 'replica') && item.state === 'ready')) throw new Error('Default execution machine must have a ready workspace replica');
+      execution.defaultMachineId = selected;
+      await options.storage.put('runtime.execution', execution);
+      publish(); await line;
     },
     async snapshot() { await line; return snapshot; },
     async submit(input: RuntimeSubmitInput) {

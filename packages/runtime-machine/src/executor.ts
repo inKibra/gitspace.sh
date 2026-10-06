@@ -1,17 +1,37 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { canonicalJson, dispatchIdentity, receiptDigest, sealReceipt, RuntimeReceiptTransportSchema, RuntimeReceiptControlSchema, RuntimeToolDispatchSchema, RuntimeGitCheckpointSchema, type RuntimeReceiptTransport, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { canonicalJson, dispatchIdentity, receiptDigest, sealReceipt, RuntimeReceiptTransportSchema, RuntimeReceiptControlSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, RuntimeGitCheckpointSchema, type RuntimeReceiptTransport, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ExecutorJournal, dispatchFingerprint, type LocalAttachment } from './journal.js';
 import { checkoutPath, executeMachineTool, type ExecutorContent, type MachineToolOptions } from './tools.js';
 import { z } from 'zod';
 import { ExecutorEffectUncertain, reconcileSupervisorCommand } from './commands.js';
 
-export type MachineExecutorOptions = MachineToolOptions & { machineId: string; journal: ExecutorJournal; onMutationSettled?: (local: LocalAttachment) => Promise<z.infer<typeof RuntimeGitCheckpointSchema> | null> };
+export type MachineExecutorOptions = MachineToolOptions & { machineId: string; journal: ExecutorJournal; onBeforeExecute?: (local: LocalAttachment, dispatch: RuntimeToolDispatch) => Promise<void>; onMutationSettled?: (local: LocalAttachment) => Promise<z.infer<typeof RuntimeGitCheckpointSchema> | null> };
 export class MachineExecutor {
   private readonly active = new Map<string, Promise<RuntimeToolResult>>();
   private readonly checkoutQueues = new Map<string, Promise<unknown>>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly executing = new Set<string>();
   constructor(private readonly options: MachineExecutorOptions) {}
+
+  async withCheckout<T>(local: LocalAttachment, operation: () => Promise<T>): Promise<T> {
+    const prior = this.checkoutQueues.get(local.rootPath) ?? Promise.resolve();
+    const pending = prior.catch(() => {}).then(operation);
+    this.checkoutQueues.set(local.rootPath, pending);
+    try { return await pending; }
+    finally { if (this.checkoutQueues.get(local.rootPath) === pending) this.checkoutQueues.delete(local.rootPath); }
+  }
+
+  private async finishMutation(local: LocalAttachment, dispatch: RuntimeToolDispatch, result: RuntimeToolResult): Promise<RuntimeToolResult> {
+    this.options.journal.saveProposal(`replica-result:${dispatch.attemptId}`, result);
+    let checkpoint: z.infer<typeof RuntimeGitCheckpointSchema> | null;
+    try { checkpoint = await this.options.onMutationSettled?.(local) ?? null; }
+    catch (error) { throw new ExecutorEffectUncertain(`Command completed; snapshot acceptance requires reconciliation: ${error instanceof Error ? error.message : String(error)}`); }
+    if (dispatch.tool === 'checkpoint' && !checkpoint) throw new ExecutorEffectUncertain('Checkpoint publication did not return accepted snapshot evidence');
+    if (dispatch.tool === 'checkpoint' && checkpoint) result = { ...result, content: [{ type: 'text', text: JSON.stringify({ checkpoint }) }] };
+    if (checkpoint?.conflicts?.length) result = { ...result, content: [...result.content, { type: 'text', text: `Workspace merge conflicts: ${checkpoint.conflicts.join(', ')}` }] };
+    this.options.journal.settle(dispatch, result);
+    return result;
+  }
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
@@ -74,6 +94,11 @@ export class MachineExecutor {
   async observe(dispatch: RuntimeToolDispatch, cancel = false): Promise<RuntimeReceiptTransport> {
     const local = this.authorize(dispatch, true);
     const attempt = this.options.journal.attempt(dispatch.attemptId);
+    const staged = this.options.journal.proposal(`replica-result:${dispatch.attemptId}`);
+    if (staged && !attempt?.result && !this.active.has(dispatch.attemptId)) {
+      const result = await this.withCheckout(local, () => this.finishMutation(local, dispatch, RuntimeToolResultSchema.parse(staged)));
+      return this.options.journal.saveReceipt(dispatch, await sealReceipt(dispatch, result, local.executionSecret));
+    }
     if (attempt?.state === 'running' && !this.active.has(dispatch.attemptId) && (dispatch.tool === 'bash' || dispatch.tool === 'jobs')) {
       try {
         const args = z.object({ command: z.string().optional(), application: z.string().optional(), args: z.array(z.string()).default([]), cwd: z.string().optional(), op: z.string().optional() }).parse(dispatch.args);
@@ -81,9 +106,8 @@ export class MachineExecutor {
           const cancelRequested = cancel || attempt.cancelRequested === true;
           const recovered = await reconcileSupervisorCommand({ application: dispatch.tool === 'bash' ? '/bin/bash' : args.application!, args: dispatch.tool === 'bash' ? ['-c', args.command!] : args.args, cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, attemptId: dispatch.attemptId, sequence: 0 }, cancelRequested);
           if (recovered) {
-            await this.options.onMutationSettled?.(local);
-            const result: RuntimeToolResult = { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: cancelRequested ? 'interrupted' : 'completed', content: [{ type: 'text', text: dispatch.tool === 'bash' ? `Exit code: ${recovered.exitCode}\n${recovered.output}` : JSON.stringify(recovered) }] };
-            this.options.journal.settle(dispatch, result);
+            const outcome: RuntimeToolResult = { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: cancelRequested ? 'interrupted' : 'completed', content: [{ type: 'text', text: dispatch.tool === 'bash' ? `Exit code: ${recovered.exitCode}\n${recovered.output}` : JSON.stringify(recovered) }] };
+            const result = await this.withCheckout(local, () => this.finishMutation(local, dispatch, outcome));
             return this.options.journal.saveReceipt(dispatch, await sealReceipt(dispatch, result, local.executionSecret));
           }
         }
@@ -151,19 +175,27 @@ export class MachineExecutor {
       try {
         const current = this.options.journal.attachment(dispatch.attachmentId);
         if (!current || current.attachment.generation !== dispatch.generation || current.attachment.state !== 'ready') throw new Error('Attachment changed before execution');
+        if (!bypassQueue) await this.options.onBeforeExecute?.(current, dispatch);
         if (!this.options.journal.launch(dispatch)) throw new ExecutorEffectUncertain('Durable launch barrier prevented execution');
         this.executing.add(dispatch.attemptId);
         let content: ExecutorContent;
-        let checkpoint: z.infer<typeof RuntimeGitCheckpointSchema> | null = null;
-        let uncertain = false;
-        try { content = await executeMachineTool(dispatch, current, controller.signal, this.options); }
-        catch (error) { uncertain = error instanceof ExecutorEffectUncertain; throw error; }
-        finally { if (!uncertain && !jobControl && dispatch.replay === 'unsafe') checkpoint = await this.options.onMutationSettled?.(current) ?? null; }
-        if (dispatch.tool === 'checkpoint') {
-          if (!checkpoint) throw new Error('Checkpoint publication did not return an immutable receipt');
-          content = [{ type: 'text', text: JSON.stringify({ checkpoint }) }];
+        try {
+          if (dispatch.tool === 'checkpoint') {
+            if (!this.options.onMutationSettled || !['primary', 'replica'].includes(current.attachment.role)) throw new Error('Checkpoint requires a cloud-following replica publisher');
+            content = [];
+          } else content = await executeMachineTool(dispatch, current, controller.signal, this.options);
+        }
+        catch (error) {
+          if (error instanceof ExecutorEffectUncertain) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          const failure: RuntimeToolResult = controller.signal.aborted
+            ? { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: 'interrupted', content: [{ type: 'text', text: message }] }
+            : { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: 'failed', content: [], error: { code: 'execution', message } };
+          if (!jobControl && dispatch.replay === 'unsafe') return await this.finishMutation(current, dispatch, failure);
+          throw error;
         }
         const result: RuntimeToolResult = { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: 'completed', content };
+        if (!jobControl && dispatch.replay === 'unsafe') return await this.finishMutation(current, dispatch, result);
         this.options.journal.settle(dispatch, result); return result;
       } catch (error) {
         if (error instanceof ExecutorEffectUncertain) throw error;

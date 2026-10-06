@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord';
 import { createRuntimeTools, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
-import { PlacementDoc, QuestionsDoc, WorkspaceDoc } from './documents.js';
+import { QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
 import { BackgroundAgentTask } from './background-agents.js';
 import { createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
@@ -87,7 +87,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   registry.install(createRetainedRulesExtension(options.retainedRules, () => harness, options.identity));
   registry.install(extension);
   registry.install(sessionControlsExtension);
-  const harness = await Harness.open(options.storage, { models: options.models, registry: ruleGenerationRegistry(registry), settings: options.settings, onReport: options.onReport, conversationCreated: async (tx, record) => { await tx.doc(PlacementDoc, record.id); } }, BACKGROUND_CONTEXT);
+  const harness = await Harness.open(options.storage, { models: options.models, registry: ruleGenerationRegistry(registry), settings: options.settings, onReport: options.onReport }, BACKGROUND_CONTEXT);
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: options.model, tools: tools.filter(tool => tool.name !== (options.editTool(options.model) === 'edit' ? 'apply_patch' : 'edit')) } });
   await harness.commit(async tx => { await tx.doc(WorkspaceDoc); await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
   return { harness, root, registry, async configureModel(conversationId: ConversationId, model: ModelRef) {

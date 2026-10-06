@@ -205,11 +205,39 @@ export async function restoredGitLfsPaths(root: string, worktreeCommit: string, 
   return (snapshot?.heldBack ?? []).map(item => ({ path: item.path, outcome: entries.has(item.path) ? 'committed' as const : 'omitted' as const }));
 }
 
-export async function checkoutGitLfs(root: string, ref: string): Promise<void> {
+/** A local-only tree for patch preimages; hydrated payloads are never checkpoint parents. */
+export async function gitLfsWorktreeTree(root: string, ref: string, otherRef: string, protectedPaths: readonly string[]): Promise<string> {
+  const entries = await tree(root, ref);
+  const other = await tree(root, otherRef);
+  const temporary = await mkdtemp(join(tmpdir(), 'gitspace-lfs-delta-'));
+  const env = { GIT_INDEX_FILE: join(temporary, 'index') };
+  try {
+    await git(root, ['read-tree', ref], env);
+    for (const [path, entry] of entries) {
+      if (protectedPaths.includes(path) || other.get(path)?.oid === entry.oid || entry.mode === '120000' || Number(text(await git(root, ['cat-file', '-s', entry.oid]))) > 1024) continue;
+      const object = parseGitLfsPointer(await git(root, ['cat-file', 'blob', entry.oid]));
+      if (!object) continue;
+      const payload = await cached(root, object);
+      if (!payload) throw new Error(`Missing Git LFS object ${object.oid} for replica delta`);
+      const oid = text(await git(root, ['hash-object', '-w', '--no-filters', '--', payload])).trim();
+      await git(root, ['update-index', '--add', '--cacheinfo', entry.mode, oid, path], env);
+    }
+    return text(await git(root, ['write-tree'], env)).trim();
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+}
+
+export async function checkoutGitLfs(root: string, ref: string, protectedPaths?: readonly string[]): Promise<void> {
   for (const [path, entry] of await tree(root, ref)) {
+    if (protectedPaths?.includes(path)) continue;
     if (entry.mode === '120000' || Number(text(await git(root, ['cat-file', '-s', entry.oid]))) > 1024) continue;
     const object = parseGitLfsPointer(await git(root, ['cat-file', 'blob', entry.oid]));
     if (!object) continue;
+    if (protectedPaths) {
+      const current = parseGitLfsPointer(await readFile(resolve(root, path)));
+      // Replica synchronization must not replace hydrated or concurrently edited
+      // local content. Only the exact newly installed pointer is hydrated.
+      if (!current || current.oid !== object.oid || current.size !== object.size) continue;
+    }
     const cachedPath = await cached(root, object);
     if (!cachedPath) throw new Error(`Missing Git LFS object ${object.oid} during checkout`);
     await writeFile(resolve(root, path), createReadStream(cachedPath));

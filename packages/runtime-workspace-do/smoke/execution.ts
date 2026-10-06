@@ -30,7 +30,7 @@ export async function runExecutionProof(): Promise<void> {
     operations: machineOperationalTools({
       get environments() { return unexpected(); }, get services() { return unexpected(); }, get authority() { return unexpected(); },
       get controls() { return unexpected(); }, get artifacts() { return unexpected(); }, get mcp() { return unexpected(); },
-      journal: () => journal, checkpoint: unexpected,
+      journal: () => journal,
     }),
   });
   let executor = openExecutor();
@@ -283,7 +283,7 @@ export async function runExecutionProof(): Promise<void> {
     const cancelled = Object.values(cancelledState.jobs.records).find(record => record.acceptance.job.jobId === cancellationJob.acceptance.job.jobId)!.observation;
     assert.equal(cancelled.status, 'terminal');
     if (cancelled.status !== 'terminal') throw new Error('Running Job cancellation did not recover a terminal receipt');
-    assert.equal(cancelled.receipt.result.status, 'interrupted');
+    assert.equal(cancelled.receipt.result.status, 'interrupted', JSON.stringify(cancelled.receipt.result));
     await until(value => value.snapshot.tasks.some(task => task.id === cancellationJob.acceptance.job.taskId && task.state === 'interrupted'));
     await until(value => JSON.stringify(value.transcript).includes(`Consumed job receipt ${cancellationJob.acceptance.job.jobId}`));
     await request('/submit', { text: 'run background job', requestId: 'stopped-conversation-job' });

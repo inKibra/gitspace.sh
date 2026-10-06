@@ -8,7 +8,7 @@ export type OperationalServices = {
   execute(input: OperationalExecution & { signal: AbortSignal }): Promise<RuntimeToolResult>;
   reconcile(attemptId: string): Promise<RuntimeToolResult | RuntimeExecutorReceipt | null>;
   cancel(attemptId: string): Promise<void>;
-  jobScope(): { projectId: string; workspaceId: string };
+  jobScope(args: JsonValue): { projectId: string; workspaceId: string } | Promise<{ projectId: string; workspaceId: string }>;
   controlJob(input: { attemptId: string; op: 'logs' | 'cancel' }): Promise<RuntimeToolResult>;
   wakeAt(timestamp: number): Promise<void>;
 };

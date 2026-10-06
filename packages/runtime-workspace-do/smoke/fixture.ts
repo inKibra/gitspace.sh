@@ -5,7 +5,7 @@ import { createOperationalTasks, type OperationalServices } from '../../runtime-
 import { RuntimeAnswerInputSchema, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { createWorkspaceRuntime } from '../src/runtime.js';
 import { createReplicaStore } from '../src/replica-store.js';
-import { PlacementDoc, QuestionsDoc } from '../../runtime-core/src/documents.js';
+import { QuestionsDoc } from '../../runtime-core/src/documents.js';
 
 const identity = RuntimeIdentitySchema.parse({ projectId: 'smoke-project', workspaceId: 'smoke-workspace' });
 const modelRef = { provider: 'fixture', modelId: 'fixture' };
@@ -37,7 +37,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
     this.operations = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, wakeAt: timestamp => ctx.storage.setAlarm(timestamp) };
     this.runtime = createWorkspaceRuntime({
       storage: ctx.storage, identity, models, model: modelRef,
-      code: { readFile: unsupported, writeSnapshot: unsupported },
+      code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: unsupported },
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: unsupported,
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported },
       operations: this.operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
@@ -75,7 +75,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       if (url.pathname === '/browser-approval-proof') {
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);
         const questionId = 'approval:browser-group-proof';
-        const card = { ...identity, id: 'current-group', conversationId: String(root.id), machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: crypto.randomUUID(), groupName: 'Smoke workspace', origins: ['example.com'], source: 'relay' as const, expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'open' as const, requiresApproval: true };
+        const card = { ...identity, id: 'current-group', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: crypto.randomUUID(), groupName: 'Smoke workspace', origins: ['example.com'], source: 'relay' as const, expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'open' as const, requiresApproval: true };
         await runtime.harness.commit(async tx => { (await tx.doc(QuestionsDoc)).items.push({ id: questionId, conversationId: String(root.id), kind: 'approval', prompt: 'Create workspace browser group', choices: ['Approve', 'Reject'], answer: null, browser: card }); }, BACKGROUND_CONTEXT);
         const answer = (expectedBrowserPreparationId?: string) => runtime.answer({ ...identity, questionId, answer: true, expectedBrowserPreparationId }, { deviceId: 'fixture-browser', canApprove: true });
         const mustReject = async (expected?: string) => { let rejected = false; try { await answer(expected); } catch { rejected = true; } check(rejected, 'Missing or stale browser preparation accepted'); check((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === questionId)?.answer === null, 'Failed browser approval changed durable answer'); };
@@ -84,41 +84,23 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         check((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === questionId)?.answer === true, 'Group creation approval was not committed');
         return Response.json({ missingRejected: true, staleRejected: true, groupApproved: true });
       }
-      if (url.pathname === '/placement-handoff-proof') {
-        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
-        const a = RuntimeAttachmentSchema.parse({ ...identity, machineId: 'placement-a', attachmentId: 'placement-a', generation: 1, role: 'primary', state: 'detached', checkout: { kind: 'shared', branch: 'main' }, capabilities: [], updatedAt: new Date().toISOString() });
-        const b = RuntimeAttachmentSchema.parse({ ...a, machineId: 'placement-b', attachmentId: 'placement-b', state: 'ready' });
+      if (url.pathname === '/execution-machine-proof') {
+        const a = RuntimeAttachmentSchema.parse({ ...identity, machineId: 'machine-a', attachmentId: 'replica-a', generation: 1, role: 'primary', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: [], updatedAt: new Date().toISOString() });
+        const b = RuntimeAttachmentSchema.parse({ ...a, machineId: 'machine-b', attachmentId: 'replica-b', role: 'replica', checkout: { kind: 'branch', branch: 'replica', commit: 'a'.repeat(40) } });
         const seed = (value: typeof a) => this.ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', value.attachmentId, JSON.stringify(value), 'fixture-only');
         seed(a); seed(b);
-        const reset = async (attachmentId = a.attachmentId, generation = a.generation) => root.commit(async tx => {
-          const doc = await tx.doc(PlacementDoc, root.id);
-          doc.attachmentId = attachmentId; doc.generation = generation;
-        }, BACKGROUND_CONTEXT);
-        const assign = () => runtime.assignPlacement(String(root.id), b.attachmentId, b.generation);
-        await reset(); await assign();
-        check((await runtime.harness.snapshot(PlacementDoc, root.id, BACKGROUND_CONTEXT))?.attachmentId === b.attachmentId, 'Detached primary did not hand off placement');
-        await assign();
-        const reject = async () => {
-          const before = await runtime.harness.snapshot(PlacementDoc, root.id, BACKGROUND_CONTEXT);
+        await runtime.setExecutionMachine(b.machineId);
+        check(runtime.defaultExecutionMachine() === b.machineId, 'Ready private replica selection failed');
+        for (const state of ['attaching', 'lost', 'draining', 'detached'] as const) {
+          seed({ ...a, state });
           let rejected = false;
-          try { await assign(); } catch { rejected = true; }
-          check(rejected, 'Unsafe placement handoff accepted');
-          check(JSON.stringify(await runtime.harness.snapshot(PlacementDoc, root.id, BACKGROUND_CONTEXT)) === JSON.stringify(before), 'Rejected handoff mutated placement');
-        };
-        for (const state of ['ready', 'attaching', 'lost', 'draining'] as const) {
-          seed({ ...a, state }); await reset(); await reject();
+          try { await runtime.setExecutionMachine(a.machineId); } catch { rejected = true; }
+          check(rejected && runtime.defaultExecutionMachine() === b.machineId, 'Unavailable replica replaced the default');
         }
-        seed(a);
-        await reset('missing-history'); await reject();
-        await reset(a.attachmentId, a.generation + 1); await reject();
-        for (const role of ['runner', 'delegate'] as const) {
-          seed(b); seed({ ...a, role }); await reset(); await reject();
-          seed(a); seed({ ...b, role }); await reset(); await reject();
-        }
-        seed({ ...b, state: 'attaching' }); await reset(); await reject();
+        await runtime.setExecutionMachine(null);
+        check(runtime.defaultExecutionMachine() === null, 'Automatic execution selection was not restored');
         this.ctx.storage.sql.exec('DELETE FROM runtime_attachments WHERE id IN (?,?)', a.attachmentId, b.attachmentId);
-        await root.commit(async tx => { const doc = await tx.doc(PlacementDoc, root.id); doc.attachmentId = null; doc.generation = 0; }, BACKGROUND_CONTEXT);
-        return Response.json({ detachedPrimaryHandoff: true, unsafeHandoffsRejected: true });
+        return Response.json({ readyReplicaSelected: true, unavailableRejected: true });
       }
       if (url.pathname === '/submit') {
         await runtime.submit({ ...identity, requestId: url.searchParams.get('requestId') ?? crypto.randomUUID(), text: url.searchParams.get('text') ?? '' });

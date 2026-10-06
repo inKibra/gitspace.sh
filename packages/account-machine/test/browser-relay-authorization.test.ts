@@ -7,7 +7,7 @@ async function fixture(authorityAgeMs = 0) {
   const workspace = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;
   const now = Date.now(); const issuedAt = new Date(now - 1000).toISOString(); const expiresAt = new Date(now + 60000).toISOString();
   const scope = { projectId: 'project', workspaceId: 'workspace', conversationId: 'conversation', machineId: 'machine', attachmentId: 'attachment', generation: 2, taskId: 'task', requestId: 'request', attemptId: crypto.randomUUID() };
-  const grantBody = { projectId:scope.projectId,workspaceId:scope.workspaceId,conversationId:scope.conversationId,machineId:scope.machineId,attachmentId:scope.attachmentId,generation:scope.generation, groupId: crypto.randomUUID(), groupName:'Workspace', source: 'relay' as const, origins:['example.com'], expiresAt };
+  const grantBody = { projectId:scope.projectId,workspaceId:scope.workspaceId,machineId:scope.machineId,attachmentId:scope.attachmentId,generation:scope.generation, groupId: crypto.randomUUID(), groupName:'Workspace', source: 'relay' as const, origins:['example.com'], expiresAt };
   const certificateBody = { accountId: 'account', projectId: 'project', workspaceId: 'workspace', publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', workspace.publicKey))), issuedAt: new Date(Date.parse(issuedAt) - authorityAgeMs).toISOString(), expiresAt };
   const certificatePayload = canonicalBrowserAuthorization(certificateBody).replace('gitspace.browser.authorization.v1\n', 'gitspace.browser.authority.v1\n');
   const authority = { body: certificateBody, signature: browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', root.privateKey, new TextEncoder().encode(certificatePayload)))) };

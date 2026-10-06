@@ -13,6 +13,7 @@ export function createCronRuntime(options: Pick<RuntimeHarnessOptions, 'admitInf
   }
   return {
     async submit(input: RuntimeCronInput): Promise<{ conversationId: string }> {
+      const root = await options.harness.root(context);
       const id = await options.harness.commit(async tx => {
         const requests = await tx.doc(CronRequestsDoc);
         const prior = requests.requests[input.requestId];
@@ -20,7 +21,8 @@ export function createCronRuntime(options: Pick<RuntimeHarnessOptions, 'admitInf
           if (prior.text !== input.text || JSON.stringify(prior.readScopes) !== JSON.stringify(input.readScopes) || JSON.stringify(prior.writeScopes) !== JSON.stringify(input.writeScopes)) throw new Error('Cron request identity changed');
           return prior.conversationId;
         }
-        const created = await tx.createConversation({ ownership: { kind: 'ownerless' } });
+        const pivot = await tx.appendEntry(root.id, { kind: 'gitspace.cron-start', data: { requestId: input.requestId } });
+        const created = await tx.forkConversation(root.id, pivot.id, { ownership: { kind: 'ownerless' } });
         const scope = await tx.doc(CronScopeDoc, created.id); scope.constrained = true; scope.readScopes = input.readScopes; scope.writeScopes = input.writeScopes;
         requests.requests[input.requestId] = { conversationId: String(created.id), text: input.text, readScopes: input.readScopes, writeScopes: input.writeScopes };
         return String(created.id);

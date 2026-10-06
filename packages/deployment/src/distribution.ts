@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-/** Native dependency graphs are built on each target, never cross-labelled. Linux artifacts use glibc, not musl. */
+/** Native dependency graphs are built on each target, never cross-labelled. Linux hosts use glibc; static tools may use musl. */
 export const DISTRIBUTION_PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64'] as const;
 export const DISTRIBUTION_BUN_VERSION = '1.4.0';
 export const distributionPlatformSchema = z.enum(DISTRIBUTION_PLATFORMS);
@@ -55,10 +55,10 @@ export const distributionManifestSchema = z.object({
       if (paths.has(parts.join('/'))) context.addIssue({ code: 'custom', message: `Runtime file is also a directory: ${name}` });
     }
   }
-  for (const required of ['host.js', 'rpc-probe.js', 'bin/bun', 'machine/machine.js', 'machine/machine-worker.js', 'machine/host-runtime.js', 'machine/machine-update.js', 'machine/machine-bootstrap.js', 'machine/machine-native.json', 'machine/native/git-lfs.json', 'machine/native/bin/git-lfs', 'machine.manifest.json']) {
+  for (const required of ['host.js', 'rpc-probe.js', 'bin/bun', 'machine/machine.js', 'machine/machine-worker.js', 'machine/host-runtime.js', 'machine/machine-update.js', 'machine/machine-bootstrap.js', 'machine/machine-native.json', 'machine/native/git-lfs.json', 'machine/native/bin/git-lfs', 'machine/native/ripgrep.json', 'machine/native/bin/rg', 'machine.manifest.json']) {
     if (!paths.has(required)) context.addIssue({ code: 'custom', message: `Runtime is missing ${required}` });
   }
-  for (const binary of ['bin/bun', 'machine/native/bin/git-lfs']) {
+  for (const binary of ['bin/bun', 'machine/native/bin/git-lfs', 'machine/native/bin/rg']) {
     if (manifest.runtime.files.find((file) => file.path === binary)?.mode !== 0o755) {
       context.addIssue({ code: 'custom', message: `${binary} must be executable` });
     }

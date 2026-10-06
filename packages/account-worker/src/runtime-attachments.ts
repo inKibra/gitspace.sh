@@ -23,7 +23,8 @@ export class RuntimeAttachmentController {
     const input = RuntimeAttachmentRequestInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
     const repository = `workspace-${input.workspaceId}`;
-    const checkpoint = input.sourceRef.startsWith('refs/gitspace/') ? await this.options.snapshot() : null;
+    const checkpoint = input.role === 'replica' || input.sourceRef.startsWith('refs/gitspace/') ? await this.options.snapshot() : null;
+    if (input.role === 'replica' && (!checkpoint || input.checkout.kind !== 'branch' || input.checkout.commit !== checkpoint.worktreeCommit)) throw new Error('Replica requires the current cloud snapshot and a private branch checkout');
     if (input.sourceRef.startsWith('refs/gitspace/') && checkpoint?.checkpointRef !== input.sourceRef) throw new Error('Selected checkpoint ref is not canonical');
     const resolved = await this.options.code.resolveRef(repository, checkpoint?.worktreeCommit ?? input.sourceRef);
     if (resolved !== input.checkout.commit) throw new Error('Assigned source ref no longer resolves to the selected commit');
@@ -41,7 +42,8 @@ export class RuntimeAttachmentController {
     }
     const result = await this.options.attachments.request(input, {
       ref: input.sourceRef, commit: resolved, requiresFiltersOrSubmodules,
-    }, input.checkout.kind === 'branch' ? [...executorCapabilities, 'delegate_export'] : executorCapabilities);
+      ...(input.role === 'replica' && checkpoint ? { checkpoint } : {}),
+    }, input.checkout.kind === 'branch' && input.role !== 'replica' ? [...executorCapabilities, 'delegate_export'] : executorCapabilities);
     this.options.publish();
     return result;
   }
@@ -53,9 +55,11 @@ export class RuntimeAttachmentController {
     const assignments = await Promise.all(assigned.map(async ({ grant, source }) => {
       if (grant.attachment.role === 'primary') return { grant, source: null, checkpoint: await this.options.snapshot() };
       if (!source) throw new Error('Private attachment source is missing');
-      if (grant.attachment.state === 'draining' || grant.attachment.state === 'lost') return { grant, source: { ...source, origin: null }, checkpoint: null };
+      const checkpoint = grant.attachment.role === 'replica' ? await this.options.snapshot() : null;
+      const sourceCheckpoint = source.checkpoint;
+      if (grant.attachment.state === 'draining' || grant.attachment.state === 'lost') return { grant, source: { ...source, origin: null }, checkpoint, sourceCheckpoint };
       const info = await this.options.code.info(`workspace-${grant.attachment.workspaceId}`);
-      return { grant, source: { ...source, remote: info.remote, origin: await this.options.origin(grant.attachment.projectId) }, checkpoint: null };
+      return { grant, source: { ...source, remote: info.remote, origin: await this.options.origin(grant.attachment.projectId) }, checkpoint, sourceCheckpoint };
     }));
     return { assignments };
   }

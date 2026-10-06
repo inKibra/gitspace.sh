@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { nativeAbiSchema } from '@gitspace/protocol/deployment';
 import { readExecutableFile, validateNativeAbi } from './executable-manifest.js';
 import { z } from 'zod';
@@ -31,9 +31,23 @@ export const gitLfsRuntimeSchema = digestSchema.extend({
 }).strict();
 export type GitLfsRuntime = z.infer<typeof gitLfsRuntimeSchema>;
 
+export const RIPGREP_PATH = 'native/bin/rg';
+export const RIPGREP_DECLARATION = 'native/ripgrep.json';
+export const ripgrepRuntimeSchema = digestSchema.extend({
+  version: z.literal(1),
+  path: z.literal(RIPGREP_PATH),
+  upstream: digestSchema.extend({
+    version: z.string().regex(/^\d+\.\d+\.\d+$/u),
+    url: z.string().startsWith('https://github.com/BurntSushi/ripgrep/releases/download/'),
+  }).strict(),
+}).strict();
+export type RipgrepRuntime = z.infer<typeof ripgrepRuntimeSchema>;
+
 export interface PreparedMachineNativeRuntime {
   /** Null only for generations that predate bundled Git LFS, e.g. a rollback target. */
   gitLfs: string | null;
+  /** Null only for rollback generations that predate bundled ripgrep; never falls back to PATH. */
+  ripgrep: string | null;
 }
 
 export async function nativeFileDigest(path: string): Promise<{ sha256: string; size: number }> {
@@ -89,12 +103,38 @@ export async function prepareGitLfs(root: string): Promise<string | null> {
   return binary;
 }
 
+export async function readRipgrepRuntime(root: string): Promise<RipgrepRuntime | null> {
+  try {
+    return ripgrepRuntimeSchema.parse(JSON.parse(await readFile(join(root, RIPGREP_DECLARATION), 'utf8')));
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** Authenticate before executing, including for a cached source-run binary. */
+export async function prepareRipgrep(root: string): Promise<string | null> {
+  const runtime = await readRipgrepRuntime(root);
+  if (!runtime) return null;
+  const binary = resolve(root, runtime.path);
+  await verifyNativeFile(binary, runtime);
+  await startNative([binary, '--version'], stdout => stdout.split(/\s/u, 3).slice(0, 2).join(' ') === `ripgrep ${runtime.upstream.version}`, 'ripgrep');
+  return binary;
+}
+
+/** Machine bootstrap owns this value; search never discovers an ambient executable. */
+export function machineRipgrepPath(environment: Record<string, string | undefined> = process.env): string {
+  const path = environment.GITSPACE_RIPGREP_PATH;
+  if (!path || !isAbsolute(path)) throw new Error('Machine search requires a prepared absolute GITSPACE_RIPGREP_PATH');
+  return path;
+}
+
 /** Called before draining a predecessor, and again by the successor before opening state. */
 export async function prepareMachineNativeRuntime(path: string): Promise<PreparedMachineNativeRuntime> {
   const runtime = await readMachineNativeRuntime(path);
   validateNativeAbi(runtime.abi);
   if (runtime.bunVersion !== Bun.version) throw new Error(`Native generation requires Bun ${runtime.bunVersion}, found ${Bun.version}`);
-  return { gitLfs: await prepareGitLfs(path) };
+  return { gitLfs: await prepareGitLfs(path), ripgrep: await prepareRipgrep(path) };
 }
 
 /**
@@ -103,10 +143,10 @@ export async function prepareMachineNativeRuntime(path: string): Promise<Prepare
  */
 export function machineToolEnvironment(
   environment: Record<string, string | undefined>,
-  native: Pick<PreparedMachineNativeRuntime, 'gitLfs'>,
-): { PATH: string; GITSPACE_MACHINE_TOOL_PATH: string } {
-  const tools = native.gitLfs ? dirname(native.gitLfs) : '';
+  native: PreparedMachineNativeRuntime,
+): { PATH: string; GITSPACE_MACHINE_TOOL_PATH: string; GITSPACE_RIPGREP_PATH: string } {
+  const tools = native.gitLfs ? dirname(native.gitLfs) : native.ripgrep ? dirname(native.ripgrep) : '';
   const previous = environment.GITSPACE_MACHINE_TOOL_PATH;
   const inherited = environment.PATH ? environment.PATH.split(delimiter).filter((entry) => !entry || (entry !== previous && entry !== tools)) : [];
-  return { PATH: (tools ? [tools, ...inherited] : inherited).join(delimiter), GITSPACE_MACHINE_TOOL_PATH: tools };
+  return { PATH: (tools ? [tools, ...inherited] : inherited).join(delimiter), GITSPACE_MACHINE_TOOL_PATH: tools, GITSPACE_RIPGREP_PATH: native.ripgrep ?? '' };
 }

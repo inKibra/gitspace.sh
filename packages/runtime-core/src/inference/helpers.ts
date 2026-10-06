@@ -1,6 +1,6 @@
 import type { ClassifierQuestion, Model, Models, ModelTypeMap, JsonObject } from '@earendil-works/pi-ai';
 import { applyInferenceSettings, type InferenceProfile } from '@gitspace/protocol/inference';
-import { RuntimeContentSchema, RuntimeJsonSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { Check } from 'typebox/schema';
 import { z } from 'zod';
 import { resolveAvailableProfileModel } from './admission.js';
@@ -17,7 +17,6 @@ const questionSchema = z.discriminatedUnion('type', [
 ]);
 const judgeArgs = z.object({ state: RuntimeJsonSchema, questions: z.record(z.string(), questionSchema).refine(value => Object.keys(value).length > 0, 'At least one question is required'), model: modelSelection }).strict();
 const selectionSettings = z.object({ modelRoles: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(), enabledModels: z.array(z.string()).optional() });
-const imageArgs = z.object({ prompt: z.string().min(1), model: modelSelection, images: z.array(RuntimeContentSchema.options[1]).optional() }).strict();
 function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: readonly T[], settings: InferenceProfile['settings'], selection: string | undefined, role: string): T | undefined {
   const config = selectionSettings.parse(applyInferenceSettings({}, settings));
   const matches = (pattern: string, model: T) => {
@@ -82,7 +81,7 @@ function validateJudgments(value: RuntimeJson, questions: z.infer<typeof judgeAr
 
 /** Only the caller's admitted registry supplies authentication and transport. */
 export async function generateProfileImage(models: Models, args: unknown, signal?: AbortSignal, settings: InferenceProfile['settings'] = {}): Promise<RuntimeToolResult['content']> {
-  const input = imageArgs.parse(args);
+  const input = RuntimeGenerateImageArgumentsSchema.parse(args);
   const model = chooseModel(await models.getAvailableOfType('image', undefined, { signal }), settings, input.model, 'image');
   if (!model) throw new Error('No authenticated admitted image model matches the image role or requested model');
   const result = await models.generateImages(model, { input: [{ type: 'text', text: input.prompt }, ...(input.images ?? [])] }, { signal });

@@ -5,7 +5,7 @@ import { createModels } from '@earendil-works/pi-ai';
 import { QuestionsDoc } from '@gitspace/runtime-core';
 import { SessionControlsDoc } from '@gitspace/runtime-core/session-controls';
 import { createRuntimeBrowserAuthority } from '../src/runtime-browser.js';
-import { RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserApprovalCard, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserApprovalCard, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 const harnesses: Harness[] = [];
 afterEach(async () => { vi.useRealTimers(); await Promise.all(harnesses.splice(0).map(harness => harness.close(BACKGROUND_CONTEXT))); });
@@ -26,15 +26,20 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical') {
   const harness = await Harness.open(new MemoryStorage(), { registry: createRegistry(), models: createModels() }, BACKGROUND_CONTEXT);
   harnesses.push(harness);
   const root = await harness.root(BACKGROUND_CONTEXT);
-  const state = { root: true, origins: ['example.com', 'other.test'], status: RuntimeBrowserStatusSchema.parse({ groups: [], records: [] }) };
+  const state: { root: boolean; defaultMachineId: string | null; origins: string[]; status: RuntimeBrowserStatus } = { root: true, defaultMachineId: null, origins: ['example.com', 'other.test'], status: RuntimeBrowserStatusSchema.parse({ groups: [], records: [] }) };
   const dispatches: RuntimeToolDispatch[] = [];
-  const runtime = { harness, browserConversation: async (_id: string) => ({ id: root.id, root: state.root }), attachments: { list: () => attachments, execute: async (dispatch: RuntimeToolDispatch): Promise<RuntimeToolResult> => {
+  const runtime = { harness, defaultExecutionMachine: () => state.defaultMachineId, browserConversation: async (_id: string) => ({ id: root.id, root: state.root }), attachments: { list: () => attachments, execute: async (dispatch: RuntimeToolDispatch): Promise<RuntimeToolResult> => {
     const { command } = RuntimeBrowserAuthorizationSchema.parse(dispatch.browserAuthorization).body;
     dispatches.push(dispatch);
     return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(command.type === 'manage' ? state.status : { targetId: 'target' }) }] };
   } } };
   const env = { ACCOUNT_ID: 'account', ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) }, CREDENTIALS: { getByName: () => ({ hasRuntimeMachine: (id: string) => credentials.has(id) ? Promise.resolve(true as const) : Promise.resolve(false as const) }) } };
-  const authority = createRuntimeBrowserAuthority({ storage, env, identity, runtime: () => runtime, approvedOrigins: async () => state.origins, groupName: async () => 'Workspace' });
+  const authority = createRuntimeBrowserAuthority({ storage, env, identity, runtime: () => runtime, async selectExecution(args, candidates) {
+    const machineId = args.on ?? state.defaultMachineId;
+    const selected = candidates.find(item => machineId === null || item.machineId === machineId);
+    if (!selected) throw new Error('No selected browser replica is ready');
+    return selected;
+  }, approvedOrigins: async () => state.origins, groupName: async () => 'Workspace' });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
   const approve = async (browser: RuntimeBrowserApprovalCard, answer: boolean | null = true) => harness.commit(async tx => { (await tx.doc(QuestionsDoc)).items = [{ id: 'approval:task', conversationId: input.conversationId, kind: 'approval', browser, answer, prompt: '', choices: ['Approve', 'Reject'] }]; }, BACKGROUND_CONTEXT);
   const mode = async (approvalMode: 'write' | 'always-ask' | 'yolo') => harness.commit(async tx => { (await tx.doc(SessionControlsDoc, root.id)).approvalMode = approvalMode; }, BACKGROUND_CONTEXT);
@@ -119,26 +124,68 @@ for (const mode of ['write', 'yolo'] as const) test(`revoked relay groups rotate
   await expect(f.authority.prepare({ ...next, attemptId: 'unapproved' })).rejects.toThrow('origin is not approved');
 });
 
-test('relay placement retains approval through transient unready attachment with another ready executor', async () => {
+test('unready replica falls back and fences the previous machine grant', async () => {
   const f = await fixture();
   const first = await f.authority.prepare(f.input); await f.approve(first); await f.authority.execute(f.input);
   f.attachments.push(RuntimeAttachmentSchema.parse({ ...f.attachment, machineId: 'replacement', attachmentId: 'replacement-attachment' }));
   f.machines.set('replacement', { kind: 'physical', desiredState: 'online' }); f.credentials.add('replacement');
   f.attachment.state = 'lost';
+  await expect(f.authority.execute(f.input)).rejects.toThrow('executing machine');
   const next = { ...f.input, requestId: 'recovered', attemptId: 'recovered' };
-  await expect(f.authority.prepare(next)).rejects.toThrow('ready');
-  await expect(f.authority.execute(f.input)).rejects.toThrow('ready');
-  expect(f.dispatches).toHaveLength(1);
-  f.attachment.state = 'ready';
   const recovered = await f.authority.prepare(next);
-  expect(recovered.groupId).toBe(first.groupId);
-  expect(recovered.machineId).toBe(first.machineId);
-  expect(recovered.requiresApproval).toBe(false);
+  expect(recovered.groupId).not.toBe(first.groupId);
+  expect(recovered.machineId).toBe('replacement');
+  expect(recovered.requiresApproval).toBe(true);
+  await f.approve(recovered); await f.authority.execute(next);
+  await expect(f.authority.execute(f.input)).rejects.toThrow('revoked');
+});
+
+test('changing the workspace execution machine fences prepared and persisted authorization', async () => {
+  const f = await fixture(); await f.mode('yolo');
+  const first = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  const replica = RuntimeAttachmentSchema.parse({ ...f.attachment, machineId: 'replica', attachmentId: 'replica-attachment', role: 'replica', checkout: { kind: 'branch', branch: 'replica', commit: 'a'.repeat(40) } });
+  f.attachments.push(replica);
+  f.machines.set('replica', { kind: 'physical', desiredState: 'online' }); f.credentials.add('replica');
+  f.state.defaultMachineId = 'replica';
+  await expect(f.authority.prepare(f.input)).rejects.toThrow('executing machine');
+  await expect(f.authority.execute(f.input)).rejects.toThrow('executing machine');
+  const next = { ...f.input, attemptId: 'switched', requestId: 'switched' };
+  const card = await f.authority.prepare(next);
+  expect(card.machineId).toBe('replica'); expect(card.groupId).not.toBe(first.groupId);
   await f.authority.execute(next);
-  const original = RuntimeBrowserAuthorizationSchema.parse(f.dispatches[0]?.browserAuthorization).body.command;
-  const resumed = RuntimeBrowserAuthorizationSchema.parse(f.dispatches[1]?.browserAuthorization).body.command;
-  if (original.type !== 'execute' || resumed.type !== 'execute') throw new Error('Missing execute commands');
-  expect(resumed.grant).toEqual(original.grant);
+  expect(f.dispatches.at(-1)?.machineId).toBe('replica');
+  replica.state = 'lost';
+  await expect(f.authority.prepare({ ...next, attemptId: 'unavailable' })).rejects.toThrow('ready');
+  expect(f.dispatches).toHaveLength(2);
+});
+
+test('explicit on overrides the workspace default without changing it and stays signed', async () => {
+  const f = await fixture(); await f.mode('yolo');
+  f.state.defaultMachineId = 'machine';
+  f.attachments.push(RuntimeAttachmentSchema.parse({ ...f.attachment, machineId: 'other', attachmentId: 'other-attachment' }));
+  f.machines.set('other', { kind: 'physical', desiredState: 'online' }); f.credentials.add('other');
+  const input = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ ...f.input.args, on: 'other' }) };
+  expect((await f.authority.prepare(input)).machineId).toBe('other');
+  await f.authority.execute(input);
+  expect(f.state.defaultMachineId).toBe('machine');
+  expect(f.dispatches[0]?.machineId).toBe('other');
+  expect(RuntimeBrowserAuthorizationSchema.parse(f.dispatches[0]?.browserAuthorization).body.command).toMatchObject({ args: { on: 'other' } });
+  await expect(f.authority.execute({ ...input, args: RuntimeBrowserArgumentsSchema.parse({ ...input.args, on: 'machine' }) })).rejects.toThrow('differs from preparation');
+});
+
+test('headless conversations share a workspace group without granting relay access to children', async () => {
+  const f = await fixture();
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless' });
+  const card = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  f.state.root = false;
+  const child = { ...f.input, conversationId: 'child', requestId: 'child', attemptId: 'child' };
+  const reused = await f.authority.prepare(child); await f.authority.execute(child);
+  expect(reused.groupId).toBe(card.groupId);
+  const first = RuntimeBrowserAuthorizationSchema.parse(f.dispatches[0]?.browserAuthorization).body.command;
+  const second = RuntimeBrowserAuthorizationSchema.parse(f.dispatches[1]?.browserAuthorization).body.command;
+  if (first.type !== 'execute' || second.type !== 'execute') throw new Error('Missing execute commands');
+  expect(second.grant).toEqual(first.grant);
+  await expect(f.authority.prepare({ ...child, args: RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' }) })).rejects.toThrow('main-agent-only');
 });
 
 for (const change of ['missing machine', 'removed machine', 'missing credentials', 'moved pairing', 'replacement attachment'] as const) test(`relay placement rotates approval after ${change}`, async () => {

@@ -1,6 +1,8 @@
 import { wire } from './json-wire.js'
 import { z } from 'zod';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
+import { WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
+import { RuntimeDispatchSelectionSchema } from '@gitspace/protocol-runtime';
 
 export const INSPECTOR_EVIDENCE_HISTORY_LIMIT = 20 as const;
 
@@ -654,3 +656,22 @@ export const CreateReviewThreadInputCodec = asWireCodec(createReviewThreadInputS
 export const AppendReviewMessageInputCodec = asWireCodec(appendReviewMessageInputSchema, 'gitspace/append-review-message-input/v1');
 export const ResolveReviewThreadInputCodec = asWireCodec(resolveReviewThreadInputSchema, 'gitspace/resolve-review-thread-input/v1');
 export const RepositoryReadRequestCodec = asWireCodec(repositoryReadRequestSchema, 'gitspace/repository-read-request/v1');
+
+/** Agent workspace tools share these envelopes with their machine implementation. */
+export const RuntimeWorkspaceCreateArgumentsSchema = RuntimeDispatchSelectionSchema.extend({
+  method: z.literal('create'), workspaceId: z.string().min(1).optional(),
+  name: z.string().trim().min(1).max(160), branch: z.string().min(1).max(512),
+  phase: WorkspacePhaseSchema.default('plan'),
+  sourceKind: z.enum(['base', 'branch', 'workspace', 'pull-request']), sourceRef: z.string(),
+  dependsOn: z.array(z.string().min(1)).optional(),
+  goal: goalDraftSchema.optional(), workflow: workflowDraftSchema.optional(), rubric: rubricDraftSchema.optional(),
+}).strict();
+export const RuntimeWorkspaceMutationArgumentsSchema = z.discriminatedUnion('method', [
+  RuntimeWorkspaceCreateArgumentsSchema,
+  RuntimeDispatchSelectionSchema.extend({ method: z.enum(['open', 'restore']), workspaceId: z.string().min(1).optional(), expectedGeneration: z.number().int().nonnegative() }).strict(),
+  RuntimeDispatchSelectionSchema.extend({ method: z.literal('setRelations'), workspaceId: z.string().min(1).optional(), expectedRevision: z.number().int().nonnegative(), dependsOn: z.array(z.string()), relatedTo: z.array(z.string()), stackedOn: z.string().nullable() }).strict(),
+]);
+export const RuntimeWorkspaceArgumentsSchema = z.union([
+  z.object({ method: z.enum(['get', 'current', 'list', 'operations']), workspaceId: z.string().min(1).optional() }).strict(),
+  RuntimeWorkspaceMutationArgumentsSchema,
+]);

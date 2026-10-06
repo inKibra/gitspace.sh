@@ -68,7 +68,8 @@ test('signed relay commands enforce identity, stable document refs, redaction, b
     await invoke({ action: 'act', source: 'relay', targetId: opened.targetId, ref: observed.nodes[1].ref, operation: 'click' });
     relay.detached = true;
     await expect(invoke({ action: 'act', source: 'relay', targetId: opened.targetId, ref: observed.nodes[1].ref, operation: 'click' })).rejects.toThrow('detached');
-    await expect(invoke({ action: 'observe', source: 'relay', targetId: opened.targetId }, 'other')).rejects.toThrow('scope');
+    const shared = browserText(await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId }, 'other'));
+    expect(shared.nodes[0].name).toBe('[form field]');
     const args = RuntimeBrowserArgumentsSchema.parse({ action: 'observe', source: 'relay', targetId: opened.targetId });
     const grant = relay.channels.get(opened.targetId)!.grant;
     const signed = await authority.dispatch(args, { type: 'execute', args, grant });

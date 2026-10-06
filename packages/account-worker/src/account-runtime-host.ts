@@ -86,11 +86,6 @@ export async function createAccountWorkspaceRuntime(
     settings,
     modelProxy: inference.modelHelper,
     retainedRules: createRuntimeRuleServices({ code, repository, ref, judge, async matchAst(conversationId, content, paths, patterns) {
-      if (!runtime) return false;
-      const conversation = (await runtime.snapshot()).conversations.find(item => item.id === conversationId);
-      if (!conversation) return false;
-      const placement = conversation.placement;
-      if (!runtime.attachments.list().some(item => item.state === 'ready' && item.capabilities.includes('rule_match_ast') && (placement ? item.attachmentId === placement.attachmentId && item.generation === placement.generation : item.role === 'primary'))) return false;
       const requestId = `rules:${crypto.randomUUID()}`;
       const result = await services.tools.invoke({ tool: 'rule_match_ast', args: { content, paths, patterns }, conversationId, taskId: requestId, requestId, attemptId: requestId, replay: 'safe', signal: AbortSignal.timeout(30_000) });
       if (result.status !== 'completed') return false;

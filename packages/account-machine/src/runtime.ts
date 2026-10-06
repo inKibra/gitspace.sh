@@ -50,12 +50,12 @@ import { recheckGitLfsOrigin, type MachineGitLfs } from './git-lfs.js';
 import { createPublishedSpaceHeadResolver } from './inspector-base.js';
 import type { SpaceWorkspaceControls } from './space-workspace-controls.js';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
-import { pinnedGitLfs } from '../../deployment/src/native-build.js';
+import { pinnedGitLfs, pinnedRipgrep } from '../../deployment/src/native-build.js';
 import { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { z } from 'zod';
 import { createMachineExecutor, type MachineExecutorRuntime } from './runtime-executor.js';
 import { machineOperationalTools } from './runtime-operations.js';
-import { RuntimeActionResultSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime';
+import { RuntimeActionResultSchema, RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -190,7 +190,7 @@ export async function startMachineRuntime() {
   process.env.GITSPACE_SUPERVISOR_WORKER_ENTRY = packaged ? join(nativeRoot, 'machine-worker.js') : join(import.meta.dir, 'terminal-worker.ts');
   const native = packaged
     ? await prepareMachineNativeRuntime(nativeRoot)
-    : { gitLfs: (await pinnedGitLfs()).path };
+    : { gitLfs: (await pinnedGitLfs()).path, ripgrep: (await pinnedRipgrep()).path };
   if (packaged) process.env.GITSPACE_MACHINE_RUNTIME_PATH = nativeRoot;
   // Hosts already start this process with the tool directory; this also covers source runs and older hosts
   // for children spawned from process.env (OMP sessions, terminals, lifecycle scripts).
@@ -864,15 +864,21 @@ export async function startMachineRuntime() {
     operations: machineOperationalTools({ environments, services: serviceManager, authority, artifacts, mcp, controls: await workspaceControls.promise, journal: () => {
       if (!executorRuntime) throw new Error('Executor initialization is incomplete');
       return executorRuntime.journal;
-    }, checkpoint: async spaceId => {
-      if (!executorRuntime) throw new Error('Executor initialization is incomplete');
-      await executorRuntime.checkpointWorkspace(spaceId);
     } }),
+    restoredBase: async (projectId, workspaceId) => {
+      const local = database.getSpace(workspaceId);
+      const placement = await authority.getSpace(projectId, workspaceId);
+      if (!local || placement?.state !== 'open' || placement.machineId !== machineId || placement.generation !== local.generation || !placement.manifestKey || !placement.manifestHash || placement.publishedRevision < 1) return null;
+      const bytes = await encryptedCheckpointBlobs.get(placement.manifestKey, placement.manifestHash);
+      if (!bytes) throw new Error('Restored workspace checkpoint manifest is unavailable');
+      return parseWorkspaceCheckpoint(JSON.parse(new TextDecoder().decode(bytes)), { projectId, spaceId: workspaceId, revision: placement.publishedRevision }).repository;
+    },
     commitSnapshot: async (local, checkpoint, previousWorktreeCommit, final = false) => {
-      await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
+      const accepted = await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
         projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
         attachmentId: local.attachment.attachmentId, generation: local.attachment.generation, checkpoint, previousWorktreeCommit, final,
-      }), RuntimeActionResultSchema);
+      }), RuntimeSnapshotCommitResultSchema);
+      return accepted.checkpoint;
     },
   });
 

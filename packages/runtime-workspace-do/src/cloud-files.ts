@@ -1,20 +1,19 @@
 import { z } from 'zod';
 import { TaggedError } from 'better-result';
-import { canonicalJson, RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeToolResultSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { canonicalJson, RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeToolResultSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeFindArgumentsSchema, ApplyPatchArgumentsSchema, prepareV4APatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { collectBytes, parseGitLfsPointer, type GitLfsConfirmedObject, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import type { AttachmentStore } from './attachments.js';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository } from './artifacts.js';
+import { validateSnapshotPath } from './artifacts-snapshot.js';
 
-const InvocationSchema = z.object({ tool: z.enum(['read', 'edit', 'write']), args: z.unknown(), requestId: z.string(), attemptId: z.string() });
+const InvocationSchema = z.object({ tool: z.enum(['read', 'edit', 'write', 'find', 'apply_patch']), args: z.unknown(), requestId: z.string(), attemptId: z.string() });
 const PathSchema = z.object({ path: z.string().min(1) });
-const ReadSchema = PathSchema.extend({ offset: z.number().int().positive().optional(), limit: z.number().int().positive().optional() });
-const WriteSchema = PathSchema.extend({ content: z.string() });
-const EditSchema = PathSchema.extend({ edits: z.array(z.object({ oldText: z.string().min(1), newText: z.string() })).min(1) });
 type Checkpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 type Invocation = z.infer<typeof InvocationSchema>;
-const PendingSchema = z.object({ input: InvocationSchema, previous: RuntimeGitCheckpointSchema, path: z.string(), content: z.string(), fence: z.number().int().positive() });
+const PendingSchema = z.object({ input: InvocationSchema, previous: RuntimeGitCheckpointSchema, mutations: z.array(z.object({ path: z.string(), content: z.string().nullable() })), fence: z.number().int().positive() });
+const MachinePendingSchema = z.object({ checkpoint: RuntimeGitCheckpointSchema, previous: z.string().nullable(), current: RuntimeGitCheckpointSchema.nullable(), base: RuntimeGitCheckpointSchema.nullable(), machineId: z.string() });
 const RetentionCheckpointSchema = RuntimeGitCheckpointSchema.extend({ publicationId: z.string().optional(), acceptedPublicationIds: z.array(z.string()).optional() });
 const CLOUD_FILE_READ_LIMIT = 8 * 1024 * 1024;
 const LFS_POINTER_LIMIT = 1024;
@@ -37,17 +36,26 @@ export async function readCurrentCheckpoint(storage: DurableObjectStorage): Prom
   }
   return row ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)) : null;
 }
-/** A non-expiring durable writer lease: uncertain publication must be retried, never stolen. */
+/** Durable publication serialization belongs to the cloud, never to a machine. */
 export class CloudFileStore {
   private readonly running = new Map<string, Promise<RuntimeToolResult>>();
+  private readonly machineRunning = new Map<string, Promise<Checkpoint>>();
   private retaining: Promise<void> | undefined;
-  constructor(private readonly storage: DurableObjectStorage, private readonly attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot'>, private readonly workspaceId: string, private readonly publish: () => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
+  private admission: Promise<void> = Promise.resolve();
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.admission.then(operation);
+    this.admission = result.then(() => {}, () => {});
+    return result;
+  }
+  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: () => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_writer(singleton INTEGER PRIMARY KEY CHECK(singleton=1), fence INTEGER NOT NULL, attempt TEXT)');
     storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_writer(singleton,fence,attempt) VALUES(1,0,NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_commits(commit_id TEXT PRIMARY KEY, predecessor TEXT, checkpoint TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lfs_retention_outbox(commit_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL, previous TEXT)');
+    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_publications(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, checkpoint TEXT)');
+    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_paths(commit_id TEXT PRIMARY KEY, paths TEXT NOT NULL)');
   }
   hasAttempt(attemptId: string): boolean {
     return this.storage.sql.exec('SELECT id FROM runtime_cloud_files WHERE id=?', attemptId).toArray().length > 0;
@@ -56,15 +64,17 @@ export class CloudFileStore {
   /** Explicit source initialization for file execution and attachment admission; snapshot stays read-only. */
   async initializeSnapshot(): Promise<Checkpoint | null> {
     const current = await this.snapshot();
-    if (current) { await this.flushRetention(); return current; }
-    if (!this.initialCheckpoint || this.attachments.list().some(a => a.role === 'primary' && a.state !== 'detached')) return null;
+    if (current) {
+      if (!this.storage.sql.exec('SELECT commit_id FROM runtime_code_commits WHERE commit_id=?', current.worktreeCommit).toArray().length) this.recordCommit(current, null);
+      await this.flushRetention(); return current;
+    }
+    if (!this.initialCheckpoint) return null;
     const source = await this.initialCheckpoint();
     if (!source) return null;
     const checkpoint = RuntimeGitCheckpointSchema.parse(source);
     const accepted = this.storage.transactionSync(() => {
       const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
       if (row) return RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint));
-      if (this.attachments.list().some(a => a.role === 'primary' && a.state !== 'detached')) return null;
       if (this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt) return null;
       this.recordCommit(checkpoint, null);
       this.enqueueRetention(checkpoint, null);
@@ -74,32 +84,84 @@ export class CloudFileStore {
     await this.flushRetention();
     return accepted;
   }
-  /** Caller verifies the primary attachment/generation and immutable object availability. */
-  commitMachine(checkpoint: Checkpoint, previous: string | null, machineId: string, initialOnly = false): void {
-    this.storage.transactionSync(() => {
-      if (this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt) throw new Error('Cloud publication holds the writer lease');
-      const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
-      const current = row ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)) : null;
-      if (initialOnly && previous !== null) throw new Error('Attaching primary requires a null predecessor');
-      if (current && checkpointIdentity(current) === checkpointIdentity(checkpoint)) {
-        const accepted = this.storage.sql.exec<{ predecessor: string | null }>('SELECT predecessor FROM runtime_code_commits WHERE commit_id=?', checkpoint.worktreeCommit).toArray()[0];
-        if (!accepted || accepted.predecessor !== previous) throw new Error('Snapshot publication has a stale predecessor');
-        this.enqueueMachineRetention(checkpoint, current, machineId);
-        return;
-      }
-      if (initialOnly && current !== null) throw new Error('Attaching primary may only publish its initial checkpoint');
-      if ((current?.worktreeCommit ?? null) !== previous) throw new Error('Snapshot publication has a stale predecessor');
-      this.recordCommit(checkpoint, previous);
-      this.enqueueMachineRetention(checkpoint, current, machineId);
-      this.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
+  /** Authorization precedes durable intent; accepted publication recovery is noncancellable. */
+  commitMachine(checkpoint: Checkpoint, previous: string | null, machineId: string, authorize?: () => void): Promise<Checkpoint> {
+    const id = `${machineId}:${checkpoint.checkpointRef}:${checkpoint.worktreeCommit}`;
+    const identity = canonicalJson({ checkpoint, previous, machineId });
+    const active = this.machineRunning.get(id);
+    if (active) return active.then(accepted => {
+      const saved = this.storage.sql.exec<{ input: string }>('SELECT input FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
+      if (saved?.input !== identity) throw new Error('Machine snapshot publication identity changed');
+      return accepted;
     });
-    this.publish();
+    const publication = this.serialize(() => this.publishMachine(id, identity, checkpoint, previous, machineId, authorize)).finally(() => this.machineRunning.delete(id));
+    this.machineRunning.set(id, publication);
+    return publication;
+  }
+  private async publishMachine(id: string, identity: string, checkpoint: Checkpoint, previous: string | null, machineId: string, authorize?: () => void): Promise<Checkpoint> {
+    const saved = this.storage.sql.exec<{ input: string; pending: string | null; checkpoint: string | null }>('SELECT input,pending,checkpoint FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
+    if (saved && saved.input !== identity) throw new Error('Machine snapshot publication identity changed');
+    if (saved?.checkpoint) { await this.flushRetention(); return RuntimeGitCheckpointSchema.parse(JSON.parse(saved.checkpoint)); }
+    let pending: z.infer<typeof MachinePendingSchema>;
+    if (saved?.pending) pending = MachinePendingSchema.parse(JSON.parse(saved.pending));
+    else {
+      const current = await this.snapshot();
+      const row = previous ? this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_commits WHERE commit_id=?', previous).toArray()[0] : undefined;
+      const base = previous === current?.worktreeCommit ? current : row ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)) : null;
+      if (current && (!previous || !base)) throw new Error('Snapshot publication has an unknown predecessor');
+      if (!current && previous !== null) throw new Error('Initial snapshot publication requires a null predecessor');
+      pending = { checkpoint, previous, current, base, machineId };
+      this.storage.transactionSync(() => {
+        authorize?.();
+        const latest = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
+        if ((latest ? checkpointIdentity(RuntimeGitCheckpointSchema.parse(JSON.parse(latest.checkpoint))) : null) !== (current ? checkpointIdentity(current) : null)) throw new Error('Canonical snapshot changed before machine publication');
+        const active = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt;
+        if (active) throw new Error('Canonical publication is busy or awaiting recovery');
+        this.storage.sql.exec('UPDATE runtime_cloud_writer SET fence=fence+1,attempt=? WHERE singleton=1', `machine:${id}`);
+        this.storage.sql.exec('INSERT INTO runtime_machine_publications(id,input,pending) VALUES(?,?,?)', id, identity, JSON.stringify(pending));
+      });
+    }
+    try { await this.storage.sync(); return await this.finishMachine(id, pending); }
+    catch (error) { throw error instanceof CloudPublicationUncertain ? error : new CloudPublicationUncertain({ attemptId: `machine:${id}`, message: error instanceof Error ? error.message : String(error) }); }
+  }
+  hasPendingMachine(machineId: string): boolean {
+    return this.storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_machine_publications WHERE pending IS NOT NULL').toArray().some(row => MachinePendingSchema.parse(JSON.parse(row.pending)).machineId === machineId);
+  }
+  private async finishMachine(id: string, pending: z.infer<typeof MachinePendingSchema>): Promise<Checkpoint> {
+    const { checkpoint, previous, current, base, machineId } = pending;
+    const merged = await this.code.mergeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous: current ?? checkpoint, base: base ?? checkpoint, machine: checkpoint, forcePublication: current === null });
+    if (merged.isErr()) throw new CloudPublicationUncertain({ attemptId: `machine:${id}`, message: merged.error.message });
+    const accepted = merged.value;
+    const paths = await this.code.listSnapshotPaths(artifactsWorkspaceRepository(this.workspaceId), accepted.worktreeTree);
+    this.storage.transactionSync(() => {
+      const active = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt;
+      if (active !== `machine:${id}`) throw new Error('Machine publication serialization changed');
+      if (current && !this.storage.sql.exec('SELECT commit_id FROM runtime_code_commits WHERE commit_id=?', current.worktreeCommit).toArray().length) this.recordCommit(current, null);
+      if (accepted.worktreeCommit !== current?.worktreeCommit) this.recordCommit(accepted, current?.worktreeCommit ?? previous);
+      if (accepted.worktreeCommit !== checkpoint.worktreeCommit && checkpoint.worktreeCommit !== current?.worktreeCommit) this.recordCommit(checkpoint, previous);
+      this.enqueueRetention(accepted, current);
+      this.enqueueRetention(checkpoint, current, `${machineId}:${checkpoint.checkpointRef}`);
+      this.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(accepted));
+      this.storage.sql.exec('INSERT OR REPLACE INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?)', accepted.worktreeCommit, JSON.stringify(paths));
+      this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,checkpoint=? WHERE id=?', JSON.stringify(accepted), id);
+      this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1');
+    });
+    await this.storage.sync(); await this.flushRetention(); this.publish(); return accepted;
   }
   /** Resume a crashed lease before attachment admission; a failed provider remains fenced. */
   async recover(): Promise<void> {
     await this.flushRetention();
     const lease = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
     if (!lease?.attempt) return;
+    if (lease.attempt.startsWith('machine:')) {
+      const id = lease.attempt.slice('machine:'.length);
+      const machine = this.storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
+      if (!machine) throw new Error('Missing pending machine publication');
+      const active = this.machineRunning.get(id);
+      if (active) await active;
+      else await this.finishMachine(id, MachinePendingSchema.parse(JSON.parse(machine.pending)));
+      return;
+    }
     const row = this.storage.sql.exec<{ input: string }>('SELECT input FROM runtime_cloud_files WHERE id=?', lease.attempt).toArray()[0];
     if (!row) throw new Error('Cloud writer lost its durable operation');
     await this.execute(InvocationSchema.parse(JSON.parse(row.input)));
@@ -108,7 +170,8 @@ export class CloudFileStore {
     const input = InvocationSchema.parse(raw);
     const active = this.running.get(input.attemptId);
     if (active) return active.then(result => { this.assertIdentity(input); return result; });
-    const promise = this.run(input, signal).catch(error => {
+    const operation = () => this.run(input, signal);
+    const promise = (input.tool === 'read' || input.tool === 'find' ? operation() : this.serialize(operation)).catch(error => {
       const saved = this.assertIdentity(input);
       if (saved?.pending && !(error instanceof CloudPublicationUncertain)) throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: error instanceof Error ? error.message : String(error) });
       throw error;
@@ -124,7 +187,7 @@ export class CloudFileStore {
   private async run(input: Invocation, signal?: AbortSignal): Promise<RuntimeToolResult> {
     const saved = this.assertIdentity(input);
     if (saved?.result) { await this.flushRetention(); return RuntimeToolResultSchema.parse(JSON.parse(saved.result)); }
-    if (saved?.pending) return this.finish(PendingSchema.parse(JSON.parse(saved.pending)), signal);
+    if (saved?.pending) return this.finish(PendingSchema.parse(JSON.parse(saved.pending)));
     const result = (status: 'completed' | 'failed', text: string): RuntimeToolResult => {
       const content: RuntimeToolResult['content'] = [{ type: 'text', text }];
       return status === 'failed'
@@ -134,13 +197,16 @@ export class CloudFileStore {
     let pending: z.infer<typeof PendingSchema> | undefined;
     try {
       signal?.throwIfAborted();
-      const previous = await this.initializeSnapshot();
+      const readOnly = input.tool === 'read' || input.tool === 'find';
+      const previous = readOnly ? await this.snapshot() ?? await this.initializeSnapshot() : await this.initializeSnapshot();
       if (!previous) throw new Error('Workspace has no committed source snapshot');
-      const args = PathSchema.parse(input.args);
-      const path = args.path.replace(/^\.\//u, '');
-      if (!path || path.startsWith('/') || path.includes('://') || path.includes('\\') || path.split('/').some(part => !part || part === '..' || part === '.git')) throw new Error('Path leaves authorized checkout');
+      const path = input.tool === 'find' || input.tool === 'apply_patch' ? '' : PathSchema.parse(input.args).path.replace(/^\.\//u, '');
+      if (path) validateSnapshotPath(path);
       const fence = this.storage.transactionSync(() => {
-        if (this.attachments.list().some(a => a.role === 'primary' && a.state !== 'detached')) throw new Error('Primary machine owns the workspace writer');
+        if (readOnly) {
+          this.storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_files(id,input) VALUES(?,?)', input.attemptId, canonicalJson(input));
+          return 0;
+        }
         const lease = this.storage.sql.exec<{ fence: number; attempt: string | null }>('SELECT fence,attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
         if (!lease || (lease.attempt && lease.attempt !== input.attemptId)) throw new Error('Cloud writer is busy or awaiting publication recovery');
         const current = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
@@ -150,15 +216,50 @@ export class CloudFileStore {
         return lease.fence + 1;
       });
       await this.storage.sync();
+      if (input.tool === 'find') {
+        const args = RuntimeFindArgumentsSchema.parse(input.args);
+        const root = args.path.replace(/^\.\//u, '').replace(/\/$/u, '');
+        if (root && root !== '.') validateSnapshotPath(root);
+        const paths = await this.paths(previous);
+        const matches = paths.filter(candidate => (!root || root === '.' || candidate === root || candidate.startsWith(`${root}/`)) && attributeMatches(args.pattern, candidate));
+        const completed = result('completed', matches.join('\n'));
+        this.complete(input, completed, fence); return completed;
+      }
+      if (input.tool === 'apply_patch') {
+        const args = ApplyPatchArgumentsSchema.parse(input.args);
+        const changes = await prepareV4APatch(args.patch, {
+          exists: async candidate => { validateSnapshotPath(candidate); return (await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), previous.worktreeCommit, candidate)) !== null; },
+          read: async candidate => {
+            validateSnapshotPath(candidate);
+            const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), previous.worktreeCommit, candidate);
+            if (!blob) throw new Error(`File not found: ${candidate}`);
+            assertCloudReadSize(blob.size, candidate);
+            return new TextDecoder('utf-8', { fatal: true }).decode(await blob.arrayBuffer());
+          },
+        });
+        const mutations: z.infer<typeof PendingSchema>['mutations'] = [];
+        for (const change of changes) {
+          for (const candidate of [change.path, ...(change.destination ? [change.destination] : [])]) {
+            validateSnapshotPath(candidate);
+            if (await this.isLfsPath(previous, candidate) || await this.hasLfsPointer(previous, candidate) || previous.lfs?.heldBack.some(entry => entry.path === candidate)) throw new Error(`LFS file ${candidate} cannot be patched in the cloud; use a machine.`);
+          }
+          if (change.destination) mutations.push({ path: change.path, content: null });
+          mutations.push({ path: change.destination ?? change.path, content: change.after });
+        }
+        pending = { input, previous, mutations, fence };
+        this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
+        await this.storage.sync();
+        return this.finish(pending);
+      }
       const trackedLfs = await this.isLfsPath(previous, path);
       const read = async () => {
         const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), previous.worktreeCommit, path);
-        if (!blob) throw new Error(`File not found: ${args.path}`);
+        if (!blob) throw new Error(`File not found: ${path}`);
         assertCloudReadSize(blob.size, path);
         return new Uint8Array(await blob.arrayBuffer());
       };
       if (input.tool === 'read') {
-        const parsed = ReadSchema.parse(input.args);
+        const parsed = RuntimeReadArgumentsSchema.parse(input.args);
         let bytes: Uint8Array = await read();
         const pointer = bytes.byteLength <= LFS_POINTER_LIMIT ? parseGitLfsPointer(bytes) : null;
         if (pointer) {
@@ -193,18 +294,18 @@ export class CloudFileStore {
         }
         this.complete(input, completed, fence); return completed;
       }
-      if (trackedLfs || await this.hasLfsPointer(previous, path)) throw new Error(`LFS file ${path} cannot be ${input.tool === 'write' ? 'written' : 'edited'} in the cloud; use a machine and commit the LFS change.`);
+      if (trackedLfs || await this.hasLfsPointer(previous, path) || previous.lfs?.heldBack.some(entry => entry.path === path)) throw new Error(`LFS file ${path} cannot be ${input.tool === 'write' ? 'written' : 'edited'} in the cloud; use a machine and commit the LFS change.`);
       let content: string;
-      if (input.tool === 'write') content = WriteSchema.parse(input.args).content;
+      if (input.tool === 'write') content = RuntimeWriteArgumentsSchema.parse(input.args).content;
       else {
-        const edits = EditSchema.parse(input.args).edits;
+        const edits = RuntimeEditArgumentsSchema.parse(input.args).edits;
         const original = new TextDecoder('utf-8', { fatal: true }).decode(await read());
         const replacements = edits.map(edit => { const index = original.indexOf(edit.oldText); if (index < 0 || original.indexOf(edit.oldText, index + 1) >= 0) throw new Error('Edit text must match exactly once'); return { ...edit, index }; }).sort((a, b) => a.index - b.index);
         let end = 0; content = '';
         for (const edit of replacements) { if (edit.index < end) throw new Error('Edit ranges overlap'); content += original.slice(end, edit.index) + edit.newText; end = edit.index + edit.oldText.length; }
         content += original.slice(end);
       }
-      pending = { input, previous, path, content, fence };
+      pending = { input, previous, mutations: [{ path, content }], fence };
       this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
       await this.storage.sync();
     } catch (error) {
@@ -218,13 +319,13 @@ export class CloudFileStore {
       });
       return failed;
     }
-    return this.finish(pending, signal);
+    return this.finish(pending);
   }
-  private async finish(pending: z.infer<typeof PendingSchema>, signal?: AbortSignal): Promise<RuntimeToolResult> {
+  private async finish(pending: z.infer<typeof PendingSchema>): Promise<RuntimeToolResult> {
     const { input, fence, previous } = pending;
     const lease = this.storage.sql.exec<{ fence: number; attempt: string | null }>('SELECT fence,attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
     if (lease?.attempt !== input.attemptId || lease.fence !== fence) throw new Error('Cloud writer fence is stale');
-    const written = await this.code.writeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous, mutations: [{ path: pending.path, content: new TextEncoder().encode(pending.content) }], ...(signal ? { signal } : {}) });
+    const written = await this.code.writeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous, mutations: pending.mutations.map(mutation => ({ path: mutation.path, content: mutation.content === null ? null : new TextEncoder().encode(mutation.content) })) });
     if (written.isErr()) {
       if (written.error.certainty === 'unknown') throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: written.error.message });
       const failed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: written.error.message }], error: { code: 'HOST_OPERATION_FAILED', message: written.error.message } };
@@ -232,7 +333,9 @@ export class CloudFileStore {
       await this.storage.sync();
       return failed;
     }
-    const completed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool === 'write' ? 'Wrote' : 'Edited'} ${PathSchema.parse(input.args).path}` }] };
+    const completed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool === 'write' ? 'Wrote' : input.tool === 'apply_patch' ? 'Patched' : 'Edited'} ${pending.mutations.map(mutation => mutation.path).join(', ')}` }] };
+    const paths = new Set(await this.paths(previous));
+    for (const mutation of pending.mutations) { if (mutation.content === null) paths.delete(mutation.path); else paths.add(mutation.path); }
     this.storage.transactionSync(() => {
       const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
       const current = row ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)) : null;
@@ -243,8 +346,16 @@ export class CloudFileStore {
       this.enqueueRetention(accepted, current);
       this.complete(input, completed, fence);
       this.storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', JSON.stringify(accepted));
+      this.storage.sql.exec('INSERT OR REPLACE INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?)', accepted.worktreeCommit, JSON.stringify([...paths].sort()));
     });
     await this.storage.sync(); await this.flushRetention(); this.publish(); return completed;
+  }
+  private async paths(checkpoint: Checkpoint): Promise<string[]> {
+    const saved = this.storage.sql.exec<{ paths: string }>('SELECT paths FROM runtime_snapshot_paths WHERE commit_id=?', checkpoint.worktreeCommit).toArray()[0];
+    if (saved) return z.array(z.string()).parse(JSON.parse(saved.paths));
+    const paths = await this.code.listSnapshotPaths(artifactsWorkspaceRepository(this.workspaceId), checkpoint.worktreeTree);
+    this.storage.sql.exec('INSERT OR IGNORE INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?)', checkpoint.worktreeCommit, JSON.stringify(paths));
+    return paths;
   }
   private async hasLfsPointer(checkpoint: Checkpoint, path: string): Promise<boolean> {
     const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), checkpoint.worktreeCommit, path);
@@ -290,15 +401,6 @@ export class CloudFileStore {
     }
     this.storage.sql.exec('INSERT INTO runtime_code_commits(commit_id,predecessor,checkpoint) VALUES(?,?,?)', checkpoint.worktreeCommit, predecessor, encoded);
   }
-  private enqueueMachineRetention(checkpoint: Checkpoint, previous: Checkpoint | null, machineId: string): void {
-    const publicationId = `${machineId}:${checkpoint.checkpointRef}`;
-    const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_commits WHERE commit_id=?', checkpoint.worktreeCommit).toArray()[0];
-    if (!row) throw new Error('Machine retention requires an accepted checkpoint');
-    const accepted = RetentionCheckpointSchema.parse(JSON.parse(row.checkpoint));
-    if (accepted.acceptedPublicationIds?.includes(publicationId)) return;
-    this.storage.sql.exec('UPDATE runtime_code_commits SET checkpoint=? WHERE commit_id=?', JSON.stringify({ ...accepted, acceptedPublicationIds: [...(accepted.acceptedPublicationIds ?? []), publicationId] }), checkpoint.worktreeCommit);
-    this.enqueueRetention(checkpoint, previous, publicationId);
-  }
   private enqueueRetention(checkpoint: Checkpoint, previous: Checkpoint | null, publicationId?: string): void {
     this.storage.sql.exec('INSERT OR IGNORE INTO runtime_lfs_retention_outbox(commit_id,checkpoint,previous) VALUES(?,?,?)', publicationId ? `${checkpoint.worktreeCommit}:${publicationId}` : checkpoint.worktreeCommit, JSON.stringify({ ...checkpoint, ...(publicationId ? { publicationId } : {}) }), previous ? JSON.stringify(previous) : null);
   }
@@ -323,6 +425,10 @@ export class CloudFileStore {
   reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void> { return reconcileRuntimeLfsSources(this.storage, objects); }
   private complete(input: Invocation, result: RuntimeToolResult, fence: number): void {
     this.storage.transactionSync(() => {
+      if (fence === 0) {
+        this.storage.sql.exec('UPDATE runtime_cloud_files SET result=? WHERE id=?', JSON.stringify(result), input.attemptId);
+        return;
+      }
       const lease = this.storage.sql.exec<{ fence: number; attempt: string | null }>('SELECT fence,attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
       if (lease?.attempt !== input.attemptId || lease.fence !== fence) throw new Error('Cloud writer fence is stale');
       this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=NULL,result=? WHERE id=?', JSON.stringify(result), input.attemptId);
@@ -339,6 +445,12 @@ export function readRuntimeLfsRoots(storage: DurableObjectStorage): Checkpoint[]
   if (tables.has('runtime_code_snapshot')) for (const row of storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot')) add(row.checkpoint);
   if (tables.has('runtime_lfs_retention_outbox')) for (const row of storage.sql.exec<{ checkpoint: string; previous: string | null }>('SELECT checkpoint,previous FROM runtime_lfs_retention_outbox')) { add(row.checkpoint); add(row.previous); }
   if (tables.has('runtime_cloud_files')) for (const row of storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_cloud_files WHERE pending IS NOT NULL')) roots.push(PendingSchema.parse(JSON.parse(row.pending)).previous);
+  if (tables.has('runtime_machine_publications')) for (const row of storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_machine_publications WHERE pending IS NOT NULL')) {
+    const pending = MachinePendingSchema.parse(JSON.parse(row.pending));
+    roots.push(pending.checkpoint);
+    if (pending.current) roots.push(pending.current);
+    if (pending.base) roots.push(pending.base);
+  }
   if (tables.has('runtime_attachments')) for (const row of storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments')) {
     const attachment = RuntimeAttachmentSchema.parse(JSON.parse(row.record));
     if (attachment.state === 'detached' || attachment.state === 'lost' || attachment.checkout.kind === 'shared') continue;
@@ -362,6 +474,13 @@ export async function reconcileRuntimeLfsSources(storage: DurableObjectStorage, 
     if (tables.has('runtime_cloud_files')) for (const row of storage.sql.exec<{ id: string; pending: string }>('SELECT id,pending FROM runtime_cloud_files WHERE pending IS NOT NULL').toArray()) {
       const pending = PendingSchema.parse(JSON.parse(row.pending));
       storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify({ ...pending, previous: transition(pending.previous) }), row.id);
+    }
+    if (tables.has('runtime_machine_publications')) for (const row of storage.sql.exec<{ id: string; pending: string | null; checkpoint: string | null }>('SELECT id,pending,checkpoint FROM runtime_machine_publications').toArray()) {
+      if (row.checkpoint) storage.sql.exec('UPDATE runtime_machine_publications SET checkpoint=? WHERE id=?', encoded(row.checkpoint), row.id);
+      if (row.pending) {
+        const pending = MachinePendingSchema.parse(JSON.parse(row.pending));
+        storage.sql.exec('UPDATE runtime_machine_publications SET pending=? WHERE id=?', JSON.stringify({ ...pending, checkpoint: transition(pending.checkpoint), current: pending.current && transition(pending.current), base: pending.base && transition(pending.base) }), row.id);
+      }
     }
   });
   await storage.sync();

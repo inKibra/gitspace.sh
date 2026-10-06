@@ -119,6 +119,8 @@ The implementation lives in `packages/`. A source checkout is for development, n
 
 Use Bun and Node.js 22 for development checks. Browser and Worker tests use Vitest on Node; machine and runtime-core tests use isolated Bun processes.
 
+Machine runtimes bundle ripgrep 14.1.1. Source runs and search integration tests download and verify the same pinned binary; no system ripgrep installation or `PATH` entry is needed.
+
 ```sh
 bun install --frozen-lockfile
 bun run dev

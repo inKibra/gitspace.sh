@@ -2,24 +2,70 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { canonicalJson, receiptDigest, verifyReceipt, RuntimeAttachmentSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
+import { canonicalJson, receiptDigest, verifyReceipt, RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
 import { ExecutorJournal } from './journal.js';
-import { MachineExecutor } from './executor.js';
+import { MachineExecutor, type MachineExecutorOptions } from './executor.js';
 import { ExecutorEffectUncertain } from './commands.js';
-import { prepareV4APatch } from './apply-patch.js';
+import { prepareV4APatch } from '@gitspace/protocol-runtime';
 import { createHmac } from 'node:crypto';
 
-async function fixture(onRun?: () => Promise<void>) {
+async function fixture(onRun?: () => Promise<void>, hooks: Pick<MachineExecutorOptions, 'onBeforeExecute' | 'onMutationSettled'> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-executor-'));
   const journal = new ExecutorJournal(join(root, 'journal.sqlite'));
   const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 7, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['write', 'bash'], updatedAt: new Date().toISOString() });
   journal.installAttachment({ attachment, rootPath: root, executionSecret: Buffer.alloc(32, 7).toString('base64url'), prerequisitesComplete: true });
   let launches = 0;
-  const executor = new MachineExecutor({ machineId: 'machine', journal, runCommand: async () => { launches++; await onRun?.(); return { exitCode: 0, output: 'effect' }; }, artifacts: () => ({ read: async () => [], write: async () => {} }), cloudModel: async () => null, cloudMcp: async () => { throw new Error('MCP is not part of this executor fixture'); } });
+  const executor = new MachineExecutor({ machineId: 'machine', journal, ...hooks, runCommand: async () => { launches++; await onRun?.(); return { exitCode: 0, output: 'effect' }; }, artifacts: () => ({ read: async () => [], write: async () => {} }), cloudModel: async () => null, cloudMcp: async () => { throw new Error('MCP is not part of this executor fixture'); } });
   const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 7, requestId: 'request', attemptId: 'attempt', tool: 'bash', args: { command: 'effect' }, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' });
   return { root, journal, executor, dispatch, launches: () => launches, close: async () => { journal.close(); await rm(root, { recursive: true, force: true }); } };
 }
 describe('executor effect ownership', () => {
+  test('checkpoint executes inside the checkout queue and returns only accepted evidence', async () => {
+    const admitted = Promise.withResolvers<void>();
+    const accepted = Promise.withResolvers<void>();
+    const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/test/1', headCommit: '1'.repeat(40), branch: 'main', indexCommit: '2'.repeat(40), trackedWorktreeCommit: '3'.repeat(40), worktreeCommit: '4'.repeat(40), indexTree: '5'.repeat(40), worktreeTree: '6'.repeat(40) });
+    const f = await fixture(undefined, { onMutationSettled: async () => { admitted.resolve(); await accepted.promise; return checkpoint; } });
+    try {
+      const local = f.journal.attachment('attachment');
+      if (!local) throw new Error('Missing fixture attachment');
+      f.journal.installAttachment({ ...local, attachment: { ...local.attachment, capabilities: [...local.attachment.capabilities, 'checkpoint'] } });
+      const dispatch = { ...f.dispatch, tool: 'checkpoint', args: {} };
+      const result = f.executor.execute(dispatch);
+      await admitted.promise;
+      expect(f.journal.attempt(dispatch.attemptId)?.result).toBeNull();
+      accepted.resolve();
+      expect((await result).content).toEqual([{ type: 'text', text: JSON.stringify({ checkpoint }) }]);
+      expect(f.launches()).toBe(0);
+    } finally { accepted.resolve(); await f.close(); }
+  });
+  test('lost publication reconciles durable output without replaying the command', async () => {
+    let offline = true;
+    const f = await fixture(undefined, { onMutationSettled: async () => { if (offline) throw new Error('offline'); return null; } });
+    try {
+      await expect(f.executor.execute(f.dispatch)).rejects.toBeInstanceOf(ExecutorEffectUncertain);
+      expect(f.journal.attempt(f.dispatch.attemptId)?.result).toBeNull();
+      expect(f.launches()).toBe(1);
+      offline = false;
+      const receipt = await f.executor.observe(f.dispatch);
+      expect(receipt.receipt.state).toBe('terminal');
+      expect((await f.executor.execute(f.dispatch)).content).toEqual([{ type: 'text', text: 'Exit code: 0\neffect' }]);
+      expect(f.launches()).toBe(1);
+    } finally { await f.close(); }
+  });
+  test('command waits for replica catch-up and accepted publication', async () => {
+    const caughtUp = Promise.withResolvers<void>(), accepted = Promise.withResolvers<void>(), published = Promise.withResolvers<void>();
+    const f = await fixture(undefined, { onBeforeExecute: async () => caughtUp.promise, onMutationSettled: async () => { published.resolve(); await accepted.promise; return null; } });
+    try {
+      const result = f.executor.execute(f.dispatch);
+      expect(f.launches()).toBe(0);
+      caughtUp.resolve();
+      await published.promise;
+      expect(f.journal.attempt(f.dispatch.attemptId)?.result).toBeNull();
+      accepted.resolve();
+      expect((await result).status).toBe('completed');
+      expect(f.launches()).toBe(1);
+    } finally { caughtUp.resolve(); accepted.resolve(); await f.close(); }
+  });
   test('duplicate unsafe dispatch shares one effect and result', async () => {
     const f = await fixture();
     try { const [a, b] = await Promise.all([f.executor.execute(f.dispatch), f.executor.execute(f.dispatch)]); expect(a).toEqual(b); expect(f.launches()).toBe(1); await f.executor.execute(f.dispatch); expect(f.launches()).toBe(1); }
@@ -51,6 +97,33 @@ describe('executor effect ownership', () => {
       await expect(verifyReceipt(f.dispatch, forged, secret)).rejects.toThrow();
       expect(f.launches()).toBe(1);
     } finally { await f.close(); }
+  });
+  test('running cancellation retains interrupted status while waiting for snapshot acceptance', async () => {
+    const launched = Promise.withResolvers<void>();
+    const stopped = Promise.withResolvers<void>();
+    const publishing = Promise.withResolvers<void>();
+    const accepted = Promise.withResolvers<void>();
+    const f = await fixture(
+      async () => { launched.resolve(); await stopped.promise; throw new Error('Command canceled; process tree stopped'); },
+      { onMutationSettled: async () => { publishing.resolve(); await accepted.promise; return null; } },
+    );
+    const running = f.executor.execute(f.dispatch);
+    try {
+      await launched.promise;
+      const raw = JSON.stringify({ op: 'cancel', dispatch: f.dispatch });
+      const signature = createHmac('sha256', Buffer.alloc(32, 7)).update(raw).digest('base64url');
+      const response = await f.executor.fetch(new Request('http://executor/runtime/receipt', { method: 'POST', body: raw, headers: { 'x-gitspace-execution-signature': signature } }));
+      expect(response.status).toBe(200);
+      stopped.resolve();
+      await publishing.promise;
+      expect(f.journal.attempt(f.dispatch.attemptId)?.result).toBeNull();
+      accepted.resolve();
+      expect((await running).status).toBe('interrupted');
+      const receipt = await f.executor.observe(f.dispatch);
+      if (receipt.receipt.state !== 'terminal') throw new Error('Canceled command has no terminal receipt');
+      expect(receipt.receipt.result.status).toBe('interrupted');
+      expect(f.launches()).toBe(1);
+    } finally { stopped.resolve(); accepted.resolve(); await running; await f.close(); }
   });
   test('signed cancellation durably fences delayed dispatch and acknowledgements are retryable', async () => {
     const f = await fixture();

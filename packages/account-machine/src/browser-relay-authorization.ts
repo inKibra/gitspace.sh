@@ -22,7 +22,7 @@ export async function verifyRelayAuthorization(authorization: RuntimeBrowserAuth
     if (!certificate || certificate.body.accountId !== trust.accountId || !validTime(certificate.body) || !await verify(trust.publicKey, certificate.signature, 'gitspace.browser.authority.v1\n', certificate.body)) throw new Error('Untrusted group grant authority');
     if (!await verify(certificate.body.publicKey, signed.signature, 'gitspace.browser.grant.v1\n', grant)) throw new Error('Invalid group grant signature');
     if (grant.projectId !== certificate.body.projectId || grant.workspaceId !== certificate.body.workspaceId) throw new Error('Group grant authority scope mismatch');
-    for (const key of ['projectId', 'workspaceId', 'conversationId', 'machineId', 'attachmentId', 'generation'] as const) if (grant[key] !== body.scope[key]) throw new Error('Grant scope mismatch');
+    for (const key of ['projectId', 'workspaceId', 'machineId', 'attachmentId', 'generation'] as const) if (grant[key] !== body.scope[key]) throw new Error('Grant scope mismatch');
     if (grant.source !== 'relay' || args.source !== 'relay' || !grant.groupId || !grant.groupName || !Array.isArray(grant.origins) || !Number.isFinite(Date.parse(grant.expiresAt)) || Date.parse(grant.expiresAt) <= now || Date.parse(grant.expiresAt) < Date.parse(body.expiresAt) || Date.parse(grant.expiresAt) > Date.parse(certificate.body.expiresAt)) throw new Error('Invalid relay group grant');
   } else if (!['prepare', 'manage', 'tabs'].includes(body.command.type)) throw new Error('Unsupported authorization');
   return body;

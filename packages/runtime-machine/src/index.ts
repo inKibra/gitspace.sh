@@ -2,7 +2,6 @@ export * from './executor.js';
 export * from './journal.js';
 export * from './commands.js';
 export * from './tools.js';
-export * from './apply-patch.js';
 export * from './attachments.js';
 export * from './artifactfs.js';
 export * from './browser.js';

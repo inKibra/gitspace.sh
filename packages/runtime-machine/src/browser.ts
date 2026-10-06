@@ -56,7 +56,7 @@ export class MachineBrowser {
     }
     return supervisor;
   }
-  private scope(dispatch: RuntimeToolDispatch) { return JSON.stringify([dispatch.projectId, dispatch.workspaceId, dispatch.conversationId, dispatch.machineId, dispatch.attachmentId, dispatch.generation]); }
+  private scope(dispatch: RuntimeToolDispatch) { return JSON.stringify([dispatch.projectId, dispatch.workspaceId, dispatch.machineId, dispatch.attachmentId, dispatch.generation]); }
   private profileKey(dispatch: RuntimeToolDispatch) { return createHash('sha256').update(JSON.stringify([dispatch.projectId, dispatch.workspaceId])).digest('hex'); }
   private async serial<T>(key: string, work: () => Promise<T>): Promise<T> {
     const previous = this.queues.get(key), gate = Promise.withResolvers<void>();
@@ -270,7 +270,7 @@ export class MachineBrowser {
       if (!this.options.relay) throw new Error('User browser relay unavailable');
       await this.options.relay.prepare(args, groupId, signal);
     }
-    const grant = RuntimeBrowserGrantSchema.parse({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, conversationId: dispatch.conversationId, machineId: dispatch.machineId, attachmentId: dispatch.attachmentId, generation: dispatch.generation, groupId, groupName: dispatch.workspaceId, source: args.source, origins: [], expiresAt: new Date(Date.now() + (this.options.grantMilliseconds ?? 30 * 60_000)).toISOString() });
+    const grant = RuntimeBrowserGrantSchema.parse({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, machineId: dispatch.machineId, attachmentId: dispatch.attachmentId, generation: dispatch.generation, groupId, groupName: dispatch.workspaceId, source: args.source, origins: [], expiresAt: new Date(Date.now() + (this.options.grantMilliseconds ?? 30 * 60_000)).toISOString() });
     const result: RuntimeBrowserPreparation = { ...grant, id: randomUUID(), action: args.action, requiresApproval: browserNeedsExplicitApproval(args) };
     return [{ type: 'text', text: JSON.stringify(result) }];
   }

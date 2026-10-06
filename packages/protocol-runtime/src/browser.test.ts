@@ -10,7 +10,7 @@ async function fixture() {
   const envelope = { version: 1 as const, tool: 'browser' as const, deadlineAt: expiresAt, replay: 'unsafe' as const };
   const issuedAt = new Date().toISOString();
   const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: 'account', projectId: scope.projectId, workspaceId: scope.workspaceId, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey))), issuedAt, expiresAt: new Date(Date.now() + 3600000).toISOString() }, root.privateKey);
-  const grant = await signRuntimeBrowserGrant({ projectId: scope.projectId, workspaceId: scope.workspaceId, conversationId: scope.conversationId, machineId: scope.machineId, attachmentId: scope.attachmentId, generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: ['example.com', '*.example.org'], source: 'relay', expiresAt }, keys.privateKey, authority);
+  const grant = await signRuntimeBrowserGrant({ projectId: scope.projectId, workspaceId: scope.workspaceId, machineId: scope.machineId, attachmentId: scope.attachmentId, generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: ['example.com', '*.example.org'], source: 'relay', expiresAt }, keys.privateKey, authority);
   const body: RuntimeBrowserAuthorizationBody = { scope, issuedAt, expiresAt, dispatch: envelope, command: { type: 'execute', args, grant } };
   return { keys, root, authority, body, dispatch: { ...scope, ...envelope, args }, authorization: await signRuntimeBrowserAuthorization(body, keys.privateKey, authority) };
 }
@@ -76,6 +76,19 @@ test('a signed group grant is reusable across distinct dispatch attempts and JS 
   expect(await verifyRuntimeBrowserGrant(grant, f.root.publicKey)).toEqual(grant.body);
   await expect(verifyRuntimeBrowserGrant(grant, f.root.publicKey, Date.parse(grant.body.expiresAt))).rejects.toThrow('expired');
   await expect(verifyRuntimeBrowserGrant({ ...grant, body: { ...grant.body, groupId: crypto.randomUUID() } }, f.root.publicKey)).rejects.toThrow('signature');
+});
+
+test('grants cross conversations but never executing machines or attachment generations', async () => {
+  const f = await fixture();
+  const scope = { ...f.body.scope, conversationId: 'another-conversation', attemptId: 'another-attempt' };
+  const body = { ...f.body, scope };
+  const authorization = await signRuntimeBrowserAuthorization(body, f.keys.privateKey, f.authority);
+  expect((await verifyRuntimeBrowserAuthorization(authorization, { ...f.dispatch, ...scope }, f.root.publicKey)).command).toEqual(f.body.command);
+  for (const changed of [{ machineId: 'another-machine' }, { attachmentId: 'another-attachment' }, { generation: 2 }]) {
+    const switched = { ...scope, ...changed };
+    const signed = await signRuntimeBrowserAuthorization({ ...body, scope: switched }, f.keys.privateKey, f.authority);
+    await expect(verifyRuntimeBrowserAuthorization(signed, { ...f.dispatch, ...switched }, f.root.publicKey)).rejects.toThrow('grant scope');
+  }
 });
 
 test('reusable grants retain account-root trust, workspace identity and certificate lifetime', async () => {

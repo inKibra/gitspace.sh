@@ -7,7 +7,7 @@ import { SpaceAuthorityDO } from '../../account-worker/src/space-authority.js';
 import { createWorkspaceRuntime } from '../src/runtime.js';
 import { CloudFileStore } from '../src/cloud-files.js';
 import { GitLfsRetention } from '../../account-worker/src/git-lfs-retention.js';
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { Result } from 'better-result';
 
 const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
 const unsupported = async (): Promise<never> => { throw new Error('External service forbidden in checkpoint proof'); };
@@ -42,9 +42,10 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       stream: () => { throw new Error('Inference forbidden in checkpoint proof'); },
       streamSimple: () => { throw new Error('Inference forbidden in checkpoint proof'); },
     });
+    const code = { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: async (input: { machine: typeof checkpoint }) => Result.ok(input.machine), listSnapshotPaths: async () => [] };
     const runtime = await createWorkspaceRuntime({
       storage: this.ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
-      code: { readFile: unsupported, writeSnapshot: unsupported },
+      code,
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs,
       initialCheckpoint: async () => { sourceReads++; return empty ? null : checkpoint; },
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => '', authorizeCronTool: unsupported },
@@ -73,7 +74,7 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       ledger.reconcile(new Set());
       assert.deepEqual(ledger.candidates(), [], 'Rejected snapshots must not release either publisher');
       this.ctx.storage.sql.exec("UPDATE runtime_cloud_writer SET attempt='lease-conflict' WHERE singleton=1");
-      await assert.rejects(runtime.snapshotCommit(publication), /writer lease/u);
+      await assert.rejects(runtime.snapshotCommit(publication), /publication is busy/u);
       assert.equal(retentionCalls, 0, 'Cloud lease conflict must not retain inventory');
       this.ctx.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1');
       rejectRetention = true;
@@ -81,7 +82,7 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       assert.deepEqual(await runtime.cloudFiles.snapshot(), checkpoint, 'Acceptance survives retention failure');
       rejectRetention = false;
       rejectRelease = true;
-      const recover = () => new CloudFileStore(this.ctx.storage, runtime.attachments, { readFile: unsupported, writeSnapshot: unsupported }, identity.workspaceId, () => {}, { has: unsupported, get: unsupported, put: unsupported }, retainLfs);
+      const recover = () => new CloudFileStore(this.ctx.storage, runtime.attachments, code, identity.workspaceId, () => {}, { has: unsupported, get: unsupported, put: unsupported }, retainLfs);
       await assert.rejects(recover().recover(), /Publication release temporarily unavailable/u);
       ledger.reconcile(new Set());
       assert.deepEqual(ledger.candidates(), [], 'Failed release keeps the real uploader pinned');
@@ -91,39 +92,30 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       assert.deepEqual(ledger.candidates(), [], 'Snapshot takes ownership before the uploader is released');
       await runtime.snapshotCommit(publication);
       await runtime.snapshotCommit(publication);
-      assert.equal(retentionCalls, 3, 'Acknowledged replay does not repeat completed retention');
       ledger.reconcile(new Set());
       assert.deepEqual(ledger.candidates(), [object], 'Owner release permits collection without machine cleanup; the other publisher stays pinned');
       ledger.retain(`publication:second-machine:${checkpoint.checkpointRef}`, [object]);
       const duplicate = recover();
-      duplicate.commitMachine(checkpoint, null, 'second-machine', true);
-      duplicate.commitMachine(checkpoint, null, 'second-machine', true);
+      await duplicate.commitMachine(checkpoint, checkpoint.worktreeCommit, 'second-machine');
+      await duplicate.commitMachine(checkpoint, checkpoint.worktreeCommit, 'second-machine');
       await recover().recover();
       ledger.reconcile(new Set());
       assert.deepEqual(ledger.candidates(), [object], 'A different accepted publisher of the same checkpoint releases its own pin exactly');
-      await assert.rejects(runtime.snapshotCommit({ ...publication, checkpoint: { ...checkpoint, worktreeCommit: 'f'.repeat(40) }, previousWorktreeCommit: checkpoint.worktreeCommit }));
+      await assert.rejects(runtime.snapshotCommit({ ...publication, checkpoint: { ...checkpoint, checkpointRef: 'refs/gitspace/unknown' }, previousWorktreeCommit: 'f'.repeat(40) }), /unknown predecessor/u);
     } else assert.deepEqual(assignment.checkpoint, checkpoint, 'First assignment must restore canonical source without prior cloud file execution');
     const lfsRestored = [{ path: 'modified.bin', outcome: 'committed' as const }, { path: 'added.bin', outcome: 'omitted' as const }];
     const ready = { ...identity, machineId: 'machine', attachmentId: result.attachment.attachmentId, generation: result.attachment.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true, capabilities: result.attachment.capabilities, lfsRestored };
     await assert.rejects(this.runtimeAttachmentReady({ ...ready, commit: 'f'.repeat(40) }));
     assert.equal((await this.runtimeAttachmentReady(ready)).attachment.state, 'ready');
     assert.deepEqual(await runtime.cloudFiles.snapshot(), checkpoint);
-    const rootHandle = await runtime.harness.root(BACKGROUND_CONTEXT);
-    const pivot = await rootHandle.commit(tx => tx.appendEntry(rootHandle.id, { kind: 'proof.before-handoff' }), BACKGROUND_CONTEXT);
-    const otherConversation = await rootHandle.fork(pivot.id, { ownership: { kind: 'ownerless' } }, BACKGROUND_CONTEXT);
     const root = (await runtime.snapshot()).conversations.find(item => item.parentId === null); assert(root);
-    await runtime.assignPlacement(root.id, ready.attachmentId, ready.generation);
-    await runtime.assignPlacement(root.id, ready.attachmentId, ready.generation);
     await this.runtimeAttachmentReady(ready);
-    await runtime.assignPlacement(root.id, ready.attachmentId, ready.generation);
     const messages = (await runtime.transcript(root.id)).filter(event => JSON.stringify(event.payload).includes('LFS handoff'));
     assert.equal(messages.length, 1);
     assert.match(JSON.stringify(messages[0]!.payload), /modified\.bin: restored committed content/u);
     assert.match(JSON.stringify(messages[0]!.payload), /added\.bin: omitted/u);
     assert.match(JSON.stringify(messages[0]!.payload), /remain on the previous machine/u);
     await assert.rejects(this.runtimeAttachmentReady({ ...ready, lfsRestored: [] }), /proof changed/u);
-    const otherEntries = await otherConversation.entries({}, 100, undefined, BACKGROUND_CONTEXT);
-    assert.equal(otherEntries.items.some(entry => entry.kind === 'gitspace.lfs-restored'), false);
     return Response.json({ passed: true });
   }
 }

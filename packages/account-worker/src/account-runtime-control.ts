@@ -17,6 +17,10 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
   if (operation === 'runtime.assignments') {
     const input = RuntimeAssignmentsInputSchema.parse(payload);
     if (input.machineId !== machine) throw new Error('Assignment target does not match the authenticated machine');
+    if (input.workspace) {
+      const access = await requireRuntimeIdentity(env, userId, input.workspace, false);
+      return access.authority.runtimeAssignments({ ...input.workspace, ...input });
+    }
     const spaces = await env.FLEET_CATALOG.getByName(userId).listSpaces();
     const assignments = [];
     for (const space of spaces) {
@@ -91,7 +95,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     case 'runtime.snapshot.commit': {
       const input = RuntimeSnapshotCommitInputSchema.parse(payload);
       const attachments = await access.authority.runtimeAttachments(identity);
-      if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation && item.role === 'primary')) throw new Error('Checkpoint source is not this machine primary');
+      if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation && (item.role === 'primary' || item.role === 'replica'))) throw new Error('Checkpoint source is not this machine replica');
       return access.authority.runtimeSnapshotCommit(input);
     }
     case 'runtime.model': {

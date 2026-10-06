@@ -64,7 +64,7 @@ try {
   assert.equal(await worker.evaluate(async () => (await globalThis.eval('stored')('identity')).privateKey.extractable), false, 'pairing private key must not be exportable');
   const signal = new AbortController().signal;
   const groupId = crypto.randomUUID();
-  const grant = await signRuntimeBrowserGrant({ projectId: 'project', workspaceId: 'workspace', conversationId: 'conversation', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId, groupName: 'Relay smoke workspace', source: 'relay', origins: ['127.0.0.1'], expiresAt: new Date(Date.now() + 500_000).toISOString() }, workspaceKeys.privateKey, authority);
+  const grant = await signRuntimeBrowserGrant({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId, groupName: 'Relay smoke workspace', source: 'relay', origins: ['127.0.0.1'], expiresAt: new Date(Date.now() + 500_000).toISOString() }, workspaceKeys.privateKey, authority);
   const url = `http://127.0.0.1:${site.port}/approved`;
   // Host authority intentionally ignores ports; localhost is a different, denied host.
   const sameHostUrl = `http://127.0.0.1:${other.port}/same-host`;

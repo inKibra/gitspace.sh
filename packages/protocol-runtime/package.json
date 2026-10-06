@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./tool-arguments": "./src/tool-arguments.ts",
+    "./apply-patch": "./src/apply-patch.ts",
     "./session-controls": "./src/session-controls.ts",
     "./workspace-controls": "./src/workspace-controls.ts",
     "./attachment-controls": "./src/attachment-controls.ts",
@@ -19,6 +21,7 @@
     "@gitspace/protocol-agent": "workspace:*",
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
+    "@gitspace/supervisor": "workspace:*",
     "zod": "^4.4.3"
   }
 }

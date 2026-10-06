@@ -3,6 +3,7 @@ import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/
 import { useResultQuery } from 'result-rpc/react';
 import type { InspectorView } from '@gitspace/protocol';
 import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeExecutionDocumentSchema, RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { Button, Dialog, DialogContent, DialogHeader, DialogTitle, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
@@ -135,12 +136,15 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     }
   };
   const attached = inspection.machines.filter(machine => snapshot.attachments.some(item => item.machineId === machine.id && item.state === 'ready'));
-  const machine = attached.find(item => item.id === terminalMachineId) ?? attached.find(item => item.id === snapshot.attachments.find(item => item.role === 'primary')?.machineId) ?? attached[0];
+  const execution = snapshot.documents['gitspace.execution'] === undefined ? { defaultMachineId: null } : RuntimeExecutionDocumentSchema.parse(snapshot.documents['gitspace.execution']);
+  const checkpoint = snapshot.documents['gitspace.code'] === undefined ? null : RuntimeGitCheckpointSchema.parse(snapshot.documents['gitspace.code']);
+  const machine = terminalMachineId ? attached.find(item => item.id === terminalMachineId) : execution.defaultMachineId ? attached.find(item => item.id === execution.defaultMachineId) : attached.find(machine => snapshot.attachments.some(attachment => attachment.machineId === machine.id && attachment.state === 'ready' && (attachment.role === 'primary' || attachment.role === 'replica')));
   const terminalClient = useMemo(() => machine?.rpcEndpoint ? createGitSpaceBrowserClient({ url: machine.rpcEndpoint }) : null, [machine?.rpcEndpoint]);
   const spaceId = snapshot.workspaceId;
   return <>
     {props.creation}
     {actionError ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
+    {checkpoint?.conflicts?.length ? <section role="alert" aria-label="Workspace merge conflicts" className="shrink-0 bg-surface-2 px-4 py-3 text-caption shadow-surface-1"><h2 className="font-medium text-destructive">Workspace merge conflicts</h2><p className="mt-1 text-muted-foreground">Machine changes reached the cloud working copy with conflicts. Resolve these files before continuing.</p><ul className="mt-2 list-inside list-disc break-all font-mono">{checkpoint.conflicts.map(path => <li key={path}>{path}</li>)}</ul></section> : null}
     {deployment.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(deployment.error, 'Read deployment status')}<Button variant="ghost" onClick={() => void deployment.refetch()}>Retry deployment status</Button></div> : null}
     {launch.launch && !launch.open ? <Button variant="ghost" size="compact" onClick={() => launch.setOpen(true)}>Show launch progress</Button> : null}
     {relationQuery.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(relationQuery.error, 'Read workspace relations')}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry relations</Button></div> : null}

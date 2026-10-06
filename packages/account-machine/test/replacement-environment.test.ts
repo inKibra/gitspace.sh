@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createDeploymentPlan, DeploymentJournal, hashArtifactPath } from '@gitspace/deployment';
 import { ReplacementEnvironment, environmentLaunchResponseSchema, environmentStatusSchema } from '../src/index.js';
 import { nativeHostAbi } from '@gitspace/deployment/manifest';
-import { GIT_LFS_DECLARATION, GIT_LFS_PATH, nativeFileDigest } from '../../deployment/src/native-runtime.js';
+import { GIT_LFS_DECLARATION, GIT_LFS_PATH, RIPGREP_DECLARATION, RIPGREP_PATH, nativeFileDigest } from '../../deployment/src/native-runtime.js';
 
 const roots: string[] = [];
 const environments: ReplacementEnvironment[] = [];
@@ -32,6 +32,15 @@ async function gitLfsFixture(path: string, label: string): Promise<void> {
     upstream: {
       version: '3.8.0', url: 'https://github.com/git-lfs/git-lfs/releases/download/v3.8.0/git-lfs-linux-amd64-v3.8.0.tar.gz',
       sha256: 'e455e00f15d9b95661b8d53498ffb0c3367962cf1ec73c31ab7369516cd6ab8d', size: 5_909_255,
+    },
+  }));
+  const ripgrep = join(path, RIPGREP_PATH);
+  await writeFile(ripgrep, `#!/bin/sh\necho 'ripgrep 14.1.1'\necho '${label}'\n`, { mode: 0o755 });
+  await writeFile(join(path, RIPGREP_DECLARATION), JSON.stringify({
+    version: 1, path: RIPGREP_PATH, ...await nativeFileDigest(ripgrep),
+    upstream: {
+      version: '14.1.1', url: 'https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz',
+      sha256: '4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e', size: 2_566_310,
     },
   }));
 }
@@ -259,15 +268,16 @@ describe('replacement environment host routes', () => {
     expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: null });
   });
 
-  it('starts each machine generation with its own bundled git-lfs for machine git and agent sessions', async () => {
+  it('starts each machine generation with its own bundled git-lfs and explicit ripgrep for machine and agent sessions', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-machine-git-lfs-'));
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'test-machine-git-lfs', root, repositoryRoot: root, rpcPort: 0, webPort: 0, machineId: 'machine-a',
       artifactKey: new Uint8Array(32).fill(1), controlToken: 'control-token',
+      environment: { GITSPACE_RIPGREP_PATH: '/stale/rg' },
     });
     environments.push(environment);
-    const booted: Array<{ generation: string; path: string; machineGit: string; agentGit: string }> = [];
+    const booted: Array<{ generation: string; path: string; machineGit: string; agentGit: string; ripgrep: string }> = [];
     for (const label of ['generation-a', 'generation-b']) {
       const candidate = join(root, label);
       await mkdir(candidate);
@@ -275,11 +285,13 @@ describe('replacement environment host routes', () => {
       await writeFile(join(candidate, 'machine.js'), `
         const machine = Bun.spawnSync(['git', 'lfs', 'version'], { stdout: 'pipe', stderr: 'pipe' });
         const agent = Bun.spawnSync(['git', 'lfs', 'version'], { env: { ...process.env }, stdout: 'pipe', stderr: 'pipe' });
+        const ripgrep = Bun.spawnSync([process.env.GITSPACE_RIPGREP_PATH, '--version'], { env: { PATH: '' }, stdout: 'pipe', stderr: 'pipe' });
         await Bun.write(process.env.GITSPACE_ENVIRONMENT_ROOT + '/machine-tools.json', JSON.stringify({
           generation: process.env.GITSPACE_MACHINE_RUNTIME_PATH,
           path: process.env.PATH,
           machineGit: machine.stdout.toString() + machine.stderr.toString(),
           agentGit: agent.stdout.toString() + agent.stderr.toString(),
+          ripgrep: ripgrep.stdout.toString() + ripgrep.stderr.toString(),
         }));
         const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => Response.json(new URL(request.url).pathname === '/__control/retire' ? { stopMode: 'replace' } : { status: 'ok' }) });
         console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
@@ -293,7 +305,7 @@ describe('replacement environment host routes', () => {
       booted.push(JSON.parse(await readFile(join(root, 'machine-tools.json'), 'utf8')));
     }
     for (const [index, label] of ['generation-a', 'generation-b'].entries()) {
-      expect(booted[index]).toMatchObject({ machineGit: `git-lfs/3.8.0 (${label})\n`, agentGit: `git-lfs/3.8.0 (${label})\n` });
+      expect(booted[index]).toMatchObject({ machineGit: `git-lfs/3.8.0 (${label})\n`, agentGit: `git-lfs/3.8.0 (${label})\n`, ripgrep: `ripgrep 14.1.1\n${label}\n` });
       expect(booted[index]!.path.split(':')[0]).toBe(join(booted[index]!.generation, 'native/bin'));
     }
     expect(booted[1]!.path).not.toContain(booted[0]!.generation);

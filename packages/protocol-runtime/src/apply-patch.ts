@@ -1,6 +1,3 @@
-import { z } from 'zod';
-
-export const ApplyPatchArgumentsSchema = z.object({ patch: z.string().min(1) });
 export type PatchChange = { path: string; destination?: string; before: string | null; after: string | null };
 export type PatchFiles = { read(path: string): Promise<string>; exists(path: string): Promise<boolean> };
 
