@@ -51,7 +51,7 @@ async function watcherProof(run: (proof: {
     database.possessSpace('workspace', 'machine').unwrap();
     const owned = database.getSpace('workspace');
     if (!owned) throw new Error('Owned workspace missing');
-    let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'watch-primary', generation: 0, ownershipGeneration: owned.generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
+    let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'watch-cache', generation: 0, ownershipGeneration: owned.generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
     attachment.cache = { state: 'live', platform: process.platform, activity: [], lastActivityAt: new Date().toISOString(), pausedAt: null, reclaimAt: null, lastSyncAt: null, localWorkOptIn, reclaimBlocked: null, setup: [] };
     let checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null = null;
     let captureAction: (() => Promise<void>) | undefined;
@@ -141,7 +141,7 @@ test('GitSpace terminal lifetime enables human watch and closing returns to grac
 test('live supervised proc edits publish periodically without enabling human watcher', async () => {
   await watcherProof(async ({ checkout, runtime, clock, watcherCount, publications }) => {
     const client = await daemonClientForProject(checkout);
-    await client.request({ op: 'start', owner: 'runtime:watch-primary:0', spec: { name: 'cache-proc-proof', application: '/bin/sh', args: ['-c', 'printf process-edit > tracked.txt; read value'], env: {}, cwd: checkout, pty: true, restart: 'no', persist: false, detached: false } });
+    await client.request({ op: 'start', owner: 'runtime:watch-cache:0', spec: { name: 'cache-proc-proof', application: '/bin/sh', args: ['-c', 'printf process-edit > tracked.txt; read value'], env: {}, cwd: checkout, pty: true, restart: 'no', persist: false, detached: false } });
     try {
       await client.request({ op: 'wait', name: 'cache-proc-proof', for: 'ready', timeoutMs: 1000 });
       await clock.until(runtime.sync());

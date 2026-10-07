@@ -12,7 +12,7 @@
     "./session-controls": "./src/session-controls.ts",
     "./workspace-controls": "./src/workspace-controls.ts",
     "./attachment-controls": "./src/attachment-controls.ts",
-    "./search-replica": "./src/search-replica.ts",
+    "./search-cache": "./src/search-cache.ts",
     "./search": "./src/search.ts",
     "./search-paths": "./src/search-paths.ts",
     "./search-ripgrep": "./src/search-ripgrep.ts",

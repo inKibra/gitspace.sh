@@ -186,7 +186,7 @@ test('background bash rejects unavailable execution before returning acceptance 
   let executions = 0;
   const { harness, root } = await registered([[call('bash', { command: 'pwd', background: true })]], completed, {
     ...operations,
-    jobScope: async () => { throw new Error('No machine attached: attach a ready workspace replica.'); },
+    jobScope: async () => { throw new Error('No machine attached: attach a ready workspace cache.'); },
     execute: async () => { executions++; return unused(); },
   });
   try {

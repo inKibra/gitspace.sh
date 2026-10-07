@@ -28,7 +28,7 @@ async function fixture(capabilities: Array<'storage.access' | 'space.control'>) 
   const userId = env.ACCOUNT_ID;
   const vault = env.CREDENTIALS.getByName(userId);
   await vault.bootstrap({ userId, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(tenantRootPrivateKey)), vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(19)) });
-  for (const machineId of ['primary', 'unassigned']) {
+  for (const machineId of ['assigned', 'unassigned']) {
     await vault.registerDevice(signCredentialAuthorityGrant({
       version: 1, userId, machineId, generation: 1, capabilities,
       signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(signingKey)),
@@ -36,13 +36,13 @@ async function fixture(capabilities: Array<'storage.access' | 'space.control'>) 
     }, tenantRootPrivateKey));
   }
   const project = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
-  const created = await project.bootstrap({ id: projectId, name: 'Repository authorization', repositoryReference: null, baseBranch: 'main', createdBy: 'primary' });
+  const created = await project.bootstrap({ id: projectId, name: 'Repository authorization', repositoryReference: null, baseBranch: 'main', createdBy: 'assigned' });
   await project.setProjectLifecycle(created.revision, 'active');
   const workspace = { id: workspaceId, projectId, kind: 'worktree' as const, name: 'Repository', branch: 'main', phase: null, sourceKind: 'branch' as const, sourceRef: 'main', sourceCommit: null, lifecycle: 'active' as const, goalId: null, expectedRevision: 0 };
   await project.putWorkspace(workspace);
   const authority = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
-  await authority.bootstrap({ projectId, spaceId: workspaceId, machineId: 'primary' });
-  const request = (payload: Record<string, unknown> = {}, machineId = 'primary', operation: ControlOperation = 'runtime.repository.credentials') => worker.fetch(new Request('https://auth.test/v1/control', {
+  await authority.bootstrap({ projectId, spaceId: workspaceId, machineId: 'assigned' });
+  const request = (payload: Record<string, unknown> = {}, machineId = 'assigned', operation: ControlOperation = 'runtime.repository.credentials') => worker.fetch(new Request('https://auth.test/v1/control', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify(createSignedControlRequest({ userId, machineId, operation, payload: { projectId, workspaceId, generation: 1, scope: 'read', ...payload }, signingPrivateKey: signingKey })),
   }), env);
@@ -68,7 +68,7 @@ describe('signed repository credential authority', () => {
         attachments: new AttachmentStore(state.storage, { seal: async secret => secret, open: async secret => secret, dispatch: unsupported }),
         code, publish() {}, snapshot: async () => checkpoint, origin: async () => null, lifecycle: unsupported, authorizeMachine: async () => {},
       });
-      const request = { projectId, workspaceId, machineId: 'primary', requestId: 'checkpoint-pin', sourceRef: checkpoint.checkpointRef, checkout: { kind: 'snapshot', commit } };
+      const request = { projectId, workspaceId, machineId: 'assigned', requestId: 'checkpoint-pin', sourceRef: checkpoint.checkpointRef, checkout: { kind: 'snapshot', commit } };
       await expect(controller.request({ ...request, checkout: { kind: 'snapshot', commit: 'c'.repeat(40) } })).rejects.toThrow();
       await expect(controller.request({ ...request, sourceRef: 'refs/gitspace/spaces/foreign/checkpoints' })).rejects.toThrow();
       const assigned = await controller.request(request);
@@ -88,7 +88,7 @@ describe('signed repository credential authority', () => {
     const response = await f.request();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: 'ok', value: lease });
-    expect((await f.request({}, 'primary', 'runtime.snapshot')).status).toBe(401);
+    expect((await f.request({}, 'assigned', 'runtime.snapshot')).status).toBe(401);
   });
 
   it('retains repository, project, signed-machine and generation boundaries', async () => {
@@ -125,7 +125,7 @@ describe('signed repository credential authority', () => {
     };
     const attachment = await runInDurableObject(f.authority, async (_instance, state) => {
       const store = new AttachmentStore(state.storage, services);
-      const { attachment } = await store.attach(RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'primary', generation: 3, role: 'runner', checkout: { kind: 'snapshot', commit: 'a'.repeat(40) }, capabilities: [] }));
+      const { attachment } = await store.attach(RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'assigned', generation: 3, role: 'runner', checkout: { kind: 'snapshot', commit: 'a'.repeat(40) }, capabilities: [] }));
       return store.ready({ ...attachment, commit: 'a'.repeat(40), prerequisitesComplete: true }).attachment;
     });
     const assigned = { attachmentId: attachment.attachmentId, generation: attachment.generation };
@@ -140,15 +140,15 @@ describe('signed repository credential authority', () => {
     expect((await f.request(assigned)).status).toBe(400);
   });
 
-  it('independent machine replicas coexist while the same shared checkout requires a completed drain before replacement', async () => {
+  it('independent machine caches coexist while the same shared checkout requires a completed drain before replacement', async () => {
     const f = await fixture(['space.control']);
     await runInDurableObject(f.authority, async (_instance, state) => {
       const store = new AttachmentStore(state.storage, {
         seal: async secret => secret, open: async secret => secret,
         dispatch: async () => { throw new Error('No machine calls allowed in this regression'); },
       });
-      const admission = RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'primary', generation: 0, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] });
-      const input = { ...admission, requestId: 'primary-request' };
+      const admission = RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'assigned', generation: 0, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] });
+      const input = { ...admission, requestId: 'assigned-request' };
       const first = await store.requestCache(input);
       expect((await store.requestCache(input)).attachment.attachmentId).toBe(first.attachment.attachmentId);
       await expect(store.requestCache({ ...input, requestId: 'premature' })).rejects.toThrow();

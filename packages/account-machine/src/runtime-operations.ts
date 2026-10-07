@@ -3,7 +3,7 @@ import { daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor
 import { checkoutPath, mergeDelegateCommit, runSupervisorCommand, ExecutorEffectUncertain, type ExecutorJournal, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
-import { replicaServiceOperation } from './replica-services.js';
+import { cacheServiceOperation } from './cache-services.js';
 import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/services';
 import { createHash } from 'node:crypto';
 import { type SpaceWorkspaceControls } from './space-workspace-controls.js';
@@ -84,7 +84,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
     },
     service: async (dispatch, local) => {
       const args = RuntimeServiceOperationSchema.parse(dispatch.args);
-      const result = await replicaServiceOperation(options.services, local, args);
+      const result = await cacheServiceOperation(options.services, local, args);
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     bash: async (dispatch, local, signal) => {
@@ -138,8 +138,9 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       } finally { await rm(directory, { recursive: true, force: true }); }
     },
     merge: async (dispatch, local, signal) => {
+      // Keep the admitted dispatch field name so persisted merge attempts replay unchanged.
       const args = z.object({ delegateAttachmentId: z.string().optional(), bundleUri: z.string().optional(), expectedPrimaryCommit: z.string().regex(/^[a-f0-9]{40,64}$/u), commit: z.string().regex(/^[a-f0-9]{40,64}$/u) }).parse(dispatch.args);
-      if (local.attachment.role !== 'cache') throw new Error('Only the primary may integrate commits');
+      if (local.attachment.role !== 'cache') throw new Error('Only a cache may integrate commits');
       if (args.bundleUri !== undefined) {
         if (!args.bundleUri.startsWith('local://workspace/delegates/')) throw new Error('Merge bundle must belong to this workspace delegate artifact scope');
         const artifact = await options.artifacts.read({ kind: 'workspace', projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, args.bundleUri);
@@ -155,7 +156,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
           const path = join(directory, 'branch.bundle');
           await writeFile(path, artifact.value, { mode: 0o600 });
           await run(['bundle', 'verify', path]);
-          if (await run(['rev-parse', 'HEAD']) !== args.expectedPrimaryCommit || await run(['status', '--porcelain'])) throw new Error('Primary changed or contains uncommitted work');
+          if (await run(['rev-parse', 'HEAD']) !== args.expectedPrimaryCommit || await run(['status', '--porcelain'])) throw new Error('Cache changed or contains uncommitted work');
           await run(['fetch', '--no-tags', '--', path, 'HEAD']);
           if (await run(['rev-parse', 'FETCH_HEAD']) !== args.commit) throw new Error('Bundle source commit does not match the authorized merge');
           await run(['merge', '--no-edit', '--no-ff', args.commit]);
@@ -165,7 +166,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       if (!args.delegateAttachmentId) throw new Error('Merge requires a delegate attachment or exported bundle');
       const delegate = options.journal().attachment(args.delegateAttachmentId);
       if (!delegate || delegate.attachment.state !== 'ready') throw new Error('Delegate attachment is not ready');
-      const result = await mergeDelegateCommit({ primary: local, delegate, expectedPrimaryCommit: args.expectedPrimaryCommit, commit: args.commit, attemptId: dispatch.attemptId, deadlineAt: dispatch.deadlineAt, signal });
+      const result = await mergeDelegateCommit({ cache: local, delegate, expectedCacheCommit: args.expectedPrimaryCommit, commit: args.commit, attemptId: dispatch.attemptId, deadlineAt: dispatch.deadlineAt, signal });
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
   };

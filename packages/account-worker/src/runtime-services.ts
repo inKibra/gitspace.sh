@@ -19,7 +19,7 @@ import { createRuntimeBrowserAuthority, type RuntimeBrowserAuthority } from './r
 import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper } from './runtime-inference.js';
 import { RuntimeProcArgumentsSchema, RuntimeGrepArgumentsSchema } from '@gitspace/protocol-runtime';
-import { caughtUpSearchReplica, type RuntimeAttachment, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
+import { caughtUpSearchCache, type RuntimeAttachment, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
@@ -153,7 +153,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       const route = await env.HOSTED_ROUTES.getByName(hostname).get();
       return !!route && route.tenant === env.ACCOUNT_ID && route.workspaceId === scope.workspaceId && Date.parse(route.leaseExpiresAt) > Date.now();
     },
-    selectExecution: (args, candidates) => selections.replica(args, candidates),
+    selectExecution: (args, candidates) => selections.cache(args, candidates),
     approvedOrigins: async () => approvedBrowserOrigins(await authority.refreshBrowserOrigins(identity.workspaceId)),
     groupName: async () => {
       const project = await authority.getProject();
@@ -220,7 +220,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const runtime = options.runtime();
         if (!(await runtime.snapshot()).conversations.some(item => item.id === input.conversationId)) throw new Error('Conversation is not owned by this workspace');
         const selected = selectedSnapshot?.attachment ?? await selections.select(input, selection, controller.signal);
-        if (!selected) throw new Error('No machine attached: the admitted execution replica is unavailable.');
+        if (!selected) throw new Error('No machine attached: the admitted execution cache is unavailable.');
         const snapshot = selectedSnapshot?.checkpoint ?? (selected.role === 'cache' ? await runtime.cloudFiles.initializeSnapshot() : undefined);
         if ((selected.role === 'cache') && !snapshot) throw new Error('Cloud working copy is unavailable');
         const tool = input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool;
@@ -324,19 +324,19 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (args.on !== undefined || args.at !== undefined) return executeMachine(input);
         const runtime = options.runtime();
         if (!runtime.cloudFiles.hasAttempt(input.attemptId)) {
-          const replicaResult = await runtime.cloudFiles.withCurrentSnapshot(async checkpoint => {
-            const attachment = caughtUpSearchReplica(runtime.attachments.list(), checkpoint);
+          const cacheResult = await runtime.cloudFiles.withCurrentSnapshot(async checkpoint => {
+            const attachment = caughtUpSearchCache(runtime.attachments.list(), checkpoint);
             if (!attachment) return null;
             try {
               const result = await executeMachine({ ...input, replay: 'safe' }, undefined, { attachment, checkpoint });
               return result.status === 'completed' ? result : null;
             } catch {
-              // Search has no effects. A disconnected or newly dirty replica
+              // Search has no effects. A disconnected or newly dirty cache
               // cannot prevent a search of the authoritative cloud snapshot.
               return null;
             }
           });
-          if (replicaResult) return replicaResult;
+          if (cacheResult) return cacheResult;
         }
         return runtime.cloudFiles.execute({ ...input, tool: 'grep' }, input.signal);
       }
@@ -487,7 +487,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     const selected = options.runtime().attachments.list()
       .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && attachment.state === 'ready' && attachment.role === 'cache' && attachment.heartbeatAt !== null && Date.now() - Date.parse(attachment.heartbeatAt) <= 30_000)
       .sort((left, right) => right.generation - left.generation)[0];
-    if (!selected) throw new Error('Original process machine is unreachable: no READY execution replica');
+    if (!selected) throw new Error('Original process machine is unreachable: no READY execution cache');
     if (!admission) {
       admission = RuntimeToolDispatchSchema.parse({ ...origin, attachmentId: selected.attachmentId, generation: selected.generation, parentAttemptId: input.originAttemptId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, replay, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
       ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(admission));
@@ -526,7 +526,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     } },
     operations: {
       execute,
-      async jobScope(args) { await selections.replica(args); return identity; },
+      async jobScope(args) { await selections.cache(args); return identity; },
       async controlJob(input) {
         const dispatch = savedDispatch(input.attemptId);
         if (!dispatch || dispatch.tool !== 'bash') throw new Error('Background command has no admitted executor');

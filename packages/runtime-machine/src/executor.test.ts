@@ -62,7 +62,7 @@ describe('executor effect ownership', () => {
       expect(f.launches()).toBe(1);
     } finally { await f.close(); }
   });
-  test('command waits for replica catch-up and accepted publication', async () => {
+  test('command waits for cache catch-up and accepted publication', async () => {
     const caughtUp = Promise.withResolvers<void>(), accepted = Promise.withResolvers<void>(), published = Promise.withResolvers<void>();
     const f = await fixture(undefined, { onBeforeExecute: async () => caughtUp.promise, onMutationSettled: async () => { published.resolve(); await accepted.promise; return null; } });
     try {

@@ -65,7 +65,7 @@ export class CloudFileStore {
     return this.storage.sql.exec('SELECT id FROM runtime_cloud_files WHERE id=?', attemptId).toArray().length > 0;
   }
   snapshot(): Promise<Checkpoint | null> { return readCurrentCheckpoint(this.storage); }
-  /** Hold the canonical publication queue through readiness verification and replica dispatch. */
+  /** Hold the canonical publication queue through readiness verification and cache dispatch. */
   withCurrentSnapshot<T>(operation: (checkpoint: Checkpoint) => Promise<T>): Promise<T> {
     return this.serialize(async () => {
       const checkpoint = await this.initializeSnapshot();

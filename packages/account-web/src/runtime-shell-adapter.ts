@@ -49,9 +49,10 @@ export function runtimeSubagents(snapshot: RuntimeSnapshot): RuntimeSideAgentBlo
   const records = runtimeSubagentRecords(snapshot);
   return snapshot.conversations.filter(item => item.parentId !== null).map(item => {
     const runtime = records.find(record => record.conversationId === item.id);
+    const requestedName = runtime?.requestedName === undefined ? runtime?.name : runtime.requestedName;
     const messages = runtimeMessages(item);
     return {
-      id: `agent:${item.id}`, type: 'side-agent', agentId: item.id, label: runtime?.name ?? (item.title || item.id),
+      id: `agent:${item.id}`, type: 'side-agent', agentId: item.id, label: requestedName?.trim() || runtime?.definition?.name.trim() || runtime?.role || item.title || item.id,
       status: item.status === 'idle' ? 'done' : item.status === 'waiting' ? 'blocked' : item.status,
       summary: messages.findLast(message => message.text.length > 0)?.text,
       messages,

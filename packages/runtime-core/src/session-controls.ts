@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { Context, JsonValue } from '@earendil-works/chord';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
-import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
+import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type AgentSetupView, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc } from './documents.js';
 import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { RuntimeHarnessOptions } from './harness.js';
@@ -22,7 +22,7 @@ export const SessionSelectionDoc = defineDoc<{ conversationId: string | null }>(
 const GoalClockDoc = defineDoc<{ startedAt: number | null; elapsedSeconds: number; tokensAtStart: number }>({ kind: 'gitspace.goal-clock', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ startedAt: null, elapsedSeconds: 0, tokensAtStart: 0 }) });
 const DefinitionMetadataSchema = z.object({ name: z.string().min(1).optional(), description: z.string().default(''), model: z.union([z.string(), z.array(z.string())]).optional(), thinking: ThinkingSchema.nullable().optional(), tools: z.union([z.string(), z.array(z.string())]).optional(), spawns: z.union([z.string(), z.array(z.string())]).optional() });
 export function parseCloudAgentDefinition(path: string, content: string) {
-  if (!/^(?:\.omp|\.agents)\/agents\/[A-Za-z0-9._-]+\.md$/u.test(path)) throw new Error('Agent definitions must be workspace .agents/agents/*.md files');
+  if (!/^(?:\.omp|\.agents)\/agents\/[A-Za-z0-9._-]+\.md$/u.test(path)) throw new Error('Agent definitions must be workspace .agents/agents/*.md or .omp/agents/*.md files');
   if (new TextEncoder().encode(content).byteLength > 262144) throw new Error('Agent definition exceeds 256 KiB');
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(content);
   const metadata = DefinitionMetadataSchema.parse(match ? parseYaml(match[1]!) : {});
@@ -32,10 +32,25 @@ export function parseCloudAgentDefinition(path: string, content: string) {
   if (disallowed.length) throw new Error(`Agent definition requests disallowed non-read-only tools: ${disallowed.join(', ')}`);
   return { name: metadata.name ?? path.split('/').at(-1)!.replace(/\.md$/u, ''), description: metadata.description, modelSelectors: list(metadata.model), thinking: metadata.thinking ?? null, tools, toolsSpecified: metadata.tools !== undefined, spawns: metadata.spawns === undefined ? null : list(metadata.spawns).join(','), instructions: content.slice(match?.[0].length ?? 0).trim() };
 }
+
+export function resolveAgentDefinitions(definitions: readonly z.infer<typeof AgentDefinitionSchema>[]) {
+  const ordered = [...definitions].sort((left, right) =>
+    Number(right.path.startsWith('.agents/agents/')) - Number(left.path.startsWith('.agents/agents/'))
+    || Number(right.source === 'cloud') - Number(left.source === 'cloud')
+    || (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  const winners = new Map<string, z.infer<typeof AgentDefinitionSchema>>();
+  const diagnostics: NonNullable<AgentSetupView['diagnostics']> = [];
+  for (const definition of ordered) {
+    const winner = winners.get(definition.name);
+    if (winner) diagnostics.push({ name: definition.name, winnerPath: winner.path, ignoredPath: definition.path });
+    else winners.set(definition.name, definition);
+  }
+  return { agents: [...winners.values()], diagnostics };
+}
 export const sessionControlsExtension = defineExtension({ name: 'gitspace.session-controls', sections: [{ key: 'session-controls', async render(input, context) {
   const controls = await input.read.snapshot(SessionControlsDoc, input.conversationId, context);
   if (!controls) return '';
-  return [controls.goal?.status === 'active' ? `Active goal: ${controls.goal.objective}` : '', ...controls.definitions.map(definition => `Available agent ${definition.name}: ${definition.description}; model ${definition.modelSelectors.join(', ') || 'workspace default (independent of parent)'}; tools ${definition.tools.join(', ') || 'fixed read-only defaults'}. Invoke agents spawn with agent: "${definition.name}" and task; name is a separate optional address. This child uses only its saved instructions and retained repository rules.`)].filter(Boolean).join('\n\n');
+  return [controls.goal?.status === 'active' ? `Active goal: ${controls.goal.objective}` : '', ...resolveAgentDefinitions(controls.definitions).agents.map(definition => `Available agent ${definition.name}: ${definition.description}; model ${definition.modelSelectors.join(', ') || 'workspace default (independent of parent)'}; tools ${definition.tools.join(', ') || 'fixed read-only defaults'}. Invoke agents spawn with agent: "${definition.name}" and task; name is a separate optional address. This child uses only its saved instructions and retained repository rules.`)].filter(Boolean).join('\n\n');
 } }] });
 export async function committedSessionApproval(harness: Harness, conversationId: string, taskId: string) {
   const questions = await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT);
@@ -257,7 +272,7 @@ export function createSessionControls(services: SessionControlServices) {
       case 'control': case 'agentSetup': case 'historyAnchorId': case 'messages': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': break;
     }
     const result: RuntimeSessionResult = { control: await control(target) };
-    if (command.type === 'agentSetup' || command.type === 'saveAgentDefinition') result.setup = { sessionId: String(target.id), agents: child ? child.definition ? [{ ...child.definition, editable: false }] : [] : (await harness.snapshot(SessionControlsDoc, target.id, ctx))?.definitions ?? [] };
+    if (command.type === 'agentSetup' || command.type === 'saveAgentDefinition') result.setup = { sessionId: String(target.id), ...(child ? { agents: child.definition ? [{ ...child.definition, editable: false }] : [], diagnostics: [] } : resolveAgentDefinitions((await harness.snapshot(SessionControlsDoc, target.id, ctx))?.definitions ?? [])) };
     if (command.type === 'messages') result.messages = (await entries(target)).reverse().flatMap(entry => entry.model ?? []);
     if (command.type === 'historyPage') result.historyPage = await services.history.page(target.id, command.request);
     if (command.type === 'transcriptPage') result.transcriptPage = await services.history.transcriptPage(target.id, command.request);

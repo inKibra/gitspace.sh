@@ -80,4 +80,16 @@ describe('runtime to existing shell adapter', () => {
     expect(runtimeSubagents(snapshot)[0]?.summary).toBe('Review complete.');
     expect(runtimeSubagents(snapshot)[0]?.messages?.[0]?.text).toBe(incoming);
   });
+
+  it('uses the spawn address, then definition name, then role instead of a generic child title', () => {
+    const snapshot = fixture();
+    snapshot.conversations.push({ id: 'child', parentId: 'root', title: 'child', status: 'idle', messages: [] });
+    const metadata = { conversationId: 'child', parentId: 'root', name: 'Boundary reviewer', attemptId: 'spawn', definition: { name: 'Repository Scout', description: '', source: 'workspace', path: '.agents/agents/repository.md', editable: true, content: 'Review', revision: 'a'.repeat(64), modelSelectors: ['pi/scout'], role: 'scout', provider: 'anthropic', model: 'claude-sonnet-4', thinking: null, selection: 'definition', tools: ['read'], spawns: null }, selection: { kind: 'role', role: 'scout' }, role: 'scout', thinking: null, tools: ['read'], model: { provider: 'anthropic', modelId: 'claude-sonnet-4' } };
+    snapshot.documents['gitspace.agents'] = [metadata];
+    expect(runtimeSubagents(snapshot)[0]?.label).toBe('Boundary reviewer');
+    snapshot.documents['gitspace.agents'] = [{ ...metadata, name: 'Repository Scout-spawn', requestedName: null }];
+    expect(runtimeSubagents(snapshot)[0]?.label).toBe('Repository Scout');
+    snapshot.documents['gitspace.agents'] = [{ ...metadata, name: 'scout-spawn', requestedName: null, definition: null }];
+    expect(runtimeSubagents(snapshot)[0]?.label).toBe('scout');
+  });
 });

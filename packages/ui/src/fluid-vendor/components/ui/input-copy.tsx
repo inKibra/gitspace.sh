@@ -16,6 +16,8 @@ type InputCopyAlign = "right" | "left";
 interface InputCopyProps extends Omit<HTMLAttributes<HTMLDivElement>, "children"> {
   /** The value to display and copy to clipboard. */
   value: string;
+  /** Optional abbreviated presentation; copying always uses the full value. */
+  displayValue?: string;
   /** Optional label displayed above the input. */
   label?: string;
   /** Callback fired after the value is copied. */
@@ -33,7 +35,7 @@ interface InputCopyProps extends Omit<HTMLAttributes<HTMLDivElement>, "children"
 }
 
 const InputCopy = forwardRef<HTMLDivElement, InputCopyProps>(
-  ({ value, label, onCopy, disabled, variant = "icon", align = "right", size, className, ...props }, ref) => {
+  ({ value, displayValue, label, onCopy, disabled, variant = "icon", align = "right", size, className, ...props }, ref) => {
     const CopyIcon = useIcon("copy");
     // "copied" and "error" both occupy the same animation slot on the button
     const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
@@ -313,9 +315,10 @@ const InputCopy = forwardRef<HTMLDivElement, InputCopyProps>(
           align === "left" ? "pl-1" : "pl-0"
         )}
         style={{ fontVariationSettings: fontWeights.normal }}
+        title={displayValue === undefined ? undefined : value}
       >
         <mark className="bg-transparent text-foreground transition-colors duration-80 group-hover:bg-[#6B97FF]/20 group-hover:text-foreground">
-          {value}
+          {displayValue ?? value}
         </mark>
       </span>
     );
@@ -379,7 +382,7 @@ const InputCopy = forwardRef<HTMLDivElement, InputCopyProps>(
           </span>
         )}
         {variant === "icon" ? (
-          <Tooltip content={tooltipState === "idle" ? "Copy to clipboard" : status === "error" ? "Copy failed" : "Copied"} delayDuration={500} sideOffset={2} forceOpen={tooltipState === "copied" ? true : tooltipState === "suppressed" ? false : undefined} onOpenChange={handleTooltipOpenChange}>
+          <Tooltip content={tooltipState === "idle" ? displayValue === undefined ? "Copy to clipboard" : value : status === "error" ? "Copy failed" : "Copied"} delayDuration={500} sideOffset={2} forceOpen={tooltipState === "copied" ? true : tooltipState === "suppressed" ? false : undefined} onOpenChange={handleTooltipOpenChange}>
             {button}
           </Tooltip>
         ) : (

@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { Miniflare } from 'miniflare';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint } from '../../account-machine/src/git-checkpoint.js';
 
-for (const scenario of ['source', 'empty', 'unborn']) test(`first primary reaches ready from ${scenario === 'source' ? 'canonical committed source' : scenario === 'unborn' ? 'canonical unborn checkpoint' : 'empty Artifacts namespace and real local Git HEAD'}`, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'gitspace-primary-checkpoint-'));
+for (const scenario of ['source', 'empty', 'unborn']) test(`first cache reaches ready from ${scenario === 'source' ? 'canonical committed source' : scenario === 'unborn' ? 'canonical unborn checkpoint' : 'empty Artifacts namespace and real local Git HEAD'}`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gitspace-cache-checkpoint-'));
   let worker: Miniflare | undefined;
   try {
     const git = async (...args: string[]) => {
@@ -25,15 +25,15 @@ for (const scenario of ['source', 'empty', 'unborn']) test(`first primary reache
     const head = scenario === 'unborn' ? null : await git('rev-parse', 'HEAD');
     const checkpoint = scenario === 'source' && head !== null ? { ...local, headCommit: head, indexCommit: head, trackedWorktreeCommit: head, worktreeCommit: head } : local;
     const config = join(directory, 'wrangler.json');
-    await writeFile(config, JSON.stringify({ name: 'local-primary-checkpoint-proof', main: new URL('./primary-checkpoint-fixture.ts', import.meta.url).pathname, compatibility_date: '2026-03-02', compatibility_flags: ['nodejs_compat'] }));
+    await writeFile(config, JSON.stringify({ name: 'local-cache-checkpoint-proof', main: new URL('./cache-checkpoint-fixture.ts', import.meta.url).pathname, compatibility_date: '2026-03-02', compatibility_flags: ['nodejs_compat'] }));
     const build = Bun.spawn([process.execPath, 'x', 'wrangler', 'deploy', '--dry-run', '--config', config, '--outdir', join(directory, 'bundle')], { env: { ...process.env, WRANGLER_SEND_METRICS: 'false' }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
     build.stdin.end();
     const [buildOut, buildError, buildExit] = await Promise.all([new Response(build.stdout).text(), new Response(build.stderr).text(), build.exited]);
     if (buildExit !== 0) throw new Error(buildOut + buildError);
     worker = new Miniflare({
-      modules: await wranglerWorkerModules(join(directory, 'bundle'), 'primary-checkpoint-fixture.js'), modulesRoot: join(directory, 'bundle'),
+      modules: await wranglerWorkerModules(join(directory, 'bundle'), 'cache-checkpoint-fixture.js'), modulesRoot: join(directory, 'bundle'),
       compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], bindings: { ACCOUNT_ID: 'account' },
-      durableObjects: { PROOF: { className: 'PrimaryCheckpointProof', useSQLite: true }, SPACE_AUTHORITY: { className: 'PrimaryCheckpointProof', useSQLite: true }, PROJECT_AUTHORITY: { className: 'CheckpointMetadata', useSQLite: true }, FLEET_CATALOG: { className: 'CheckpointMetadata', useSQLite: true }, CREDENTIALS: { className: 'CheckpointMetadata', useSQLite: true } },
+      durableObjects: { PROOF: { className: 'CacheCheckpointProof', useSQLite: true }, SPACE_AUTHORITY: { className: 'CacheCheckpointProof', useSQLite: true }, PROJECT_AUTHORITY: { className: 'CheckpointMetadata', useSQLite: true }, FLEET_CATALOG: { className: 'CheckpointMetadata', useSQLite: true }, CREDENTIALS: { className: 'CheckpointMetadata', useSQLite: true } },
       outboundService: () => { throw new Error('Live provider access forbidden'); },
     });
     const response = await worker.dispatchFetch(`http://proof/${scenario}`, { method: 'POST', body: JSON.stringify(checkpoint) });

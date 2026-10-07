@@ -214,7 +214,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (await this.ctx.storage.get('runtime.identity') === undefined) return { assignments: [] };
     if (input.afterSnapshot !== undefined) {
       const runtime = await this.getRuntime(identity);
-      if (!runtime.attachments.list().some(item => item.machineId === input.machineId && (item.role === 'cache') && ['attaching', 'ready', 'draining'].includes(item.state))) throw new Error('Snapshot wait requires an active replica');
+      if (!runtime.attachments.list().some(item => item.machineId === input.machineId && (item.role === 'cache') && ['attaching', 'ready', 'draining'].includes(item.state))) throw new Error('Snapshot wait requires an active cache');
       await runtime.waitForSnapshot(input.afterSnapshot);
     }
     const result = await (await this.attachmentController(identity)).assignments(input);
@@ -225,7 +225,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeAttachmentReady(raw: unknown) {
     const input = RuntimeAttachmentReadyInputSchema.parse(raw);
     const result = await (await this.attachmentController(input)).ready(input);
-    await (await this.getRuntime(input)).replicaReady(input.attachmentId, input.generation);
+    await (await this.getRuntime(input)).cacheReady(input.attachmentId, input.generation);
     return result;
   }
 
@@ -245,7 +245,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeDetach(raw: unknown) {
     const input = RuntimeDetachInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
-    if (input.state === 'detached' && runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents replica detach');
+    if (input.state === 'detached' && runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents cache detach');
     if (input.state === 'detached') await runtime.attachments.reconcileDetach(input);
     const attachment = runtime.attachments.detach(input);
     runtime.publish();

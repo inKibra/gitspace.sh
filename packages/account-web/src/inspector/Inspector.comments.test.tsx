@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RepositoryDiffView, ReviewThreadView } from '@gitspace/protocol';
 import { Inspector, type InspectorProps } from './Inspector.js';
+import { RuntimeSubagentRecordSchema } from '@gitspace/protocol-runtime';
 
 vi.mock('@pierre/diffs/react', () => ({ FileDiff: ({ options }: { options: { onLineSelectionEnd(range: unknown): void } }) => <button onClick={() => options.onLineSelectionEnd({ side: 'deletions', start: 1, end: 1 })}>Select old line</button> }));
 vi.mock('@pierre/trees/react', () => ({
@@ -163,4 +164,25 @@ it('does not advertise an empty legacy service count for the runtime inventory',
   expect(tab).toBeDefined();
   expect(tab?.textContent).not.toContain(' · 0');
   expect(container.textContent).toContain('Services across machine caches');
+});
+
+it('shows a compact retained revision while copying the full identity', async () => {
+  const revision = '1234567890abcdef'.repeat(4);
+  const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+  const runtime = RuntimeSubagentRecordSchema.parse({ parentId: 'root', name: 'Boundary reviewer', attemptId: 'spawn', role: 'scout', selection: { kind: 'role', role: 'scout' }, thinking: null, tools: ['read'], model: { provider: 'anthropic', modelId: 'claude-sonnet-4' }, definition: { name: 'Repository Scout', description: '', source: 'workspace', path: '.agents/agents/repository.md', editable: true, content: 'Review', revision, modelSelectors: ['pi/scout'], role: 'scout', provider: 'anthropic', model: 'claude-sonnet-4', thinking: null, selection: 'definition', tools: ['read'], spawns: null } });
+  props = { ...props, initialView: 'subagents', subagents: [{ id: 'agent:child', type: 'side-agent', agentId: 'child', label: runtime.name, agent: runtime.role ?? undefined, model: 'anthropic / claude-sonnet-4', status: 'done', runtime }] };
+  await render();
+  const revisionLabel = [...container.querySelectorAll('dt')].find(element => element.textContent === 'Definition revision');
+  const revisionValue = revisionLabel?.nextElementSibling;
+  expect(revisionValue?.textContent).toContain(revision.slice(0, 8));
+  expect(revisionValue?.textContent).not.toContain(revision);
+  expect(revisionValue?.querySelector('[title]')?.getAttribute('title')).toBe(revision);
+  const copy = revisionValue?.querySelector('button');
+  expect(copy).not.toBeNull();
+  await act(async () => { copy!.click(); });
+  expect(writeText).toHaveBeenCalledWith(revision);
+  expect(container.querySelector('[aria-label="Role"]')?.textContent).toContain('scout');
+  expect(container.querySelector('[aria-label="Model"]')?.textContent).toContain('claude-sonnet-4');
+  expect(container.querySelector('[aria-label="Model"]')?.textContent).toContain('anthropic');
+  writeText.mockRestore();
 });

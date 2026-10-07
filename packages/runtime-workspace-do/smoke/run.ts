@@ -138,7 +138,7 @@ try {
   }
   console.log('PASS cold ask recovery, both answer surfaces, idle watch, approval authority and canonical phase');
   console.log('PASS browser approval binds displayed resolved preparation', await request('/browser-approval-proof'));
-  console.log('PASS workspace execution selection requires a ready replica', await request('/execution-machine-proof'));
+  console.log('PASS workspace execution selection requires a ready cache', await request('/execution-machine-proof'));
   console.log('PASS bounded tasks and full receipts', await request('/burst'));
   const scope = z.object({ root: z.string(), child: z.string(), sibling: z.string(), grandchild: z.string() }).parse(await request('/scoped-stop-seed'));
   await until(snapshot => Object.values(scope).every(id => snapshot.questions.some(question => question.conversationId === id && question.answer === null)));

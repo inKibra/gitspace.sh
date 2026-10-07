@@ -13,7 +13,7 @@ const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitsp
 export class CloudFilesProof extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     await this.ctx.storage.deleteAll();
-    let primary: RuntimeAttachment[] = [], failPush = false, pushes = 0;
+    let caches: RuntimeAttachment[] = [], failPush = false, pushes = 0;
     let pause: { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } | undefined;
     let loseResponse = false, rejectWrite = false;
     let mergedCheckpoint: typeof checkpoint | undefined, observedMergeBase: typeof checkpoint | undefined;
@@ -93,18 +93,18 @@ export class CloudFilesProof extends DurableObject {
         return Result.ok(next);
       },
     };
-    const open = () => new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs);
+    const open = () => new CloudFileStore(this.ctx.storage, { list: () => caches }, code, 'cloud', () => {}, lfs, retainLfs);
     let store = open();
     const invoke = (tool: 'read' | 'write' | 'edit' | 'find' | 'apply_patch', args: unknown, id: string = crypto.randomUUID()) => store.execute({ tool, args, requestId: id, attemptId: id });
     assert.equal((await invoke('read', { path: 'file.txt' })).status, 'failed');
     await this.ctx.storage.put('runtime.code', checkpoint);
     const scenario = new URL(request.url).searchParams.get('scenario');
-    if (scenario === 'replica-index') {
+    if (scenario === 'cache-index') {
       failIndex = true;
       assert.equal(await store.withCurrentSnapshot(async current => {
         assert.equal(current.worktreeCommit, checkpoint.worktreeCommit);
-        return 'healthy replica selected';
-      }), 'healthy replica selected');
+        return 'healthy cache selected';
+      }), 'healthy cache selected');
       return Response.json({ passed: true });
     }
     if (scenario === 'committed-index') {
@@ -207,55 +207,55 @@ export class CloudFilesProof extends DurableObject {
     assert.throws(() => attachments.ready(ready), /readiness proof/);
     assert.throws(() => attachments.ready(ready, 'f'.repeat(40)), /readiness proof/);
     attachments.ready(ready, checkpoint.worktreeCommit);
-    primary = attachments.list();
-    assert.equal((await invoke('write', { path: 'owned.txt', content: 'with ready replica' })).status, 'completed');
+    caches = attachments.list();
+    assert.equal((await invoke('write', { path: 'owned.txt', content: 'with ready cache' })).status, 'completed');
     assert.equal(store.hasAttempt('write-once'), true);
     assert.equal(store.hasAttempt('never-dispatched'), false);
     const replayPushes = pushes;
     assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written' }, 'write-once'), written);
     assert.equal(pushes, replayPushes);
-    attachments.transition(attached.attachmentId, attached.generation, 'lost'); primary = attachments.list();
-    assert.equal((await invoke('write', { path: 'lost.txt', content: 'with lost replica' })).status, 'completed');
+    attachments.transition(attached.attachmentId, attached.generation, 'lost'); caches = attachments.list();
+    assert.equal((await invoke('write', { path: 'lost.txt', content: 'with lost cache' })).status, 'completed');
     attachments.transition(attached.attachmentId, attached.generation, 'draining');
     assert.throws(() => attachments.transition(attached.attachmentId, attached.generation, 'detached'), /final snapshot/);
     assert.throws(() => attachments.recordCacheFlush(attached.attachmentId, attached.generation + 1));
     attachments.recordCacheFlush(attached.attachmentId, attached.generation);
-    attachments.transition(attached.attachmentId, attached.generation, 'detached'); primary = attachments.list();
+    attachments.transition(attached.attachmentId, attached.generation, 'detached'); caches = attachments.list();
     const afterDetach = await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach');
     assert.equal(afterDetach.status, 'completed');
     assert.deepEqual((await invoke('read', { path: 'after-detach.txt' })).content, [{ type: 'text', text: 'resumed' }]);
-    const nextPrimary = (await attachments.attach(RuntimeAttachInputSchema.parse({ ...admission, machineId: 'machine-b' }))).attachment;
+    const nextCache = (await attachments.attach(RuntimeAttachInputSchema.parse({ ...admission, machineId: 'machine-b' }))).attachment;
     const cloudCheckpoint = await store.snapshot(); assert(cloudCheckpoint);
-    attachments.ready({ ...ready, machineId: nextPrimary.machineId, attachmentId: nextPrimary.attachmentId, generation: nextPrimary.generation, commit: cloudCheckpoint.worktreeCommit }, cloudCheckpoint.worktreeCommit);
-    primary = attachments.list();
+    attachments.ready({ ...ready, machineId: nextCache.machineId, attachmentId: nextCache.attachmentId, generation: nextCache.generation, commit: cloudCheckpoint.worktreeCommit }, cloudCheckpoint.worktreeCommit);
+    caches = attachments.list();
     const handoffPushes = pushes;
     assert.deepEqual(await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach'), afterDetach);
     assert.equal(pushes, handoffPushes);
-    assert.equal((await invoke('write', { path: 'after-b.txt', content: 'with replacement replica' })).status, 'completed');
+    assert.equal((await invoke('write', { path: 'after-b.txt', content: 'with replacement cache' })).status, 'completed');
     await assert.rejects(attachments.attach(admission), /stale/);
-    primary = [RuntimeAttachmentSchema.parse({ ...attached, state: 'attaching' })];
-    assert.equal((await invoke('write', { path: 'attaching.txt', content: 'with attaching replica' })).status, 'completed');
-    primary = [];
+    caches = [RuntimeAttachmentSchema.parse({ ...attached, state: 'attaching' })];
+    assert.equal((await invoke('write', { path: 'attaching.txt', content: 'with attaching cache' })).status, 'completed');
+    caches = [];
     await this.ctx.storage.delete('runtime.code');
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_snapshot');
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_commits');
     const seedEntered = Promise.withResolvers<void>(), seedRelease = Promise.withResolvers<void>();
-    const seedingStore = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs, async () => { seedEntered.resolve(); await seedRelease.promise; return checkpoint; });
+    const seedingStore = new CloudFileStore(this.ctx.storage, { list: () => caches }, code, 'cloud', () => {}, lfs, retainLfs, async () => { seedEntered.resolve(); await seedRelease.promise; return checkpoint; });
     assert.equal(await seedingStore.snapshot(), null, 'Reading runtime state must not initialize an Artifacts repository');
     const seed = seedingStore.execute({ tool: 'read', args: { path: 'file.txt' }, requestId: 'raced-seed', attemptId: 'raced-seed' });
     await seedEntered.promise;
-    primary = [RuntimeAttachmentSchema.parse({ ...attached, state: 'attaching' })];
+    caches = [RuntimeAttachmentSchema.parse({ ...attached, state: 'attaching' })];
     seedRelease.resolve();
     assert.equal((await seed).status, 'completed');
-    primary = [];
-    store = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs, async () => checkpoint);
+    caches = [];
+    store = new CloudFileStore(this.ctx.storage, { list: () => caches }, code, 'cloud', () => {}, lfs, retainLfs, async () => checkpoint);
     assert.equal((await invoke('read', { path: 'file.txt' })).status, 'completed');
     assert.equal((await store.snapshot())?.worktreeCommit, checkpoint.worktreeCommit);
     assert.equal((await invoke('write', { path: 'first-cloud.txt', content: 'without prior machine' })).status, 'completed');
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_snapshot');
     this.ctx.storage.sql.exec('DELETE FROM runtime_code_commits');
     const unborn = { ...checkpoint, headCommit: null };
-    store = new CloudFileStore(this.ctx.storage, { list: () => primary }, code, 'cloud', () => {}, lfs, retainLfs, async () => unborn);
+    store = new CloudFileStore(this.ctx.storage, { list: () => caches }, code, 'cloud', () => {}, lfs, retainLfs, async () => unborn);
     assert.equal((await invoke('write', { path: 'unborn.txt', content: 'cloud before attachment' })).status, 'completed');
     const unbornCloud = await store.snapshot(); assert(unbornCloud);
     assert.equal(unbornCloud.headCommit, null);

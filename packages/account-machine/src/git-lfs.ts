@@ -234,7 +234,7 @@ export async function checkoutGitLfs(root: string, ref: string, protectedPaths?:
     if (!object) continue;
     if (protectedPaths) {
       const current = parseGitLfsPointer(await readFile(resolve(root, path)));
-      // Replica synchronization must not replace hydrated or concurrently edited
+      // Cache synchronization must not replace hydrated or concurrently edited
       // local content. Only the exact newly installed pointer is hydrated.
       if (!current || current.oid !== object.oid || current.size !== object.size) continue;
     }

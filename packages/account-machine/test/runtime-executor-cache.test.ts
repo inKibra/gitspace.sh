@@ -9,7 +9,7 @@ import { RuntimeAttachmentSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssi
 import { CloudRuntimeClient } from '../src/cloud-runtime-client.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { createMachineExecutor, type MachineExecutorRuntime } from '../src/runtime-executor.js';
-import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, saveGitReplicaBase } from '../src/git-checkpoint.js';
+import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, saveGitCacheBase } from '../src/git-checkpoint.js';
 
 async function git(cwd: string, ...args: string[]) {
   const child = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' });
@@ -18,8 +18,8 @@ async function git(cwd: string, ...args: string[]) {
   return stdout.trim();
 }
 
-test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches ready with %s canonical state', async initial => {
-  const root = await mkdtemp(join(tmpdir(), 'gitspace-primary-executor-'));
+test.each(['committed', 'unborn', 'published unborn'])('cache executor reaches ready with %s canonical state', async initial => {
+  const root = await mkdtemp(join(tmpdir(), 'gitspace-cache-executor-'));
   const checkout = join(root, 'checkout'), remote = join(root, 'remote.git');
   let runtime: MachineExecutorRuntime | undefined;
   const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
@@ -39,12 +39,12 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
     database.possessSpace('workspace', 'machine').unwrap();
     const owned = database.getSpace('workspace');
     if (!owned) throw new Error('Owned workspace missing');
-    let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'first-primary', generation: 0, ownershipGeneration: owned.generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
+    let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'first-cache', generation: 0, ownershipGeneration: owned.generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
     const authority: { checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null; readyCommit: string | null } = { checkpoint: null, readyCommit: null };
     if (initial === 'published unborn') {
       authority.checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: checkout, spaceId: 'workspace', revision: 1 });
       await git(checkout, 'push', remote, `${authority.checkpoint.checkpointRef}:${authority.checkpoint.checkpointRef}`);
-      await saveGitReplicaBase(checkout, authority.checkpoint);
+      await saveGitCacheBase(checkout, authority.checkpoint);
       await writeFile(join(checkout, 'tracked.txt'), 'stale local contents\n');
     }
     const changed = new Set<() => void>();
@@ -119,7 +119,7 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
     });
     await runtime.sync();
     expect(runtime.journal.attachment(attachment.attachmentId)?.attachment.state).toBe('ready');
-    if (!authority.checkpoint) throw new Error('Ready primary has no canonical checkpoint');
+    if (!authority.checkpoint) throw new Error('Ready cache has no canonical checkpoint');
     expect(authority.readyCommit).toBe(authority.checkpoint.worktreeCommit);
     expect(authority.checkpoint?.headCommit).toBe(head);
     if (head === null) {

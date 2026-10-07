@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { collectBytes, confirmGitLfsObjects, GitLfsObjectSchema, type GitLfsOriginConfirmation, type GitLfsStore } from '@gitspace/protocol-workspace';
-import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitReplicaCheckpoint, IncrementalGitSnapshots, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
+import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, IncrementalGitSnapshots, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
 import { recheckGitLfsOrigin, restoredGitLfsPaths } from '../src/git-lfs.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { committedLfsInventory } from '../src/git-lfs-inventory.js';
@@ -40,10 +40,10 @@ function fixture() {
   return { root, base, pointer, lfs, uploads, objects, capture };
 }
 
-it('applies committed LFS deltas to hydrated replicas without replacing later held-back bytes', async () => {
+it('applies committed LFS deltas to hydrated caches without replacing later held-back bytes', async () => {
   const f = fixture();
   const base = await f.capture(1);
-  const target = mkdtempSync(join(tmpdir(), 'gitspace-lfs-replica-')); roots.push(target);
+  const target = mkdtempSync(join(tmpdir(), 'gitspace-lfs-cache-')); roots.push(target);
   git(target, 'init', '-b', 'main');
   git(target, 'fetch', f.root, `${base.checkpointRef}:${base.checkpointRef}`);
   await restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint: base, branch: 'main', lfs: f.lfs });
@@ -52,14 +52,14 @@ it('applies committed LFS deltas to hydrated replicas without replacing later he
   git(f.root, 'add', 'asset.bin'); git(f.root, 'commit', '-m', 'new payload');
   const incoming = await f.capture(2);
   git(target, 'fetch', f.root, `${incoming.checkpointRef}:${incoming.checkpointRef}`);
-  await applyGitReplicaCheckpoint({ repositoryPath: target, previous: base, checkpoint: incoming, lfs: f.lfs });
+  await applyGitCacheCheckpoint({ repositoryPath: target, previous: base, checkpoint: incoming, lfs: f.lfs });
   expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('new committed payload');
   expect(git(target, 'write-tree')).toBe(incoming.indexTree);
   if (incoming.headCommit === null) throw new Error('Committed LFS fixture lost HEAD');
   expect(git(target, 'rev-parse', 'HEAD')).toBe(incoming.headCommit);
   writeFileSync(join(target, 'asset.bin'), 'private newer bytes');
-  const held = await createGitIntermediateCheckpoint({ repositoryPath: target, spaceId: 'replica', revision: 3, lfs: f.lfs });
-  await applyGitReplicaCheckpoint({ repositoryPath: target, previous: held, checkpoint: incoming, lfs: f.lfs });
+  const held = await createGitIntermediateCheckpoint({ repositoryPath: target, spaceId: 'cache', revision: 3, lfs: f.lfs });
+  await applyGitCacheCheckpoint({ repositoryPath: target, previous: held, checkpoint: incoming, lfs: f.lfs });
   expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('private newer bytes');
   expect(f.uploads).not.toContain(createHash('sha256').update('private newer bytes').digest('hex'));
 });

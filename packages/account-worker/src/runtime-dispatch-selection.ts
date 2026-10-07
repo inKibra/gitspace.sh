@@ -25,7 +25,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
       if (!machine || machine.desiredState === 'removed' || !await env.CREDENTIALS.getByName(env.ACCOUNT_ID).hasRuntimeMachine(machineId)) throw new Error('Attachment target is not an enrolled account machine');
     },
   });
-  async function replica(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
+  async function cache(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
     const selection = RuntimeDispatchSelectionSchema.parse(args);
     let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => item.role === 'cache' && item.heartbeatAt !== null && Date.now() - Date.parse(item.heartbeatAt) <= 30_000 && (item.state === 'ready' || item.cache?.state === 'paused' || item.cache?.state === 'reclaimed'));
     const selector = selection.on;
@@ -57,7 +57,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
       if (preferred !== null) candidates.sort((a, b) => Number(b.machineId === preferred) - Number(a.machineId === preferred));
     }
     const selected = candidates.find(item => item.state === 'ready') ?? candidates[0];
-    if (!selected) throw new Error('No machine attached: attach a ready workspace replica or choose an available execution machine.');
+    if (!selected) throw new Error('No machine attached: attach a ready workspace cache or choose an available execution machine.');
     return selected;
   }
   async function pause(signal: AbortSignal) {
@@ -70,7 +70,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
   }
   async function select(input: { requestId: string; attemptId: string; args: unknown }, state: DispatchSelectionState, signal: AbortSignal): Promise<RuntimeAttachment> {
     const selection = RuntimeDispatchSelectionSchema.parse(input.args);
-    let canonical = await replica(state.machineId ? { ...selection, on: state.machineId } : input.args);
+    let canonical = await cache(state.machineId ? { ...selection, on: state.machineId } : input.args);
     if (canonical.state !== 'ready') {
       const action = options.runtime().attachments.requestCacheAction({ ...canonical, requestId: `wake:${input.attemptId}`, action: { kind: 'setup' } });
       options.runtime().publish();
@@ -114,5 +114,5 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
       await pause(signal);
     }
   }
-  return { load, save, select, replica };
+  return { load, save, select, cache };
 }

@@ -52,8 +52,8 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
   const identity = RuntimeIdentitySchema.parse(payload);
   const access = await requireRuntimeIdentity(env, userId, identity, operation !== 'runtime.snapshot');
   const placement = await access.authority.get();
-  const primary = placement?.machineId === machine && ['open', 'opening', 'closing'].includes(placement.state);
-  if (!primary) {
+  const workspaceAssigned = placement?.machineId === machine && ['open', 'opening', 'closing'].includes(placement.state);
+  if (!workspaceAssigned) {
     const attachments = await access.authority.runtimeAttachments(identity);
     if (!attachments.some(item => item.machineId === machine && ['attaching', 'ready', 'draining'].includes(item.state))) throw new Error('Machine has no active assignment in this workspace');
   }
@@ -68,7 +68,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     case 'runtime.cancel':
     case 'runtime.answer':
     case 'runtime.session': {
-      if (!primary) throw new Error('Detached executors cannot control workspace conversations');
+      if (!workspaceAssigned) throw new Error('Detached executors cannot control workspace conversations');
       if (operation === 'runtime.submit') return access.authority.runtimeSubmit(payload);
       if (operation === 'runtime.cancel') return access.authority.runtimeCancel(payload);
       if (operation === 'runtime.answer') return access.authority.runtimeAnswer(payload, { deviceId: machineId, canApprove: false });
@@ -89,7 +89,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     case 'runtime.snapshot.commit': {
       const input = RuntimeSnapshotCommitInputSchema.parse(payload);
       const attachments = await access.authority.runtimeAttachments(identity);
-      if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation && (item.role === 'cache'))) throw new Error('Checkpoint source is not this machine replica');
+      if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation && (item.role === 'cache'))) throw new Error('Checkpoint source is not this machine cache');
       return access.authority.runtimeSnapshotCommit(input);
     }
     case 'runtime.heartbeat': return access.authority.runtimeHeartbeat({ ...payload, machineId: machine });

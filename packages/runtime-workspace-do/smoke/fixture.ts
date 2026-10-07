@@ -103,12 +103,12 @@ export class RuntimeSmoke extends DurableObject<unknown> {
           seed({ ...a, state });
           let rejected = false;
           try { await runtime.setExecutionMachine(a.machineId); } catch { rejected = true; }
-          check(rejected && runtime.defaultExecutionMachine() === b.machineId, 'Unavailable replica replaced the default');
+          check(rejected && runtime.defaultExecutionMachine() === b.machineId, 'Unavailable cache replaced the default');
         }
         await runtime.setExecutionMachine(null);
         check(runtime.defaultExecutionMachine() === null, 'Automatic execution selection was not restored');
         this.ctx.storage.sql.exec('DELETE FROM runtime_attachments WHERE id IN (?,?)', a.attachmentId, b.attachmentId);
-        return Response.json({ readyReplicaSelected: true, unavailableRejected: true });
+        return Response.json({ readyCacheSelected: true, unavailableRejected: true });
       }
       if (url.pathname === '/scoped-stop-seed') {
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);

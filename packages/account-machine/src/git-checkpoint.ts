@@ -164,7 +164,8 @@ export async function completeGitCheckpoint(repositoryPath: string, checkpoint: 
   return RuntimeGitCheckpointSchema.parse({ ...checkpoint, trackedWorktreeCommit: trackedWorktreeCommit.stdout, indexTree: indexTree.stdout, worktreeTree: worktreeTree.stdout });
 }
 
-export async function readGitReplicaBase(repositoryPath: string): Promise<GitIntermediateCheckpoint | null> {
+// The on-disk base filename is retained so existing cache reconciliation keeps its merge base.
+export async function readGitCacheBase(repositoryPath: string): Promise<GitIntermediateCheckpoint | null> {
   const path = resolve(repositoryPath, (await runGit(repositoryPath, ['rev-parse', '--git-path', 'gitspace-replica-base.json'])).stdout);
   try { return RuntimeGitCheckpointSchema.parse(JSON.parse(await readFile(path, 'utf8'))); }
   catch (error) {
@@ -173,7 +174,7 @@ export async function readGitReplicaBase(repositoryPath: string): Promise<GitInt
   }
 }
 
-export async function saveGitReplicaBase(repositoryPath: string, checkpoint: GitIntermediateCheckpoint): Promise<void> {
+export async function saveGitCacheBase(repositoryPath: string, checkpoint: GitIntermediateCheckpoint): Promise<void> {
   const path = resolve(repositoryPath, (await runGit(repositoryPath, ['rev-parse', '--git-path', 'gitspace-replica-base.json'])).stdout);
   const temporary = `${path}.${crypto.randomUUID()}.tmp`;
   try {
@@ -209,12 +210,12 @@ export async function restoreGitIntermediateCheckpoint(input: {
   await runGit(input.repositoryPath, ['read-tree', input.checkpoint.indexCommit]);
   await checkoutGitLfs(input.repositoryPath, input.checkpoint.worktreeCommit);
   await gitLfsRestoreReceipt(input.repositoryPath, await restoredGitLfsPaths(input.repositoryPath, input.checkpoint.worktreeCommit, input.checkpoint.lfs));
-  await saveGitReplicaBase(input.repositoryPath, await completeGitCheckpoint(input.repositoryPath, input.checkpoint));
+  await saveGitCacheBase(input.repositoryPath, await completeGitCheckpoint(input.repositoryPath, input.checkpoint));
 }
 
 /** Apply only the portable delta. Git checks preimages before writing, so concurrent
  * human edits reject reconciliation rather than being reset out of the checkout. */
-export async function applyGitReplicaCheckpoint(input: {
+export async function applyGitCacheCheckpoint(input: {
   repositoryPath: string;
   previous: GitIntermediateCheckpoint;
   checkpoint: GitIntermediateCheckpoint;
@@ -243,7 +244,7 @@ export async function applyGitReplicaCheckpoint(input: {
   if (checkpoint.headCommit !== previous.headCommit || checkpoint.branch !== previous.branch) {
     const head = await readGitCheckpointHead(repositoryPath);
     if (head.headCommit !== checkpoint.headCommit || head.branch !== checkpoint.branch) {
-      if (head.headCommit !== previous.headCommit || head.branch !== previous.branch) throw new GitCheckpointError('replica HEAD', 'HEAD changed during reconciliation');
+      if (head.headCommit !== previous.headCommit || head.branch !== previous.branch) throw new GitCheckpointError('cache HEAD', 'HEAD changed during reconciliation');
       const target = `refs/heads/${checkpoint.branch}`;
       const zero = '0000000000000000000000000000000000000000';
       if (checkpoint.branch === previous.branch) {
@@ -251,7 +252,7 @@ export async function applyGitReplicaCheckpoint(input: {
         else await runGit(repositoryPath, ['update-ref', '-d', target, previous.headCommit ?? zero]);
       } else {
         const existing = await runGit(repositoryPath, ['show-ref', '--verify', '--quiet', target], { allowMissingRef: true });
-        if (existing.exitCode === 0 && (await runGit(repositoryPath, ['rev-parse', target])).stdout !== checkpoint.headCommit) throw new GitCheckpointError('replica branch', 'Target branch changed during reconciliation');
+        if (existing.exitCode === 0 && (await runGit(repositoryPath, ['rev-parse', target])).stdout !== checkpoint.headCommit) throw new GitCheckpointError('cache branch', 'Target branch changed during reconciliation');
         if (existing.exitCode === 1 && checkpoint.headCommit) await runGit(repositoryPath, ['update-ref', target, checkpoint.headCommit, zero]);
         await runGit(repositoryPath, ['symbolic-ref', 'HEAD', target]);
       }

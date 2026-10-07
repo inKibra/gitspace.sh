@@ -10,7 +10,7 @@ import { createConversationTools } from './conversation-tools.js';
 import { createConversationLifecycle, type ConversationLifecycle } from './conversation-lifecycle.js';
 import { createBackgroundAgentTask } from './background-agents.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
-import { SessionControlsDoc, createSessionControls } from './session-controls.js';
+import { SessionControlsDoc, createSessionControls, parseCloudAgentDefinition } from './session-controls.js';
 import { PlanDoc, WorkspaceDoc } from './documents.js';
 import type { RuntimeHarnessOptions } from './harness.js';
 
@@ -18,7 +18,7 @@ const context = BACKGROUND_CONTEXT;
 const model: Model<Api> = { id: 'child-fixture', name: 'Child fixture', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
 const definition = AgentDefinitionSchema.parse({ name: 'review', description: 'Review source', source: 'cloud', path: '.agents/agents/review.md', editable: true, content: '---\nmodel: test/file-model\nthinking: low\ntools: read\n---\nOnly the saved reviewer persona.', revision: 'exact-file-revision', modelSelectors: ['test/file-model'], role: null, provider: 'test', model: 'file-model', thinking: 'low', selection: 'definition', tools: ['read'], spawns: null });
 const Owner = defineTask<{ label: string }, { phase: 'hold' }, null>({ name: 'proof.SpawnOwner', version: 1, initial: () => ({ phase: 'hold' }), phases: { async hold(task, runtime, ctx) { if (task.input.label !== 'complete') await runtime.sleep(Date.now() + 300000, ctx); await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
-async function fixture(ownerLabel = 'spawns') {
+async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; content: string }>) {
   const storage = new MemoryStorage();
   const registry = createRegistry();
   const ready = Promise.withResolvers<ConversationLifecycle>();
@@ -35,17 +35,18 @@ async function fixture(ownerLabel = 'spawns') {
   } };
   const harness = await Harness.open(storage, { registry, models, settings: { compaction: { enabled: false } } }, context);
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: 'parent-only-model' }, thinkingLevel: 'max', instructions: 'PRIVATE PARENT PERSONA', tools } });
-  await root.commit(async tx => { const state = await tx.doc(SessionControlsDoc, root.id); state.definitions = [definition]; state.fastMode = true; state.approvalMode = 'yolo'; state.role = 'parent'; state.selection = { kind: 'explicit', provider: 'test', modelId: 'parent-only-model' }; }, context);
+  await root.commit(async tx => { const state = await tx.doc(SessionControlsDoc, root.id); state.definitions = files ? [] : [definition]; state.fastMode = true; state.approvalMode = 'yolo'; state.role = 'parent'; state.selection = { kind: 'explicit', provider: 'test', modelId: 'parent-only-model' }; }, context);
   const catalog = async () => ({ models: [{ provider: 'test', id: 'file-model', name: 'File model', contextWindow: 100000 }], roles: [{ id: 'review', label: 'Reviewer role', provider: 'test', model: 'role-model', thinking: 'medium', current: false }] });
   const admitInference: RuntimeHarnessOptions['admitInference'] = async ({ selection }) => selection?.kind === 'explicit' ? { provider: selection.provider, modelId: selection.modelId } : { provider: 'test', modelId: selection?.kind === 'role' ? 'role-model' : 'default-model' };
   const configureModel = async (id: ConversationId, selected: ModelRef) => { const child = await harness.conversation(id, context); if (!child) throw new Error('Missing child'); const metadata = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child; await child.configure({ model: selected, tools: metadata ? tools.filter(tool => metadata.tools.includes(tool.name)) : tools }, context); };
   const lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, wake: async () => {} }); ready.resolve(lifecycle);
-  const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog });
+  const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog, refreshDefinitions: target => controls.loadDefinitions(target) });
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };
   const controls = createSessionControls({
     harness, root, lifecycle, admitInference, configureModel, catalog,
     reload: async () => {},
+    ...(files ? { loadAgentDefinitions: async () => files } : {}),
     browser: async id => { browserTargets.push(id); return { groups: [], records: [] }; },
     history: {
       async conversation(id) {
@@ -75,6 +76,48 @@ async function fixture(ownerLabel = 'spawns') {
   }
   return { harness, root, storage, lifecycle, call, spawned, seen, controls, browserTargets, backgroundReceived: backgroundReceived.promise };
 }
+
+test('both agent directories accept declared names and invalid paths explain both choices', () => {
+  for (const directory of ['.omp', '.agents']) {
+    expect(parseCloudAgentDefinition(`${directory}/agents/file.md`, '---\nname: reviewer\n---\nInspect').name).toBe('reviewer');
+    expect(parseCloudAgentDefinition(`${directory}/agents/file.md`, 'Inspect').name).toBe('file');
+  }
+  expect(() => parseCloudAgentDefinition('agents/file.md', 'Inspect')).toThrow(/\.agents\/agents\/\*\.md.*\.omp\/agents\/\*\.md/u);
+});
+
+test.each([false, true])('canonical agent name wins discovery and spawn regardless of order (reverse=%s)', async reverse => {
+  const canonical = { path: '.agents/agents/canonical-file.md', content: '---\nname: reviewer\ntools: read\n---\nCANONICAL PERSONA' };
+  const legacy = { path: '.omp/agents/legacy-file.md', content: '---\nname: reviewer\ntools: read\n---\nLEGACY PERSONA' };
+  const files = reverse ? [canonical, legacy] : [legacy, canonical];
+  const f = await fixture('spawns', files);
+  try {
+    const report = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup;
+    expect(report?.agents.map(agent => agent.path)).toEqual([canonical.path]);
+    expect(report).toMatchObject({ diagnostics: [{ name: 'reviewer', winnerPath: canonical.path, ignoredPath: legacy.path }] });
+    const { child } = await f.spawned({ op: 'spawn', agent: 'reviewer', task: 'Inspect' });
+    expect((await child.agent(context)).instructions).toContain('CANONICAL PERSONA');
+    expect((await child.agent(context)).instructions).not.toContain('LEGACY PERSONA');
+    const winner = report!.agents[0]!;
+    const saved = (await f.controls.execute(String(f.root.id), { type: 'saveAgentDefinition', path: winner.path, expectedRevision: winner.revision, content: canonical.content.replace('CANONICAL PERSONA', 'CLOUD PERSONA') })).setup;
+    expect(saved?.agents[0]?.source).toBe('cloud');
+    const cloud = await f.spawned({ op: 'spawn', agent: 'reviewer', task: 'Inspect saved override' });
+    expect((await cloud.child.agent(context)).instructions).toContain('CLOUD PERSONA');
+    files.splice(0, files.length, legacy);
+    expect((await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup?.agents[0]?.source).toBe('cloud');
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
+test('legacy-only discovery refreshes before spawn when canonical files appear', async () => {
+  const files = [{ path: '.omp/agents/reviewer.md', content: 'Legacy instructions' }];
+  const f = await fixture('spawns', files);
+  try {
+    const legacy = await f.spawned({ op: 'spawn', agent: 'reviewer', task: 'Inspect legacy' });
+    expect((await legacy.child.agent(context)).instructions).toContain('Legacy instructions');
+    files.push({ path: '.agents/agents/other.md', content: '---\nname: reviewer\n---\nFresh canonical instructions' });
+    const fresh = await f.spawned({ op: 'spawn', agent: 'reviewer', task: 'Inspect refreshed' });
+    expect((await fresh.child.agent(context)).instructions).toContain('Fresh canonical instructions');
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
 
 test('role and file children independently resolve selection, persona, thinking and readonly tools', async () => {
   const f = await fixture();

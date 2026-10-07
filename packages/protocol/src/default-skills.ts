@@ -46,7 +46,7 @@ Use typed workspace tools:
 - \`space_phase({ args: { phase: 'code' } })\` changes this workspace at its current revision. \`space_workspace\` method setRelations accepts expectedRevision, dependsOn, relatedTo, and stackedOn.
 - Lifecycle methods open and restore take expectedGeneration; restore also takes expectedRevision. Use the latest authority values, never invented generations.
 
-Mutating workspace tools act on the conversation's current workspace and primary attachment. An agent cannot close or archive its own workspace from a running tool; use the browser. Cloud goal, workflow, and rubric tools can target other workspaces without opening them.`);
+Mutating workspace tools act on the conversation's current workspace and cache attachment. An agent cannot close or archive its own workspace from a running tool; use the browser. Cloud goal, workflow, and rubric tools can target other workspaces without opening them.`);
 const SPACE_REVIEW = gitSpaceSkill('space-review', 'Review current files and Git diffs with durable typed threads.', `
 Use repository tools for files and diffs, then use \`space_review({ args: { method: 'list' } })\` for durable threads. Methods create, append, and resolve accept their typed fields inside args. Read the schema with method describe and operation set to the intended mutation. Anchor comments to generation plus Git object identity, and preserve stale threads rather than silently relocating them.`);
 const SPACE_ARTIFACTS = gitSpaceSkill('space-artifacts', 'Publish and attach durable workspace evidence artifacts.', `

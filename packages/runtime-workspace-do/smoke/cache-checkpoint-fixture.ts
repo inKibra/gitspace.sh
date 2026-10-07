@@ -13,7 +13,7 @@ import { LifecycleRunSchema } from '../../protocol-environment/src/schema.js';
 
 const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
 const unsupported = async (): Promise<never> => { throw new Error('External service forbidden in checkpoint proof'); };
-export class PrimaryCheckpointProof extends SpaceAuthorityDO {
+export class CacheCheckpointProof extends SpaceAuthorityDO {
   async fetch(request: Request): Promise<Response> {
     const supplied = RuntimeGitCheckpointSchema.parse(await request.json());
     const empty = new URL(request.url).pathname === '/empty';
@@ -71,7 +71,7 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       readTree: async () => [],
     };
     this.env.ARTIFACTS = { get: async () => repository, create: unsupported, import: unsupported, list: unsupported, delete: unsupported };
-    const result = await this.runtimeCacheAttachmentRequest({ ...identity, machineId: 'machine', requestId: 'first-primary' });
+    const result = await this.runtimeCacheAttachmentRequest({ ...identity, machineId: 'machine', requestId: 'first-cache' });
     const assignment = (await this.runtimeAssignments({ ...identity, machineId: 'machine' })).assignments[0];
     assert(assignment);
     if (empty) {
@@ -174,4 +174,4 @@ export class CheckpointMetadata extends DurableObject {
     return state;
   }
 }
-export default { fetch(request: Request, env: { PROOF: DurableObjectNamespace<PrimaryCheckpointProof> }) { return env.PROOF.getByName(new URL(request.url).pathname).fetch(request); } };
+export default { fetch(request: Request, env: { PROOF: DurableObjectNamespace<CacheCheckpointProof> }) { return env.PROOF.getByName(new URL(request.url).pathname).fetch(request); } };

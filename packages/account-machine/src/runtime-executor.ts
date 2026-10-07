@@ -7,7 +7,7 @@ import { RuntimeJsonSchema, RuntimeGitCheckpointSchema, RuntimeAssignmentsResult
 import type { GitSpaceDatabase, LocalArtifactResolver } from '@gitspace/core';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
-import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, completeGitCheckpoint, restoreGitIntermediateCheckpoint, applyGitReplicaCheckpoint, gitCheckpointIncludes, readGitReplicaBase, saveGitReplicaBase } from './git-checkpoint.js';
+import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, completeGitCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase } from './git-checkpoint.js';
 import type { GitIntermediateCheckpoint } from './git-checkpoint.js';
 import type { ArtifactsGitRemote } from './artifacts-git-remote.js';
 import type { SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
@@ -65,8 +65,8 @@ export async function createMachineExecutor(options: {
   const install = async (local: LocalAttachment, previous: GitIntermediateCheckpoint, checkpoint: GitIntermediateCheckpoint, incoming = false) => {
     await options.gitRemote.fetchCheckpoint({ binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` }, repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit });
     if (incoming && await gitCheckpointIncludes(local.rootPath, previous, checkpoint)) return false;
-    // Every canonical cache uses the workspace branch, never a private replica branch.
-    await applyGitReplicaCheckpoint({ repositoryPath: local.rootPath, previous, checkpoint, lfs: await options.lfs?.(local.attachment.projectId) });
+    // Every canonical cache uses the workspace branch, never a private execution branch.
+    await applyGitCacheCheckpoint({ repositoryPath: local.rootPath, previous, checkpoint, lfs: await options.lfs?.(local.attachment.projectId) });
     return true;
   };
   const capture = async (local: LocalAttachment): Promise<GitIntermediateCheckpoint | null> => {
@@ -121,7 +121,7 @@ export async function createMachineExecutor(options: {
             }
           }
           snapshots.query('UPDATE snapshots SET pending=NULL, committed=? WHERE attachment=?').run(JSON.stringify(accepted), key);
-          await saveGitReplicaBase(local.rootPath, accepted);
+          await saveGitCacheBase(local.rootPath, accepted);
           saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), lastSyncAt: new Date().toISOString() });
           return accepted;
         },
@@ -142,7 +142,7 @@ export async function createMachineExecutor(options: {
     if (incoming && accepted && before?.worktreeCommit === accepted.worktreeCommit && incoming.worktreeCommit !== accepted.worktreeCommit) {
       if (await install(local, accepted, incoming, true)) {
         snapshots.query('UPDATE snapshots SET committed=? WHERE attachment=?').run(JSON.stringify(incoming), key);
-        await saveGitReplicaBase(local.rootPath, incoming);
+        await saveGitCacheBase(local.rootPath, incoming);
         saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), lastSyncAt: new Date().toISOString() });
       }
     }
@@ -174,7 +174,7 @@ export async function createMachineExecutor(options: {
           });
         } catch (error) {
           if (signal.aborted) return;
-          console.error('[runtime-replica-follow]', error instanceof Error ? error.message : String(error));
+          console.error('[runtime-cache-follow]', error instanceof Error ? error.message : String(error));
           await new Promise<void>(resolve => {
             const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); };
             const timer = setTimeout(finish, 1000);
@@ -199,10 +199,10 @@ export async function createMachineExecutor(options: {
           void executor.withCheckout(local, async () => {
             const current = journal.attachment(local.attachment.attachmentId);
             if (!stopping.signal.aborted && current?.attachment.state === 'ready' && !journal.hasRunningCheckout(local.rootPath)) await reconcile(current);
-          }).catch(error => console.error('[runtime-replica]', error instanceof Error ? error.message : String(error)));
+          }).catch(error => console.error('[runtime-cache]', error instanceof Error ? error.message : String(error)));
         });
       },
-      failed: error => console.error('[runtime-replica-watch]', error.message),
+      failed: error => console.error('[runtime-cache-watch]', error.message),
     });
     if (stopping.signal.aborted) { watcher.close(); cancel?.(); return; }
     watchers.set(local.rootPath, { close() { cancel?.(); watcher.close(); } });
@@ -522,7 +522,7 @@ export async function createMachineExecutor(options: {
                   captures.delete(key);
                 }
                 if (!durable?.committed && !durable?.pending) {
-                  let base = await readGitReplicaBase(prepared.rootPath);
+                  let base = await readGitCacheBase(prepared.rootPath);
                   if (!base && trustedExisting) {
                     const restored = await options.restoredBase?.(attachment.projectId, attachment.workspaceId);
                     if (restored) {
@@ -541,7 +541,7 @@ export async function createMachineExecutor(options: {
                     base = cloud;
                   }
                   if (base) {
-                    await saveGitReplicaBase(prepared.rootPath, base);
+                    await saveGitCacheBase(prepared.rootPath, base);
                     snapshots.query('INSERT OR REPLACE INTO snapshots(attachment,revision,committed) VALUES(?,?,?)').run(key, Date.now(), JSON.stringify(base));
                   }
                 }

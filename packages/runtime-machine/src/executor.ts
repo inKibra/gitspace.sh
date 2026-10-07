@@ -23,6 +23,7 @@ export class MachineExecutor {
   }
 
   private async finishMutation(local: LocalAttachment, dispatch: RuntimeToolDispatch, result: RuntimeToolResult): Promise<RuntimeToolResult> {
+    // Preserve the journal key so recovery finds already-completed effects without replaying them.
     this.options.journal.saveProposal(`replica-result:${dispatch.attemptId}`, result);
     let checkpoint: z.infer<typeof RuntimeGitCheckpointSchema> | null;
     try { checkpoint = await this.options.onMutationSettled?.(local) ?? null; }

@@ -52,7 +52,7 @@ Workspace phases are:
 | `review` | Read the diff, evidence, review threads, and change guide. |
 | `ship` | Release the work and watch its operational state. |
 
-A workspace can attach to eligible machines, with explicit placement for its checkouts and tasks. The primary checkout has one fenced writer. Runners use a recorded source commit rather than sharing a mutable filesystem. Losing a connection does not prove that an old command stopped, so unresolved effects must reconcile before they can safely repeat. A GitSpace workspace can also modify and release the account's own GitSpace code, subject to approval.
+A workspace can attach to eligible machines, with explicit placement for its checkouts and tasks. Each machine keeps an equal cache of the canonical cloud working tree, with one fenced writer for each admitted mutation. Runners use a recorded source commit rather than sharing a mutable filesystem. Losing a connection does not prove that an old command stopped, so unresolved effects must reconcile before they can safely repeat. A GitSpace workspace can also modify and release the account's own GitSpace code, subject to approval.
 
 ## Account releases
 
@@ -73,6 +73,19 @@ The live runtime view is bounded. It projects the newest 256 entries per convers
 Cloud recovery restores durable session state and reconciles pending work. It does not blindly replay an uncertain machine effect, turn a stored job into a live process, or answer a pending human question. Protected lifecycle terminal input and output remain outside agent-readable transcripts and general process logs.
 
 Saved OMP conversations remain historical records. GitSpace reads supported JSONL transcript formats through version 3 without launching OMP; newer unsupported formats report an error. Those archives do not become live Pi sessions, and a saved checkpoint cannot recreate an old process. Archive views and their history controls are separate from the bounded Pi runtime view.
+
+### Agent definitions
+
+Keep repository agent files in `.agents/agents/*.md`. GitSpace also reads
+`.omp/agents/*.md` from existing projects. An agent's frontmatter `name`
+identifies it; without one, GitSpace uses the filename. When both directories
+define the same name, `.agents/agents` wins regardless of discovery order.
+**Inspector > Agent setup** shows the winning and ignored paths.
+
+Agent setup reads committed repository definitions without an attached machine.
+Saving there keeps a revision-checked cloud override for that path, not a
+working-tree edit. Directory precedence still applies. The change affects
+future agent starts; existing subagents keep their retained definitions.
 
 ## Inspector products
 

@@ -5,7 +5,7 @@ export * from './attachment-controls.js';
 export * from './session-controls.js';
 export * from './machine-controls.js';
 export * from './scheduling.js';
-export * from './search-replica.js';
+export * from './search-cache.js';
 export * from './execution-contracts.js';
 export * from './rule-interruptions.js';
 export * from './receipt-transport.js';

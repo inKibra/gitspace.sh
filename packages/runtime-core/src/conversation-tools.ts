@@ -5,7 +5,7 @@ import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, Runtime
 import type { ToolServices } from './tools.js';
 import { CronScopeDoc } from './documents.js';
 import { cronTaskScopes } from './cron.js';
-import { SessionControlsDoc, parseCloudAgentDefinition, type SessionControlServices } from './session-controls.js';
+import { SessionControlsDoc, parseCloudAgentDefinition, resolveAgentDefinitions, type SessionControlServices } from './session-controls.js';
 import { BackgroundAgentsDoc, type BackgroundAgentTask } from './background-agents.js';
 import { AgentDefinitionContextDoc, type SubagentMetadata } from './subagent-state.js';
 import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
@@ -54,7 +54,7 @@ export function createConversationTools(options: ConversationToolOptions) {
         const previous = previousId ? (await harness.snapshot(AgentDefinitionContextDoc, (await resolve(previousId)).id, context))?.child : null;
         const definitions = await harness.snapshot(SessionControlsDoc, target.id, context);
         const agentSelector = 'agent' in args ? args.agent : undefined;
-        const definition = previous ? previous.definition : agentSelector ? definitions?.definitions.find(value => value.name === agentSelector || value.path === agentSelector) : undefined;
+        const definition = previous ? previous.definition : agentSelector ? resolveAgentDefinitions(definitions?.definitions ?? []).agents.find(value => value.name === agentSelector || value.path === agentSelector) : undefined;
         if (!previous && agentSelector && !definition) throw new Error('Requested agent definition not found');
         const parsed = definition ? parseCloudAgentDefinition(definition.path, definition.content) : null;
         const catalog = await options.catalog();
@@ -94,7 +94,7 @@ export function createConversationTools(options: ConversationToolOptions) {
           childControls.role = role?.id ?? null;
           childControls.selection = selection;
           const definitionContext = await tx.doc(AgentDefinitionContextDoc, created.id);
-          definitionContext.child = { parentId: input.conversationId, name, attemptId: input.attemptId, definition: definition ?? null, selection, role: role?.id ?? null, thinking, tools, model: null };
+          definitionContext.child = { parentId: input.conversationId, name, requestedName: args.name ?? null, attemptId: input.attemptId, definition: definition ?? null, selection, role: role?.id ?? null, thinking, tools, model: null };
           anchors.children[input.attemptId] = String(created.id);
           return String(created.id);
         }, context);

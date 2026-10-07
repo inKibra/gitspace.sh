@@ -28,9 +28,12 @@ export const SessionControlSchema = z.object({
 });
 export type SessionControlView = z.infer<typeof SessionControlSchema>;
 export const AgentDefinitionSchema = z.object({ name: z.string(), description: z.string(), source: z.string(), path: z.string(), editable: z.boolean(), content: z.string(), revision: z.string(), modelSelectors: z.array(z.string()), role: z.string().nullable(), provider: z.string().nullable(), model: z.string().nullable(), thinking: z.string().nullable().default(null), selection: z.enum(['definition', 'settings']), tools: z.array(z.string()), spawns: z.string().nullable() });
-export const RuntimeSubagentRecordSchema = z.object({ parentId: z.string(), name: z.string(), attemptId: z.string(), definition: AgentDefinitionSchema.nullable(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).nullable(), tools: z.array(z.string()), model: z.object({ provider: z.string(), modelId: z.string() }).nullable() });
+// requestedName is absent in older records; null records an omitted spawn name
+// without replacing the unique address used for parent/sibling messaging.
+export const RuntimeSubagentRecordSchema = z.object({ parentId: z.string(), name: z.string(), requestedName: z.string().nullable().optional(), attemptId: z.string(), definition: AgentDefinitionSchema.nullable(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).nullable(), tools: z.array(z.string()), model: z.object({ provider: z.string(), modelId: z.string() }).nullable() });
 export type RuntimeSubagentRecord = z.infer<typeof RuntimeSubagentRecordSchema>;
-export const AgentSetupSchema = z.object({ sessionId: z.string(), agents: z.array(AgentDefinitionSchema) });
+export const AgentDefinitionDiagnosticSchema = z.object({ name: z.string(), winnerPath: z.string(), ignoredPath: z.string() });
+export const AgentSetupSchema = z.object({ sessionId: z.string(), agents: z.array(AgentDefinitionSchema), diagnostics: z.array(AgentDefinitionDiagnosticSchema).optional() });
 const simple = ['control', 'agentSetup', 'historyAnchorId', 'messages', 'usage', 'persist', 'handoff', 'resume', 'stop', 'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'] as const;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),

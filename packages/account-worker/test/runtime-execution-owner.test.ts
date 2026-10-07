@@ -61,7 +61,7 @@ async function ownerFixture(ctx: DurableObjectState) {
     return { runtime, services, root, invoke, text, identity, checkpoint, calls, reports, code };
 }
 
-test('cloud file ownership survives attached replicas; machine calls select the workspace default and fail immediately when unavailable', async () => {
+test('cloud file ownership survives attached caches; machine calls select the workspace default and fail immediately when unavailable', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`owner-proof:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, services, root, invoke, text, identity, checkpoint } = await ownerFixture(ctx);
     const a = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'a', machineId: 'a', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
@@ -123,7 +123,7 @@ test('cloud file ownership survives attached replicas; machine calls select the 
       expect(machine.mock.calls.at(-1)?.[0].attachmentId).toBe('runner-a');
       await runtime.setExecutionMachine(null);
       const selector = createDispatchSelector({ storage: ctx.storage, env, identity, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; } });
-      expect((await selector.replica({ at: 'current' }, [runnerB, a])).attachmentId).toBe(a.attachmentId);
+      expect((await selector.cache({ at: 'current' }, [runnerB, a])).attachmentId).toBe(a.attachmentId);
       const explicitMissing = await invoke('bash', { command: 'pwd', on: 'b', at: 'current' });
       expect(explicitMissing.status).toBe('failed');
       expect(text(explicitMissing)).toContain('No machine attached');
@@ -229,7 +229,7 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
   });
 });
 
-test('grep searches the current cloud snapshot without a machine replica', async () => {
+test('grep searches the current cloud snapshot without a machine cache', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-proof:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text } = await ownerFixture(ctx);
     try {
@@ -240,44 +240,44 @@ test('grep searches the current cloud snapshot without a machine replica', async
   });
 });
 
-test('grep admits only a caught-up replica and falls back to the current cloud snapshot', async () => {
+test('grep admits only a caught-up cache and falls back to the current cloud snapshot', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-routing:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text, identity, checkpoint } = await ownerFixture(ctx);
-    const replica = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-replica', machineId: 'search-machine', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
-    const seed = (commit: string) => ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', replica.attachmentId, JSON.stringify({ ...replica, executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: commit } }), 'fixture');
-    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'replica-hit' }] }));
+    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-cache', machineId: 'search-machine', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
+    const seed = (commit: string) => ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify({ ...cache, executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: commit } }), 'fixture');
+    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'cache-hit' }] }));
     try {
       seed('0'.repeat(40));
       expect(text(await invoke('grep', { pattern: 'cloud' }))).toContain('hello.txt:1:cloud original');
       expect(machine).not.toHaveBeenCalled();
       seed(checkpoint.worktreeCommit);
-      expect(text(await invoke('grep', { pattern: 'cloud' }))).toBe('replica-hit');
-      expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ machineId: replica.machineId, snapshot: checkpoint });
+      expect(text(await invoke('grep', { pattern: 'cloud' }))).toBe('cache-hit');
+      expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ machineId: cache.machineId, snapshot: checkpoint });
       await invoke('write', { path: 'hello.txt', content: 'updated cloud snapshot\n' });
       expect(text(await invoke('grep', { pattern: 'cloud' }))).toContain('hello.txt:1:updated cloud snapshot');
       expect(machine).toHaveBeenCalledTimes(1);
       const current = await runtime.cloudFiles.snapshot();
       if (!current) throw new Error('Expected current snapshot');
       seed(current.worktreeCommit);
-      machine.mockRejectedValueOnce(new Error('Replica worktree changed after heartbeat'));
+      machine.mockRejectedValueOnce(new Error('Cache worktree changed after heartbeat'));
       expect(text(await invoke('grep', { pattern: 'cloud' }))).toContain('hello.txt:1:updated cloud snapshot');
       expect(machine).toHaveBeenCalledTimes(2);
     } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
 
-test('grep selects a healthy caught-up replica before a failing cloud index', async () => {
+test('grep selects a healthy caught-up cache before a failing cloud index', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-index-failure:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text, identity, checkpoint, code } = await ownerFixture(ctx);
-    const replica = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-replica', machineId: 'search-machine', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
-    ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', replica.attachmentId, JSON.stringify(replica), 'fixture');
+    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-cache', machineId: 'search-machine', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
+    ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
     ctx.storage.sql.exec('DELETE FROM runtime_search_state');
     const index = vi.spyOn(code, 'listSnapshotEntries').mockRejectedValue(new Error('Search index unavailable'));
-    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'replica-hit' }] }));
+    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'cache-hit' }] }));
     try {
       const result = await invoke('grep', { pattern: 'cloud' });
       expect(result.status).toBe('completed');
-      expect(text(result)).toBe('replica-hit');
+      expect(text(result)).toBe('cache-hit');
       expect(index).not.toHaveBeenCalled();
       expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ tool: 'grep', snapshot: checkpoint });
     } finally { index.mockRestore(); machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }

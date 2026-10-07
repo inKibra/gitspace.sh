@@ -119,17 +119,17 @@ export async function prepareMachineAttachment(journal: ExecutorJournal, options
   return local;
 }
 
-/** Explicit merge belongs only to a currently fenced primary. The returned commit is the integration evidence. */
-export async function mergeDelegateCommit(input: { primary: LocalAttachment; delegate: LocalAttachment; expectedPrimaryCommit: string; commit: string; attemptId: string; deadlineAt: string; signal: AbortSignal }, runCommand: RunExecutorCommand = runSupervisorCommand): Promise<{ commit: string; sourceCommit: string }> {
-  if (input.primary.attachment.role !== 'cache' || input.delegate.attachment.role !== 'delegate' || input.primary.attachment.projectId !== input.delegate.attachment.projectId || input.primary.attachment.workspaceId !== input.delegate.attachment.workspaceId) throw new Error('Merge attachment relationship is unauthorized');
-  if (!/^[a-f0-9]{40,64}$/u.test(input.commit) || !/^[a-f0-9]{40,64}$/u.test(input.expectedPrimaryCommit)) throw new Error('Merge requires full immutable commit IDs');
+/** Explicit merge belongs only to a currently fenced cache. The returned commit is the integration evidence. */
+export async function mergeDelegateCommit(input: { cache: LocalAttachment; delegate: LocalAttachment; expectedCacheCommit: string; commit: string; attemptId: string; deadlineAt: string; signal: AbortSignal }, runCommand: RunExecutorCommand = runSupervisorCommand): Promise<{ commit: string; sourceCommit: string }> {
+  if (input.cache.attachment.role !== 'cache' || input.delegate.attachment.role !== 'delegate' || input.cache.attachment.projectId !== input.delegate.attachment.projectId || input.cache.attachment.workspaceId !== input.delegate.attachment.workspaceId) throw new Error('Merge attachment relationship is unauthorized');
+  if (!/^[a-f0-9]{40,64}$/u.test(input.commit) || !/^[a-f0-9]{40,64}$/u.test(input.expectedCacheCommit)) throw new Error('Merge requires full immutable commit IDs');
   let sequence = 0;
   const run = async (args: string[]) => {
-    const result = await runCommand({ application: 'git', args, cwd: input.primary.rootPath, attemptId: input.attemptId, sequence: sequence++, deadlineAt: input.deadlineAt, signal: input.signal });
+    const result = await runCommand({ application: 'git', args, cwd: input.cache.rootPath, attemptId: input.attemptId, sequence: sequence++, deadlineAt: input.deadlineAt, signal: input.signal });
     if (result.exitCode !== 0) throw new Error(result.output);
     return result.output.trim();
   };
-  if (await run(['rev-parse', 'HEAD']) !== input.expectedPrimaryCommit) throw new Error('Cache source commit changed before merge');
+  if (await run(['rev-parse', 'HEAD']) !== input.expectedCacheCommit) throw new Error('Cache source commit changed before merge');
   if (await run(['status', '--porcelain'])) throw new Error('Cache checkout must be clean before merge');
   await run(['fetch', '--no-tags', '--', input.delegate.rootPath, input.commit]);
   await run(['merge', '--no-edit', '--no-ff', input.commit]);

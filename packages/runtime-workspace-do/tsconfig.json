@@ -22,7 +22,7 @@
     "smoke/execution-fixture.ts",
     "smoke/cloud-files-fixture.ts",
     "smoke/cloud-search-fixture.ts",
-    "smoke/primary-checkpoint-fixture.ts",
+    "smoke/cache-checkpoint-fixture.ts",
     "../account-worker/worker-configuration.d.ts"
   ]
 }

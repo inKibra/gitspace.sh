@@ -7,8 +7,8 @@ import type { z } from 'zod';
 import type { WorkspaceServiceManager } from './workspace-services.js';
 import { workspaceProcessVisible } from './workspace-process.js';
 
-/** Ready attachment worktrees, not legacy primary projections, own runtime services. */
-export async function replicaServiceOperation(manager: WorkspaceServiceManager, local: LocalAttachment, raw: z.input<typeof RuntimeServiceOperationSchema>) {
+/** Ready attachment worktrees own runtime services. */
+export async function cacheServiceOperation(manager: WorkspaceServiceManager, local: LocalAttachment, raw: z.input<typeof RuntimeServiceOperationSchema>) {
   const operation = RuntimeServiceOperationSchema.parse(raw);
   const { attachment } = local;
   if (attachment.state !== 'ready') throw new Error('Services require a ready attachment');

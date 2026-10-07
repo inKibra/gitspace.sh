@@ -72,7 +72,7 @@ The consolidated decision record + build blueprint. Companion to `AGENT-SURFACES
   (tmux embedded)**.
 - **Crons run on a machine, never the relay.** Because storage is canonical in CF, a cron can
   run on **any online machine** that mounts the artifacts repo, then commits back. Nominate a
-  **primary base-owner machine** (default executor; e.g. a cloud `serve`); fall back to any
+  **default execution machine** (default executor; e.g. a cloud `serve`); fall back to any
   online machine. (A DO-based scheduler/dispatcher is the eventual picker — deferred.)
 - **Headless OMP auth** already works: `discoverAuthStorage(.pi)` + the `Bun.secrets` keychain,
   no interactive prompt — so a cron can invoke a skill/workflow non-interactively.
@@ -167,7 +167,7 @@ keep the `pi-runtime` firewall).
 ---
 
 ## 4. Open / exploratory
-- **Primary base-owner machine** policy + the **DO dispatcher** that picks the cron executor.
+- **Default execution machine** policy + the **DO dispatcher** that picks the cron executor.
 - **Crons ↔ services** exact semantics (start-a-service; rolled-up runs against base).
 - **Stage-advancement constraints** derived from chain/stack edges.
 - **Side-effect capability enforcement** beyond token write-scope (email/deploy/PR).
@@ -193,19 +193,17 @@ session resolves. It shows the loaded source, path, revision, model selectors,
 current role, and current model. This preview uses saved files and current
 settings, not the editor draft or past runs.
 
-Edit repository definitions in `.omp/agents/*.md`. An inherited definition is
-read-only here; **Create workspace override** copies it into the checkout.
-A repository definition replaces an inherited definition with the same name.
-Existing per-agent model settings still take precedence over the definition's
-model selector. **Settings → OMP → Agents** keeps its existing behavior.
+Keep repository definitions in `.agents/agents/*.md`. GitSpace also reads
+`.omp/agents/*.md` for existing projects. The frontmatter `name` identifies an
+agent; when absent, the filename supplies its name. If both directories define
+the same name, `.agents/agents` wins regardless of discovery order. Agent setup
+shows both paths and explains which definition it ignores.
 
-Saving writes the working-tree file without staging or committing it. The
-runtime validates the definition, rejects stale revisions and paths outside
-the repository agent directory, and publishes the file atomically. Refreshing
-or encountering an error does not discard a draft. The UI offers the latest
-source for comparison before a conflicting draft can use the new revision.
-Fresh agent starts use the saved definition; agents already running keep their
-loaded definition.
+In the cloud runtime, saving keeps a revision-checked session override for the
+same path. It does not write, stage or commit a repository file. Directory
+precedence still applies across paths. Refreshing or encountering an error does
+not discard a draft. Fresh agent starts use the saved definition; agents already
+running keep their retained definition.
 
 The existing **Usage** view shows combined session-tree totals and separate
 root and child totals. Model and role breakdowns cover the whole tree.

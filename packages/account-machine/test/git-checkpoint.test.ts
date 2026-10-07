@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitReplicaCheckpoint, readGitReplicaBase, IncrementalGitSnapshots } from '../src/git-checkpoint.js';
+import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, readGitCacheBase, IncrementalGitSnapshots } from '../src/git-checkpoint.js';
 import type { GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
 
 const roots: string[] = [];
@@ -87,19 +87,19 @@ describe('Git intermediate checkpoint', () => {
     const { source } = fixture();
     let committed = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'branch', revision: 1 });
     const base = committed;
-    git(source, 'switch', '-c', 'private-replica');
+    git(source, 'switch', '-c', 'private-cache');
     let revision = 1;
     const publications: GitIntermediateCheckpoint[] = [];
     const snapshots = new IncrementalGitSnapshots({
       repositoryPath: source, spaceId: 'branch', allocateRevision: async () => ++revision,
       loadPending: async () => null, loadCommitted: async () => committed, savePending: async () => {},
-      normalizeBranch: (branch, prior) => branch === 'private-replica' ? prior?.branch ?? branch : branch,
+      normalizeBranch: (branch, prior) => branch === 'private-cache' ? prior?.branch ?? branch : branch,
       publish: async checkpoint => { publications.push(checkpoint); },
       commit: async checkpoint => { committed = checkpoint; return checkpoint; },
     });
     expect(await snapshots.capture()).toEqual(base);
     expect(publications).toEqual([]);
-    expect(git(source, 'branch', '--show-current')).toBe('private-replica');
+    expect(git(source, 'branch', '--show-current')).toBe('private-cache');
     git(source, 'switch', '-c', 'human-branch');
     const changed = await snapshots.capture();
     expect(changed.branch).toBe('human-branch');
@@ -109,22 +109,22 @@ describe('Git intermediate checkpoint', () => {
 
   it('applies cloud state while preserving later human edits and ignored files', async () => {
     const { source, remote, target } = fixture();
-    const base = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'replica', revision: 1 });
+    const base = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'cache', revision: 1 });
     git(source, 'push', remote, `${base.checkpointRef}:${base.checkpointRef}`);
     git(target, 'init', '-b', 'main');
     git(target, 'fetch', remote, `${base.checkpointRef}:${base.checkpointRef}`);
     await restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint: base, branch: 'main' });
-    expect(await readGitReplicaBase(target)).toEqual(base);
+    expect(await readGitCacheBase(target)).toEqual(base);
     writeFileSync(join(source, 'staged.txt'), 'cloud staged\n');
     git(source, 'add', 'staged.txt');
     git(source, 'commit', '-m', 'cloud commit');
     writeFileSync(join(source, 'portable.txt'), 'cloud portable\n');
-    const incoming = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'replica', revision: 2 });
+    const incoming = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'cache', revision: 2 });
     git(source, 'push', remote, `${incoming.checkpointRef}:${incoming.checkpointRef}`);
     git(target, 'fetch', remote, `${incoming.checkpointRef}:${incoming.checkpointRef}`);
     writeFileSync(join(target, 'unstaged.txt'), 'later human edit\n');
     writeFileSync(join(target, 'secret.env'), 'local secret\n');
-    await applyGitReplicaCheckpoint({ repositoryPath: target, previous: base, checkpoint: incoming });
+    await applyGitCacheCheckpoint({ repositoryPath: target, previous: base, checkpoint: incoming });
     expect(await Bun.file(join(target, 'portable.txt')).text()).toBe('cloud portable\n');
     expect(await Bun.file(join(target, 'unstaged.txt')).text()).toBe('later human edit\n');
     expect(await Bun.file(join(target, 'secret.env')).text()).toBe('local secret\n');
@@ -148,7 +148,7 @@ describe('Git intermediate checkpoint', () => {
     git(source, 'push', remote, `${incoming.checkpointRef}:${incoming.checkpointRef}`);
     git(target, 'fetch', remote, `${incoming.checkpointRef}:${incoming.checkpointRef}`);
     writeFileSync(join(target, 'unstaged.txt'), 'human edit\n');
-    await expect(applyGitReplicaCheckpoint({ repositoryPath: target, previous: base, checkpoint: incoming })).rejects.toThrow();
+    await expect(applyGitCacheCheckpoint({ repositoryPath: target, previous: base, checkpoint: incoming })).rejects.toThrow();
     expect(await Bun.file(join(target, 'unstaged.txt')).text()).toBe('human edit\n');
     expect(git(target, 'write-tree')).toBe(base.indexTree);
     if (base.headCommit === null) throw new Error('Committed base fixture lost HEAD');

@@ -22,6 +22,7 @@ export class AttachmentStore {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_history_result_chunks(id TEXT NOT NULL,kind TEXT NOT NULL,part INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,kind,part))');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_writer(singleton INTEGER PRIMARY KEY CHECK(singleton=1), fence INTEGER NOT NULL, attempt TEXT)');
     storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_writer(singleton,fence,attempt) VALUES(1,0,NULL)');
+    // Retain this persisted table name: existing cache detach fences must survive upgrades.
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_primary_flush(attachment TEXT PRIMARY KEY, generation INTEGER NOT NULL)');
     const columns = storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_attachments)').toArray();
     if (!columns.some(column => column.name === 'request_id')) storage.sql.exec('ALTER TABLE runtime_attachments ADD COLUMN request_id TEXT');

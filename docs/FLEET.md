@@ -512,13 +512,13 @@ before execution; there is no silent legacy alias.
   renders the installed `SETTINGS_SCHEMA` instead of maintaining a parallel
   catalog. `UserSettingsDO` stores the exact managed `config.yml` with a
   generation, SHA-256 checksum, writer, and update time. Each machine keeps a
-  writable local replica at OMP's normal path. Native OMP or GitSpace writes are
+  writable local cache at OMP's normal path. Native OMP or GitSpace writes are
   watched and published with compare-and-swap; stale writes are rejected and
   replaced by the newer cloud generation. A hibernation-safe Durable Object
   WebSocket broadcasts generation changes to every authenticated machine;
   reconnect uses bounded backoff and there is no settings poller. Machines
   replace newer files atomically, call `Settings.reloadFromDisk()`, fan reloads
-  into active OMP sessions, and retain the last replica for offline startup.
+  into active OMP sessions, and retain the last cache for offline startup.
 - **Git identity**: the user fleet owns one generated Ed25519 SSH identity in
   canonical cloud storage. Each enrolled machine materializes the same key with
   `0600` permissions. GitSpace repositories receive its `core.sshCommand` plus

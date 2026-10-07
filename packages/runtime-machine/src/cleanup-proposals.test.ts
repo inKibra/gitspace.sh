@@ -61,7 +61,7 @@ test('cleanup retains work on unverified stop and retries after deletion before 
   } finally { await f.close(); }
 });
 
-test('cleanup refuses unresolved effects and forged primary scope', async () => {
+test('cleanup refuses unresolved effects and forged cache scope', async () => {
   const f = await fixture();
   try {
     await writeFile(join(f.root, 'work'), 'keep');
@@ -75,13 +75,13 @@ test('cleanup refuses unresolved effects and forged primary scope', async () => 
   } finally { await f.close(); }
 });
 
-test('primary drain preserves shared files and failed cleanup cannot acknowledge detach', async () => {
+test('cache drain preserves shared files and failed cleanup cannot acknowledge detach', async () => {
   const f = await fixture();
   try {
-    const primary: LocalAttachment = { ...f.local, attachment: { ...f.local.attachment, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, ownershipGeneration: 7 } };
-    f.journal.installAttachment(primary);
+    const cache: LocalAttachment = { ...f.local, attachment: { ...f.local.attachment, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, ownershipGeneration: 7 } };
+    f.journal.installAttachment(cache);
     await writeFile(join(f.root, 'work'), 'shared work');
-    const input = { attachment: { ...primary.attachment, state: 'draining' as const }, checkoutRoot: '/not-a-private-checkout', signal: f.signal, stopAndVerify: async () => { throw new Error('process still running'); }, verifyUnmounted: async () => { throw new Error('must not unmount shared checkout'); } };
+    const input = { attachment: { ...cache.attachment, state: 'draining' as const }, checkoutRoot: '/not-a-private-checkout', signal: f.signal, stopAndVerify: async () => { throw new Error('process still running'); }, verifyUnmounted: async () => { throw new Error('must not unmount shared checkout'); } };
     await expect(cleanupMachineAttachment(f.journal, input)).rejects.toThrow('process still running');
     expect(f.journal.attachment('runner')?.attachment.state).toBe('draining');
     expect(await readFile(join(f.root, 'work'), 'utf8')).toBe('shared work');

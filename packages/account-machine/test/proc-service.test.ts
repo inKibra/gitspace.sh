@@ -8,7 +8,7 @@ import { RuntimeAttachmentSchema, RuntimeToolDispatchSchema } from '@gitspace/pr
 import { signServiceAssertion, SERVICE_ASSERTION_HEADER } from '@gitspace/protocol/service-access';
 import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import { machineProcessOperation } from '../src/runtime-operations.js';
-import { replicaServiceOperation } from '../src/replica-services.js';
+import { cacheServiceOperation } from '../src/cache-services.js';
 
 test('proc ready.port becomes a private signed route and stop releases its lease', async () => {
   const root = await mkdtemp(join(tmpdir(), 'proc-service-'));
@@ -16,7 +16,7 @@ test('proc ready.port becomes a private signed route and stop releases its lease
   const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const trust = { accountId: 'account', publicKey: credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey))) };
   const leases = new Map<string, string>();
-  const manager = new WorkspaceServiceManager(database, { list: async () => [], startService: async () => { throw new Error('Primary not allowed'); }, stop: async () => { throw new Error('Primary not allowed'); } }, 'machine', root, 'gssh.dev', 'test', { leaseHostedRoute: async (projectId, route) => { leases.set(route.hostname, `${projectId}:${route.machineId}:${route.workspaceId}`); return { ...route, updatedAt: new Date().toISOString() }; }, releaseHostedRoute: async (_project, hostname) => leases.delete(hostname) }, async () => trust);
+  const manager = new WorkspaceServiceManager(database, { list: async () => [], startService: async () => { throw new Error('Workspace terminal not allowed'); }, stop: async () => { throw new Error('Workspace terminal not allowed'); } }, 'machine', root, 'gssh.dev', 'test', { leaseHostedRoute: async (projectId, route) => { leases.set(route.hostname, `${projectId}:${route.machineId}:${route.workspaceId}`); return { ...route, updatedAt: new Date().toISOString() }; }, releaseHostedRoute: async (_project, hostname) => leases.delete(hostname) }, async () => trust);
   const [allocated] = await manager.allocateDefinitionPorts('workspace', { name: 'proc-http', command: process.execPath, args: [], cwd: '.', env: {}, ports: [{ name: 'http', protocol: 'http' }] });
   if (!allocated) throw new Error('Missing allocated port');
   const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'cache', generation: 1, role: 'cache', checkout: { kind: 'snapshot', commit: 'a'.repeat(40) }, state: 'ready', capabilities: ['proc'], updatedAt: new Date().toISOString() });
@@ -30,16 +30,16 @@ test('proc ready.port becomes a private signed route and stop releases its lease
     expect(leases.get(hostname)).toBe('project:machine:workspace');
     expect(await (await fetch(`http://127.0.0.1:${allocated.port}/`)).text()).toBe('proc-private');
     expect((await manager.proxy(new Request(`https://${hostname}/`)))?.status).toBe(401);
-    const inventory = await replicaServiceOperation(manager, local, { op: 'list' });
+    const inventory = await cacheServiceOperation(manager, local, { op: 'list' });
     expect(inventory).toMatchObject([{ name: 'proc-http', source: 'process', state: 'ready', url: `https://${hostname}` }]);
-    const output = await replicaServiceOperation(manager, local, { op: 'logs', name: 'proc-http', source: 'process' });
+    const output = await cacheServiceOperation(manager, local, { op: 'logs', name: 'proc-http', source: 'process' });
     expect(output).toMatchObject({ name: 'proc-http', text: expect.stringContaining('proc service output') });
     const assertion = await signServiceAssertion({ version: 1, accountId: 'account', hostname, machineId: 'machine', caller: { kind: 'cloud', accountId: 'account', projectId: 'project', workspaceId: 'workspace' }, method: 'GET', target: '/', issuedAt: Date.now(), expiresAt: Date.now() + 30_000, nonce: crypto.randomUUID() }, keys.privateKey);
     expect(await (await manager.proxy(new Request(`https://${hostname}/`, { headers: { [SERVICE_ASSERTION_HEADER]: assertion } })))?.text()).toBe('proc-private');
     await handler(RuntimeToolDispatchSchema.parse({ ...base, args: { op: 'stop', name: 'proc-http' } }), local, signal);
     expect(leases.has(hostname)).toBe(false);
     expect(await manager.proxy(new Request(`https://${hostname}/`))).toBeNull();
-    await replicaServiceOperation(manager, local, { op: 'start', name: 'proc-http', source: 'process' });
+    await cacheServiceOperation(manager, local, { op: 'start', name: 'proc-http', source: 'process' });
     expect(leases.has(hostname)).toBe(true);
   } finally {
     await handler(RuntimeToolDispatchSchema.parse({ ...base, args: { op: 'stop', name: 'proc-http' } }), local, AbortSignal.timeout(5000)).catch(() => {});

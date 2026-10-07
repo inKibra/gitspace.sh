@@ -4,7 +4,7 @@ import {
   RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema,
   RuntimeWatchEventSchema, RuntimeActionResultSchema,
 } from '@gitspace/protocol-runtime';
-import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
+import { RuntimeSessionInputSchema, RuntimeSessionResultSchema, AgentDefinitionDiagnosticSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeQaActionResultSchema, RuntimeCachePolicyInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentRequestResultSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema, RuntimeCacheActionInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeDraftSaveInputSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
@@ -1415,6 +1415,7 @@ export type AgentDefinitionSetup = InputOf<typeof AgentDefinitionSetupCodec>;
 export const AgentSetupViewCodec = wire.object({
   sessionId: wire.string,
   agents: wire.array(AgentDefinitionSetupCodec),
+  diagnostics: wire.optional(wire.array(runtimeWire(AgentDefinitionDiagnosticSchema, 'gitspace/agent-definition-diagnostic/v1'))),
 });
 export type AgentSetupView = InputOf<typeof AgentSetupViewCodec>;
 const SaveAgentDefinitionFields = {

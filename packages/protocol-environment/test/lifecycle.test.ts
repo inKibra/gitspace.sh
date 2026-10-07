@@ -26,7 +26,7 @@ const claim = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op
 const finish = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'finish' }>> = {}): LifecycleMutation => ({ op: 'finish', runId, token: 'ownership', status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {}, ...overrides });
 
 describe('isomorphic environment decisions', () => {
-  it('requires authenticated attachment admission and keeps copy bindings out of primary state', () => {
+  it('requires authenticated attachment admission and keeps copy bindings out of workspace state', () => {
     const context = scenario();
     const attachment = { attachmentId: 'runner-a', generation: 3 };
     const mutation = claim('runner-preparation', { generation: null, phase: 'workspace/materialize', attachment });

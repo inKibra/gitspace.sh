@@ -2,7 +2,7 @@ import type { RuntimeAttachment } from './base.js';
 import type { RuntimeGitCheckpoint } from './git-checkpoint.js';
 
 /** Readiness alone is not a snapshot proof. Heartbeats are admitted under the exact attachment generation. */
-export function caughtUpSearchReplica(attachments: readonly RuntimeAttachment[], checkpoint: RuntimeGitCheckpoint, now = Date.now()): RuntimeAttachment | null {
+export function caughtUpSearchCache(attachments: readonly RuntimeAttachment[], checkpoint: RuntimeGitCheckpoint, now = Date.now()): RuntimeAttachment | null {
   return attachments.find(attachment => {
     const observation = attachment.executionObservation;
     if (!observation) return false;

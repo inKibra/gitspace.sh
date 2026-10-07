@@ -41,7 +41,7 @@ export type WorkspaceRuntime = {
   cachePolicy(): RuntimeCachePolicy;
   setCachePolicy(reclaimSeconds: number): Promise<void>;
   waitForSnapshot(commit: string): Promise<void>;
-  replicaReady(attachmentId: string, generation: number): Promise<void>;
+  cacheReady(attachmentId: string, generation: number): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
   discoverMcp(input: { requestId: string; args: JsonValue }): Promise<RuntimeToolResult>;
   qa(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted & { shareDraft?: string }>;
@@ -56,7 +56,8 @@ export type WorkspaceRuntime = {
   transcript(conversationId?: string): Promise<(TranscriptEvent & { sessionId: string })[]>;
   publish(): void;
 };
-const ReplicaNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }) });
+// Retain the persisted document kind so acknowledged cache notices are not emitted again.
+const CacheNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }) });
 export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): Promise<WorkspaceRuntime> {
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
   const runtime = await createRuntimeHarness({ ...options, storage });
@@ -398,11 +399,11 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       await options.storage.put('runtime.cachePolicy', cachePolicy);
       publish(); await line;
     },
-    async replicaReady(attachmentId, generation) {
+    async cacheReady(attachmentId, generation) {
       const attachment = attachments.list().find(item => item.attachmentId === attachmentId && item.generation === generation && item.state === 'ready');
       if (!attachment?.lfsRestored?.length) return;
       await harness.commit(async tx => {
-        const seen = await tx.doc(ReplicaNoticesDoc);
+        const seen = await tx.doc(CacheNoticesDoc);
         const key = `${attachmentId}:${generation}`;
         if (seen.seen[key]) return;
         const text = `LFS handoff to ${attachment.machineId}:\n${attachment.lfsRestored!.map(item => `${item.path}: ${item.outcome === 'committed' ? 'restored committed content' : 'omitted'}`).join('\n')}\nHeld-back local changes remain on the previous machine.`;

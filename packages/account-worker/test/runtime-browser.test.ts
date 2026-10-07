@@ -53,7 +53,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   const authority = createRuntimeBrowserAuthority({ storage, env, identity, runtime: () => runtime, async selectExecution(args, candidates) {
     const machineId = args.on ?? state.defaultMachineId;
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
-    if (!selected) throw new Error('No selected browser replica is ready');
+    if (!selected) throw new Error('No selected browser cache is ready');
     return selected;
   }, approvedOrigins: async () => state.origins, groupName: async () => 'Workspace' });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };

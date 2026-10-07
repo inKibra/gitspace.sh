@@ -385,7 +385,7 @@ test('machine deltas merge onto cloud files and index with clean text merges, ex
   } finally { await f.close(); }
 });
 
-for (const resolution of ['replica', 'cloud'] as const) for (const replacement of ['text', 'delete', 'binary'] as const) test(`${resolution} ${replacement} clean publication clears resolved conflicts while retaining untouched markers`, async () => {
+for (const resolution of ['cache', 'cloud'] as const) for (const replacement of ['text', 'delete', 'binary'] as const) test(`${resolution} ${replacement} clean publication clears resolved conflicts while retaining untouched markers`, async () => {
   const f = await fixture();
   const journal = new ExecutorJournal(join(f.dir, 'executor.sqlite'));
   try {
@@ -421,7 +421,7 @@ for (const resolution of ['replica', 'cloud'] as const) for (const replacement o
       const files: Record<string, string> = { untouched: await read(previous, 'untouched') };
       if (replacement !== 'delete' || path === 'resolved') files.resolved = await read(previous, 'resolved');
       const entries = Object.fromEntries(Object.entries(files).filter(([name]) => replacement !== 'delete' || name !== path).map(([name, content]) => [name, name === path ? clean : content]));
-      const plan = resolution === 'replica'
+      const plan = resolution === 'cache'
         ? await planSnapshotMerge(reader, previous, previous, await snapshot(entries))
         : { mutations: [{ path, content: replacement === 'delete' ? null : text.encode(clean) }] };
       const result = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous, ...plan }, f.request);
@@ -451,7 +451,7 @@ for (const resolution of ['replica', 'cloud'] as const) for (const replacement o
   } finally { journal.close(); await f.close(); }
 });
 
-for (const publication of ['cloud', 'replica'] as const) test(`${publication} publication introduces conflict flags for marker content and clears them only after resolution`, async () => {
+for (const publication of ['cloud', 'cache'] as const) test(`${publication} publication introduces conflict flags for marker content and clears them only after resolution`, async () => {
   const f = await fixture();
   try {
     const reader = { ...f.repo, readBlob: async (oid: string) => new Blob([Uint8Array.from((await git.readBlob({ fs, dir: f.dir, oid })).blob)]) };
@@ -460,9 +460,9 @@ for (const publication of ['cloud', 'replica'] as const) test(`${publication} pu
       const blob = await git.writeBlob({ fs, dir: f.dir, blob: text.encode(content) });
       const entries = (await git.readTree({ fs, dir: f.dir, oid: previous.worktreeTree })).tree.map(entry => entry.path === 'script' ? { ...entry, oid: blob } : entry);
       const tree = await git.writeTree({ fs, dir: f.dir, tree: entries });
-      const commit = await git.writeCommit({ fs, dir: f.dir, commit: { tree, parent: [previous.worktreeCommit], author, committer: author, message: 'replica edit\n' } });
+      const commit = await git.writeCommit({ fs, dir: f.dir, commit: { tree, parent: [previous.worktreeCommit], author, committer: author, message: 'cache edit\n' } });
       const machine = { ...previous, worktreeTree: tree, worktreeCommit: commit, trackedWorktreeCommit: commit };
-      const plan = publication === 'replica' ? await planSnapshotMerge(reader, previous, previous, machine) : { mutations };
+      const plan = publication === 'cache' ? await planSnapshotMerge(reader, previous, previous, machine) : { mutations };
       const result = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous, ...plan }, f.request);
       if (result.isErr()) throw result.error;
       expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: result.value.worktreeCommit, filepath: 'script' })).blob)).toBe(content);
@@ -483,7 +483,7 @@ test('first machine publication creates the canonical ref even when all uploaded
   const f = await fixture();
   try {
     await git.deleteRef({ fs, dir: f.dir, ref: f.previous.checkpointRef });
-    const machine = { ...f.previous, checkpointRef: 'refs/gitspace/machines/replica/checkpoints' };
+    const machine = { ...f.previous, checkpointRef: 'refs/gitspace/machines/cache/checkpoints' };
     await git.writeRef({ fs, dir: f.dir, ref: machine.checkpointRef, value: machine.worktreeCommit });
     const input = { repository: 'fixture', workspaceId: 'workspace', previous: machine, machine, mutations: [], forcePublication: true };
     const accepted = await writeArtifactsSnapshot(f.repo, input, f.request);
@@ -564,7 +564,7 @@ test('ordinary marker scanning reads only the changed blob in a large tree', asy
   } finally { await f.close(); }
 });
 
-for (const publication of ['cloud', 'replica', 'initial', 'recovery'] as const) test(`${publication} marker scanning ignores non-text marker-like objects`, async () => {
+for (const publication of ['cloud', 'cache', 'initial', 'recovery'] as const) test(`${publication} marker scanning ignores non-text marker-like objects`, async () => {
   const f = await fixture();
   try {
     const marker = '<<<<<<< cloud\nours\n=======\ntheirs\n>>>>>>> machine\n';
@@ -586,7 +586,7 @@ for (const publication of ['cloud', 'replica', 'initial', 'recovery'] as const) 
       expect(recovered.conflicts).toEqual(['real-text']);
       return;
     }
-    const plan = publication === 'replica'
+    const plan = publication === 'cache'
       ? await planSnapshotMerge(f.repo, f.previous, f.previous, machine)
       : publication === 'initial' ? { machine, mutations } : { mutations };
     const result = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: f.previous, ...plan }, f.request);
