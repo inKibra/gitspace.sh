@@ -66,4 +66,13 @@ describe('UsageView', () => {
     expect(failed.querySelector('[role="alert"]')?.textContent).toContain('transcript unreadable');
     expect(failed.querySelector<HTMLButtonElement>('[aria-label="Refresh usage"]')?.disabled).toBe(false);
   });
+
+  it('keeps provider account limits separate from recorded session costs', () => {
+    const container = document.createElement('div');
+    container.innerHTML = renderToStaticMarkup(<UsageView sessionId="session-a" report={reportFixture()} status="ready" onLoad={noop} onRefresh={noop} providerUsage={{ status: 'ready', report: { generatedAt: '2026-10-06T00:00:00Z', reports: [{ provider: 'provider', account: 'Team', fetchedAt: '2026-10-06T00:00:00Z', limits: [{ id: 'window', label: 'Weekly', scope: 'account', window: 'week', unit: 'requests', used: 8, limit: 10, remaining: 2, remainingFraction: 0.2, resetsAt: null, status: null }], notes: [] }], accountsWithoutUsage: ['offline-account'], errors: [{ provider: 'other', message: 'Account usage unavailable' }] } }} />);
+    expect(section(container, 'Provider account limits').textContent).toContain('8 / 10 requests');
+    expect(section(container, 'Provider account limits').textContent).toContain('offline-account');
+    expect(section(container, 'Provider account limits').querySelector('[role="alert"]')?.textContent).toContain('Account usage unavailable');
+    expect(section(container, 'Session scope').textContent).toContain('$0.10');
+  });
 });

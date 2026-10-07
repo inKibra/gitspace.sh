@@ -5,7 +5,7 @@ import { runtimeLfsHeldBack, useLfsTransition, type ConfirmLfsTransition } from 
 import { executionAgentId, type ExecutionBlock, type SideAgentBlock, type TurnBlock } from '@gitspace/blocks';
 import type { InspectorView, RuntimeSettingValue, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import { DEFAULT_INFERENCE_PROFILE_ID, inferenceSettingMetadata } from '@gitspace/protocol/inference';
-import { executionHash, projectEnvironmentState, lifecycleExecutionOutcome, isLifecycleRunActive, latestLifecycleRun, latestExecutionRun, type EnvironmentBundle as ProtocolEnvironmentBundle } from '@gitspace/protocol-environment';
+import { EnvironmentBundleSchema, executionHash, projectEnvironmentState, lifecycleExecutionOutcome, isLifecycleRunActive, latestLifecycleRun, latestExecutionRun, type EnvironmentBundle as ProtocolEnvironmentBundle } from '@gitspace/protocol-environment';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
@@ -46,7 +46,10 @@ import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadInspectorContent, loadInspectorResource } from './resource-content.js';
 import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useSpaceSynchronization } from './SynchronizationProvider.js';
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
+import { RuntimeMachines } from './RuntimeMachines.js';
 import { useRuntimeInspectorState } from './useRuntimeInspectorState.js';
+import { RuntimeServices } from './RuntimeServices.js';
+import { RuntimeSubagentHistory } from './RuntimeSubagentHistory.js';
 import { CloudCreationProgress } from './CloudCreationProgress.js';
 
 
@@ -94,7 +97,7 @@ function optionalQueryParameter(name: string): string | null {
 const CONFIGURE_ENVIRONMENT_PROMPT = 'Use the workspace-lifecycle skill to help me configure this repository. Inspect the repository and our shared environment ledger, then discuss the local preparation and cloud resources this project needs. Propose the five lifecycle phases and profiles. Do not edit files or run lifecycle scripts until I review the plan; approval to edit is not approval to execute.';
 
 
-function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, workspace, generation, machineId, runtimeAvailable, onAskAgent }: { projectId: string; projectName: string; workspaceName: string; spaceId: string; workspace: boolean; generation: number; machineId?: string; runtimeAvailable: boolean; onAskAgent?: (text: string) => Promise<void> }) {
+function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, workspace, generation, machineId, runtimeAvailable, onAskAgent, runtimeContext }: { projectId: string; projectName: string; workspaceName: string; spaceId: string; workspace: boolean; generation: number; machineId?: string; runtimeAvailable: boolean; onAskAgent?: (text: string) => Promise<void>; runtimeContext?: RuntimeInspectorContext }) {
   const query = useResultQuery(rpcClient.environment.get, { spaceId });
   const machines = useAccountMachines();
   const retained = useRetainedRead(query, JSON.stringify([spaceId, generation, machineId]));
@@ -112,7 +115,7 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
   const runners = (machineValues ?? []).filter((candidate) => candidate.state === 'online' && candidate.desiredState === 'online' && candidate.rpcEndpoint);
   const runner = runners.find((candidate) => candidate.id === runnerId) ?? runners[0];
   const remote = read.value;
-  const bundle = JSON.parse(remote.bundleJson) as ProtocolEnvironmentBundle;
+  const bundle = EnvironmentBundleSchema.parse(JSON.parse(remote.bundleJson));
   const mutate = (operation: () => Promise<unknown>): void => {
     if (busy) return;
     setActionError(null); setBusy(true);
@@ -173,16 +176,16 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
       profiles: Object.fromEntries(Object.entries(bundle.profiles).map(([name, profile]) => [name, { checks: profile.checks, secrets: profile.secrets, inputs: profile.values, notes: profile.notes ?? '' }])),
       inputs: bundle.values,
     },
-    machines: [{
+    machines: machineId ? [{
       id: machineId ?? 'unavailable',
-      label: runtimeAvailable ? machineId ?? 'current machine' : 'no active machine',
-      platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : navigator.platform.toLowerCase().includes('win') ? 'win32' : 'linux',
+      label: machineValues?.find(candidate => candidate.id === machineId)?.label ?? machineId,
+      platform: runtimeContext?.snapshot.attachments.find(attachment => attachment.machineId === machineId)?.cache?.platform ?? null,
       current: true,
       capabilities: Object.fromEntries(remote.executions.filter((item) => item.kind === 'check').map((item) => {
         const result = latestChecks?.results.find((candidate) => candidate.id === item.id);
         return [item.id, result?.exitCode != null ? { status: result.exitCode === 0 ? 'pass' as const : 'fail' as const, output: result.output || `Exited ${result.exitCode}` } : { status: 'unprobed' as const }];
       })),
-    }],
+    }] : [],
     lifecycle: remote.executions.filter((item) => item.kind === 'script').map((item) => ({
       id: item.id,
       phase: item.phase!,
@@ -214,6 +217,21 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
     </section> : null}
     <EnvironmentView
       model={model}
+      machinePanel={runtimeContext ? <RuntimeMachines snapshot={runtimeContext.snapshot} onCommitFirst={onAskAgent ? () => onAskAgent('Help me review and commit uncommitted Git LFS changes before reclaiming or detaching this machine cache.') : undefined} profile={remote.selectedProfile}
+        onOpenLog={runId => { const run = remote.lifecycle.runs.find(item => item.id === runId); const step = run?.results[0]; if (run) openRunLog(run.id, { id: step?.id ?? run.id, label: step?.id ?? run.phase }); else setActionError('The machine reported this setup run, but its durable log has not arrived. Refresh the environment and try again.'); }}
+        renderBlockers={selectedMachineId => {
+          const attachment = runtimeContext.snapshot.attachments.find(item => item.machineId === selectedMachineId);
+          const waiting = attachment?.cache?.setup.some(step => step.state === 'waiting-for-approval');
+          const executions = remote.executions.filter(item => !remote.lifecycle.approvals.some(approval => approval.executionHash === item.hash && approval.scope === item.approval));
+          const origins = remote.lifecycle.browserOrigins.filter(origin => !remote.lifecycle.approvals.some(approval => approval.executionHash === origin.hash));
+          return <div className="flex flex-col gap-2">
+            {waiting ? <p className="text-caption text-warning">Commands are blocked: setup is waiting for approval.</p> : null}
+            {waiting ? executions.map(item => <div key={item.hash} className="flex flex-wrap items-center justify-between gap-2 text-caption"><span>{item.kind === 'check' ? 'Check' : 'Script'} · {item.label} · Waiting approval</span><Button variant="secondary" size="compact" className="min-h-10" disabled={busy} onClick={() => openExecution(item.id, true)}>Review & approve</Button></div>) : null}
+            {origins.map(origin => <div key={origin.hash} className="flex flex-wrap items-center justify-between gap-2 text-caption"><span>Browser origin · {origin.pattern} · Waiting approval</span><Button variant="secondary" size="compact" className="min-h-10" disabled={busy} onClick={() => openExecution(origin.hash, true)}>Review & approve</Button></div>)}
+          </div>;
+        }}
+        renderRuns={selectedMachineId => <div className="flex flex-col gap-1"><h4 className="text-caption font-medium">Recent setup runs</h4>{remote.lifecycle.runs.filter(run => run.machineId === selectedMachineId).slice(-5).reverse().map(run => <div className="flex flex-col gap-1 text-caption" key={run.id}><span>{run.phase} · {run.status} · {new Date(run.startedAt).toLocaleString()}</span>{run.results.map(step => <Button key={step.id} variant="ghost" size="compact" className="min-h-10 justify-start" onClick={() => openRunLog(run.id, { id: step.id, label: step.id })}>View {step.id} log</Button>)}</div>)}</div>}
+      /> : undefined}
       busy={busy}
       runtimeAvailable={runtimeAvailable}
       cloudRunnerAvailable={runtimeAvailable || !!runner}
@@ -312,6 +330,8 @@ export function LiveInspector({
   const request = { spaceId, expectedGeneration: generation };
   const queryRuntime = useResultRuntime();
   const runtimeInspector = useRuntimeInspectorState(runtimeContext);
+  const serviceMachines = useAccountMachines();
+  const serviceMachineValues = useRetainedQueryValue(serviceMachines, 'inspector-service-machines');
   const overview = useResultQuery(rpcClient.inspector.overview, request);
   const artifactCatalog = useResultQuery(rpcClient.inspector.artifacts.list, request);
   const [secondaryQueries, setSecondaryQueries] = useState({ repository: false, journal: false, threads: false, services: false });
@@ -320,7 +340,7 @@ export function LiveInspector({
   const repository = useRepositoryTree(spaceId, generation, repositoryMode, readKey, runtimeAvailable && secondaryQueries.repository);
   const journal = useResultQuery(rpcClient.inspector.journal.list, request, { enabled: secondaryQueries.journal });
   const threads = useResultQuery(rpcClient.inspector.review.list, request, { enabled: secondaryQueries.threads });
-  const services = useResultQuery(rpcClient.inspector.services.list, request, { enabled: runtimeAvailable && secondaryQueries.services });
+  const services = useResultQuery(rpcClient.inspector.services.list, request, { enabled: !runtimeContext && runtimeAvailable && secondaryQueries.services });
   const [usageRequested, setUsageRequested] = useState(false);
   // Reads are driven below rather than by query auto-refetch: a large session
   // tree must finish before a later invalidation starts another traversal.
@@ -473,7 +493,7 @@ export function LiveInspector({
     }, { spaceId, projectId, generation, sessionId, runtimeAvailable }, uri, signal)}
     scope={scope}
     workspaces={workspaces}
-    environment={<LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} generation={generation} machineId={scope?.holder.kind === 'held' ? scope.holder.machineId : undefined} runtimeAvailable={runtimeAvailable} onAskAgent={onAskAgent} />}
+    environment={<LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} generation={generation} machineId={scope?.holder.kind === 'held' ? scope.holder.machineId : undefined} runtimeAvailable={runtimeAvailable} onAskAgent={onAskAgent} runtimeContext={runtimeContext} />}
     onSelectWorkspace={onSelectWorkspace}
     onSetRelations={onSetRelations}
     stackStatus={stackValue ?? null}
@@ -543,7 +563,13 @@ export function LiveInspector({
     }}
     threads={threadsValue ?? []}
     services={servicesValue ?? []}
+    runtimeServices={runtimeContext ? <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><RuntimeServices snapshot={runtimeContext.snapshot} machines={(serviceMachineValues ?? []).map(machine => ({ id: machine.id, label: machine.label }))} /></ScrollArea> : undefined}
     subagents={runtimeInspector?.subagents ?? subagents}
+    onStopSubagent={runtimeContext ? async conversationId => {
+      const result = await rpcClient.runtime.session({ projectId: runtimeContext.snapshot.projectId, workspaceId: runtimeContext.snapshot.workspaceId, conversationId, command: { type: 'stop' } });
+      if (result.status === 'error') throw result.error;
+    } : undefined}
+    renderSubagentTranscript={runtimeContext ? conversationId => <RuntimeSubagentHistory snapshot={runtimeContext.snapshot} conversationId={conversationId} /> : undefined}
     usage={runtimeInspector?.usage ?? {
       sessionId,
       report: usageRead.value ?? null,
@@ -578,7 +604,7 @@ export function LiveInspector({
     sectionErrors={{
       files: repository.state === 'failure' ? { message: rpcErrorMessage(repository.error, 'inspector.repository.tree'), retained: repositoryValue !== undefined, retry: () => void repository.refetch() } : undefined,
       journal: journal.state === 'failure' ? { message: rpcErrorMessage(journal.error, 'inspector.journal.list'), retained: journalValue !== undefined, retry: () => void journal.refetch() } : undefined,
-      services: services.state === 'failure' ? { message: rpcErrorMessage(services.error, 'inspector.services.list'), retained: servicesValue !== undefined, retry: () => void services.refetch() } : undefined,
+      services: !runtimeContext && services.state === 'failure' ? { message: rpcErrorMessage(services.error, 'inspector.services.list'), retained: servicesValue !== undefined, retry: () => void services.refetch() } : undefined,
       artifacts: artifactCatalog.state === 'failure' ? { message: rpcErrorMessage(artifactCatalog.error, 'inspector.artifacts.list'), retained: artifactValue !== undefined, retry: () => void artifactCatalog.refetch() } : undefined,
     }}
     onClose={onClose}

@@ -143,7 +143,7 @@ export class WorkspaceServiceManager {
   }
   allocateDefinitionPorts(spaceId: string, definition: WorkspaceServiceDefinition) { return this.allocatedPorts(spaceId, definition, true); }
   routeUrl(spaceId: string, name: string): string | null {
-    return this.publicDomain && this.publicNamespace ? `https://${serviceHostname(this.publicDomain, this.publicNamespace, spaceId, name)}` : null;
+    return this.publicDomain && this.publicNamespace ? `https://${serviceHostname(this.publicDomain, this.publicNamespace, `${spaceId}-${this.machineId}`, name)}` : null;
   }
   async registerProcessRoute(input: { projectId: string; workspaceId: string; generation: number; name: string; portName: string; port: number }): Promise<string> {
     const url = this.routeUrl(input.workspaceId, input.name);

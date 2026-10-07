@@ -4,18 +4,21 @@ import type { SpaceViewCodec } from '@gitspace/protocol/rpc-contract';
 import type { InputOf } from 'result-rpc';
 import type { RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuntimeSubagentRecordSchema, type RuntimeSubagentRecord } from '@gitspace/protocol-runtime/session-controls';
+import { RuntimeExecutionDocumentSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { z } from 'zod';
 import { deriveWorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { AgentScopeView, ProjectAgentView, WorkspaceView } from './GitSpaceShell.js';
 
 /** Runtime ownership is cloud-owned, independently of any attached working copy. */
 export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<InspectorView, 'project' | 'workspace' | 'workspaces' | 'machines' | 'placement'>, relationWorkspaces: InputOf<typeof SpaceViewCodec>['workspaces'] = []): { workspace: AgentScopeView; baseSpace: ProjectAgentView; workspaces: WorkspaceView[]; relationsReady: boolean } {
-  const primary = snapshot.attachments.find(item => item.role === 'primary' && item.state !== 'detached');
+  const execution = RuntimeExecutionDocumentSchema.parse(snapshot.documents['gitspace.execution'] ?? { defaultMachineId: null });
+  const caches = snapshot.attachments.filter(item => item.role === 'cache' && item.state !== 'detached');
+  const cache = caches.find(item => item.machineId === execution.defaultMachineId) ?? caches.find(item => item.state === 'ready') ?? caches[0];
   const document = snapshot.documents['gitspace.workspace'];
   const phaseValue = document && typeof document === 'object' && !Array.isArray(document) ? document.phase : null;
   const phase = phaseValue === 'plan' || phaseValue === 'code' || phaseValue === 'review' || phaseValue === 'ship' ? phaseValue : inspection.workspace.phase ?? 'plan';
   const status = deriveWorkspaceStatusSummary({ agents: snapshot.conversations.map(item => ({ state: item.status === 'running' ? 'running' : item.status === 'waiting' ? 'permission-needed' : 'waiting', ...(item.status === 'failed' ? { failure: { code: 'RUNTIME_FAILED', message: 'Conversation failed' } } : {}) })) });
-  const common = { projectId: inspection.project.id, projectName: inspection.project.name, generation: primary?.generation ?? inspection.placement?.generation ?? 0, possessedBy: primary?.machineId ?? '', holder: primary ? { kind: 'held' as const, machineId: primary.machineId, label: inspection.machines.find(item => item.id === primary.machineId)?.label ?? primary.machineId } : { kind: 'unknown' as const }, status };
+  const common = { projectId: inspection.project.id, projectName: inspection.project.name, generation: inspection.placement?.generation ?? cache?.ownershipGeneration ?? 0, possessedBy: cache?.machineId ?? '', holder: cache ? { kind: 'held' as const, machineId: cache.machineId, label: inspection.machines.find(item => item.id === cache.machineId)?.label ?? cache.machineId } : { kind: 'unknown' as const }, status };
   const baseSpace: ProjectAgentView = { ...common, kind: 'project', id: inspection.project.id, name: inspection.project.name, branch: inspection.project.baseBranch, phase: null, closedAt: inspection.project.archivedAt ? new Date(inspection.project.archivedAt) : null };
   const definitions = inspection.workspaces.some(item => item.id === inspection.workspace.id) ? inspection.workspaces : [...inspection.workspaces, inspection.workspace];
   const workspaces: WorkspaceView[] = definitions.filter(item => item.kind === 'worktree').map(item => {

@@ -166,7 +166,7 @@ export class MachineExecutor {
         let content: ExecutorContent;
         try {
           if (dispatch.tool === 'checkpoint') {
-            if (!this.options.onMutationSettled || !['primary', 'replica'].includes(current.attachment.role)) throw new Error('Checkpoint requires a cloud-following replica publisher');
+            if (!this.options.onMutationSettled || current.attachment.role !== 'cache') throw new Error('Checkpoint requires a canonical cache publisher');
             content = [];
           } else content = await executeMachineTool(dispatch, current, controller.signal, this.options);
         }

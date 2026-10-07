@@ -3,7 +3,7 @@ import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 /** Snapshot and delta payloads may exceed SQLite's per-value limit. */
 export function createReplicaStore(storage: DurableObjectStorage) {
   const sql = storage.sql;
-  function put(kind: 'snapshot' | 'event', cursor: number, payload: string) {
+  function put(kind: 'snapshot' | 'event' | 'draft', cursor: number, payload: string) {
     let part = 0;
     for (let offset = 0; offset < payload.length;) {
       let end = Math.min(payload.length, offset + 16_384);
@@ -29,6 +29,16 @@ export function createReplicaStore(storage: DurableObjectStorage) {
     }
   });
   return {
+    draft(): string | undefined {
+      const parts = sql.exec<{ payload: string }>("SELECT payload FROM runtime_replica WHERE kind='draft' ORDER BY part").toArray();
+      return parts.length ? parts.map(row => row.payload).join('') : undefined;
+    },
+    commitDraft(revision: number, payload: string): void {
+      storage.transactionSync(() => {
+        sql.exec("DELETE FROM runtime_replica WHERE kind='draft'");
+        put('draft', revision, payload);
+      });
+    },
     snapshot(): string | undefined {
       const parts = sql.exec<{ payload: string }>("SELECT payload FROM runtime_replica WHERE kind='snapshot' ORDER BY part").toArray();
       return parts.length ? parts.map(row => row.payload).join('') : undefined;

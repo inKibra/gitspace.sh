@@ -18,7 +18,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     return result;
   } };
   const identity = { projectId: 'project', workspaceId: 'workspace' };
-  const attachment = RuntimeAttachmentSchema.parse({ ...identity, machineId: 'machine', attachmentId: 'attachment', generation: 1, state: 'ready', role: 'primary', checkout: { kind: 'shared', branch: 'main' }, updatedAt: new Date().toISOString(), capabilities: ['browser', 'browser_control', 'browser.relay', 'browser.headless'] });
+  const attachment = RuntimeAttachmentSchema.parse({ ...identity, machineId: 'machine', attachmentId: 'attachment', generation: 1, state: 'ready', role: 'cache', checkout: { kind: 'shared', branch: 'main' }, updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), capabilities: ['browser', 'browser_control', 'browser.relay', 'browser.headless'] });
   const attachments = [attachment];
   const machines = new Map<string, Pick<FleetMachineDefinition, 'kind' | 'desiredState'>>([['machine', { kind, desiredState: 'online' }]]);
   const credentials = new Set(['machine']);

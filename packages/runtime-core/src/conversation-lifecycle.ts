@@ -5,6 +5,7 @@ import { SessionControlsDoc } from './session-controls.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { z } from 'zod';
 import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
+import { QuestionsDoc } from './documents.js';
 
 export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
@@ -96,7 +97,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     async runWhileActive(id, operation) {
       return serialized(async () => {
         const conversation = await resolve(id);
-        if (pendingStops.size || (await harness.snapshot(ConversationLifecycleDoc, conversation.id, context))?.stopped) throw new Error('Conversation is stopped; only an explicit user message may resume it');
+        if ((await harness.snapshot(ConversationLifecycleDoc, conversation.id, context))?.stopped) throw new Error('Conversation is stopped; only an explicit user message may resume it');
         return operation();
       });
     },
@@ -152,6 +153,11 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
         const records = await serialized(() => setStopped(id, true));
         const targets = await Promise.all(records.map(record => resolve(String(record.id))));
         await Promise.all(targets.map(target => target.abort(context, { background: true })));
+        const stopped = new Set(records.map(record => String(record.id)));
+        await harness.commit(async tx => {
+          const questions = await tx.doc(QuestionsDoc);
+          questions.items = questions.items.filter(question => question.answer !== null || !stopped.has(question.conversationId));
+        }, context);
       } finally { pendingStops.delete(settled.promise); settled.resolve(); }
     },
     async resume(id) { await userInput(id, async () => {}); },

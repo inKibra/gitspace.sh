@@ -3,12 +3,15 @@ import { abortSpaceClose, beginSpaceClose, beginSpaceOpen, bootstrapSpaceAuthori
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
-import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeAttachInputSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeGitCheckpointSchema, RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
-import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimePrimaryAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
+import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
+import { RuntimeServiceInputSchema } from '@gitspace/protocol-runtime/services';
+import { runtimeServiceControl } from './runtime-service-control.js';
+import { RuntimeGitCheckpointSchema, RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema, RuntimeCachePolicyInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema, RuntimeCacheActionInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
 import { requireRuntimeIdentity } from './runtime-access.js';
@@ -102,30 +105,19 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     }
     return readCurrentCheckpoint(this.ctx.storage);
   }
-  async runtimeSubmit(raw: unknown) { const input = RuntimeSubmitInputSchema.parse(raw); return (await this.getRuntime(input)).submit(input); }
+  async runtimeDraft(raw: unknown, actor: { deviceId: string }) { const input = RuntimeDraftSaveInputSchema.parse(raw); return (await this.getRuntime(input)).saveDraft(input, actor.deviceId); }
+  async runtimeSubmit(raw: unknown, actor?: { deviceId: string }) { const input = RuntimeSubmitInputSchema.parse(raw); return (await this.getRuntime(input)).submit(input, actor?.deviceId); }
   async runtimeCancel(raw: unknown) { const input = RuntimeCancelInputSchema.parse(raw); return (await this.getRuntime(input)).cancel(input); }
   async runtimeAnswer(raw: unknown, actor: { deviceId: string; canApprove: boolean }) { const input = RuntimeAnswerInputSchema.parse(raw); return (await this.getRuntime(input)).answer(input, actor); }
   async runtimeWatch(raw: unknown): Promise<Response> { const input = RuntimeWatchInputSchema.parse(raw); return (await this.getRuntime(input)).watch(input); }
-  async runtimeAttach(raw: unknown) {
-    const input = RuntimeAttachInputSchema.parse(raw);
-    const runtime = await this.getRuntime(input);
-    const placement = this.get();
-    const admitted = runtime.attachments.list().find(attachment => attachment.machineId === input.machineId && attachment.generation === input.generation && attachment.role === 'primary');
-    const ownershipGeneration = admitted?.ownershipGeneration ?? admitted?.generation;
-    const browserMachine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
-    if (!browserMachine || browserMachine.desiredState === 'removed') input.capabilities = input.capabilities.filter(capability => capability !== 'browser' && capability !== 'browser_control' && !capability.startsWith('browser.'));
-    else if (browserMachine.kind !== 'physical') input.capabilities = input.capabilities.filter(capability => capability !== 'browser.relay');
-    if (input.role !== 'primary' || !admitted || !['attaching', 'ready'].includes(admitted.state) || !placement || placement.machineId !== input.machineId || placement.generation !== ownershipGeneration || placement.state !== 'open') throw new Error('Primary attachment requires a durable request and current open checkout ownership');
-    const result = await runtime.attachments.attach(input);
-    const current = this.get();
-    if (!current || current.generation !== ownershipGeneration || current.machineId !== input.machineId || current.state !== 'open') throw new Error('Checkout ownership changed during attachment');
-    runtime.publish();
-    return result;
-  }
 
-  async runtimeSession(raw: unknown, actor: { canApprove: boolean }): Promise<Response> {
+  async runtimeSession(raw: unknown, actor: { canApprove: boolean; deviceId?: string }): Promise<Response> {
     const input = RuntimeSessionInputSchema.parse(raw);
-    return Response.json(await (await this.getRuntime(input)).session(input.conversationId, input.command, actor.canApprove));
+    return Response.json(await (await this.getRuntime(input)).session(input.conversationId, input.command, actor.canApprove, actor.deviceId));
+  }
+  async runtimeServices(raw: unknown) {
+    const input = RuntimeServiceInputSchema.parse(raw);
+    return runtimeServiceControl(await this.getRuntime(input), input);
   }
   async runtimeBrowserAuthority(raw: unknown) {
     const input = RuntimeIdentitySchema.extend({ machineId: z.string(), attachmentId: z.string(), generation: z.number().int().nonnegative() }).parse(raw);
@@ -180,24 +172,32 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return (await this.attachmentController(input)).request(input);
   }
 
-  async runtimePrimaryAttachmentRequest(raw: unknown) {
-    const input = RuntimePrimaryAttachmentRequestInputSchema.parse(raw);
+  async runtimeCacheAttachmentRequest(raw: unknown) {
+    const input = RuntimeCacheAttachmentRequestInputSchema.parse(raw);
     const { project, workspace } = await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
     const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
     if (!machine || machine.desiredState === 'removed' || !await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).hasRuntimeMachine(input.machineId)) throw new Error('Attachment target is not an enrolled account machine');
     const runtime = await this.getRuntime(input);
     await runtime.cloudFiles.recover();
     await runtime.cloudFiles.initializeSnapshot();
-    const placement = this.get();
-    if (!placement || placement.state !== 'open' || placement.machineId !== input.machineId) throw new Error('Primary attachment requires existing open canonical checkout ownership on the selected machine');
-    const result = await runtime.attachments.requestPrimary({ ...input, ownershipGeneration: placement.generation, checkout: { kind: 'shared', branch: workspace?.branch ?? project.baseBranch }, capabilities: executorCapabilities });
-    const current = this.get();
-    if (!current || current.state !== 'open' || current.machineId !== input.machineId || current.generation !== placement.generation) {
-      if (result.attachment.state === 'attaching') runtime.attachments.transition(result.attachment.attachmentId, result.attachment.generation, 'draining');
-      throw new Error('Checkout ownership changed during attachment request');
-    }
+    const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace?.branch ?? project.baseBranch }, capabilities: executorCapabilities });
     runtime.publish();
     return result;
+  }
+
+  async runtimeCacheAction(raw: unknown) {
+    const input = RuntimeCacheActionInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    const result = runtime.attachments.requestCacheAction(input);
+    runtime.publish();
+    return result;
+  }
+
+  async runtimeCachePolicy(raw: unknown) {
+    const input = RuntimeCachePolicyInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    await runtime.setCachePolicy(input.reclaimSeconds);
+    return { accepted: true as const, cursor: (await runtime.snapshot()).cursor };
   }
 
   async runtimeAttachmentDetachRequest(raw: unknown) {
@@ -214,10 +214,12 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (await this.ctx.storage.get('runtime.identity') === undefined) return { assignments: [] };
     if (input.afterSnapshot !== undefined) {
       const runtime = await this.getRuntime(identity);
-      if (!runtime.attachments.list().some(item => item.machineId === input.machineId && (item.role === 'primary' || item.role === 'replica') && ['attaching', 'ready', 'draining'].includes(item.state))) throw new Error('Snapshot wait requires an active replica');
+      if (!runtime.attachments.list().some(item => item.machineId === input.machineId && (item.role === 'cache') && ['attaching', 'ready', 'draining'].includes(item.state))) throw new Error('Snapshot wait requires an active replica');
       await runtime.waitForSnapshot(input.afterSnapshot);
     }
-    return (await this.attachmentController(identity)).assignments(input);
+    const result = await (await this.attachmentController(identity)).assignments(input);
+    const cachePolicy = (await this.getRuntime(identity)).cachePolicy();
+    return { assignments: result.assignments.map(assignment => ({ ...assignment, cachePolicy })) };
   }
 
   async runtimeAttachmentReady(raw: unknown) {
@@ -234,6 +236,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
       if (machine?.kind !== 'physical' || machine.desiredState === 'removed') input.browserCapabilities = [];
     }
+    if (input.cache?.state === 'reclaimed' && runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents cache reclamation');
     const attachment = runtime.attachments.heartbeat(input);
     runtime.publish();
     return { attachment };

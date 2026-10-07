@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./draft": "./src/draft.ts",
+    "./services": "./src/services.ts",
     "./tool-arguments": "./src/tool-arguments.ts",
     "./apply-patch": "./src/apply-patch.ts",
     "./session-controls": "./src/session-controls.ts",

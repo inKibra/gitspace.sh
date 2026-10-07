@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { GitSpaceDatabase, LocalArtifactResolver, MemoryArtifactObjectStore } from '@gitspace/core';
 import type { ControlOperation } from '@gitspace/protocol';
-import { RuntimeAttachmentSchema, RuntimeAttachmentReadyInputSchema, RuntimeAttachInputSchema, RuntimeAssignmentsInputSchema, RuntimeIdentitySchema, RuntimeToolDispatchSchema, type RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeIdentitySchema, RuntimeToolDispatchSchema, type RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
 import { CloudRuntimeClient } from '../src/cloud-runtime-client.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { createMachineExecutor, type MachineExecutorRuntime } from '../src/runtime-executor.js';
@@ -39,7 +39,7 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
     database.possessSpace('workspace', 'machine').unwrap();
     const owned = database.getSpace('workspace');
     if (!owned) throw new Error('Owned workspace missing');
-    let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'first-primary', generation: 0, ownershipGeneration: owned.generation, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
+    let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'first-primary', generation: 0, ownershipGeneration: owned.generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
     const authority: { checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null; readyCommit: string | null } = { checkpoint: null, readyCommit: null };
     if (initial === 'published unborn') {
       authority.checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: checkout, spaceId: 'workspace', revision: 1 });
@@ -47,7 +47,6 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
       await saveGitReplicaBase(checkout, authority.checkpoint);
       await writeFile(join(checkout, 'tracked.txt'), 'stale local contents\n');
     }
-    const initialCheckpoint = authority.checkpoint;
     const changed = new Set<() => void>();
     const pollStarted = Promise.withResolvers<void>();
     const cloudInstalled = Promise.withResolvers<void>();
@@ -75,20 +74,15 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
           }
           return schema.parse({ assignments: [{ grant: { attachment, executionSecret: 'local-proof-secret' }, source: null, checkpoint: authority.checkpoint }] });
         }
-        if (operation === 'runtime.attach') {
-          const input = RuntimeAttachInputSchema.parse(payload);
-          expect(input.machineId).toBe(attachment.machineId);
-          expect(input.generation).toBe(attachment.generation);
-          return schema.parse({ attachment, executionSecret: 'local-proof-secret' });
-        }
         if (operation === 'runtime.attachment.ready') {
           const input = RuntimeAttachmentReadyInputSchema.parse(payload);
           if (!authority.checkpoint || input.commit !== authority.checkpoint.worktreeCommit) throw new Error('Ready precedes canonical publication');
-          expect(await git(remote, 'show', `${input.commit}:tracked.txt`)).toBe('initial dirty workspace');
+          expect(await git(remote, 'show', `${input.commit}:tracked.txt`)).toBe(initial === 'published unborn' ? 'stale local contents' : 'initial dirty workspace');
           authority.readyCommit = input.commit;
           attachment = { ...attachment, state: 'ready' };
           return schema.parse({ attachment });
         }
+        if (operation === 'runtime.heartbeat') return schema.parse({ attachment });
         throw new Error(`Unexpected external operation: ${operation}`);
       }
     }
@@ -106,7 +100,7 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
       artifacts: new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32)),
       cloud: new LocalCloud({ baseUrl: 'https://proof.invalid', userId: 'account', machineId: 'machine', signingPrivateKey: new Uint8Array(32) }),
       gitRemote: new LocalGitRemote({ credentials: unavailable }),
-      prepareAttachment: unavailable, originGitEnvironment: unavailable,
+      prepareAttachment: async () => {}, originGitEnvironment: unavailable,
       commitSnapshot: async (local, checkpoint, previous) => {
         expect(local.attachment.attachmentId).toBe(attachment.attachmentId);
         expect(previous).toBe(authority.checkpoint?.worktreeCommit ?? null);
@@ -126,7 +120,7 @@ test.each(['committed', 'unborn', 'published unborn'])('primary executor reaches
     await runtime.sync();
     expect(runtime.journal.attachment(attachment.attachmentId)?.attachment.state).toBe('ready');
     if (!authority.checkpoint) throw new Error('Ready primary has no canonical checkpoint');
-    expect(authority.readyCommit).toBe((initialCheckpoint ?? authority.checkpoint).worktreeCommit);
+    expect(authority.readyCommit).toBe(authority.checkpoint.worktreeCommit);
     expect(authority.checkpoint?.headCommit).toBe(head);
     if (head === null) {
       expect(await git(checkout, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');

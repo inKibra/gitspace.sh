@@ -403,7 +403,7 @@ for (const resolution of ['replica', 'cloud'] as const) for (const replacement o
     if (conflicted.isErr()) throw conflicted.error;
     expect(conflicted.value.conflicts).toEqual(['resolved', 'untouched']);
     let accepted = conflicted.value;
-    const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['checkpoint'], updatedAt: new Date().toISOString() });
+    const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['checkpoint'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
     journal.installAttachment({ attachment, rootPath: f.dir, executionSecret: Buffer.alloc(32, 7).toString('base64url'), prerequisitesComplete: true });
     const executor = new MachineExecutor({ machineId: 'machine', journal, onMutationSettled: async () => accepted, runCommand: async () => { throw new Error('Checkpoint must not launch a command'); }, artifacts: () => ({ read: async () => [], write: async () => {} }) });
     const agentResult = async (checkpoint: RuntimeGitCheckpoint) => {

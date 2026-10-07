@@ -12,7 +12,7 @@ import { createHmac } from 'node:crypto';
 async function fixture(onRun?: () => Promise<void>, hooks: Pick<MachineExecutorOptions, 'onBeforeExecute' | 'onMutationSettled'> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-executor-'));
   const journal = new ExecutorJournal(join(root, 'journal.sqlite'));
-  const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 7, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['write', 'bash'], updatedAt: new Date().toISOString() });
+  const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 7, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['write', 'bash'], updatedAt: new Date().toISOString() });
   journal.installAttachment({ attachment, rootPath: root, executionSecret: Buffer.alloc(32, 7).toString('base64url'), prerequisitesComplete: true });
   let launches = 0;
   const executor = new MachineExecutor({ machineId: 'machine', journal, ...hooks, runCommand: async () => { launches++; await onRun?.(); return { exitCode: 0, output: 'effect' }; }, artifacts: () => ({ read: async () => [], write: async () => {} }) });

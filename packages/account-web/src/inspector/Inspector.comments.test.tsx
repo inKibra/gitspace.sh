@@ -136,3 +136,31 @@ it('does not label committed comparisons as machine-local changes', async () => 
   expect(container.textContent).not.toContain('Only on this machine');
   expect(container.textContent).not.toContain('assets/offline.psd');
 });
+
+it('offers a scoped Stop only for active subagents and keeps their inspection read only', async () => {
+  const stop = async (id: string) => {
+    props = { ...props, subagents: props.subagents.map(agent => agent.type === 'side-agent' && agent.agentId === id ? { ...agent, status: 'done' } : agent) };
+    root.render(<Inspector {...props} />);
+  };
+  props = { ...props, initialView: 'subagents', subagents: [
+    { id: 'agent:a', type: 'side-agent', agentId: 'a', label: 'Research A', status: 'running', messages: [{ id: 'a-text', type: 'message', role: 'assistant', text: 'Read-only child transcript' }] },
+    { id: 'agent:b', type: 'side-agent', agentId: 'b', label: 'Research B', status: 'running' },
+  ], onStopSubagent: stop };
+  await render();
+  const first = container.querySelector<HTMLButtonElement>('button[aria-label="Stop Research A"]');
+  expect(first).not.toBeNull();
+  await act(async () => { first!.click(); });
+  expect(container.querySelector('button[aria-label="Stop Research A"]')).toBeNull();
+  expect(container.querySelector('button[aria-label="Stop Research B"]')).not.toBeNull();
+  expect(container.querySelector('textarea')).toBeNull();
+  expect(container.textContent).toContain('Read-only child transcript');
+});
+
+it('does not advertise an empty legacy service count for the runtime inventory', async () => {
+  props = { ...props, initialView: 'services', runtimeServices: <p>Services across machine caches</p> };
+  await render();
+  const tab = [...container.querySelectorAll('[role="tab"]')].find(item => item.textContent?.startsWith('Services'));
+  expect(tab).toBeDefined();
+  expect(tab?.textContent).not.toContain(' · 0');
+  expect(container.textContent).toContain('Services across machine caches');
+});

@@ -9,6 +9,7 @@ import { SessionTreeExplorer } from './SessionTreeExplorer.js';
 import { ModelCombobox, modelOptions } from './ModelCombobox.js';
 import { navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
+import type { WorkspaceDraftBinding } from './workspace-draft.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -77,6 +78,7 @@ export interface ComposerProps {
   skills?: readonly SkillView[];
   running: boolean;
   onSend?: GitSpaceShellProps['onSend'];
+  draft?: WorkspaceDraftBinding;
   pending: boolean;
   recovering?: boolean;
   error?: string;
@@ -84,7 +86,7 @@ export interface ComposerProps {
   onRetryControls?: () => void;
 }
 
-export function Composer({ workspace, controls, providers, skills = [], running, onSend, pending, recovering = false, error, controlsError, onRetryControls }: ComposerProps) {
+export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, pending, recovering = false, error, controlsError, onRetryControls }: ComposerProps) {
   const icons = useIcons();
   const inference = useInference();
   const assignment = inference?.state?.assignments.find((entry) => entry.projectId === workspace.projectId);
@@ -92,7 +94,9 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const inferenceUnavailable = inference !== null && !profile;
   const selectedModelKey = `${controls?.value.provider ?? ''}/${controls?.value.model ?? ''}`;
   const invalidModel = !!controls?.value.model && !controls.value.models.some((model) => `${model.provider}/${model.id}` === selectedModelKey);
-  const [message, setMessage] = useState('');
+  const [localMessage, setLocalMessage] = useState('');
+  const message = workspaceDraft?.text ?? localMessage;
+  const setMessage = workspaceDraft?.onChange ?? setLocalMessage;
   const [attachments, setAttachments] = useState<File[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -100,6 +104,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     const text = draft.trim();
     if (!text || !onSend || pending || recovering || inferenceUnavailable) return false;
     setSubmitError(null);
+    const sentDraft = workspaceDraft?.capture();
     try {
       const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
       const images = await Promise.all(draftAttachments.filter((file) => file.type.startsWith('image/')).map(imageAttachment));
@@ -107,8 +112,9 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         if (file.type.startsWith('text/') && file.size <= 256 * 1024) return `<attachment name="${file.name}">\n${await file.text()}\n</attachment>`;
         return `<attachment name="${file.name}" type="${file.type || 'application/octet-stream'}" size="${file.size}" />`;
       }));
-      await onSend([text, ...attached].join('\n\n'), behavior, images);
-      setMessage('');
+      await onSend([text, ...attached].join('\n\n'), behavior, images, sentDraft?.draftRevision);
+      if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
+      else setLocalMessage(current => current === draft ? '' : current);
       setAttachments([]);
       return true;
     } catch (failure) {
@@ -189,8 +195,11 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     {controls?.onReadHistory && showHistory ? <SessionTreeExplorer key={controls.value.sessionId} historyAnchorId={controls.value.historyAnchorId} onReadHistory={controls.onReadHistory} onNavigate={controls.onNavigateTree} onClose={() => setShowHistory(false)} /> : null}
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}
     {selectedProvider && !selectedProvider.hasAuth ? <ProviderNotice provider={selectedProvider} profileId={profile?.id} /> : null}
+    {workspaceDraft?.error ? <p role="alert" className="text-caption text-destructive">{workspaceDraft.error}</p> : null}
+    {workspaceDraft && message ? <Button variant="ghost" size="compact" className="min-h-10" onClick={workspaceDraft.onDiscard}>Discard draft</Button> : null}
     <InputMessage
       data-slot="input-message"
+      onBlurCapture={() => workspaceDraft?.onBlur()}
       value={message}
       onValueChange={setMessage}
       onSend={(text, files, meta) => { if (meta?.queuedId) return; void submit(text, files); }}

@@ -1,15 +1,32 @@
 import { UsageDoc, type Storage, type Harness, type ConversationId, type EntryId, type Cursor } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { SessionUsageReport, UsageTotals } from '@gitspace/protocol-runtime/session-controls';
+import { AgentDefinitionContextDoc } from '@gitspace/runtime-core';
 
 export async function readCloudUsage(durable: DurableObjectStorage, storage: Storage, harness: Harness, target: ConversationId): Promise<SessionUsageReport> {
   const sql = durable.sql;
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_usage_requests(owner INTEGER NOT NULL,model TEXT NOT NULL,requests INTEGER NOT NULL,PRIMARY KEY(owner,model))');
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_usage_progress(owner INTEGER PRIMARY KEY,entry INTEGER NOT NULL)');
-  const owners = new Map<number, number | null>();
+  const conversations = [];
   let cursor: Cursor | undefined;
-  do { const page = await storage.scanConversations({}, 128, cursor, BACKGROUND_CONTEXT); for (const record of page.items) owners.set(Number(record.id), record.owner ? Number(record.owner.conversationId) : null); cursor = page.next; } while (cursor);
-  const included = [...owners.keys()].filter(id => { for (let owner: number | null | undefined = id; owner !== null && owner !== undefined; owner = owners.get(owner)) if (owner === Number(target)) return true; return false; });
+  do { const page = await storage.scanConversations({}, 128, cursor, BACKGROUND_CONTEXT); conversations.push(...page.items); cursor = page.next; } while (cursor);
+  const identities = new Map(conversations.map(record => [String(record.id), record.id]));
+  const metadata = new Map(await Promise.all(conversations.map(async record => [record.id, (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child ?? null] as const)));
+  const owners = new Map(conversations.map(record => {
+    const child = metadata.get(record.id);
+    const parent = child ? identities.get(child.parentId) : record.owner?.conversationId;
+    if (child && parent === undefined) throw new Error('Usage subagent parent is missing');
+    return [record.id, parent ?? null] as const;
+  }));
+  const included = [...owners.keys()].filter(id => {
+    const seen = new Set<ConversationId>();
+    for (let owner: ConversationId | null | undefined = id; owner !== null && owner !== undefined; owner = owners.get(owner)) {
+      if (owner === target) return true;
+      if (seen.has(owner)) throw new Error('Usage conversation ancestry contains a cycle');
+      seen.add(owner);
+    }
+    return false;
+  });
   const empty = (): UsageTotals => ({ requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, reasoningTokens: 0, costUsd: 0 });
   const report: SessionUsageReport = { sessionId: String(target), totals: empty(), totalsDeep: empty(), childSessions: Math.max(0, included.length - 1), byModel: [], byRole: [], byAgent: [], byCompletion: [], warnings: ['Pi usage includes compaction and tool charges. Request counts cover persisted assistant responses; historical role and compaction-request attribution are not recorded.'] };
   function add(into: UsageTotals, value: UsageTotals) { for (const key of Object.keys(into) as (keyof UsageTotals)[]) into[key] += value[key]; }
@@ -29,11 +46,11 @@ export async function readCloudUsage(durable: DurableObjectStorage, storage: Sto
         after = row.id;
       }
     }
-    const state = await harness.snapshot(UsageDoc, owner as ConversationId, BACKGROUND_CONTEXT);
+    const state = await harness.snapshot(UsageDoc, owner, BACKGROUND_CONTEXT);
     const requests = Object.fromEntries(sql.exec<{model:string;requests:number}>('SELECT model,requests FROM runtime_usage_requests WHERE owner=?', owner).toArray().map(row => [row.model, row.requests]));
     for (const bucket of ['models', 'tools'] as const) for (const [key, usage] of Object.entries(state?.[bucket] ?? {})) {
       const totals: UsageTotals = { requests: bucket === 'models' ? requests[key] ?? 0 : 0, input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, totalTokens: usage.totalTokens, reasoningTokens: usage.reasoning ?? 0, costUsd: usage.cost.total };
-      if (owner === Number(target)) add(report.totals, totals);
+      if (owner === target) add(report.totals, totals);
       add(report.totalsDeep, totals);
       const split = key.indexOf('/');
       const provider = bucket === 'models' ? key.slice(0, split) : 'tool';
@@ -41,7 +58,13 @@ export async function readCloudUsage(durable: DurableObjectStorage, storage: Sto
       let row = report.byModel.find(row => row.provider === provider && row.model === model);
       if (!row) { row = { provider, model, totals: empty() }; report.byModel.push(row); }
       add(row.totals, totals);
-      report.byAgent.push({ agentId: String(owner), agent: owner === Number(target) ? 'Main' : `Conversation ${owner}`, selection: 'unknown', role: null, provider, model, definitionSource: null, definitionPath: null, definitionRevision: null, spawns: owner === Number(target) ? 0 : 1, firstAt: null, lastAt: null, totals });
+      const child = metadata.get(owner);
+      const role = child?.role ?? null;
+      let roleRow = report.byRole.find(row => row.role === role);
+      if (!roleRow) { roleRow = { role, models: [], totals: empty() }; report.byRole.push(roleRow); }
+      if (!roleRow.models.includes(`${provider}/${model}`)) roleRow.models.push(`${provider}/${model}`);
+      add(roleRow.totals, totals);
+      report.byAgent.push({ agentId: String(owner), agent: child?.name ?? (owner === target ? 'Main' : `Conversation ${owner}`), selection: child?.selection.kind === 'role' ? 'role' : child?.selection.kind === 'explicit' ? 'pinned' : 'unknown', role, provider, model, definitionSource: child?.definition?.source ?? null, definitionPath: child?.definition?.path ?? null, definitionRevision: child?.definition?.revision ?? null, spawns: child ? 1 : 0, firstAt: null, lastAt: null, totals });
     }
   }
   return report;

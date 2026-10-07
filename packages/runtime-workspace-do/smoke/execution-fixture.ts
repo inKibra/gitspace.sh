@@ -201,8 +201,8 @@ export class ExecutionSmoke extends DurableObject<Environment> {
         });
       }
       if (path === '/setup') {
-        const grant = await runtime.attachments.attach({ ...identity, machineId: RuntimeMachineIdSchema.parse('proof-machine'), generation: 7, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash', 'write', 'read', 'proc'] });
-        if (grant.attachment.state === 'attaching') grant.attachment = runtime.attachments.transition(grant.attachment.attachmentId, grant.attachment.generation, 'ready');
+        const grant = await runtime.attachments.attach({ ...identity, machineId: RuntimeMachineIdSchema.parse('proof-machine'), generation: 7, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash', 'write', 'read', 'proc'] });
+        if (grant.attachment.state === 'attaching') grant.attachment = runtime.attachments.ready({ ...grant.attachment, commit: 'a'.repeat(40), prerequisitesComplete: true }, 'a'.repeat(40)).attachment;
         await this.ctx.storage.put('proof-grant', grant);
         await root.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'yolo'; }, BACKGROUND_CONTEXT);
         return Response.json(grant);

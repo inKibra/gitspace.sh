@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { canonicalJson, RuntimeBashCommandArgumentsSchema, RuntimeReceiptTransportSchema, RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeReceiptTransport } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 
-const LocalAttachmentSchema = z.object({ attachment: RuntimeAttachmentSchema, rootPath: z.string().min(1), executionSecret: z.string().min(1), prerequisitesComplete: z.boolean(), checkoutPrepared: z.boolean().optional() });
+const LocalAttachmentSchema = z.object({ attachment: RuntimeAttachmentSchema, rootPath: z.string().min(1), executionSecret: z.string().min(1), prerequisitesComplete: z.boolean(), checkoutPrepared: z.boolean().optional(), ownedCheckout: z.boolean().optional() });
 export type LocalAttachment = z.infer<typeof LocalAttachmentSchema>;
 const RowSchema = z.object({ payload: z.string() });
 const AttemptSchema = z.object({ dispatch: RuntimeToolDispatchSchema, fingerprint: z.string(), state: z.enum(['starting', 'running', 'fenced', 'settled']), result: RuntimeToolResultSchema.nullable(), receipt: RuntimeReceiptTransportSchema.optional(), acknowledged: z.boolean().optional(), cancelRequested: z.boolean().optional() });
@@ -31,10 +31,10 @@ export class ExecutorJournal {
     if (previous && (previous.attachment.generation > record.attachment.generation || previous.attachment.machineId !== record.attachment.machineId || previous.attachment.workspaceId !== record.attachment.workspaceId || previous.attachment.projectId !== record.attachment.projectId)) throw new Error('Attachment identity or generation conflict');
     if (previous && previous.attachment.generation !== record.attachment.generation && this.unresolved(previous.attachment).length) throw new Error('Cannot transfer attachment while effects are unresolved');
     for (const other of this.attachments()) {
-      if (other.attachment.attachmentId === record.attachment.attachmentId || other.attachment.workspaceId !== record.attachment.workspaceId || other.attachment.projectId !== record.attachment.projectId || other.attachment.role !== 'primary' || record.attachment.role !== 'primary') continue;
-      if (other.attachment.generation > record.attachment.generation) throw new Error('New primary attachment has stale authority generation');
+      if (other.attachment.attachmentId === record.attachment.attachmentId || other.attachment.workspaceId !== record.attachment.workspaceId || other.attachment.projectId !== record.attachment.projectId || other.attachment.role !== 'cache' || record.attachment.role !== 'cache') continue;
+      if (other.attachment.generation > record.attachment.generation) throw new Error('New cache attachment has stale authority generation');
       if (other.attachment.state === 'ready' || other.attachment.state === 'draining') {
-        if (this.unresolved(other.attachment).length) throw new Error('Previous primary has unresolved effects; transfer requires recovery');
+        if (this.unresolved(other.attachment).length) throw new Error('Previous cache has unresolved effects; transfer requires recovery');
         this.database.query('UPDATE executor_attachments SET payload=? WHERE id=?').run(JSON.stringify({ ...other, attachment: { ...other.attachment, state: 'detached' } }), other.attachment.attachmentId);
       }
     }

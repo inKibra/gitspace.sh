@@ -345,7 +345,7 @@ export function requiredCapability(procedurePath: string, kind: 'query' | 'mutat
   if (procedurePath === 'session.prompt' || procedurePath.startsWith('session.answer') || procedurePath === 'session.steer') return 'session.prompt';
   if (procedurePath === 'runtime.submit' || procedurePath === 'runtime.cancel' || procedurePath === 'runtime.answer' || procedurePath === 'runtime.browserSelect') return 'session.prompt';
   // The command handler checks the stronger capability for each mutation.
-  if (procedurePath === 'runtime.session') return 'rpc.read';
+  if (procedurePath === 'runtime.session' || procedurePath === 'runtime.services') return 'rpc.read';
   if (procedurePath.startsWith('machine.image.') && kind === 'mutation') return 'deployment.control';
   if (procedurePath.startsWith('machine.') && kind === 'mutation') return 'fleet.control';
   if (procedurePath.startsWith('devices.') && kind === 'mutation') return 'devices.manage';

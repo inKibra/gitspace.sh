@@ -26,7 +26,7 @@ Browser / MCP ──Chord──▶ Workspace DO: pi-durable Session (conversatio
                               │ relay: tool calls, jobs, environment runs, PTY streams
                  ┌────────────┴─────────────┐
                  ▼                          ▼
-        Machine (working-copy replica)  Machine (snapshot-pinned runner)
+        Machine (local workspace cache) Machine (snapshot-pinned runner)
         supervisor · programs · sync    supervisor · jobs · tests
 ```
 
@@ -131,7 +131,7 @@ packages/
                               facade, Chord service endpoints, Artifacts binding, dispatch over the relay;
                               exported through account-worker's entry
   runtime-machine/       NEW  Machine executor: ExecutionEnv over working copies, machine tools
-                              (bash/grep/ast-grep), replica synchronization,
+                              (bash/grep/ast-grep), cache synchronization,
                               egress proxy, attachment client
   supervisor/            NEW  Process supervisor: PTY and pipe processes, owners, readiness, restart
                               policies, capped logs with cursors; replaces OMP's launch broker
@@ -180,10 +180,10 @@ packages/
 | Document | Scope | Contents |
 |---|---|---|
 | `pi.agent`, `pi.live`, `pi.inbox`, `pi.usage` | conversation | Built-in: agent choices, running generation and tools, queued messages, spend. |
-| `gitspace.execution` | workspace | `{ defaultMachineId: string \| null }`. A ready replica or automatic first-ready selection; never conversation ownership. |
+| `gitspace.execution` | workspace | `{ defaultMachineId: string \| null }`. A ready cache or automatic first-ready selection; never conversation ownership. |
 | `gitspace.workspace` | session | Phase (plan/code/ship), goal, dependencies, branch, Artifacts repo, creation progress. |
 | `gitspace.todos`, `gitspace.plan` | conversation | Todo phases; plan reference and approval state. |
-| `gitspace.machines` | session | Attached replicas and pinned runners, capabilities, and readiness per profile. |
+| `gitspace.machines` | session | Attached caches and pinned runners, capabilities, and readiness per profile. |
 | `gitspace.environment` | session | Selected profile, run ledger mirror, bindings, per-copy materialization state (§10). |
 | `gitspace.jobs` | session | Job and process registry for the agent hub (§8.2). |
 | `gitspace.qa` | session | Reports filed in this workspace before they reach the project QA queue. |
@@ -208,18 +208,18 @@ packages/
 Each tool is declared **cloud** or **machine**:
 
 - **Cloud:** repository `read`, `write`, `edit`, `apply_patch`, and `find` always use the DO's Artifacts working-copy snapshot, whether machines are attached or not. `find` reads a commit-keyed path index and accepts `pattern` and `path`; it rejects the unsupported `glob` option. History, workspace reads, web search, judging, and cloud MCP also run here.
-- **Machine:** `bash`, jobs, processes, environment runs, and AST matching execute on the chosen replica. Default `grep` uses pinned ripgrep on a verified caught-up replica, otherwise the cloud snapshot index. Cloud codemode sends nested calls through the normal tool authority.
+- **Machine:** `bash`, jobs, processes, environment runs, and AST matching execute on the chosen cache. Default `grep` uses pinned ripgrep on a verified caught-up cache, otherwise the cloud snapshot index. Cloud codemode sends nested calls through the normal tool authority.
 
-The workspace has one main conversation. Only it and human replica edits can change the shared cloud working copy. Main-agent mutations serialize within a turn; independent reads can run in parallel. No conversation carries machine placement. Each admitted machine command carries the latest cloud snapshot as its minimum input.
+The workspace has one main conversation. Only it and human edits to local caches can change the shared cloud working copy. Main-agent mutations serialize within a turn; independent reads can run in parallel. No conversation carries machine placement. Each admitted machine command carries the latest cloud snapshot as its minimum input.
 
 ### 7.2 Choosing machines
 
 File tools have no machine selector. Program execution uses the workspace default or an explicit per-call override:
 
-- `machines`: list attachments and use `setDefault` to choose a ready replica. `machineId: null` restores automatic first-ready selection. A configured but unavailable default fails rather than silently selecting a different machine.
+- `machines`: list attachments and use `setDefault` to choose a ready cache. `machineId: null` restores automatic first-ready selection. A configured but unavailable default fails rather than silently selecting a different machine.
 - Applicable machine tools accept `on` to override the workspace default.
 - `on` is a machine ID, unambiguous label, or selector such as `{ needs: ["macos"], profile: "ios", prefer: "idle" }`. No ready match fails immediately.
-- `at` selects a separate snapshot-pinned runner on the machine chosen from ready primary/replica attachments first. `"current"` pins the current cloud snapshot; a commit or ref pins that exact source. Existing runners and delegates cannot substitute for a missing execution replica. It does not move a conversation or change the shared copy.
+- `at` selects a separate snapshot-pinned runner on a machine with a ready cache attachment. `"current"` pins the current cloud snapshot; a commit or ref pins that exact source. Existing runners and delegates cannot substitute for a missing execution cache. It does not move a conversation or change the shared copy.
 - Policy: per-project allowed machines and labels set by the user; approval before running on a machine the user does not own; secrets restricted by machine trust (§10.6).
 
 ### 7.3 Failure semantics
@@ -238,9 +238,9 @@ The cloud copy remains authoritative with or without attached machines:
 
 1. **Repository files:** all file tools use the DO's Artifacts snapshot chain. Cloud edits change portable file contents, not Git HEAD or the staged index.
 2. **Conversation and views:** transcript, documents, tasks, plan, goal, QA, history search, and cloud-tool turns remain available.
-3. **Machine programs:** before a command, the replica publishes local changes relative to its durable base and catches up to the command's minimum snapshot. After the command, it publishes a delta, waits for cloud acceptance, and returns the result. An unchanged checkout publishes nothing.
-4. **Concurrent changes:** the DO applies machine deltas to the latest cloud copy. Different files merge independently; same-file edits use a three-way merge. GitSpace conflict markers flag a path whether a replica or a cloud `write`, `edit`, or `apply_patch` introduced them. A partial resolution stays flagged while markers remain. An explicit clean replacement or deletion clears that path's conflict notice. Machine Git changes carry HEAD and index state; cloud file edits preserve them.
-5. **Continuous sync:** a signed long poll wakes replicas when the cloud snapshot changes. A filesystem watcher coalesces human edits through the same capture queue. Batched, cached Git ignore checks keep ignored writes from resetting the debounce; changes to ignore files invalidate the cache, including external global ignore changes. Capture waits for the complete dirty set, index, and HEAD to remain stable for one second, then checks again immediately before and after capture. A changed candidate is discarded before publication and retried. Every untracked file that Git does not ignore is portable, including editor scratch filenames. Git's standard rules cover `.gitignore`, `.git/info/exclude`, and `core.excludesFile`; tracked files remain covered regardless of those rules. Reconnect reconciles from the last applied durable base instead of resetting the checkout.
+3. **Machine programs:** before a command, the cache publishes local changes relative to its durable base and catches up to the command's minimum snapshot. After the command, it publishes a delta, waits for cloud acceptance, and returns the result. An unchanged checkout publishes nothing.
+4. **Concurrent changes:** the DO applies machine deltas to the latest cloud copy. Different files merge independently; same-file edits use a three-way merge. GitSpace conflict markers flag a path whether a cache or a cloud `write`, `edit`, or `apply_patch` introduced them. A partial resolution stays flagged while markers remain. An explicit clean replacement or deletion clears that path's conflict notice. Machine Git changes carry HEAD and index state; cloud file edits preserve them.
+5. **Continuous sync:** a signed long poll wakes caches when the cloud snapshot changes. A filesystem watcher coalesces human edits through the same capture queue. Batched, cached Git ignore checks keep ignored writes from resetting the debounce; changes to ignore files invalidate the cache, including external global ignore changes. Capture waits for the complete dirty set, index, and HEAD to remain stable for one second, then checks again immediately before and after capture. A changed candidate is discarded before publication and retried. Every untracked file that Git does not ignore is portable, including editor scratch filenames. Git's standard rules cover `.gitignore`, `.git/info/exclude`, and `core.excludesFile`; tracked files remain covered regardless of those rules. Reconnect reconciles from the last applied durable base instead of resetting the checkout.
 6. **Publication recovery:** one durable DO publication queue serializes canonical updates. This is not a machine writer lease. Once admitted, an uncertain publication must finish or remain fenced; it cannot be replayed as a new command.
 
 A settle window cannot prove that a writer has finished. A writer paused for longer than one second can look like a completed save. Avoiding that ambiguity requires a writer-completion protocol; timestamps alone cannot provide it.
@@ -251,7 +251,7 @@ A settle window cannot prove that a writer has finished. A writer paused for lon
 
 | Tool | Decision | Notes |
 |---|---|---|
-| `read`, `write`, `edit`, `bash` | Owner-schema registrations | File tools use the cloud copy; bash uses an execution replica. Each model gets `edit` or `apply_patch` by family (§8.8). |
+| `read`, `write`, `edit`, `bash` | Owner-schema registrations | File tools use the cloud copy; bash uses an execution cache. Each model gets `edit` or `apply_patch` by family (§8.8). |
 | `apply_patch` | Cloud file mutation | Shared V4A parser and atomic snapshot publication for OpenAI families (§8.8). |
 | `grep`, `find` | Separate owners | `grep` uses caught-up machine ripgrep or the cloud snapshot index; `find` uses the DO's commit-keyed path index. |
 | `codemode` | Keep | Cloud WorkerLoader isolate with nested durable tool calls (§7.4). |
@@ -276,7 +276,9 @@ OMP's `hub` combined three systems (`tools/hub/index.ts:1-16`). Our transcripts 
 
 ### 8.3 Subagents
 
-Subagents remain task-owned conversations with background anchors and steer/follow-up. They do not copy a parent machine-placement document or acquire authority to mutate the shared cloud copy. Their broader delegation model belongs to the next owner-correction pass.
+Subagents remain task-owned conversations with background anchors and internal `agents.send` steering. User and device prompts target only the main conversation. The workspace has no conversation picker.
+
+Inspector shows each child's bounded transcript, status, and the definition and model selection retained when it started. These views are read-only. A child's Stop aborts its subtree and background ownership tasks, then removes unanswered questions from that subtree. Main and sibling work continues. Main Stop still stops the whole tree.
 
 ### 8.4 Time-traveling stream rules (TTSR)
 
@@ -391,7 +393,7 @@ Receipt endpoints omit userinfo, query, and fragment; the Worker rejects them in
 
 Machine hydration streams R2 and origin content to a temporary file beside the LFS cache. It rejects excess bytes immediately, then checks the exact size and incremental SHA-256 before an atomic rename. Failure or cancellation removes the temporary file. Cache checks, native smudge output, uploads, and worktree restoration also stream instead of collecting the full payload. R2 encryption retains the existing 32 MiB chunk format; ciphertext reads stop at the expected chunk size plus framing, and authenticated inventories have a separate byte limit. The machine and Worker verify the complete plaintext identity as the stream ends.
 
-In-use roots include current runtime and portable checkpoints, active attachment checkpoints, pending publication predecessors, and unacknowledged retention outboxes. Closed but restorable workspaces retain their roots; historical rows alone are not roots. The DO validates the replica generation and predecessor before admitting a publication. It commits the accepted merged checkpoint and retention outbox together. The outbox retains the snapshot before releasing the exact uploader's publication pin. Portable acceptance uses the same order. Recovery needs no machine response or cleanup call, and keeps pending predecessors rooted until acknowledgement.
+In-use roots include current runtime and portable checkpoints, active attachment checkpoints, pending publication predecessors, and unacknowledged retention outboxes. Closed but restorable workspaces retain their roots; historical rows alone are not roots. The DO validates the cache generation and predecessor before admitting a publication. It commits the accepted merged checkpoint and retention outbox together. The outbox retains the snapshot before releasing the exact uploader's publication pin. Portable acceptance uses the same order. Recovery needs no machine response or cleanup call, and keeps pending predecessors rooted until acknowledgement.
 
 An external-origin project can evict R2 only after positive origin confirmation and durable source transition of every affected snapshot. Origin metadata retains the confirmed endpoint, so later `.lfsconfig` changes do not misattribute ownership to a new server. Immutable portable manifests use an authoritative project source overlay at restore. Without an external origin, every object reachable through any branch or tag in canonical project/workspace Artifacts repositories remains protected. Unavailable inventory fails closed. Objects exclusive to archived/deleted workspace snapshots become eligible once attachment and publication pins are gone.
 
@@ -420,7 +422,7 @@ Environment scripts keep their format and semantics; every run requires a machin
 | `machine/prepare` + `checks` | per machine × profile | every machine that executes for the workspace |
 | `cloud/provision`, `cloud/destroy` | per workspace, once | the workspace execution machine by default, or an allowed machine chosen with `on` |
 | `workspace/materialize`, `workspace/dematerialize` | per working copy at a commit | the machine holding that copy |
-| services | per working copy | the selected execution replica |
+| services | per working copy | the selected execution cache |
 
 ### 10.3 Execution
 
@@ -471,15 +473,18 @@ Replaces OMP's launch broker, which GitSpace uses today for every terminal, serv
 
 ### 11.2 Attachments and execution machines
 
-- The DO owns the shared working copy. `primary` names the existing materialized checkout attachment; `replica` names an additional private checkout that follows the cloud. Neither has a cloud writer lease. `runner` stays pinned to an immutable source; `delegate` remains branch-isolated.
+- The DO owns the shared working copy. Every normal attachment is an equal local `cache` that follows the cloud, with no writer lease. A `runner` stays pinned to an immutable source; a `delegate` remains branch-isolated.
 - A machine attaching runs `machine/prepare` + checks for the workspace's profile, then checks out or fetches its copy.
 - The UI groups terminals, services, and environment state by machine.
+- Automatic reclaim pauses when uncommitted LFS changes remain local. The machine row shows the blocked paths. Manual reclaim and detach require a fresh choice to commit first or continue without those changes; consent belongs to that request.
+- Cleanup publishes its final checkpoint once, against the accepted predecessor, before removing the checkout. Reclaimed caches can resume. Explicit detach ends in `detached` and removes the machine row.
+- Heartbeats expire after 30 seconds. Header and machine rows update without waiting for another runtime snapshot; offline status takes precedence over setup state.
 
 ### 11.3 Multi-machine levels
 
 | Level | Machines do | Consistency |
 |---|---|---|
-| 1 | Cloud file tools and human replica edits update one snapshot chain; programs execute on synchronized replicas or pinned runners | Three-way delta merge, durable bases, visible conflict paths |
+| 1 | Cloud file tools and human cache edits update one snapshot chain; programs execute on synchronized caches or pinned runners | Three-way delta merge, durable bases, visible conflict paths |
 | 2 | Delegated subagents work on their own branch, possibly on another machine, and return commits; a `Merge` task integrates | git merges; conflicts become agent tasks |
 
 ## 12. Inference and credentials
@@ -528,6 +533,10 @@ A classifier role defaulting to TypeSafe Jev (available through `typesafe`, `ope
 - **State sync:** Chord replicated state over the relay for workspace, agent, task, environment, and terminal state: snapshot, then ordered deltas, `reset` on overflow. Replaces `fact_events` projections and per-feature resync for these domains.
 - **Machineless views:** transcript, documents, code, environment, QA from the DO.
 - **New surfaces:** Agent hub panel, machines view, QA inbox, per-machine terminals and services.
+- **Drafts:** send carries the sending device's observed draft revision. Only that revision can clear. Discard makes one revision-checked clear; a conflict adopts the newer cloud draft without retrying an empty edit.
+- **Agent setup:** the main cloud session reads committed project definitions and resolves their roles. Save keeps a revision-checked cloud override for future starts; it does not write or commit a repository file. Existing children keep their retained definition.
+- **Usage:** recorded root and descendant token and cost totals remain available without machines. Provider account limits and their refresh stay separate from session cost.
+- **Services:** Inspector lists declared services and agent processes across caches. Start, stop, restart, and logs target an exact machine, attachment, and generation. Private URLs include the machine identity and use the existing cookie-bound service login.
 - **Creation progress:** long creation calls keep streaming progress instead of failing the request (the UI currently reports "request timed out" while creation succeeds).
 
 ## 14. Migration and cutover

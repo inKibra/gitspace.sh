@@ -75,7 +75,7 @@ export class WorkspaceHubTerminalUnavailable extends Error {
 type HubClientFactory = (projectDirectory: string) => Promise<DaemonBrokerClient>;
 
 interface HubScope {
-  space: NonNullable<ReturnType<GitSpaceDatabase['getSpace']>>;
+  space: { rootPath: string };
   client: DaemonBrokerClient;
 }
 interface TerminalObserver { controller: AbortController; references: number; failure: Error | null }
@@ -108,6 +108,7 @@ export class WorkspaceHubTerminalCoordinator {
     private readonly database: GitSpaceDatabase,
     private readonly machineId: string,
     private readonly clientForProject: HubClientFactory = daemonClientForProject,
+    private readonly cache?: { path(spaceId: string): string | null; use(spaceId: string): Promise<void>; changed(): Promise<void> },
   ) { this.terminalJournal = new TerminalSnapshotJournal(database); }
 
   async forgetSpace(spaceId: string): Promise<void> {
@@ -267,6 +268,7 @@ export class WorkspaceHubTerminalCoordinator {
   }
 
   async createShell(spaceId: string): Promise<WorkspaceTerminalView> {
+    await this.cache?.use(spaceId);
     const scope = await this.scope(spaceId);
     const shell = process.env.SHELL || (process.platform === 'win32' ? process.env.COMSPEC : undefined) || '/bin/bash';
     const spec: DaemonStartSpec = {
@@ -282,6 +284,7 @@ export class WorkspaceHubTerminalCoordinator {
     };
     const started = await scope.client.request({ op: 'start', spec, owner: ownerFor(spaceId, 'user') });
     if (started.op !== 'start') throw new Error('Supervisor returned an invalid start response');
+    await this.cache?.changed();
     const { env, ...configuration } = spec;
     return this.view(spaceId, started.daemon, { ...configuration, envNames: Object.keys(env) });
   }
@@ -294,6 +297,7 @@ export class WorkspaceHubTerminalCoordinator {
     cwd: string,
     env: Record<string, string>,
   ): Promise<WorkspaceTerminalView> {
+    await this.cache?.use(spaceId);
     const scope = await this.scope(spaceId);
     if (!isInside(scope.space.rootPath, cwd)) throw new WorkspaceHubSpaceUnavailable(spaceId);
     const name = `gitspace-svc-${spaceId.slice(0, 12)}-${serviceName}`;
@@ -316,6 +320,7 @@ export class WorkspaceHubTerminalCoordinator {
     };
     const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'service')}:${serviceName}` });
     if (started.op !== 'start') throw new Error(`Supervisor returned an invalid start response for service ${serviceName}`);
+    await this.cache?.changed();
     const { env: bindings, ...configuration } = spec;
     return this.view(spaceId, started.daemon, { ...configuration, envNames: Object.keys(bindings) });
   }
@@ -568,6 +573,7 @@ export class WorkspaceHubTerminalCoordinator {
     if (terminalKind(spaceId, described.daemon.owner) === 'lifecycle') throw new Error('Lifecycle terminals must be cancelled through their environment run');
     const result = await client.request({ op: 'stop', name, timeoutMs: 5_000 });
     if (result.op !== 'stop') throw new Error(`Supervisor returned an invalid stop response for ${name}`);
+    await this.cache?.changed();
     return this.view(spaceId, result.daemon, spec);
   }
 
@@ -586,6 +592,8 @@ export class WorkspaceHubTerminalCoordinator {
   }
 
   private async scope(spaceId: string): Promise<HubScope> {
+    const cachePath = this.cache?.path(spaceId);
+    if (cachePath) return { space: { rootPath: cachePath }, client: await this.clientForProject(cachePath) };
     const space = this.database.getSpace(spaceId);
     if (!space || space.placementState === 'closed' || space.holderId !== this.machineId) {
       throw new WorkspaceHubSpaceUnavailable(spaceId);

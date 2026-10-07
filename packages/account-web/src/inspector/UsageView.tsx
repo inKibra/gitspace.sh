@@ -16,17 +16,20 @@ import {
   ThinkingIndicator,
   type BadgeProps,
 } from '@gitspace/ui';
-import type { SessionUsageReport } from '@gitspace/protocol';
+import type { ProviderUsage, SessionUsageReport } from '@gitspace/protocol';
 import { AlertCircle, BarChart01, RefreshCcw01 } from '@untitledui/icons';
 import type { ReactNode } from 'react';
 import { EmptyState } from '../GitSpaceShell.js';
+import { formatUsageAmount, formatUsageReset } from '../ProvidersSection.js';
 
 export type UsageStatus = 'idle' | 'loading' | 'ready' | 'error';
+export type InspectorProviderUsageState = { report: ProviderUsage | null; status: UsageStatus; error?: string };
 export interface UsageViewProps {
   sessionId: string | null;
   report: SessionUsageReport | null;
   status: UsageStatus;
   error?: string;
+  providerUsage?: InspectorProviderUsageState;
   onLoad(): void;
   onRefresh(): void;
 }
@@ -162,7 +165,7 @@ function Report({ report }: { report: SessionUsageReport }) {
   </>;
 }
 
-export function UsageView({ sessionId, report, status, error, onLoad, onRefresh }: UsageViewProps) {
+export function UsageView({ sessionId, report, status, error, onLoad, onRefresh, providerUsage }: UsageViewProps) {
   if (!sessionId) return <div className="p-4"><EmptyState icon={ic(BarChart01, 22)} title="No live session" description="Usage is attributed per agent session. Start the workspace agent to record requests, tokens, and cost." /></div>;
   let body: ReactNode;
   if (!report && status === 'loading') body = <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label="Loading session usage…" /></div>;
@@ -178,5 +181,20 @@ export function UsageView({ sessionId, report, status, error, onLoad, onRefresh 
     {report && status === 'loading' ? <p role="status" className="text-caption text-muted-foreground">Refreshing usage; showing the last report.</p> : null}
     {report && error ? <div role="alert" className="flex flex-col gap-1 text-caption text-destructive"><span>Usage refresh failed: {error}</span><span>The last report is still shown.</span><Button variant="ghost" size="compact" type="button" onClick={onRefresh} disabled={status === 'loading'}>Retry usage</Button></div> : null}
     {body}
+    {providerUsage ? <Section title="Provider account limits">
+      <p className="text-caption text-muted-foreground">Account-wide provider windows are separate from this session’s recorded tokens and cost.</p>
+      {providerUsage.status === 'loading' ? <p role="status" className="text-caption text-muted-foreground">Loading provider account limits…</p> : null}
+      {providerUsage.error ? <p role="alert" className="text-caption text-destructive">{providerUsage.error}</p> : null}
+      {providerUsage.report?.reports.map(account => <div key={`${account.provider}/${account.account}`} className="flex flex-col gap-2">
+        <h4 className="text-caption font-medium">{account.provider}{account.account ? ` · ${account.account}` : ''}</h4>
+        {account.limits.map(limit => <div key={limit.id} className="flex flex-wrap justify-between gap-2 text-caption"><span>{limit.label}{limit.window ? ` · ${limit.window}` : ''} · {limit.scope}</span><span className="tabular-nums">{formatUsageAmount(limit)}{limit.resetsAt ? ` · ${formatUsageReset(limit.resetsAt) ?? limit.resetsAt}` : ''}</span></div>)}
+        {account.notes.map(note => <p key={note} className="text-caption text-muted-foreground">{note}</p>)}
+        <p className="text-caption text-muted-foreground">Checked {new Date(account.fetchedAt).toLocaleString()}</p>
+      </div>)}
+      {providerUsage.report?.accountsWithoutUsage.map(account => <p key={account} className="text-caption text-muted-foreground">Provider limits unavailable for {account}.</p>)}
+      {providerUsage.report?.errors.map(failure => <p key={failure.provider} role="alert" className="text-caption text-destructive">{failure.provider}: {failure.message}</p>)}
+      {providerUsage.report && !providerUsage.report.reports.length && !providerUsage.report.accountsWithoutUsage.length && !providerUsage.report.errors.length ? <p className="text-caption text-muted-foreground">No provider account limits were reported.</p> : null}
+      {providerUsage.status === 'error' ? <Button variant="secondary" size="compact" type="button" disabled={status === 'loading'} onClick={onRefresh}>Retry provider limits</Button> : null}
+    </Section> : null}
   </div></ScrollArea>;
 }

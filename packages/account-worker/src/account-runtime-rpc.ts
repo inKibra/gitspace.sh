@@ -2,8 +2,9 @@ import { deviceCanAdminister, type DeviceCapability, type GitSpaceRpcContext } f
 import {
   runtimeSnapshotContract, runtimeSubmitContract, runtimeCancelContract,
   runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract,
-  runtimeExecutionMachineContract, runtimeQaContract, runtimeAttachmentRequestContract, runtimePrimaryAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
-  runtimeBrowserTrustContract,
+  runtimeExecutionMachineContract, runtimeQaContract, runtimeAttachmentRequestContract, runtimeCacheAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
+  runtimeBrowserTrustContract, runtimeCacheActionContract, runtimeCachePolicyContract, runtimeDraftContract,
+  runtimeServicesContract,
 } from '@gitspace/protocol/rpc-contract';
 import { RuntimeIdentitySchema, RuntimeWatchEventSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
@@ -77,10 +78,16 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(await env.ACCOUNT_STATE.getByName(userId).browserTrust());
     } catch (error) { return err(errors.OperationFailed({ operation: 'read browser trust root', message: message(error) })); }
   });
+  const draft = server.implement(runtimeDraftContract).handler(async ({ input, errors }) => {
+    try {
+      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'session.prompt');
+      return ok(await authority.runtimeDraft(input, { deviceId }));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'save workspace draft', message: message(error) })); }
+  });
   const submit = server.implement(runtimeSubmitContract).handler(async ({ input, errors }) => {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'session.prompt');
-      return ok(await authority.runtimeSubmit(input));
+      return ok(await authority.runtimeSubmit(input, { deviceId }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'submit cloud conversation', message: message(error) })); }
   });
   const cancel = server.implement(runtimeCancelContract).handler(async ({ input, errors }) => {
@@ -102,8 +109,14 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       if (['setApproval', 'setWorkspacePhase', 'saveAgentDefinition', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(input.command.type)
         && !deviceCanAdminister(device, 'account.admin')) throw new Error('This session command requires account administration');
       if (['setApproval', 'answerAsk'].includes(input.command.type) && device.kind !== 'browser') throw new Error('Human session decisions require the browser');
-      return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession(input, { canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin') })).json()));
+      return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession(input, { deviceId, canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin') })).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control cloud session', message: message(error) })); }
+  });
+  const services = server.implement(runtimeServicesContract).handler(async ({ input, errors }) => {
+    try {
+      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, input.command.op === 'list' || input.command.op === 'logs' ? 'rpc.read' : 'rpc.write');
+      return ok(await authority.runtimeServices(input));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'control workspace services', message: message(error) })); }
   });
   const executionMachine = server.implement(runtimeExecutionMachineContract).handler(async ({ input, errors }) => {
     try {
@@ -124,17 +137,29 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(await authority.runtimeAttachmentRequest(input));
     } catch (error) { return err(errors.OperationFailed({ operation: 'request executor attachment', message: message(error) })); }
   });
-  const requestPrimaryAttachment = server.implement(runtimePrimaryAttachmentRequestContract).handler(async ({ input, errors }) => {
+  const requestCacheAttachment = server.implement(runtimeCacheAttachmentRequestContract).handler(async ({ input, errors }) => {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
-      return ok(await authority.runtimePrimaryAttachmentRequest(input));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'request primary attachment', message: message(error) })); }
+      return ok(await authority.runtimeCacheAttachmentRequest(input));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'request cache attachment', message: message(error) })); }
   });
   const detachAttachment = server.implement(runtimeAttachmentDetachRequestContract).handler(async ({ input, errors }) => {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
       return ok(await authority.runtimeAttachmentDetachRequest(input));
     } catch (error) { return err(errors.OperationFailed({ operation: 'drain executor attachment', message: message(error) })); }
+  });
+  const cacheAction = server.implement(runtimeCacheActionContract).handler(async ({ input, errors }) => {
+    try {
+      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
+      return ok(await authority.runtimeCacheAction(input));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'request cache action', message: message(error) })); }
+  });
+  const cachePolicy = server.implement(runtimeCachePolicyContract).handler(async ({ input, errors }) => {
+    try {
+      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
+      return ok(await authority.runtimeCachePolicy(input));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'configure cache policy', message: message(error) })); }
   });
   const watch = server.implement(runtimeWatchContract).stream(async function* ({ input, signal, errors }) {
     try {
@@ -147,5 +172,5 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'watch cloud runtime', message: message(error) }));
     }
   });
-  return { snapshot, submit, cancel, answer, browserTrust, session, executionMachine, qa, attachment: { request: requestAttachment, primary: { request: requestPrimaryAttachment }, detach: detachAttachment }, watch };
+  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, executionMachine, qa, cachePolicy, attachment: { request: requestAttachment, cache: { request: requestCacheAttachment }, action: cacheAction, detach: detachAttachment }, watch };
 }

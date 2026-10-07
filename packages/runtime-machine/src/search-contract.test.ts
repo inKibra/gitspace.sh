@@ -18,7 +18,7 @@ test('search advertised file filters change real search results and find rejects
   const ripgrep = await pinnedRipgrep();
   const decoy = await mkdtemp(join(tmpdir(), 'runtime-search-ambient-'));
   let searchPath = '';
-  const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['grep', 'find'], updatedAt: new Date().toISOString() });
+  const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['grep', 'find'], updatedAt: new Date().toISOString() });
   const local = { attachment, rootPath, executionSecret: 'unused', prerequisitesComplete: true };
   const options: MachineToolOptions = { runCommand: command => {
     const { promise, resolve, reject } = Promise.withResolvers<{ exitCode: number; output: string }>();

@@ -7,6 +7,12 @@ import { OverviewView } from './inspector/index.js';
 
 
 describe('GitSpaceShell', () => {
+  it('renders the saved workspace draft instead of an empty composer', () => {
+    const draft = { text: 'Saved on the other device', error: null, saving: false, onChange: () => undefined, onBlur: () => undefined, onDiscard: () => undefined, capture: () => ({ generation: 0, draftRevision: 0 }), accepted: () => undefined };
+    const props = { ...verticalSliceFixture, draft, onSend: async () => undefined };
+    const html = renderToStaticMarkup(<GitSpaceShell {...props} />);
+    expect(html).toContain('Saved on the other device');
+  });
   it('warns for unavailable status without animating retained work as live', () => {
     const scope = { ...verticalSliceFixture.workspace, status: { ...verticalSliceFixture.workspace.status, primaryColor: 'green' as const } };
     expect(workspaceStatusColor({ ...scope, freshness: 'stale' })).toBe('orange');

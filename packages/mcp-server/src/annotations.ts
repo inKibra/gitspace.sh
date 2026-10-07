@@ -8,13 +8,17 @@ export type ToolAnnotation =
 export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   "runtime.snapshot": { readOnlyHint: true, openWorldHint: false },
   "runtime.watch": { readOnlyHint: true, openWorldHint: false },
+  "runtime.draft": { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  "runtime.cachePolicy": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  "runtime.attachment.action": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   "runtime.submit": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   "runtime.cancel": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   "runtime.session": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  "runtime.services": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   "runtime.executionMachine": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   "runtime.qa": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   "runtime.attachment.request": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-  "runtime.attachment.primary.request": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  "runtime.attachment.cache.request": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   "runtime.attachment.detach": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   "transcriptPage": {
     "readOnlyHint": true,

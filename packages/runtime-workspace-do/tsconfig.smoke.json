@@ -4,5 +4,5 @@
     "lib": ["ES2024", "DOM"],
     "types": ["bun"]
   },
-  "include": ["smoke/run.ts", "smoke/cloud-files.test.ts", "smoke/primary-checkpoint.test.ts", "smoke/cloud-search-benchmark.ts"]
+  "include": ["smoke/run.ts", "smoke/draft.test.ts", "smoke/cloud-files.test.ts", "smoke/primary-checkpoint.test.ts", "smoke/cloud-search-benchmark.ts"]
 }

@@ -73,14 +73,16 @@ export interface SessionHistoryService {
   transcriptContent(target: ConversationId, request: TranscriptContentRequest): Promise<TranscriptContentPage>;
   usage(target: ConversationId, harness: Harness): Promise<SessionUsageReport>;
 }
+export type SessionCatalog = { models: SessionControlView['models']; roles: SessionControlView['roles']; inference?: SessionControlView['inference'] };
 export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference'> & {
   harness: Harness;
   root: Conversation;
   history: SessionHistoryService;
   lifecycle: ConversationLifecycle;
   configureModel(id: ConversationId, model: ModelRef): Promise<void>;
-  catalog(): Promise<{ models: SessionControlView['models']; roles: SessionControlView['roles']; inference?: SessionControlView['inference'] }>;
+  catalog(): Promise<SessionCatalog>;
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
+  loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
   browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage>;
 };
 export function createSessionControls(services: SessionControlServices) {
@@ -92,6 +94,31 @@ export function createSessionControls(services: SessionControlServices) {
     const value = await harness.conversation(await services.history.conversation(id), ctx);
     if (!value) throw new Error('Conversation not found');
     return value;
+  }
+  async function definition(path: string, content: string, source: 'workspace' | 'cloud', catalog: SessionCatalog, previous?: z.infer<typeof AgentDefinitionSchema>): Promise<z.infer<typeof AgentDefinitionSchema>> {
+    const parsed = parseCloudAgentDefinition(path, content);
+    const selections = parsed.modelSelectors.map(selector => {
+      const role = selector.startsWith('pi/') ? catalog.roles.find(value => value.id === selector.slice(3)) : undefined;
+      const model = role ? catalog.models.find(value => value.provider === role.provider && value.id === role.model) : catalog.models.find(value => `${value.provider}/${value.id}` === selector || value.id === selector);
+      return { role, model };
+    });
+    const selected = selections.find(value => value.model !== undefined);
+    if (parsed.modelSelectors.length && !selected) throw new Error(`Agent model selector for ${path} is not admitted by the inference profile`);
+    const revision = previous?.content === content ? previous.revision : Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content))), value => value.toString(16).padStart(2, '0')).join('');
+    return { name: parsed.name, description: parsed.description, source, path, editable: true, content, revision, modelSelectors: parsed.modelSelectors, role: selected?.role?.id ?? null, provider: selected?.model?.provider ?? null, model: selected?.model?.id ?? null, thinking: parsed.thinking ?? selected?.role?.thinking ?? null, selection: parsed.modelSelectors.length ? 'definition' : 'settings', tools: parsed.tools, spawns: parsed.spawns };
+  }
+  async function loadDefinitions(target: Conversation) {
+    if (!services.loadAgentDefinitions || (await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child) return;
+    const [files, catalog, state] = await Promise.all([services.loadAgentDefinitions(), services.catalog(), harness.snapshot(SessionControlsDoc, target.id, ctx)]);
+    const previous = state?.definitions ?? [];
+    const loaded = await Promise.all(files.map(file => definition(file.path, file.content, 'workspace', catalog, previous.find(item => item.path === file.path))));
+    await target.commit(async tx => {
+      const draft = await tx.doc(SessionControlsDoc, target.id);
+      const overrides = draft.definitions.filter(item => item.source === 'cloud');
+      const paths = new Set(overrides.map(item => item.path));
+      const merged = [...loaded.filter(item => !paths.has(item.path)), ...overrides];
+      if (JSON.stringify(draft.definitions) !== JSON.stringify(merged)) { draft.definitions = merged; draft.revision++; }
+    }, ctx);
   }
   async function entries(target: Conversation) { const values: EntryRecord[] = []; let cursor: Cursor | undefined; do { const page = await target.entries({}, 100, cursor, ctx); values.push(...page.items); cursor = page.next; } while (cursor); return values; }
   async function control(target: Conversation): Promise<SessionControlView> {
@@ -113,9 +140,10 @@ export function createSessionControls(services: SessionControlServices) {
   async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false): Promise<RuntimeSessionResult> {
     let target = await conversation(id);
     const child = (await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child;
-    if (child && !['control', 'agentSetup', 'historyAnchorId', 'messages', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage'].includes(command.type)) {
-      throw new Error('Subagent session controls are read-only; target the workspace root for mutations');
+    if (child && !['control', 'agentSetup', 'historyAnchorId', 'messages', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'stop'].includes(command.type)) {
+      throw new Error('Subagents accept inspection and scoped Stop only; target the workspace main conversation for user messages and mutations');
     }
+    if (!child && ['agentSetup', 'saveAgentDefinition', 'prompt', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(command.type)) await loadDefinitions(target);
     await target.commit(async tx => { await tx.doc(SessionControlsDoc, target.id); }, ctx);
     const mutate = (apply: (draft: z.infer<typeof ControlsSchema>) => void) => target.commit(async tx => { const draft = await tx.doc(SessionControlsDoc, target.id); apply(draft); draft.revision++; }, ctx);
     switch (command.type) {
@@ -215,19 +243,11 @@ export function createSessionControls(services: SessionControlServices) {
         break;
       }
       case 'saveAgentDefinition': {
-        const parsed = parseCloudAgentDefinition(command.path, command.content);
-        const catalog = await services.catalog();
-        const selector = parsed.modelSelectors[0];
-        const role = selector?.startsWith('pi/') ? catalog.roles.find(value => value.id === selector.slice(3)) : undefined;
-        const model = role ? catalog.models.find(value => value.provider === role.provider && value.id === role.model) : selector ? catalog.models.find(value => `${value.provider}/${value.id}` === selector || value.id === selector) : undefined;
-        if (selector && !model) throw new Error('Agent model selector is not admitted by the inference profile');
-        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(command.content));
-        const revision = Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
+        const saved = await definition(command.path, command.content, 'cloud', await services.catalog());
         await mutate(draft => {
           const previous = draft.definitions.find(definition => definition.path === command.path);
           if ((previous?.revision ?? null) !== command.expectedRevision) throw new Error('Agent definition revision conflict');
-          const definition = { name: parsed.name, description: parsed.description, source: 'cloud', path: command.path, editable: true, content: command.content, revision, modelSelectors: parsed.modelSelectors, role: role?.id ?? null, provider: model?.provider ?? null, model: model?.id ?? null, thinking: parsed.thinking ?? role?.thinking ?? null, selection: selector ? 'definition' as const : 'settings' as const, tools: parsed.tools, spawns: parsed.spawns };
-          if (previous) draft.definitions.splice(draft.definitions.indexOf(previous), 1, definition); else draft.definitions.push(definition);
+          if (previous) draft.definitions.splice(draft.definitions.indexOf(previous), 1, saved); else draft.definitions.push(saved);
         });
         break;
       }
@@ -245,5 +265,5 @@ export function createSessionControls(services: SessionControlServices) {
     if (command.type === 'usage') result.usage = await services.history.usage(target.id, harness);
     return result;
   }
-  return { execute, control, conversation };
+  return { execute, control, conversation, loadDefinitions };
 }

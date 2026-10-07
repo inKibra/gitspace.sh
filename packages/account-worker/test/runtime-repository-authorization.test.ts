@@ -1,12 +1,13 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant, type ControlOperation } from '@gitspace/protocol';
-import { RuntimeAttachInputSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachInputSchema, RuntimeHeartbeatInputSchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore, type AttachmentServices } from '@gitspace/runtime-workspace-do';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { RuntimeAttachmentController } from '../src/runtime-attachments.js';
+import { emptyLifecycleState } from '@gitspace/protocol-environment';
 
 const projectId = 'repository-project';
 const workspaceId = 'repository-workspace';
@@ -146,46 +147,75 @@ describe('signed repository credential authority', () => {
         seal: async secret => secret, open: async secret => secret,
         dispatch: async () => { throw new Error('No machine calls allowed in this regression'); },
       });
-      const admission = RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'primary', generation: 0, ownershipGeneration: 1, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] });
+      const admission = RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'primary', generation: 0, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] });
       const input = { ...admission, requestId: 'primary-request' };
-      const first = await store.requestPrimary(input);
-      expect((await store.requestPrimary(input)).attachment.attachmentId).toBe(first.attachment.attachmentId);
-      await expect(store.requestPrimary({ ...input, ownershipGeneration: 2 })).rejects.toThrow();
-      await expect(store.requestPrimary({ ...input, requestId: 'premature' })).rejects.toThrow();
-      const other = await store.requestPrimary({ ...RuntimeAttachInputSchema.parse({ ...admission, machineId: 'other' }), requestId: 'other-machine' });
+      const first = await store.requestCache(input);
+      expect((await store.requestCache(input)).attachment.attachmentId).toBe(first.attachment.attachmentId);
+      await expect(store.requestCache({ ...input, requestId: 'premature' })).rejects.toThrow();
+      const other = await store.requestCache({ ...RuntimeAttachInputSchema.parse({ ...admission, machineId: 'other' }), requestId: 'other-machine' });
       expect((await store.assignments(other.attachment.machineId))[0]?.grant.attachment.attachmentId).toBe(other.attachment.attachmentId);
       expect(other.attachment.machineId).not.toBe(first.attachment.machineId);
       expect((await store.assignments(admission.machineId))[0]?.grant.attachment.state).toBe('attaching');
       expect(() => store.detach({ ...first.attachment, generation: first.attachment.generation + 1, state: 'draining' })).toThrow();
       expect(() => store.detach({ ...first.attachment, state: 'detached' })).toThrow();
       store.detach({ ...first.attachment, state: 'draining' });
-      await expect(store.requestPrimary({ ...input, requestId: 'while-draining' })).rejects.toThrow();
+      await expect(store.requestCache({ ...input, requestId: 'while-draining' })).rejects.toThrow();
       expect((await store.assignments(admission.machineId))[0]?.grant.attachment.state).toBe('draining');
       expect(() => store.detach({ ...first.attachment, state: 'detached' })).toThrow();
-      store.recordPrimaryFlush(first.attachment.attachmentId, first.attachment.generation);
+      store.recordCacheFlush(first.attachment.attachmentId, first.attachment.generation);
       store.detach({ ...first.attachment, state: 'detached' });
       expect(await store.assignments(admission.machineId)).toEqual([]);
       expect(await store.assignments(admission.machineId)).toEqual([]);
-      expect((await store.requestPrimary(input)).attachment.state).toBe('detached');
-      const renewed = await store.requestPrimary({ ...input, requestId: 'explicit-new-request' });
+      expect((await store.requestCache(input)).attachment.state).toBe('detached');
+      const renewed = await store.requestCache({ ...input, requestId: 'explicit-new-request' });
       expect(renewed.attachment.generation).toBeGreaterThan(first.attachment.generation);
       expect(renewed.attachment.attachmentId).not.toBe(first.attachment.attachmentId);
-      expect(renewed.attachment.ownershipGeneration).toBe(1);
     });
   });
 
-  it('native primary confirmation cannot create an unrequested lease or reuse stale canonical ownership', async () => {
+  it('requires all durable setup receipts for every equal canonical cache', async () => {
     const f = await fixture(['space.control']);
-    const input = { generation: 0, ownershipGeneration: 1, machineId: 'primary', role: 'primary', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] };
-    expect((await f.request(input, 'primary', 'runtime.attach')).status).toBe(400);
-    const attachment = await runInDurableObject(f.authority, async (_instance, state) => {
+    await runInDurableObject(f.authority, async (_instance, state) => {
+      const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
+      const store = new AttachmentStore(state.storage, { seal: async secret => secret, open: async secret => secret, dispatch: unsupported });
+      const controller = new RuntimeAttachmentController({
+        attachments: store,
+        code: new ArtifactsCodeStore({ get: unsupported, create: unsupported, import: unsupported, list: unsupported, delete: unsupported }),
+        publish() {}, snapshot: async () => null, origin: async () => null,
+        lifecycle: async () => emptyLifecycleState(projectId, workspaceId),
+        authorizeMachine: async () => {},
+      });
+      for (const machineId of ['first-cache', 'second-cache']) {
+        const input = RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId, generation: 0, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] });
+        const { attachment } = await store.requestCache({ ...input, requestId: machineId });
+        await expect(controller.ready({ ...attachment, commit: 'a'.repeat(40), prerequisitesComplete: true })).rejects.toThrow(/durable receipt/);
+        expect(store.list().find(item => item.attachmentId === attachment.attachmentId)?.state).toBe('attaching');
+      }
+    });
+  });
+
+  it('retains reclaimed canonical caches and fences reclamation behind final publication', async () => {
+    const f = await fixture(['space.control']);
+    await runInDurableObject(f.authority, async (_instance, state) => {
       const store = new AttachmentStore(state.storage, {
         seal: async secret => secret, open: async secret => secret,
-        dispatch: async () => { throw new Error('No machine effects allowed'); },
+        dispatch: async () => { throw new Error('Unexpected machine dispatch'); },
       });
-      return (await store.requestPrimary({ ...RuntimeAttachInputSchema.parse({ ...input, projectId, workspaceId, ownershipGeneration: 0 }), requestId: 'stale-primary' })).attachment;
+      const admission = RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'cache', generation: 0, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] });
+      const { attachment } = await store.requestCache({ ...admission, requestId: 'cache-admit' });
+      const requested = store.requestCacheAction({ ...attachment, requestId: 'reclaim-cache', action: { kind: 'reclaim' } });
+      expect(requested.attachment.cacheAction?.status).toBe('requested');
+      const now = new Date().toISOString();
+      const observation = { state: 'reclaimed', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: now, reclaimAt: now, lastSyncAt: now, localWorkOptIn: false, setup: [] };
+      const heartbeat = RuntimeHeartbeatInputSchema.parse({ ...attachment, executionObservation: { activeExecutions: 0, observedAt: now }, cache: observation, cacheAction: { requestId: 'reclaim-cache', status: 'completed', error: null } });
+      expect(() => store.heartbeat(heartbeat)).toThrow(/snapshot/i);
+      store.recordCacheFlush(attachment.attachmentId, attachment.generation);
+      expect(store.heartbeat(heartbeat).cache?.state).toBe('reclaimed');
+      expect((await store.assignments(attachment.machineId))[0]?.grant.attachment.attachmentId).toBe(attachment.attachmentId);
+      const setup = store.requestCacheAction({ ...attachment, requestId: 'restore-cache', action: { kind: 'setup' } });
+      expect(setup.attachment.cacheAction?.status).toBe('requested');
+      expect(setup.attachment.state).not.toBe('ready');
     });
-    expect((await f.request({ ...input, generation: attachment.generation, ownershipGeneration: 0 }, 'primary', 'runtime.attach')).status).toBe(400);
-    expect((await f.request({ ...input, generation: attachment.generation, machineId: 'unassigned' }, 'unassigned', 'runtime.attach')).status).toBe(400);
   });
+
 });

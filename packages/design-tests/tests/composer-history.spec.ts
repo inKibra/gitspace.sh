@@ -1,0 +1,30 @@
+import { expect, test } from '@playwright/test';
+
+test('history waits for native visual-row boundaries and restores the draft', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Desktop keyboard history');
+  await page.goto('/?gallery=design-system');
+  await page.getByRole('switch', { name: 'Assistant streaming' }).click();
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true });
+  const history = 'previous message '.repeat(45);
+  await composer.fill(history);
+  await composer.press('Enter');
+  await expect(composer).toHaveValue('');
+  const draft = 'draft text with a long wrapped first line '.repeat(35);
+  await composer.fill(draft);
+  await composer.evaluate(element => { if (element instanceof HTMLTextAreaElement) element.setSelectionRange(0, 0); });
+  await composer.press('ArrowDown');
+  const secondRow = await composer.evaluate(element => element instanceof HTMLTextAreaElement ? element.selectionStart : -1);
+  expect(secondRow).toBeGreaterThan(0);
+  await composer.press('ArrowUp');
+  await expect(composer).toHaveValue(draft);
+  await expect.poll(() => composer.evaluate(element => element instanceof HTMLTextAreaElement ? element.selectionStart : -1)).toBe(0);
+  await composer.press('ArrowUp');
+  await expect(composer).toHaveValue(history.trim());
+  await composer.evaluate(element => { if (element instanceof HTMLTextAreaElement) element.setSelectionRange(0, 0); });
+  await composer.press('ArrowDown');
+  await expect(composer).toHaveValue(history.trim());
+  expect(await composer.evaluate(element => element instanceof HTMLTextAreaElement ? element.selectionStart : -1)).toBeGreaterThan(0);
+  await composer.evaluate(element => { if (element instanceof HTMLTextAreaElement) element.setSelectionRange(element.value.length, element.value.length); });
+  await composer.press('ArrowDown');
+  await expect(composer).toHaveValue(draft);
+});

@@ -1,9 +1,10 @@
 import { z } from 'zod';
-import { daemonClientForProject, type DaemonRequest, type DaemonResponse } from '@gitspace/supervisor';
+import { daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor';
 import { checkoutPath, mergeDelegateCommit, runSupervisorCommand, ExecutorEffectUncertain, type ExecutorJournal, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
 import { replicaServiceOperation } from './replica-services.js';
+import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/services';
 import { createHash } from 'node:crypto';
 import { type SpaceWorkspaceControls } from './space-workspace-controls.js';
 import { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
@@ -14,12 +15,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MachineMcpCoordinator } from './local-mcp.js';
 import { RuntimeBashCommandArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeDelegateExportArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeAgentLifecycleRunArgumentsSchema } from '@gitspace/protocol-runtime';
-import { PROTECTED_LIFECYCLE_SOCKET } from './protected-lifecycle.js';
+import { workspaceProcessVisible } from './workspace-process.js';
 
-export async function workspaceProcessVisible(root: string, process: Extract<DaemonResponse, { op: 'describe' }>): Promise<boolean> {
-  if (process.spec.visibility === 'private' || process.spec.inheritEnv === false || process.spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET)) return false;
-  try { await checkoutPath(root, process.spec.cwd); return true; } catch { return false; }
-}
 
 export function machineOperationalTools(options: { environments: WorkspaceEnvironmentManager; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; controls: SpaceWorkspaceControls; artifacts: LocalArtifactResolver; mcp: MachineMcpCoordinator; journal: () => ExecutorJournal }): Record<string, ExecutorOperationHandler> {
   return {
@@ -36,7 +33,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     create: async (dispatch, local) => {
-      if (local.attachment.role !== 'primary') throw new Error('Workspace changes require the primary attachment');
+      if (local.attachment.role !== 'cache') throw new Error('Workspace changes require a cache attachment');
       const request = RuntimeWorkspaceMutationArgumentsSchema.parse(dispatch.args);
       if (request.workspaceId !== undefined && request.workspaceId !== dispatch.workspaceId) throw new Error('Workspace target is outside this dispatch');
       let result: unknown;
@@ -72,7 +69,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     workspace_phase: async (dispatch, local) => {
-      if (local.attachment.role !== 'primary') throw new Error('Phase changes require the primary attachment');
+      if (local.attachment.role !== 'cache') throw new Error('Phase changes require a canonical cache');
       const { phase } = RuntimeSpacePhaseArgumentsSchema.parse(dispatch.args);
       const definition = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId && workspace.projectId === dispatch.projectId);
       if (!definition || definition.kind === 'base') throw new Error('Phase changes require a workspace in the current project');
@@ -80,13 +77,13 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       return [{ type: 'text', text: `Workspace phase set to ${phase}` }];
     },
     lifecycle: async (dispatch, local) => {
-      if (local.attachment.role !== 'primary') throw new Error('Lifecycle requires primary attachment');
+      if (local.attachment.role !== 'cache') throw new Error('Lifecycle requires a canonical cache');
       const { on: _on, at: _at, ...args } = RuntimeAgentLifecycleRunArgumentsSchema.parse(dispatch.args);
-      const accepted = await options.environments.acceptRun(dispatch.workspaceId, args);
+      const accepted = await options.environments.acceptRun(dispatch.workspaceId, args, local);
       return [{ type: 'text', text: JSON.stringify(accepted) }];
     },
     service: async (dispatch, local) => {
-      const args = z.discriminatedUnion('op', [z.object({ op: z.literal('list') }), z.object({ op: z.enum(['start', 'stop']), name: z.string().min(1) })]).parse(dispatch.args);
+      const args = RuntimeServiceOperationSchema.parse(dispatch.args);
       const result = await replicaServiceOperation(options.services, local, args);
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
@@ -142,7 +139,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
     },
     merge: async (dispatch, local, signal) => {
       const args = z.object({ delegateAttachmentId: z.string().optional(), bundleUri: z.string().optional(), expectedPrimaryCommit: z.string().regex(/^[a-f0-9]{40,64}$/u), commit: z.string().regex(/^[a-f0-9]{40,64}$/u) }).parse(dispatch.args);
-      if (local.attachment.role !== 'primary') throw new Error('Only the primary may integrate commits');
+      if (local.attachment.role !== 'cache') throw new Error('Only the primary may integrate commits');
       if (args.bundleUri !== undefined) {
         if (!args.bundleUri.startsWith('local://workspace/delegates/')) throw new Error('Merge bundle must belong to this workspace delegate artifact scope');
         const artifact = await options.artifacts.read({ kind: 'workspace', projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, args.bundleUri);
@@ -218,7 +215,8 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
       if (args.op === 'restart' && result.op === 'restart' && existing.spec.ready) {
         const readiness = await client.request({ op: 'wait', name: args.name, for: 'ready', timeoutMs: existing.spec.ready.timeoutMs ?? 30_000 }, signal);
         if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new ExecutorEffectUncertain('Process did not become ready with the admitted identity');
-        return [{ type: 'text', text: JSON.stringify({ op: 'restart', daemon: readiness.daemon }) }];
+        const url = existing.spec.ready.port ? await options.services.registerProcessRoute({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, generation: dispatch.generation, name: args.name, portName: 'http', port: existing.spec.ready.port }) : null;
+        return [{ type: 'text', text: JSON.stringify({ op: 'restart', daemon: readiness.daemon, url }) }];
       }
       return [{ type: 'text', text: JSON.stringify(result) }];
   };

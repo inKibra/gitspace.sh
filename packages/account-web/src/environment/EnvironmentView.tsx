@@ -191,7 +191,7 @@ function LifecycleCard({ script, disabled, onApprove, onRevoke, onOpenFile, onOp
   </Card>;
 }
 
-export function EnvironmentView({ model, busy = false, runtimeAvailable = true, cloudRunnerAvailable = runtimeAvailable, onConfigure, onRecoverRun, onCancelRun, onOpenRunLog, onProfileChange, onApprove, onRevoke, onGrantSecret, onInputChange, onFixCheck, onUpdateCheck, onDeleteCheck, onAddCheck, onAddValue, onOpenSecrets, onOpenLifecycleFile, onOpenLifecycleOutput, onRunChecks, onRunLifecycle }: EnvironmentViewProps) {
+export function EnvironmentView({ model, machinePanel, busy = false, runtimeAvailable = true, cloudRunnerAvailable = runtimeAvailable, onConfigure, onRecoverRun, onCancelRun, onOpenRunLog, onProfileChange, onApprove, onRevoke, onGrantSecret, onInputChange, onFixCheck, onUpdateCheck, onDeleteCheck, onAddCheck, onAddValue, onOpenSecrets, onOpenLifecycleFile, onOpenLifecycleOutput, onRunChecks, onRunLifecycle }: EnvironmentViewProps) {
   const shape = useShape();
   const [addCheckOpen, setAddCheckOpen] = useState(false);
   const [addValueOpen, setAddValueOpen] = useState(false);
@@ -236,6 +236,7 @@ export function EnvironmentView({ model, busy = false, runtimeAvailable = true, 
         </div>
         <p className="text-caption text-muted-foreground text-pretty">Approved scripts run as your machine user and can use existing home configuration and credentials. Secret grants control injected secrets, not other credentials on the machine. This is not a sandbox.</p>
       </header>
+      {machinePanel}
       {model.configured === false ? <section className="flex flex-wrap items-center justify-between gap-2 text-caption text-muted-foreground" aria-label="Repository environment configuration">
         <p className="max-w-prose text-pretty">No repository lifecycle configured. Keep working, or ask the agent to plan one with you.</p>
         {onConfigure ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={onConfigure}>Configure with agent</Button> : <span>Open this workspace to configure with the agent.</span>}

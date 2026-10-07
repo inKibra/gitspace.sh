@@ -392,7 +392,11 @@ export async function startMachineRuntime() {
   const encryptedCheckpointBlobs = new EncryptedCheckpointBlobStore(checkpointBlobs, encryptionKey);
   const lifecycle = new PortableSpaceLifecycle(authority, encryptedCheckpointBlobs, gitRemote, lfs);
   const closedSpaceTranscripts = new ClosedSpaceTranscriptReader(authority, encryptedCheckpointBlobs, async (bytes) => readLegacyTranscriptBytes(bytes), join(environmentRoot, 'runtime', 'transcript-checkpoints'), sessionFile => agentRuntime.transcript(sessionFile));
-  const terminals = new WorkspaceHubTerminalCoordinator(database, machineId);
+  const terminals = new WorkspaceHubTerminalCoordinator(database, machineId, undefined, {
+    path: spaceId => executorRuntime?.journal.attachments().find(local => local.attachment.workspaceId === spaceId && local.attachment.role === 'cache' && local.attachment.state === 'ready')?.rootPath ?? null,
+    use: async spaceId => { if (executorRuntime) await executorRuntime.useWorkspace(spaceId); },
+    changed: async () => { await executorRuntime?.sync(); },
+  });
   const environments = new WorkspaceEnvironmentManager(database, authority, terminals, authority, {
     machineId,
     stateRoot: join(environmentRoot, 'lifecycle-runs'),
@@ -858,13 +862,13 @@ export async function startMachineRuntime() {
     },
   });
   executorRuntime = await createMachineExecutor({
-    environmentRoot, machineId, database, artifacts, cloud: cloudRuntime, gitRemote, lfs,
+    environmentRoot, managedSpaceRoot, machineId, database, artifacts, cloud: cloudRuntime, gitRemote, lfs,
     browser: { enabled: true, services: {
       serviceHostname: hostname => hostname.endsWith(`--${process.env.GITSPACE_SERVICE_NAMESPACE}-srv.${process.env.GITSPACE_SERVICE_DOMAIN}`),
       workspaceServiceHostname: async (hostname, scope) => (await authority.listHostedRoutes(scope.projectId)).some(route => route.workspaceId === scope.workspaceId && route.hostname === hostname),
       serviceForward: serviceAccess.forward,
     } },
-    prepareAttachment: (local, signal) => environments.prepareAttachment(local, signal),
+    prepareAttachment: (local, signal, progress) => environments.prepareAttachment(local, signal, progress),
     originGitEnvironment: async (origin) => gitIdentity.gitEnvironment(origin),
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
     operations: machineOperationalTools({ environments, services: serviceManager, authority, artifacts, mcp, controls: await workspaceControls.promise, journal: () => {

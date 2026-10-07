@@ -41,6 +41,16 @@ Explicit setup enables the workspace's automatic local-preparation policy. It ru
 
 A direct `workspace/materialize` request runs local reconstruction only; it never creates or adopts cloud resources first. If a materialization script requires recorded ownership bindings, establish them through approved `cloud/provision` or adoption before materializing. Do not bypass ownership checks or copy another workspace's bindings to make setup pass.
 
+## Machine copies and the Environment panel
+
+The workspace header has one **Environment** chip. It opens **Inspector > Environment**, with the current profile and default machine, followed by each machine's setup, activity, sync state, and logs. Waiting approvals appear beside the blocked machine. The same panel retains the editable lifecycle definition, secrets and values, browser-origin approvals, and recent runs.
+
+Normal attachments are equal caches of the cloud working tree. Each machine uses its standard workspace path and runs machine preparation, checks, and materialization under the same approval rules. A successful setup on one machine does not prove that another machine is ready. **Setup again** records a new run; **Make default** changes routing without moving the workspace.
+
+Commands catch up before execution and publish changes when they finish. Services and running processes publish periodically. Continuous sync ends after active work stops and a 15-minute grace period expires. Attaching a terminal or enabling **Work locally** also starts a human file watcher. Viewing the workspace in a browser does not start that watcher.
+
+An idle copy pauses before it is reclaimed. The default reclaim delay is 24 hours; the workspace cache policy can change it. Low disk space may trigger earlier reclaim of an idle copy. A final acknowledged snapshot, no held-back LFS edits, and no unresolved effects are required before deletion. **Reclaim now** uses the same barriers. The next command rebuilds the copy and runs approved local setup again. Machines without a heartbeat for 30 seconds cannot receive new work; reconnecting requires catch-up before they become ready.
+
 ## Close, move, and retire
 
 **Close** saves a checkpoint and releases the managed checkout. **Move** saves and removes the source checkout, then restores the same durable workspace on another machine. Neither action authorizes remote destruction. **Retirement** is a separate, explicit decision about cloud resources. Archiving is not retirement.
@@ -49,7 +59,7 @@ If the original machine is gone, choose another authorized online runner in the 
 
 Before local removal, GitSpace drains services and runs dematerialization. It must save the checkpoint successfully before deleting the managed checkout. A failed dematerialization or checkpoint blocks deletion, not your access to the workspace. Fix the failure while the local files remain available.
 
-Private runner and delegate checkouts have a separate drain step. GitSpace verifies the attachment generation, stops owned processes, confirms that any mount is gone, and refuses deletion while execution claims remain unresolved. A lost attachment fences work but does not authorize deleting files. Shared primary checkouts do not use this cleanup path.
+Private runner and delegate checkouts have a separate drain step. GitSpace verifies the attachment generation, stops owned processes, confirms that any mount is gone, and refuses deletion while execution claims remain unresolved. A lost attachment fences work but does not authorize deleting files. Normal cache reclamation has its own final-snapshot and held-back-change barriers.
 
 Pi conversation state lives in the cloud, not in the checkout. The checkpoint records its cloud session and conversation reference alongside the saved code and artifact state. Moving a checkout does not transfer ownership of the conversation to the destination machine.
 

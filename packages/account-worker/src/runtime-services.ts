@@ -221,8 +221,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (!(await runtime.snapshot()).conversations.some(item => item.id === input.conversationId)) throw new Error('Conversation is not owned by this workspace');
         const selected = selectedSnapshot?.attachment ?? await selections.select(input, selection, controller.signal);
         if (!selected) throw new Error('No machine attached: the admitted execution replica is unavailable.');
-        const snapshot = selectedSnapshot?.checkpoint ?? (selected.role === 'primary' || selected.role === 'replica' ? await runtime.cloudFiles.initializeSnapshot() : undefined);
-        if ((selected.role === 'primary' || selected.role === 'replica') && !snapshot) throw new Error('Cloud working copy is unavailable');
+        const snapshot = selectedSnapshot?.checkpoint ?? (selected.role === 'cache' ? await runtime.cloudFiles.initializeSnapshot() : undefined);
+        if ((selected.role === 'cache') && !snapshot) throw new Error('Cloud working copy is unavailable');
         const tool = input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool;
         dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, conversationKind: conversation.root ? 'main' : 'subagent', taskId: input.taskId, machineId: selected.machineId, attachmentId: selected.attachmentId, generation: selected.generation, requestId: input.requestId, attemptId: input.attemptId, ...(snapshot ? { snapshot } : {}), tool, args: input.args, deadlineAt: deadline, replay: input.replay });
         ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(dispatch));
@@ -485,7 +485,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     let admission = savedDispatch(input.attemptId);
     if (admission && (admission.tool !== 'proc' || admission.machineId !== origin.machineId || admission.projectId !== origin.projectId || admission.workspaceId !== origin.workspaceId || admission.parentAttemptId !== input.originAttemptId || admission.conversationId !== input.conversationId || admission.taskId !== input.taskId || admission.requestId !== input.requestId || admission.replay !== replay || canonicalJson(admission.args) !== canonicalJson(input.args))) throw new Error('Process control identity changed');
     const selected = options.runtime().attachments.list()
-      .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && attachment.state === 'ready' && (attachment.role === 'primary' || attachment.role === 'replica'))
+      .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && attachment.state === 'ready' && attachment.role === 'cache' && attachment.heartbeatAt !== null && Date.now() - Date.parse(attachment.heartbeatAt) <= 30_000)
       .sort((left, right) => right.generation - left.generation)[0];
     if (!selected) throw new Error('Original process machine is unreachable: no READY execution replica');
     if (!admission) {

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ProcessSupervisor } from '@gitspace/supervisor';
-import { workspaceProcessVisible } from '../src/runtime-operations.js';
+import { workspaceProcessVisible } from '../src/workspace-process.js';
 
 test('workspace process visibility spans generations and user services but excludes private and neighboring workspaces', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-process-scope-'));

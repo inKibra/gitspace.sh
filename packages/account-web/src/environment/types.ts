@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { LifecyclePhase as ProtocolLifecyclePhase, LifecycleState } from '@gitspace/protocol-environment';
 
 export type LifecycleLedger = LifecycleState;
@@ -51,7 +52,7 @@ export type CapabilityResult =
 export interface EnvironmentMachine {
   id: string;
   label: string;
-  platform: Platform;
+  platform: string | null;
   current: boolean;
   capabilities: Record<string, CapabilityResult>;
 }
@@ -135,6 +136,7 @@ export interface EnvironmentViewModel {
 
 export interface EnvironmentViewProps {
   model: EnvironmentViewModel;
+  machinePanel?: ReactNode;
   busy?: boolean;
   runtimeAvailable?: boolean;
   cloudRunnerAvailable?: boolean;

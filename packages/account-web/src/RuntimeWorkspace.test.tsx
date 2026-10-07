@@ -9,15 +9,16 @@ import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gits
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
 import { RuntimeWorkspaceShell } from './RuntimeWorkspace.js';
 
-const mocks = vi.hoisted(() => ({ setRelations: vi.fn(), refresh: vi.fn(), shell: null as unknown, saved: null as unknown, failed: false, pending: false }));
+const mocks = vi.hoisted((): { setRelations: ReturnType<typeof vi.fn>; refresh: ReturnType<typeof vi.fn>; shell: GitSpaceShellProps | null; saved: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), shell: null, saved: null, failed: false, pending: false }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, workspace: { setRelations: mocks.setRelations } }, createGitSpaceBrowserClient: vi.fn() }));
 vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: procedure === 'relations' && mocks.failed ? 'failure' : procedure === 'relations' && mocks.pending ? 'pending' : 'success', error: new Error('relations unavailable'), value: procedure === 'relations' ? mocks.saved : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: null, run: vi.fn(), error: null }) }));
 vi.mock('./useTranscriptHistory.js', () => ({ useTranscriptHistory: () => ({ refresh: vi.fn() }) }));
 vi.mock('./RuntimeMachines.js', () => ({ RuntimeMachines: () => null }));
-vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}</div>; }, EmptyState: () => null, StatusDot: () => null }));
+vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
 const stamp = '2026-10-03T00:00:00.000Z';
+const inspectEnvironment = vi.fn();
 const project = cloudProjectSummarySchema.parse({ id: 'project', name: 'Project', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, archivedAt: null, updatedAt: stamp });
 const workspace = cloudWorkspaceDefinitionSchema.parse({ id: 'workspace', projectId: project.id, kind: 'worktree', name: 'Work', branch: 'work', phase: 'code', sourceKind: 'base', sourceRef: 'main', lifecycle: 'active', goalId: null, revision: 1, archivedAt: null, createdAt: stamp, updatedAt: stamp });
 const inspection: InspectorView = {
@@ -41,6 +42,9 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   mocks.setRelations.mockReset(); mocks.refresh.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false;
   snapshot.documents = {};
+  snapshot.conversations = [];
+  snapshot.attachments = [];
+  inspectEnvironment.mockReset();
   mocks.saved = { workspaces: [{ id: workspace.id, relations: { dependsOn: ['parent'], relatedTo: [], stackedOn: 'parent' }, stack: { blockedBy: ['parent'], blocking: [], findings: [] } }] };
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
@@ -109,4 +113,40 @@ it('announces persistent cloud merge conflicts while the machines dialog is clos
   snapshot.documents['gitspace.code'] = { ...RuntimeGitCheckpointSchema.parse(snapshot.documents['gitspace.code']), conflicts: [] };
   await act(render);
   expect(container.querySelector('[aria-label="Workspace merge conflicts"]')).toBeNull();
+});
+
+it('opens Inspector Environment from the single environment chip instead of a machines dialog', async () => {
+  await act(render);
+  const chip = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.includes('Environment'));
+  expect(chip?.textContent).toContain('0 machines');
+  await act(() => chip?.click());
+  expect(inspectEnvironment).toHaveBeenCalledTimes(1);
+  expect(document.body.textContent).not.toContain('Workspace machines');
+});
+
+it('keeps the workspace view on its main agent without a conversation picker', async () => {
+  snapshot.conversations = [
+    { id: 'child', parentId: 'main', title: 'Research child', status: 'running', messages: [] },
+    { id: 'main', parentId: null, title: 'Workspace agent', status: 'running', messages: [] },
+  ];
+  await act(async () => { render(); });
+  expect(container.querySelector('select[aria-label="Conversation"]')).toBeNull();
+  expect(mocks.shell?.mainAgent?.title).toBe('Workspace agent');
+});
+
+it('changes the Environment chip to offline without another snapshot render', async () => {
+  vi.useFakeTimers();
+  try {
+    const now = new Date();
+    snapshot.attachments = [RuntimeSnapshotSchema.shape.attachments.element.parse({
+      projectId: project.id, workspaceId: workspace.id, attachmentId: 'cache', machineId: 'machine', generation: 1,
+      role: 'cache', checkout: { kind: 'shared', branch: 'work' }, state: 'ready', capabilities: [],
+      updatedAt: now.toISOString(), heartbeatAt: now.toISOString(),
+    })];
+    await act(async () => { render(); });
+    const chip = container.querySelector('button[aria-label^="Environment"]');
+    expect(chip?.getAttribute('aria-label')).not.toContain('Offline');
+    await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+    expect(chip?.getAttribute('aria-label')).toMatch(/offline/i);
+  } finally { vi.useRealTimers(); }
 });

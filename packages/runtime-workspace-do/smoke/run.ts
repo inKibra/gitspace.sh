@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { Miniflare } from 'miniflare';
 import { z } from 'zod';
 import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeSessionResultSchema, type RuntimeSessionCommand, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { WorkspaceDraftSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
 import { runExecutionProof } from './execution.js';
 import { searchWasmModule } from './search-wasm.js';
 
@@ -56,6 +57,45 @@ try {
     assert.equal(event.type, 'snapshot');
   } finally { clearTimeout(timer); await reader.cancel(); }
 
+  const saveDraft = async (text: string, expectedRevision: number, deviceId: string) => {
+    assert(worker);
+    const response = await fetch(new URL('/draft', await worker.ready), { method: 'POST', headers: { 'content-type': 'application/json', 'x-fixture-device': deviceId }, body: JSON.stringify({ text, expectedRevision }) });
+    assert(response.ok, await response.clone().text());
+    return WorkspaceDraftSaveResultSchema.parse(await response.json());
+  };
+  const draftWatch = await fetch(new URL('/watch-current', await worker.ready));
+  assert(draftWatch.body);
+  const draftReader = draftWatch.body.pipeThrough(new TextDecoderStream()).getReader();
+  const initialDraftFrame = await draftReader.read();
+  assert(!initialDraftFrame.done);
+  const savedDraft = await saveDraft('Draft from device A', 0, 'device-a');
+  assert.equal(savedDraft.draft.text, 'Draft from device A');
+  let watchedDraft = '';
+  while (!watchedDraft.includes('Draft from device A')) {
+    const frame = await draftReader.read();
+    assert(!frame.done);
+    watchedDraft += frame.value;
+  }
+  await draftReader.cancel();
+  assert.equal(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']).deviceId, 'device-a');
+  const newerDraft = await saveDraft('Newer edit from device B ' + '🚀'.repeat(40_000), savedDraft.draft.revision, 'device-b');
+  await worker.dispose();
+  worker = new Miniflare(options);
+  assert.deepEqual(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']), newerDraft.draft);
+  await request(`/submit?text=Send%20stale%20draft&draftRevision=${savedDraft.draft.revision}`);
+  assert.deepEqual(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']), newerDraft.draft, 'A stale send erased an unseen edit from device B');
+  await request('/submit?text=Programmatic%20send');
+  assert.deepEqual(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']), newerDraft.draft, 'A send without observed draft revision erased the draft');
+  await request('/session', { ...identity, command: { type: 'prompt', text: 'Stale prompt', draftRevision: savedDraft.draft.revision } });
+  assert.deepEqual(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']), newerDraft.draft, 'A stale prompt erased an unseen edit');
+  await request('/session', { ...identity, command: { type: 'prompt', text: 'Programmatic prompt' } });
+  assert.deepEqual(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']), newerDraft.draft, 'A prompt without an observed revision erased the draft');
+  await request(`/submit?text=Send%20draft%20proof&draftRevision=${newerDraft.draft.revision}`);
+  const clearedDraft = WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']);
+  assert.equal(clearedDraft.text, '');
+  assert(clearedDraft.revision > newerDraft.draft.revision);
+  console.log('PASS draft watch delivery, device authorship, cold recovery and accepted-send clearing');
+
   // Both public answer surfaces must restart a persisted suspended Pi task by themselves.
   for (const surface of ['session', 'answer'] as const) {
     const before = assistantReplies(RuntimeSnapshotSchema.parse(await request('/')));
@@ -100,6 +140,35 @@ try {
   console.log('PASS browser approval binds displayed resolved preparation', await request('/browser-approval-proof'));
   console.log('PASS workspace execution selection requires a ready replica', await request('/execution-machine-proof'));
   console.log('PASS bounded tasks and full receipts', await request('/burst'));
+  const scope = z.object({ root: z.string(), child: z.string(), sibling: z.string(), grandchild: z.string() }).parse(await request('/scoped-stop-seed'));
+  await until(snapshot => Object.values(scope).every(id => snapshot.questions.some(question => question.conversationId === id && question.answer === null)));
+  const liveTasks = async () => z.array(z.object({ id: z.string(), conversationId: z.string(), kind: z.string(), state: z.string() })).parse(await request('/live-tasks'));
+  const scopedTasks = await liveTasks();
+  assert(Object.values(scope).every(id => scopedTasks.some(task => task.conversationId === id && task.state !== 'terminal')), 'Scoped Stop must start with real live tasks in all four conversations');
+  assert.equal(scopedTasks.filter(task => task.kind === 'gitspace.BackgroundAgent' && task.state !== 'terminal').length, 2, 'Background ownership waiters were not live');
+  await request(`/submit?conversationId=${scope.child}&text=Forbidden%20child%20message`, undefined, true);
+  await request('/session', { ...identity, conversationId: scope.child, command: { type: 'prompt', text: 'Forbidden child prompt' } }, true);
+  await session({ type: 'stop' }, scope.child);
+  const afterChildStop = await liveTasks();
+  for (const id of [scope.child, scope.grandchild]) assert(!afterChildStop.some(task => task.conversationId === id && task.state !== 'terminal'), 'Child Stop left a descendant task running');
+  const stoppedSnapshot = RuntimeSnapshotSchema.parse(await request('/'));
+  assert(!stoppedSnapshot.questions.some(question => [scope.child, scope.grandchild].includes(question.conversationId) && question.answer === null), 'Stopped child retained an actionable question');
+  assert(stoppedSnapshot.conversations.filter(conversation => [scope.child, scope.grandchild].includes(conversation.id)).every(conversation => conversation.status === 'idle'), 'Stopped child still appears active');
+  for (const id of [scope.root, scope.sibling]) assert(afterChildStop.some(task => task.conversationId === id && task.state !== 'terminal'), 'Child Stop aborted main or sibling work');
+  const backgroundDeadline = Date.now() + 5000;
+  while ((await liveTasks()).filter(task => task.kind === 'gitspace.BackgroundAgent' && task.state !== 'terminal').length > 1 && Date.now() < backgroundDeadline) await Bun.sleep(20);
+  assert.equal((await liveTasks()).filter(task => task.kind === 'gitspace.BackgroundAgent' && task.state !== 'terminal').length, 1, 'Child Stop did not settle its background owner independently');
+  for (const type of ['usage', 'agentSetup', 'control'] as const) await session({ type }, scope.child);
+  const beforeInspection = await liveTasks();
+  assert(!beforeInspection.some(task => [scope.child, scope.grandchild].includes(task.conversationId) && task.state !== 'terminal'), 'Inspection resumed stopped work');
+  await session({ type: 'stop' }, scope.root);
+  assert(!(await liveTasks()).some(task => Object.values(scope).includes(task.conversationId) && task.state !== 'terminal'), 'Main Stop failed to cascade');
+  console.log('PASS main-only input and scoped Stop with four live Pi conversations');
+  const familyUsage = (await session({ type: 'usage' }, scope.root)).usage!;
+  const childUsage = await Promise.all([scope.child, scope.sibling, scope.grandchild].map(async id => (await session({ type: 'usage' }, id)).usage!));
+  assert.equal(familyUsage.totalsDeep.totalTokens, familyUsage.totals.totalTokens + childUsage.reduce((sum, report) => sum + report.totals.totalTokens, 0), 'Workspace usage omitted child inference');
+  assert.equal(familyUsage.childSessions, 3);
+  assert(familyUsage.byAgent.some(row => row.agentId === scope.child && row.agent === 'child'), 'Usage lost persisted subagent identity');
 
   const seeded = z.object({ conversationId: z.string(), ids: z.array(z.string()), pivot: z.string(), branches: z.array(z.string()) }).parse(await request('/history-seed'));
   // Re-open so the index must survive/recover independently of live commit callbacks.
@@ -180,6 +249,17 @@ try {
   assert(forkTranscript.rows.some(row => row.item.type === 'message' && row.item.text.startsWith('history-20 ')));
   assert(!forkTranscript.rows.some(row => row.item.type === 'message' && row.item.text.startsWith('history-21 ')));
   await request('/session', { ...identity, conversationId: fork.control.sessionId, command: { type: 'transcriptContent', request: { generation: latestTranscript.generation, rowId: expanded.id, offset: 0 } } }, true);
+  await request('/enable-definitions');
+  const discovered = (await session({ type: 'agentSetup' }, seeded.conversationId)).setup!;
+  const repositoryAgent = discovered.agents.find(agent => agent.path === '.agents/agents/repository.md');
+  assert(repositoryAgent, 'Agent setup did not discover committed repository definitions');
+  assert.equal(repositoryAgent.role, 'scout');
+  assert.equal(repositoryAgent.provider, 'fixture');
+  assert.equal(repositoryAgent.model, 'fixture');
+  const override = { type: 'saveAgentDefinition' as const, path: repositoryAgent.path, expectedRevision: repositoryAgent.revision, content: '---\nname: Repository Scout\nmodel: pi/scout\ntools: read\n---\nCloud override survives recovery.' };
+  await session(override, seeded.conversationId);
+  await worker.dispose(); worker = new Miniflare(options);
+  assert.equal((await session({ type: 'agentSetup' }, seeded.conversationId)).setup!.agents.find(agent => agent.path === override.path)?.content, override.content);
   const definition = { type: 'saveAgentDefinition' as const, path: '.agents/agents/smoke.md', expectedRevision: null, content: '---\nname: Smoke\n---\nFollow the cloud workspace instructions.' };
   const saved = (await session(definition, seeded.conversationId)).setup!;
   assert.equal(saved.agents.find(agent => agent.path === definition.path)?.content, definition.content);

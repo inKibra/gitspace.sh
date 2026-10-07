@@ -159,7 +159,7 @@ export class CloudFilesProof extends DurableObject {
     await assert.rejects(invoke('write', { path: 'retry.txt', content: 'durable' }, 'retry'));
     assert.equal((await invoke('write', { path: 'other.txt', content: 'blocked' })).status, 'failed');
     const attachments = new AttachmentStore(this.ctx.storage, { seal: async secret => secret, open: async secret => secret, dispatch: async () => { throw new Error('No machine transport in fixture'); } });
-    const admission = RuntimeAttachInputSchema.parse({ projectId: 'p', workspaceId: 'cloud', machineId: 'm', generation: 0, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['read', 'write', 'edit'] });
+    const admission = RuntimeAttachInputSchema.parse({ projectId: 'p', workspaceId: 'cloud', machineId: 'm', generation: 0, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['read', 'write', 'edit'] });
     store = open(); failPush = false; await store.recover();
     assert.equal(files.get('retry.txt'), 'durable');
     assert.equal((await invoke('write', { path: 'retry.txt', content: 'durable' }, 'retry')).status, 'completed');
@@ -218,8 +218,8 @@ export class CloudFilesProof extends DurableObject {
     assert.equal((await invoke('write', { path: 'lost.txt', content: 'with lost replica' })).status, 'completed');
     attachments.transition(attached.attachmentId, attached.generation, 'draining');
     assert.throws(() => attachments.transition(attached.attachmentId, attached.generation, 'detached'), /final snapshot/);
-    assert.throws(() => attachments.recordPrimaryFlush(attached.attachmentId, attached.generation + 1));
-    attachments.recordPrimaryFlush(attached.attachmentId, attached.generation);
+    assert.throws(() => attachments.recordCacheFlush(attached.attachmentId, attached.generation + 1));
+    attachments.recordCacheFlush(attached.attachmentId, attached.generation);
     attachments.transition(attached.attachmentId, attached.generation, 'detached'); primary = attachments.list();
     const afterDetach = await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach');
     assert.equal(afterDetach.status, 'completed');

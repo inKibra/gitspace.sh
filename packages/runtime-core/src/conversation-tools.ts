@@ -1,4 +1,4 @@
-import { defineDoc, type Harness, type Storage, type ConversationId, type Cursor, type EntryRecord } from '@earendil-works/pi-durable';
+import { defineDoc, type Harness, type Storage, type Conversation, type ConversationId, type Cursor, type EntryRecord } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, SUBAGENT_READONLY_TOOLS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
@@ -11,7 +11,7 @@ import { AgentDefinitionContextDoc, type SubagentMetadata } from './subagent-sta
 import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
 const Anchors = defineDoc<{ entries: Record<string, string>; children: Record<string, string> }>({ kind: 'gitspace.context-anchors', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ entries: {}, children: {} }) });
 const ThinkingSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).nullable();
-export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask } & Pick<SessionControlServices, 'admitInference' | 'configureModel' | 'catalog'>;
+export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask; refreshDefinitions?(target: Conversation): Promise<void> } & Pick<SessionControlServices, 'admitInference' | 'configureModel' | 'catalog'>;
 export function createConversationTools(options: ConversationToolOptions) {
   const { harness, storage } = options;
   const context = BACKGROUND_CONTEXT;
@@ -49,6 +49,7 @@ export function createConversationTools(options: ConversationToolOptions) {
       const group = await family(target.id);
       if (args.op === 'spawn') {
         if (group.self) throw new Error('Subagents cannot spawn nested agents');
+        await options.refreshDefinitions?.(target);
         const previousId = (await harness.snapshot(Anchors, target.id, context))?.children[input.attemptId];
         const previous = previousId ? (await harness.snapshot(AgentDefinitionContextDoc, (await resolve(previousId)).id, context))?.child : null;
         const definitions = await harness.snapshot(SessionControlsDoc, target.id, context);

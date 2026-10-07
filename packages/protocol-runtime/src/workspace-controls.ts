@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeActionResultSchema } from './base.js';
+import { RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeActionResultSchema, RuntimeCachePolicySchema } from './base.js';
 import { RuntimeGitCheckpointSchema } from './git-checkpoint.js';
 export { RuntimeGitCheckpointSchema } from './git-checkpoint.js';
 export const RuntimeQaActionResultSchema = RuntimeActionResultSchema.extend({ shareDraft: z.url().optional() });
@@ -8,6 +8,7 @@ export const RuntimeSnapshotCommitInputSchema = RuntimeIdentitySchema.extend({ a
 export const RuntimeSnapshotCommitResultSchema = RuntimeActionResultSchema.extend({ checkpoint: RuntimeGitCheckpointSchema });
 export const RuntimeExecutionMachineInputSchema = RuntimeIdentitySchema.extend({ machineId: RuntimeMachineIdSchema.nullable() });
 export const RuntimeExecutionDocumentSchema = z.object({ defaultMachineId: RuntimeMachineIdSchema.nullable() });
+export const RuntimeCachePolicyInputSchema = RuntimeIdentitySchema.extend({ reclaimSeconds: RuntimeCachePolicySchema.shape.reclaimSeconds });
 export const RuntimeCreationSchema = z.object({ state: z.enum(['pending', 'forking', 'checkout', 'materializing', 'ready', 'failed']), taskId: z.string().nullable(), message: z.string().nullable() });
 export const RuntimeQaItemSchema = z.object({ id: z.string(), title: z.string(), description: z.string(), historyRef: z.string(), tool: z.string().nullable(), model: z.string(), runtimeVersion: z.string(), state: z.enum(['open', 'dismissed', 'merged', 'shared']), duplicateOf: z.string().nullable(), createdAt: z.iso.datetime() });
 export const RuntimeQaActionInputSchema = RuntimeIdentitySchema.extend({ itemId: z.string(), action: z.discriminatedUnion('kind', [z.object({ kind: z.literal('dismiss') }), z.object({ kind: z.literal('merge'), targetId: z.string() }), z.object({ kind: z.literal('share'), target: z.enum(['gitspace', 'repository']), redactedExcerpt: z.string().min(1), confirmed: z.literal(true) })]) });

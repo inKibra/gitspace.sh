@@ -481,6 +481,7 @@ function AgentSection() {
         <InputMessage data-slot="input-message"
           value={draft}
           onValueChange={setDraft}
+          history={sent}
           placeholder="Ask the workspace agent…"
           files={files}
           onFilesChange={setFiles}

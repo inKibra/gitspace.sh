@@ -44,6 +44,7 @@ import { WorkspaceTerminals, type WorkspaceTerminalsProps } from './WorkspaceTer
 import { WorkspacePicker, type WorkspacePickerItem } from './WorkspacePicker.js';
 import { glyph } from './glyph.js';
 import { ResourceLink, ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
+import type { WorkspaceDraftBinding } from './workspace-draft.js';
 
 /** Where a space lives right now, from the account-wide placement table: held by a machine, released to the cloud, or not yet known. */
 export type SpaceHolderView =
@@ -144,7 +145,8 @@ export interface GitSpaceShellProps {
   /** Cloud runtime status is independent of the directory's machine placement projection. */
   runtimeSummary?: SidebarSpaceSummary;
   machines?: Array<{ id: string; label: string }>;
-  onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>) => void | Promise<void>;
+  onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>, draftRevision?: number) => void | Promise<void>;
+  draft?: WorkspaceDraftBinding;
   sessionControls?: SessionControlsProps;
   approvalCard?: ReactNode;
   controlsError?: string;
@@ -303,7 +305,7 @@ export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, pending, error, onReopenSpace, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, skills, banner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, pending, error, onReopenSpace, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, skills, banner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
@@ -316,6 +318,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
   history?: GitSpaceShellProps['history'];
   transport: TransportBlock[];
   onSend?: GitSpaceShellProps['onSend'];
+  draft?: WorkspaceDraftBinding;
   pending: boolean;
   error?: string;
   onReopenSpace?: GitSpaceShellProps['onReopenSpace'];
@@ -469,7 +472,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
               <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || (inactive && !released && !workspace.closedAt && !onRetryAgent) || (released && claimMachines.length > 0 && !claimMachineId)} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? onRetryAgent ? 'Retrying agent…' : 'Opening…' : workspace.closedAt ? 'Restore' : released ? 'Reopen' : onRetryAgent ? 'Retry agent' : 'Start'}</Button>
               {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
             </div>
-          : <Composer workspace={workspace} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
+          : <Composer workspace={workspace} draft={draft} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
       </div>
     </div>
   </div>;
@@ -593,7 +596,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -727,7 +730,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content">
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} approvalCard={approvalCard} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} pending={sendPending || closePendingSpaceId === workspace.id} error={sendError} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills} banner={launchBanner} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} approvalCard={approvalCard} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} pending={sendPending || closePendingSpaceId === workspace.id} error={sendError} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills} banner={launchBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined)}</aside> : null}

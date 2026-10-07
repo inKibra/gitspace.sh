@@ -6,7 +6,7 @@ export function caughtUpSearchReplica(attachments: readonly RuntimeAttachment[],
   return attachments.find(attachment => {
     const observation = attachment.executionObservation;
     if (!observation) return false;
-    return attachment.state === 'ready' && (attachment.role === 'primary' || attachment.role === 'replica')
+    return attachment.state === 'ready' && attachment.role === 'cache' && attachment.heartbeatAt !== null && now - Date.parse(attachment.heartbeatAt) <= 30_000
       && attachment.capabilities.includes('grep') && observation.materializedCommit === checkpoint.worktreeCommit
       && observation.activeExecutions === 0 && now - Date.parse(observation.observedAt) <= 30_000
       && Date.parse(observation.observedAt) <= now + 5_000;

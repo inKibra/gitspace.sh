@@ -89,7 +89,7 @@ import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { artifactImageUrl, markdownImageSources } from '../markdown-artifact-images.js';
 import { EmptyState, StatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
 import { OverviewView, type OverviewViewProps } from './OverviewView.js';
-import { UsageView, type UsageStatus } from './UsageView.js';
+import { UsageView, type UsageStatus, type InspectorProviderUsageState } from './UsageView.js';
 import { AgentSetupView, type InspectorAgentSetupState } from './AgentSetupView.js';
 import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
 import { ArtifactUploadButton, ArtifactUploadList, useArtifactUploads, type ArtifactUploads } from './ArtifactUploads.js';
@@ -122,6 +122,7 @@ export interface InspectorUsageState {
   report: SessionUsageReport | null;
   status: UsageStatus;
   error?: string;
+  providerUsage?: InspectorProviderUsageState;
   load(): void;
   refresh(): void;
 }
@@ -151,7 +152,10 @@ export interface InspectorProps {
   journalEntries: readonly JournalEntryView[];
   threads: readonly ReviewThreadView[];
   services: readonly ServiceView[];
+  runtimeServices?: ReactNode;
   subagents: readonly (ExecutionBlock | RuntimeSideAgentBlock)[];
+  onStopSubagent?(conversationId: string): Promise<void>;
+  renderSubagentTranscript?(conversationId: string): ReactNode;
   usage: InspectorUsageState;
   agentSetup: InspectorAgentSetupState;
   onRequestArtifact(reference: Extract<EvidenceReference, { kind: 'artifact' }>, signal?: AbortSignal): Promise<InspectorArtifactContent>;
@@ -670,10 +674,20 @@ function ArtifactsSurface({ references, onOpen, actions, uploads }: { references
   </div></ScrollArea></div>;
 }
 
-function SubagentsSurface({ subagents }: { subagents: readonly (ExecutionBlock | RuntimeSideAgentBlock)[] }) {
+function SubagentsSurface({ subagents, onStop, renderTranscript }: { subagents: InspectorProps['subagents']; onStop?: InspectorProps['onStopSubagent']; renderTranscript?: InspectorProps['renderSubagentTranscript'] }) {
+  const [stopping, setStopping] = useState<readonly string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const stop = async (id: string) => {
+    if (!onStop || stopping.includes(id)) return;
+    setError(null); setStopping(values => [...values, id]);
+    try { await onStop(id); }
+    catch (cause) { setError(rpcErrorMessage(cause, 'Stop subagent')); }
+    finally { setStopping(values => values.filter(value => value !== id)); }
+  };
   if (!subagents.length) return <Padded><EmptyState icon={ic(Users01, 22)} title="No delegated work" description="Subagents from the canonical agent transcript appear here while they run and after they yield." /></Padded>;
-  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="p-4"><CardGroup border="outlined">{subagents.map((agent) => <Card key={agent.id}>
-    <CardHeader><CardMedia icon={UsersGlyph} /><CardTitle>{agent.label}</CardTitle><CardDescription>{[agent.agent ?? 'subagent', agent.model, agent.status].filter(Boolean).join(' · ')}</CardDescription><CardAction className="flex flex-wrap gap-1"><Tone value={agent.status} />{agent.type === 'execution' && agent.hasFailures && agent.status !== 'failed' ? <Badge variant="dot" color="red">Failure in history</Badge> : null}</CardAction></CardHeader>
+  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="p-4">{error ? <p role="alert" className="mb-3 text-destructive">{error}</p> : null}<CardGroup border="outlined">{subagents.map((agent) => <Card key={agent.id}>
+    <CardHeader><CardMedia icon={UsersGlyph} /><CardTitle>{agent.label}</CardTitle><CardDescription>{[agent.agent ?? 'subagent', agent.model, agent.status].filter(Boolean).join(' · ')}</CardDescription><CardAction className="flex flex-wrap gap-1"><Tone value={agent.status} />{agent.type === 'side-agent' && onStop && (agent.status === 'running' || agent.status === 'blocked') ? <Button variant="secondary" size="compact" aria-label={`Stop ${agent.label}`} disabled={stopping.includes(agent.agentId)} onClick={() => void stop(agent.agentId)}>{stopping.includes(agent.agentId) ? 'Stopping…' : 'Stop'}</Button> : null}{agent.type === 'execution' && agent.hasFailures && agent.status !== 'failed' ? <Badge variant="dot" color="red">Failure in history</Badge> : null}</CardAction></CardHeader>
     {agent.summary ? <CardContent><GitSpaceMarkdown>{agent.summary}</GitSpaceMarkdown></CardContent> : null}
     {agent.type === 'side-agent' && agent.runtime ? <CardContent>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-caption">
@@ -683,7 +697,7 @@ function SubagentsSurface({ subagents }: { subagents: readonly (ExecutionBlock |
       </dl>
       {agent.runtime.definition ? <details><summary className="min-h-10 cursor-pointer py-2 text-caption">Retained definition · read-only</summary><p className="mb-2 break-all font-mono text-caption text-muted-foreground">{agent.runtime.definition.path}</p><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{agent.runtime.definition.content}</pre></details> : null}
     </CardContent> : null}
-    {agent.type === 'side-agent' && agent.messages?.length ? <CardContent><details><summary className="min-h-10 cursor-pointer py-2 text-caption">Conversation history</summary><div className="flex min-w-0 flex-col gap-2">{agent.messages.map(message => <TranscriptItemView key={message.id} item={message} active={false} />)}</div></details></CardContent> : null}
+    {agent.type === 'side-agent' && renderTranscript ? <CardContent><Button variant="ghost" aria-expanded={expanded === agent.agentId} onClick={() => setExpanded(value => value === agent.agentId ? null : agent.agentId)}>{expanded === agent.agentId ? 'Hide transcript' : 'View transcript'}</Button>{expanded === agent.agentId ? renderTranscript(agent.agentId) : null}</CardContent> : agent.type === 'side-agent' && agent.messages?.length ? <CardContent><details><summary className="min-h-10 cursor-pointer py-2 text-caption">Conversation history</summary><div className="flex min-w-0 flex-col gap-2">{agent.messages.map(message => <TranscriptItemView key={message.id} item={message} active={false} />)}</div></details></CardContent> : null}
   </Card>)}</CardGroup></div></ScrollArea>;
 }
 function ServicesSurface({ services, onOpenTerminal, onStart, onStop }: {
@@ -1024,8 +1038,7 @@ export function Inspector(props: InspectorProps) {
       ? artifacts.find((reference) => reference.url === activeDocument.target.slice(8)) ?? null
       : [...artifacts, ...evidence.filter((reference): reference is ArtifactReference => reference.kind === 'artifact')].find((reference) => artifactId(reference) === activeDocument.target) ?? null
     : null;
-  // Usage is a transcript read on the machine: fetch it the first time the tab
-  // is shown rather than for every Inspector mount.
+  // Read recorded usage when requested, not on every Inspector mount.
   useEffect(() => { if (runtimeAvailable && view === 'usage') props.usage.load(); }, [view, runtimeAvailable]);
   useEffect(() => { if (runtimeAvailable && view === 'agents') props.agentSetup.load(); }, [view, runtimeAvailable, props.agentSetup.sessionId]);
   const loadArtifact = async (reference: ArtifactReference): Promise<void> => {
@@ -1091,7 +1104,7 @@ export function Inspector(props: InspectorProps) {
     setActiveThreadId(created.id);
     setThreadSelection(null);
   };
-  const counts: Partial<Record<InspectorPermanentView, number>> = { subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.services.length };
+  const counts: Partial<Record<InspectorPermanentView, number>> = { subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined };
   for (const tab of permanentTabs) if (props.sectionErrors?.[tab.id] && !props.sectionErrors[tab.id]!.retained) delete counts[tab.id];
   const threadOpen = !!(activeThread || threadSelection);
   const closeThread = (): void => { setActiveThread(null); setThreadSelection(null); };
@@ -1148,15 +1161,15 @@ export function Inspector(props: InspectorProps) {
       case 'environment': return props.environment ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'agents': return null;
-      case 'subagents': return <SubagentsSurface subagents={props.subagents} />;
+      case 'subagents': return <SubagentsSurface subagents={props.subagents} onStop={props.onStopSubagent} renderTranscript={props.renderSubagentTranscript} />;
       case 'files': return <FilesSurface entries={props.repositoryEntries.filter((entry) => entry.mode === props.repositoryMode)} heldBack={props.repositoryMode === 'working' ? props.lfsHeldBack ?? [] : []} mode={props.repositoryMode} onModeChange={props.onRepositoryModeChange} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, props.repositoryMode)} onOpenHeldBack={path => openFile(path, 'working')} />;
       case 'artifacts': return <ArtifactsSurface references={artifacts} onOpen={(reference) => {
         if (reference.kind !== 'artifact') return;
         openDocument({ id: `artifact-current:${reference.url}`, kind: 'artifact', label: reference.label, target: `current:${reference.url}` });
         void loadArtifact(reference);
       }} actions={props.artifactActions} uploads={props.artifactUpload ? uploads : null} />;
-      case 'services': return <ServicesSurface services={props.services} onOpenTerminal={(name) => props.onOpenServiceTerminal?.(name)} onStart={props.onStartService} onStop={props.onStopService} />;
-      case 'usage': return <UsageView sessionId={props.usage.sessionId} report={props.usage.report} status={props.usage.status} error={props.usage.error} onLoad={props.usage.load} onRefresh={props.usage.refresh} />;
+      case 'services': return props.runtimeServices ?? <ServicesSurface services={props.services} onOpenTerminal={(name) => props.onOpenServiceTerminal?.(name)} onStart={props.onStartService} onStop={props.onStopService} />;
+      case 'usage': return <UsageView sessionId={props.usage.sessionId} report={props.usage.report} status={props.usage.status} error={props.usage.error} onLoad={props.usage.load} onRefresh={props.usage.refresh} providerUsage={props.usage.providerUsage} />;
       case 'guide': return <><ChangeGuideSurface
         guide={props.overview.changeGuide}
         reviewerId={props.reviewerId}

@@ -5,8 +5,10 @@ import {
   RuntimeWatchEventSchema, RuntimeActionResultSchema,
 } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeQaActionResultSchema } from '@gitspace/protocol-runtime/workspace-controls';
-import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentRequestResultSchema, RuntimePrimaryAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
+import { RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeQaActionResultSchema, RuntimeCachePolicyInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentRequestResultSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema, RuntimeCacheActionInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
+import { RuntimeDraftSaveInputSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
+import { RuntimeServiceInputSchema, RuntimeServiceResultSchema } from '@gitspace/protocol-runtime/services';
 import { EnvironmentFailureSchema, LifecycleRunSchema, LifecycleStateSchema, type EnvironmentFailure, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
 import {
   AgentHealthStateSchema, AgentLifecycleStateSchema, AgentSessionRenderStateSchema, SessionActivitySchema,
@@ -589,6 +591,10 @@ export const runtimeSessionContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeSessionInputSchema, 'gitspace/runtime-session-input/v1'))
   .output(runtimeWire(RuntimeSessionResultSchema, 'gitspace/runtime-session-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeServicesContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeServiceInputSchema, 'gitspace/runtime-services-input/v1'))
+  .output(runtimeWire(RuntimeServiceResultSchema, 'gitspace/runtime-services-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const runtimeExecutionMachineContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeExecutionMachineInputSchema, 'gitspace/runtime-execution-machine-input/v1'))
   .output(runtimeWire(RuntimeActionResultSchema, 'gitspace/runtime-action-result/v1'))
@@ -601,13 +607,25 @@ export const runtimeAttachmentRequestContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeAttachmentRequestInputSchema, 'gitspace/runtime-attachment-request/v1'))
   .output(runtimeWire(RuntimeAttachmentRequestResultSchema, 'gitspace/runtime-attachment-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
-export const runtimePrimaryAttachmentRequestContract = gitspaceRpc.procedure()
-  .input(runtimeWire(RuntimePrimaryAttachmentRequestInputSchema, 'gitspace/runtime-primary-attachment-request/v1'))
+export const runtimeCacheAttachmentRequestContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeCacheAttachmentRequestInputSchema, 'gitspace/runtime-cache-attachment-request/v1'))
   .output(runtimeWire(RuntimeAttachmentRequestResultSchema, 'gitspace/runtime-attachment-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const runtimeAttachmentDetachRequestContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeAttachmentDetachRequestInputSchema, 'gitspace/runtime-attachment-detach-request/v1'))
   .output(runtimeWire(RuntimeAttachmentRequestResultSchema, 'gitspace/runtime-attachment-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeCacheActionContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeCacheActionInputSchema, 'gitspace/runtime-cache-action/v1'))
+  .output(runtimeWire(RuntimeAttachmentRequestResultSchema, 'gitspace/runtime-attachment-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeCachePolicyContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeCachePolicyInputSchema, 'gitspace/runtime-cache-policy/v1'))
+  .output(runtimeWire(RuntimeActionResultSchema, 'gitspace/runtime-action/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const runtimeDraftContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeDraftSaveInputSchema, 'gitspace/runtime-draft-save/v1'))
+  .output(runtimeWire(WorkspaceDraftSaveResultSchema, 'gitspace/runtime-draft-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const spaceViewContract = gitspaceRpc
@@ -2174,15 +2192,18 @@ export const terminalLiveContract = gitspaceRpc.procedure()
 export const gitspaceContract = gitspaceRpc.contract({
   runtime: {
     snapshot: runtimeSnapshotContract,
+    draft: runtimeDraftContract,
     submit: runtimeSubmitContract,
     cancel: runtimeCancelContract,
     answer: runtimeAnswerContract,
     browserTrust: runtimeBrowserTrustContract,
     watch: runtimeWatchContract,
     session: runtimeSessionContract,
+    services: runtimeServicesContract,
     executionMachine: runtimeExecutionMachineContract,
     qa: runtimeQaContract,
-    attachment: { request: runtimeAttachmentRequestContract, primary: { request: runtimePrimaryAttachmentRequestContract }, detach: runtimeAttachmentDetachRequestContract },
+    cachePolicy: runtimeCachePolicyContract,
+    attachment: { request: runtimeAttachmentRequestContract, cache: { request: runtimeCacheAttachmentRequestContract }, action: runtimeCacheActionContract, detach: runtimeAttachmentDetachRequestContract },
   },
   transcript: transcriptContract,
   transcriptPage: transcriptPageContract,

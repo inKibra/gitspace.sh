@@ -60,7 +60,7 @@ export function authorizeLifecycleMachineMutation(input: LifecycleMutation, fact
   if (!facts.machineOnline) throw new EnvironmentError('RunnerUnavailable', 'Lifecycle execution requires an online authorized machine', { machineId: facts.machineId });
   if (input.attachment) {
     const attachment = facts.attachment;
-    if (!attachment || attachment.attachmentId !== input.attachment.attachmentId || attachment.generation !== input.attachment.generation || attachment.machineId !== facts.machineId || attachment.projectId !== facts.projectId || !['attaching', 'ready'].includes(attachment.state) || attachment.role === 'primary' || input.generation !== null || !['machine/prepare', 'checks', 'workspace/materialize', 'workspace/dematerialize'].includes(input.phase)) {
+    if (!attachment || attachment.attachmentId !== input.attachment.attachmentId || attachment.generation !== input.attachment.generation || attachment.machineId !== facts.machineId || attachment.projectId !== facts.projectId || !['attaching', 'ready'].includes(attachment.state) || input.generation !== null || !['machine/prepare', 'checks', 'workspace/materialize', 'workspace/dematerialize'].includes(input.phase)) {
       throw new EnvironmentError('PermissionDenied', 'Lifecycle attachment admission is missing or stale');
     }
     return;

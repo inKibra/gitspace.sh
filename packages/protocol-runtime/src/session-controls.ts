@@ -39,7 +39,7 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserDiscard'), machineId: z.string(), recordId: z.string() }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
-  z.object({ type: z.literal('prompt'), text: z.string(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),
+  z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),
   z.object({ type: z.literal('setWorkspacePhase'), phase: z.enum(['plan', 'code', 'review', 'ship']) }),
   z.object({ type: z.literal('cycleRole'), direction: z.enum(['forward', 'backward']) }),
   z.object({ type: z.literal('setModel'), provider: z.string(), model: z.string() }),

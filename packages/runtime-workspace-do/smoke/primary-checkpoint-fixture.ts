@@ -1,13 +1,15 @@
 import { DurableObject } from 'cloudflare:workers';
 import { strict as assert } from 'node:assert';
 import { createModels } from '@earendil-works/pi-ai';
-import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime';
 import { bootstrapSpaceAuthority, GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 import { SpaceAuthorityDO } from '../../account-worker/src/space-authority.js';
 import { createWorkspaceRuntime } from '../src/runtime.js';
 import { CloudFileStore } from '../src/cloud-files.js';
 import { GitLfsRetention } from '../../account-worker/src/git-lfs-retention.js';
 import { Result } from 'better-result';
+import { emptyLifecycleState } from '../../protocol-environment/src/lifecycle.js';
+import { LifecycleRunSchema } from '../../protocol-environment/src/schema.js';
 
 const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
 const unsupported = async (): Promise<never> => { throw new Error('External service forbidden in checkpoint proof'); };
@@ -62,7 +64,14 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
     await this.runtimeSnapshot(identity);
     await this.runtimeCodeCheckpoint(identity);
     assert.equal(sourceReads, 0, 'Read-only runtime access must not consult Artifacts');
-    const result = await this.runtimePrimaryAttachmentRequest({ ...identity, machineId: 'machine', requestId: 'first-primary' });
+    const repository: ArtifactsRepo = {
+      [Symbol.dispose]() {}, createToken: unsupported, revokeToken: unsupported, listTokens: unsupported, fork: unsupported, readBlob: unsupported, readFile: unsupported, log: async () => [],
+      info: async () => ({ id: 'proof', name: 'proof', description: null, defaultBranch: 'main', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastPushAt: null, source: null, readOnly: false, remote: 'https://artifacts.invalid/workspace.git' }),
+      readCommit: async hash => ({ hash, treeHash: checkpoint.worktreeTree, parents: [], message: 'proof', author: { name: 'Proof', email: 'proof@example.invalid' }, committer: { name: 'Proof', email: 'proof@example.invalid' }, authoredAt: 1, committedAt: 1 }),
+      readTree: async () => [],
+    };
+    this.env.ARTIFACTS = { get: async () => repository, create: unsupported, import: unsupported, list: unsupported, delete: unsupported };
+    const result = await this.runtimeCacheAttachmentRequest({ ...identity, machineId: 'machine', requestId: 'first-primary' });
     const assignment = (await this.runtimeAssignments({ ...identity, machineId: 'machine' })).assignments[0];
     assert(assignment);
     if (empty) {
@@ -106,6 +115,8 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
     const lfsRestored = [{ path: 'modified.bin', outcome: 'committed' as const }, { path: 'added.bin', outcome: 'omitted' as const }];
     const ready = { ...identity, machineId: 'machine', attachmentId: result.attachment.attachmentId, generation: result.attachment.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true, capabilities: result.attachment.capabilities, lfsRestored };
     await assert.rejects(this.runtimeAttachmentReady({ ...ready, commit: 'f'.repeat(40) }));
+    await assert.rejects(this.runtimeAttachmentReady(ready), /durable receipt/u);
+    await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`).fetch(new Request('https://proof/setup-receipts', { method: 'POST', body: JSON.stringify(result.attachment) }));
     assert.equal((await this.runtimeAttachmentReady(ready)).attachment.state, 'ready');
     assert.deepEqual(await runtime.cloudFiles.snapshot(), checkpoint);
     const root = (await runtime.snapshot()).conversations.find(item => item.parentId === null); assert(root);
@@ -116,6 +127,26 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
     assert.match(JSON.stringify(messages[0]!.payload), /added\.bin: omitted/u);
     assert.match(JSON.stringify(messages[0]!.payload), /remain on the previous machine/u);
     await assert.rejects(this.runtimeAttachmentReady({ ...ready, lfsRestored: [] }), /proof changed/u);
+    const lease = { ...identity, machineId: result.attachment.machineId, attachmentId: result.attachment.attachmentId, generation: result.attachment.generation };
+    runtime.attachments.requestCacheAction({ ...lease, requestId: 'reclaim-confirmed', action: { kind: 'reclaim', discardHeldBack: true } });
+    let cache = runtime.attachments.list().find(item => item.attachmentId === lease.attachmentId);
+    assert.equal(cache?.cacheAction?.discardHeldBack, true, 'Explicit reclaim acceptance survives assignment persistence');
+    assert.throws(() => runtime.attachments.requestCacheAction({ ...lease, requestId: 'reclaim-confirmed', action: { kind: 'reclaim' } }), /identity/u);
+    assert(cache?.cache);
+    runtime.attachments.heartbeat({ ...lease, cache: { ...cache.cache, state: 'paused', reclaimBlocked: 'Held-back LFS: private.bin' }, cacheAction: { requestId: 'reclaim-confirmed', status: 'failed', error: 'Held back' }, executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
+    runtime.attachments.detach({ ...lease, state: 'draining' });
+    cache = runtime.attachments.list().find(item => item.attachmentId === lease.attachmentId);
+    assert.deepEqual(cache?.detachRequest, {}, 'Generic detach must not inherit the prior reclaim acceptance');
+    runtime.attachments.detach({ ...lease, state: 'draining', discardHeldBack: true });
+    cache = runtime.attachments.list().find(item => item.attachmentId === lease.attachmentId);
+    assert.equal(cache?.detachRequest?.discardHeldBack, true, 'Explicit detach acceptance survives assignment persistence');
+    assert(cache?.cache);
+    assert.throws(() => runtime.attachments.detach({ ...lease, state: 'detached' }), /final snapshot/u);
+    runtime.attachments.recordCacheFlush(lease.attachmentId, lease.generation);
+    const reclaimed = runtime.attachments.heartbeat({ ...lease, cache: { ...cache.cache, state: 'reclaimed', reclaimBlocked: null }, executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
+    assert.equal(reclaimed.state, 'draining', 'Explicit detach must not return to resumable attaching state');
+    runtime.attachments.detach({ ...lease, state: 'detached' });
+    assert.equal((await runtime.attachments.assignments(lease.machineId)).length, 0, 'Detached cache disappears from assignments');
     return Response.json({ passed: true });
   }
 }
@@ -124,5 +155,23 @@ export class CheckpointMetadata extends DurableObject {
   listWorkspaces() { return [{ id: identity.workspaceId, projectId: identity.projectId, branch: 'main', lifecycle: 'active' }]; }
   getMachine() { return { id: 'machine', desiredState: 'online' }; }
   hasRuntimeMachine() { return true; }
+  async fetch(request: Request) {
+    const attachment = RuntimeAttachmentSchema.parse(await request.json());
+    await this.ctx.storage.put('attachment', attachment);
+    return new Response('saved');
+  }
+  async getLifecycleState() {
+    const state = emptyLifecycleState(identity.projectId, identity.workspaceId);
+    const stored = await this.ctx.storage.get('attachment');
+    if (stored === undefined) return state;
+    const attachment = RuntimeAttachmentSchema.parse(stored);
+    state.runs = ['machine/prepare', 'checks', 'workspace/materialize'].map(phase => LifecycleRunSchema.parse({
+      id: `attachment:${attachment.attachmentId}:${attachment.generation}:${phase}`,
+      projectId: identity.projectId, spaceId: identity.workspaceId, phase, status: 'succeeded', profile: 'default', machineId: attachment.machineId,
+      generation: null, attachment: { attachmentId: attachment.attachmentId, generation: attachment.generation }, executionHashes: [], terminalName: null,
+      results: [], output: '', exitCode: 0, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), deadlineAt: new Date(Date.now() + 60_000).toISOString(), cancelRequestedAt: null, failure: null, incidents: [],
+    }));
+    return state;
+  }
 }
 export default { fetch(request: Request, env: { PROOF: DurableObjectNamespace<PrimaryCheckpointProof> }) { return env.PROOF.getByName(new URL(request.url).pathname).fetch(request); } };

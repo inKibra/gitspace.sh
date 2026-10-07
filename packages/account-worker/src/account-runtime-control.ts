@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import type { SignedControlRequest } from '@gitspace/protocol/credential-vault';
-import { RuntimeIdentitySchema, RuntimeAttachInputSchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
+import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeCacheAttachmentRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeRepositoryCredentialsInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
@@ -41,10 +41,6 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
       const attachment = attachments.find(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation);
       if (!attachment || !['attaching', 'ready', 'draining'].includes(attachment.state)) throw new Error('Repository lease requires a current assigned checkout');
       if (input.scope === 'write' && (attachment.role === 'runner' || !['ready', 'draining'].includes(attachment.state))) throw new Error('This attachment cannot publish repository changes');
-      if (attachment.role === 'primary') {
-        const placement = await access.authority.get();
-        if (!placement || !['open', 'closing'].includes(placement.state) || placement.machineId !== machine || placement.generation !== (attachment.ownershipGeneration ?? attachment.generation)) throw new Error('Primary repository lease requires current canonical checkout ownership');
-      }
     } else {
       const placement = await access.authority.get();
       if (!placement || placement.machineId !== machine || !['open', 'opening', 'closing'].includes(placement.state)
@@ -67,11 +63,6 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     return access.authority.runtimeBrowserAuthority(input);
   }
   switch (operation) {
-    case 'runtime.attach': {
-      const input = RuntimeAttachInputSchema.parse(payload);
-      if (input.machineId !== machine || input.role !== 'primary') throw new Error('Machine may only enroll its canonical primary checkout');
-      return access.authority.runtimeAttach(input);
-    }
     case 'runtime.snapshot': return RuntimeSnapshotSchema.parse(await (await access.authority.runtimeSnapshot(identity)).json());
     case 'runtime.submit':
     case 'runtime.cancel':
@@ -85,6 +76,11 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
       if (['setApproval', 'setWorkspacePhase', 'saveAgentDefinition'].includes(input.command.type)) throw new Error('Administrative session changes require the direct device-signed cloud API');
       return RuntimeSessionResultSchema.parse(await (await access.authority.runtimeSession(input, { canApprove: false })).json());
     }
+    case 'runtime.attachment.cache.request': {
+      const input = RuntimeCacheAttachmentRequestInputSchema.parse(payload);
+      if (input.machineId !== machine) throw new Error('Cache request target mismatch');
+      return access.authority.runtimeCacheAttachmentRequest(input);
+    }
     case 'runtime.attachment.ready': {
       const input = RuntimeAttachmentReadyInputSchema.parse(payload);
       if (input.machineId !== machine) throw new Error('Attachment ready target mismatch');
@@ -93,7 +89,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     case 'runtime.snapshot.commit': {
       const input = RuntimeSnapshotCommitInputSchema.parse(payload);
       const attachments = await access.authority.runtimeAttachments(identity);
-      if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation && (item.role === 'primary' || item.role === 'replica'))) throw new Error('Checkpoint source is not this machine replica');
+      if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation && (item.role === 'cache'))) throw new Error('Checkpoint source is not this machine replica');
       return access.authority.runtimeSnapshotCommit(input);
     }
     case 'runtime.heartbeat': return access.authority.runtimeHeartbeat({ ...payload, machineId: machine });

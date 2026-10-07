@@ -27,7 +27,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
   });
   async function replica(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
     const selection = RuntimeDispatchSelectionSchema.parse(args);
-    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => item.state === 'ready' && (item.role === 'primary' || item.role === 'replica'));
+    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => item.role === 'cache' && item.heartbeatAt !== null && Date.now() - Date.parse(item.heartbeatAt) <= 30_000 && (item.state === 'ready' || item.cache?.state === 'paused' || item.cache?.state === 'reclaimed'));
     const selector = selection.on;
     if (typeof selector === 'string') {
       let machineId = candidates.find(item => item.machineId === selector)?.machineId;
@@ -54,9 +54,9 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
       }
     } else {
       const preferred = options.runtime().defaultExecutionMachine();
-      if (preferred !== null) candidates = candidates.filter(item => item.machineId === preferred);
+      if (preferred !== null) candidates.sort((a, b) => Number(b.machineId === preferred) - Number(a.machineId === preferred));
     }
-    const selected = candidates[0];
+    const selected = candidates.find(item => item.state === 'ready') ?? candidates[0];
     if (!selected) throw new Error('No machine attached: attach a ready workspace replica or choose an available execution machine.');
     return selected;
   }
@@ -70,8 +70,20 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
   }
   async function select(input: { requestId: string; attemptId: string; args: unknown }, state: DispatchSelectionState, signal: AbortSignal): Promise<RuntimeAttachment> {
     const selection = RuntimeDispatchSelectionSchema.parse(input.args);
-    if (selection.at === undefined) return replica(input.args);
-    if (!state.machineId) { state.machineId = (await replica(input.args)).machineId; save(input.attemptId, state); }
+    let canonical = await replica(state.machineId ? { ...selection, on: state.machineId } : input.args);
+    if (canonical.state !== 'ready') {
+      const action = options.runtime().attachments.requestCacheAction({ ...canonical, requestId: `wake:${input.attemptId}`, action: { kind: 'setup' } });
+      options.runtime().publish();
+      while (canonical.state !== 'ready') {
+        if (canonical.cacheAction?.status === 'failed') throw new Error(canonical.cacheAction.error ?? 'Cache setup failed');
+        await pause(signal);
+        const current = options.runtime().attachments.list().find(item => item.attachmentId === action.attachment.attachmentId);
+        if (!current || !current.heartbeatAt || Date.now() - Date.parse(current.heartbeatAt) > 30_000) throw new Error('No machine attached: selected cache is offline');
+        canonical = current;
+      }
+    }
+    if (selection.at === undefined) return canonical;
+    if (!state.machineId) { state.machineId = canonical.machineId; save(input.attemptId, state); }
     if (!state.commit) {
       if (selection.at === 'current') {
         const checkpoint = await options.runtime().cloudFiles.initializeSnapshot();
@@ -88,6 +100,8 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
     while (true) {
       signal.throwIfAborted();
       const attachments = options.runtime().attachments.list();
+      const host = attachments.find(item => item.machineId === state.machineId && item.role === 'cache');
+      if (!host?.heartbeatAt || Date.now() - Date.parse(host.heartbeatAt) > 30_000) throw new Error('No machine attached: selected machine is offline');
       let attachment = state.attachmentId ? attachments.find(item => item.attachmentId === state.attachmentId) : attachments.find(item => item.machineId === state.machineId && item.role === 'runner' && item.state === 'ready' && item.checkout.kind === 'snapshot' && item.checkout.commit === state.commit);
       if (!attachment) {
         if (state.attachmentId) throw new Error('Selected runner is no longer attached');

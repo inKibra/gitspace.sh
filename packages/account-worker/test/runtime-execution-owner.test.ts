@@ -64,8 +64,8 @@ async function ownerFixture(ctx: DurableObjectState) {
 test('cloud file ownership survives attached replicas; machine calls select the workspace default and fail immediately when unavailable', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`owner-proof:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, services, root, invoke, text, identity, checkpoint } = await ownerFixture(ctx);
-    const a = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'a', machineId: 'a', generation: 1, role: 'primary', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: new Date().toISOString() });
-    const b = RuntimeAttachmentSchema.parse({ ...a, attachmentId: 'b', machineId: 'b', role: 'replica', checkout: { kind: 'branch', branch: 'replica-b', commit: checkpoint.worktreeCommit } });
+    const a = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'a', machineId: 'a', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
+    const b = RuntimeAttachmentSchema.parse({ ...a, attachmentId: 'b', machineId: 'b' });
     const seed = (attachment: typeof a) => ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
     const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: `${dispatch.machineId}:${dispatch.snapshot?.worktreeCommit}` }] }));
     try {
@@ -97,7 +97,7 @@ test('cloud file ownership survives attached replicas; machine calls select the 
       expect(text(await invoke('bash', { command: 'pwd', on: 'a' }))).toBe(`a:${current?.worktreeCommit}`);
       expect(text(await invoke('rule_match_ast', { pattern: '$A', text: 'value' }))).toBe(`b:${current?.worktreeCommit}`);
       seed({ ...b, state: 'lost' });
-      expect((await invoke('bash', { command: 'pwd' })).status).toBe('failed');
+      expect(text(await invoke('bash', { command: 'pwd' }))).toBe(`a:${current?.worktreeCommit}`);
       expect(text(await invoke('read', { path: 'hello.txt' }))).toContain('cloud edit');
       await runtime.setExecutionMachine(null);
       expect(text(await invoke('bash', { command: 'pwd' }))).toBe(`a:${current?.worktreeCommit}`);
@@ -116,9 +116,9 @@ test('cloud file ownership survives attached replicas; machine calls select the 
       seed({ ...b, state: 'lost' });
       const executed = machine.mock.calls.length;
       const unavailableDefault = await invoke('bash', { command: 'pwd', at: 'current' });
-      expect(unavailableDefault.status).toBe('failed');
-      expect(text(unavailableDefault)).toContain('No machine attached');
-      expect(machine.mock.calls).toHaveLength(executed);
+      expect(unavailableDefault.status).toBe('completed');
+      expect(text(unavailableDefault)).toBe('a:undefined');
+      expect(machine.mock.calls).toHaveLength(executed + 1);
       expect(text(await invoke('grep', { pattern: 'cloud', on: 'a', at: 'current' }))).toBe('a:undefined');
       expect(machine.mock.calls.at(-1)?.[0].attachmentId).toBe('runner-a');
       await runtime.setExecutionMachine(null);
@@ -157,6 +157,31 @@ test('cloud file ownership survives attached replicas; machine calls select the 
       const onlyRunners = await invoke('bash', { command: 'pwd', at: 'current' });
       expect(onlyRunners.status).toBe('failed');
       expect(text(onlyRunners)).toContain('No machine attached');
+    } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('equal canonical caches fall back from stale defaults and require readiness after reconnect', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`cache-offline:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text, identity } = await ownerFixture(ctx);
+    const now = new Date().toISOString();
+    const cache = { state: 'live', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: null, reclaimAt: null, lastSyncAt: now, localWorkOptIn: false, setup: [] };
+    const a = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'cache-a', machineId: 'cache-a', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: now, heartbeatAt: now, cache });
+    const b = RuntimeAttachmentSchema.parse({ ...a, attachmentId: 'cache-b', machineId: 'cache-b' });
+    const seed = (attachment: typeof a) => ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
+    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: dispatch.machineId }] }));
+    try {
+      seed(a); seed(b);
+      await runtime.setExecutionMachine(b.machineId);
+      seed({ ...b, heartbeatAt: new Date(Date.now() - 31_000).toISOString() });
+      expect(text(await invoke('bash', { command: 'pwd' }))).toBe(a.machineId);
+      seed({ ...a, heartbeatAt: new Date(Date.now() - 31_000).toISOString() });
+      const before = machine.mock.calls.length;
+      expect((await invoke('bash', { command: 'pwd' })).status).toBe('failed');
+      expect(machine.mock.calls.length).toBe(before);
+      const resumed = runtime.attachments.heartbeat({ ...identity, machineId: a.machineId, attachmentId: a.attachmentId, generation: a.generation, executionObservation: { activeExecutions: 0, observedAt: now } });
+      expect(resumed.state).toBe('attaching');
+      expect((await invoke('bash', { command: 'pwd' })).status).toBe('failed');
     } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
@@ -218,7 +243,7 @@ test('grep searches the current cloud snapshot without a machine replica', async
 test('grep admits only a caught-up replica and falls back to the current cloud snapshot', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-routing:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text, identity, checkpoint } = await ownerFixture(ctx);
-    const replica = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-replica', machineId: 'search-machine', generation: 1, role: 'replica', state: 'ready', checkout: { kind: 'branch', branch: 'replica', commit: checkpoint.worktreeCommit }, capabilities: ['grep'], updatedAt: new Date().toISOString() });
+    const replica = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-replica', machineId: 'search-machine', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
     const seed = (commit: string) => ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', replica.attachmentId, JSON.stringify({ ...replica, executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: commit } }), 'fixture');
     const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'replica-hit' }] }));
     try {
@@ -244,7 +269,7 @@ test('grep admits only a caught-up replica and falls back to the current cloud s
 test('grep selects a healthy caught-up replica before a failing cloud index', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-index-failure:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text, identity, checkpoint, code } = await ownerFixture(ctx);
-    const replica = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-replica', machineId: 'search-machine', generation: 1, role: 'replica', state: 'ready', checkout: { kind: 'branch', branch: 'replica', commit: checkpoint.worktreeCommit }, capabilities: ['grep'], updatedAt: new Date().toISOString(), executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
+    const replica = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-replica', machineId: 'search-machine', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
     ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', replica.attachmentId, JSON.stringify(replica), 'fixture');
     ctx.storage.sql.exec('DELETE FROM runtime_search_state');
     const index = vi.spyOn(code, 'listSnapshotEntries').mockRejectedValue(new Error('Search index unavailable'));

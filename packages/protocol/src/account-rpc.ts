@@ -5,6 +5,7 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'runtime.answer': true, 'runtime.watch': true,
   'runtime.browserTrust': true, 'runtime.browserTargets': true, 'runtime.browserSelect': true,
   'runtime.session': true, 'runtime.executionMachine': true, 'runtime.qa': true,
+  'runtime.services': true,
   'runtime.attachment.request': true,
   'providers.login.start': true, 'providers.login.events': true,
   'providers.login.respond': true, 'providers.login.cancel': true,

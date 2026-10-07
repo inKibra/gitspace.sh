@@ -218,7 +218,7 @@ export async function gitLfsWorktreeTree(root: string, ref: string, otherRef: st
       const object = parseGitLfsPointer(await git(root, ['cat-file', 'blob', entry.oid]));
       if (!object) continue;
       const payload = await cached(root, object);
-      if (!payload) throw new Error(`Missing Git LFS object ${object.oid} for replica delta`);
+      if (!payload) throw new Error(`Missing Git LFS object ${object.oid} for cache delta`);
       const oid = text(await git(root, ['hash-object', '-w', '--no-filters', '--', payload])).trim();
       await git(root, ['update-index', '--add', '--cacheinfo', entry.mode, oid, path], env);
     }

@@ -3,7 +3,7 @@ import type { RuntimeAttachment, RuntimeSnapshotCommitInput } from '@gitspace/pr
 import type { AttachmentStore, ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import type { LifecycleState } from '@gitspace/protocol-environment';
 
-export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'proc', 'browser'];
+export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser'];
 
 /** Invoked behind canonical project/workspace and enrolled-machine authorization. */
 export class RuntimeAttachmentController {
@@ -19,31 +19,35 @@ export class RuntimeAttachmentController {
     authorizeMachine(machineId: RuntimeAttachment['machineId']): Promise<void>;
   }) {}
 
+  private async requiresFiltersOrSubmodules(repository: string, commit: string) {
+    const metadata = await this.options.code.readCommit(repository, commit);
+    if (!metadata) throw new Error('Selected snapshot commit is unavailable');
+    const trees = [metadata.treeHash];
+    while (trees.length) {
+      const next = trees.pop();
+      if (!next) break;
+      const tree = await this.options.code.readTree(repository, next);
+      if (!tree) throw new Error('Selected snapshot tree is unavailable');
+      for (const entry of tree) {
+        if (entry.type === 'gitlink' || entry.name === '.gitattributes' || entry.name === '.gitmodules') return true;
+        if (entry.type === 'tree') trees.push(entry.hash);
+      }
+    }
+    return false;
+  }
+
   async request(raw: unknown) {
     const input = RuntimeAttachmentRequestInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
     const repository = `workspace-${input.workspaceId}`;
-    const checkpoint = input.role === 'replica' || input.sourceRef.startsWith('refs/gitspace/') ? await this.options.snapshot() : null;
-    if (input.role === 'replica' && (!checkpoint || input.checkout.kind !== 'branch' || input.checkout.commit !== checkpoint.worktreeCommit)) throw new Error('Replica requires the current cloud snapshot and a private branch checkout');
+    const checkpoint = input.sourceRef.startsWith('refs/gitspace/') ? await this.options.snapshot() : null;
     if (input.sourceRef.startsWith('refs/gitspace/') && checkpoint?.checkpointRef !== input.sourceRef) throw new Error('Selected checkpoint ref is not canonical');
     const resolved = await this.options.code.resolveRef(repository, checkpoint?.worktreeCommit ?? input.sourceRef);
     if (resolved !== input.checkout.commit) throw new Error('Assigned source ref no longer resolves to the selected commit');
-    const metadata = await this.options.code.readCommit(repository, resolved);
-    if (!metadata) throw new Error('Selected snapshot commit is unavailable');
-    const trees = [metadata.treeHash];
-    let requiresFiltersOrSubmodules = false;
-    while (trees.length && !requiresFiltersOrSubmodules) {
-      const tree = await this.options.code.readTree(repository, trees.pop()!);
-      if (!tree) throw new Error('Selected snapshot tree is unavailable');
-      for (const entry of tree) {
-        if (entry.type === 'gitlink' || entry.name === '.gitattributes' || entry.name === '.gitmodules') { requiresFiltersOrSubmodules = true; break; }
-        if (entry.type === 'tree') trees.push(entry.hash);
-      }
-    }
+    const requiresFiltersOrSubmodules = await this.requiresFiltersOrSubmodules(repository, resolved);
     const result = await this.options.attachments.request(input, {
       ref: input.sourceRef, commit: resolved, requiresFiltersOrSubmodules,
-      ...(input.role === 'replica' && checkpoint ? { checkpoint } : {}),
-    }, input.checkout.kind === 'branch' && input.role !== 'replica' ? [...executorCapabilities, 'delegate_export'] : executorCapabilities);
+    }, input.checkout.kind === 'branch' ? [...executorCapabilities, 'delegate_export'] : executorCapabilities);
     this.options.publish();
     return result;
   }
@@ -51,11 +55,17 @@ export class RuntimeAttachmentController {
   async assignments(raw: unknown) {
     const input = RuntimeAssignmentsInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
-    const assigned = await this.options.attachments.assignments(input.machineId);
+    const assigned = await this.options.attachments.assignments(input.machineId, executorCapabilities);
     const assignments = await Promise.all(assigned.map(async ({ grant, source }) => {
-      if (grant.attachment.role === 'primary') return { grant, source: null, checkpoint: await this.options.snapshot() };
+      if (grant.attachment.role === 'cache') {
+        const checkpoint = await this.options.snapshot();
+        if (!checkpoint) return { grant, source: null, checkpoint };
+        const info = await this.options.code.info(`workspace-${grant.attachment.workspaceId}`);
+        const requiresFiltersOrSubmodules = await this.requiresFiltersOrSubmodules(`workspace-${grant.attachment.workspaceId}`, checkpoint.worktreeCommit);
+        return { grant, source: { ref: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit, requiresFiltersOrSubmodules, remote: info.remote, origin: await this.options.origin(grant.attachment.projectId), checkpoint }, checkpoint };
+      }
       if (!source) throw new Error('Private attachment source is missing');
-      const checkpoint = grant.attachment.role === 'replica' ? await this.options.snapshot() : null;
+      const checkpoint = null;
       const sourceCheckpoint = source.checkpoint;
       if (grant.attachment.state === 'draining' || grant.attachment.state === 'lost') return { grant, source: { ...source, origin: null }, checkpoint, sourceCheckpoint };
       const info = await this.options.code.info(`workspace-${grant.attachment.workspaceId}`);
@@ -68,19 +78,15 @@ export class RuntimeAttachmentController {
     const input = RuntimeAttachmentReadyInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
     const attachment = this.options.attachments.list().find(item => item.attachmentId === input.attachmentId && item.generation === input.generation);
-    if (attachment?.role === 'primary') {
-      const checkpoint = await this.options.snapshot();
-      if (!checkpoint) throw new Error('Primary readiness requires its canonical checkpoint');
-      const result = this.options.attachments.ready(input, checkpoint.worktreeCommit);
-      this.options.publish();
-      return result;
-    }
     const lifecycle = await this.options.lifecycle(input.projectId, input.workspaceId);
     for (const phase of ['machine/prepare', 'checks', 'workspace/materialize']) {
-      const run = lifecycle.runs.find(candidate => candidate.id === `attachment:${input.attachmentId}:${input.generation}:${phase}`);
+      const runId = attachment?.cacheAction?.action === 'setup' ? `attachment:${input.attachmentId}:${input.generation}:${attachment.cacheAction.requestId}:${phase}` : `attachment:${input.attachmentId}:${input.generation}:${phase}`;
+      const run = lifecycle.runs.find(candidate => candidate.id === runId);
       if (!run || run.status !== 'succeeded' || run.machineId !== input.machineId || run.attachment?.attachmentId !== input.attachmentId || run.attachment.generation !== input.generation) throw new Error(`Attachment prerequisite ${phase} lacks a successful durable receipt`);
     }
-    const result = this.options.attachments.ready(input);
+    const checkpoint = attachment?.role === 'cache' ? await this.options.snapshot() : null;
+    if (attachment?.role === 'cache' && !checkpoint) throw new Error('Cache readiness requires its canonical checkpoint');
+    const result = this.options.attachments.ready(input, checkpoint?.worktreeCommit);
     this.options.publish();
     return result;
   }

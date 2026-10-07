@@ -17,14 +17,28 @@ export type RuntimeBrowserExecution = z.infer<typeof RuntimeBrowserExecutionSche
 const result = { requestId: z.string().min(1), attemptId: z.string().min(1), content: z.array(RuntimeContentSchema), browser: RuntimeBrowserExecutionSchema.optional() };
 export const RuntimeToolResultSchema = z.discriminatedUnion('status', [z.object({ ...result, status: z.literal('completed') }), z.object({ ...result, status: z.literal('failed'), error: z.object({ code: z.string(), message: z.string() }) }), z.object({ ...result, status: z.literal('interrupted') })]);
 export const RuntimeCheckoutSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('shared'), branch: z.string().min(1) }), z.object({ kind: z.literal('snapshot'), commit: z.string().regex(/^[a-f0-9]{40,64}$/) }), z.object({ kind: z.literal('branch'), branch: z.string().min(1), commit: z.string().regex(/^[a-f0-9]{40,64}$/) })]);
-export const RuntimeAttachmentSchema = z.object({ ...identity, attachmentId: z.string().min(1), machineId: RuntimeMachineIdSchema, generation: z.number().int().nonnegative(), ownershipGeneration: z.number().int().nonnegative().optional(), role: z.enum(['primary', 'replica', 'runner', 'delegate']), checkout: RuntimeCheckoutSchema, state: z.enum(['attaching', 'ready', 'draining', 'detached', 'lost']), capabilities: z.array(z.string()), updatedAt: z.iso.datetime(), executionObservation: RuntimeExecutionObservationSchema.optional(), lfsRestored: z.array(GitLfsRestoredSchema).optional() });
+export const RuntimeCacheObservationSchema = z.object({
+  state: z.enum(['setup', 'live', 'paused', 'reclaimed', 'draining']),
+  platform: z.string().nullable(),
+  activity: z.array(z.object({ reason: z.enum(['command', 'service', 'watcher', 'proc', 'terminal', 'local-work', 'grace', 'setup', 'sync']), name: z.string() })),
+  lastActivityAt: z.iso.datetime(), pausedAt: z.iso.datetime().nullable(), reclaimAt: z.iso.datetime().nullable(), lastSyncAt: z.iso.datetime().nullable(),
+  localWorkOptIn: z.boolean(),
+  reclaimBlocked: z.string().nullable().default(null),
+  setup: z.array(z.object({ phase: z.enum(['machine/prepare', 'checks', 'workspace/materialize']), state: z.enum(['pending', 'waiting-for-approval', 'running', 'succeeded', 'failed']), runId: z.string().nullable() })),
+});
+export const RuntimeCachePolicySchema = z.object({ idleGraceSeconds: z.number().int().nonnegative().default(900), reclaimSeconds: z.number().int().nonnegative().default(86400) });
+export const RuntimeCacheActionSchema = z.object({ requestId: z.string().min(1), action: z.enum(['setup', 'reclaim']), status: z.enum(['requested', 'running', 'completed', 'failed']), error: z.string().nullable(), discardHeldBack: z.boolean().optional() });
+export type RuntimeCacheObservation = z.infer<typeof RuntimeCacheObservationSchema>;
+export type RuntimeCachePolicy = z.infer<typeof RuntimeCachePolicySchema>;
+export type RuntimeCacheAction = z.infer<typeof RuntimeCacheActionSchema>;
+export const RuntimeAttachmentSchema = z.object({ ...identity, attachmentId: z.string().min(1), machineId: RuntimeMachineIdSchema, generation: z.number().int().nonnegative(), ownershipGeneration: z.number().int().nonnegative().optional(), role: z.enum(['cache', 'runner', 'delegate']), checkout: RuntimeCheckoutSchema, state: z.enum(['attaching', 'ready', 'draining', 'detached', 'lost']), capabilities: z.array(z.string()), updatedAt: z.iso.datetime(), heartbeatAt: z.iso.datetime().nullable().default(null), cache: RuntimeCacheObservationSchema.optional(), cacheAction: RuntimeCacheActionSchema.optional(), detachRequest: z.object({ discardHeldBack: z.boolean().optional() }).optional(), executionObservation: RuntimeExecutionObservationSchema.optional(), lfsRestored: z.array(GitLfsRestoredSchema).optional() });
 export const RuntimeMessageSchema = z.object({ id: z.string(), role: z.enum(['user', 'assistant', 'tool', 'system']), content: z.array(RuntimeContentSchema), createdAt: z.iso.datetime() });
 export const RuntimeConversationSchema = z.object({ id: z.string(), parentId: z.string().nullable(), title: z.string(), status: z.enum(['idle', 'running', 'waiting', 'failed']), messages: z.array(RuntimeMessageSchema) });
 export const RuntimeTaskSchema = z.object({ id: z.string(), kind: z.string(), conversationId: z.string().nullable(), parentId: z.string().nullable(), background: z.boolean(), state: z.enum(['pending', 'running', 'waiting', 'completed', 'failed', 'interrupted']), machineId: RuntimeMachineIdSchema.nullable(), result: RuntimeJsonSchema.nullable() });
 export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: z.string(), kind: z.enum(['ask', 'approval']), prompt: z.string(), choices: z.array(z.string()), answer: RuntimeJsonSchema.nullable(), browser: RuntimeBrowserApprovalCardSchema.optional() });
 export const RuntimeSnapshotSchema = z.object({ version: z.literal(1), ...identity, cursor: z.number().int().nonnegative(), conversations: z.array(RuntimeConversationSchema), tasks: z.array(RuntimeTaskSchema), attachments: z.array(RuntimeAttachmentSchema), questions: z.array(RuntimeQuestionSchema), documents: z.record(z.string(), RuntimeJsonSchema) });
 export const RuntimeSnapshotInputSchema = RuntimeIdentitySchema;
-export const RuntimeSubmitInputSchema = z.object({ ...identity, conversationId: z.string().optional(), requestId: z.string().min(1), text: z.string().min(1) });
+export const RuntimeSubmitInputSchema = z.object({ ...identity, conversationId: z.string().optional(), requestId: z.string().min(1), text: z.string().min(1), draftRevision: z.number().int().nonnegative().optional() });
 export const RuntimeCancelInputSchema = z.object({ ...identity, conversationId: z.string() });
 export const RuntimeAnswerInputSchema = z.object({ ...identity, questionId: z.string(), answer: RuntimeJsonSchema, expectedBrowserPreparationId: z.string().optional() });
 export const RuntimeWatchInputSchema = z.object({ ...identity, after: z.number().int().nonnegative().nullable() });

@@ -9,14 +9,16 @@ import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, type AttachmentServices } from './attachments.js';
 import { createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeSessionCommand, RuntimeSessionResult, TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, RuntimeExecutionDocumentSchema, RuntimeMachineIdSchema, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
+import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, RuntimeExecutionDocumentSchema, RuntimeMachineIdSchema, RuntimeCachePolicySchema, type RuntimeCachePolicy, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { createCronRuntime, type RuntimeCronInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord';
 import { createHistoryIndex } from './history-index.js';
 import { createReplicaStore } from './replica-store.js';
+import { WorkspaceDraftStore } from './draft.js';
+import type { WorkspaceDraftSave, WorkspaceDraftSaveResult } from '@gitspace/protocol-runtime/draft';
 import { CloudFileStore } from './cloud-files.js';
-import type { ArtifactsCodeStore } from './artifacts.js';
+import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifacts.js';
 import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
 export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'listSnapshotEntries' | 'readBlob'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
@@ -27,14 +29,17 @@ export type WorkspaceRuntime = {
   cloudFiles: CloudFileStore;
   snapshot(): Promise<RuntimeSnapshot>;
   browserConversation(conversationId: string): Promise<{ id: ConversationId; root: boolean }>;
-  submit(input: RuntimeSubmitInput): Promise<RuntimeAccepted>;
+  submit(input: RuntimeSubmitInput, deviceId?: string): Promise<RuntimeAccepted>;
+  saveDraft(input: WorkspaceDraftSave, deviceId: string): Promise<WorkspaceDraftSaveResult>;
   cancel(input: RuntimeCancelInput): Promise<RuntimeAccepted>;
   answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted>;
   watch(input: RuntimeWatchInput): Promise<Response>;
   wake(): Promise<void>;
-  session(conversationId: string | undefined, command: RuntimeSessionCommand, canApprove?: boolean): Promise<RuntimeSessionResult>;
+  session(conversationId: string | undefined, command: RuntimeSessionCommand, canApprove?: boolean, deviceId?: string): Promise<RuntimeSessionResult>;
   setExecutionMachine(machineId: string | null): Promise<void>;
   defaultExecutionMachine(): string | null;
+  cachePolicy(): RuntimeCachePolicy;
+  setCachePolicy(reclaimSeconds: number): Promise<void>;
   waitForSnapshot(commit: string): Promise<void>;
   replicaReady(attachmentId: string, generation: number): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
@@ -58,6 +63,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const { harness } = runtime;
   const attachments = new AttachmentStore(options.storage, options.attachments);
   const execution = RuntimeExecutionDocumentSchema.parse(await options.storage.get('runtime.execution') ?? { defaultMachineId: null });
+  const cachePolicy = RuntimeCachePolicySchema.parse(await options.storage.get('runtime.cachePolicy') ?? {});
   const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.lfs, async (checkpoint, publicationId) => {
     try { await options.retainLfs(checkpoint, publicationId); }
     catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
@@ -66,12 +72,33 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     try { await cloudFiles.recover(); }
     catch (error) { options.onReport(error); await options.schedule(Date.now() + 5_000); }
   }
+  let definitionFiles: { commit: string; files: Array<{ path: string; content: string }> } | undefined;
+  const loadAgentDefinitions: NonNullable<SessionControlServices['loadAgentDefinitions']> = async () => {
+    const checkpoint = await cloudFiles.initializeSnapshot();
+    if (!checkpoint) return [];
+    if (definitionFiles?.commit === checkpoint.worktreeCommit) return definitionFiles.files;
+    const repository = artifactsWorkspaceRepository(options.identity.workspaceId);
+    const paths = (await options.code.listSnapshotPaths(repository, checkpoint.worktreeTree)).filter(path => /^(?:\.omp|\.agents)\/agents\/[A-Za-z0-9._-]+\.md$/u.test(path)).sort();
+    const files = await Promise.all(paths.map(async path => {
+      const blob = await options.code.readFile(repository, checkpoint.worktreeCommit, path);
+      if (!blob) throw new Error(`Committed agent definition is missing: ${path}`);
+      if (blob.size > 262144) throw new Error(`Agent definition exceeds 256 KiB: ${path}`);
+      return { path, content: await blob.text() };
+    }));
+    definitionFiles = { commit: checkpoint.worktreeCommit, files };
+    return files;
+  };
   const history = createHistoryIndex(options.storage, storage, (reference, conversationId) => attachments.historyResult(reference, conversationId));
   await history.refresh();
-  const controls = createSessionControls({ ...runtime, ...options.session, browser: options.browser, history: history.service, admitInference: options.admitInference });
-  const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog });
+  const controls = createSessionControls({ ...runtime, ...options.session, loadAgentDefinitions, browser: options.browser, history: history.service, admitInference: options.admitInference });
+  const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
   const cron = createCronRuntime({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { await options.schedule(Date.now() + 1000); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
+  const drafts = new WorkspaceDraftStore({
+    read: async () => { const value = replica.draft(); return value === undefined ? undefined : JSON.parse(value); },
+    write: async value => { replica.commitDraft(value.revision, JSON.stringify(value)); },
+  });
+  await drafts.initialize();
   options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_management(request_id TEXT PRIMARY KEY, input TEXT NOT NULL, result TEXT)');
   // Only committed task outcomes and tool/history entries prove materialization.
   // Receipt reads themselves never authorize collection.
@@ -241,7 +268,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     const workspace = await harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT);
     const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
-    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.execution': execution } });
+    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.execution': execution, 'gitspace.draft': drafts.snapshot(), cachePolicy } });
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops: diffRevisions(snapshot, next) });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
@@ -338,31 +365,39 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     async snapshotCommit(raw) {
       const input = RuntimeSnapshotCommitInputSchema.parse(raw);
       const authorize = () => {
-        const attachment = attachments.list().find(item => item.attachmentId === input.attachmentId && item.generation === input.generation && (item.role === 'primary' || item.role === 'replica') && ['attaching', 'ready', 'draining'].includes(item.state));
-        if (!attachment) throw new Error('Snapshot publication requires an authorized replica');
+        const attachment = attachments.list().find(item => item.attachmentId === input.attachmentId && item.generation === input.generation && (item.role === 'cache') && ['attaching', 'ready', 'draining'].includes(item.state));
+        if (!attachment) throw new Error('Snapshot publication requires an authorized cache');
         if (attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId) throw new Error('Snapshot identity mismatch');
-        if (input.final && attachment.state !== 'draining') throw new Error('Final snapshot requires a draining replica');
+        if (input.final && attachment.state !== 'draining') throw new Error('Final snapshot requires a draining cache');
         return attachment;
       };
       const attachment = authorize();
       const checkpoint = await cloudFiles.commitMachine(input.checkpoint, input.previousWorktreeCommit, attachment.machineId, authorize);
       try { await cloudFiles.flushRetention(); }
       catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
-      if (input.final) attachments.recordPrimaryFlush(input.attachmentId, input.generation);
+      if (input.final) attachments.recordCacheFlush(input.attachmentId, input.generation);
       await options.storage.sync();
       publish(); await line;
       return { accepted: true, cursor: snapshot.cursor, checkpoint };
     },
     lfsRoots: () => cloudFiles.lfsRoots(),
     reconcileLfsSources: objects => cloudFiles.reconcileLfsSources(objects),
-    async session(conversationId, command, canApprove = false) {
-      const wakesTasks = !['control', 'agentSetup', 'historyAnchorId', 'messages', 'historyPage', 'persist', 'handoff', 'stop'].includes(command.type);
-      if (wakesTasks) await options.schedule(Date.now() + 1000);
+    async session(conversationId, command, canApprove = false, deviceId) {
+      const clearsDraft = deviceId !== undefined && command.type === 'prompt' && command.draftRevision !== undefined && (conversationId === undefined || conversationId === String(runtime.root.id));
+      const wakesTasks = ['prompt', 'answerAsk', 'compact', 'promoteQueuedMessage', 'resume'].includes(command.type);
       const result = await controls.execute(conversationId, command, canApprove);
+      if (wakesTasks) await options.schedule(Date.now() + 1000);
+      if (clearsDraft && command.type === 'prompt' && command.draftRevision !== undefined) { await drafts.clear(command.draftRevision, deviceId); publish(); await line; }
       if (wakesTasks) { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); }
       return result;
     },
     defaultExecutionMachine: () => execution.defaultMachineId,
+    cachePolicy: () => cachePolicy,
+    async setCachePolicy(reclaimSeconds) {
+      cachePolicy.reclaimSeconds = RuntimeCachePolicySchema.shape.reclaimSeconds.parse(reclaimSeconds);
+      await options.storage.put('runtime.cachePolicy', cachePolicy);
+      publish(); await line;
+    },
     async replicaReady(attachmentId, generation) {
       const attachment = attachments.list().find(item => item.attachmentId === attachmentId && item.generation === generation && item.state === 'ready');
       if (!attachment?.lfsRestored?.length) return;
@@ -392,22 +427,29 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     },
     async setExecutionMachine(machineId) {
       const selected = machineId === null ? null : RuntimeMachineIdSchema.parse(machineId);
-      if (selected !== null && !attachments.list().some(item => item.machineId === selected && (item.role === 'primary' || item.role === 'replica') && item.state === 'ready')) throw new Error('Default execution machine must have a ready workspace replica');
+      if (selected !== null && !attachments.list().some(item => item.machineId === selected && (item.role === 'cache') && item.state === 'ready')) throw new Error('Default execution machine must have a ready workspace cache');
       execution.defaultMachineId = selected;
       await options.storage.put('runtime.execution', execution);
       publish(); await line;
     },
     async snapshot() { await line; return snapshot; },
-    async submit(input: RuntimeSubmitInput) {
+    async saveDraft(input, deviceId) {
+      const result = await drafts.save(input, deviceId);
+      publish(); await line;
+      return result;
+    },
+    async submit(input: RuntimeSubmitInput, deviceId) {
       const target = await conversation(input.conversationId);
+      if ((await harness.snapshot(AgentDefinitionContextDoc, target.id, BACKGROUND_CONTEXT))?.child) throw new Error('User messages must target the workspace main conversation');
+      await controls.loadDefinitions(target);
       await options.schedule(Date.now() + 1000);
       await runtime.lifecycle.userInput(String(target.id), async () => {
-        const child = (await harness.snapshot(AgentDefinitionContextDoc, target.id, BACKGROUND_CONTEXT))?.child;
-        const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, target.id, BACKGROUND_CONTEXT))?.selection ?? { kind: 'default' as const };
+        const selection = (await harness.snapshot(SessionControlsDoc, target.id, BACKGROUND_CONTEXT))?.selection ?? { kind: 'default' as const };
         const admitted = await options.admitInference({ conversationId: String(target.id), requestId: input.requestId, selection });
         await runtime.configureModel(target.id, admitted);
         await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, BACKGROUND_CONTEXT);
       });
+      if (deviceId !== undefined && input.draftRevision !== undefined && target.id === runtime.root.id) { await drafts.clear(input.draftRevision, deviceId); publish(); }
       options.waitUntil(target.waitForIdle(BACKGROUND_CONTEXT));
       await line;
       return { accepted: true as const, cursor: snapshot.cursor, conversationId: String(target.id) };

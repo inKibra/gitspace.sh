@@ -15,6 +15,7 @@ import type { EffectiveSecretMetadata } from '@gitspace/protocol';
 import type { WorkspaceLifecyclePlanResult, WorkspaceLifecyclePlanStep } from './workspace-hub.js';
 import type { ProjectLifecycleAuthority } from './project-lifecycle.js';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
+import type { RuntimeCacheObservation } from '@gitspace/protocol-runtime';
 
 
 export interface EnvironmentExecutionView {
@@ -95,7 +96,6 @@ export class WorkspaceEnvironmentManager {
         await this.authority.mutateLifecycleState(projectId, spaceId, { op: 'incidents', runId: run.id, incidents: pending.incidents });
       }
       await rm(pending.directory, { recursive: true, force: true });
-      if (pending.workingDirectory) await rm(pending.workingDirectory, { recursive: true, force: true });
       await rm(`${journal}.incident.tmp`, { force: true });
       await rm(journal);
     }
@@ -205,7 +205,7 @@ export class WorkspaceEnvironmentManager {
   }
 
   /** The request ends after durable acceptance; no caller signal owns execution. */
-  async acceptRun(spaceId: string, candidate: LifecycleRunRequest): Promise<LifecycleRun> {
+  async acceptRun(spaceId: string, candidate: LifecycleRunRequest, attachment?: LocalAttachment): Promise<LifecycleRun> {
     const request = parseLifecycleRunRequest(candidate);
     const key = `${spaceId}:${request.runId}`;
     const accepting = this.accepting.get(key);
@@ -213,7 +213,7 @@ export class WorkspaceEnvironmentManager {
       assertLifecycleRequestIdentity(request, accepting);
       return accepting.promise;
     }
-    const space = this.database.getSpace(spaceId);
+    const space = attachment ? { projectId: attachment.attachment.projectId } : this.database.getSpace(spaceId);
     if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
     const state = await this.authority.getLifecycleState(space.projectId, spaceId);
     const concurrent = this.accepting.get(key);
@@ -229,9 +229,11 @@ export class WorkspaceEnvironmentManager {
     const accepted = Promise.withResolvers<LifecycleRun>();
     this.accepting.set(key, { phase: request.phase, interactive: request.interactive, promise: accepted.promise });
     const options = { ...request, accepted: (run: LifecycleRun) => { this.accepting.delete(key); accepted.resolve(run); } };
-    const execution = request.phase === 'checks'
-      ? this.runApproved(spaceId, 'checks', true, undefined, options)
-      : this.runPhase(spaceId, request.phase, request.rerun ?? false, options);
+    const execution = attachment && !request.phase.startsWith('cloud/')
+      ? this.runApproved(spaceId, request.phase, request.rerun ?? true, attachment.rootPath, options, attachment)
+      : request.phase === 'checks'
+        ? this.runApproved(spaceId, 'checks', true, undefined, options)
+        : this.runPhase(spaceId, request.phase, request.rerun ?? false, options);
     void execution.catch((error: unknown) => {
       accepted.reject(error);
       console.error('[gitspace-lifecycle] accepted operation requires attention', request.runId, error);
@@ -288,12 +290,13 @@ export class WorkspaceEnvironmentManager {
     }
   }
 
-  /** Runner copies must complete their own approved preparation before attachment readiness. */
-  async prepareAttachment(local: LocalAttachment, signal: AbortSignal): Promise<void> {
+  /** Every machine cache completes its own approved preparation before readiness. */
+  async prepareAttachment(local: LocalAttachment, signal: AbortSignal, progress?: (step: RuntimeCacheObservation['setup'][number]) => Promise<void>): Promise<void> {
     const { workspaceId, projectId, attachmentId, generation } = local.attachment;
     for (const phase of ['machine/prepare', 'checks', 'workspace/materialize'] as const) {
       signal.throwIfAborted();
-      const runId = `attachment:${attachmentId}:${generation}:${phase}`;
+      const runId = `attachment:${attachmentId}:${generation}:${local.attachment.cacheAction?.action === 'setup' ? `${local.attachment.cacheAction.requestId}:` : ''}${phase}`;
+      await progress?.({ phase, state: 'running', runId });
       let cancellation: Promise<unknown> | undefined;
       const cancel = () => { cancellation ??= this.authority.mutateLifecycleState(projectId, workspaceId, { op: 'cancel', runId }); void cancellation.catch(() => {}); };
       signal.addEventListener('abort', cancel, { once: true });
@@ -304,6 +307,11 @@ export class WorkspaceEnvironmentManager {
         }, local);
         if (results.some(result => result.exitCode !== 0)) throw new EnvironmentError('ExecutionFailed', 'Attachment preparation failed', { attachmentId, phase });
         signal.throwIfAborted();
+        await progress?.({ phase, state: 'succeeded', runId });
+      } catch (error) {
+        const waiting = error instanceof EnvironmentError && ['ApprovalRequired', 'RunConflict'].includes(error.code);
+        await progress?.({ phase, state: waiting ? 'waiting-for-approval' : 'failed', runId });
+        throw error;
       } finally {
         signal.removeEventListener('abort', cancel);
         await cancellation;
@@ -324,7 +332,7 @@ export class WorkspaceEnvironmentManager {
         const pending = JSON.parse(await readFile(join(this.options.stateRoot, file), 'utf8')) as PendingLifecycleRun;
         if (this.active.has(pending.runId) || this.accepting.has(`${pending.spaceId}:${pending.runId}`)) continue;
         const space = this.database.getSpace(pending.spaceId);
-        if (!space || space.projectId !== pending.projectId) throw new EnvironmentError('NotFound', 'Lifecycle recovery space is unavailable');
+        if ((space && space.projectId !== pending.projectId) || (!space && !pending.workingDirectory)) throw new EnvironmentError('NotFound', 'Lifecycle recovery space is unavailable');
         const state = await this.authority.getLifecycleState(pending.projectId, pending.spaceId);
         const run = state.runs.find((entry) => entry.id === pending.runId);
         if (!run || !isLifecycleRunActive(run)) {
@@ -337,7 +345,7 @@ export class WorkspaceEnvironmentManager {
           if (!this.runner?.cancelLifecycleRun) continue;
           await this.runner.cancelLifecycleRun(pending.spaceId, pending.terminalName, pending.workingDirectory);
         }
-        const secrets = pending.secretNames.length ? await this.secrets?.materializeProjectSecrets(pending.projectId, pending.secretNames, space.kind === 'base' ? null : space.id) : {};
+        const secrets = pending.secretNames.length ? await this.secrets?.materializeProjectSecrets(pending.projectId, pending.secretNames, pending.projectId === pending.spaceId ? null : pending.spaceId) : {};
         if (!secrets) continue;
         const bindings = await this.readBindings(pending.directory, Object.values(secrets));
         await this.syncPendingLog(pending);
@@ -349,7 +357,6 @@ export class WorkspaceEnvironmentManager {
         });
         await rm(join(this.options.stateRoot, file));
         await rm(pending.directory, { recursive: true, force: true });
-        if (pending.workingDirectory) await rm(pending.workingDirectory, { recursive: true, force: true });
       } catch (error) {
         console.error('[gitspace-lifecycle] interrupted run requires explicit recovery', file, error instanceof Error ? error.message : String(error));
       }

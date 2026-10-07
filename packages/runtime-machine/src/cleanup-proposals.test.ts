@@ -66,7 +66,7 @@ test('cleanup refuses unresolved effects and forged primary scope', async () => 
   try {
     await writeFile(join(f.root, 'work'), 'keep');
     const input = { attachment: { ...f.local.attachment, state: 'draining' as const }, checkoutRoot: f.directory, signal: f.signal, stopAndVerify: async () => {}, verifyUnmounted: async () => {} };
-    await expect(cleanupMachineAttachment(f.journal, { ...input, attachment: { ...input.attachment, role: 'primary' } })).rejects.toThrow();
+    await expect(cleanupMachineAttachment(f.journal, { ...input, attachment: { ...input.attachment, role: 'cache' } })).rejects.toThrow();
     f.journal.begin(RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'runner', generation: 1,
     conversationId: 'conversation', taskId: 'task', requestId: 'request', attemptId: 'attempt', tool: 'bash', args: { command: 'effect' },
     deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe', }));
@@ -78,7 +78,7 @@ test('cleanup refuses unresolved effects and forged primary scope', async () => 
 test('primary drain preserves shared files and failed cleanup cannot acknowledge detach', async () => {
   const f = await fixture();
   try {
-    const primary: LocalAttachment = { ...f.local, attachment: { ...f.local.attachment, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, ownershipGeneration: 7 } };
+    const primary: LocalAttachment = { ...f.local, attachment: { ...f.local.attachment, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, ownershipGeneration: 7 } };
     f.journal.installAttachment(primary);
     await writeFile(join(f.root, 'work'), 'shared work');
     const input = { attachment: { ...primary.attachment, state: 'draining' as const }, checkoutRoot: '/not-a-private-checkout', signal: f.signal, stopAndVerify: async () => { throw new Error('process still running'); }, verifyUnmounted: async () => { throw new Error('must not unmount shared checkout'); } };

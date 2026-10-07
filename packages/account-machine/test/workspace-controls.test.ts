@@ -16,7 +16,7 @@ describe('Machine workspace control admission', () => {
       environments: { acceptRun: async () => { lifecycleRuns += 1; } },
     } as unknown as Parameters<typeof machineOperationalTools>[0];
     const tools = machineOperationalTools(options);
-    const run = (tool: string, args: RuntimeToolDispatch['args']) => tools[tool]!({ projectId: 'project-a', workspaceId: 'workspace-a', args } as RuntimeToolDispatch, { attachment: { role: 'primary' } } as Parameters<typeof tools[string]>[1], new AbortController().signal);
+    const run = (tool: string, args: RuntimeToolDispatch['args']) => tools[tool]!({ projectId: 'project-a', workspaceId: 'workspace-a', args } as RuntimeToolDispatch, { attachment: { role: 'cache' } } as Parameters<typeof tools[string]>[1], new AbortController().signal);
     return { run, creations: () => creations, lifecycleRuns: () => lifecycleRuns, managementCalls: () => managementCalls };
   }
   it('validates every draft before workspace creation', async () => {

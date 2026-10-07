@@ -28,15 +28,28 @@ describe('runtime to existing shell adapter', () => {
     expect(html).not.toContain('Open on machine');
   });
 
-  it('preserves role, generation and canonical phase without treating loss as ownership transfer', () => {
+  it('preserves canonical generation and phase without treating cache loss as ownership transfer', () => {
     const snapshot = fixture();
-    snapshot.attachments = [RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: project.id, workspaceId: workspace.id, attachmentId: 'primary', machineId: 'offline', generation: 8, role: 'primary', checkout: { kind: 'shared', branch: 'runtime' }, state: 'lost', capabilities: [], updatedAt: stamp })];
+    snapshot.attachments = [RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: project.id, workspaceId: workspace.id, attachmentId: 'cache', machineId: 'offline', generation: 2, ownershipGeneration: 8, role: 'cache', checkout: { kind: 'shared', branch: 'runtime' }, state: 'lost', capabilities: [], updatedAt: stamp })];
     const scope = runtimeScope(snapshot, inspection);
     expect(scope.workspace.holder).toEqual({ kind: 'held', machineId: 'offline', label: 'offline' });
     expect(scope.workspace.generation).toBe(8);
     expect(scope.workspace.phase).toBe('review');
     snapshot.documents['gitspace.workspace'] = { phase: 'ship' };
     expect(runtimeScope(snapshot, inspection).workspace.phase).toBe('ship');
+  });
+
+  it('uses the default equal cache for presentation without closing cloud scope or substituting its lease generation', () => {
+    const snapshot = fixture();
+    snapshot.attachments = ['first', 'preferred'].map(machineId => RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: project.id, workspaceId: workspace.id, attachmentId: machineId, machineId, generation: machineId === 'first' ? 90 : 200, role: 'cache', checkout: { kind: 'shared', branch: 'runtime' }, state: 'ready', capabilities: [], updatedAt: stamp }));
+    snapshot.documents['gitspace.execution'] = { defaultMachineId: 'preferred' };
+    const scope = runtimeScope(snapshot, inspection);
+    expect(scope.workspace.holder).toEqual({ kind: 'held', machineId: 'preferred', label: 'preferred' });
+    expect(scope.workspace.generation).toBe(0);
+    expect(scope.workspace.closedAt).toBeNull();
+    snapshot.attachments = [];
+    expect(runtimeScope(snapshot, inspection).workspace.closedAt).toBeNull();
+    expect(runtimeScope(snapshot, inspection).workspace.holder).toEqual({ kind: 'unknown' });
   });
 
   it('uses authoritative relations and stack findings instead of erasing the graph', () => {

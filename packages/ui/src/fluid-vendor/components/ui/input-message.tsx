@@ -549,6 +549,10 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
     } = textareaProps ?? {};
 
     const filesArr = useMemo(() => files ?? [], [files]);
+    const currentDraft = useRef({ value, files: filesArr });
+    if (currentDraft.current.value !== value || currentDraft.current.files !== filesArr) {
+      currentDraft.current = { value, files: filesArr };
+    }
     const supportsFiles = onFilesChange !== undefined;
 
     // Queue is active only when both the status is controlled and a change
@@ -568,6 +572,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
     // ArrowDown past the newest entry restores it.
     const [historyIndex, setHistoryIndex] = useState<number | null>(null);
     const draftBeforeHistory = useRef("");
+    const historyKey = useRef(0);
 
     // Suggested prompts. The list only shows while the draft is empty, and
     // `activeSuggestion` is the highlighted row — focus never leaves the
@@ -695,6 +700,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
       // While the assistant is streaming, queue mode snapshots the draft
       // while steer mode sends it directly into the active turn.
       if (streaming && supportsQueue && streamingSubmitBehavior === "queue") {
+        const submitted = currentDraft.current;
         const item: QueuedMessage = {
           id: crypto.randomUUID(),
           text: trimmed,
@@ -702,8 +708,10 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
         };
         const accepted = await onQueueChange?.([...queueRef.current, item]);
         if (accepted === false) return;
-        onValueChange("");
-        if (supportsFiles) onFilesChange?.([]);
+        if (currentDraft.current === submitted) {
+          onValueChange("");
+          if (supportsFiles) onFilesChange?.([]);
+        }
         requestAnimationFrame(() => textareaRef.current?.focus());
         return;
       }
@@ -819,6 +827,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
 
     const handleKeyDown = useCallback(
       (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+        const key = ++historyKey.current;
         if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         if (e.key === "Enter" && isTouch) return;
 
@@ -876,9 +885,8 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
           return;
         }
 
-        // Readline-style history. Only plain ArrowUp/ArrowDown navigate (no
-        // modifiers), and only when the caret is on the first/last line so
-        // multi-line editing still works normally.
+        // Let native caret movement resolve soft wraps before consulting history.
+        // Only a key that leaves the selection unchanged is a history boundary.
         if (
           history.length > 0 &&
           (e.key === "ArrowUp" || e.key === "ArrowDown") &&
@@ -890,35 +898,30 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
           const el = e.currentTarget;
           const caret = el.selectionStart ?? 0;
           const end = el.selectionEnd ?? caret;
-          if (e.key === "ArrowUp" && !value.slice(0, caret).includes("\n")) {
-            const start = historyIndex == null ? history.length : historyIndex;
-            if (start > 0) {
-              e.preventDefault();
+          const direction = e.key;
+          setTimeout(() => {
+            if (
+              key !== historyKey.current ||
+              textareaRef.current !== el ||
+              document.activeElement !== el ||
+              el.value !== value ||
+              el.selectionStart !== caret ||
+              el.selectionEnd !== end
+            ) return;
+            if (direction === "ArrowUp") {
+              const start = historyIndex ?? history.length;
+              if (start === 0) return;
               if (historyIndex == null) draftBeforeHistory.current = value;
-              const ni = start - 1;
-              setHistoryIndex(ni);
-              onValueChange(history[ni]);
-              setCaretEnd();
-            }
-            return;
-          }
-          if (
-            e.key === "ArrowDown" &&
-            historyIndex != null &&
-            !value.slice(end).includes("\n")
-          ) {
-            e.preventDefault();
-            const ni = historyIndex + 1;
-            if (ni >= history.length) {
-              setHistoryIndex(null);
-              onValueChange(draftBeforeHistory.current);
+              setHistoryIndex(start - 1);
+              onValueChange(history[start - 1]);
             } else {
-              setHistoryIndex(ni);
-              onValueChange(history[ni]);
+              if (historyIndex == null) return;
+              const next = historyIndex + 1;
+              setHistoryIndex(next >= history.length ? null : next);
+              onValueChange(next >= history.length ? draftBeforeHistory.current : history[next]);
             }
             setCaretEnd();
-            return;
-          }
+          }, 0);
         }
 
         if (e.key === "Enter" && !e.shiftKey) {

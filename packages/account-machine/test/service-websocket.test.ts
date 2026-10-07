@@ -18,8 +18,7 @@ test('real machine connector authenticates service ingress before bridging a loc
   const backendHeaders = Promise.withResolvers<Headers>();
   const service = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request, server) { backendHeaders.resolve(request.headers); if (server.upgrade(request)) return; return new Response('upgrade required', { status: 400 }); }, websocket: { message(socket, message) { socket.send(`echo:${message}`); } } });
   const manager = new WorkspaceServiceManager(database, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine-a', root, 'gssh.dev', 'test', undefined, async () => trust);
-  const hostname = 'socket--workspace--test-srv.gssh.dev';
-  await manager.registerProcessRoute({ projectId: 'project', workspaceId: 'workspace', generation: 1, name: 'socket', portName: 'http', port: service.port! });
+  const hostname = new URL(await manager.registerProcessRoute({ projectId: 'project', workspaceId: 'workspace', generation: 1, name: 'socket', portName: 'http', port: service.port! })).hostname;
   const ingress = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) { return await manager.proxy(request) ?? new Response(null, { status: 404 }); } });
   const connected = Promise.withResolvers<Bun.ServerWebSocket<undefined>>();
   const echoed = Promise.withResolvers<string>();
@@ -56,7 +55,7 @@ test('real machine connector authenticates service ingress before bridging a loc
 test('machine-B loopback WebSocket forwarding signs the relay target and preserves text and binary frames', async () => {
   const signingPrivateKey = new Uint8Array(32).fill(17);
   const signingPublicKey = credentialProtocolBase64.encode(ed25519.getPublicKey(signingPrivateKey));
-  const hostname = 'socket--workspace--test-srv.gssh.dev';
+  const hostname = 'socket--workspace-machine-a--test-srv.gssh.dev';
   const relay = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request, server) {
     const url = new URL(request.url);
     const authorization = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey, target: `${request.method}\n${url.pathname}${url.search}`, maxSkewMs: 30_000 });

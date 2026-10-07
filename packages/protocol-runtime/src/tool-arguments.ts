@@ -59,6 +59,7 @@ export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof Ru
   if (['read', 'grep', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait'].includes(String(args.op));
+  if (name === 'service') return args.op === 'list' || args.op === 'logs';
   if (name.startsWith('space_') || name === 'environment') return ['get', 'current', 'list', 'operations', 'describe', 'read', 'readCode', 'listScopes', 'listPromotions', 'runLog', 'log'].includes(String(args.method));
   return false;
 }
