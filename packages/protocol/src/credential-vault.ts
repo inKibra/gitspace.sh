@@ -167,8 +167,6 @@ export const controlOperationSchema = z.enum([
   'runtime.cancel',
   'runtime.answer',
   'runtime.session',
-  'runtime.model',
-  'runtime.mcp',
   'runtime.snapshot.commit',
   'runtime.assignments',
   'runtime.attachment.ready',

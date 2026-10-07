@@ -34,7 +34,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'] },
 };
 async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = []) {
-  const tools = [...createRuntimeTools({ ...services, invoke }, jobServices), ...extraTools];
+  const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools }));
   let generation = 0;
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
@@ -175,7 +175,7 @@ test('agent environment registration rejects human lifecycle options before disp
 });
 
 test('agent advertised lifecycle schema excludes human options', () => {
-  const environment = createRuntimeTools(services, operations).find(tool => tool.name === 'environment');
+  const environment = createRuntimeTools(services, operations, unused, unused).find(tool => tool.name === 'environment');
   if (!environment) throw new Error('Missing environment registration');
   const advertised = JSON.stringify(environment.parameters);
   expect(advertised).not.toContain('"interactive"');
@@ -277,3 +277,84 @@ test('bash logs exposes executor failures as tool errors rather than successful 
     expect(JSON.stringify(result?.content)).toContain('Command output is unavailable');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 4000);
+
+test('codemode children own durable attempts and recheck plan permissions rather than inheriting parent approval', async () => {
+  const invoked: Array<Parameters<ToolServices['invoke']>[0]> = [];
+  const fixture = await registered([[call('codemode', { code: 'composed' })]], async input => {
+    invoked.push(input);
+    if (input.tool !== 'codemode') return completed(input);
+    if (!input.codemodeTools) throw new Error('Missing durable codemode tool authority');
+    const signal = AbortSignal.timeout(2000);
+    await input.codemodeTools({ tool: 'read', args: { path: 'before.txt' }, callId: 'nested-read', signal });
+    await input.codemodeTools({ tool: 'write', args: { path: 'allowed.txt', content: 'allowed' }, callId: 'nested-write', signal });
+    await fixture.harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'plan'; }, BACKGROUND_CONTEXT);
+    await expect(input.codemodeTools({ tool: 'write', args: { path: 'denied.txt', content: 'denied' }, callId: 'nested-denied', signal })).resolves.toMatchObject({ status: 'failed', error: expect.stringContaining('Plan mode') });
+    await expect(input.codemodeTools({ tool: 'codemode', args: { code: 'return 1' }, callId: 'nested-isolate', signal })).resolves.toMatchObject({ status: 'failed', error: expect.stringContaining('Nested codemode') });
+    return completed(input);
+  });
+  try {
+    await fixture.root.submit({ type: 'input', content: 'Compose tools.' }, BACKGROUND_CONTEXT);
+    await fixture.root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(invoked.map(input => input.tool)).toEqual(['codemode', 'read', 'write']);
+    expect(new Set(invoked.map(input => input.attemptId)).size).toBe(3);
+    const rawResults = (await fixture.root.entries({}, 100, undefined, BACKGROUND_CONTEXT)).items.flatMap(entry => entry.model ?? []).filter(message => message.role === 'toolResult');
+    expect(rawResults.find(result => result.toolCallId === 'nested-denied')?.isError).toBe(true);
+    const results = (await fixture.root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
+    expect(results.some(result => result.toolCallId.startsWith('nested-'))).toBe(false);
+    const parentResult = results.find(result => result.toolCallId === 'codemode');
+    expect(parentResult?.isError, JSON.stringify(parentResult)).not.toBe(true);
+  } finally { await fixture.harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('codemode child mutation asks independently and rejection prevents its effect', async () => {
+  let mutations = 0;
+  const fixture = await registered([[call('codemode', { code: 'composed' })]], async input => {
+    if (input.tool !== 'codemode') { mutations++; return completed(input); }
+    if (!input.codemodeTools) throw new Error('Missing codemode permission authority');
+    await fixture.harness.commit(async tx => { (await tx.doc(SessionControlsDoc, fixture.root.id)).approvalMode = 'write'; }, BACKGROUND_CONTEXT);
+    await expect(input.codemodeTools({ tool: 'write', args: { path: 'denied', content: 'denied' }, callId: 'nested-rejected', signal: AbortSignal.timeout(2000) })).resolves.toMatchObject({ status: 'failed', error: expect.stringContaining('not approved') });
+    return completed(input);
+  });
+  await fixture.harness.commit(async tx => { await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
+  const watch = await fixture.harness.watchDoc(QuestionsDoc, BACKGROUND_CONTEXT);
+  if (!watch) throw new Error('Questions fixture document missing');
+  const asked = Promise.withResolvers<string>();
+  watch.start(async value => {
+    const question = value?.items.find(item => item.prompt.startsWith('Allow write?') && item.answer === null);
+    if (question) asked.resolve(question.id);
+  });
+  try {
+    await fixture.root.submit({ type: 'input', content: 'Request a denied mutation.' }, BACKGROUND_CONTEXT);
+    const id = await asked.promise;
+    expect(mutations).toBe(0);
+    await fixture.harness.commit(async tx => {
+      const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === id);
+      if (!question) throw new Error('Child approval disappeared');
+      question.answer = false;
+    }, BACKGROUND_CONTEXT);
+    await fixture.root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(mutations).toBe(0);
+    const parent = (await fixture.root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'codemode');
+    expect(parent?.role === 'toolResult' && parent.isError, JSON.stringify(parent)).not.toBe(true);
+  } finally { await watch.stop(); await fixture.harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('codemode authority distinguishes definitive denied reads from interrupted child effects', async () => {
+  let effects = 0;
+  const outcomes: unknown[] = [];
+  const fixture = await registered([[call('codemode', { code: 'outcome-proof' })]], async input => {
+    if (input.tool === 'write') { effects++; return completed(input); }
+    if (input.tool === 'read') return { requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text: 'Unknown executor outcome' }] };
+    if (!input.codemodeTools) throw new Error('Missing codemode authority');
+    for (const [tool, args, callId] of [['write', { path: 'effect', content: 'once' }, 'effect'], ['ungranted-read', {}, 'denied'], ['read', { path: 'unknown' }, 'unknown']] as const) {
+      outcomes.push(await input.codemodeTools({ tool, args, callId, signal: AbortSignal.timeout(2000) }).catch(error => ({ thrown: String(error) })));
+    }
+    return completed(input);
+  });
+  try {
+    await fixture.root.submit({ type: 'input', content: 'Distinguish child outcomes.' }, BACKGROUND_CONTEXT);
+    await fixture.root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(effects).toBe(1);
+    expect(outcomes).toMatchObject([{ status: 'completed' }, { status: 'failed' }, { status: 'interrupted' }]);
+  } finally { await fixture.harness.close(BACKGROUND_CONTEXT); }
+}, 5000);

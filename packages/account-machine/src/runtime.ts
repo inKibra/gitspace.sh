@@ -27,6 +27,7 @@ import {
 } from './index.js';
 import { installDefaultGitSpaceSkills } from './default-skills.js';
 import { WorkspaceServiceManager } from './workspace-services.js';
+import { createServiceAccessClient } from './service-forward.js';
 import { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import { credentialProtocolBase64, type CloudProjectSummary, type CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
@@ -207,6 +208,7 @@ export async function startMachineRuntime() {
     machineId,
     signingPrivateKey: signingKey(),
   };
+  const serviceAccess = createServiceAccessClient(controlOptions);
   const authority = new CloudSpaceCheckpointAuthority(controlOptions);
   const checkpointBlobs = new CloudDataCheckpointBlobStore(controlOptions);
   const cloudRuntime = new CloudRuntimeClient(controlOptions);
@@ -333,8 +335,7 @@ export async function startMachineRuntime() {
   const existingMachine = (await authority.listMachineDefinitions()).find((machine) => machine.id === machineId);
   const browserEnabled = existingMachine?.kind === 'physical' && existingMachine.provider === 'physical';
   const browserRelay = new BrowserRelaySupervisor({
-    environmentRoot, machineId, enabled: browserEnabled,
-    onError: (error) => console.error('[gitspace-browser-relay]', error),
+    environmentRoot, machineId, enabled: browserEnabled, accountUrl: controlOptions.baseUrl,
   });
   if (browserEnabled && !process.env.GITSPACE_UPDATE_OWNER && (await browserRelay.status()).installed) {
     void browserRelay.start().catch((error) => console.error('[gitspace-browser-relay]', error));
@@ -444,6 +445,7 @@ export async function startMachineRuntime() {
     process.env.GITSPACE_SERVICE_DOMAIN ?? null,
     process.env.GITSPACE_SERVICE_NAMESPACE ?? null,
     authority,
+    serviceAccess.trust,
   );
   const spaces = new MachinePortableSpaceController(
     database,
@@ -857,7 +859,11 @@ export async function startMachineRuntime() {
   });
   executorRuntime = await createMachineExecutor({
     environmentRoot, machineId, database, artifacts, cloud: cloudRuntime, gitRemote, lfs,
-    browser: { enabled: browserEnabled, relay: browserRelay },
+    browser: { enabled: true, services: {
+      serviceHostname: hostname => hostname.endsWith(`--${process.env.GITSPACE_SERVICE_NAMESPACE}-srv.${process.env.GITSPACE_SERVICE_DOMAIN}`),
+      workspaceServiceHostname: async (hostname, scope) => (await authority.listHostedRoutes(scope.projectId)).some(route => route.workspaceId === scope.workspaceId && route.hostname === hostname),
+      serviceForward: serviceAccess.forward,
+    } },
     prepareAttachment: (local, signal) => environments.prepareAttachment(local, signal),
     originGitEnvironment: async (origin) => gitIdentity.gitEnvironment(origin),
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),

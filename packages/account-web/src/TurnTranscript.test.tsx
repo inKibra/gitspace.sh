@@ -4,6 +4,18 @@ import { describe, expect, it } from 'vitest';
 import { TurnTranscript } from './TurnTranscript.js';
 
 describe('TurnTranscript', () => {
+  it('identifies the admitted Chrome for each persisted relay action', () => {
+    const turns: TurnBlock[] = [{
+      id: 'chrome-turn', type: 'turn', status: 'done', sideAgents: [],
+      items: [
+        { id: 'a', type: 'tool-call', toolCallId: 'a', tool: 'browser', status: 'done', details: { browser: { pairingId: '00000000-0000-4000-8000-000000000001', name: 'Staging admin Chrome' } } },
+        { id: 'b', type: 'tool-call', toolCallId: 'b', tool: 'browser', status: 'done', details: { browser: { pairingId: '00000000-0000-4000-8000-000000000002', name: 'Customer account Chrome' } } },
+      ],
+    }];
+    const html = renderToStaticMarkup(<TurnTranscript turns={turns} transport={[]} />);
+    expect(html).toContain('Staging admin Chrome');
+    expect(html).toContain('Customer account Chrome');
+  });
   it('renders persisted user and tool image attachments', () => {
     const turns: TurnBlock[] = [{
       id: 'turn-1',

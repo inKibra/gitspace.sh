@@ -1,4 +1,6 @@
 [
+  { "name": "CODEMODE_LOADER", "source": "worker-loader" },
+  { "name": "BROWSER", "source": "browser-rendering" },
   {
     "name": "BLOBS",
     "source": "object-storage"

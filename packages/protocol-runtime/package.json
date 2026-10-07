@@ -10,6 +10,10 @@
     "./session-controls": "./src/session-controls.ts",
     "./workspace-controls": "./src/workspace-controls.ts",
     "./attachment-controls": "./src/attachment-controls.ts",
+    "./search-replica": "./src/search-replica.ts",
+    "./search": "./src/search.ts",
+    "./search-paths": "./src/search-paths.ts",
+    "./search-ripgrep": "./src/search-ripgrep.ts",
     "./machine-controls": "./src/machine-controls.ts"
   },
   "scripts": {
@@ -22,6 +26,12 @@
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
     "@gitspace/supervisor": "workspace:*",
+    "ignore": "7",
+    "picomatch": "4",
+    "rregex": "1.13.1",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/picomatch": "4"
   }
 }

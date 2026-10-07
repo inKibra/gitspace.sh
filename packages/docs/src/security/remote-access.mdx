@@ -33,6 +33,14 @@ Account creation or recovery in the web page creates a short-lived signed browse
 
 Browser RPC requests are signed. Verification binds a request to the enrolled device and detects changes to the signed request.
 
+Private workspace-service browser sessions require `rpc.write`, not just `rpc.read`. The Worker checks that authority when approving access and when validating an existing session. A signed tunnel request may come from a user-, project-, or workspace-scoped device; admission verifies the actual method and body without granting downstream RPC capabilities.
+
+Device-signed tunnel uploads must declare `Content-Length`, capped at 64 MiB. The signed header includes the body SHA-256. Authentication checks the signature, timestamp, and current device authority before reading the body. The relay streams the upload and verifies its length and digest before sending normal EOF. A mismatch aborts the request, but cannot undo bytes already delivered to the service.
+
+Chrome extension pairing and project approval are separate. Confirm the extension's fingerprint in account Settings, then approve that Chrome in your personal Project Settings. Project approval covers your workspaces in that project, including yolo mode. It does not replace the shared origin grants in `browser.origins`. Revocation rejects saved grants immediately and closes that Chrome's project groups. The account retains failed closure requests and retries when the extension reconnects. Reapproval creates new authority rather than reviving old grants.
+
+Anonymous extension connections require a live invitation awaiting a key. Limits apply to IPv6 /64 and /48 networks, and IPv4 /32 and /24 networks. Only confirmed keys bypass those limits.
+
 ## Encrypted data
 
 Current package code encrypts these data classes:

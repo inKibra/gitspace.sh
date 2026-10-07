@@ -9,7 +9,7 @@ import { createAccountWorkspaceRuntime } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeGitCheckpointSchema, RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimePrimaryAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
-import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema, RuntimeModelInputSchema, RuntimeMcpInputSchema } from '@gitspace/protocol-runtime/machine-controls';
+import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
 import { requireRuntimeIdentity } from './runtime-access.js';
 import { z } from 'zod';
@@ -282,17 +282,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return Response.json(await (await this.getRuntime(input)).transcript(input.conversationId));
   }
 
-  async runtimeModel(raw: unknown, machineId: string): Promise<Response> {
-    const input = RuntimeModelInputSchema.parse(raw);
-    if (input.dispatch.machineId !== machineId) throw new Error('Model request executor mismatch');
-    return Response.json(await (await this.getRuntime(input.dispatch)).model(input, machineId));
-  }
-
-  async runtimeMcp(raw: unknown, machineId: string): Promise<Response> {
-    const input = RuntimeMcpInputSchema.parse(raw);
-    if (input.dispatch.machineId !== machineId) throw new Error('MCP request executor mismatch');
-    return Response.json(await (await this.getRuntime(input.dispatch)).mcp(input, machineId));
-  }
 
   async runtimeDiscoverMcp(raw: unknown) {
     const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), args: z.object({ connectionId: z.string().min(1) }) }).parse(raw);

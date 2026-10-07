@@ -9,7 +9,7 @@ Replace GitSpace's embedded OMP (oh-my-pi 18.2.11) agent runtime with a runtime 
 - `@earendil-works/pi-ai` for providers and classifier (Jev) and image models,
 - `@earendil-works/pi-durable` for the durable conversations, tasks, and documents of a workspace,
 - `@earendil-works/chord` for replicated state, services, and UI sync,
-- `@earendil-works/pi-mcp` for MCP and `@earendil-works/pi-codemode` for scripted tool fan-out.
+- `@earendil-works/pi-mcp` for MCP and cloud WorkerLoader isolates for scripted tool fan-out.
 
 Target architecture (**option B**): each workspace lives in a **Cloudflare Durable Object** that hosts its pi-durable Session (agent conversation, subagents, operational tasks, documents). Code lives in a per-workspace **Artifacts** repository (internal storage; the `local://` artifact store keeps its name). Machines become **executors**: they hold working copies, run tools, processes, and environment scripts, and attach or detach without moving the workspace.
 
@@ -81,7 +81,7 @@ pi-durable makes the durable record the state: runs, queued messages, aborts, su
 | `pi-durable` 1.0 | Harness: Sessions, conversations, entries, tasks, documents, watch | README marks it **experimental**. Built-in tools: `read`, `write`, `edit`, `bash` only; `read` has no image support yet. Storage: memory, SQLite, JSONL; the portable cores run "on Bun or in Cloudflare Durable Objects". |
 | `chord` 1.0 | Replicated state, services, Context, delta tracking | Runtime-neutral except the plugin bundler/loader (`chord/bundler`, `chord/node`, esbuild). |
 | `pi-mcp` 1.0 | MCP client | Standalone. |
-| `pi-codemode` 1.0 | Sandboxed JS that calls injected tools | QuickJS (`quickjs-wasi`) in a `node:worker_threads` worker; runs on machines (§7.4). |
+| Codemode | Sandboxed JS that calls injected tools | Cloud WorkerLoader isolate with no network, raw sockets, Node compatibility, or environment bindings (§7.4). |
 | `pi-server` / `pi-client` / `pi-protocol` | Routing clients to hosted Sessions over CBOR | Optional; usable as the relay adapter for Chord services. |
 
 Every Pi package is pinned to an exact version. GitSpace code imports Pi only through `packages/runtime-*` modules so API changes stay contained.
@@ -97,7 +97,7 @@ Every Pi package is pinned to an exact version. GitSpace code imports Pi only th
 | **Credential vault DO** (existing) | Tenant Worker | Sealed provider credentials, refresh leases, profiles, assignments. |
 | **Artifacts namespace** | Cloudflare Artifacts, one per tenant | One repo per project (imported) and one fork per workspace. |
 | **R2 bucket** (existing, one per tenant: `gsp-relay-<accountId>`) | Cloudflare | Blobs: `local://` artifacts, uploads, large tool outputs. |
-| **Machine runtime** | User machines, GitSpace cloud machines | Attaches to workspaces, holds working copies, runs the **supervisor** (terminals, services, jobs, environment runs), executes machine tools and codemode. |
+| **Machine runtime** | User machines, GitSpace cloud machines | Attaches to workspaces, holds working copies, runs the **supervisor** (terminals, services, jobs, environment runs), and executes admitted machine tools. Codemode stays in the cloud. |
 | **Relay** (existing) | Cloudflare | Transport between DOs, browsers, and machines. |
 
 ### 5.2 Ownership rules
@@ -131,7 +131,7 @@ packages/
                               facade, Chord service endpoints, Artifacts binding, dispatch over the relay;
                               exported through account-worker's entry
   runtime-machine/       NEW  Machine executor: ExecutionEnv over working copies, machine tools
-                              (bash/grep/ast-grep), codemode host, replica synchronization,
+                              (bash/grep/ast-grep), replica synchronization,
                               egress proxy, attachment client
   supervisor/            NEW  Process supervisor: PTY and pipe processes, owners, readiness, restart
                               policies, capped logs with cursors; replaces OMP's launch broker
@@ -163,7 +163,7 @@ packages/
 1. Only `runtime-core`, `runtime-workspace-do`, and `runtime-machine` import `@earendil-works/*`.
 2. `runtime-core` is runtime-neutral: no `node:*`, no `chord/node`, no `chord/bundler`, no `pi-codemode`.
 3. `runtime-workspace-do` is Worker-safe; its bundle is checked for Node-only modules.
-4. `runtime-machine` may use Node/Bun APIs, `pi-codemode`, and `pi-mcp`.
+4. `runtime-machine` may use Node/Bun APIs and `pi-mcp`. It does not host codemode.
 5. `protocol-*` packages import neither Pi nor runtime packages; `account-web` imports `protocol-*` and the Chord client only.
 6. `account-machine` uses `runtime-machine`, `supervisor`, and `protocol-runtime`, never `runtime-core` internals.
 
@@ -208,7 +208,7 @@ packages/
 Each tool is declared **cloud** or **machine**:
 
 - **Cloud:** repository `read`, `write`, `edit`, `apply_patch`, and `find` always use the DO's Artifacts working-copy snapshot, whether machines are attached or not. `find` reads a commit-keyed path index and accepts `pattern` and `path`; it rejects the unsupported `glob` option. History, workspace reads, web search, judging, and cloud MCP also run here.
-- **Machine:** `bash`, `grep`, jobs, processes, environment runs, AST matching, and codemode execute on the chosen replica. `grep` remains unchanged in this pass.
+- **Machine:** `bash`, jobs, processes, environment runs, and AST matching execute on the chosen replica. Default `grep` uses pinned ripgrep on a verified caught-up replica, otherwise the cloud snapshot index. Cloud codemode sends nested calls through the normal tool authority.
 
 The workspace has one main conversation. Only it and human replica edits can change the shared cloud working copy. Main-agent mutations serialize within a turn; independent reads can run in parallel. No conversation carries machine placement. Each admitted machine command carries the latest cloud snapshot as its minimum input.
 
@@ -230,7 +230,7 @@ File tools have no machine selector. Program execution uses the workspace defaul
 
 ### 7.4 Codemode
 
-`pi-codemode` runs on the **machine**, as published (Node/Bun, worker thread, 256 MB VM). The DO sends one "run script" call; the script's `tools.*` calls run locally, turning many relay round trips into one. Its `models.*` calls (classify, image generation) are proxied to the DO so credentials stay in the cloud. QuickJS inside the DO is possible (`quickjs-wasi` accepts a precompiled `WebAssembly.Module`) but not planned.
+Codemode runs in a fresh cloud WorkerLoader isolate. User code receives revocable tool, MCP, and model capabilities, not machine access or credentials. The isolate has no direct network access, raw sockets, Node compatibility, or injected environment bindings. Each nested tool call passes through normal routing, hooks, approval, and grants and has its own durable outcome. Capability-call and child-call budgets are separate; the child limit also applies to MCP fan-out. A script can catch a definitive failure and complete without repeating earlier effects. Unknown outcomes remain interrupted and cannot replay on recovery. Subagents cannot use codemode.
 
 ### 7.5 Machineless operation
 
@@ -253,8 +253,8 @@ A settle window cannot prove that a writer has finished. A writer paused for lon
 |---|---|---|
 | `read`, `write`, `edit`, `bash` | Owner-schema registrations | File tools use the cloud copy; bash uses an execution replica. Each model gets `edit` or `apply_patch` by family (§8.8). |
 | `apply_patch` | Cloud file mutation | Shared V4A parser and atomic snapshot publication for OpenAI families (§8.8). |
-| `grep`, `find` | Separate owners | `grep` remains machine ripgrep; `find` uses the DO's commit-keyed path index. |
-| `codemode` | Keep | Machine-side (§7.4). |
+| `grep`, `find` | Separate owners | `grep` uses caught-up machine ripgrep or the cloud snapshot index; `find` uses the DO's commit-keyed path index. |
+| `codemode` | Keep | Cloud WorkerLoader isolate with nested durable tool calls (§7.4). |
 | `space_*` | New | Our host namespace as tools: environment, goal, artifacts, phase, workspace. |
 | `agents`, `jobs`, `proc` | New, replace `hub` | §8.2. |
 | `todo`, `ask`, plan approval | Port | Documents and waiting submissions. |
@@ -545,7 +545,7 @@ Each milestone ends with its exit criteria demonstrated on Darktop and recorded 
 |---|---|---|
 | **M0** | Decisions and spikes | S0: Codex model and usage request from Cloudflare egress. S1: pi-durable + Chord + `pi-ai` in a DO: one conversation, one tool call over the relay, CPU per turn and per commit, Worker bundle compatibility, provider-aborted stream behaviour, context edits omitting a span, tool set changed mid-conversation. S2: Artifacts import of inkibra-core, fork, clone/push timings, snapshot to a private ref, `readFile` from a DO, LFS answer, WalGit comparison. Go/no-go for option B. |
 | **M1** | Runtime core | Workspace DO hosts a Session; vault-backed providers with the catalog overlay on DO storage; machine attachment and routing for `read`/`write`/`edit`/`apply_patch`/`bash`/`grep`/`find` with the edit-tool rule; relay transport; kill-and-resume tests for DO and machine. |
-| **M2** | Agent parity | `todo`, `ask`, plan mode and approval, skills, rules (tool-call and judged TTSR), `space_*`, MCP via `pi-mcp`, `local://`, codemode on machines, web search, images, titles, QA reporting, history search. Real-model test suite equivalent to today's `account-omp` suite. |
+| **M2** | Agent parity | `todo`, `ask`, plan mode and approval, skills, rules (tool-call and judged TTSR), `space_*`, MCP via `pi-mcp`, `local://`, cloud WorkerLoader codemode, web search, images, titles, QA reporting, history search. Real-model test suite equivalent to today's `account-omp` suite. |
 | **M3** | Supervisor and environments | Supervisor replaces the OMP broker for terminals, services, lifecycle runs; `LifecycleRun` tasks; environment definitions from commits; `jobs`/`proc`/`agents` tools; Agent hub panel. |
 | **M4** | Workspace operations | `CreateWorkspace` and `Checkpoint` tasks on Artifacts; continuous snapshots; launch no longer blocks on uploads; crons as tasks. |
 | **M5** | UI on Chord and machineless | Workspace, agent, task, environment, terminal state via Chord; machineless repository read/edit/write and conversation; creation progress streaming. |

@@ -6,6 +6,7 @@ import type { PlatformDeployResponse, WorkerReleaseMetadata } from '@gitspace/pr
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../src/index.js';
 import { CHANNEL_BUNDLE_KEY, CHANNEL_METADATA_KEY, migrationDelta, type ScriptUploadMetadata } from '../src/deployer.js';
+import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 
 const { secretKey, publicKey } = ed25519.keygen();
 const ADMIN_PUBLIC_KEY = btoa(String.fromCharCode(...publicKey));
@@ -13,6 +14,7 @@ const ADMIN_PUBLIC_KEY = btoa(String.fromCharCode(...publicKey));
 interface Upload {
   metadata: ScriptUploadMetadata;
   module: string;
+  wasm: number[];
 }
 
 /** What the fake Cloudflare API has "deployed": script name → module source; the dispatcher stub serves from it. */
@@ -30,6 +32,13 @@ const realFetch = globalThis.fetch;
 
 function bundleSource(version: string): string {
   return `/* version: ${version} */ export default { fetch() { return new Response('ok'); } };`;
+}
+
+function bundleArtifact(version: string): string {
+  return new TextDecoder().decode(encodeWorkerBundle([
+    { name: 'worker.mjs', type: 'esm', content: new TextEncoder().encode(bundleSource(version)) },
+    { name: 'engine.wasm', type: 'wasm', content: new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]) },
+  ]));
 }
 
 async function sha256(text: string): Promise<string> {
@@ -143,8 +152,8 @@ async function accountId(tenant: string): Promise<string> {
 }
 
 async function stageRelease(tenant: string, sha: string, version = sha): Promise<{ bundleKey: string; bundleHash: string }> {
-  const source = bundleSource(version);
-  const bundleKey = `users/${await accountId(tenant)}/releases/${sha}/worker.mjs`;
+  const source = bundleArtifact(version);
+  const bundleKey = `users/${await accountId(tenant)}/releases/${sha}/worker.bundle.json`;
   let staged = objects.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`);
   if (!staged) { staged = new Map(); objects.set(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`, staged); }
   staged.set(bundleKey, source);
@@ -208,7 +217,9 @@ beforeEach(() => {
       return Response.json({ success: false, errors: [{ code: 10021, message }], result: null }, { status: 400 });
     }
     const module = await modulePart.text();
-    uploads.push({ metadata: parsed as ScriptUploadMetadata, module });
+    const wasm = init.body.get('engine.wasm');
+    if (!(wasm instanceof File) || wasm.type !== 'application/wasm') throw new Error('Static WASM upload missing');
+    uploads.push({ metadata: parsed as ScriptUploadMetadata, module, wasm: [...new Uint8Array(await wasm.arrayBuffer())] });
     scripts.set(match[1]!, module);
     return Response.json({ success: true, errors: [], result: { id: match[1] } });
   };
@@ -311,6 +322,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     expect(uploads).toHaveLength(1);
     const upload = uploads[0]!;
     expect(upload.module).toBe(bundleSource('abc123'));
+    expect(upload.wasm).toEqual([0, 97, 115, 109, 1, 0, 0, 0]);
     expect(upload.metadata).toMatchObject({
       bindings: expect.arrayContaining([
         { type: 'durable_object_namespace', name: 'CREDENTIALS', class_name: 'CredentialVaultDO' },
@@ -325,8 +337,8 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
     });
 
-    const copy = await env.RELEASES.get('tenants/bravo/abc123/worker.mjs');
-    expect(await copy?.text()).toBe(bundleSource('abc123'));
+    const copy = await env.RELEASES.get('tenants/bravo/abc123/worker.bundle.json');
+    expect(await copy?.text()).toBe(bundleArtifact('abc123'));
 
     const ledger = await env.CREDITS.getByName('bravo').listLedger();
     expect(ledger).toHaveLength(1);
@@ -401,7 +413,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
   });
 
   it('falls back to the channel bundle when a first deploy is unhealthy', async () => {
-    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleSource('channel:9.9.9'));
+    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleArtifact('channel:9.9.9'));
     await env.RELEASES.put(CHANNEL_METADATA_KEY, JSON.stringify(metadata(['v1'])));
     const token = await mintToken('golf');
     const result = await deploy('golf', token, 'unhealthy', ['v1'], 'nope');
@@ -412,8 +424,8 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
 });
 
 describe('POST /__platform/tenants/:tenant/revert', () => {
-  it('reverts to channel using channel/worker.mjs and its metadata', async () => {
-    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleSource('channel:1.2.3'));
+  it('reverts to the complete channel module graph and its metadata', async () => {
+    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleArtifact('channel:1.2.3'));
     await env.RELEASES.put(CHANNEL_METADATA_KEY, JSON.stringify(metadata(['v1', 'v2'])));
     const token = await mintToken('hotel', 'v2');
     await deploy('hotel', token, 'h1', ['v1', 'v2']);
@@ -485,7 +497,7 @@ describe('operator account-bound deployment', () => {
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${a}`)).toBe(bundleSource('account-a'));
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource('account-b'));
 
-    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleSource('channel:isolated'));
+    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleArtifact('channel:isolated'));
     await env.RELEASES.put(CHANNEL_METADATA_KEY, JSON.stringify(metadata(['v1'])));
     expect((await post(b, 'revert', { accountId: bId, to: 'channel' })).status).toBe(200);
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource('channel:isolated'));

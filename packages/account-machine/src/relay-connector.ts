@@ -11,6 +11,7 @@ import {
   type RelaySocketMessage,
 } from '@gitspace/protocol';
 import { signedCredentialAuthorityGrantSchema, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
+import { SERVICE_ASSERTION_HEADER, stripGitSpaceCredentials } from '@gitspace/protocol/service-access';
 
 interface PendingRequest {
   method: string;
@@ -62,6 +63,7 @@ export class MachineRelayConnector {
   private stopped = false;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly forwarding = new Map<string, AbortController>();
+  private readonly serviceSockets = new Map<string, WebSocket>();
 
   constructor(private readonly options: MachineRelayConnectorOptions) {}
 
@@ -137,6 +139,8 @@ export class MachineRelayConnector {
     this.pending.clear();
     for (const controller of this.forwarding.values()) controller.abort();
     this.forwarding.clear();
+    for (const service of this.serviceSockets.values()) service.close(1011, 'Machine relay disconnected');
+    this.serviceSockets.clear();
     socket.terminate();
     const { cause, error, code, reason } = disconnect;
     console.warn(JSON.stringify({
@@ -193,9 +197,20 @@ export class MachineRelayConnector {
       }
       return;
     }
+    if (message.type === 'tunnel.websocket.data') {
+      this.serviceSockets.get(message.requestId)?.send(message.binary ? Uint8Array.from(decodeTunnelChunk(message.data)) : message.data);
+      return;
+    }
+    if (message.type === 'tunnel.websocket.close') {
+      this.serviceSockets.get(message.requestId)?.close(1000, message.reason);
+      this.serviceSockets.delete(message.requestId);
+      return;
+    }
     if (message.type === 'tunnel.request.cancel') {
       this.pending.delete(message.requestId);
       this.forwarding.get(message.requestId)?.abort();
+      this.serviceSockets.get(message.requestId)?.close();
+      this.serviceSockets.delete(message.requestId);
       return;
     }
     if (message.type === 'tunnel.request.start') {
@@ -220,6 +235,36 @@ export class MachineRelayConnector {
     const controller = new AbortController();
     this.forwarding.set(requestId, controller);
     try {
+      const websocket = new Headers(pending.headers).get('upgrade')?.toLowerCase() === 'websocket';
+      if (websocket) {
+        const headers = new Headers(pending.headers);
+        headers.delete('upgrade'); headers.delete('connection');
+        headers.set('x-gitspace-websocket-probe', '1');
+        const admitted = await fetch(new URL(pending.path, this.options.localOrigin), { headers, signal: controller.signal });
+        if (!admitted.ok) throw new Error('Service WebSocket authorization rejected');
+        const raw: unknown = await admitted.json();
+        if (!raw || typeof raw !== 'object' || !('url' in raw) || typeof raw.url !== 'string') throw new Error('Invalid service WebSocket target');
+        const target = new URL(raw.url);
+        if (target.protocol !== 'ws:' || target.hostname !== '127.0.0.1') throw new Error('Invalid service WebSocket target');
+        headers.delete('host');
+        headers.delete('x-gitspace-websocket-probe');
+        headers.delete(SERVICE_ASSERTION_HEADER);
+        stripGitSpaceCredentials(headers);
+        const service: unknown = Reflect.construct(WebSocket, [target, { headers: Object.fromEntries(headers) } satisfies Bun.WebSocketOptions]);
+        if (!(service instanceof WebSocket)) throw new Error('Bun WebSocket construction failed');
+        this.serviceSockets.set(requestId, service);
+        service.binaryType = 'arraybuffer';
+        service.addEventListener('open', () => this.send(socket, { version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.open', requestId }));
+        service.addEventListener('message', event => this.send(socket, { version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.data', requestId, binary: typeof event.data !== 'string', data: typeof event.data === 'string' ? event.data : encodeTunnelChunk(new Uint8Array(event.data)) }));
+        service.addEventListener('close', event => {
+          this.serviceSockets.delete(requestId);
+          if (this.socket === socket) this.send(socket, { version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.close', requestId, code: event.code, reason: event.reason.slice(0, 123) });
+        });
+        service.addEventListener('error', () => {
+          if (this.socket === socket) this.send(socket, { version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.error', requestId, message: 'Service WebSocket failed' });
+        });
+        return;
+      }
       const bodyLength = pending.chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
       const body = bodyLength === 0
         ? undefined

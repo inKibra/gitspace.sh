@@ -14,3 +14,4 @@ export const RuntimeGitCheckpointSchema = z.object({
   lfs: GitLfsSnapshotSchema.optional(),
   conflicts: z.array(z.string().min(1)).optional(),
 });
+export type RuntimeGitCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;

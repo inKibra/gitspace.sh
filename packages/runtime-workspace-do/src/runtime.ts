@@ -13,13 +13,12 @@ import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, RuntimeExecu
 import type { z } from 'zod';
 import { createCronRuntime, type RuntimeCronInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord';
-import { RuntimeModelInputSchema, RuntimeMcpInputSchema, type RuntimeModelInput, type RuntimeMcpInput } from '@gitspace/protocol-runtime';
 import { createHistoryIndex } from './history-index.js';
 import { createReplicaStore } from './replica-store.js';
 import { CloudFileStore } from './cloud-files.js';
 import type { ArtifactsCodeStore } from './artifacts.js';
 import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; modelProxy(input: { conversationId: string; operation: 'completion' | 'judge'; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; mcpProxy(input: { conversationId: string; attemptId: string; callId: string; method: RuntimeMcpInput['method']; args: JsonValue; signal: AbortSignal }): Promise<JsonValue>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'listSnapshotEntries' | 'readBlob'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 type RuntimeBrowserService = NonNullable<SessionControlServices['browser']>;
 export type WorkspaceRuntime = {
@@ -50,8 +49,6 @@ export type WorkspaceRuntime = {
   cronCancel(requestId: string, confirmStopWorkspaceAgent: boolean): Promise<RuntimeRequestStatus>;
   cronNotifyOverdue(requestId: string): Promise<void>;
   transcript(conversationId?: string): Promise<(TranscriptEvent & { sessionId: string })[]>;
-  model(input: RuntimeModelInput, machineId: string): Promise<JsonValue>;
-  mcp(input: RuntimeMcpInput, machineId: string): Promise<JsonValue>;
   publish(): void;
 };
 const ReplicaNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }) });
@@ -316,32 +313,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     cronWithdraw: cron.withdraw,
     cronCancel: cron.cancel,
     cronNotifyOverdue: cron.notifyOverdue,
-    async model(raw, machineId) {
-      const input = RuntimeModelInputSchema.parse(raw);
-      const attempt = attachments.getAttempt(input.dispatch.attemptId);
-      if (!attempt || attempt.status !== 'dispatched' || attempt.dispatch.machineId !== machineId || JSON.stringify(attempt.dispatch) !== JSON.stringify(input.dispatch) || attempt.dispatch.tool !== 'codemode') throw new Error('Model proxy requires the exact active codemode attempt');
-      const attachment = attachments.list().find(item => item.attachmentId === attempt.dispatch.attachmentId);
-      if (!attachment || attachment.state !== 'ready' || attachment.generation !== attempt.dispatch.generation) throw new Error('Model proxy attachment is fenced');
-      const remaining = Date.parse(attempt.dispatch.deadlineAt) - Date.now();
-      if (remaining <= 0) throw new Error('Model proxy attempt deadline expired');
-      const inspection = await harness.inspect(BACKGROUND_CONTEXT);
-      const task = inspection.tasks.find(item => `tool:${item.record.id}` === attempt.dispatch.attemptId && item.record.kind === 'pi.tool' && item.record.state.status === 'running');
-      if (!task) throw new Error('Model proxy owning tool is not running');
-      return options.modelProxy({ conversationId: String(task.record.conversationId), operation: input.operation, args: input.args, signal: AbortSignal.timeout(remaining) });
-    },
-    async mcp(raw, machineId) {
-      const input = RuntimeMcpInputSchema.parse(raw);
-      const attempt = attachments.getAttempt(input.dispatch.attemptId);
-      if (!attempt || attempt.status !== 'dispatched' || attempt.dispatch.machineId !== machineId || JSON.stringify(attempt.dispatch) !== JSON.stringify(input.dispatch) || attempt.dispatch.tool !== 'codemode') throw new Error('MCP proxy requires the exact active codemode attempt');
-      const attachment = attachments.list().find(item => item.attachmentId === attempt.dispatch.attachmentId);
-      if (!attachment || attachment.state !== 'ready' || attachment.generation !== attempt.dispatch.generation) throw new Error('MCP proxy attachment is fenced');
-      const remaining = Date.parse(attempt.dispatch.deadlineAt) - Date.now();
-      if (remaining <= 0) throw new Error('MCP proxy attempt deadline expired');
-      const inspection = await harness.inspect(BACKGROUND_CONTEXT);
-      const task = inspection.tasks.find(item => `tool:${item.record.id}` === attempt.dispatch.attemptId && item.record.kind === 'pi.tool' && item.record.state.status === 'running');
-      if (!task) throw new Error('MCP proxy owning tool is not running');
-      return options.mcpProxy({ conversationId: String(task.record.conversationId), attemptId: attempt.dispatch.attemptId, callId: input.callId, method: input.method, args: input.args, signal: AbortSignal.timeout(remaining) });
-    },
     async transcript(conversationId) {
       const target = await conversation(conversationId);
       const events: (TranscriptEvent & { sessionId: string })[] = [];

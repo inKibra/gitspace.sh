@@ -684,8 +684,8 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('project.routes.lease', { projectId, route });
   }
 
-  releaseHostedRoute(projectId: string, hostname: string): Promise<boolean> {
-    return this.call('project.routes.release', { projectId, hostname });
+  releaseHostedRoute(projectId: string, hostname: string, generation: number): Promise<boolean> {
+    return this.call('project.routes.release', { projectId, hostname, generation });
   }
 
   async putSpaceDefinition(definition: PortableSpaceDefinition): Promise<PortableSpaceDefinition> {

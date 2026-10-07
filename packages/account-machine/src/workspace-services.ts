@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { GitSpaceDatabase } from '@gitspace/core';
 import type { ServiceView } from '@gitspace/protocol/inspector-contract';
 import type { HostedServiceRoute } from '@gitspace/protocol';
+import { SERVICE_ASSERTION_HEADER, stripGitSpaceCredentials, verifyServiceAssertion } from '@gitspace/protocol/service-access';
 import type { WorkspaceTerminalView } from './workspace-hub.js';
 
 const MIN_SERVICE_PORT = 17_000;
@@ -36,7 +37,7 @@ interface ServiceTerminalCoordinator {
 }
 interface HostedRouteAuthority {
   leaseHostedRoute(projectId: string, route: Omit<HostedServiceRoute, 'updatedAt'>): Promise<HostedServiceRoute>;
-  releaseHostedRoute(projectId: string, hostname: string): Promise<boolean>;
+  releaseHostedRoute(projectId: string, hostname: string, generation: number): Promise<boolean>;
 }
 interface ServiceAllocationState {
   version: 1;
@@ -123,6 +124,7 @@ export class WorkspaceServiceManager {
   private readonly routes = new Map<string, ActiveServiceRoute>();
   private leaseTimer: Timer | null = null;
   private allocationWrites: Promise<unknown> = Promise.resolve();
+  private readonly assertionNonces = new Map<string, number>();
   constructor(
     private readonly database: GitSpaceDatabase,
     private readonly terminals: ServiceTerminalCoordinator,
@@ -131,7 +133,33 @@ export class WorkspaceServiceManager {
     private readonly publicDomain: string | null,
     private readonly publicNamespace: string | null,
     private readonly routeAuthority?: HostedRouteAuthority,
+    private readonly trust?: () => Promise<{ accountId: string; publicKey: string }>,
   ) {}
+  parseDefinitions(source: unknown): WorkspaceServiceDefinition[] {
+    if (!source || typeof source !== 'object' || !('services' in source) || !Array.isArray(source.services)) throw new Error('Service definitions require services array');
+    const definitions = source.services.map(parseService);
+    if (new Set(definitions.map(item => item.name)).size !== definitions.length) throw new Error('Duplicate service name');
+    return definitions;
+  }
+  allocateDefinitionPorts(spaceId: string, definition: WorkspaceServiceDefinition) { return this.allocatedPorts(spaceId, definition, true); }
+  routeUrl(spaceId: string, name: string): string | null {
+    return this.publicDomain && this.publicNamespace ? `https://${serviceHostname(this.publicDomain, this.publicNamespace, spaceId, name)}` : null;
+  }
+  async registerProcessRoute(input: { projectId: string; workspaceId: string; generation: number; name: string; portName: string; port: number }): Promise<string> {
+    const url = this.routeUrl(input.workspaceId, input.name);
+    if (!url) throw new Error('Private service routing is not configured');
+    const route = { projectId: input.projectId, generation: input.generation, spaceId: input.workspaceId, serviceName: input.name, portName: input.portName, port: input.port, hostname: new URL(url).hostname };
+    await this.leaseRoute(route);
+    this.routes.set(route.hostname, route);
+    return url;
+  }
+  async releaseProcessRoutes(spaceId: string, name: string): Promise<void> {
+    for (const [hostname, route] of this.routes) {
+      if (route.spaceId !== spaceId || route.serviceName !== name) continue;
+      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname, route.generation);
+      this.routes.delete(hostname);
+    }
+  }
 
   async definitions(spaceId: string): Promise<WorkspaceServiceDefinition[]> {
     const space = this.database.getSpace(spaceId);
@@ -173,8 +201,8 @@ export class WorkspaceServiceManager {
           if (port.protocol !== 'http' || !this.publicDomain || !this.publicNamespace) continue;
           const hostname = serviceHostname(this.publicDomain, this.publicNamespace, spaceId, definition.name);
           const route = { projectId: space.projectId, generation: space.generation, spaceId, serviceName: definition.name, portName: port.name, port: port.port, hostname };
-          this.routes.set(hostname, route);
           await this.leaseRoute(route);
+          this.routes.set(hostname, route);
         }
       }
       return {
@@ -211,8 +239,8 @@ export class WorkspaceServiceManager {
       if (port.protocol !== 'http' || !this.publicDomain || !this.publicNamespace) continue;
       const hostname = serviceHostname(this.publicDomain, this.publicNamespace, spaceId, definition.name);
       const route = { projectId: space.projectId, generation: space.generation, spaceId, serviceName: definition.name, portName: port.name, port: port.port, hostname };
-      this.routes.set(hostname, route);
       await this.leaseRoute(route);
+      this.routes.set(hostname, route);
     }
     return (await this.list(spaceId)).find((service) => service.id === definition.name) ?? {
       spaceId, generation: space.generation, id: definition.name, name: definition.name,
@@ -228,7 +256,7 @@ export class WorkspaceServiceManager {
     if (current.state !== 'stopped') await this.terminals.stop(spaceId, current.terminalName);
     for (const [hostname, route] of this.routes) {
       if (route.spaceId !== spaceId || route.serviceName !== serviceName) continue;
-      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname);
+      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname, route.generation);
       this.routes.delete(hostname);
     }
     return { ...current, state: 'stopped', exitedAt: new Date().toISOString(), exitCode: 0 };
@@ -242,7 +270,7 @@ export class WorkspaceServiceManager {
     }
     for (const [hostname, route] of this.routes) {
       if (route.spaceId !== spaceId) continue;
-      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname);
+      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname, route.generation);
       this.routes.delete(hostname);
     }
   }
@@ -250,7 +278,7 @@ export class WorkspaceServiceManager {
   async forgetSpace(spaceId: string): Promise<void> {
     for (const [hostname, route] of this.routes) {
       if (route.spaceId !== spaceId) continue;
-      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname);
+      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname, route.generation);
       this.routes.delete(hostname);
     }
     const operation = this.allocationWrites.then(async () => {
@@ -271,22 +299,30 @@ export class WorkspaceServiceManager {
     const hostname = request.headers.get('x-forwarded-host')?.toLowerCase() ?? requestUrl.hostname.toLowerCase();
     const route = this.routes.get(hostname);
     if (!route) return null;
+    const trust = await this.trust?.();
+    const assertion = trust ? verifyServiceAssertion({ header: request.headers.get(SERVICE_ASSERTION_HEADER), publicKey: trust.publicKey, accountId: trust.accountId, machineId: this.machineId, hostname, method: request.method, target: `${requestUrl.pathname}${requestUrl.search}` }) : null;
+    if (!assertion || this.assertionNonces.has(assertion.nonce)) return new Response('Service authorization required', { status: 401 });
+    for (const [nonce, expiry] of this.assertionNonces) if (expiry <= Date.now()) this.assertionNonces.delete(nonce);
+    this.assertionNonces.set(assertion.nonce, assertion.expiresAt);
     const target = new URL(request.url);
     target.protocol = 'http:';
     target.hostname = '127.0.0.1';
     target.port = String(route.port);
+    if (request.headers.get('x-gitspace-websocket-probe') === '1') return Response.json({ url: target.href.replace(/^http/u, 'ws') });
     const headers = new Headers(request.headers);
     headers.set('x-forwarded-host', hostname);
     headers.set('x-gitspace-space', route.spaceId);
     headers.set('x-gitspace-service', route.serviceName);
     headers.delete('host');
+    headers.delete(SERVICE_ASSERTION_HEADER);
+    stripGitSpaceCredentials(headers);
     return fetch(new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' }));
   }
 
   async dispose(): Promise<void> {
     if (this.leaseTimer) clearInterval(this.leaseTimer);
     this.leaseTimer = null;
-    await Promise.all([...this.routes.values()].map((route) => this.routeAuthority?.releaseHostedRoute(route.projectId, route.hostname)));
+    await Promise.all([...this.routes.values()].map((route) => this.routeAuthority?.releaseHostedRoute(route.projectId, route.hostname, route.generation)));
     this.routes.clear();
   }
 

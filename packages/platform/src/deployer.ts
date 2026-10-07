@@ -6,10 +6,11 @@ import {
   type WorkerReleaseMetadata,
 } from '@gitspace/protocol/deployment';
 import type { TenantDeployRecord, TenantDeploymentsDO, TenantDeploymentState } from './tenant-deployments.js';
+import { decodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 
 export const CLOUDFLARE_API = 'https://api.cloudflare.com/client/v4';
 /** Our channel build, placed in RELEASES by the GitSpace release pipeline. */
-export const CHANNEL_BUNDLE_KEY = 'channel/worker.mjs';
+export const CHANNEL_BUNDLE_KEY = 'channel/worker.bundle.json';
 export const CHANNEL_METADATA_KEY = 'channel/metadata.json';
 export const CHANNEL_SHA = 'channel';
 
@@ -38,6 +39,8 @@ export interface ScriptUploadMetadata {
     | { type: 'durable_object_namespace'; name: string; class_name: string }
     | { type: 'r2_bucket'; name: string; bucket_name: string }
     | { type: 'artifacts'; name: string; namespace: string }
+    | { type: 'worker_loader'; name: string }
+    | { type: 'browser'; name: string }
     | { type: 'plain_text'; name: string; text: string }
     | { type: 'secret_text'; name: string; text: string }
     | { type: 'service'; name: string; service: string }
@@ -93,6 +96,8 @@ export function scriptUploadMetadata(
     names.add(resource.name);
     if (resource.source === 'object-storage') { bindings.push({ type: 'r2_bucket', name: resource.name, bucket_name: tenant.blobBucket }); continue; }
     if (resource.source === 'artifacts') { bindings.push({ type: 'artifacts', name: resource.name, namespace: `gsp-${tenant.accountId}` }); continue; }
+    if (resource.source === 'worker-loader') { bindings.push({ type: 'worker_loader', name: resource.name }); continue; }
+    if (resource.source === 'browser-rendering') { bindings.push({ type: 'browser', name: resource.name }); continue; }
     if (resource.source === 'public-assets') { bindings.push({ type: 'service', name: resource.name, service: tenant.publicAssetsService }); continue; }
     if (resource.source === 'platform-service') { bindings.push({ type: 'service', name: resource.name, service: tenant.platformService }); continue; }
     if (resource.source === 'provider-token') { bindings.push({ type: 'secret_text', name: resource.name, text: tenant.token }); continue; }
@@ -167,9 +172,11 @@ async function readCloudflareEnvelope(response: Response): Promise<CloudflareApi
 }
 
 async function uploadScript(env: Env, tenant: string, bundle: ArrayBuffer, metadata: ScriptUploadMetadata): Promise<DeployFailure | null> {
+  const decoded = decodeWorkerBundle(bundle, metadata.main_module);
+  if (decoded.isErr()) return { status: 409, code: 'WORKER_MODULE_INVALID', message: decoded.error.message };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }), 'metadata.json');
-  form.append(metadata.main_module, new Blob([bundle], { type: 'application/javascript+module' }), metadata.main_module);
+  for (const module of decoded.value) form.append(module.name, new Blob([module.content], { type: module.type === 'wasm' ? 'application/wasm' : 'application/javascript+module' }), module.name);
   const url = `${CLOUDFLARE_API}/accounts/${env.CF_ACCOUNT_ID}/workers/dispatch/namespaces/${env.DISPATCH_NAMESPACE}/scripts/${env.DISPATCH_NAMESPACE}-tenant-${tenant}`;
   let response: Response;
   try {
@@ -343,8 +350,10 @@ export async function deployTenantWorker(env: Env, tenant: string, request: Plat
   if (hash !== request.bundleHash) {
     return { status: 'error', error: { status: 409, code: 'BUNDLE_HASH_MISMATCH', message: `Bundle hashes to ${hash}, expected ${request.bundleHash}` } };
   }
-  const bundleKey = `tenants/${tenant}/${request.sha}/worker.mjs`;
-  await env.RELEASES.put(bundleKey, bundle, { httpMetadata: { contentType: 'application/javascript+module' } });
+  const decoded = decodeWorkerBundle(bundle, request.metadata.mainModule);
+  if (decoded.isErr()) return { status: 'error', error: { status: 409, code: 'WORKER_MODULE_INVALID', message: decoded.error.message } };
+  const bundleKey = `tenants/${tenant}/${request.sha}/worker.bundle.json`;
+  await env.RELEASES.put(bundleKey, bundle, { httpMetadata: { contentType: 'application/json' } });
 
   const deployments = env.DEPLOYMENTS.getByName(tenant);
   const lease = await deployments.acquireLease();

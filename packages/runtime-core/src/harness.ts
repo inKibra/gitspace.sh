@@ -6,7 +6,7 @@ import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
 import { createBackgroundAgentTask } from './background-agents.js';
-import { createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
+import { admitRuntimeCodemodeTool, createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
 import { ruleGenerationRegistry } from './rule-generations.js';
 import { createJobTask, createProcessExitTask, type JobServices } from './jobs.js';
 import { RuntimeBrowserArgumentsSchema, RuntimeChildAgentsArgumentsSchema, isSubagentReadonlyTool, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
@@ -50,7 +50,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     context.abortSignal?.addEventListener('abort', abort, { once: true });
     try { return await waiting.promise; }
     finally { context.abortSignal?.removeEventListener('abort', abort); await watch.stop(); }
-  } }, jobs);
+  } }, jobs, (id, context) => harness.abortTask(id, context), (call, api, context) => admitRuntimeCodemodeTool(options.retainedRules, harness, options.identity, call, api, context));
   const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), backgroundAgentTask, createJobTask(jobs), createProcessExitTask(jobs)], sections: [{ key: 'gitspace', async render(input, context) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;

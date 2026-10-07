@@ -11,6 +11,8 @@
   "artifacts": [
     { "binding": "ARTIFACTS", "namespace": "gitspace-local" }
   ],
+  "worker_loaders": [{ "binding": "CODEMODE_LOADER" }],
+  "browser": { "binding": "BROWSER" },
   "durable_objects": {
     "bindings": [
       {

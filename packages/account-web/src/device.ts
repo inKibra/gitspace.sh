@@ -8,6 +8,7 @@ import {
   encodeSignedRpcHeader,
   RPC_DEVICE_HEADER,
   rpcSignaturePayload,
+  rpcBodySha256,
   type DeviceBinding,
   type DeviceCapability,
   type DeviceInvite,
@@ -156,9 +157,10 @@ export class DeviceRejectedError extends Error {
 export async function signDeviceRequest(device: BrowserDevice, request: { method: string; path: string; body: Uint8Array }): Promise<string> {
   const timestamp = Date.now();
   const nonce = crypto.randomUUID();
-  const payload = rpcSignaturePayload({ deviceId: device.deviceId, timestamp, nonce, ...request });
+  const bodySha256 = rpcBodySha256(request.body);
+  const payload = rpcSignaturePayload({ deviceId: device.deviceId, timestamp, nonce, method: request.method, path: request.path, bodySha256 });
   const signature = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.sign('Ed25519', device.keyPair.privateKey, owned(payload))));
-  return encodeSignedRpcHeader({ version: 1, deviceId: device.deviceId, timestamp, nonce, signature });
+  return encodeSignedRpcHeader({ version: 1, deviceId: device.deviceId, timestamp, nonce, bodySha256, signature });
 }
 
 /**

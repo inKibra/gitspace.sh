@@ -34,10 +34,10 @@ export const AgentSetupSchema = z.object({ sessionId: z.string(), agents: z.arra
 const simple = ['control', 'agentSetup', 'historyAnchorId', 'messages', 'usage', 'persist', 'handoff', 'resume', 'stop', 'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'] as const;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),
-  z.object({ type: z.literal('browserRevoke'), machineId: z.string(), groupId: z.string().uuid() }),
+  z.object({ type: z.literal('browserRevoke'), machineId: z.string().optional(), groupId: z.string().uuid() }),
   z.object({ type: z.literal('browserReconcile'), machineId: z.string(), recordId: z.string() }),
   z.object({ type: z.literal('browserDiscard'), machineId: z.string(), recordId: z.string() }),
-  z.object({ type: z.literal('browserArtifact'), machineId: z.string(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
+  z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
   z.object({ type: z.literal('prompt'), text: z.string(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),
   z.object({ type: z.literal('setWorkspacePhase'), phase: z.enum(['plan', 'code', 'review', 'ship']) }),

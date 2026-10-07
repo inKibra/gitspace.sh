@@ -8,6 +8,8 @@ import {
   type CredentialPins, type VaultModels,
 } from '@gitspace/runtime-core/inference';
 
+export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
+export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
 const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, notice: z.string().optional() });
 type Admission = z.infer<typeof admissionSchema>;
 const pinSchema = z.object({ credentialId: z.string(), lastUsedAt: z.number() });
@@ -108,7 +110,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
       const models = await collection(admission.profile, input.conversationId, false, admission);
       return generateProfileImage(models, input.args, input.signal, admission.profile.settings);
     },
-    async modelHelper(input: { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal }) {
+    async modelHelper(input: RuntimeModelHelperInput) {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
       const models = await collection(admission.profile, input.conversationId, false, admission);
       return runProfileModelHelper(models, input.operation, input.args, input.signal, admission.profile.settings);

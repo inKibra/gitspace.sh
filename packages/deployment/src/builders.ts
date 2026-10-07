@@ -1,10 +1,11 @@
 import { cp, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from './executable-manifest.js';
 import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
 import { packageMachineNativeRuntime } from './native-build.js';
+import { encodeWorkerBundle, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 
 /**
  * Builders for the three account-owned GitSpace release targets. The
@@ -52,6 +53,7 @@ export async function workspaceSha(root: string): Promise<string> {
 
 async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: string): Promise<BuiltArtifact> {
   await mkdir(outDir, { recursive: true });
+  const modules = new Map<string, WorkerModule>();
   const result = await Bun.build({
     entrypoints: [entrypoint],
     target: 'browser',
@@ -60,9 +62,27 @@ async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: st
     external: ['cloudflare:workers'],
     conditions: ['workerd'],
     define: { GITSPACE_WORKER_SHA: JSON.stringify(sha) },
+    plugins: [{
+      name: 'static-worker-wasm',
+      setup(build) {
+        build.onResolve({ filter: /\.wasm$/u }, async args => {
+          const source = resolve(dirname(args.importer), args.path);
+          const content = new Uint8Array(await Bun.file(source).arrayBuffer());
+          const name = basename(args.path);
+          if (args.path !== name && args.path !== `./${name}`) throw new Error(`Worker WASM imports must use a sibling module name: ${args.path}`);
+          const previous = modules.get(name);
+          if (previous && !Buffer.from(previous.content).equals(content)) throw new Error(`Conflicting worker WASM module name: ${name}`);
+          modules.set(name, { name, type: 'wasm', content });
+          await Bun.write(join(outDir, name), content);
+          return { path: `./${name}`, external: true };
+        });
+      },
+    }],
   });
   if (!result.success) throw new AggregateError(result.logs, 'Worker build failed');
-  const path = join(outDir, 'worker.mjs');
+  const entry = new Uint8Array(await Bun.file(join(outDir, 'worker.mjs')).arrayBuffer());
+  const path = join(outDir, 'worker.bundle.json');
+  await Bun.write(path, encodeWorkerBundle([{ name: 'worker.mjs', type: 'esm', content: entry }, ...[...modules.values()].sort((a, b) => a.name.localeCompare(b.name))]));
   return { path, hash: await hashArtifactPath(path) };
 }
 /** Account tenant Worker bundle stamped with its release sha (`GITSPACE_WORKER_SHA`, served at `/healthz`). */

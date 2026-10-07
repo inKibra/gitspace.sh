@@ -122,6 +122,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     const trees = new Map<string, ArtifactsTreeEntry[]>();
     let hydratedEntries = 0;
     const markerConflicts = new Set(input.conflicts ?? previous.conflicts ?? []);
+    const rescanConflicts = input.machine !== undefined && (input.forcePublication === true || input.conflicts === undefined);
     const loadTree = async (oid: string): Promise<ArtifactsTreeEntry[]> => {
       const cached = trees.get(oid);
       if (cached) return cached;
@@ -175,13 +176,15 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
       }
       const tree = await git.writeTree({ fs, dir, tree: [...entries.values()] });
       if (tree !== oid) oids.add(tree);
-      if (input.machine && input.conflicts === undefined) trees.set(tree, [...entries.values()].map(entry => ({ name: entry.path, hash: entry.oid, mode: entry.mode, type: entry.type === 'commit' ? 'gitlink' : entry.type })));
+      if (rescanConflicts) trees.set(tree, [...entries.values()].map(entry => ({ name: entry.path, hash: entry.oid, mode: entry.mode, type: entry.type === 'commit' ? 'gitlink' : entry.type })));
       return tree;
     };
     const worktreeTree = await editTree(previous.worktreeTree, mutations, false);
-    // Unmerged initial/recovery publications have no planner-derived marker
-    // inventory. Inspect their complete worktree, including unchanged blobs.
-    if (input.machine && input.conflicts === undefined) {
+    // Initial/recovery publications and missing inventories require the merged
+    // worktree itself, not seeded conflict flags, to establish current markers.
+    if (rescanConflicts) {
+      markerConflicts.clear();
+      if (input.conflicts?.includes('HEAD')) markerConflicts.add('HEAD');
       const scan = async (tree: string, prefix: string, ancestors: Set<string>): Promise<void> => {
         if (ancestors.has(tree) || ancestors.size > 128) throw new Error('Invalid snapshot tree depth');
         ancestors.add(tree);

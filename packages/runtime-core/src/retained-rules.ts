@@ -1,5 +1,5 @@
 import { createAssistantMessageEventStream, type AssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
-import { defineDoc, defineExtension, GenerationTask, LiveDoc, ToolTask, hook, type Harness } from '@earendil-works/pi-durable';
+import { defineDoc, defineExtension, GenerationTask, LiveDoc, ToolTask, hook, type Harness, type HookApi, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
@@ -155,13 +155,7 @@ function toolOutput(name: string, raw: Record<string, unknown>): Output {
 function outputs(message: AssistantMessage): Output[] {
   return message.content.map((part, ordinal) => part.type === 'text' ? { source: 'text' as const, text: part.text, paths: [], ordinal } : part.type === 'thinking' ? { source: 'thinking' as const, text: part.thinking, paths: [], ordinal } : { ...toolOutput(part.name, part.arguments), ordinal });
 }
-export function createRetainedRulesExtension(services: RetainedRuleServices, getHarness: () => Harness, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, prepareArguments: (name: string, args: Record<string, unknown>) => unknown) {
-  return defineExtension({ name: 'gitspace.retained-rules', sections: [{ key: 'project-rules', async render(input, context) {
-    const definition = await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context);
-    const rules = (await services.loadRules(String(input.conversationId))).filter(rule => rule.enabled && (!rule.agents.length || rule.agents.some(pattern => glob(pattern.toLowerCase(), (definition?.child?.definition?.name ?? definition?.child?.role ?? 'main').toLowerCase()))));
-    return rules.map(rule => rule.alwaysApply ? rule.content : `Rule ${rule.name}: ${rule.description || 'Project instruction'} (read rule://${rule.name})`).join('\n\n');
-  } }], hooks: [hook(GenerationTask, {
-    async beforeRequest(_request, api, context) {
+async function createRuleBinding(services: RetainedRuleServices, getHarness: () => Harness, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, api: Pick<HookApi, 'taskId' | 'conversationId' | 'snapshot'>, context: Context): Promise<Binding> {
       const definition = await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context);
       const rules = (await services.loadRules(String(api.conversationId))).filter(rule => rule.enabled && (!rule.agents.length || rule.agents.some(pattern => glob(pattern.toLowerCase(), (definition?.child?.definition?.name ?? definition?.child?.role ?? 'main').toLowerCase()))));
       const compiled = rules.map(rule => ({ rule, patterns: rule.condition.flatMap(pattern => {
@@ -223,6 +217,33 @@ export function createRetainedRulesExtension(services: RetainedRuleServices, get
         }, context);
         return delivered;
       } };
+  return binding;
+}
+
+export async function admitRuntimeCodemodeTool(services: RetainedRuleServices, harness: Harness, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, call: { id: string; name: string; arguments: Record<string, unknown> }, api: ToolExecutionApi, context: Context): Promise<void> {
+  const live = await api.snapshot(LiveDoc, api.conversationId, context);
+  if (!live?.run) throw new Error('Codemode requires an active generation');
+  const admission = await api.snapshot(RuleToolAdmissions, api.conversationId, context);
+  if (admission?.generation !== String(live.run.taskId)) throw new Error('Codemode generation admission is unavailable');
+  const binding = await createRuleBinding(services, () => harness, identity, { taskId: live.run.taskId, conversationId: api.conversationId, snapshot: api.snapshot.bind(api) }, context);
+  if ((await binding.check(toolOutput(call.name, call.arguments), true, context)).some(match => match.interrupt)) throw new Error('Codemode child interrupted by project rule');
+  const hash = await digest(canonicalJson([call.name, call.arguments]));
+  await api.commit(async tx => {
+    const current = await tx.doc(RuleToolAdmissions, api.conversationId);
+    const interruption = await tx.doc(RuleInterruptionsDoc, api.conversationId);
+    if (current.generation !== admission.generation || interruption.active?.state === 'pending') throw new Error('Codemode generation is fenced');
+    current.calls[call.id] = hash;
+  }, context);
+}
+
+export function createRetainedRulesExtension(services: RetainedRuleServices, getHarness: () => Harness, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, prepareArguments: (name: string, args: Record<string, unknown>) => unknown) {
+  return defineExtension({ name: 'gitspace.retained-rules', sections: [{ key: 'project-rules', async render(input, context) {
+    const definition = await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context);
+    const rules = (await services.loadRules(String(input.conversationId))).filter(rule => rule.enabled && (!rule.agents.length || rule.agents.some(pattern => glob(pattern.toLowerCase(), (definition?.child?.definition?.name ?? definition?.child?.role ?? 'main').toLowerCase()))));
+    return rules.map(rule => rule.alwaysApply ? rule.content : `Rule ${rule.name}: ${rule.description || 'Project instruction'} (read rule://${rule.name})`).join('\n\n');
+  } }], hooks: [hook(GenerationTask, {
+    async beforeRequest(_request, api, context) {
+      const binding = await createRuleBinding(services, getHarness, identity, api, context);
       let scope = pendingBindings.get(getHarness());
       if (!scope) { scope = new Map(); pendingBindings.set(getHarness(), scope); }
       scope.set(String(api.conversationId), binding);

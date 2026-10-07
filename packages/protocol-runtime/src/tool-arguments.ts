@@ -19,11 +19,16 @@ export const RuntimeBashControlArgumentsSchema = z.discriminatedUnion('op', [
 ]);
 export const RuntimeBashArgumentsSchema = z.union([RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema]);
 export const RuntimeFindArgumentsSchema = z.object({ pattern: z.string(), path: z.string().default('.') }).strict();
-export const RuntimeGrepArgumentsSchema = RuntimeFindArgumentsSchema.extend({ ...RuntimeDispatchSelectionSchema.shape, glob: z.string().optional() });
+export const RuntimeGrepArgumentsSchema = RuntimeFindArgumentsSchema.extend({
+  ...RuntimeDispatchSelectionSchema.shape, glob: z.string().optional(),
+  hidden: z.boolean().default(false), gitignore: z.boolean().default(true),
+  multiline: z.boolean().default(false), caseSensitive: z.boolean().default(true),
+  offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(10000).default(1000),
+});
 export const RuntimeAstGrepArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ pattern: z.string().min(1), path: z.string().default('.'), language: z.string().optional() });
 export const RuntimeAstEditArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ ops: z.array(z.object({ pat: z.string().min(1), out: z.string() })).min(1), paths: z.array(path).min(1), language: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/u) });
 export const RuntimeAstResolveArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ proposalId: path, action: z.enum(['apply', 'reject']) });
-export const RuntimeCodemodeArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ code: z.string() });
+export const RuntimeCodemodeArgumentsSchema = z.object({ code: z.string().max(262144), timeoutMs: z.number().int().positive().max(30000).default(30000) }).strict();
 const processName = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,159}$/u);
 const processTimeout = z.number().int().positive().max(300_000);
 const processSelection = RuntimeDispatchSelectionSchema.shape;

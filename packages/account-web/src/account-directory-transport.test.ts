@@ -52,7 +52,7 @@ it('signs the resume cursor and accepts only validated directory frames', async 
   const auth = decodeSignedRpcHeader(url.searchParams.get('auth')!);
   expect(auth).not.toBeNull();
   url.searchParams.delete('auth');
-  const payload = rpcSignaturePayload({ ...auth!, method: 'GET', path: `${url.pathname}${url.search}`, body: new Uint8Array() });
+  const payload = rpcSignaturePayload({ ...auth!, method: 'GET', path: `${url.pathname}${url.search}` });
   expect(await crypto.subtle.verify('Ed25519', keyPair.publicKey, Uint8Array.from(deviceProtocolBase64.decode(auth!.signature)).buffer, Uint8Array.from(payload).buffer)).toBe(true);
   expect(url.searchParams.get('after')).toBe('37');
   socket.open();

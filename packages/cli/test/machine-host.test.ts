@@ -4,6 +4,8 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import type { Server, Subprocess } from 'bun';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { credentialProtocolBase64, signCredentialAuthorityGrant, verifyRelayAuthorization } from '@gitspace/protocol';
 
 const CLI = join(import.meta.dir, '..', 'src', 'index.ts');
 const READY_URL = 'http://127.0.0.1:8081';
@@ -11,14 +13,24 @@ const roots: string[] = [];
 const processes: Subprocess[] = [];
 const detachedPids: number[] = [];
 let server: Server<undefined>;
+const machineKey = new Uint8Array(32).fill(3);
+const machinePublicKey = credentialProtocolBase64.encode(ed25519.getPublicKey(machineKey));
+const machineGrant = signCredentialAuthorityGrant({ version: 1, userId: 'u-test', machineId: 'm-test', signingPublicKey: machinePublicKey, exchangePublicKey: machinePublicKey, capabilities: ['space.control'], generation: 1 }, new Uint8Array(32).fill(9));
+const encodedGrant = Buffer.from(JSON.stringify(machineGrant)).toString('base64url');
 
 beforeAll(() => {
   server = Bun.serve({
     port: 0,
     hostname: '127.0.0.1',
-    fetch: (request) => new URL(request.url).pathname === '/v1/control'
-      ? Response.json({ status: 'ok', value: { key: Buffer.alloc(32, 7).toString('base64') } })
-      : new Response('ok'),
+    fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === '/v1/control') return Response.json({ status: 'ok', value: { key: Buffer.alloc(32, 7).toString('base64') } });
+      if (url.pathname.startsWith('/tunnel/')) {
+        const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: machinePublicKey, target: `${url.pathname}${url.search}`, maxSkewMs: 30_000 });
+        if (verified.status !== 'ok' || request.headers.get('x-gitspace-machine-grant') !== encodedGrant) return new Response(null, { status: 401 });
+      }
+      return new Response('ok');
+    },
   });
 });
 afterAll(() => server.stop(true));
@@ -56,7 +68,7 @@ async function configRoot(): Promise<string> {
   const origin = `http://127.0.0.1:${server.port}`;
   await writeFile(join(root, 'config.json'), JSON.stringify({
     version: 4, apiUrl: origin, accountUrl: origin, handle: 'tester', userId: 'u-test', relayUrl: origin, rootPublicKey: 'root',
-    machine: { id: 'm-test', label: 'Test machine', signingPrivateKey: Buffer.alloc(32, 3).toString('base64'), exchangePrivateKey: Buffer.alloc(32, 4).toString('base64'), grant: {} },
+    machine: { id: 'm-test', label: 'Test machine', signingPrivateKey: Buffer.from(machineKey).toString('base64'), exchangePrivateKey: Buffer.alloc(32, 4).toString('base64'), grant: machineGrant },
   }));
   return root;
 }
@@ -83,6 +95,12 @@ async function gitspace(root: string, ...args: string[]): Promise<{ exitCode: nu
   const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   return { exitCode, stdout, stderr };
 }
+
+it('authenticates machine status health through the private tunnel', async () => {
+  const result = await gitspace(await configRoot(), 'machine', 'status');
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain('Machine tunnel: reachable');
+});
 
 it('reports the host from host-ready.json as running while machine.pid is stale', async () => {
   const root = await configRoot();

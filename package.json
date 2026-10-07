@@ -75,14 +75,14 @@
   },
   "patchedDependencies": {
     "ghostty-web@0.4.0": "patches/ghostty-web@0.4.0.patch",
-    "result-rpc@0.5.0": "packages/protocol/patches/result-rpc@0.5.0.patch"
+    "result-rpc@0.5.0": "packages/protocol/patches/result-rpc@0.5.0.patch",
+    "rregex@1.13.1": "patches/rregex@1.13.1.patch"
   },
   "overrides": {
     "@earendil-works/pi-ai": "1.0.0",
     "@earendil-works/pi-durable": "1.0.0",
     "@earendil-works/chord": "1.0.0",
     "@earendil-works/pi-mcp": "1.0.0",
-    "@earendil-works/pi-codemode": "1.0.0",
     "shiki": "4.3.1"
   }
 }

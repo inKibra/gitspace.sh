@@ -1,0 +1,15 @@
+diff --git a/package.json b/package.json
+index ea318df4fe1b4515b1dea94e57c2c710477feb04..f06fa9fcf9c7f5cfd837e6dd3dd05790190c5954 100644
+--- a/package.json
++++ b/package.json
+@@ -11,6 +11,10 @@
+   "exports": {
+     "./package.json": "./package.json",
+     ".": {
++      "workerd": {
++        "types": "./lib/cf.d.ts",
++        "default": "./lib/cf.mjs"
++      },
+       "import": {
+         "types": "./lib/esm.d.ts",
+         "default": "./lib/esm.mjs"

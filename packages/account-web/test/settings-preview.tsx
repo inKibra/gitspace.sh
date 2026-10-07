@@ -56,7 +56,6 @@ createRoot(root).render(<SettingsPage
   browserRelay={null}
   onSetupBrowserRelay={unavailable}
   onStartBrowserRelay={unavailable}
-  onStopBrowserRelay={unavailable}
   onUnpairBrowserRelay={unavailable}
   onTestBrowserRelay={unavailable}
   deployment={null}

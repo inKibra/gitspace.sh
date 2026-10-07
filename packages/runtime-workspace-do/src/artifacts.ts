@@ -53,6 +53,12 @@ export class ArtifactsCodeStore {
     finally { await disposeArtifactsRepository(repo); }
   }
 
+  async listSnapshotEntries(repository: string, tree: string) {
+    const repo = await this.binding.get(repositorySchema.parse(repository));
+    try { return await snapshotEntries(repo, tree); }
+    finally { await disposeArtifactsRepository(repo); }
+  }
+
   async info(repository: string) {
     const repo = await this.binding.get(repositorySchema.parse(repository));
     try { return await repo.info(); }

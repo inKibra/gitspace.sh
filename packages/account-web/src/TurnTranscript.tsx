@@ -1,5 +1,7 @@
 import type { AskBlock, ExecutionBlock, MessageImage, RichContentBlock, SideAgentBlock, ToolCallBlock, TranscriptItem, TransportBlock, TurnBlock } from '@gitspace/blocks';
 import type { PendingAskAnswer } from '@gitspace/protocol';
+import { RuntimeBrowserExecutionSchema } from '@gitspace/protocol-runtime';
+import { z } from 'zod';
 import { AskUserQuestions, Badge, Button, ChatMessage, Dialog, DialogContent, DialogTitle, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, ThinkingIndicator, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape, type AskUserAnswer, type IconName } from '@gitspace/ui';
 import { AlertCircle, ChevronDown, ChevronRight, GitBranch01, Link03, ShieldTick, Terminal, Users01 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
@@ -65,6 +67,7 @@ function MessageAttachments({ images }: { images: MessageImage[] }) {
 
 // ThinkingStep drops `pending` rows, so every state maps to a visible icon.
 const TOOL_ICON: Record<ToolCallBlock['status'], IconName> = { pending: 'circle', running: 'loader', done: 'check', error: 'x', interrupted: 'x' };
+const browserExecutionDetails = z.object({ browser: RuntimeBrowserExecutionSchema });
 
 function ToolArguments({ args }: { args: unknown }) {
   const serialized = JSON.stringify(args, null, 2);
@@ -77,8 +80,9 @@ function ToolCall({ block, state, onStateChange }: { block: ToolCallBlock } & It
   const hasDetail = hasArgs || (block.input?.length ?? 0) + (block.result?.length ?? 0) > 0;
   const hasImage = block.input?.some((content) => content.type === 'image') || block.result?.some((content) => content.type === 'image');
   const failed = block.status === 'error';
+  const chrome = block.tool === 'browser' ? browserExecutionDetails.safeParse(block.details) : null;
   return <ThinkingSteps className="w-full" defaultOpen={failed} open={state?.open} onOpenChange={(open) => onStateChange?.({ open })}>
-    <ThinkingStepsHeader>{block.tool}</ThinkingStepsHeader>
+    <ThinkingStepsHeader>{block.tool}{chrome?.success ? <span className="ml-2 text-caption font-normal" title={chrome.data.browser.pairingId}>· {chrome.data.browser.name}</span> : null}</ThinkingStepsHeader>
     <ThinkingStepsContent>
       <ThinkingStep label={block.target ?? block.tool} description={failed ? 'failed' : block.status} status={block.status === 'running' ? 'active' : 'complete'} icon={TOOL_ICON[block.status]} isLast>
         {hasDetail ? <ThinkingSteps className="w-full" key={hasImage ? 'image' : 'detail'} defaultOpen={failed || hasImage} open={state?.detailsOpen} onOpenChange={(detailsOpen) => onStateChange?.({ detailsOpen })}>

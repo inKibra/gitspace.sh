@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { RuntimeBrowserAuthorityCertificateBodySchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody } from '@gitspace/protocol-runtime';
 import { runtimeBrowserKey, runtimeBrowserPublicKey } from './runtime-browser.js';
+import { ServiceAssertionBodySchema, signServiceAssertion, type ServiceAssertionBody } from '@gitspace/protocol/service-access';
 export interface AccountRecord {
   userId: string;
   handle: string;
@@ -27,6 +28,12 @@ export class AccountStateDO extends DurableObject<Env> {
  getByHandle(handle: string): AccountRecord | null { return handle === this.env.TENANT_ID ? this.get(this.env.ACCOUNT_ID) : null; }
  async browserTrust() {
    return { accountId: this.env.ACCOUNT_ID, ...await runtimeBrowserPublicKey(this.ctx.storage) };
+ }
+ async signServiceRequest(raw: ServiceAssertionBody) {
+   const body = ServiceAssertionBodySchema.parse(raw);
+   const now = Date.now();
+   if (body.accountId !== this.env.ACCOUNT_ID || body.caller.accountId !== this.env.ACCOUNT_ID || body.issuedAt > now + 5000 || body.expiresAt <= now || body.expiresAt - body.issuedAt > 60_000) throw new Error('Invalid service assertion');
+   return signServiceAssertion(body, (await runtimeBrowserKey(this.ctx.storage)).privateKey);
  }
  async certifyBrowserAuthority(raw: RuntimeBrowserAuthorityCertificateBody) {
    const body = RuntimeBrowserAuthorityCertificateBodySchema.parse(raw);

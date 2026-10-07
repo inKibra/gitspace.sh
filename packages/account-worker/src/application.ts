@@ -3,6 +3,7 @@ import { runtimeMachineControl } from './account-runtime-control.js';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
 import { z } from 'zod';
+import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, type LoginState } from '@gitspace/provider-auth';
 import { collectUsage, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
 import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
@@ -48,6 +49,7 @@ import {
   type SignedDeviceInvite,
   decodeSignedRpcHeader,
   verifyRpcSignature,
+  verifyRpcDigestSignature,
   RPC_DEVICE_HEADER,
   MACHINE_PAIRING_TTL_MS,
   credentialAuthorityGrantPayload,
@@ -114,7 +116,6 @@ import { SpaceAuthorityDO } from './space-authority.js';
 import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
 import { HandleUnavailable, SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
-import { HostedRouteRegistryDO } from './hosted-route-registry.js';
 import { AccountStateDO } from './account-state.js';
 import type { SpaceAuthorityResult } from '@gitspace/protocol-workspace';
 import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
@@ -146,7 +147,7 @@ const REQUEST_NONCE_RETENTION_MS = SIGNED_UPLOAD_MAX_AGE_MS;
  * five-minute invitation lifetime, which a wider window would make vacuous.
  */
 const ENROLLMENT_CLOCK_SKEW_MS = 60_000;
-const REQUEST_MAX_BYTES = 512 * 1024;
+export const REQUEST_MAX_BYTES = 512 * 1024;
 const DATA_OBJECT_MAX_BYTES = 64 * 1024 * 1024;
 const DATA_REQUEST_HEADER_MAX_BYTES = 8 * 1024;
 const REFRESH_LEASE_MS = 20_000;
@@ -774,9 +775,23 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return this.authorizeRpcRequest(input, false);
   }
 
+  /** Admit identity only; the tunnel destination retains procedure and scope authorization. */
+  authorizeTunnelDeviceRequest(input: { header: string | null; target: string; method: string }): CredentialVaultResult<{ deviceId: string; bodySha256: string }> {
+    const config = this.config();
+    if (!config || config.user_id !== this.env.ACCOUNT_ID || config.root_public_key !== this.env.AUTH_PUBLIC_KEY) {
+      return publicError('RPC_FORBIDDEN', 'Account credential authority does not own this tenant');
+    }
+    const header = input.header ? decodeSignedRpcHeader(input.header) : null;
+    if (!header || Math.abs(Date.now() - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError('RPC_UNAUTHORIZED', 'Device signature is missing, invalid or expired');
+    const device = this.currentDeviceGrant(header.deviceId);
+    if (!device || !verifyRpcDigestSignature(header, { method: input.method, path: input.target }, device.signingPublicKey)) return publicError('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked');
+    const nonce = this.consumeRequestNonce(header.nonce, header.timestamp);
+    return nonce.status === 'error' ? nonce : { status: 'ok', value: { deviceId: device.deviceId, bodySha256: header.bodySha256 } };
+  }
+
   /** Runtime routing performs canonical project/workspace scope checks after this signature admission. */
   authorizeWorkspaceRuntimeRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
-    return this.authorizeRpcRequest(input, false, false, true);
+    return this.authorizeRpcRequest(input, false, false, 'workspace-runtime');
   }
 
   /** Current tenant-local authority, including issuer revocation and expiration. */
@@ -789,6 +804,18 @@ export class CredentialVaultDO extends DurableObject<Env> {
     };
     const record = resolve(deviceId);
     return record ? verifyDeviceGrantRecord(record, credentialProtocolBase64.decode(config.root_public_key), Date.now(), resolve) : null;
+  }
+  serviceDeviceAuthority(deviceId: string): { expiresAt: number | null } | null {
+    const device = this.currentDeviceGrant(deviceId);
+    if (!device || device.kind !== 'browser' || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.write')) return null;
+    let expiresAt = device.expiresAt ?? Infinity;
+    let record = this.deviceGrant(deviceId);
+    while (record?.invite.issuer.kind === 'device') {
+      record = this.deviceGrant(record.invite.issuer.deviceId);
+      if (!record) return null;
+      expiresAt = Math.min(expiresAt, deviceGrantExpiresAt(record) ?? Infinity);
+    }
+    return { expiresAt: expiresAt === Infinity ? null : expiresAt };
   }
   private mcpAccessRow() {
     return this.ctx.storage.sql.exec<{ revision: number; device_id: string | null; sealed_key: string | null; token_hash: string | null; updated_at: string }>(
@@ -860,12 +887,12 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (input.operation === 'rotate' && (!row?.token_hash || !row.device_id || !this.currentDeviceGrant(row.device_id))) {
       return publicError('MCP_NOT_ACTIVE', 'Enable an active MCP grant before rotating its token');
     }
-    return this.ctx.storage.transactionSync(() => {
+    const result: McpAccessResult = this.ctx.storage.transactionSync(() => {
       if (invite && binding) {
         const enrolled = this.enrollDevice({ invite, binding });
         if (enrolled.status === 'error') return enrolled;
       }
-      if (input.operation === 'disable' && row?.device_id) this.revokeDeviceGrant(row.device_id);
+      if (input.operation === 'disable' && row?.device_id) this.recordDeviceRevocation(row.device_id);
       this.ctx.storage.sql.exec(`
         INSERT INTO mcp_access(id, revision, device_id, sealed_key, token_hash, updated_at) VALUES (1, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,device_id=excluded.device_id,sealed_key=excluded.sealed_key,token_hash=excluded.token_hash,updated_at=excluded.updated_at
@@ -874,6 +901,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
       tokenHash ?? null, new Date().toISOString());
       return { status: 'ok', value: { ...this.mcpAccessView(), ...(token ? { token } : {}) } };
     });
+    if (result.status === 'ok' && input.operation === 'disable' && row?.device_id) await this.env.RELAY.getByName(this.env.RELAY_NAME).serviceRevokeDevice(row.device_id);
+    return result;
   }
 
   /** Internal DO RPC only. Authenticate the bearer before decrypting signing material. */
@@ -903,7 +932,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return this.authorizeRpcRequest({ ...input, method: 'GET', body: new Uint8Array(), capabilities: ['rpc.read'] }, false, !initial);
   }
 
-  private authorizeRpcRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[]; method?: 'GET' | 'POST' }, browserOnly: boolean, revalidate = false, workspaceRuntime = false): CredentialVaultResult<{ deviceId: string }> {
+  private authorizeRpcRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[]; method?: string }, browserOnly: boolean, revalidate = false, admission: 'account' | 'workspace-runtime' = 'account'): CredentialVaultResult<{ deviceId: string }> {
     const config = this.config();
     const header = input.header ? decodeSignedRpcHeader(input.header) : null;
     const now = Date.now();
@@ -921,7 +950,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (!device || !verifyRpcSignature(header, { method: input.method ?? 'POST', path: input.target, body: input.body }, device.signingPublicKey)) {
       return publicError('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked');
     }
-    if ((browserOnly && device.kind !== 'browser') || (!workspaceRuntime && device.scope.kind !== 'user')
+    if ((browserOnly && device.kind !== 'browser') || (admission === 'account' && device.scope.kind !== 'user')
       || !input.capabilities.every((capability) => device.capabilities.includes(capability))) {
       return publicError('RPC_FORBIDDEN', 'Device is out of scope or lacks permission');
     }
@@ -1194,7 +1223,12 @@ export class CredentialVaultDO extends DurableObject<Env> {
       'SELECT record_json, generation, revoked_at FROM device_grants ORDER BY updated_at',
     ).toArray().map((row) => ({ ...(JSON.parse(row.record_json) as DeviceGrantRecord), generation: row.generation, revokedAt: row.revoked_at }));
   }
-  revokeDeviceGrant(deviceId: string): CredentialVaultResult<{ deviceId: string; revokedAt: number }> {
+  async revokeDeviceGrant(deviceId: string): Promise<CredentialVaultResult<{ deviceId: string; revokedAt: number }>> {
+    const result = this.recordDeviceRevocation(deviceId);
+    if (result.status === 'ok') await this.env.RELAY.getByName(this.env.RELAY_NAME).serviceRevokeDevice(deviceId);
+    return result;
+  }
+  private recordDeviceRevocation(deviceId: string): CredentialVaultResult<{ deviceId: string; revokedAt: number }> {
     const revokedAt = Date.now();
     const row = this.ctx.storage.sql.exec<{ revoked_at: number | null }>('SELECT revoked_at FROM device_grants WHERE device_id = ?', deviceId).toArray()[0];
     if (!row) return publicError('DEVICE_NOT_FOUND', 'Device is not enrolled');
@@ -3918,18 +3952,27 @@ const worker = {
               value = await authority.listHostedRoutes();
               break;
             case 'project.routes.lease': {
-              const route = await authority.leaseHostedRoute(
-                body.payload.route as Parameters<ProjectAuthorityDO['leaseHostedRoute']>[0],
-              );
-              await (env.HOSTED_ROUTES as DurableObjectNamespace<HostedRouteRegistryDO>).getByName(route.hostname).lease(body.userId, route);
+              const input = hostedServiceRouteSchema.omit({ updatedAt: true }).parse(body.payload.route);
+              const ingress = new URL(input.ingress);
+              if (input.machineId !== body.machineId || !input.hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`) || ingress.protocol !== 'http:' || ingress.hostname !== '127.0.0.1' || Number(ingress.port) !== input.port || ingress.pathname !== '/' || ingress.search || ingress.username || ingress.password) throw new Error('Invalid tenant service route');
+              const workspace = (await authority.listWorkspaces()).find(item => item.id === input.workspaceId);
+              if (!workspace) throw new Error('Service workspace does not belong to this project');
+              const route = await authority.leaseHostedRoute(input);
+              try {
+                await env.HOSTED_ROUTES.getByName(route.hostname).lease(body.userId, route);
+              } catch (error) {
+                await authority.releaseHostedRoute(route.hostname, route.machineId, route.generation);
+                throw error;
+              }
               value = route;
               break;
             }
             case 'project.routes.release': {
               const hostname = String(body.payload.hostname ?? '');
-              const released = await authority.releaseHostedRoute(hostname, body.machineId);
+              const generation = z.number().int().nonnegative().parse(body.payload.generation);
+              const released = await authority.releaseHostedRoute(hostname, body.machineId, generation);
               if (released) {
-                await (env.HOSTED_ROUTES as DurableObjectNamespace<HostedRouteRegistryDO>).getByName(hostname).release(body.userId, body.machineId);
+                await env.HOSTED_ROUTES.getByName(hostname).release(body.userId, body.machineId, generation);
               }
               value = released;
               break;

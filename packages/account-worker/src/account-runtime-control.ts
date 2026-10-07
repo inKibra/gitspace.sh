@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import type { SignedControlRequest } from '@gitspace/protocol/credential-vault';
-import { RuntimeIdentitySchema, RuntimeAttachInputSchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema, RuntimeJsonSchema } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeAttachInputSchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
-import { RuntimeModelInputSchema, RuntimeMcpInputSchema, RuntimeRepositoryCredentialsInputSchema } from '@gitspace/protocol-runtime/machine-controls';
+import { RuntimeRepositoryCredentialsInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 import { requireRuntimeIdentity } from './runtime-access.js';
 import { ensureRuntimeCodeRepository } from './account-runtime-host.js';
@@ -53,9 +53,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     await ensureRuntimeCodeRepository(env, userId, identity);
     return new ArtifactsCodeStore(env.ARTIFACTS).credentials(repository, input.scope);
   }
-  const model = operation === 'runtime.model' ? RuntimeModelInputSchema.parse(payload) : null;
-  const mcp = operation === 'runtime.mcp' ? RuntimeMcpInputSchema.parse(payload) : null;
-  const identity = RuntimeIdentitySchema.parse(model?.dispatch ?? mcp?.dispatch ?? payload);
+  const identity = RuntimeIdentitySchema.parse(payload);
   const access = await requireRuntimeIdentity(env, userId, identity, operation !== 'runtime.snapshot');
   const placement = await access.authority.get();
   const primary = placement?.machineId === machine && ['open', 'opening', 'closing'].includes(placement.state);
@@ -97,14 +95,6 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
       const attachments = await access.authority.runtimeAttachments(identity);
       if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation && (item.role === 'primary' || item.role === 'replica'))) throw new Error('Checkpoint source is not this machine replica');
       return access.authority.runtimeSnapshotCommit(input);
-    }
-    case 'runtime.model': {
-      if (!model || model.dispatch.machineId !== machine) throw new Error('Model request executor mismatch');
-      return RuntimeJsonSchema.parse(await (await access.authority.runtimeModel(model, machine)).json());
-    }
-    case 'runtime.mcp': {
-      if (!mcp || mcp.dispatch.machineId !== machine) throw new Error('MCP request executor mismatch');
-      return RuntimeJsonSchema.parse(await (await access.authority.runtimeMcp(mcp, machine)).json());
     }
     case 'runtime.heartbeat': return access.authority.runtimeHeartbeat({ ...payload, machineId: machine });
     case 'runtime.detach': return access.authority.runtimeDetach({ ...payload, machineId: machine });

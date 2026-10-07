@@ -1,23 +1,22 @@
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
-import { CodemodeSandbox } from '@earendil-works/pi-codemode';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
-import { RuntimeContentSchema, RuntimeJsonSchema, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
-import { ApplyPatchArgumentsSchema, prepareV4APatch, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeBashCommandArgumentsSchema, RuntimeFindArgumentsSchema, RuntimeGrepArgumentsSchema, RuntimeAstGrepArgumentsSchema, RuntimeAstEditArgumentsSchema, RuntimeAstResolveArgumentsSchema, RuntimeCodemodeArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeContentSchema, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { ApplyPatchArgumentsSchema, prepareV4APatch, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeBashCommandArgumentsSchema, RuntimeFindArgumentsSchema, RuntimeGrepArgumentsSchema, RuntimeAstGrepArgumentsSchema, RuntimeAstEditArgumentsSchema, RuntimeAstResolveArgumentsSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment, ExecutorJournal } from './journal.js';
 import { proposalPath, stageProposal, resolveProposal } from './ast-proposals.js';
-import { ExecutorEffectUncertain, type RunExecutorCommand } from './commands.js';
+import type { RunExecutorCommand } from './commands.js';
 import { machineRipgrepPath } from '../../deployment/src/native-runtime.js';
+import { searchRipgrepArguments, searchRipgrepOutput } from '../../protocol-runtime/src/search-ripgrep.js';
+import { materializeSearchSnapshot } from './search-snapshot.js';
 
 export type ExecutorContent = z.infer<typeof RuntimeContentSchema>[];
 export type ExecutorArtifactAccess = { read(uri: string, signal: AbortSignal): Promise<ExecutorContent>; write(uri: string, content: string, signal: AbortSignal): Promise<void> };
-export type ExecutorCloudModelProxy = (input: { dispatch: RuntimeToolDispatch; operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; signal: AbortSignal }) => Promise<z.infer<typeof RuntimeJsonSchema>>;
-export type ExecutorCloudMcpProxy = (input: { dispatch: RuntimeToolDispatch; callId: string; method: 'list' | 'search' | 'describe' | 'call'; args: z.infer<typeof RuntimeJsonSchema>; signal: AbortSignal }) => Promise<z.infer<typeof RuntimeJsonSchema>>;
 export type ExecutorOperationHandler = (dispatch: RuntimeToolDispatch, local: LocalAttachment, signal: AbortSignal) => Promise<ExecutorContent>;
-export type MachineToolOptions = { journal?: ExecutorJournal; runCommand: RunExecutorCommand; artifacts: (attachment: LocalAttachment) => ExecutorArtifactAccess; cloudModel: ExecutorCloudModelProxy; cloudMcp: ExecutorCloudMcpProxy; operations?: Record<string, ExecutorOperationHandler> };
+export type MachineToolOptions = { journal?: ExecutorJournal; runCommand: RunExecutorCommand; artifacts: (attachment: LocalAttachment) => ExecutorArtifactAccess; operations?: Record<string, ExecutorOperationHandler> };
 const ProposalSchema = z.object({ changes: z.array(z.object({ path: z.string(), before: z.string(), after: z.string() })) });
 
 export async function checkoutPath(root: string, path: string): Promise<string> {
@@ -122,10 +121,14 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
     }
     case 'grep': {
       const args = RuntimeGrepArgumentsSchema.parse(dispatch.args);
-      const path = await checkoutPath(local.rootPath, args.path);
-      const result = await command(machineRipgrepPath(), ['--line-number', '--no-heading', ...(args.glob ? ['--glob', args.glob] : []), '--', args.pattern, path]);
+      const searchRoot = dispatch.snapshot ? await materializeSearchSnapshot(local.rootPath, dispatch.snapshot) : local.rootPath;
+      await checkoutPath(searchRoot, args.path);
+      const ignored = args.gitignore ? await command(machineRipgrepPath(), ['--files', '--no-config', '--hidden', '--no-ignore', '--glob=.gitignore', '--glob=.ignore', '--glob=!.git/**', '--', searchRoot]) : { exitCode: 0, output: '' };
+      if (ignored.exitCode > 1) throw new Error(ignored.output);
+      const ignoreFiles = await Promise.all(ignored.output.trim().split('\n').filter(Boolean).map(async file => ({ path: relative(searchRoot, file), content: await readFile(await checkoutPath(searchRoot, file), 'utf8') })));
+      const result = await command(machineRipgrepPath(), searchRipgrepArguments(args, searchRoot));
       if (result.exitCode > 1) throw new Error(result.output);
-      return text(result.output);
+      return text(searchRipgrepOutput(result.output, args, searchRoot, ignoreFiles));
     }
     case 'find': {
       const args = RuntimeFindArgumentsSchema.parse(dispatch.args);
@@ -189,41 +192,6 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
       if (!options.journal) throw new Error('AST proposals require durable executor storage');
       const args = RuntimeAstResolveArgumentsSchema.parse(dispatch.args);
       return text(`Proposal ${await resolveProposal(options.journal, local, args.proposalId, args.action, signal)}`);
-    }
-    case 'codemode': {
-      const args = RuntimeCodemodeArgumentsSchema.parse(dispatch.args);
-      const pending = new Set<Promise<unknown>>();
-      let uncertain: ExecutorEffectUncertain | undefined;
-      const track = <T>(operation: () => Promise<T>, mutationProxy = false): Promise<T> => {
-        const running = Promise.resolve().then(operation).catch((error: unknown) => {
-          if (error instanceof ExecutorEffectUncertain || mutationProxy) uncertain ??= new ExecutorEffectUncertain('Codemode child effect requires reconciliation', { cause: error });
-          throw error;
-        });
-        pending.add(running);
-        void running.then(() => pending.delete(running), () => pending.delete(running));
-        return running;
-      };
-      const sandbox = new CodemodeSandbox({
-        timeoutMs: Math.max(1, Date.parse(dispatch.deadlineAt) - Date.now()),
-        tools: ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find'].map(tool => ({ name: tool, execute: (input, call) => track(() => executeMachineTool({ ...dispatch, tool, args: RuntimeJsonSchema.parse(input), attemptId: `${dispatch.attemptId}:eval:${sequence++}` }, local, call.signal, options)) })),
-        globals: [
-          ...(['completion', 'judge'] as const).map(operation => ({ name: operation, execute: (input: unknown, call: { signal: AbortSignal }) => track(() => options.cloudModel({ dispatch, operation, args: RuntimeJsonSchema.parse(input), signal: call.signal })) })),
-          ...(['list', 'search', 'describe', 'call'] as const).map(method => ({ name: `mcp.${method}`, execute: (input: unknown, call: { signal: AbortSignal }) => track(() => options.cloudMcp({ dispatch, callId: String(sequence++), method, args: RuntimeJsonSchema.parse(input ?? {}), signal: call.signal }), method === 'call') })),
-        ],
-      });
-      try {
-        const result = await sandbox.execute(args.code, { signal });
-        if (!result.ok) throw new Error(result.error.message);
-        return [...result.output, ...text(JSON.stringify(result.value) ?? '')];
-      } finally {
-        try { await sandbox.close(); }
-        finally {
-          // Pi serializes callback errors and does not await aborted callbacks. Keep
-          // host evidence outside that boundary, including script-caught errors.
-          await Promise.allSettled([...pending]);
-          if (uncertain) throw uncertain;
-        }
-      }
     }
     default: {
       const operation = options.operations?.[dispatch.tool];

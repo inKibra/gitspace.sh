@@ -310,15 +310,19 @@ machine.command('recover').description('Build and activate a complete tenant mac
 machine.command('status').description('Show local runtime and relay status').action(async () => {
   const config = await requireConfig();
   const host = await runningHost();
-  const health = async (url: URL): Promise<string> => {
+  const health = async (url: URL, headers?: HeadersInit): Promise<string> => {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) });
       return response.ok ? 'reachable' : `HTTP ${response.status}`;
     } catch { return 'unreachable'; }
   };
+  const tunnelUrl = new URL(`/tunnel/${encodeURIComponent(config.machine.id)}/health`, config.relayUrl);
   const [relay, tunnel] = await Promise.all([
     health(new URL('/health', config.relayUrl)),
-    health(new URL(`/tunnel/${encodeURIComponent(config.machine.id)}/health`, config.relayUrl)),
+    health(tunnelUrl, {
+      authorization: createRelayAuthorization(credentialProtocolBase64.decode(config.machine.signingPrivateKey), `${tunnelUrl.pathname}${tunnelUrl.search}`),
+      'x-gitspace-machine-grant': Buffer.from(JSON.stringify(config.machine.grant)).toString('base64url'),
+    }),
   ]);
   console.log(`Machine: ${config.machine.label}\nDaemon: ${host ? `running (pid ${host.pid}${host.url ? `, rpc ${host.url}` : ''})` : 'stopped'}\nRelay service: ${relay}\nMachine tunnel: ${tunnel}\nAccount: ${config.accountUrl}\nLog: ${LOG_PATH}`);
 });

@@ -151,5 +151,5 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
   if (headChanged && cloud.headCommit !== base.headCommit && cloud.headCommit !== machine.headCommit) conflicts.add('HEAD');
   const objects = new Map([...cloud.lfs?.objects ?? [], ...machine.lfs?.objects ?? []].map(object => [object.oid, object]));
   const heldBack = new Map([...cloud.lfs?.heldBack ?? [], ...machine.lfs?.heldBack ?? []].map(entry => [entry.path, entry]));
-  return { mutations, indexMutations, trackedMutations, conflicts: [...conflicts].sort(), machine: { ...machine, headCommit: headChanged && cloud.headCommit === base.headCommit ? machine.headCommit : cloud.headCommit, branch: branchChanged && cloud.branch === base.branch ? machine.branch : cloud.branch, ...(cloud.lfs || machine.lfs ? { lfs: { objects: [...objects.values()], heldBack: [...heldBack.values()] } } : {}) } };
+  return { forcePublication: options.forcePublication === true, mutations, indexMutations, trackedMutations, conflicts: [...conflicts].sort(), machine: { ...machine, headCommit: headChanged && cloud.headCommit === base.headCommit ? machine.headCommit : cloud.headCommit, branch: branchChanged && cloud.branch === base.branch ? machine.branch : cloud.branch, ...(cloud.lfs || machine.lfs ? { lfs: { objects: [...objects.values()], heldBack: [...heldBack.values()] } } : {}) } };
 }

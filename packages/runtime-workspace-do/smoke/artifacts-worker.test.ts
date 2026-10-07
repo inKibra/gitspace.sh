@@ -8,6 +8,7 @@ import git from 'isomorphic-git';
 import { Miniflare, Request as WorkerRequest, Response as WorkerResponse } from 'miniflare';
 import { z } from 'zod';
 import { RuntimeGitCheckpointSchema, RuntimeToolResultSchema } from '@gitspace/protocol-runtime';
+import { wranglerWorkerModules } from './search-wasm.js';
 
 // Exercise the production bundler and fetch implementation, not Bun's Node-compatible fetch.
 // All outbound requests terminate at a disposable local native Git receive-pack process.
@@ -45,6 +46,8 @@ export class CloudMutationProof extends DurableObject {
       writeSnapshot: input => writeArtifactsSnapshot(repo, input),
       mergeSnapshot: unsupported,
       listSnapshotPaths: async (_repository, oid) => (await (await object('tree', oid)).json()).map(entry => entry.name),
+      listSnapshotEntries: async (_repository, oid) => new Map((await (await object('tree', oid)).json()).map(entry => [entry.name, { oid: entry.hash, mode: entry.mode, type: entry.type }])),
+      readBlob: async (_repository, oid) => { const response = await object('blob', oid); return response.status === 404 ? null : response.blob(); },
     };
     const store = new CloudFileStore(this.ctx.storage, { list: () => [] }, code, 'worker-proof', () => {}, { has: unsupported, get: unsupported, put: unsupported }, async () => {}, async () => initial);
     const result = await store.execute(input);
@@ -62,13 +65,12 @@ const result=await writeArtifactsSnapshot(repo,{repository:'local',workspaceId:'
     build.stdin.end();
     const [buildOut, buildErr, buildExit] = await Promise.all([new Response(build.stdout).text(), new Response(build.stderr).text(), build.exited]);
     assert.equal(buildExit, 0, buildOut + buildErr);
-    const contents = await Bun.file(join(dir, 'bundle/worker.js')).text();
     let redirect: 'discovery' | 'push' | null = 'discovery';
-    worker = new Miniflare({ modules: [{ type: 'ESModule', path: join(dir, 'worker.js'), contents }], modulesRoot: dir, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { CLOUD: { className: 'CloudMutationProof', useSQLite: true } }, outboundService: async (request: WorkerRequest) => {
+    worker = new Miniflare({ modules: await wranglerWorkerModules(join(dir, 'bundle'), 'worker.js'), modulesRoot: join(dir, 'bundle'), compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { CLOUD: { className: 'CloudMutationProof', useSQLite: true } }, outboundService: async (request: WorkerRequest) => {
       const url = new URL(request.url);
       assert.equal(url.host, 'local-git.invalid', 'Never follow redirects or contact a live provider');
       if (url.pathname === '/object') {
-        const input = z.object({ kind: z.enum(['commit', 'tree', 'file']), oid: z.string(), path: z.string().optional() }).parse(await request.json());
+        const input = z.object({ kind: z.enum(['commit', 'tree', 'file', 'blob']), oid: z.string(), path: z.string().optional() }).parse(await request.json());
         if (input.kind === 'commit') {
           const value = (await git.readCommit({ fs, dir, oid: input.oid })).commit;
           return WorkerResponse.json({ hash: input.oid, treeHash: value.tree, parents: value.parent, message: value.message, author: value.author, committer: value.committer, authoredAt: value.author.timestamp, committedAt: value.committer.timestamp });

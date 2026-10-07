@@ -120,13 +120,14 @@ export interface VerifiedDevice {
   expiresAt: number | null;
 }
 
-/** Header carrying the request signature; the body hash is recomputed by the verifier. */
+/** Signed digest admits streaming requests before reading bytes; receivers still verify the body. */
 export const RPC_DEVICE_HEADER = 'x-gitspace-device';
 export const signedRpcHeaderSchema = z.object({
   version: z.literal(1),
   deviceId: z.uuid(),
   timestamp: z.number().int().nonnegative(),
   nonce: z.uuid(),
+  bodySha256: z.string().regex(/^[A-Za-z0-9+/]{43}=$/u),
   signature: z.string().min(64).max(128),
 });
 export type SignedRpcHeader = z.infer<typeof signedRpcHeaderSchema>;
@@ -276,14 +277,14 @@ export function verifyDeviceGrantRecord(record: DeviceGrantRecord, rootSigningPu
   };
 }
 
-export interface RpcSignatureInput {
-  deviceId: string;
-  timestamp: number;
-  nonce: string;
+export type RpcSignatureInput = Pick<SignedRpcHeader, 'deviceId' | 'timestamp' | 'nonce' | 'bodySha256'> & {
   method: string;
   /** Pathname plus search, as the machine sees it after any proxy. */
   path: string;
-  body: Uint8Array;
+};
+
+export function rpcBodySha256(body: Uint8Array): string {
+  return toBase64(sha256(body));
 }
 
 /** Bytes signed per request; exported so WebCrypto callers can sign them. */
@@ -295,7 +296,7 @@ export function rpcSignaturePayload(input: RpcSignatureInput): Uint8Array {
     nonce: input.nonce,
     method: input.method.toUpperCase(),
     path: input.path,
-    bodySha256: toBase64(sha256(input.body)),
+    bodySha256: input.bodySha256,
   });
 }
 
@@ -305,6 +306,7 @@ export function encodeSignedRpcHeader(header: SignedRpcHeader): string {
 
 export function decodeSignedRpcHeader(value: string): SignedRpcHeader | null {
   try {
+    if (value.length > 2048) return null;
     const parsed = signedRpcHeaderSchema.safeParse(JSON.parse(new TextDecoder().decode(fromBase64Url(value))));
     return parsed.success ? parsed.data : null;
   } catch {
@@ -313,16 +315,26 @@ export function decodeSignedRpcHeader(value: string): SignedRpcHeader | null {
 }
 
 /** Sign with a raw Ed25519 private key (Node/Bun clients); browsers use WebCrypto over `rpcSignaturePayload`. */
-export function signRpcRequest(input: Omit<RpcSignatureInput, 'timestamp' | 'nonce'> & { signingPrivateKey: Uint8Array; timestamp?: number; nonce?: string }): string {
+export function signRpcRequest(input: Omit<RpcSignatureInput, 'timestamp' | 'nonce' | 'bodySha256'> & { body: Uint8Array; signingPrivateKey: Uint8Array; timestamp?: number; nonce?: string }): string {
+  return signRpcDigestRequest({ ...input, bodySha256: rpcBodySha256(input.body) });
+}
+
+/** Streaming callers compute this digest incrementally rather than collecting the body. */
+export function signRpcDigestRequest(input: Omit<RpcSignatureInput, 'timestamp' | 'nonce'> & { signingPrivateKey: Uint8Array; timestamp?: number; nonce?: string }): string {
   const timestamp = input.timestamp ?? Date.now();
   const nonce = input.nonce ?? crypto.randomUUID();
   const signature = toBase64(ed25519.sign(rpcSignaturePayload({ ...input, timestamp, nonce }), input.signingPrivateKey));
-  return encodeSignedRpcHeader({ version: 1, deviceId: input.deviceId, timestamp, nonce, signature });
+  return encodeSignedRpcHeader({ version: 1, deviceId: input.deviceId, timestamp, nonce, bodySha256: input.bodySha256, signature });
 }
 
-export function verifyRpcSignature(header: SignedRpcHeader, input: Omit<RpcSignatureInput, 'deviceId' | 'timestamp' | 'nonce'>, signingPublicKey: Uint8Array): boolean {
+export function verifyRpcSignature(header: SignedRpcHeader, input: Pick<RpcSignatureInput, 'method' | 'path'> & { body: Uint8Array }, signingPublicKey: Uint8Array): boolean {
+  return rpcBodySha256(input.body) === header.bodySha256 && verifyRpcDigestSignature(header, input, signingPublicKey);
+}
+
+/** Authenticate only the claimed digest. Stream receivers must check it before normal EOF. */
+export function verifyRpcDigestSignature(header: SignedRpcHeader, input: Pick<RpcSignatureInput, 'method' | 'path'>, signingPublicKey: Uint8Array): boolean {
   try {
-    return ed25519.verify(fromBase64(header.signature), rpcSignaturePayload({ ...input, deviceId: header.deviceId, timestamp: header.timestamp, nonce: header.nonce }), signingPublicKey);
+    return ed25519.verify(fromBase64(header.signature), rpcSignaturePayload({ ...input, deviceId: header.deviceId, timestamp: header.timestamp, nonce: header.nonce, bodySha256: header.bodySha256 }), signingPublicKey);
   } catch {
     return false;
   }

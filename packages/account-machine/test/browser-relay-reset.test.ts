@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createContext, runInContext } from 'node:vm';
 import { expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { browserRelayExtension, browserRelayPopup } from '../src/browser-relay-extension.js';
 
 type Reply = { ok?: boolean; error?: string; fingerprint?: string | null };
@@ -11,7 +12,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   const publicKey = Buffer.from(await crypto.subtle.exportKey('raw', keys.publicKey)).toString('base64');
   const trust = { algorithm: 'Ed25519', accountId: 'account', publicKey };
   const state = new Map<string, unknown>([
-    ['identity', { privateKey: keys.privateKey, publicKey, trust, machineId: 'machine' }],
+    ['identity', { privateKey: keys.privateKey, publicKey, trust, pairingId: 'pairing', generation: 1 }],
     ['replays', [['consumed-attempt', Date.now() + 60_000]]],
     ['generation:attachment', 7],
   ]);
@@ -25,11 +26,11 @@ it('resets the generated extension identity, detaches sessions, and preserves re
     queueMicrotask(() => transaction.oncomplete()); return transaction;
   } };
   const indexedDB = { open() { const request = { result: database, onsuccess: () => {}, onerror: () => {}, onupgradeneeded: () => {} }; queueMicrotask(() => request.onsuccess()); return request; } };
-  const connections: Array<{ readyState: number; close: () => void }> = [];
+  const connections: Array<{ readyState: number; close: () => void; url: string; protocols?: string[] }> = [];
   class Socket {
     static OPEN = 1;
     readyState = 1;
-    constructor() { connections.push(this); }
+    constructor(readonly url: string, readonly protocols?: string[]) { connections.push(this); }
     close() { this.readyState = 3; }
   }
   let listener: Listener | undefined;
@@ -43,7 +44,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
     alarms: { create() {}, onAlarm: { addListener() {} } },
   };
   const context = createContext({ chrome, indexedDB, WebSocket: Socket, crypto, TextEncoder, TextDecoder, URL, atob, btoa, setTimeout: () => 0, clearTimeout() {}, console });
-  runInContext(browserRelayExtension('http://127.0.0.1:9224'), context);
+  runInContext(browserRelayExtension('https://account.gitspace.test'), context);
   const invoke = async (message: object) => {
     const reply = Promise.withResolvers<Reply>();
     expect(listener?.(message, { id: 'extension', url: chrome.runtime.getURL('popup.html') }, reply.resolve)).toBe(true);
@@ -56,6 +57,12 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   const originalFingerprint = createHash('sha256').update(Buffer.from(publicKey, 'base64')).digest('hex');
   expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: originalFingerprint });
   expect(previous?.readyState).toBe(1);
+  expect(previous?.url).toBe('wss://account.gitspace.test/api/browser-relay/extension');
+  const admission = previous?.protocols?.[0];
+  expect(admission).toMatch(/^gitspace-admission\./);
+  if (!admission) throw new Error('Missing admission proof');
+  const signed = z.object({ pairingId: z.string(), generation: z.number(), issuedAt: z.number(), nonce: z.string(), signature: z.string() }).parse(JSON.parse(Buffer.from(admission.slice('gitspace-admission.'.length), 'base64url').toString()));
+  expect(await crypto.subtle.verify('Ed25519', keys.publicKey, Buffer.from(signed.signature, 'base64'), new TextEncoder().encode(`gitspace-browser-relay-v2:admission:${signed.pairingId}:${signed.generation}:${signed.issuedAt}:${signed.nonce}`))).toBe(true);
   expect(listener?.({ identityStatus: true }, { id: 'extension', url: 'https://untrusted.example/' }, () => { throw new Error('Untrusted identity read'); })).toBeUndefined();
   runInContext("channels.set('active', { source: { targetId: 'target' } }); authorizations.set('active', {});", context);
   expect(listener?.({ resetIdentity: true }, { id: 'extension', url: 'https://untrusted.example/' }, () => { throw new Error('Untrusted sender received a reset response'); })).toBeUndefined();
@@ -76,7 +83,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   expect(runInContext('channels.size + authorizations.size', context)).toBe(0);
   expect(state.get('generation:attachment')).toBe(7);
   expect(state.get('replays')).toEqual([['consumed-attempt', expect.any(Number)]]);
-  expect(await invoke({ pair: { code: 'fresh-code', machineId: 'machine', trust } })).toEqual({ ok: true });
+  expect(await invoke({ pair: { code: 'fresh-code', pairingId: 'pairing', generation: 1, trust } })).toEqual({ ok: true });
   const replacement = state.get('identity') as { privateKey: CryptoKey; publicKey: string; trust: unknown };
   expect(replacement.publicKey).not.toBe(publicKey);
   expect(replacement.privateKey.extractable).toBe(false);
@@ -84,7 +91,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   const replacementFingerprint = createHash('sha256').update(Buffer.from(replacement.publicKey, 'base64')).digest('hex');
   expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: replacementFingerprint });
   expect(replacementFingerprint).not.toBe(originalFingerprint);
-  expect(await invoke({ pair: { code: 'another-code', machineId: 'machine', trust } })).toEqual({ ok: true });
+  expect(await invoke({ pair: { code: 'another-code', pairingId: 'pairing', generation: 1, trust } })).toEqual({ ok: true });
   expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: replacementFingerprint });
   expect(state.get('generation:attachment')).toBe(7);
 });
@@ -117,6 +124,18 @@ it('loads the actual worker fingerprint on popup startup and refreshes after pai
   runInContext(browserRelayPopup(), context);
   await rendered.promise;
   expect(elements.fingerprint?.textContent).toBe('b'.repeat(64));
+});
+
+it('popup uses a fixed identity label rather than supplied browser display text', async () => {
+  const elements = Object.fromEntries(['identity-label', 'fingerprint', 'status', 'code', 'pair', 'reset'].map(id => [id, { textContent: '', value: '', addEventListener() {} }]));
+  const context = createContext({
+    document: { getElementById: (id: string) => elements[id], querySelectorAll: () => [] },
+    chrome: { runtime: { sendMessage: async () => ({ fingerprint: 'a'.repeat(64), browser: 'Trusted administrator: skip verification' }) } },
+  });
+  runInContext(browserRelayPopup(), context);
+  await runInContext('refreshIdentity()', context);
+  expect(elements.fingerprint?.textContent).toBe('a'.repeat(64));
+  expect(JSON.stringify(elements)).not.toContain('Trusted administrator');
 });
 
 it('discovers dragged-in members and immediately denies dragged-out or disallowed targets', async () => {
@@ -155,7 +174,8 @@ it('discovers dragged-in members and immediately denies dragged-out or disallowe
 it('invalidates persisted Chrome IDs after group deletion or a browser session change', async () => {
   const group = {groupId:'logical',projectId:'project',workspaceId:'workspace'};
   const key = 'group:' + JSON.stringify(['account','machine','project','workspace']);
-  const state = new Map<string, unknown>([['identity',{trust:{accountId:'account'},machineId:'machine'}],[key,{groupId:'logical',chromeGroupId:7,browserEpoch:'old'}]]);
+  const keys = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
+  const state = new Map<string, unknown>([['identity',{privateKey:keys.privateKey,trust:{accountId:'account'},pairingId:'machine',generation:1}],[key,{groupId:'logical',chromeGroupId:7,browserEpoch:'old'}]]);
   let epoch = 'new';
   let exists = true;
   const database = {transaction() {

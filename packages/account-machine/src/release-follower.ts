@@ -65,7 +65,7 @@ export interface ReleaseObjectKeys {
 
 export function releaseObjectKeys(sha: string): ReleaseObjectKeys {
   return {
-    worker: `releases/${sha}/worker.mjs`,
+    worker: `releases/${sha}/worker.bundle.json`,
     machine: `releases/${sha}/machine.manifest.json`,
     frontendManifest: `releases/${sha}/frontend.manifest.json`,
     frontend: `releases/${sha}/frontend`,

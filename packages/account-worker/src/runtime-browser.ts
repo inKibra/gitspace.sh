@@ -1,14 +1,19 @@
+import type { BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
 import type { ToolServices } from '@gitspace/runtime-core';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import type { RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import type { WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { committedSessionApproval, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 import type { AccountStateDO } from './account-state.js';
 import type { CredentialVaultDO } from './application.js';
+import { createAccountBrowserAuthority } from './runtime-browser-account.js';
+import type { BrowserRenderingBinding } from './browser-cdp.js';
+import type { RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
 export interface RuntimeBrowserAuthority {
   prepare: ToolServices['prepareBrowser'];
   execute: ToolServices['invoke'];
@@ -17,12 +22,15 @@ export interface RuntimeBrowserAuthority {
 type Input = Parameters<ToolServices['invoke']>[0] & { parentAttemptId?: string };
 const savedPreparation = z.object({ fingerprint: z.string(), card: RuntimeBrowserApprovalCardSchema });
 type BrowserStorageTransaction = { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> };
-type BrowserStorage = BrowserStorageTransaction & { transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
+type BrowserStorage = BrowserStorageTransaction & { delete(key: string): Promise<boolean>; transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
 type BrowserEnvironment = {
   ACCOUNT_ID: Env['ACCOUNT_ID'];
+  RELAY_NAME: Env['RELAY_NAME'];
   ACCOUNT_STATE: { getByName(name: string): Pick<AccountStateDO, 'certifyBrowserAuthority'> };
   FLEET_CATALOG: { getByName(name: string): { getMachine(id: string): Promise<Pick<FleetMachineDefinition, 'kind' | 'desiredState'> | null> } };
   CREDENTIALS: { getByName(name: string): Pick<DurableObjectStub<CredentialVaultDO>, 'hasRuntimeMachine'> };
+  BROWSER?: BrowserRenderingBinding;
+  RELAY?: { getByName(name: string): { browserRelayPlacement(projectId: string, pairingId?: string): Promise<RuntimeAccountBrowserPlacement>; browserRelayProjectSettings(projectId: string): Promise<RuntimeProjectBrowserSettings>; browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
 };
 type BrowserRuntime = Pick<WorkspaceRuntime, 'harness' | 'browserConversation'> & { attachments: Pick<WorkspaceRuntime['attachments'], 'list' | 'execute'> };
 export async function runtimeBrowserKey(storage: BrowserStorage) {
@@ -41,7 +49,8 @@ export async function runtimeBrowserPublicKey(storage: DurableObjectStorage) {
   const pair = await runtimeBrowserKey(storage);
   return { algorithm: 'Ed25519' as const, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))) };
 }
-export function createRuntimeBrowserAuthority(options: { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; groupName(): Promise<string> }): RuntimeBrowserAuthority {
+export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; groupName(): Promise<string>; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname };
+export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOptions): RuntimeBrowserAuthority {
   const { storage, env, identity } = options;
   async function eligible(machineId: string) {
     for (const attachment of options.runtime().attachments.list()) {
@@ -69,6 +78,10 @@ export function createRuntimeBrowserAuthority(options: { storage: BrowserStorage
     const authority = await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).certifyBrowserAuthority({ accountId: env.ACCOUNT_ID, ...identity, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', publicKey))), issuedAt, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() });
     return { privateKey, authority, issuedAt };
   }
+  const account = createAccountBrowserAuthority(options, signing);
+  function accountPlacement(args: RuntimeBrowserArguments) {
+    return args.source === 'relay' || !args.on && !options.runtime().attachments.list().some(item => item.state === 'ready' && item.capabilities.includes('browser.headless'));
+  }
   async function signed(input: Input, placement: { machineId: string; attachmentId: string; generation: number }, command: RuntimeBrowserAuthorizationBody['command'], expiresAt: string): Promise<RuntimeToolDispatch> {
     const scope = { ...identity, machineId: placement.machineId, attachmentId: placement.attachmentId, generation: placement.generation, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId };
     const conversation = await options.runtime().browserConversation(input.conversationId);
@@ -90,6 +103,7 @@ export function createRuntimeBrowserAuthority(options: { storage: BrowserStorage
   }
   async function prepare(input: Input) {
     const { conversation, args, origins } = await context(input);
+    if (accountPlacement(args)) return account.prepare(input, args, origins);
     const fingerprint = canonicalBrowserAuthorization({ ...input, signal: undefined, args });
     const key = `runtime.browser.prepare:${input.attemptId}`;
     const prior = await storage.get(key);
@@ -97,6 +111,7 @@ export function createRuntimeBrowserAuthority(options: { storage: BrowserStorage
       const saved = savedPreparation.parse(prior);
       if (saved.fingerprint !== fingerprint) throw new Error('Browser attempt identity reused');
       if (await storage.get(`runtime.browser.revoked:${saved.card.groupId}`)) throw new Error('Browser group grant expired or revoked');
+      if ('placement' in saved.card) throw new Error('Browser placement changed');
       const executor = await execution(args);
       if (saved.card.machineId !== executor.machineId || saved.card.attachmentId !== executor.attachmentId || saved.card.generation !== executor.generation) throw new Error('Browser executing machine or attachment changed');
       return saved.card;
@@ -130,9 +145,11 @@ export function createRuntimeBrowserAuthority(options: { storage: BrowserStorage
   }
   async function execute(input: Input): Promise<RuntimeToolResult> {
     const { args, origins } = await context(input);
+    if (accountPlacement(args)) return account.execute(input, args, origins);
     const saved = savedPreparation.parse(await storage.get(`runtime.browser.prepare:${input.attemptId}`));
     if (saved.fingerprint !== canonicalBrowserAuthorization({ ...input, signal: undefined, args })) throw new Error('Browser dispatch differs from preparation');
     const card = saved.card;
+    if ('placement' in card) throw new Error('Browser placement changed');
     if (Date.parse(card.expiresAt) <= Date.now() || await storage.get(`runtime.browser.revoked:${card.groupId}`)) throw new Error('Browser group grant expired or revoked');
     if (canonicalBrowserAuthorization(origins) !== canonicalBrowserAuthorization(card.origins)) throw new Error('Approved environment browser origins changed; prepare a new browser request.');
     if (card.requiresApproval) {
@@ -161,6 +178,7 @@ export function createRuntimeBrowserAuthority(options: { storage: BrowserStorage
     return options.runtime().attachments.execute(dispatch, input.signal ?? AbortSignal.timeout(Math.max(1, Date.parse(dispatch.deadlineAt) - Date.now())));
   }
   async function manage(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement) {
+    if (!machineId) return account.manage(conversationId, command);
     const placements = machineId ? [await eligible(machineId)] : await Promise.all([...new Set(options.runtime().attachments.list().filter(item => item.state === 'ready' && item.capabilities.some(cap => cap.startsWith('browser.'))).map(item => item.machineId))].map(id => eligible(id)));
     if (command.action !== 'status' && placements.length !== 1) throw new Error('Browser management requires an exact machine');
     if (command.action === 'revoke') {
@@ -181,7 +199,7 @@ export function createRuntimeBrowserAuthority(options: { storage: BrowserStorage
       if (command.action !== 'artifact') {
         const status = RuntimeBrowserStatusSchema.parse(response);
         for (const group of status.groups) {
-          if (group.projectId !== identity.projectId || group.workspaceId !== identity.workspaceId || group.machineId !== placement.machineId || group.attachmentId !== placement.attachmentId || group.generation !== placement.generation) throw new Error('Browser status group placement mismatch');
+          if ('placement' in group || group.projectId !== identity.projectId || group.workspaceId !== identity.workspaceId || group.machineId !== placement.machineId || group.attachmentId !== placement.attachmentId || group.generation !== placement.generation) throw new Error('Browser status group placement mismatch');
           if (group.state !== 'revoked' && group.state !== 'expired' && group.state !== 'closed') continue;
           await storage.transaction(async tx => {
             const stored = await tx.get(`runtime.browser.grant:${group.groupId}`);

@@ -1,9 +1,11 @@
 export * from './base.js';
+export type { RuntimeGitCheckpoint } from './git-checkpoint.js';
 export * from './workspace-controls.js';
 export * from './attachment-controls.js';
 export * from './session-controls.js';
 export * from './machine-controls.js';
 export * from './scheduling.js';
+export * from './search-replica.js';
 export * from './execution-contracts.js';
 export * from './rule-interruptions.js';
 export * from './receipt-transport.js';

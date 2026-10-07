@@ -137,29 +137,11 @@ export class MachineExecutor {
     if (running) return running;
     if (previous) throw new ExecutorEffectUncertain('Prior claim cannot be relaunched; reconcile its receipt');
     if (Date.parse(dispatch.deadlineAt) <= Date.now()) throw new Error('Execution deadline expired');
-    let parentController: AbortController | undefined;
-    if (dispatch.parentAttemptId !== undefined) {
-      const parent = this.options.journal.attempt(dispatch.parentAttemptId);
-      parentController = this.controllers.get(dispatch.parentAttemptId);
-      if ((dispatch.tool !== 'mcp_discover' && dispatch.tool !== 'mcp_invoke') || !parent || parent.state !== 'running'
-        || parent.dispatch.tool !== 'codemode' || parent.dispatch.parentAttemptId !== undefined
-        || parent.dispatch.attachmentId !== dispatch.attachmentId || parent.dispatch.generation !== dispatch.generation
-        || parent.dispatch.projectId !== dispatch.projectId || parent.dispatch.workspaceId !== dispatch.workspaceId
-        || parent.dispatch.conversationId !== dispatch.conversationId || parent.dispatch.taskId !== dispatch.taskId
-        || parent.dispatch.machineId !== dispatch.machineId || !this.executing.has(dispatch.parentAttemptId)
-        || !parentController || parentController.signal.aborted || Date.parse(dispatch.deadlineAt) > Date.parse(parent.dispatch.deadlineAt)) {
-        throw new Error('Nested dispatch is not an active admitted codemode MCP child');
-      }
-    }
     const jobControl = this.options.journal.jobControl(dispatch);
     this.options.journal.begin(dispatch);
     const controller = new AbortController();
     this.controllers.set(dispatch.attemptId, controller);
-    const parentSignal = parentController?.signal;
-    const abortChild = () => controller.abort(parentSignal?.reason);
-    parentSignal?.addEventListener('abort', abortChild, { once: true });
-    if (parentSignal?.aborted) abortChild();
-    const bypassQueue = parentController !== undefined || jobControl !== null;
+    const bypassQueue = jobControl !== null;
     const prior = bypassQueue ? Promise.resolve() : this.checkoutQueues.get(local.rootPath) ?? Promise.resolve();
     const pending = prior.catch(() => {}).then(async (): Promise<RuntimeToolResult> => {
       if (this.options.journal.attempt(dispatch.attemptId)?.state === 'fenced') throw new ExecutorEffectUncertain('Durable launch barrier prevented execution');
@@ -214,7 +196,6 @@ export class MachineExecutor {
     if (!bypassQueue) this.checkoutQueues.set(local.rootPath, pending);
     try { return await pending; }
     finally {
-      parentSignal?.removeEventListener('abort', abortChild);
       this.active.delete(dispatch.attemptId); this.controllers.delete(dispatch.attemptId);
       if (this.checkoutQueues.get(local.rootPath) === pending) this.checkoutQueues.delete(local.rootPath);
     }

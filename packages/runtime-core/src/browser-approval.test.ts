@@ -22,7 +22,7 @@ for (const approvalMode of ['write', 'always-ask'] as const) test(`registered br
     question: unused, instructions: async () => '', authorizeCronTool: unused,
   };
   const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, deliverConversationEvent: unused, observeProcess: unused, stopProcess: unused };
-  const tools = createRuntimeTools(services, operations);
+  const tools = createRuntimeTools(services, operations, (id, context) => harness.abortTask(id, context), async () => {});
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registered-browser-proof', tools }));
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
     generations++;
@@ -83,7 +83,7 @@ for (const { name, args, approvalMode } of automaticCases) test(`${name} does no
     question: unused, instructions: async () => '', authorizeCronTool: unused,
   };
   const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, deliverConversationEvent: unused, observeProcess: unused, stopProcess: unused };
-  const tools = createRuntimeTools(services, operations);
+  const tools = createRuntimeTools(services, operations, (id, context) => harness.abortTask(id, context), async () => {});
   const registry = createRegistry(); registry.install(defineExtension({ name: 'automatic-browser-proof', tools }));
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
     generations++;

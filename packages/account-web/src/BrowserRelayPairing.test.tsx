@@ -2,47 +2,29 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { BrowserRelayStatus } from '@gitspace/protocol';
 import { BrowserRelayWalkthrough } from './SettingsPage.js';
-import { rpcClient } from './rpc-client.js';
-import { ok } from 'result-rpc';
-vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: { browserTrust: vi.fn() } } }));
-let root: Root;
-let container: HTMLDivElement;
-const relay: BrowserRelayStatus = { machineId: 'authenticated-machine', state: 'waiting', installed: true, pairingCode: 'temporary-code', extensionPath: '/extension', chromeExtensionPath: '/extension', owned: true, endpoint: 'http://127.0.0.1:9224', browserName: null, browserVersion: null, message: null };
-beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); container = document.createElement('div'); document.body.append(container); root = createRoot(container); vi.clearAllMocks(); });
-afterEach(async () => { await act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
-function button(label: string) { const result = [...document.querySelectorAll('button')].find(item => item.textContent === label); if (!result) throw new Error(`Missing ${label}`); return result; }
-it('gets the account trust pin only after a human gesture and invalidates JSON when the ephemeral code changes', async () => {
-  const trust = { accountId: 'signed-in-account', algorithm: 'Ed25519' as const, publicKey: 'authenticated-cloud-root' };
-  vi.mocked(rpcClient.runtime.browserTrust).mockResolvedValue(ok(trust));
-  const noop = async () => {};
-  await act(() => root.render(<BrowserRelayWalkthrough open onOpenChange={() => {}} relay={relay} onSetup={noop} onStart={noop} onTest={noop} onUnpair={noop} />));
-  expect(rpcClient.runtime.browserTrust).not.toHaveBeenCalled();
-  await act(() => button('Get pairing JSON').click());
-  const json = [...document.querySelectorAll('code')].map(item => item.textContent ?? '').find(text => text.startsWith('{'));
-  expect(JSON.parse(json!)).toEqual({ code: 'temporary-code', machineId: 'authenticated-machine', trust });
-  await act(() => root.render(<BrowserRelayWalkthrough open onOpenChange={() => {}} relay={{ ...relay, pairingCode: 'replacement-code' }} onSetup={noop} onStart={noop} onTest={noop} onUnpair={noop} />));
-  expect(document.body.textContent).not.toContain('authenticated-cloud-root');
-  expect([...document.querySelectorAll('button')].some(item => item.textContent === 'Copy pairing JSON')).toBe(false);
+import { pairAccountBrowser } from './browser-relay-client.js';
+import type { RuntimeAccountBrowserRelayStatus } from '@gitspace/protocol-runtime';
+vi.mock('./browser-relay-client.js', () => ({ pairAccountBrowser: vi.fn(), confirmAccountBrowser: vi.fn() }));
+let root: Root; let container: HTMLDivElement;
+const relay: RuntimeAccountBrowserRelayStatus = { pairings: [] };
+const noop = async () => {};
+beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); container=document.createElement('div');document.body.append(container);root=createRoot(container);vi.clearAllMocks(); });
+afterEach(async()=>{await act(()=>root.unmount());container.remove();vi.unstubAllGlobals();});
+function button(label:string) { const found=[...document.querySelectorAll('button')].find(item=>item.textContent===label);if(!found)throw new Error(`Missing ${label}`);return found; }
+it('retrieves pairing from the authenticated account without needing a machine',async()=>{
+ const pairing={code:'fixture-secret-8a6c2f',pairingId:'00000000-0000-4000-8000-000000000001',generation:1,endpoint:'https://account.gitspace.test',expiresAt:new Date(Date.now()+600_000).toISOString(),trust:{algorithm:'Ed25519' as const,accountId:'account',publicKey:'root'}};
+ vi.mocked(pairAccountBrowser).mockResolvedValue(pairing);
+ await act(()=>root.render(<BrowserRelayWalkthrough open onOpenChange={()=>{}} relay={relay} onSetup={noop} onStart={noop} onTest={noop} onUnpair={noop}/>));
+ await act(()=>button('Get pairing JSON').click());
+ expect(document.body.textContent).toContain(pairing.code);
+ await act(()=>root.render(<BrowserRelayWalkthrough open={false} onOpenChange={()=>{}} relay={relay} onSetup={noop} onStart={noop} onTest={noop} onUnpair={noop}/>));
+ expect(document.body.textContent).not.toContain(pairing.code);
 });
-it('does not offer pairing JSON when authenticated cloud trust is unavailable', async () => {
-  vi.mocked(rpcClient.runtime.browserTrust).mockRejectedValue(new Error('Sign in again'));
-  const noop = async () => {};
-  await act(() => root.render(<BrowserRelayWalkthrough open onOpenChange={() => {}} relay={relay} onSetup={noop} onStart={noop} onTest={noop} onUnpair={noop} />));
-  await act(() => button('Get pairing JSON').click());
-  expect(document.querySelector('[role="alert"]')?.textContent).toContain('Sign in again');
-  expect([...document.querySelectorAll('button')].some(item => item.textContent === 'Copy pairing JSON')).toBe(false);
-});
-it('shows the fingerprint and keeps Forget disabled until completion, surfacing failures', async () => {
-  const pending = Promise.withResolvers<void>(); const noop = async () => {};
-  const unpair = vi.fn(() => pending.promise);
-  await act(() => root.render(<BrowserRelayWalkthrough open onOpenChange={() => {}} relay={{ ...relay, pairingCode: null, pairedKeyFingerprint: 'abc123' }} onSetup={noop} onStart={noop} onTest={noop} onUnpair={unpair} />));
-  expect(document.body.textContent).toContain('SHA-256 abc123');
-  await act(() => button('Forget paired browser').click());
-  expect(button('Forget paired browser').disabled).toBe(true);
-  await act(async () => { pending.reject(new Error('Could not remove saved identity')); });
-  expect(document.querySelector('[role="alert"]')?.textContent).toContain('Could not remove saved identity');
-  expect(button('Forget paired browser').disabled).toBe(false);
-  expect(unpair).toHaveBeenCalledTimes(1);
+it('shows pinned fingerprint and serializes forgetting the account browser',async()=>{
+ const pending=Promise.withResolvers<void>();const forget=vi.fn(()=>pending.promise);
+ await act(()=>root.render(<BrowserRelayWalkthrough open onOpenChange={()=>{}} relay={{...relay,pairings:[{pairingId:'00000000-0000-4000-8000-000000000001',generation:1,connected:true,browser:'Chrome',state:'confirmed',expiresAt:null,pairedKeyFingerprint:'a'.repeat(64)}]}} onSetup={noop} onStart={noop} onTest={noop} onUnpair={forget}/>));
+ expect(document.body.textContent).toContain(`SHA-256 ${'a'.repeat(64)}`);
+ await act(()=>button('Forget paired browser').click());expect(forget).toHaveBeenCalledWith('00000000-0000-4000-8000-000000000001');expect(button('Forget paired browser').disabled).toBe(true);
+ await act(()=>pending.resolve());expect(button('Forget paired browser').disabled).toBe(false);
 });

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { AvailableModel, BrowserRelayStatus, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
+import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
 import { inferenceSettingSection } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import type { ApiClientDraft } from './device.js';
@@ -7,6 +7,8 @@ import type { McpAccessView } from '@gitspace/protocol/mcp-access';
 import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { rpcClient } from './rpc-client.js';
+import type { RuntimeAccountBrowserRelayStatus } from '@gitspace/protocol-runtime';
+import { pairAccountBrowser, confirmAccountBrowser } from './browser-relay-client.js';
 import {
   Accordion,
   AccordionContent,
@@ -98,11 +100,10 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   composioSetup: ComposioSetupRpcView | null;
   onPutComposioSetup: (apiKey: string) => Promise<void>;
   onDeleteComposioSetup: () => Promise<void>;
-  browserRelay: BrowserRelayStatus | null;
+  browserRelay: RuntimeAccountBrowserRelayStatus | null;
   onSetupBrowserRelay: () => Promise<void>;
   onStartBrowserRelay: () => Promise<void>;
-  onStopBrowserRelay: () => Promise<void>;
-  onUnpairBrowserRelay: () => Promise<void>;
+  onUnpairBrowserRelay: (pairingId: string) => Promise<void>;
   onTestBrowserRelay: () => Promise<void>;
   /** Projects this account can scope an API client to. */
   projects: ReadonlyArray<{ id: string; name: string }>;
@@ -449,95 +450,51 @@ function ComposioSetupDialog({ open, onOpenChange, setup, onPut, onDelete }: {
 }
 export function BrowserRelayWalkthrough({ open, onOpenChange, relay, onSetup, onStart, onTest, onUnpair }: {
   open: boolean;
-  onOpenChange: (open: boolean) => void;
-  relay: BrowserRelayStatus | null;
-  onSetup: () => Promise<void>;
-  onStart: () => Promise<void>;
-  onTest: () => Promise<void>;
-  onUnpair: () => Promise<void>;
+  onOpenChange(open: boolean): void;
+  relay: RuntimeAccountBrowserRelayStatus | null;
+  onSetup(): Promise<void>;
+  onStart(): Promise<void>;
+  onTest(): Promise<void>;
+  onUnpair(pairingId: string): Promise<void>;
 }) {
-  const [extensionsCopied, setExtensionsCopied] = useState(false);
-  const [developerMode, setDeveloperMode] = useState(false);
-  const [extensionLoaded, setExtensionLoaded] = useState(false);
-  const [badgeConfirmed, setBadgeConfirmed] = useState(false);
-  const [tested, setTested] = useState(false);
+  const [pairing, setPairing] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pairing, setPairing] = useState<{ code: string; machineId: string; json: string } | null>(null);
-  const pairingGeneration = useRef(0);
-  useEffect(() => { pairingGeneration.current++; setPairing(null); }, [open, relay?.pairingCode, relay?.machineId]);
-  const pairingJson = pairing?.code === relay?.pairingCode && pairing?.machineId === relay?.machineId ? pairing?.json : null;
-  const prepared = relay?.installed === true && relay.state !== 'stopped' && relay.state !== 'error';
-  const run = async (name: string, operation: () => Promise<void>, complete?: () => void) => {
-    setPending(name);
-    setError(null);
-    try {
-      await operation();
-      complete?.();
-    } catch (failure) {
-      setError(rpcErrorMessage(failure, 'Browser relay setup'));
-    } finally {
-      setPending(null);
-    }
+  const generation = useRef(0);
+  useEffect(() => { generation.current++; setPairing(null); }, [open]);
+  const run = async (name: string, operation: () => Promise<void>) => {
+    if (pending) return;
+    setPending(name); setError(null);
+    try { await operation(); } catch (cause) { setError(rpcErrorMessage(cause, 'Account browser relay')); } finally { setPending(null); }
   };
-  const numberedTitle = (number: number, title: string) => <span className="flex items-center gap-2"><Badge color="gray"><span className="tabular-nums">{number}</span></Badge>{title}</span>;
-  return <Dialog open={open} onOpenChange={onOpenChange}>
-    <DialogContent className="max-w-3xl">
-      <DialogHeader>
-        <DialogTitle>Set up Chrome Browser Relay</DialogTitle>
-        <DialogDescription>Load the extension in the Chrome profile you want agents to control. Pair it once with your signed-in GitSpace account. The paired extension reconnects after native runtime or browser restarts.</DialogDescription>
-      </DialogHeader>
-      <div className="flex max-h-[65vh] flex-col gap-4 overflow-y-auto pr-1 max-sm:[&_[data-slot=card]]:flex-col max-sm:[&_[data-slot=card]]:items-stretch max-sm:[&_[data-slot=card]]:gap-0 max-sm:[&_[data-slot=card]]:pr-3 max-sm:[&_[data-slot=card-footer]]:ml-0 max-sm:[&_[data-slot=card-footer]]:flex-wrap max-sm:[&_[data-slot=card-footer]]:pb-3">
-        <SettingRows>
-          <SettingRow title="Paired browser identity" description={relay?.pairedKeyFingerprint ? <span className="break-all font-mono text-xs">SHA-256 {relay.pairedKeyFingerprint}</span> : 'No browser identity is paired.'}>
-            {relay?.pairedKeyFingerprint ? <Button variant="secondary" size="compact" disabled={pending !== null} loading={pending === 'unpair'} onClick={() => void run('unpair', onUnpair)}>Forget paired browser</Button> : null}
-          </SettingRow>
-        </SettingRows>
-        <p className="text-caption text-muted-foreground">Forget disconnects the paired browser and removes its saved public key. Use this after reinstalling the extension or resetting its identity, then get new pairing JSON. Reset identity in the extension popup deletes its private key and account trust.</p>
-        <SettingRows>
-          <SettingRow title="Extension directory" description={<code className="break-all text-xs">{relay?.extensionPath ?? 'Preparing path…'}</code>}><Badge color={relay?.installed ? 'green' : 'gray'}>{relay?.installed ? 'Files prepared' : 'Not prepared'}</Badge></SettingRow>
-          <SettingRow title="Local relay" description={<code className="text-xs">{relay?.endpoint ?? 'http://127.0.0.1:9224'}</code>}><Badge color={relay?.state === 'connected' ? 'green' : relay?.state === 'waiting' ? 'blue' : 'gray'}>{relay?.state ?? 'checking'}</Badge></SettingRow>
-        </SettingRows>
-        <SettingRows>
-          <SettingRow title={numberedTitle(1, 'Prepare Browser Relay')} description="Writes the GitSpace Chrome extension, configures its local relay URL, and starts the machine-side relay.">
-            {prepared ? <Badge color="green">{icon(Check)}Done</Badge> : <Button variant="primary" size="compact" loading={pending === 'prepare'} onClick={() => void run('prepare', relay?.installed ? onStart : onSetup)}>Prepare</Button>}
-          </SettingRow>
-          <SettingRow title={numberedTitle(2, 'Open Chrome extensions')} description={<span>Paste <code>chrome://extensions</code> into Chrome’s address bar. Web pages cannot open Chrome settings directly.</span>}>
-            {extensionsCopied ? <Badge color="green">{icon(Check)}Copied</Badge> : <Button variant="secondary" size="compact" disabled={!prepared} onClick={() => void navigator.clipboard.writeText('chrome://extensions').then(() => setExtensionsCopied(true))}>Copy address</Button>}
-          </SettingRow>
-          <SettingRow title={numberedTitle(3, 'Enable Developer mode')} description="Turn on Developer mode in the top-right of Chrome’s extensions page.">
-            <Switch label="Developer mode enabled" checked={developerMode} disabled={!extensionsCopied} onToggle={() => setDeveloperMode((value) => !value)} />
-          </SettingRow>
-          <SettingRow title={numberedTitle(4, 'Load the unpacked extension')} description={<span>Choose <strong>Load unpacked</strong>, then select <code className="block max-w-xl break-all pt-1 text-xs">{relay?.chromeExtensionPath ?? relay?.extensionPath ?? 'Extension path unavailable'}</code></span>}>
-            <Button variant="secondary" size="compact" disabled={!developerMode || !relay} onClick={() => { if (relay) void navigator.clipboard.writeText(relay.chromeExtensionPath); }}>Copy path</Button>
-            <Switch label="Extension loaded" checked={extensionLoaded} disabled={!developerMode} onToggle={() => setExtensionLoaded((value) => !value)} />
-          </SettingRow>
-          <SettingRow title={numberedTitle(5, 'Pair the extension')} description={<span>Get pairing JSON from your signed-in account, then paste it into the GitSpace extension popup and click Pair. The account trust key comes from GitSpace’s authenticated cloud session, never localhost. The code is temporary. Chrome stores a non-exportable private key in the extension’s IndexedDB; the machine stores only its public key. No reusable shared secret is written to extension files.{pairingJson ? <code className="mt-2 block select-all whitespace-pre-wrap break-all font-mono text-caption">{pairingJson}</code> : <span className="mt-1 block">{relay?.state === 'connected' ? 'Paired with Chrome.' : relay?.pairingCode ? 'Ready to retrieve account trust and prepare pairing JSON.' : 'Prepare the relay to obtain a pairing code.'}</span>}</span>}>
-            {relay?.pairingCode ? <Button variant="secondary" size="compact" disabled={pending !== null} loading={pending === 'pairing'} onClick={() => void run('pairing', async () => {
-              const code = relay.pairingCode!;
-              const generation = pairingGeneration.current;
-              const response = await rpcClient.runtime.browserTrust({});
-              if (response.status === 'error') throw response.error;
-              if (generation === pairingGeneration.current) setPairing({ code, machineId: relay.machineId, json: JSON.stringify({ code, machineId: relay.machineId, trust: response.value }, null, 2) });
-            })}>Get pairing JSON</Button> : null}
-            {pairingJson ? <Button variant="secondary" size="compact" disabled={pending !== null} onClick={() => void run('copy-pairing', () => navigator.clipboard.writeText(pairingJson))}>Copy pairing JSON</Button> : null}
-          </SettingRow>
-          <SettingRow title={numberedTitle(6, 'Confirm Chrome is connected')} description="Check that the extension has connected to this machine’s localhost relay.">
-            {badgeConfirmed || relay?.state === 'connected' ? <Badge color="green">{icon(Check)}Connected</Badge> : <Button variant="secondary" size="compact" loading={pending === 'badge'} disabled={!extensionLoaded} onClick={() => void run('badge', onTest, () => setBadgeConfirmed(true))}>Check connection</Button>}
-          </SettingRow>
-          <SettingRow title={numberedTitle(7, 'Test Browser Relay')} description={tested ? 'The local relay reports a connected Chrome extension. No tabs were opened or controlled.' : 'Checks relay connection status without opening or controlling a tab.'}>
-            {tested ? <Badge color="green">{icon(Check)}Passed</Badge> : <Button variant="primary" size="compact" loading={pending === 'test'} disabled={!extensionLoaded || relay?.state !== 'connected'} onClick={() => void run('test', onTest, () => setTested(true))}>Run test</Button>}
-          </SettingRow>
-        </SettingRows>
-        <Elevated offset={1} className="rounded-lg p-3 text-caption text-muted-foreground"><strong className="block text-foreground">Headless by default. Your Chrome only when needed.</strong>Agents use local headless Chromium for tests, previews, and scraping without browser approval. Only the main agent may explicitly request Browser Relay for your signed-in accounts. Each workspace gets one coloured Chrome tab group named after the workspace. Drag a tab into the group to share it; drag it out to take it back. Other tabs are invisible to the agent. Each new group needs approval outside yolo, including after revocation. Approved hosts come from the committed environment definition. Approve new hosts in Environment or through an API/MCP key with lifecycle.control, whole-account scope, and Write. Yolo does not approve origins. Project approval applies only where the committed bundle lists the origin; older branches gain it after merging or rebasing base to include it. JavaScript and screenshots need no separate approval. Browser content may enter agent history, and redaction cannot guarantee a page contains no sensitive content. Revoke group access in Workspace machines or stop Browser Relay to disconnect Chrome.</Elevated>
-        {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
-      </div>
-      <DialogFooter>
-        <Button variant="secondary" onClick={() => onOpenChange(false)}>{tested ? 'Close' : 'Cancel'}</Button>
-        <Button variant="primary" disabled={!tested} onClick={() => onOpenChange(false)}>{icon(Check)}Finish setup</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>;
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-3xl">
+    <DialogHeader><DialogTitle>Connect your Chrome profile</DialogTitle><DialogDescription>The extension connects directly to your account. No machine or localhost relay is required.</DialogDescription></DialogHeader>
+    <div className="flex max-h-[65vh] flex-col gap-4 overflow-y-auto">
+      <SettingRows>
+        <SettingRow title="1. Download the extension" description="Download and unzip the account-specific extension into a folder you can keep.">
+          <Button variant="secondary" disabled={pending !== null} loading={pending === 'download'} onClick={() => void run('download', onSetup)}>Download extension</Button>
+        </SettingRow>
+        <SettingRow title="2. Load it in Chrome" description="Open chrome://extensions, enable Developer mode, choose Load unpacked, and select the unzipped folder.">
+          <Button variant="secondary" onClick={() => void navigator.clipboard.writeText('chrome://extensions')}>Copy extensions address</Button>
+        </SettingRow>
+        <SettingRow title="3. Pair this account" description={<span>Paste this one-time JSON into the extension popup. Chrome keeps a non-exportable private key; your account stores only its public key.{pairing ? <code className="mt-2 block select-all whitespace-pre-wrap break-all font-mono text-caption">{pairing}</code> : null}</span>}>
+          <Button variant="primary" disabled={pending !== null} loading={pending === 'pairing'} onClick={() => void run('pairing', async () => { const current = generation.current; const value = await pairAccountBrowser(); if (current === generation.current) setPairing(JSON.stringify(value, null, 2)); await onStart(); })}>Get pairing JSON</Button>
+          {pairing ? <Button variant="secondary" onClick={() => void navigator.clipboard.writeText(pairing)}>Copy pairing JSON</Button> : null}
+        </SettingRow>
+        <SettingRow title="4. Confirm your Chrome identity" description="Compare the SHA-256 fingerprint with the extension popup. Confirm only if every character matches. Pairing codes expire after ten minutes; confirmed identities do not. Choose project browsers separately in project Settings.">
+          <Button variant="secondary" disabled={pending !== null} onClick={() => void run('refresh', onStart)}>Refresh status</Button>
+        </SettingRow>
+        {relay?.pairings.map(browser => <SettingRow key={browser.pairingId} title={browser.state === 'confirmed' ? browser.browser ?? 'Confirmed Chrome' : 'Unconfirmed browser'} description={<span>{browser.state === 'awaiting-key' ? <span>Waiting for extension. Code expires {new Date(browser.expiresAt).toLocaleTimeString()}.</span> : <code className="block break-all font-mono">SHA-256 {browser.pairedKeyFingerprint}</code>}<code className="block break-all text-muted-foreground">{browser.pairingId}</code></span>}>
+          <Badge color={browser.connected ? 'green' : 'gray'}>{browser.connected ? 'Connected' : 'Disconnected'}</Badge>
+          {browser.state === 'pending-confirmation' ? <Button variant="primary" disabled={pending !== null} onClick={() => void run('confirm', async () => { await confirmAccountBrowser(browser.pairingId, browser.pairedKeyFingerprint); await onStart(); })}>Fingerprints match — confirm</Button> : null}
+          <Button variant="secondary" disabled={pending !== null} loading={pending === `unpair:${browser.pairingId}`} onClick={() => void run(`unpair:${browser.pairingId}`, () => onUnpair(browser.pairingId))}>Forget paired browser</Button>
+        </SettingRow>)}
+      </SettingRows>
+      <p className="text-caption text-muted-foreground">Only the main agent can use your signed-in profile. Approved origins and signed grants limit it to this workspace’s Chrome tab group. Drag tabs out to revoke their access. Resetting the extension identity requires forgetting the paired browser before pairing again.</p>
+      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+    </div>
+    <DialogFooter><Button variant="secondary" onClick={() => onOpenChange(false)}>Close</Button><Button variant="primary" disabled={pending !== null} loading={pending === 'test'} onClick={() => void run('test', onTest)}>Check connection</Button></DialogFooter>
+  </DialogContent></Dialog>;
 }
 
 
@@ -667,9 +624,9 @@ function ConnectionsSettings({
   devices, onRevokeDevice, onSignOut, onCreateApiClient, projects,
   canManageMcp, canEnableMcp, onMcpStatus, onMcpEnable, onMcpRotate, onMcpDisable,
   composioSetup, onPutComposioSetup, onDeleteComposioSetup,
-  browserRelay, onSetupBrowserRelay, onStartBrowserRelay, onStopBrowserRelay, onUnpairBrowserRelay, onTestBrowserRelay,
+  browserRelay, onSetupBrowserRelay, onStartBrowserRelay, onUnpairBrowserRelay, onTestBrowserRelay,
   canConnectBrowser, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected,
-}: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup' | 'browserRelay' | 'onSetupBrowserRelay' | 'onStartBrowserRelay' | 'onStopBrowserRelay' | 'onUnpairBrowserRelay' | 'onTestBrowserRelay'> & BrowserConnectionActions & McpAccessActions) {
+}: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup' | 'browserRelay' | 'onSetupBrowserRelay' | 'onStartBrowserRelay' | 'onUnpairBrowserRelay' | 'onTestBrowserRelay'> & BrowserConnectionActions & McpAccessActions) {
   const [apiClientOpen, setApiClientOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [composioOpen, setComposioOpen] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('setup') === 'composio');
@@ -687,9 +644,6 @@ function ConnectionsSettings({
       setRelayPending(false);
     }
   };
-  const connectedBrowser = browserRelay?.state === 'connected' && browserRelay.browserName
-    ? `${browserRelay.browserName}${browserRelay.browserVersion ? ` ${browserRelay.browserVersion}` : ''}`
-    : null;
   return <>
     <McpAccessSettings projects={projects} canManageMcp={canManageMcp} canEnableMcp={canEnableMcp} onMcpStatus={onMcpStatus} onMcpEnable={onMcpEnable} onMcpRotate={onMcpRotate} onMcpDisable={onMcpDisable} />
     <Group title="Plugin providers">
@@ -703,11 +657,9 @@ function ConnectionsSettings({
     </Group>
     <Group title="Browser control">
       <SettingRows>
-        <SettingRow title={connectedBrowser ? `${connectedBrowser} Browser Relay` : 'Browser Relay'} description={browserRelay ? <>{connectedBrowser ? `${connectedBrowser} is connected at ${browserRelay.endpoint}.` : browserRelay.state === 'waiting' ? 'Relay is running. Load and enable the unpacked Chrome extension to connect.' : browserRelay.message ?? 'Gives the main agent access to its workspace tab group when it needs your signed-in accounts.'}<span className="mt-1 block font-mono text-xs">{browserRelay.extensionPath}</span></> : 'Checking this machine…'}>
-          <Button variant={browserRelay?.installed ? 'secondary' : 'primary'} size="compact" onClick={() => setRelayGuideOpen(true)}>Setup guide</Button>
-          {browserRelay?.installed && (browserRelay.state === 'stopped' || browserRelay.state === 'error') ? <Button variant="secondary" size="compact" loading={relayPending} onClick={() => void runRelayAction(onStartBrowserRelay)}>Start</Button> : null}
-          {browserRelay?.state === 'waiting' || browserRelay?.state === 'connected' ? <Button variant="secondary" size="compact" disabled={relayPending} onClick={() => void runRelayAction(onTestBrowserRelay)}>Test</Button> : null}
-          {browserRelay?.owned && (browserRelay.state === 'waiting' || browserRelay.state === 'connected') ? <Button variant="ghost" size="compact" disabled={relayPending} onClick={() => void runRelayAction(onStopBrowserRelay)}>Stop</Button> : null}
+        <SettingRow title="Account Browser Relay" description="Connect Chrome directly to this account. Machines are not required.">
+          <Button variant="secondary" size="compact" onClick={() => setRelayGuideOpen(true)}>Setup guide</Button>
+          <Button variant="secondary" size="compact" disabled={relayPending} onClick={() => void runRelayAction(onTestBrowserRelay)}>Check connection</Button>
         </SettingRow>
       </SettingRows>
       <p className="text-caption text-muted-foreground">Headless Chromium is the default and needs no browser approval. Only the main agent may request Browser Relay for your signed-in session. Relay tabs belong to one coloured group per workspace: drag tabs in to share them and out to take them back. Approve hosts in Environment or through an API/MCP key with lifecycle.control, whole-account scope, and Write. Yolo does not approve origins. Project approval applies only where the committed bundle lists the origin; older branches gain it after merging or rebasing base to include it. Each new group asks for approval outside yolo. JavaScript and screenshots are included in the origin grant. Browser tools and remote callers use the same signed workspace-group grant. Shell and codemode run as the machine user and are trusted as that user; browser controls do not isolate same-user code. Browser content may enter agent history. Use a separate personal project for personal browser tasks.</p>

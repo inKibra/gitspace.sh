@@ -8,7 +8,7 @@ import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeEnvironmentArgumentsSch
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
-import { createCloudRuntimeMcp, invokeMcpNamespace } from './runtime-mcp.js';
+import { createCloudRuntimeMcp } from './runtime-mcp.js';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { RuntimeHistoryIndex, type HistoryDocument } from '@gitspace/runtime-core/history';
 import type { RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
@@ -16,10 +16,15 @@ import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createDispatchSelector } from './runtime-dispatch-selection.js';
 import { invokeRuntimeSpaceTool, runtimeSpaceToolNames } from './runtime-space-tools.js';
 import { createRuntimeBrowserAuthority, type RuntimeBrowserAuthority } from './runtime-browser.js';
+import { createCloudCodemode } from './runtime-codemode.js';
+import type { RuntimeModelHelper } from './runtime-inference.js';
+import { RuntimeProcArgumentsSchema, RuntimeGrepArgumentsSchema } from '@gitspace/protocol-runtime';
+import { caughtUpSearchReplica, type RuntimeAttachment, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
+import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
 export type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
-type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0] & { parentAttemptId?: string };
+type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
 type Operation = Parameters<WorkspaceRuntimeOptions['operations']['execute']>[0];
 type ServicesOptions = {
   ctx: DurableObjectState;
@@ -29,6 +34,7 @@ type ServicesOptions = {
   schedule(timestamp: number): Promise<void>;
   generateImage(input: { args: Invocation['args']; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']>;
   judge: RetainedRuleServices['judge'];
+  model: RuntimeModelHelper;
   instructionLoader: RuntimeInstructionLoader;
 };
 const object = z.record(z.string(), RuntimeJsonSchema);
@@ -38,7 +44,7 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const completed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
 const interrupted = (input: Pick<Invocation, 'requestId' | 'attemptId'>, text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text }] });
 const failed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, error: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: message(error) }], error: { code: 'HOST_OPERATION_FAILED', message: message(error) } });
-const machineTools: Record<string, true | undefined> = { bash: true, grep: true, codemode: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, create: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
+const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, create: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
 machineTools.browser = true;
 
 /** QA is written to the existing project event authority; nothing is sent externally. */
@@ -131,14 +137,22 @@ export async function authorizeCronTool(input: { tool: string; args: Invocation[
   if (!allowed) throw new Error(`Cron ${write ? 'write' : 'read'} scope does not authorize ${resource}`);
 }
 
-export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceRuntimeOptions, 'tools' | 'operations' | 'onReport' | 'mcpProxy'> & { browser: RuntimeBrowserAuthority['manage'] } {
+export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceRuntimeOptions, 'tools' | 'operations' | 'onReport'> & { browser: RuntimeBrowserAuthority['manage'] } {
   const { ctx, env, identity } = options;
   const baseWorkspaceId: string = identity.projectId;
   const mcp = createCloudRuntimeMcp(env, identity);
+  const codemode = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: options.model });
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   const source = () => readInspectorContext(env, env.ACCOUNT_ID, identity.workspaceId, identity.projectId);
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
+    serviceFetch: request => fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, ...identity }, request),
+    serviceHostname: hostname => isHostedServiceHostname(env, hostname),
+    workspaceServiceHostname: async (hostname, scope) => {
+      if (!isHostedServiceHostname(env, hostname) || scope.projectId !== identity.projectId || scope.workspaceId !== identity.workspaceId) return false;
+      const route = await env.HOSTED_ROUTES.getByName(hostname).get();
+      return !!route && route.tenant === env.ACCOUNT_ID && route.workspaceId === scope.workspaceId && Date.parse(route.leaseExpiresAt) > Date.now();
+    },
     selectExecution: (args, candidates) => selections.replica(args, candidates),
     approvedOrigins: async () => approvedBrowserOrigins(await authority.refreshBrowserOrigins(identity.workspaceId)),
     groupName: async () => {
@@ -164,33 +178,30 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   // These are request envelopes, not a second lifecycle/job authority. The executor and
   // existing project ledgers remain the owners of effect outcomes and claim tokens.
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_host_dispatch (id TEXT PRIMARY KEY, dispatch TEXT NOT NULL)');
-  ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_mcp_calls (id TEXT PRIMARY KEY, request TEXT NOT NULL, result TEXT)');
   const selections = createDispatchSelector({ storage: ctx.storage, env, identity, runtime: options.runtime });
   const savedDispatch = (attemptId: string) => {
     const row = ctx.storage.sql.exec<{ dispatch: string }>('SELECT dispatch FROM runtime_host_dispatch WHERE id=?', attemptId).toArray()[0];
     return row ? RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)) : null;
   };
   const selecting = new Map<string, { fingerprint: string; promise: Promise<RuntimeToolResult> }>();
-  async function executeMachine(input: Invocation, deadlineAt?: string): Promise<RuntimeToolResult> {
-    const fingerprint = canonicalJson({ requestId: input.requestId, conversationId: input.conversationId, taskId: input.taskId, tool: input.tool, args: input.args, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}), replay: input.replay });
+  async function executeMachine(input: Invocation, deadlineAt?: string, selectedSnapshot?: { attachment: RuntimeAttachment; checkpoint: RuntimeGitCheckpoint }): Promise<RuntimeToolResult> {
+    const fingerprint = canonicalJson({ requestId: input.requestId, conversationId: input.conversationId, taskId: input.taskId, tool: input.tool, args: input.args, replay: input.replay });
     const prior = selecting.get(input.attemptId);
     if (prior) return prior.fingerprint === fingerprint ? prior.promise : failed(input, new Error('Concurrent attempt identity changed'));
-    const promise = executeMachineOnce(input, deadlineAt);
+    const promise = executeMachineOnce(input, deadlineAt, selectedSnapshot);
     selecting.set(input.attemptId, { fingerprint, promise });
     try { return await promise; } finally { selecting.delete(input.attemptId); }
   }
-  async function executeMachineOnce(input: Invocation, deadlineAt?: string): Promise<RuntimeToolResult> {
+  async function executeMachineOnce(input: Invocation, deadlineAt?: string, selectedSnapshot?: { attachment: RuntimeAttachment; checkpoint: RuntimeGitCheckpoint }): Promise<RuntimeToolResult> {
     const conversation = await options.runtime().browserConversation(input.conversationId);
     if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args)) return failed(input, new Error('Subagent machine dispatch is read-only'));
     let dispatch = savedDispatch(input.attemptId);
-    const fingerprint = canonicalJson({ requestId: input.requestId, conversationId: input.conversationId, taskId: input.taskId, tool: input.tool, args: input.args, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}), replay: input.replay });
+    const fingerprint = canonicalJson({ requestId: input.requestId, conversationId: input.conversationId, taskId: input.taskId, tool: input.tool, args: input.args, replay: input.replay });
     let selection = selections.load(input.attemptId);
     if (selection && selection.fingerprint !== fingerprint) return failed(input, new Error('Attempt identity was reused for a different operation'));
     if (selection?.result) return RuntimeToolResultSchema.parse(selection.result);
-    const parent = input.parentAttemptId ? savedDispatch(input.parentAttemptId) : null;
-    if (input.parentAttemptId && !parent) return failed(input, new Error('Nested machine dispatch has no admitted parent'));
     const controller = new AbortController();
-    const deadline = selection?.deadline ?? dispatch?.deadlineAt ?? parent?.deadlineAt ?? deadlineAt ?? new Date(Date.now() + 30 * 60_000).toISOString();
+    const deadline = selection?.deadline ?? dispatch?.deadlineAt ?? deadlineAt ?? new Date(Date.now() + 30 * 60_000).toISOString();
     selection ??= { fingerprint, deadline };
     selections.save(input.attemptId, selection);
     const settle = (result: RuntimeToolResult) => { selection!.result = result; selections.save(input.attemptId, selection!); return result; };
@@ -206,21 +217,16 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     active.set(input.attemptId, controller);
     try {
       if (!dispatch) {
-        const args = object.parse(input.args);
-        const explicit = args.on !== undefined || args.at !== undefined;
         const runtime = options.runtime();
         if (!(await runtime.snapshot()).conversations.some(item => item.id === input.conversationId)) throw new Error('Conversation is not owned by this workspace');
-        if (parent && explicit) throw new Error('Nested machine dispatch cannot change its admitted execution machine');
-        const selected = parent
-          ? runtime.attachments.list().find(item => item.attachmentId === parent.attachmentId && item.generation === parent.generation && item.machineId === parent.machineId && item.state === 'ready')
-          : await selections.select(input, selection, controller.signal);
+        const selected = selectedSnapshot?.attachment ?? await selections.select(input, selection, controller.signal);
         if (!selected) throw new Error('No machine attached: the admitted execution replica is unavailable.');
-        const snapshot = selected.role === 'primary' || selected.role === 'replica' ? await runtime.cloudFiles.initializeSnapshot() : undefined;
+        const snapshot = selectedSnapshot?.checkpoint ?? (selected.role === 'primary' || selected.role === 'replica' ? await runtime.cloudFiles.initializeSnapshot() : undefined);
         if ((selected.role === 'primary' || selected.role === 'replica') && !snapshot) throw new Error('Cloud working copy is unavailable');
         const tool = input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool;
-        dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, conversationKind: conversation.root ? 'main' : 'subagent', taskId: input.taskId, machineId: selected.machineId, attachmentId: selected.attachmentId, generation: selected.generation, requestId: input.requestId, attemptId: input.attemptId, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}), ...(snapshot ? { snapshot } : {}), tool, args: input.args, deadlineAt: deadline, replay: input.replay });
+        dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, conversationKind: conversation.root ? 'main' : 'subagent', taskId: input.taskId, machineId: selected.machineId, attachmentId: selected.attachmentId, generation: selected.generation, requestId: input.requestId, attemptId: input.attemptId, ...(snapshot ? { snapshot } : {}), tool, args: input.args, deadlineAt: deadline, replay: input.replay });
         ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(dispatch));
-      } else if (dispatch.requestId !== input.requestId || dispatch.conversationId !== input.conversationId || dispatch.taskId !== input.taskId || dispatch.replay !== input.replay || dispatch.parentAttemptId !== input.parentAttemptId || dispatch.tool !== (input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool) || canonicalJson(dispatch.args) !== canonicalJson(input.args)) {
+      } else if (dispatch.requestId !== input.requestId || dispatch.conversationId !== input.conversationId || dispatch.taskId !== input.taskId || dispatch.replay !== input.replay || dispatch.tool !== (input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool) || canonicalJson(dispatch.args) !== canonicalJson(input.args)) {
         throw new Error('Attempt identity was reused for a different operation');
       }
       return settle(await options.runtime().attachments.execute(dispatch, controller.signal));
@@ -313,6 +319,28 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       const conversation = await options.runtime().browserConversation(input.conversationId);
       if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args)) throw new Error('Subagent tools are read-only');
       input.signal?.throwIfAborted();
+      if (input.tool === 'grep') {
+        const args = RuntimeGrepArgumentsSchema.parse(input.args);
+        if (args.on !== undefined || args.at !== undefined) return executeMachine(input);
+        const runtime = options.runtime();
+        if (!runtime.cloudFiles.hasAttempt(input.attemptId)) {
+          const replicaResult = await runtime.cloudFiles.withCurrentSnapshot(async checkpoint => {
+            const attachment = caughtUpSearchReplica(runtime.attachments.list(), checkpoint);
+            if (!attachment) return null;
+            try {
+              const result = await executeMachine({ ...input, replay: 'safe' }, undefined, { attachment, checkpoint });
+              return result.status === 'completed' ? result : null;
+            } catch {
+              // Search has no effects. A disconnected or newly dirty replica
+              // cannot prevent a search of the authoritative cloud snapshot.
+              return null;
+            }
+          });
+          if (replicaResult) return replicaResult;
+        }
+        return runtime.cloudFiles.execute({ ...input, tool: 'grep' }, input.signal);
+      }
+      if (input.tool === 'codemode') return codemode.execute(input);
       if (input.tool === 'browser') return browser.execute(input);
       if (input.tool === 'browser_control') throw new Error('Browser management requires human control');
       if (input.tool === 'mcp_discover' || input.tool === 'mcp_invoke') {
@@ -450,44 +478,32 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   async function controlProcess(input: Parameters<WorkspaceRuntimeOptions['operations']['observeProcess']>[0], replay: 'safe' | 'unsafe'): Promise<RuntimeToolResult> {
     const origin = savedDispatch(input.originAttemptId);
-    if (!origin || origin.tool !== 'proc' || origin.conversationId !== input.conversationId) throw new Error('Process control has no admitted origin');
-    let dispatch = savedDispatch(input.attemptId);
-    if (!dispatch) {
-      const selected = options.runtime().attachments.list()
-        .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && attachment.state === 'ready' && (attachment.role === 'primary' || attachment.role === 'replica'))
-        .sort((left, right) => right.generation - left.generation)[0];
-      if (!selected) throw new Error('Original process machine is unreachable: no READY execution replica');
-      dispatch = RuntimeToolDispatchSchema.parse({ ...origin, attachmentId: selected.attachmentId, generation: selected.generation, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, replay, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
-      ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(dispatch));
-    } else if (dispatch.conversationId !== input.conversationId || dispatch.taskId !== input.taskId || dispatch.requestId !== input.requestId || dispatch.replay !== replay || canonicalJson(dispatch.args) !== canonicalJson(input.args)) throw new Error('Process control identity changed');
+    if (!origin || origin.tool !== 'proc' || origin.conversationId !== input.conversationId || origin.projectId !== identity.projectId || origin.workspaceId !== identity.workspaceId) throw new Error('Process control has no admitted origin');
+    const originArgs = RuntimeProcArgumentsSchema.parse(origin.args);
+    const name = originArgs.op === 'start' ? originArgs.spec.name : originArgs.op === 'restart' ? originArgs.name : null;
+    if (name === null || name !== object.parse(input.args).name) throw new Error('Process control identity changed');
+    let admission = savedDispatch(input.attemptId);
+    if (admission && (admission.tool !== 'proc' || admission.machineId !== origin.machineId || admission.projectId !== origin.projectId || admission.workspaceId !== origin.workspaceId || admission.parentAttemptId !== input.originAttemptId || admission.conversationId !== input.conversationId || admission.taskId !== input.taskId || admission.requestId !== input.requestId || admission.replay !== replay || canonicalJson(admission.args) !== canonicalJson(input.args))) throw new Error('Process control identity changed');
+    const selected = options.runtime().attachments.list()
+      .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && attachment.state === 'ready' && (attachment.role === 'primary' || attachment.role === 'replica'))
+      .sort((left, right) => right.generation - left.generation)[0];
+    if (!selected) throw new Error('Original process machine is unreachable: no READY execution replica');
+    if (!admission) {
+      admission = RuntimeToolDispatchSchema.parse({ ...origin, attachmentId: selected.attachmentId, generation: selected.generation, parentAttemptId: input.originAttemptId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, replay, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+      ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(admission));
+    }
+    let dispatch = admission;
+    if (admission.attachmentId !== selected.attachmentId || admission.generation !== selected.generation) {
+      // Executor envelopes are immutable. Reattachment gets a distinct transport
+      // attempt while the logical control and exact supervisor instance stay fixed.
+      const attemptId = `${input.attemptId}:attachment:${encodeURIComponent(selected.attachmentId)}:${selected.generation}`;
+      dispatch = savedDispatch(attemptId) ?? RuntimeToolDispatchSchema.parse({ ...admission, attemptId, attachmentId: selected.attachmentId, generation: selected.generation, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+      ctx.storage.sql.exec('INSERT OR IGNORE INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', attemptId, JSON.stringify(dispatch));
+    }
     return options.runtime().attachments.execute(dispatch, AbortSignal.timeout(30_000));
   }
   return {
     browser: browser.manage,
-    async mcpProxy(input) {
-      let sequence = 0;
-      return invokeMcpNamespace(input.method, input.args, async (tool, args) => {
-        const id = `mcp:${input.attemptId}:${input.callId}:${sequence++}`;
-        const request = JSON.stringify({ tool, args });
-        const prior = ctx.storage.sql.exec<{ request: string; result: string | null }>('SELECT request,result FROM runtime_mcp_calls WHERE id=?', id).toArray()[0];
-        if (prior) {
-          if (prior.request !== request) throw new Error('MCP child invocation identity changed');
-          if (prior.result !== null) return RuntimeJsonSchema.parse(JSON.parse(prior.result));
-          throw new Error('MCP invocation has unresolved effects and will not be replayed');
-        } else {
-          ctx.storage.sql.exec('INSERT INTO runtime_mcp_calls(id,request) VALUES(?,?)', id, request);
-        }
-        const parent = savedDispatch(input.attemptId);
-        if (!parent) throw new Error('MCP parent admission missing');
-        const result = await invoke({ tool, args, conversationId: input.conversationId, taskId: parent.taskId, requestId: id, attemptId: id, parentAttemptId: input.attemptId, replay: 'unsafe', signal: input.signal });
-        if (result.status !== 'completed') throw new Error(result.status === 'failed' ? result.error.message : 'MCP child attempt was interrupted');
-        const text = result.content.find(item => item.type === 'text');
-        if (!text || text.type !== 'text') throw new Error('MCP child omitted its result');
-        const value = RuntimeJsonSchema.parse(JSON.parse(text.text));
-        ctx.storage.sql.exec('UPDATE runtime_mcp_calls SET result=? WHERE id=?', JSON.stringify(value), id);
-        return value;
-      });
-    },
     tools: { invoke, prepareBrowser: browser.prepare, authorizeCronTool, async instructions(conversationId) {
       const project = await authority.getProject();
       if (!project) throw new Error('Project is not configured');
@@ -521,12 +537,15 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       observeProcess: input => controlProcess(input, 'safe'),
       stopProcess: input => controlProcess(input, 'unsafe'),
       async reconcile(attemptId) {
+        const cloud = codemode.reconcile(attemptId);
+        if (cloud) return cloud;
         const dispatch = savedDispatch(attemptId);
         if (!dispatch) return null;
         if (dispatch.tool === 'lifecycle') return awaitLifecycle(dispatch);
         return controlAttempt(attemptId, 'runtime_reconcile');
       },
       async cancel(attemptId) {
+        codemode.cancel(attemptId);
         active.get(attemptId)?.abort(new Error('Cancelled'));
         const dispatch = savedDispatch(attemptId);
         if (dispatch?.tool === 'lifecycle') await cancelLifecycle(dispatch);

@@ -37,7 +37,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
     this.operations = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => ctx.storage.setAlarm(timestamp) };
     this.runtime = createWorkspaceRuntime({
       storage: ctx.storage, identity, models, model: modelRef,
-      code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: unsupported },
+      code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: unsupported, listSnapshotEntries: unsupported, readBlob: unsupported },
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: unsupported,
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported },
       operations: this.operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
@@ -48,7 +48,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         return requests.filter(id => id.startsWith('fallback-')).map(requestId => ({ requestId, message: 'Selected model fixture/removed disappeared; using fixture/fixture.' }));
       },
       session: { catalog: async () => ({ models: [{ provider: 'fixture', id: 'fixture', name: 'Smoke', contextWindow: 8192 }], roles: [] }), reload: unsupported },
-      qa: { list: async () => [], act: unsupported }, modelProxy: unsupported, mcpProxy: unsupported,
+      qa: { list: async () => [], act: unsupported },
       attachments: { seal: unsupported, open: unsupported, dispatch: unsupported },
       waitUntil: promise => ctx.waitUntil(promise), schedule: timestamp => ctx.storage.setAlarm(timestamp),
     });

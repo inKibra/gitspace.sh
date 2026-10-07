@@ -3,6 +3,7 @@ import { daemonClientForProject, type DaemonRequest, type DaemonResponse } from 
 import { checkoutPath, mergeDelegateCommit, runSupervisorCommand, ExecutorEffectUncertain, type ExecutorJournal, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
+import { replicaServiceOperation } from './replica-services.js';
 import { createHash } from 'node:crypto';
 import { type SpaceWorkspaceControls } from './space-workspace-controls.js';
 import { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
@@ -85,9 +86,8 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       return [{ type: 'text', text: JSON.stringify(accepted) }];
     },
     service: async (dispatch, local) => {
-      if (local.attachment.role !== 'primary') throw new Error('Services require primary attachment');
       const args = z.discriminatedUnion('op', [z.object({ op: z.literal('list') }), z.object({ op: z.enum(['start', 'stop']), name: z.string().min(1) })]).parse(dispatch.args);
-      const result = args.op === 'list' ? await options.services.list(dispatch.workspaceId) : args.op === 'start' ? await options.services.start(dispatch.workspaceId, args.name) : await options.services.stop(dispatch.workspaceId, args.name);
+      const result = await replicaServiceOperation(options.services, local, args);
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     bash: async (dispatch, local, signal) => {
@@ -118,51 +118,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
         || (result.op === 'stop' && result.daemon.id !== described.daemon.id)) throw new Error('Supervisor identity changed during job control');
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
-    proc: async (dispatch, local, signal) => {
-      const args = RuntimeProcArgumentsSchema.parse(dispatch.args);
-      const client = await daemonClientForProject(local.rootPath);
-      const owner = `workspace:${dispatch.projectId}:${dispatch.workspaceId}`;
-      const mutate = async (request: DaemonRequest) => {
-        try { return await client.request(request, signal); }
-        catch (error) { throw new ExecutorEffectUncertain('Supervisor mutation outcome requires reconciliation', { cause: error }); }
-      };
-      if (args.op === 'start') {
-        const processes = await client.request({ op: 'list' }, signal);
-        if (processes.op !== 'list') throw new Error('Invalid supervisor list response');
-        if (processes.daemons.some(process => process.name === args.spec.name)) {
-          const existing = await client.request({ op: 'describe', name: args.spec.name }, signal);
-          if (existing.op !== 'describe' || !await workspaceProcessVisible(local.rootPath, existing)) throw new Error('Process name belongs to a private or out-of-workspace process');
-        }
-        const spec = { ...args.spec, cwd: args.spec.cwd ? await checkoutPath(local.rootPath, args.spec.cwd) : local.rootPath };
-        const result = await mutate({ op: 'start', spec, owner });
-        if (result.op !== 'start') throw new Error('Invalid supervisor start response');
-        if (spec.ready) {
-          const readiness = await client.request({ op: 'wait', name: spec.name, for: 'ready', timeoutMs: spec.ready.timeoutMs ?? 30_000 }, signal);
-          if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id) throw new ExecutorEffectUncertain('Process identity changed while observing readiness');
-          return [{ type: 'text', text: JSON.stringify({ op: 'start', daemon: readiness.daemon }) }];
-        }
-        return [{ type: 'text', text: JSON.stringify(result) }];
-      }
-      if (args.op === 'list') {
-        const result = await client.request(args, signal);
-        if (result.op !== 'list') throw new Error('Invalid supervisor list response');
-        const visible = [];
-        for (const process of result.daemons) {
-          const described = await client.request({ op: 'describe', name: process.name }, signal);
-          if (described.op === 'describe' && await workspaceProcessVisible(local.rootPath, described)) visible.push(process);
-        }
-        return [{ type: 'text', text: JSON.stringify(visible) }];
-      }
-      const existing = await client.request({ op: 'describe', name: args.name, ...(args.op === 'status' || args.op === 'describe' || args.op === 'stop' ? { instanceId: args.instanceId, restartCount: args.restartCount } : {}) }, signal);
-      if (existing.op !== 'describe' || !await workspaceProcessVisible(local.rootPath, existing)) throw new Error('Private or out-of-workspace processes are not accessible');
-      const result = args.op === 'send' || args.op === 'stop' || args.op === 'restart' ? await mutate(args) : args.op === 'status' || args.op === 'describe' ? existing : await client.request(args, signal);
-      if (args.op === 'restart' && result.op === 'restart' && existing.spec.ready) {
-        const readiness = await client.request({ op: 'wait', name: args.name, for: 'ready', timeoutMs: existing.spec.ready.timeoutMs ?? 30_000 }, signal);
-        if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id) throw new ExecutorEffectUncertain('Process identity changed while observing readiness');
-        return [{ type: 'text', text: JSON.stringify({ op: 'restart', daemon: readiness.daemon }) }];
-      }
-      return [{ type: 'text', text: JSON.stringify(result) }];
-    },
+    proc: machineProcessOperation(options),
     delegate_export: async (dispatch, local, signal) => {
       if (local.attachment.role !== 'delegate' || local.attachment.checkout.kind !== 'branch') throw new Error('Only delegated branches may export integration commits');
       const args = RuntimeDelegateExportArgumentsSchema.parse(dispatch.args);
@@ -215,5 +171,55 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       const result = await mergeDelegateCommit({ primary: local, delegate, expectedPrimaryCommit: args.expectedPrimaryCommit, commit: args.commit, attemptId: dispatch.attemptId, deadlineAt: dispatch.deadlineAt, signal });
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
+  };
+}
+
+export function machineProcessOperation(options: { services: WorkspaceServiceManager }): ExecutorOperationHandler {
+  return async (dispatch, local, signal) => {
+      const args = RuntimeProcArgumentsSchema.parse(dispatch.args);
+      const client = await daemonClientForProject(local.rootPath);
+      const owner = `workspace:${dispatch.projectId}:${dispatch.workspaceId}`;
+      const mutate = async (request: DaemonRequest) => {
+        try { return await client.request(request, signal); }
+        catch (error) { throw new ExecutorEffectUncertain('Supervisor mutation outcome requires reconciliation', { cause: error }); }
+      };
+      if (args.op === 'start') {
+        const processes = await client.request({ op: 'list' }, signal);
+        if (processes.op !== 'list') throw new Error('Invalid supervisor list response');
+        if (processes.daemons.some(process => process.name === args.spec.name)) {
+          const existing = await client.request({ op: 'describe', name: args.spec.name }, signal);
+          if (existing.op !== 'describe' || !await workspaceProcessVisible(local.rootPath, existing)) throw new Error('Process name belongs to a private or out-of-workspace process');
+        }
+        const spec = { ...args.spec, cwd: args.spec.cwd ? await checkoutPath(local.rootPath, args.spec.cwd) : local.rootPath };
+        const result = await mutate({ op: 'start', spec, owner });
+        if (result.op !== 'start') throw new Error('Invalid supervisor start response');
+        if (spec.ready) {
+          const readiness = await client.request({ op: 'wait', name: spec.name, for: 'ready', timeoutMs: spec.ready.timeoutMs ?? 30_000 }, signal);
+          if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new ExecutorEffectUncertain('Process did not become ready with the admitted identity');
+          const url = spec.ready.port ? await options.services.registerProcessRoute({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, generation: dispatch.generation, name: spec.name, portName: 'http', port: spec.ready.port }) : null;
+          return [{ type: 'text', text: JSON.stringify({ op: 'start', daemon: readiness.daemon, url }) }];
+        }
+        return [{ type: 'text', text: JSON.stringify(result) }];
+      }
+      if (args.op === 'list') {
+        const result = await client.request(args, signal);
+        if (result.op !== 'list') throw new Error('Invalid supervisor list response');
+        const visible = [];
+        for (const process of result.daemons) {
+          const described = await client.request({ op: 'describe', name: process.name }, signal);
+          if (described.op === 'describe' && await workspaceProcessVisible(local.rootPath, described)) visible.push(process);
+        }
+        return [{ type: 'text', text: JSON.stringify(visible) }];
+      }
+      const existing = await client.request({ op: 'describe', name: args.name, ...(args.op === 'status' || args.op === 'describe' || args.op === 'stop' ? { instanceId: args.instanceId, restartCount: args.restartCount } : {}) }, signal);
+      if (existing.op !== 'describe' || !await workspaceProcessVisible(local.rootPath, existing)) throw new Error('Private or out-of-workspace processes are not accessible');
+      const result = args.op === 'send' || args.op === 'stop' || args.op === 'restart' ? await mutate(args) : args.op === 'status' || args.op === 'describe' ? existing : await client.request(args, signal);
+      if (args.op === 'stop') await options.services.releaseProcessRoutes(dispatch.workspaceId, args.name);
+      if (args.op === 'restart' && result.op === 'restart' && existing.spec.ready) {
+        const readiness = await client.request({ op: 'wait', name: args.name, for: 'ready', timeoutMs: existing.spec.ready.timeoutMs ?? 30_000 }, signal);
+        if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new ExecutorEffectUncertain('Process did not become ready with the admitted identity');
+        return [{ type: 'text', text: JSON.stringify({ op: 'restart', daemon: readiness.daemon }) }];
+      }
+      return [{ type: 'text', text: JSON.stringify(result) }];
   };
 }

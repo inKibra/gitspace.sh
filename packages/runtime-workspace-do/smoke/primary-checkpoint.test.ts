@@ -1,3 +1,4 @@
+import { wranglerWorkerModules } from './search-wasm.js';
 import { test, expect } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -30,7 +31,7 @@ for (const scenario of ['source', 'empty', 'unborn']) test(`first primary reache
     const [buildOut, buildError, buildExit] = await Promise.all([new Response(build.stdout).text(), new Response(build.stderr).text(), build.exited]);
     if (buildExit !== 0) throw new Error(buildOut + buildError);
     worker = new Miniflare({
-      modules: [{ type: 'ESModule', path: join(directory, 'fixture.js'), contents: await Bun.file(join(directory, 'bundle/primary-checkpoint-fixture.js')).text() }], modulesRoot: directory,
+      modules: await wranglerWorkerModules(join(directory, 'bundle'), 'primary-checkpoint-fixture.js'), modulesRoot: join(directory, 'bundle'),
       compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], bindings: { ACCOUNT_ID: 'account' },
       durableObjects: { PROOF: { className: 'PrimaryCheckpointProof', useSQLite: true }, SPACE_AUTHORITY: { className: 'PrimaryCheckpointProof', useSQLite: true }, PROJECT_AUTHORITY: { className: 'CheckpointMetadata', useSQLite: true }, FLEET_CATALOG: { className: 'CheckpointMetadata', useSQLite: true }, CREDENTIALS: { className: 'CheckpointMetadata', useSQLite: true } },
       outboundService: () => { throw new Error('Live provider access forbidden'); },

@@ -3,12 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": { ".": "./src/index.ts", "./browser-semantic": "./src/browser-semantic.ts", "./browser-output": "./src/browser-output.ts", "./browser-screenshot": "./src/browser-screenshot.ts", "./browser-service-policy": "./src/browser-service-policy.ts" },
   "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json", "test": "bun ../../scripts/test-isolated.ts src", "test:browser:headless": "bun src/browser-smoke.ts" },
   "dependencies": {
     "@puppeteer/browsers": "3.0.6",
     "@earendil-works/pi-durable": "1.0.0",
-    "@earendil-works/pi-codemode": "1.0.0",
     "@earendil-works/chord": "1.0.0",
     "@gitspace/protocol": "workspace:*",
     "@gitspace/protocol-runtime": "workspace:*",

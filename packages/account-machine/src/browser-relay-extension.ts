@@ -1,4 +1,4 @@
-import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine';
+import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { verifyRelayAuthorization } from './browser-relay-authorization.js';
 
@@ -16,14 +16,14 @@ export function browserRelayPopup(): string {
   return `async function refreshIdentity() { const result = await chrome.runtime.sendMessage({ identityStatus: true }); if (result?.error) throw new Error(result.error); document.getElementById('fingerprint').textContent = result.fingerprint || 'No identity. Pair to generate a key.'; }
 async function action(message, success) { const buttons = document.querySelectorAll('button'); buttons.forEach(button => button.disabled = true); try { const result = await chrome.runtime.sendMessage(message()); if (result?.error) throw new Error(result.error); await refreshIdentity(); document.getElementById('code').value = ''; document.getElementById('status').textContent = success; } catch(error) { document.getElementById('status').textContent = error.message; } finally { buttons.forEach(button => button.disabled = false); } }
 void refreshIdentity().catch(error => { document.getElementById('status').textContent = error.message; });
-document.getElementById('pair').addEventListener('submit', event => { event.preventDefault(); void action(() => { const pairing = JSON.parse(document.getElementById('code').value); if (!pairing.code || !pairing.machineId || pairing.trust?.algorithm !== 'Ed25519' || !pairing.trust.accountId || !pairing.trust.publicKey) throw new Error('Copy the pairing data from authenticated GitSpace Settings'); return { pair: pairing }; }, 'Pairing requested. Check GitSpace for connection status.'); });
+document.getElementById('pair').addEventListener('submit', event => { event.preventDefault(); void action(() => { const pairing = JSON.parse(document.getElementById('code').value); if (!pairing.code || !pairing.pairingId || !Number.isSafeInteger(pairing.generation) || pairing.trust?.algorithm !== 'Ed25519' || !pairing.trust.accountId || !pairing.trust.publicKey || Date.parse(pairing.expiresAt) <= Date.now()) throw new Error('Copy fresh pairing data from authenticated GitSpace Settings'); return { pair: pairing }; }, 'Compare the fingerprint above with GitSpace Settings, then confirm there before agents can use this Chrome.'); });
 document.getElementById('reset').addEventListener('click', () => { void action(() => ({ resetIdentity: true }), 'Identity reset. Use Forget paired browser in GitSpace Settings, then get new pairing JSON.'); });`;
 }
 
 // Only the extension has a transport credential, entered interactively. It grants no client CDP endpoint.
 export function browserRelayExtension(endpoint: string): string {
   return `
-const endpoint = ${JSON.stringify(endpoint.replace('http:', 'ws:') + '/extension')};
+const endpoint = ${JSON.stringify(new URL('/api/browser-relay/extension', endpoint).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:'))};
 const browserOriginMatches = ${browserOriginMatches.toString()};
 const allowed = ${relayCommandAllowed.toString()};
 const prepareScreenshot = ${JSON.stringify(browserScreenshotPrepareFunction)};
@@ -41,7 +41,7 @@ const encode64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 async function authorize(authorization) {
   const identity = await stored('identity'); if (!identity) throw new Error('Human pairing required');
   const body = await verifyAuthorization(authorization, identity.trust);
-  if (body.scope.machineId !== identity.machineId) throw new Error('Paired machine scope mismatch');
+  if (body.scope.placement?.kind !== 'account-relay' || body.scope.placement.pairingId !== identity.pairingId || body.scope.placement.generation !== identity.generation) throw new Error('Paired account relay scope mismatch');
   const replayKey = JSON.stringify([body.scope.projectId, body.scope.workspaceId, body.scope.attemptId]);
   const db = await database;
   const replay = Promise.withResolvers(); const tx = db.transaction('state', 'readwrite'); const store = tx.objectStore('state');
@@ -50,12 +50,12 @@ async function authorize(authorization) {
     const entries = (request.result || []).filter(entry => entry[1] > Date.now());
     if (entries.some(entry => entry[0] === replayKey) || entries.length >= 10000) { tx.abort(); return; }
     entries.push([replayKey, Date.parse(body.expiresAt)]); store.put(entries, 'replays');
-    const generationKey = 'generation:' + JSON.stringify([body.scope.projectId,body.scope.workspaceId,body.scope.attachmentId]);
+    const generationKey = 'generation:' + JSON.stringify([body.scope.projectId,body.scope.workspaceId,body.scope.placement.pairingId]);
     const generation = store.get(generationKey);
-    generation.onsuccess = () => { if (generation.result !== undefined && generation.result > body.scope.generation) { tx.abort(); return; } store.put(body.scope.generation, generationKey); };
+    generation.onsuccess = () => { if (generation.result !== undefined && generation.result > body.scope.placement.generation) { tx.abort(); return; } store.put(body.scope.placement.generation, generationKey); };
   };
   tx.oncomplete = replay.resolve; tx.onerror = () => replay.reject(new Error('Authorization replay persistence failed')); tx.onabort = () => replay.reject(new Error('Replayed or fenced authorization, or replay capacity exhausted')); await replay.promise;
-  for (const [id, channel] of channels) if (channel.grant.projectId === body.scope.projectId && channel.grant.workspaceId === body.scope.workspaceId && channel.grant.attachmentId === body.scope.attachmentId && channel.grant.generation < body.scope.generation) { authorizations.delete(channel.grant.groupId); await fence(id); }
+  for (const [id, channel] of channels) if (channel.grant.projectId === body.scope.projectId && channel.grant.workspaceId === body.scope.workspaceId && channel.grant.placement.pairingId === body.scope.placement.pairingId && channel.grant.placement.generation < body.scope.placement.generation) { authorizations.delete(channel.grant.groupId); await fence(id); }
   const command = body.command;
   const id = command.type === 'execute' ? command.grant.body.groupId : command.type === 'manage' ? 'management' : command.groupId;
   if (command.type === 'execute') {
@@ -73,7 +73,7 @@ function send(value) { if (socket?.readyState === WebSocket.OPEN) socket.send(JS
 async function targets() { return (await chrome.debugger.getTargets()).filter(target => target.type === 'page'); }
 async function targetInfo(id) { const target = (await targets()).find(target => target.id === id); if (!target || !Number.isInteger(target.tabId)) throw new Error('Unknown exact tab target'); return target; }
 function permitted(grant, url) { try { const parsed = new URL(url); return url === 'about:blank' || (['http:', 'https:'].includes(parsed.protocol) && grant.origins.some(pattern => browserOriginMatches(pattern, parsed.hostname))); } catch { return false; } }
-async function retireGroup(groupId) {
+async function retireGroup(groupId, closeTabs = false) {
   // Keep the fence after identity reset, browser restart, and replacement group creation.
   await persist('retired-group:' + groupId, true);
   authorizations.delete(groupId);
@@ -81,12 +81,28 @@ async function retireGroup(groupId) {
   const db = await database; const keys = Promise.withResolvers();
   const request = db.transaction('state').objectStore('state').getAllKeys();
   request.onsuccess = () => keys.resolve(request.result); request.onerror = () => keys.reject(request.error);
-  for (const key of await keys.promise) if (typeof key === 'string' && key.startsWith('group:')) { const record = await stored(key); if (record?.groupId === groupId) await persist(key, null); }
+  const { browserEpoch } = closeTabs ? await chrome.storage.session.get('browserEpoch') : {};
+  for (const key of await keys.promise) if (typeof key === 'string' && (key.startsWith('group:') || (closeTabs && key.startsWith('closing-group:')))) {
+    const record = await stored(key);
+    if (record?.groupId !== groupId) continue;
+    if (closeTabs) {
+      const closingKey = 'closing-group:' + groupId + ':' + record.chromeGroupId;
+      if (browserEpoch && record.browserEpoch === browserEpoch) {
+        // Keep ownership through a failed close, group replacement, and service-worker restart.
+        await persist(closingKey, record);
+        const tabs = await chrome.tabs.query({ groupId: record.chromeGroupId });
+        const ids = tabs.filter(tab => tab.groupId === record.chromeGroupId && Number.isInteger(tab.id)).map(tab => tab.id);
+        if (ids.length) await chrome.tabs.remove(ids);
+      }
+      await persist(closingKey, null);
+    }
+    await persist(key, null);
+  }
 }
 async function groupRecord(grant, establish = false) {
   if (await stored('retired-group:' + grant.groupId)) throw new Error('Workspace group retired');
   const identity = await stored('identity');
-  const scope = JSON.stringify([identity.trust.accountId, identity.machineId, grant.projectId, grant.workspaceId]);
+  const scope = JSON.stringify([identity.trust.accountId, identity.pairingId, grant.projectId, grant.workspaceId]);
   const key = 'group:' + scope;
   const bindingKey = 'group-binding:' + scope;
   const record = await stored(key);
@@ -251,7 +267,7 @@ async function execute(message) {
     if (!authorization || authorization.body.command.type !== 'prepare' || Date.parse(authorization.body.expiresAt) <= Date.now() || Date.parse(authorization.body.dispatch.deadlineAt) <= Date.now() || authorization.used.has('prepare')) throw new Error('Signed workspace preparation required');
     authorization.used.add('prepare'); return {};
   }
-  if (message.operation === 'revoke') { await retireGroup(message.groupId); return {}; }
+  if (message.operation === 'revoke') { await retireGroup(message.groupId, true); return {}; }
   if (message.operation === 'tabs') {
     const authorization = authorizations.get(message.groupId);
     if (!authorization || authorization.body.command.type !== 'execute' || authorization.body.command.args.action !== 'tabs' || Date.parse(authorization.body.expiresAt) <= Date.now() || Date.parse(authorization.body.dispatch.deadlineAt) <= Date.now() || authorization.used.has('tabs')) throw new Error('Signed group discovery required');
@@ -356,7 +372,14 @@ async function connect() {
   if (socket && socket.readyState <= WebSocket.OPEN) return;
   await chrome.storage.local.remove('pairingCode');
   const identity = await stored('identity'); if (!identity || managingIdentity || generation !== identityGeneration || (socket && socket.readyState <= WebSocket.OPEN)) return;
-  const connection = new WebSocket(endpoint);
+  const protocols = [];
+  if (!pairingCode) {
+    const issuedAt = Date.now(), nonce = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
+    const signature = encode64(await crypto.subtle.sign('Ed25519', identity.privateKey, new TextEncoder().encode('gitspace-browser-relay-v2:admission:' + identity.pairingId + ':' + identity.generation + ':' + issuedAt + ':' + nonce)));
+    protocols.push('gitspace-admission.' + btoa(JSON.stringify({ pairingId: identity.pairingId, generation: identity.generation, issuedAt, nonce, signature })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''));
+  }
+  if (managingIdentity || generation !== identityGeneration || (socket && socket.readyState <= WebSocket.OPEN)) return;
+  const connection = new WebSocket(endpoint, protocols);
   socket = connection;
   const clientNonce = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
   let serverNonce;
@@ -377,7 +400,7 @@ async function connect() {
             if (!/^[a-f0-9]{64}$/.test(serverNonce)) throw new Error('Invalid challenge');
             const proof = encode64(await crypto.subtle.sign('Ed25519', identity.privateKey, new TextEncoder().encode('gitspace-browser-relay-v2:client:' + serverNonce + ':' + clientNonce)));
             if (socket !== connection || generation !== identityGeneration) throw new Error('Identity changed');
-            connection.send(JSON.stringify({ pairing: 'client', clientNonce, publicKey: identity.publicKey, proof, ...(pairingCode ? { code: pairingCode } : {}) }));
+            connection.send(JSON.stringify({ pairing: 'client', pairingId: identity.pairingId, clientNonce, publicKey: identity.publicKey, proof, ...(pairingCode ? { code: pairingCode } : {}) }));
             return;
           }
           if (message.pairing !== 'server' || !serverNonce) throw new Error('Invalid relay acknowledgement');
@@ -428,12 +451,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => { if ((!messa
       tx.objectStore('state').delete('identity'); tx.oncomplete = deleted.resolve; tx.onerror = () => deleted.reject(tx.error); tx.onabort = () => deleted.reject(tx.error);
       await deleted.promise; respond({ ok: true }); return;
     }
-  const { code, trust, machineId } = message.pair;
-  if (typeof code !== 'string' || typeof machineId !== 'string' || !machineId || !trust || trust.algorithm !== 'Ed25519' || !trust.accountId || typeof trust.publicKey !== 'string') throw new Error('Invalid human pairing');
+  const { code, trust, pairingId, generation } = message.pair;
+  if (typeof code !== 'string' || typeof pairingId !== 'string' || !pairingId || !Number.isSafeInteger(generation) || !trust || trust.algorithm !== 'Ed25519' || !trust.accountId || typeof trust.publicKey !== 'string') throw new Error('Invalid human pairing');
   await crypto.subtle.importKey('raw', Uint8Array.from(atob(trust.publicKey), c => c.charCodeAt(0)), 'Ed25519', false, ['verify']);
   let identity = await stored('identity');
-  if (identity && (identity.machineId !== machineId || identity.trust.accountId !== trust.accountId || identity.trust.publicKey !== trust.publicKey)) throw new Error('Clear extension identity before changing account or machine authority');
-  if (!identity) { const keys = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']); identity = { privateKey: keys.privateKey, publicKey: encode64(await crypto.subtle.exportKey('raw', keys.publicKey)), trust, machineId }; await persist('identity', identity); }
+  if (identity && (identity.pairingId !== pairingId || identity.generation !== generation || identity.trust.accountId !== trust.accountId || identity.trust.publicKey !== trust.publicKey)) throw new Error('Clear extension identity before changing account relay authority');
+  if (!identity) { const keys = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']); identity = { privateKey: keys.privateKey, publicKey: encode64(await crypto.subtle.exportKey('raw', keys.publicKey)), trust, pairingId, generation }; await persist('identity', identity); }
   await chrome.storage.local.remove('pairingCode'); pairingCode = code;
     respond({ ok: true });
   } finally { managingIdentity = false; await connect(); }
@@ -442,4 +465,13 @@ chrome.alarms.create('relay-reconnect', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => { for (const [id] of channels) void check(id).catch(() => {}); void connect(); });
 connect();
 `;
+}
+
+export function browserRelayFiles(endpoint: string): Record<string, string> {
+  return {
+    'background.js': browserRelayExtension(endpoint),
+    'popup.js': browserRelayPopup(),
+    'popup.html': '<!doctype html><html><body><p>Browser identity — compare this fingerprint in GitSpace Settings</p><p>Extension public key fingerprint (SHA-256)</p><code id="fingerprint"></code><form id="pair"><label>Account pairing details <input id="code" autocomplete="off" required></label><button>Pair</button></form><button id="reset" type="button">Reset identity</button><p id="status" role="status"></p><script src="popup.js"></script></body></html>',
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.0.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage'], host_permissions: [`${new URL(endpoint).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html' } }),
+  };
 }

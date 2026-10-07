@@ -955,8 +955,9 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
   updates are workspace/block scoped; streaming text uses append deltas; large
   live payloads truncate while committed history remains authoritative.
   OMP 18 + commit `b972282` implement the first skinny-event cut.
-- Browser relay uses a per-workspace capability grant and OMP’s global broker.
-  Logged-in browser access is never ambient.
+- Browser Relay connects the extension directly to the account Worker and uses
+  signed workspace/group/origin grants. Headless runs in cloud Browser Rendering
+  or private-pipe machine Chromium. Logged-in browser access is never ambient.
 - Browser RPC stays on result-rpc's native transport for queries, mutations,
   and active-pane streams. One synchronization owner shares each resource
   channel; components subscribe to its cache rather than opening transports.

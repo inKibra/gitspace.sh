@@ -65,7 +65,7 @@ export async function createAccountWorkspaceRuntime(
   const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   let runtime: WorkspaceRuntime | undefined;
-  const services = createRuntimeServices({ ctx, env, identity, schedule, generateImage: inference.generateImage, judge, instructionLoader, runtime() {
+  const services = createRuntimeServices({ ctx, env, identity, schedule, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });
@@ -84,7 +84,6 @@ export async function createAccountWorkspaceRuntime(
       return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length));
     },
     settings,
-    modelProxy: inference.modelHelper,
     retainedRules: createRuntimeRuleServices({ code, repository, ref, judge, async matchAst(conversationId, content, paths, patterns) {
       const requestId = `rules:${crypto.randomUUID()}`;
       const result = await services.tools.invoke({ tool: 'rule_match_ast', args: { content, paths, patterns }, conversationId, taskId: requestId, requestId, attemptId: requestId, replay: 'safe', signal: AbortSignal.timeout(30_000) });

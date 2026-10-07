@@ -1569,9 +1569,9 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }
 
   listHostedRoutes(now = new Date().toISOString()): HostedServiceRoute[] {
-    this.ctx.storage.sql.exec('DELETE FROM hosted_routes WHERE lease_expires_at<=?', now);
+    // Retain expired leases as generation fences; only live routes are returned.
     return this.ctx.storage.sql.exec<HostedRouteRow>(
-      'SELECT * FROM hosted_routes ORDER BY hostname',
+      'SELECT * FROM hosted_routes WHERE lease_expires_at>? ORDER BY hostname', now,
     ).toArray().map(hostedRoute);
   }
 
@@ -1579,6 +1579,11 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.commit('service', input.workspaceId, () => {
     const now = new Date().toISOString();
     if (input.leaseExpiresAt <= now) throw new Error('Hosted route lease must expire in the future');
+    const current = this.ctx.storage.sql.exec<HostedRouteRow>('SELECT * FROM hosted_routes WHERE hostname=?', input.hostname).toArray()[0];
+    if (current) {
+      const sameOwner = current.machine_id === input.machineId && current.workspace_id === input.workspaceId && current.service_name === input.serviceName;
+      if ((!sameOwner && current.lease_expires_at > now) || (sameOwner && input.generation < current.generation)) throw new Error('Hosted route lease owner or generation conflict');
+    }
     this.ctx.storage.sql.exec(
       `INSERT INTO hosted_routes VALUES(?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(hostname) DO UPDATE SET
@@ -1608,12 +1613,14 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  releaseHostedRoute(hostname: string, machineId: string): boolean {
+  releaseHostedRoute(hostname: string, machineId: string, generation: number): boolean {
     return this.commit('service', hostname, () => {
     return this.ctx.storage.sql.exec(
-      'DELETE FROM hosted_routes WHERE hostname=? AND machine_id=? RETURNING hostname',
+      "UPDATE hosted_routes SET lease_expires_at='1970-01-01T00:00:00.000Z' WHERE hostname=? AND machine_id=? AND generation=? AND lease_expires_at>? RETURNING hostname",
       hostname,
       machineId,
+      generation,
+      new Date().toISOString(),
     ).toArray().length > 0;
     });
   }

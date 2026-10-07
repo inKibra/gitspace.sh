@@ -15,7 +15,7 @@ async function fixture(onRun?: () => Promise<void>, hooks: Pick<MachineExecutorO
   const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 7, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['write', 'bash'], updatedAt: new Date().toISOString() });
   journal.installAttachment({ attachment, rootPath: root, executionSecret: Buffer.alloc(32, 7).toString('base64url'), prerequisitesComplete: true });
   let launches = 0;
-  const executor = new MachineExecutor({ machineId: 'machine', journal, ...hooks, runCommand: async () => { launches++; await onRun?.(); return { exitCode: 0, output: 'effect' }; }, artifacts: () => ({ read: async () => [], write: async () => {} }), cloudModel: async () => null, cloudMcp: async () => { throw new Error('MCP is not part of this executor fixture'); } });
+  const executor = new MachineExecutor({ machineId: 'machine', journal, ...hooks, runCommand: async () => { launches++; await onRun?.(); return { exitCode: 0, output: 'effect' }; }, artifacts: () => ({ read: async () => [], write: async () => {} }) });
   const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, conversationKind: 'main', conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 7, requestId: 'request', attemptId: 'attempt', tool: 'bash', args: { command: 'effect' }, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' });
   return { root, journal, executor, dispatch, launches: () => launches, close: async () => { journal.close(); await rm(root, { recursive: true, force: true }); } };
 }
@@ -211,7 +211,7 @@ describe('executor effect ownership', () => {
       expect((await f.executor.observe(second)).receipt.state).toBe('fenced-not-started');
       const third = { ...f.dispatch, requestId: 'later-request', attemptId: 'later-attempt' };
       await expect(f.executor.execute(third)).rejects.toThrow('Unresolved checkout execution');
-      const recovered = new MachineExecutor({ machineId: 'machine', journal: f.journal, runCommand: async () => { throw new Error('Cold executor must not launch'); }, artifacts: () => ({ read: async () => [], write: async () => {} }), cloudModel: async () => null, cloudMcp: async () => { throw new Error('MCP is not part of this executor fixture'); } });
+      const recovered = new MachineExecutor({ machineId: 'machine', journal: f.journal, runCommand: async () => { throw new Error('Cold executor must not launch'); }, artifacts: () => ({ read: async () => [], write: async () => {} }) });
       const fourth = { ...f.dispatch, requestId: 'cold-request', attemptId: 'cold-attempt' };
       await expect(recovered.execute(fourth)).rejects.toThrow('Unresolved checkout execution');
       expect((await recovered.observe(fourth)).receipt.state).toBe('fenced-not-started');

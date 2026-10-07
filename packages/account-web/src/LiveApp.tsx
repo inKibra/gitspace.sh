@@ -1,4 +1,6 @@
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import type { RuntimeAccountBrowserRelayStatus } from '@gitspace/protocol-runtime';
+import { accountBrowserStatus, downloadAccountBrowserExtension, unpairAccountBrowser } from './browser-relay-client.js';
 import { runtimeLfsHeldBack, useLfsTransition, type ConfirmLfsTransition } from './LfsTransition.js';
 import { executionAgentId, type ExecutionBlock, type SideAgentBlock, type TurnBlock } from '@gitspace/blocks';
 import type { InspectorView, RuntimeSettingValue, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
@@ -31,6 +33,7 @@ import { ACCOUNT_DIRECTORY_CHANGED, PRODUCT_ROUTE_LABELS, isGlobalView, navigate
 import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
+import { ServiceAccessApproval } from './ServiceAccessApproval.js';
 import { SkillsPage } from './SkillsPage.js';
 import { PluginsPage } from './PluginsPage.js';
 import { ProjectSecretsPage, type ProjectSecretsProps } from './ProjectSecretsPage.js';
@@ -894,13 +897,13 @@ function GitSpaceProduct() {
   const composioSetupValue = useRetainedQueryValue(composioSetupQuery, 'composio-setup');
   const putComposioSetup = useResultMutation(rpcClient.mcp.composio.setup.put);
   const deleteComposioSetup = useResultMutation(rpcClient.mcp.composio.setup.delete);
-  const browserRelayQuery = useResultQuery(rpcClient.browserRelay.status, {}, { enabled: runtimeMetadataEnabled });
-  const browserRelayValue = useRetainedQueryValue(browserRelayQuery, 'browser-relay');
-  const setupBrowserRelay = useResultMutation(rpcClient.browserRelay.setup);
-  const startBrowserRelay = useResultMutation(rpcClient.browserRelay.start);
-  const stopBrowserRelay = useResultMutation(rpcClient.browserRelay.stop);
-  const unpairBrowserRelay = useResultMutation(rpcClient.browserRelay.unpair);
-  const testBrowserRelay = useResultMutation(rpcClient.browserRelay.test);
+  const [browserRelayValue, setBrowserRelayValue] = useState<RuntimeAccountBrowserRelayStatus | null>(null);
+  const [browserRelayError, setBrowserRelayError] = useState<string | null>(null);
+  const refreshBrowserRelay = async () => {
+    try { const value = await accountBrowserStatus(); setBrowserRelayValue(value); setBrowserRelayError(null); return value; }
+    catch (error) { setBrowserRelayError(rpcErrorMessage(error, 'Account browser')); throw error; }
+  };
+  useEffect(() => { let active = true; void accountBrowserStatus().then(value => { if (active) setBrowserRelayValue(value); }, error => { if (active) setBrowserRelayError(rpcErrorMessage(error, 'Account browser')); }); return () => { active = false; }; }, []);
   const saveComposioSetup = async (apiKey: string): Promise<void> => {
     const result = await putComposioSetup.mutateAsync({ apiKey });
     if (result.status === 'error') throw result.error;
@@ -911,14 +914,10 @@ function GitSpaceProduct() {
     if (result.status === 'error') throw result.error;
     await composioSetupQuery.refetch();
   };
-  const runBrowserRelay = async (operation: 'setup' | 'start' | 'stop' | 'unpair' | 'test'): Promise<void> => {
-    const procedure = operation === 'setup' ? setupBrowserRelay
-      : operation === 'start' ? startBrowserRelay
-        : operation === 'stop' ? stopBrowserRelay
-          : operation === 'unpair' ? unpairBrowserRelay : testBrowserRelay;
-    const result = await procedure.mutateAsync({});
-    await browserRelayQuery.refetch();
-    if (result.status === 'error') throw result.error;
+  const runBrowserRelay = async (operation: 'setup' | 'start' | 'test'): Promise<void> => {
+    if (operation === 'setup') await downloadAccountBrowserExtension();
+    const value = await refreshBrowserRelay();
+    if (operation === 'test' && !value.pairings.some(browser => browser.state === 'confirmed' && browser.connected)) throw new Error('Connect and confirm a Chrome, then approve it in project settings');
   };
   const revokeDeviceAndRefresh = async (deviceId: string): Promise<void> => {
     const result = await revokeDevice.mutateAsync({ deviceId });
@@ -1233,11 +1232,12 @@ function GitSpaceProduct() {
   }
   const reads = [
     ['Account settings', settingsQuery], ['Runtime settings', runtimeQuery], ['Git identity', gitIdentityQuery], ['Machines', machinesQuery],
-    ['Devices', devicesQuery], ['Source', settingsDeploymentQuery], ['Composio setup', composioSetupQuery], ['Browser relay', browserRelayQuery],
+    ['Devices', devicesQuery], ['Source', settingsDeploymentQuery], ['Composio setup', composioSetupQuery],
     ['Projects', productProjectsQuery], ['Models', modelsQuery],
     ['Cloud images', cloudImagesQuery], ['Cloud image default', imageDefaultQuery],
   ] as const;
   const page = (mode: 'settings' | 'onboarding') => <>
+    {browserRelayError ? <p role="alert" className="px-8 py-1 text-caption text-destructive">{browserRelayError}<Button variant="ghost" size="compact" onClick={() => void refreshBrowserRelay().catch(() => {})}>Retry browser status</Button></p> : null}
     {reads.map(([label, query]) => query.state === 'failure' ? <p key={label} role="alert" className="px-8 py-1 text-caption text-destructive">{label}: {rpcErrorMessage(query.error, label)}<Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry</Button></p> : null)}
     <SettingsPage
     mode={mode}
@@ -1289,8 +1289,7 @@ function GitSpaceProduct() {
     browserRelay={browserRelayValue ?? null}
     onSetupBrowserRelay={() => runBrowserRelay('setup')}
     onStartBrowserRelay={() => runBrowserRelay('start')}
-    onStopBrowserRelay={() => runBrowserRelay('stop')}
-    onUnpairBrowserRelay={() => runBrowserRelay('unpair')}
+    onUnpairBrowserRelay={async pairingId => { setBrowserRelayValue(await unpairAccountBrowser(pairingId)); }}
     onTestBrowserRelay={() => runBrowserRelay('test')}
     projects={(productProjectsValue ?? []).map((project) => ({ id: project.id, name: project.name }))}
     onBack={() => navigateProduct(optionalQueryParameter('project') ? 'agent' : 'projects', 'replace')}
@@ -1676,5 +1675,6 @@ function AccountProductRoute() {
 
 
 export function LiveApp() {
+  if (window.location.pathname === '/service-access') return <DeviceGate><ServiceAccessApproval /></DeviceGate>;
   return <DeviceGate><ResultRpcProvider client={rpcClient}><SynchronizationProvider><InferenceProvider><AccountFrame><AccountProductRoute /></AccountFrame></InferenceProvider></SynchronizationProvider></ResultRpcProvider></DeviceGate>;
 }

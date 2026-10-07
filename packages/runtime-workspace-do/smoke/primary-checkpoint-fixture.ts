@@ -42,7 +42,7 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       stream: () => { throw new Error('Inference forbidden in checkpoint proof'); },
       streamSimple: () => { throw new Error('Inference forbidden in checkpoint proof'); },
     });
-    const code = { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: async (input: { machine: typeof checkpoint }) => Result.ok(input.machine), listSnapshotPaths: async () => [] };
+    const code = { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: async (input: { machine: typeof checkpoint }) => Result.ok(input.machine), listSnapshotPaths: async () => [], listSnapshotEntries: async () => new Map(), readBlob: unsupported };
     const runtime = await createWorkspaceRuntime({
       storage: this.ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
       code,
@@ -53,7 +53,7 @@ export class PrimaryCheckpointProof extends SpaceAuthorityDO {
       retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
       onReport: error => { throw error; }, admitInference: unsupported, bindInferenceConversation: async () => [],
       session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported },
-      qa: { list: async () => [], act: unsupported }, modelProxy: unsupported, mcpProxy: unsupported,
+      qa: { list: async () => [], act: unsupported },
       attachments: { seal: async secret => secret, open: async secret => secret, dispatch: unsupported },
       waitUntil: promise => this.ctx.waitUntil(promise), schedule: async () => {},
     });

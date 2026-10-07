@@ -10,6 +10,7 @@ import { ExecutorJournal, MachineExecutor, runSupervisorCommand } from '../../ru
 import { machineOperationalTools } from '../../account-machine/src/runtime-operations.js';
 import { startDaemonBrokerFromEnvironment } from '../../supervisor/src/broker.js';
 import { daemonClientForProject } from '../../supervisor/src/client.js';
+import { searchWasmModule } from './search-wasm.js';
 
 const unexpected = (): never => { throw new Error('Execution proof unexpectedly accessed an unrelated authority'); };
 const stateSchema = z.object({ jobs: z.object({ records: z.record(z.string(), z.object({ acceptance: RuntimeJobAcceptanceSchema, observation: RuntimeJobObservationSchema, delivered: z.boolean() })) }), todos: z.object({ items: z.array(z.object({ id: z.string(), status: z.string() })) }).nullable(), completions: z.array(z.string()), toolErrors: z.number().int(), toolResults: z.array(z.unknown()), holding: z.boolean(), transcript: z.array(z.unknown()), snapshot: RuntimeSnapshotSchema });
@@ -26,7 +27,7 @@ export async function runExecutionProof(): Promise<void> {
   let brokerStarted = false;
   let journal = new ExecutorJournal(join(directory, 'executor.sqlite'));
   const openExecutor = () => new MachineExecutor({ machineId: 'proof-machine', journal, runCommand: runSupervisorCommand,
-    artifacts: unexpected, cloudModel: unexpected, cloudMcp: unexpected,
+    artifacts: unexpected,
     operations: machineOperationalTools({
       get environments() { return unexpected(); }, get services() { return unexpected(); }, get authority() { return unexpected(); },
       get controls() { return unexpected(); }, get artifacts() { return unexpected(); }, get mcp() { return unexpected(); },
@@ -43,11 +44,11 @@ export async function runExecutionProof(): Promise<void> {
   try {
     await startDaemonBrokerFromEnvironment();
     brokerStarted = true;
-    const built = await Bun.build({ entrypoints: [new URL('./execution-fixture.ts', import.meta.url).pathname], target: 'browser', external: ['cloudflare:workers'] });
+    const built = await Bun.build({ entrypoints: [new URL('./execution-fixture.ts', import.meta.url).pathname], target: 'browser', conditions: ['workerd'], external: ['cloudflare:workers', '*.wasm'] });
     if (!built.success) throw new AggregateError(built.logs, 'Execution proof fixture build failed');
     assert.equal(built.outputs.length, 1);
     const options: ConstructorParameters<typeof Miniflare>[0] = {
-      modules: [{ type: 'ESModule', path: join(directory, 'execution.js'), contents: await built.outputs[0]!.text() }], modulesRoot: directory,
+      modules: [{ type: 'ESModule', path: join(directory, 'execution.js'), contents: await built.outputs[0]!.text() }, await searchWasmModule(directory)], modulesRoot: directory,
       compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { EXECUTION: { className: 'ExecutionSmoke', useSQLite: true } }, durableObjectsPersist: join(directory, 'cloud'),
       outboundService: unexpected,
       serviceBindings: { EXECUTOR: async (request: WorkerRequest) => {

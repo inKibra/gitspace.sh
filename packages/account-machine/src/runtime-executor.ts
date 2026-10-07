@@ -2,7 +2,7 @@ import { mkdir, chmod, readFile } from 'node:fs/promises';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, cleanupMachineAttachment, type ExecutorArtifactAccess, type RuntimeBrowserRelay } from '@gitspace/runtime-machine';
+import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, cleanupMachineAttachment, type ExecutorArtifactAccess, type MachineBrowserOptions } from '@gitspace/runtime-machine';
 import { RuntimeJsonSchema, RuntimeGitCheckpointSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, browserUnbase64, verifyRuntimeBrowserAuthorization } from '@gitspace/protocol-runtime';
 import type { GitSpaceDatabase, LocalArtifactResolver } from '@gitspace/core';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
@@ -23,7 +23,7 @@ export async function createMachineExecutor(options: {
   gitRemote: ArtifactsGitRemote;
   lfs?: (projectId: string, publicationId?: string) => Promise<MachineGitLfs>;
   operations?: Record<string, ExecutorOperationHandler>;
-  browser?: { enabled: boolean; relay?: RuntimeBrowserRelay };
+  browser?: Pick<MachineBrowserOptions, 'enabled' | 'services'>;
   commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null, final?: boolean): Promise<GitIntermediateCheckpoint>;
   restoredBase?(projectId: string, workspaceId: string): Promise<SpaceCheckpointManifest['repository'] | null>;
   prepareAttachment(local: LocalAttachment, signal: AbortSignal): Promise<void>;
@@ -197,7 +197,7 @@ export async function createMachineExecutor(options: {
   const browserRelative = relative(resolve(options.environmentRoot), browserDirectory);
   if (options.browser?.enabled && (!browserRelative || (!browserRelative.startsWith('..') && !isAbsolute(browserRelative)))) throw new Error('Browser profiles must be outside the environment root');
   const browser = new MachineBrowser({
-    directory: browserDirectory, enabled: options.browser?.enabled === true, relay: options.browser?.relay,
+    directory: browserDirectory, enabled: options.browser?.enabled === true, services: options.browser?.services,
     verifyAuthorization: async (authorization, dispatch) => {
       const keyId = JSON.stringify([dispatch.projectId, dispatch.workspaceId, dispatch.attachmentId, dispatch.generation]);
       let trustedKey = trustedBrowserKeys.get(keyId);
@@ -217,7 +217,18 @@ export async function createMachineExecutor(options: {
   const executor = new MachineExecutor({
     machineId: options.machineId, journal, runCommand: runSupervisorCommand,
     onMutationSettled: capture,
-    onBeforeExecute: async (local, dispatch) => { await reconcile(local, dispatch.snapshot); },
+    onBeforeExecute: async (local, dispatch) => {
+      if (dispatch.tool === 'grep' && dispatch.snapshot && (local.attachment.role === 'primary' || local.attachment.role === 'replica')) {
+        const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
+        const row = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
+        const applied = row?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)) : null;
+        if (row?.pending || applied?.worktreeCommit !== dispatch.snapshot.worktreeCommit) throw new Error('Grep replica has not materialized the canonical snapshot');
+        // Native grep reads an immutable raw-blob tree keyed by this verified applied
+        // commit; local edits, LFS hydration and filesystem races cannot affect it.
+        return;
+      }
+      await reconcile(local, dispatch.snapshot);
+    },
     operations: { ...options.operations, browser: (dispatch, local, signal) => browser.execute(dispatch, local, signal), browser_control: (dispatch, local, signal) => browser.execute(dispatch, local, signal) },
     artifacts: local => {
       const capability = { kind: 'workspace' as const, projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId };
@@ -236,14 +247,11 @@ export async function createMachineExecutor(options: {
       };
       return adapter;
     },
-    cloudModel: input => options.cloud.call('runtime.model', { dispatch: input.dispatch, operation: input.operation, args: input.args }, RuntimeJsonSchema, input.signal),
-    cloudMcp: input => options.cloud.call('runtime.mcp', { dispatch: input.dispatch, callId: input.callId, method: input.method, args: input.args }, RuntimeJsonSchema, input.signal),
   });
-  const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'codemode', 'checkpoint', ...Object.keys(options.operations ?? {})];
+  const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'checkpoint', ...Object.keys(options.operations ?? {})];
   const browserCapabilities = async (): Promise<string[]> => {
     if (options.browser?.enabled !== true) return [];
-    const relayConnected = await options.browser.relay?.status().then(status => status.connected, () => false) ?? false;
-    return ['browser', 'browser_control', 'browser.headless', ...(relayConnected ? ['browser.relay'] : [])];
+    return ['browser', 'browser_control', 'browser.headless'];
   };
   const isBrowserCapability = (capability: string) => capability === 'browser' || capability === 'browser_control' || capability.startsWith('browser.');
   let stopped = false;
@@ -488,10 +496,12 @@ export async function createMachineExecutor(options: {
       const observedAt = new Date().toISOString();
       for (const local of attachments) {
         if (stopped) return;
+        const row = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(`${local.attachment.attachmentId}:${local.attachment.generation}`);
+        const materializedCommit = row?.committed && !row.pending ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)).worktreeCommit : null;
         await options.cloud.call('runtime.heartbeat', RuntimeHeartbeatInputSchema.parse({
           projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
           machineId: options.machineId, attachmentId: local.attachment.attachmentId,
-          generation: local.attachment.generation, executionObservation: { activeExecutions, observedAt },
+          generation: local.attachment.generation, executionObservation: { activeExecutions, observedAt, materializedCommit },
           browserCapabilities: browserSupport,
         }), RuntimeJsonSchema, stopping.signal);
         const current = journal.attachment(local.attachment.attachmentId);

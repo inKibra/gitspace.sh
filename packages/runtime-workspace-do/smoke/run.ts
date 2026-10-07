@@ -8,16 +8,17 @@ import { Miniflare } from 'miniflare';
 import { z } from 'zod';
 import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeSessionResultSchema, type RuntimeSessionCommand, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { runExecutionProof } from './execution.js';
+import { searchWasmModule } from './search-wasm.js';
 
 const identity = { projectId: 'smoke-project', workspaceId: 'smoke-workspace' };
 const directory = await mkdtemp(join(tmpdir(), 'gitspace-runtime-smoke-'));
 let worker: Miniflare | undefined;
 try {
-  const built = await Bun.build({ entrypoints: [new URL('./fixture.ts', import.meta.url).pathname], target: 'browser', external: ['cloudflare:workers'] });
+  const built = await Bun.build({ entrypoints: [new URL('./fixture.ts', import.meta.url).pathname], target: 'browser', conditions: ['workerd'], external: ['cloudflare:workers', '*.wasm'] });
   if (!built.success) throw new AggregateError(built.logs, 'Runtime smoke fixture build failed');
   assert.equal(built.outputs.length, 1);
   const contents = await built.outputs[0]!.text();
-  const options = { modules: [{ type: 'ESModule' as const, path: join(directory, 'fixture.js'), contents }], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { SMOKE: { className: 'RuntimeSmoke', useSQLite: true }, REPLICA: { className: 'ReplicaSmoke', useSQLite: true } }, durableObjectsPersist: join(directory, 'state'), outboundService: () => { throw new Error('External network forbidden in runtime smoke'); } };
+  const options = { modules: [{ type: 'ESModule' as const, path: join(directory, 'fixture.js'), contents }, await searchWasmModule(directory)], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { SMOKE: { className: 'RuntimeSmoke', useSQLite: true }, REPLICA: { className: 'ReplicaSmoke', useSQLite: true } }, durableObjectsPersist: join(directory, 'state'), outboundService: () => { throw new Error('External network forbidden in runtime smoke'); } };
   worker = new Miniflare(options);
   async function request(path: string, body?: unknown, expectedFailure = false): Promise<unknown> {
     assert(worker);

@@ -115,7 +115,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
     };
     this.runtime = createWorkspaceRuntime({
       storage: ctx.storage, identity, models, model: reference,
-      code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: unsupported },
+      code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: unsupported, listSnapshotEntries: unsupported, readBlob: unsupported },
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: unsupported,
       tools: { prepareBrowser: unsupported, invoke: async input => {
         if (input.tool === 'agents') return (await this.runtime).invokeConversationTool(input);
@@ -130,7 +130,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
       admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return reference; },
       bindInferenceConversation: async (conversationId, _signal, _submissions, requests) => { for (const requestId of requests) if (await ctx.storage.get(`admission:${requestId}`) !== conversationId) throw new Error('Missing durable inference admission'); },
       session: { catalog: async () => ({ models: [{ provider: 'fixture', id: reference.modelId, name: 'Proof', contextWindow: 8192 }], roles: [{ id: 'fixture', label: 'Proof child', provider: 'fixture', model: reference.modelId, thinking: null, current: false }] }), reload: unsupported },
-      qa: { list: async () => [], act: unsupported }, modelProxy: unsupported, mcpProxy: unsupported,
+      qa: { list: async () => [], act: unsupported },
       attachments: {
         // The isolated fixture does not exercise vault wrapping; actual receipt encryption/authentication remains enabled.
         seal: async secret => secret, open: async secret => secret,

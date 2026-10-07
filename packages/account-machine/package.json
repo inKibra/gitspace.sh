@@ -2,10 +2,13 @@
   "name": "@gitspace/account-machine",
   "version": "0.0.0",
   "private": true,
-  "gitspace": { "inferenceVersion": 1 },
+  "gitspace": {
+    "inferenceVersion": 1
+  },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./browser-extension": "./src/browser-relay-extension.ts"
   },
   "scripts": {
     "start": "bun src/runtime.ts",
@@ -32,5 +35,8 @@
     "drizzle-orm": "^0.45.2",
     "result-rpc": "0.5.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "fflate": "0.8.3"
   }
 }

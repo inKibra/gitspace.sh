@@ -16,6 +16,7 @@
     "./routed-transport": "./src/routed-transport.ts",
     "./relay": "./src/relay.ts",
     "./deployment": "./src/deployment.ts",
+    "./worker-bundle": "./src/worker-bundle.ts",
     "./cron-contract": "./src/cron-contract.ts",
     "./inspector-contract": "./src/inspector-contract.ts",
     "./mcp-contract": "./src/mcp-contract.ts",
@@ -27,6 +28,7 @@
     "./json-representation": "./src/json-representation.ts",
     "./default-skills": "./src/default-skills.ts",
     "./snapshot-page": "./src/snapshot-page.ts",
+    "./service-access": "./src/service-access.ts",
     "./transcript": "./src/transcript.ts",
     "./rpc-crypto": "./src/rpc-crypto.ts"
   },

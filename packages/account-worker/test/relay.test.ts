@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { env, exports } from 'cloudflare:workers';
 import { runInDurableObject, runDurableObjectAlarm } from 'cloudflare:test';
@@ -7,6 +8,9 @@ import {
   RELAY_HEARTBEAT_MODE,
   RELAY_PROTOCOL_VERSION,
   createRelayAuthorization,
+  createDeviceBinding,
+  signDeviceInvite,
+  signRpcDigestRequest,
   decodeTunnelChunk,
   decryptArtifactBytes,
   encodeTunnelChunk,
@@ -20,6 +24,8 @@ import {
   type SignedCredentialAuthorityGrant,
 } from '@gitspace/protocol/credential-vault';
 import relayWorker, { CredentialVaultDO } from '../src/index.js';
+import { SERVICE_ASSERTION_HEADER, verifyServiceAssertion } from '@gitspace/protocol/service-access';
+import { fetchInternalService } from '../src/service-access.js';
 
 const privateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const machinePrivateKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
@@ -69,6 +75,15 @@ function machineAuthorizedRequest(url: string, init: RequestInit = {}): Request 
   headers.set('authorization', createRelayAuthorization(machinePrivateKey, target));
   headers.set('x-gitspace-machine-grant', btoa(JSON.stringify(machineGrant)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, ''));
   return new Request(url, { ...init, headers });
+}
+
+async function enrollServiceBrowser() {
+  const key = crypto.getRandomValues(new Uint8Array(32));
+  const invite = signDeviceInvite({ version: 1, userId: env.ACCOUNT_ID, inviteId: crypto.randomUUID(), kind: 'browser', label: null, scope: { kind: 'user' }, capabilities: ['rpc.read', 'rpc.write'], canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: 'https://api.gitspace.sh' }, privateKey);
+  const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(key)), label: 'Service browser', boundAt: Date.now(), signingPrivateKey: key });
+  const result = await env.CREDENTIALS.getByName(env.ACCOUNT_ID).enrollDevice({ invite, binding });
+  if (result.status !== 'ok') throw new Error(result.error.message);
+  return { deviceId: binding.deviceId, signingPrivateKey: key };
 }
 
 
@@ -175,7 +190,7 @@ describe('portable RelayDO', () => {
     machine.addEventListener('message', (event) => messages.push(event.data));
     const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
     await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('darktop');
-    const response = await exports.default.fetch(new Request('https://relay.test/tunnel/darktop/private'));
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/private'));
     expect(response.status).toBe(503);
     expect((await closed).code).toBe(1008);
     expect(messages).toEqual([]);
@@ -231,7 +246,7 @@ describe('portable RelayDO', () => {
     machine.send(JSON.stringify(frame));
     expect(JSON.parse(await echoed)).toEqual(frame);
     const received = nextMessage(machine);
-    const responsePromise = exports.default.fetch(new Request('https://relay.test/tunnel/darktop/rpc', {
+    const responsePromise = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', {
       method: 'POST',
       headers: { origin: `https://${env.RELAY_NAME}.gitspace.sh` },
     }));
@@ -273,7 +288,7 @@ describe('portable RelayDO', () => {
       oldServer = state.getWebSockets('endpoint:machine:darktop')[0];
     });
     const oldReceived = nextMessage(old);
-    const oldResponse = exports.default.fetch(new Request('https://relay.test/tunnel/darktop/rpc', { method: 'POST' }));
+    const oldResponse = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', { method: 'POST' }));
     const oldRequest = parseTunnelRequest(await oldReceived);
     const replacement = await openSocket('machine', 'darktop');
     expect((await oldResponse).status).toBe(502);
@@ -285,7 +300,7 @@ describe('portable RelayDO', () => {
       received.push(message);
       if (message.type === 'tunnel.request.start') newStarted.resolve(message.requestId);
     });
-    const newResponse = exports.default.fetch(new Request('https://relay.test/tunnel/darktop/health'));
+    const newResponse = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/health'));
     const requestId = await newStarted.promise;
     await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (instance) => {
       // An unclean, delayed close must neither echo reserved code 1006 nor poison the replacement.
@@ -309,7 +324,7 @@ describe('portable RelayDO', () => {
     });
     // Invoke the HTTP handler directly so cancellation is observable on the incoming
     // upload, rather than hidden behind an additional test service-binding boundary.
-    const response = await relayWorker.fetch(new Request('https://relay.test/tunnel/darktop/rpc', {
+    const response = await relayWorker.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', {
       method: 'POST',
       headers: { origin: `https://${env.RELAY_NAME}.gitspace.sh` },
       body: new ReadableStream<Uint8Array>({ cancel: () => uploadCancelled.resolve() }),
@@ -328,7 +343,7 @@ describe('portable RelayDO', () => {
       const socket = state.getWebSockets('endpoint:machine:darktop')[0]!;
       vi.spyOn(socket, 'send').mockImplementation(() => { throw new Error('Transport send failed'); });
     });
-    const response = await exports.default.fetch(new Request('https://relay.test/tunnel/darktop/rpc', {
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', {
       method: 'POST',
       headers: { origin: `https://${env.RELAY_NAME}.gitspace.sh` },
     }));
@@ -352,11 +367,69 @@ describe('portable RelayDO', () => {
         cancelled.resolve(message.requestId);
       }
     });
-    const response = await exports.default.fetch(new Request('https://relay.test/tunnel/darktop/events'));
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/events'));
     await response.body!.cancel();
     expect(await cancelled.promise).toBe(requestId);
     expect(machine.readyState).toBe(WebSocket.OPEN);
     machine.close(1000, 'done');
+  });
+
+  it('streams a signed 33 MiB upload through the real relay without a buffered DO RPC body', async () => {
+    const machine = await openSocket('machine', 'darktop');
+    const device = await enrollServiceBrowser();
+    const size = 33 * 1024 * 1024, chunk = new Uint8Array(64 * 1024).fill(37);
+    const expected = createHash('sha256');
+    for (let offset = 0; offset < size; offset += chunk.byteLength) expected.update(chunk);
+    const bodySha256 = expected.digest('base64'), received = createHash('sha256');
+    let produced = 0, bytes = 0, streaming = false;
+    machine.addEventListener('message', event => {
+      if (typeof event.data !== 'string') return;
+      const message = parseTunnelRequest(event.data);
+      if (message.type === 'tunnel.request.chunk') {
+        if (bytes === 0) streaming = produced < size;
+        const part = decodeTunnelChunk(message.data); bytes += part.byteLength; received.update(part);
+      } else if (message.type === 'tunnel.request.end') {
+        machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.start', requestId: message.requestId, status: 200, headers: [] }));
+        machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.chunk', requestId: message.requestId, data: encodeTunnelChunk(new TextEncoder().encode(JSON.stringify({ bytes, digest: received.digest('base64') }))) }));
+        machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.end', requestId: message.requestId }));
+      }
+    });
+    const path = '/tunnel/darktop/upload';
+    const body = new ReadableStream<Uint8Array>({ pull(controller) { produced += chunk.byteLength; controller.enqueue(chunk); if (produced === size) controller.close(); } }, { highWaterMark: 0 });
+    // The shared fixture uses a 2s header deadline; this throughput proof has its own 30s test deadline.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const response = await relayWorker.fetch(new Request(`https://relay.test${path}`, { method: 'PUT', headers: { 'content-length': String(size), 'x-gitspace-device': signRpcDigestRequest({ ...device, method: 'PUT', path, bodySha256 }) }, body }), env);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ bytes: size, digest: bodySha256 });
+      expect(streaming).toBe(true);
+    } finally { vi.useRealTimers(); machine.close(1000, 'done'); }
+  }, 30_000);
+
+  it.each(['digest', 'length'] as const)('cancels a signed upload with a mismatched %s without sending normal EOF', async mismatch => {
+    const machine = await openSocket('machine', 'darktop', true);
+    const device = await enrollServiceBrowser();
+    const chunk = new Uint8Array(64 * 1024).fill(37);
+    const bodySha256 = createHash('sha256').update(mismatch === 'digest' ? new Uint8Array(chunk.byteLength) : chunk).digest('base64');
+    let ended = false, cancelled = false;
+    machine.addEventListener('message', event => {
+      if (typeof event.data !== 'string') return;
+      const message = parseTunnelRequest(event.data);
+      if (message.type === 'tunnel.request.cancel') cancelled = true;
+      if (message.type === 'tunnel.request.end') {
+        ended = true;
+        machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.start', requestId: message.requestId, status: 200, headers: [] }));
+        machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.end', requestId: message.requestId }));
+      }
+    });
+    const path = '/tunnel/darktop/upload';
+    const body = new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(chunk); controller.close(); } });
+    try {
+      const response = await relayWorker.fetch(new Request(`https://relay.test${path}`, { method: 'PUT', headers: { 'content-length': String(chunk.byteLength + (mismatch === 'length' ? 1 : 0)), 'x-gitspace-device': signRpcDigestRequest({ ...device, method: 'PUT', path, bodySha256 }) }, body }), env);
+      expect(response.status).toBe(502);
+      expect(ended).toBe(false);
+      await vi.waitFor(() => expect(cancelled).toBe(true));
+    } finally { machine.close(1000, 'done'); }
   });
 
   it('streams a development HTTP request through the machine socket', async () => {
@@ -399,7 +472,7 @@ describe('portable RelayDO', () => {
       'https://relay.test/tunnel/darktop/api/hello?mode=dev',
       {
         method: 'POST',
-        headers: { 'content-type': 'text/plain', 'x-request-test': 'kept' },
+        headers: { 'content-type': 'text/plain', 'x-request-test': 'kept', 'x-gitspace-signed-target': '/forged', 'x-gitspace-auth-nonce': 'forged', 'x-gitspace-auth-timestamp': '0', 'x-gitspace-role': 'machine', 'x-gitspace-endpoint-id': 'forged', 'x-gitspace-tunnel-machine': 'other-machine', 'x-gitspace-tunnel-path': '/forged', 'x-gitspace-service-session': 'forged', 'x-forwarded-host': 'forged.gssh.dev', 'x-gitspace-service-assertion': 'forged' },
         body: 'request body',
       },
     ));
@@ -409,6 +482,8 @@ describe('portable RelayDO', () => {
     expect(await response.text()).toBe('local response');
     expect(startMessage).toMatchObject({ method: 'POST', path: '/api/hello?mode=dev' });
     expect(startMessage?.headers).toContainEqual(['x-request-test', 'kept']);
+    expect(new Headers(startMessage?.headers).get('x-gitspace-signed-target')).toBe('/tunnel/darktop/api/hello?mode=dev');
+    for (const name of ['x-gitspace-auth-nonce', 'x-gitspace-auth-timestamp', 'x-gitspace-role', 'x-gitspace-endpoint-id', 'x-gitspace-tunnel-machine', 'x-gitspace-tunnel-path', 'x-gitspace-service-session', 'x-forwarded-host', 'x-gitspace-service-assertion']) expect(new Headers(startMessage?.headers).has(name)).toBe(false);
     const requestBody = new Uint8Array(bodyParts.reduce((total, part) => total + part.byteLength, 0));
     let offset = 0;
     for (const part of bodyParts) {
@@ -448,4 +523,81 @@ describe('portable RelayDO', () => {
     expect(await decryptArtifactBytes(new Uint8Array(await get.arrayBuffer()), key)).toEqual(plaintext);
   });
 
+  it('serves host-cookie HTTP, cloud internal fetch, and authenticated second-machine access through signed relay ingress', async () => {
+    const hostname = `web--space-a--${env.TENANT_ID}-srv.gssh.dev`;
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'web', machineId: 'darktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+    const trust = await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust();
+    const machine = await openSocket('machine', 'darktop');
+    const observed: string[] = [];
+    let cloudHeaders: Headers | undefined;
+    machine.addEventListener('message', event => {
+      const message = parseTunnelRequest(String(event.data));
+      if (message.type !== 'tunnel.request.start') return;
+      const assertion = verifyServiceAssertion({ header: new Headers(message.headers).get(SERVICE_ASSERTION_HEADER), publicKey: trust.publicKey, accountId: env.ACCOUNT_ID, machineId: 'darktop', hostname, method: message.method, target: message.path });
+      if (!assertion) throw new Error('Worker did not sign service request');
+      observed.push(assertion.caller.kind === 'device' ? assertion.caller.deviceId : assertion.caller.workspaceId);
+      if (message.path === '/cloud') cloudHeaders = new Headers(message.headers);
+      machine.send(JSON.stringify({ version: 1, type: 'tunnel.response.start', requestId: message.requestId, status: 200, headers: [] }));
+      machine.send(JSON.stringify({ version: 1, type: 'tunnel.response.chunk', requestId: message.requestId, data: encodeTunnelChunk(new TextEncoder().encode('private service')) }));
+      machine.send(JSON.stringify({ version: 1, type: 'tunnel.response.end', requestId: message.requestId }));
+    });
+    const relay = env.RELAY.getByName(env.RELAY_NAME);
+    const state = crypto.randomUUID();
+    const { deviceId: browserId } = await enrollServiceBrowser();
+    const ticket = await relay.serviceApprove({ hostname, deviceId: browserId, state, returnTo: '/' });
+    const session = await relay.serviceRedeem(ticket, hostname, state);
+    if (!session) throw new Error('Ticket failed');
+    const cookieResponse = await exports.default.fetch(new Request(`https://${hostname}/private?x=1`, { headers: { cookie: `__Host-gitspace-service=${session.token}` } }));
+    expect(await cookieResponse.text()).toBe('private service');
+    const cloudResponse = await fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, projectId: 'project-a', workspaceId: 'space-a' }, new Request(`https://${hostname}/cloud`, { headers: { cookie: 'app_session=logged-in; __Host-gitspace-service=private; __Host-gitspace-service-state=state', authorization: 'Bearer app-token' } }));
+    expect(await cloudResponse.text()).toBe('private service');
+    expect(cloudHeaders?.get('cookie')).toBe('app_session=logged-in');
+    expect(cloudHeaders?.get('authorization')).toBe('Bearer app-token');
+    const keyB = Uint8Array.from({ length: 32 }, (_, index) => index + 50);
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).registerDevice(signCredentialAuthorityGrant({ ...machineGrant.grant, machineId: 'machine-b', signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(keyB)) }, privateKey));
+    const path = `/api/services/fetch?url=${encodeURIComponent(`https://${hostname}/from-b`)}`;
+    const responseB = await exports.default.fetch(new Request(`https://relay.test${path}`, { headers: { 'x-gitspace-machine': 'machine-b', authorization: createRelayAuthorization(keyB, `GET\n${path}`) } }));
+    expect(await responseB.text()).toBe('private service');
+    expect(observed).toEqual([browserId, 'space-a', 'machine-b']);
+    const forged = await exports.default.fetch(new Request('https://relay.test/tunnel/darktop/private', { headers: { 'x-forwarded-host': hostname } }));
+    expect(forged.status).toBe(401);
+    machine.close();
+  });
+
+  it.each(['expiry', 'revocation', 'logout'] as const)('closes cookie-authenticated service WebSocket on %s after a successful roundtrip', async reason => {
+    const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'socket', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+    const machine = await openSocket('machine', 'darktop');
+    machine.addEventListener('message', event => {
+      const message = parseTunnelRequest(String(event.data));
+      if (message.type === 'tunnel.request.start') {
+        expect(new Headers(message.headers).get('upgrade')).toBe('websocket');
+        machine.send(JSON.stringify({ version: 1, type: 'tunnel.websocket.open', requestId: message.requestId }));
+      } else if (message.type === 'tunnel.websocket.data') machine.send(JSON.stringify({ ...message, data: `echo:${message.data}` }));
+    });
+    const relay = env.RELAY.getByName(env.RELAY_NAME);
+    const state = crypto.randomUUID();
+    const { deviceId: browserId } = await enrollServiceBrowser();
+    const ticket = await relay.serviceApprove({ hostname, deviceId: browserId, state, returnTo: '/' });
+    const session = await relay.serviceRedeem(ticket, hostname, state);
+    if (!session) throw new Error('Ticket failed');
+    const response = await exports.default.fetch(new Request(`https://${hostname}/socket`, { headers: { origin: `https://${hostname}`, upgrade: 'websocket', cookie: `__Host-gitspace-service=${session.token}` } }));
+    expect(response.status).toBe(101);
+    const client = response.webSocket;
+    if (!client) throw new Error('Missing service WebSocket');
+    client.accept();
+    const echoed = nextMessage(client);
+    client.send('hello');
+    expect(await echoed).toBe('echo:hello');
+    const closed = new Promise<CloseEvent>(resolve => client.addEventListener('close', resolve, { once: true }));
+    if (reason === 'revocation') await env.CREDENTIALS.getByName(env.ACCOUNT_ID).revokeDeviceGrant(browserId);
+    else if (reason === 'logout') await exports.default.fetch(new Request(`https://${hostname}/__gitspace/logout`, { method: 'POST', headers: { origin: `https://${hostname}`, cookie: `__Host-gitspace-service=${session.token}` } }));
+    else {
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 900_001);
+      await runDurableObjectAlarm(relay);
+    }
+    expect((await closed).code).toBe(1008);
+    expect(await relay.serviceValidate(session.token, hostname)).toBeNull();
+    machine.close();
+  });
 });

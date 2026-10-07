@@ -6,7 +6,7 @@ import { TenantComputeProvider } from './compute-provider.js';
 export interface TenantDeployRecord {
   id: number;
   sha: string;
-  /** Object key in RELEASES (`tenants/<tenant>/<sha>/worker.mjs` or `channel/worker.mjs`). */
+  /** Object key in RELEASES (`tenants/<tenant>/<sha>/worker.bundle.json` or `channel/worker.bundle.json`). */
   bundleKey: string;
   metadata: WorkerReleaseMetadata;
   uploadedAt: string;

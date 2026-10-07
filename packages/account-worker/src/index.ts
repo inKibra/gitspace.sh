@@ -21,12 +21,16 @@ import {
   type SignedCredentialAuthorityGrant,
 } from '@gitspace/protocol/credential-vault';
 import { WORKER_VERSION_HEADER } from '@gitspace/protocol/deployment';
-import application, { CredentialVaultDO } from './application.js';
-import { HostedRouteRegistryDO } from './hosted-route-registry.js';
-import { FleetCatalogDO } from './fleet-catalog.js';
-import { forwardTunnelRequest, relayRequest, tunnelTarget, INTERNAL_NONCE, INTERNAL_TIMESTAMP, INTERNAL_TUNNEL_MACHINE, INTERNAL_TUNNEL_PATH, INTERNAL_SIGNED_TARGET } from './relay-request.js';
+import application, { CredentialVaultDO, REQUEST_MAX_BYTES } from './application.js';
+import { forwardTunnelRequest, relayRequest, tunnelTarget, verifiedTunnelBody, TUNNEL_MAX_BODY_BYTES, TunnelBodyProofSchema, INTERNAL_TUNNEL_BODY_PROOF, INTERNAL_NONCE, INTERNAL_TIMESTAMP, INTERNAL_TUNNEL_MACHINE, INTERNAL_TUNNEL_PATH, INTERNAL_SIGNED_TARGET, INTERNAL_SERVICE_SESSION } from './relay-request.js';
 import type { TenantReleasesDO } from './tenant-releases.js';
 import { handleMcpRequest } from './mcp-server.js';
+import { z } from 'zod';
+import { rpcBodySha256 } from '@gitspace/protocol/device-grant';
+import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
+import { ServiceSessions, ServiceSessionSchema, type ServiceSession, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
+import { AccountBrowserRelay, browserRelayArchive } from './browser-relay.js';
+import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 export * from './application.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
@@ -43,6 +47,8 @@ const INTERNAL_HEADERS: Record<string, true> = {
   [INTERNAL_TUNNEL_MACHINE]: true,
   [INTERNAL_TUNNEL_PATH]: true,
   [INTERNAL_SIGNED_TARGET]: true,
+  [INTERNAL_SERVICE_SESSION]: true,
+  [INTERNAL_TUNNEL_BODY_PROOF]: true,
 };
 const ARTIFACT_PATH = /^\/artifacts\/([a-f0-9]{64})$/u;
 const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
@@ -61,6 +67,8 @@ const HOP_BY_HOP_HEADERS: Record<string, true> = {
 
 interface PendingTunnel {
   socket: WebSocket;
+  serviceSocket?: WebSocket;
+  session?: ServiceSession;
   method: string;
   origin: string | null;
   resolve: (response: Response) => void;
@@ -149,7 +157,7 @@ function filteredHeaders(headers: Headers, requestDirection: boolean): Array<[st
   for (const [name, value] of headers) {
     const lower = name.toLowerCase();
     if (HOP_BY_HOP_HEADERS[lower] || lower.startsWith('cf-') || INTERNAL_HEADERS[lower]) continue;
-    if (requestDirection && (lower === 'authorization' || lower === 'host' || lower === MACHINE_GRANT_HEADER)) continue;
+    if (requestDirection && (lower === 'host' || lower === MACHINE_GRANT_HEADER || (lower === 'authorization' && /^GitSpace\s/iu.test(value)))) continue;
     result.push([name, value]);
   }
   return result;
@@ -265,6 +273,58 @@ async function handleArtifactRequest(request: Request, env: Env, hash: string): 
 export class UserRelayDO extends DurableObject<Env> {
   private readonly pendingTunnels = new Map<string, PendingTunnel>();
   private readonly machineChecks = new WeakMap<WebSocket, Promise<boolean>>();
+  private readonly serviceSessions = new ServiceSessions(this.ctx.storage, this.env.ACCOUNT_ID, deviceId => this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).serviceDeviceAuthority(deviceId));
+  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env);
+  async serviceApprove(input: { hostname: string; deviceId: string; state: string; returnTo: string }) {
+    const ticket = await this.serviceSessions.approve(input);
+    await this.scheduleMachineCheck();
+    return ticket;
+  }
+  async serviceRedeem(ticket: string, hostname: string, state: string | null) {
+    const session = await this.serviceSessions.redeem(ticket, hostname, state);
+    await this.scheduleMachineCheck();
+    return session;
+  }
+  serviceValidate(token: string | null, hostname: string) { return this.serviceSessions.validate(token, hostname); }
+  async serviceRevokeDevice(deviceId: string) {
+    const sessions = await this.serviceSessions.revokeDevice(deviceId);
+    await this.closeServiceSessions(sessions);
+    await this.scheduleMachineCheck();
+    return sessions;
+  }
+  async serviceLogout(token: string | null, hostname: string) {
+    const sessionId = await this.serviceSessions.logout(token, hostname);
+    if (sessionId) await this.closeServiceSessions([sessionId]);
+    await this.scheduleMachineCheck();
+    return sessionId !== null;
+  }
+  private async closeServiceSessions(sessionIds: readonly string[]) {
+    if (!sessionIds.length) return;
+    const revoked = new Set(sessionIds);
+    for (const [requestId, pending] of this.pendingTunnels) {
+      if (pending.session && revoked.has(pending.session.sessionId)) {
+        pending.serviceSocket?.close(1008, 'Service authorization expired');
+        await this.failTunnel(requestId, new Error('Service authorization expired'), 401, 'SERVICE_SESSION_EXPIRED');
+      }
+    }
+  }
+  private async serviceTunnelAuthorized(requestId: string, pending: PendingTunnel): Promise<boolean> {
+    if (!pending.session) return true;
+    const session = await this.serviceSessions.validate(pending.session.sessionId, pending.session.hostname).catch(() => null);
+    if (session && session.deviceId === pending.session.deviceId) return true;
+    pending.serviceSocket?.close(1008, 'Service authorization expired');
+    await this.failTunnel(requestId, new Error('Service authorization expired'), 401, 'SERVICE_SESSION_EXPIRED');
+    return false;
+  }
+  browserRelayFetch(request: Request) { return this.browserRelay.fetch(request); }
+  browserRelayPair(trust: RuntimeBrowserTrust, endpoint: string) { return this.browserRelay.pair(trust, endpoint); }
+  browserRelayStatus() { return this.browserRelay.status(); }
+  browserRelayPlacement(projectId: string, pairingId?: string) { return this.browserRelay.placement(projectId, pairingId); }
+  browserRelayProjectSettings(projectId: string) { return this.browserRelay.projectSettings(projectId); }
+  browserRelaySetProjectSettings(projectId: string, expectedRevision: number, preferences: RuntimeProjectBrowserPreferences) { return this.browserRelay.setProjectSettings(projectId, expectedRevision, preferences); }
+  browserRelayUnpair(pairingId: string) { return this.browserRelay.unpair(pairingId); }
+  browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
+  browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.execute(authorization); }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -326,6 +386,37 @@ export class UserRelayDO extends DurableObject<Env> {
 
     try {
       switch (message.type) {
+        case 'tunnel.websocket.open': {
+          if (pending.responseStarted) throw new Error('Duplicate service WebSocket');
+          if (!await this.serviceTunnelAuthorized(message.requestId, pending)) return;
+          const pair = new WebSocketPair();
+          const [client, server] = Object.values(pair);
+          server.accept();
+          pending.serviceSocket = server;
+          pending.responseStarted = true;
+          clearTimeout(pending.timeout);
+          server.addEventListener('message', event => {
+            this.ctx.waitUntil((async () => {
+              if (!await this.serviceTunnelAuthorized(message.requestId, pending)) return;
+              if (!await this.authorizeSocket(socket, true)) return server.close(1008, 'Machine authorization expired');
+              socket.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.data', requestId: message.requestId, binary: typeof event.data !== 'string', data: typeof event.data === 'string' ? event.data : encodeTunnelChunk(new Uint8Array(event.data)) } satisfies TunnelRequestMessage));
+            })().catch(() => server.close(1008, 'Service authorization unavailable')));
+          });
+          server.addEventListener('close', () => {
+            if (socket.readyState === 1) socket.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.close', requestId: message.requestId, code: 1000, reason: '' } satisfies TunnelRequestMessage));
+            void this.finishTunnel(message.requestId);
+          });
+          pending.resolve(new Response(null, { status: 101, webSocket: client }));
+          return;
+        }
+        case 'tunnel.websocket.data':
+          if (!await this.serviceTunnelAuthorized(message.requestId, pending)) return;
+          pending.serviceSocket?.send(message.binary ? decodeTunnelChunk(message.data) : message.data);
+          return;
+        case 'tunnel.websocket.close':
+          pending.serviceSocket?.close(1000, message.reason);
+          await this.finishTunnel(message.requestId);
+          return;
         case 'tunnel.response.start': {
           if (pending.responseStarted) throw new Error('Duplicate tunnel response headers');
           const hasBody = pending.method !== 'HEAD' && ![204, 205, 304].includes(message.status);
@@ -432,6 +523,23 @@ export class UserRelayDO extends DurableObject<Env> {
     const path = request.headers.get(INTERNAL_TUNNEL_PATH);
     const origin = request.headers.get('origin');
     if (!machineId || !path) return this.tunnelCors(jsonError(400, 'INVALID_TUNNEL', 'Tunnel target is missing'), origin);
+    let bodyProof: z.infer<typeof TunnelBodyProofSchema> | undefined;
+    const rawProof = request.headers.get(INTERNAL_TUNNEL_BODY_PROOF);
+    if (rawProof !== null) {
+      try { bodyProof = TunnelBodyProofSchema.parse(JSON.parse(rawProof)); }
+      catch { return jsonError(400, 'INVALID_TUNNEL', 'Tunnel body proof is invalid'); }
+    }
+    let session: ServiceSession | undefined;
+    const rawSession = request.headers.get(INTERNAL_SERVICE_SESSION);
+    if (rawSession !== null) {
+      let raw: unknown;
+      try { raw = JSON.parse(rawSession); } catch { return jsonError(401, 'SERVICE_SESSION_REJECTED', 'Invalid service session'); }
+      const parsed = ServiceSessionSchema.safeParse(raw);
+      if (!parsed.success) return jsonError(401, 'SERVICE_SESSION_REJECTED', 'Invalid service session');
+      const current = await this.serviceSessions.validate(parsed.data.sessionId, parsed.data.hostname);
+      if (!current || current.deviceId !== parsed.data.deviceId || current.hostname !== request.headers.get('x-forwarded-host')) return jsonError(401, 'SERVICE_SESSION_REJECTED', 'Service session expired');
+      session = current;
+    }
     let machine: WebSocket | undefined;
     for (const socket of this.ctx.getWebSockets(`endpoint:machine:${machineId}`)) {
       if (await this.authorizeSocket(socket, true)) {
@@ -447,6 +555,7 @@ export class UserRelayDO extends DurableObject<Env> {
     const abort = () => this.failTunnel(requestId, new Error('Tunnel request was cancelled'), 499, 'TUNNEL_CANCELLED');
     const pending: PendingTunnel = {
       socket: machine,
+      session,
       method: request.method,
       origin,
       resolve,
@@ -463,6 +572,7 @@ export class UserRelayDO extends DurableObject<Env> {
 
     try {
       const tunnelHeaders = new Headers(filteredHeaders(request.headers, true));
+      if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') tunnelHeaders.set('upgrade', 'websocket');
       const signedTarget = request.headers.get(INTERNAL_SIGNED_TARGET);
       if (signedTarget) tunnelHeaders.set(INTERNAL_SIGNED_TARGET, signedTarget);
       const start: TunnelRequestMessage = {
@@ -476,7 +586,7 @@ export class UserRelayDO extends DurableObject<Env> {
       // One request belongs to one socket. A replacement never receives a replay.
       pending.dispatched = true;
       machine.send(JSON.stringify(start));
-      void this.sendRequestBody(requestId, pending, request.body).catch((error) => {
+      void this.sendRequestBody(requestId, pending, request.body && bodyProof ? verifiedTunnelBody(request.body, bodyProof) : request.body).catch((error) => {
         this.failTunnel(requestId, error instanceof Error ? error : new Error(String(error)));
       });
     } catch (error) {
@@ -549,6 +659,7 @@ export class UserRelayDO extends DurableObject<Env> {
       }
     }
     if (pending.writer) void pending.writer.abort(error).catch(() => {});
+    pending.serviceSocket?.close(1011, 'Service tunnel disconnected');
     if (!pending.responseStarted) {
       const message = pending.dispatched
         ? `${error.message}. The remote outcome may be unknown; refresh workspace state before retrying.`
@@ -574,11 +685,13 @@ export class UserRelayDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     await Promise.all(this.ctx.getWebSockets().map((socket) => this.authorizeSocket(socket)));
+    await this.closeServiceSessions(await this.serviceSessions.sweep());
+    for (const [requestId, pending] of this.pendingTunnels) if (pending.session) await this.serviceTunnelAuthorized(requestId, pending);
     await this.scheduleMachineCheck();
   }
 
   private async scheduleMachineCheck(): Promise<void> {
-    let next = Infinity;
+    let next = await this.serviceSessions.nextExpiry() ?? Infinity;
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = this.socketAttachment(socket);
       if (socket.readyState === 1 && attachment?.role === 'machine') {
@@ -688,23 +801,102 @@ export default {
       if (!object) return jsonError(404, 'OBJECT_NOT_FOUND', 'Tenant object is unavailable');
       return new Response(request.method === 'HEAD' ? null : (object as R2ObjectBody).body, { headers: { 'content-type': 'application/octet-stream', 'content-length': String(object.size), etag: object.httpEtag } });
     }
-    if (url.hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`)) {
-      const route = await (env.HOSTED_ROUTES as DurableObjectNamespace<HostedRouteRegistryDO>).getByName(url.hostname).get();
-      if (!route || route.tenant !== env.ACCOUNT_ID) return jsonError(404, 'SERVICE_ROUTE_NOT_FOUND', 'Service route is unavailable');
-      const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(env.ACCOUNT_ID).getMachine(route.machineId);
-      if (!machine?.rpcEndpoint) return jsonError(404, 'SERVICE_ROUTE_NOT_FOUND', 'Service machine is unavailable');
-      const endpoint = new URL(machine.rpcEndpoint);
-      const headers = new Headers(request.headers);
-      headers.set('x-forwarded-host', url.hostname);
-      headers.set(INTERNAL_SIGNED_TARGET, `${url.pathname}${url.search}`);
-      if (endpoint.hostname === new URL(env.RELAY_URL).hostname) {
-        url.pathname = `/tunnel/${encodeURIComponent(route.machineId)}${url.pathname}`;
-        request = new Request(url, { method: request.method, headers, body: request.body, redirect: 'manual' });
-      } else {
-        url.protocol = endpoint.protocol;
-        url.host = endpoint.host;
-        return fetch(new Request(url, { method: request.method, headers, body: request.body, redirect: 'manual' }));
+    if (isHostedServiceHostname(env, url.hostname)) {
+      const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(request.method) || request.headers.get('upgrade')?.toLowerCase() === 'websocket';
+      if (unsafe) {
+        const origin = request.headers.get('origin');
+        if (origin !== null ? origin !== url.origin : request.headers.get('sec-fetch-site') !== 'same-origin') {
+          return jsonError(403, 'SERVICE_ORIGIN_REJECTED', 'This service requires its exact origin');
+        }
       }
+      const relay = env.RELAY.getByName(env.RELAY_NAME);
+      if (url.pathname === '/__gitspace/logout') {
+        if (request.method !== 'POST') return jsonError(405, 'METHOD_NOT_ALLOWED', 'Service logout requires POST');
+        await relay.serviceLogout(serviceCookie(request, SERVICE_COOKIE), url.hostname);
+        return new Response(null, { status: 204, headers: { 'cache-control': 'no-store', 'set-cookie': `${SERVICE_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0` } });
+      }
+      if (url.pathname === '/__gitspace/auth') {
+        const redeemed = await relay.serviceRedeem(url.searchParams.get('ticket') ?? '', url.hostname, serviceCookie(request, SERVICE_STATE_COOKIE));
+        if (!redeemed) return jsonError(401, 'SERVICE_TICKET_REJECTED', 'Service login expired or was already used');
+        const headers = new Headers({ location: redeemed.returnTo, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+        headers.append('set-cookie', `${SERVICE_COOKIE}=${redeemed.token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900`);
+        headers.append('set-cookie', `${SERVICE_STATE_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
+        return new Response(null, { status: 303, headers });
+      }
+      const session = await relay.serviceValidate(serviceCookie(request, SERVICE_COOKIE), url.hostname);
+      if (session) return fetchInternalService(env, { kind: 'device', accountId: env.ACCOUNT_ID, deviceId: session.deviceId }, request, session);
+      if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') return jsonError(401, 'SERVICE_LOGIN_REQUIRED', 'Open this service in the browser to approve access');
+      const state = crypto.randomUUID();
+      const approval = new URL('/service-access', env.ACCOUNT_URL);
+      approval.searchParams.set('hostname', url.hostname);
+      approval.searchParams.set('state', state);
+      approval.searchParams.set('returnTo', safeServiceReturn(`${url.pathname}${url.search}`) ? `${url.pathname}${url.search}` : '/');
+      return new Response(null, { status: 303, headers: { location: approval.href, 'cache-control': 'no-store', 'set-cookie': `${SERVICE_STATE_COOKIE}=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300` } });
+    }
+    if (url.pathname === '/api/browser-relay/extension') return env.RELAY.getByName(env.RELAY_NAME).browserRelayFetch(request);
+    if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
+      if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
+      const declared = request.headers.get('content-length');
+      if (declared !== null && (!/^\d+$/u.test(declared) || !Number.isSafeInteger(Number(declared)))) return jsonError(400, 'REQUEST_LENGTH_INVALID', 'Invalid request content length');
+      if (declared !== null && Number(declared) > REQUEST_MAX_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Account request exceeds size limit');
+      const body = new Uint8Array(await request.arrayBuffer());
+      if (body.byteLength > REQUEST_MAX_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Account request exceeds size limit');
+      const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+      const mutatesPairing = /^\/api\/browser-relay\/(pair|unpair|confirm|project-update)$/u.test(url.pathname);
+      const requiresWrite = mutatesPairing || url.pathname === '/api/services/approve';
+      const auth = await vault.authorizeBrowserRequest({ header: request.headers.get('x-gitspace-device'), target: `${url.pathname}${url.search}`, body, capabilities: [requiresWrite ? 'rpc.write' : 'rpc.read'] });
+      if (auth.status === 'error') return Response.json(auth, { status: auth.error.code === 'RPC_FORBIDDEN' ? 403 : 401 });
+      if (mutatesPairing) {
+        const device = await vault.currentDeviceGrant(auth.value.deviceId);
+        if (!device || device.kind !== 'browser' || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.write')) return jsonError(403, 'RPC_FORBIDDEN', 'Pairing requires an account-scoped browser with write access');
+      }
+      const relay = env.RELAY.getByName(env.RELAY_NAME);
+      if (url.pathname.endsWith('/extension.zip')) return new Response(Uint8Array.from(browserRelayArchive(env.ACCOUNT_URL)), { headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename=\"gitspace-browser-relay.zip\"', 'cache-control': 'no-store' } });
+      if (url.pathname === '/api/services/approve') {
+        const parsed = z.object({ hostname: z.string(), state: z.string().uuid(), returnTo: z.string() }).safeParse(JSON.parse(new TextDecoder().decode(body)));
+        if (!parsed.success || !isHostedServiceHostname(env, parsed.data.hostname) || !safeServiceReturn(parsed.data.returnTo)) return jsonError(400, 'SERVICE_APPROVAL_INVALID', 'Invalid service approval');
+        const route = await env.HOSTED_ROUTES.getByName(parsed.data.hostname).get();
+        if (!route || route.tenant !== env.ACCOUNT_ID) return jsonError(404, 'SERVICE_ROUTE_NOT_FOUND', 'Service unavailable');
+        const ticket = await relay.serviceApprove({ ...parsed.data, deviceId: auth.value.deviceId });
+        return Response.json({ status: 'ok', value: { callback: `https://${parsed.data.hostname}/__gitspace/auth?ticket=${encodeURIComponent(ticket)}` } });
+      }
+      if (url.pathname.endsWith('/pair')) return Response.json({ status: 'ok', value: await relay.browserRelayPair(await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust(), new URL('/api/browser-relay/extension', env.ACCOUNT_URL).href.replace(/^http/u, 'ws')) });
+      if (url.pathname.endsWith('/status')) return Response.json({ status: 'ok', value: await relay.browserRelayStatus() });
+      let raw: unknown;
+      try { raw = JSON.parse(new TextDecoder().decode(body)); } catch { return jsonError(400, 'PAIRING_REQUEST_INVALID', 'Invalid browser pairing request'); }
+      if (url.pathname.endsWith('/project-status') || url.pathname.endsWith('/project-update')) {
+        const project = z.object({ projectId: z.string().min(1).max(256) }).safeParse(raw);
+        if (!project.success) return jsonError(400, 'PROJECT_BROWSER_REQUEST_INVALID', 'Project identity is required');
+        if (url.pathname.endsWith('/project-status')) return Response.json({ status: 'ok', value: await relay.browserRelayProjectSettings(project.data.projectId) });
+        const update = z.object({ expectedRevision: z.number().int().nonnegative(), preferences: RuntimeProjectBrowserPreferencesSchema }).safeParse(raw);
+        if (!update.success) return jsonError(400, 'PROJECT_BROWSER_REQUEST_INVALID', 'Invalid project Chrome preferences');
+        try {
+          const value = await relay.browserRelaySetProjectSettings(project.data.projectId, update.data.expectedRevision, update.data.preferences);
+          return Response.json({ status: 'ok', value });
+        } catch (error) {
+          return jsonError(409, 'PROJECT_BROWSER_UPDATE_REJECTED', error instanceof Error ? error.message : 'Project Chrome update rejected');
+        }
+      }
+      const parsed = z.object({ pairingId: z.string().uuid(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).safeParse(raw);
+      if (!parsed.success || (url.pathname.endsWith('/confirm') && !parsed.data.fingerprint)) return jsonError(400, 'PAIRING_REQUEST_INVALID', 'A paired browser identity is required');
+      const value = url.pathname.endsWith('/unpair') ? await relay.browserRelayUnpair(parsed.data.pairingId)
+        : await relay.browserRelayConfirm(parsed.data.pairingId, parsed.data.fingerprint!);
+      return Response.json({ status: 'ok', value });
+    }
+    if (url.pathname === '/api/services/fetch' || url.pathname === '/api/services/trust') {
+      const machineId = request.headers.get('x-gitspace-machine') ?? '';
+      const target = `${request.method}\n${url.pathname}${url.search}`;
+      const auth = await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID).authorizeMachineRequest(request.headers.get('authorization'), target, machineId);
+      if (auth.status === 'error') return Response.json(auth, { status: 401 });
+      if (url.pathname.endsWith('/trust')) return Response.json(await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust());
+      const targetUrl = url.searchParams.get('url');
+      if (!targetUrl) return jsonError(400, 'SERVICE_URL_REQUIRED', 'Service URL required');
+      const headers = new Headers(request.headers);
+      const applicationAuthorization = headers.get('x-gitspace-service-authorization');
+      headers.delete('x-gitspace-service-authorization');
+      headers.delete('authorization');
+      if (applicationAuthorization) headers.set('authorization', applicationAuthorization);
+      return fetchInternalService(env, { kind: 'device', accountId: env.ACCOUNT_ID, deviceId: machineId }, new Request(targetUrl, { method: request.method, headers, body: request.body, signal: request.signal }));
     }
     if (url.pathname === '/health' || url.pathname === '/healthz') {
       return Response.json(
@@ -731,7 +923,28 @@ export default {
         },
       });
     }
-    if (tunnel) return forwardTunnelRequest(request, env, tunnel);
+    if (tunnel) {
+      let bodyProof: z.infer<typeof TunnelBodyProofSchema> | undefined;
+      if (request.headers.has('x-gitspace-device')) {
+        const auth = await env.CREDENTIALS.getByName(env.ACCOUNT_ID).authorizeTunnelDeviceRequest({ header: request.headers.get('x-gitspace-device'), target: `${url.pathname}${url.search}`, method: request.method });
+        if (auth.status === 'error') return Response.json(auth, { status: 401 });
+        const declared = request.headers.get('content-length');
+        if (declared === null && request.body !== null) return jsonError(411, 'REQUEST_LENGTH_REQUIRED', 'Tunnel uploads require Content-Length');
+        if (declared !== null && (!/^\d+$/u.test(declared) || !Number.isSafeInteger(Number(declared)))) return jsonError(400, 'REQUEST_LENGTH_INVALID', 'Invalid tunnel content length');
+        const length = declared === null ? 0 : Number(declared);
+        if (length > TUNNEL_MAX_BODY_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Tunnel uploads are limited to 64 MiB');
+        bodyProof = { length, bodySha256: auth.value.bodySha256 };
+        if (!request.body && (length !== 0 || auth.value.bodySha256 !== rpcBodySha256(new Uint8Array()))) return jsonError(400, 'REQUEST_BODY_MISMATCH', 'Tunnel body does not match its signed digest and declared length');
+      } else {
+        const auth = request.headers.has(MACHINE_GRANT_HEADER) ? await authorizedMachineRequest(request, env, null) : authorizedRootRequest(request, env);
+        if (auth instanceof Response) return auth;
+        if (!await env.RELAY.getByName(env.RELAY_NAME).consumeAuthorization(auth.nonce, auth.timestamp)) return jsonError(401, 'AUTH_REPLAY', 'Tunnel authorization was already used');
+      }
+      const headers = new Headers(request.headers);
+      for (const name of Object.keys(INTERNAL_HEADERS)) headers.delete(name);
+      for (const name of ['x-forwarded-host', 'x-gitspace-service-assertion', 'x-gitspace-websocket-probe', 'x-gitspace-service-authorization']) headers.delete(name);
+      return forwardTunnelRequest(new Request(request, { headers }), env, tunnel, bodyProof);
+    }
 
     let authorization: Response | { nonce: string; timestamp: number; target: string };
     if (url.pathname === '/ws') {

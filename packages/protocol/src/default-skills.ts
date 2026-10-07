@@ -133,7 +133,7 @@ Treat pre/setup/select/remove configuration as migration work, not executable al
 
 Explain persistence before handoff: checkpoints preserve tracked changes and non-ignored untracked files, not ignored .env files, node_modules, machine packages, or arbitrary home-directory files. Rebuild local state on materialization. Keep durable data in explicit remote resources. Preparation failure must not block access to the workspace; failed dematerialization or checkpointing must not delete its checkout.`);
 const INTEGRATION_CODE_MODE = gitSpaceSkill('integration-code-mode', 'Discover and compose project-granted MCP tools from executable JavaScript.', `
-Use \`codemode({ args: { code: '...' } })\`. The Pi Sandbox exposes grant-scoped MCP calls alongside completion and judge:
+Use \`codemode({ args: { code: '...' } })\`. A fresh cloud Worker isolate exposes grant-scoped MCP calls alongside completion and judge:
 
 - \`mcp.list()\`
 - \`mcp.search({ query, limit? })\`

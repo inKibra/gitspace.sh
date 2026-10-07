@@ -12,6 +12,7 @@ import {
   signRpcRequest,
   verifyDeviceGrantRecord,
   verifyRpcSignature,
+  verifyRpcDigestSignature,
   decodeApiKey,
   scopeContains,
   deviceCanAdminister,
@@ -70,6 +71,10 @@ describe('device grants', () => {
     const header = decodeSignedRpcHeader(signRpcRequest({ deviceId: '22222222-2222-4222-8222-222222222222', method: 'post', path: '/rpc', body, signingPrivateKey: devicePrivate }))!;
     expect(header.deviceId).toBe('22222222-2222-4222-8222-222222222222');
     expect(verifyRpcSignature(header, { method: 'POST', path: '/rpc', body }, devicePublic)).toBe(true);
+    expect(verifyRpcDigestSignature(header, { method: 'POST', path: '/rpc' }, devicePublic)).toBe(true);
+    const forgedDigest = { ...header, bodySha256: deviceProtocolBase64.encode(new Uint8Array(32)) };
+    expect(verifyRpcDigestSignature(forgedDigest, { method: 'POST', path: '/rpc' }, devicePublic)).toBe(false);
+    expect(verifyRpcSignature(forgedDigest, { method: 'POST', path: '/rpc', body }, devicePublic)).toBe(false);
     expect(verifyRpcSignature(header, { method: 'POST', path: '/rpc', body: new TextEncoder().encode('{"v":1,"batch":[1]}') }, devicePublic)).toBe(false);
     expect(verifyRpcSignature(header, { method: 'POST', path: '/rpc?x=1', body }, devicePublic)).toBe(false);
     expect(verifyRpcSignature({ ...header, timestamp: header.timestamp + 1 }, { method: 'POST', path: '/rpc', body }, devicePublic)).toBe(false);

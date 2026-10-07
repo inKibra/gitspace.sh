@@ -153,7 +153,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       onRetryAgent={async () => { await run({ type: 'resume' }); }} onOpenSettings={props.onOpenSettings} onSelectProject={props.onSelectProject} onSelectWorkspace={props.onSelectWorkspace}
       controlsError={session.error ?? (providers.state === 'failure' ? rpcErrorMessage(providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
-      approvalCard={question?.browser ? <BrowserApprovalCard key={`${question.id}:${question.browser.id}`} request={question.browser} requestDetails={question.prompt} connected={connected} machineName={inspection.machines.find(machine => machine.id === question.browser?.machineId)?.label} onAnswer={async approved => {
+      approvalCard={question?.browser ? <BrowserApprovalCard key={`${question.id}:${question.browser.id}`} request={question.browser} requestDetails={question.prompt} connected={connected} machineName={inspection.machines.find(machine => question.browser && 'machineId' in question.browser && machine.id === question.browser.machineId)?.label} onAnswer={async approved => {
         const response = await rpcClient.runtime.answer({ ...identity, questionId: question.id, answer: approved, expectedBrowserPreparationId: question.browser!.id });
         if (response.status === 'error') throw response.error;
         await run({ type: 'control' });

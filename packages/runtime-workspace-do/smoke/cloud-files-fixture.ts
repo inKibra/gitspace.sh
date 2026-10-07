@@ -6,10 +6,12 @@ import { CloudFileStore } from '../src/cloud-files.js';
 import { AttachmentStore } from '../src/attachments.js';
 import { ArtifactsSnapshotError, type WriteSnapshotInput } from '../src/artifacts.js';
 import { collectBytes, GitLfsObjectSchema, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 
 const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/spaces/cloud/checkpoints', branch: 'main', headCommit: '1'.repeat(40), indexCommit: '2'.repeat(40), trackedWorktreeCommit: '3'.repeat(40), worktreeCommit: '4'.repeat(40), indexTree: '5'.repeat(40), worktreeTree: '6'.repeat(40) });
 export class CloudFilesProof extends DurableObject {
-  async fetch(): Promise<Response> {
+  async fetch(request: Request): Promise<Response> {
     await this.ctx.storage.deleteAll();
     let primary: RuntimeAttachment[] = [], failPush = false, pushes = 0;
     let pause: { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } | undefined;
@@ -48,8 +50,19 @@ export class CloudFilesProof extends DurableObject {
       if (retentionUnavailable) throw new Error('Retention unavailable');
       retained.set(value.worktreeCommit, value);
     };
+    const searchBlobs = new Map<string, Blob>();
+    let failIndex = false;
     const code = {
       listSnapshotPaths: async () => [...files.keys()].sort(),
+      listSnapshotEntries: async () => {
+        if (failIndex) throw new Error('Search index unavailable');
+        return new Map([...files].map(([path, content]) => {
+          const oid = bytesToHex(sha256(new TextEncoder().encode(content)));
+          searchBlobs.set(oid, new Blob([content]));
+          return [path, { oid, mode: '100644', type: 'blob' as const }];
+        }));
+      },
+      readBlob: async (_repository: string, oid: string) => searchBlobs.get(oid) ?? null,
       mergeSnapshot: async (input: { machine: typeof checkpoint; base: typeof checkpoint }) => {
         observedMergeBase = input.base;
         if (failPush) return Result.err(new ArtifactsSnapshotError({ operation: 'mergeSnapshot', message: 'lost merge response', certainty: 'unknown' }));
@@ -85,6 +98,31 @@ export class CloudFilesProof extends DurableObject {
     const invoke = (tool: 'read' | 'write' | 'edit' | 'find' | 'apply_patch', args: unknown, id: string = crypto.randomUUID()) => store.execute({ tool, args, requestId: id, attemptId: id });
     assert.equal((await invoke('read', { path: 'file.txt' })).status, 'failed');
     await this.ctx.storage.put('runtime.code', checkpoint);
+    const scenario = new URL(request.url).searchParams.get('scenario');
+    if (scenario === 'replica-index') {
+      failIndex = true;
+      assert.equal(await store.withCurrentSnapshot(async current => {
+        assert.equal(current.worktreeCommit, checkpoint.worktreeCommit);
+        return 'healthy replica selected';
+      }), 'healthy replica selected');
+      return Response.json({ passed: true });
+    }
+    if (scenario === 'committed-index') {
+      assert.equal((await store.execute({ tool: 'grep', args: { pattern: 'one' }, requestId: 'prime', attemptId: 'prime' })).status, 'completed');
+      failIndex = true;
+      const committed = await invoke('write', { path: 'repair.txt', content: 'repairneedle' }, 'index-failed-write');
+      assert.equal(committed.status, 'completed');
+      assert.equal(files.get('repair.txt'), 'repairneedle');
+      assert.equal(pushes, 1);
+      store = open();
+      assert.deepEqual(await invoke('write', { path: 'repair.txt', content: 'repairneedle' }, 'index-failed-write'), committed);
+      failIndex = false;
+      const repaired = await store.execute({ tool: 'grep', args: { pattern: 'repairneedle' }, requestId: 'repair', attemptId: 'repair' });
+      assert.equal(repaired.status, 'completed');
+      assert.match(JSON.stringify(repaired.content), /repairneedle/u);
+      assert.equal(pushes, 1);
+      return Response.json({ passed: true });
+    }
     assert.deepEqual((await invoke('read', { path: 'file.txt', offset: 2, limit: 1 })).content, [{ type: 'text', text: 'two' }]);
     assert.equal((await invoke('read', { path: 'absent' })).status, 'failed');
     assert.equal((await invoke('edit', { path: 'repeat.txt', edits: [{ oldText: 'same', newText: 'other' }] })).status, 'failed');

@@ -405,7 +405,7 @@ for (const resolution of ['replica', 'cloud'] as const) for (const replacement o
     let accepted = conflicted.value;
     const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, role: 'primary', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['checkpoint'], updatedAt: new Date().toISOString() });
     journal.installAttachment({ attachment, rootPath: f.dir, executionSecret: Buffer.alloc(32, 7).toString('base64url'), prerequisitesComplete: true });
-    const executor = new MachineExecutor({ machineId: 'machine', journal, onMutationSettled: async () => accepted, runCommand: async () => { throw new Error('Checkpoint must not launch a command'); }, artifacts: () => ({ read: async () => [], write: async () => {} }), cloudModel: async () => null, cloudMcp: async () => { throw new Error('Live MCP forbidden'); } });
+    const executor = new MachineExecutor({ machineId: 'machine', journal, onMutationSettled: async () => accepted, runCommand: async () => { throw new Error('Checkpoint must not launch a command'); }, artifacts: () => ({ read: async () => [], write: async () => {} }) });
     const agentResult = async (checkpoint: RuntimeGitCheckpoint) => {
       accepted = checkpoint;
       return executor.execute(RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, requestId: checkpoint.worktreeCommit, attemptId: checkpoint.worktreeCommit, tool: 'checkpoint', args: {}, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' }));
@@ -524,6 +524,28 @@ for (const publication of ['initial', 'recovery'] as const) test(`${publication}
     expect(replay.value).toEqual(accepted.value);
   } finally { await f.close(); }
 }, 5000);
+
+for (const publication of ['initial', 'recovery', 'no-inventory'] as const) test(`${publication} merge-planned complete marker rescan drops deleted and clean conflicts instead of retaining checkpoint flags`, async () => {
+  const f = await fixture();
+  try {
+    const clean = await git.writeBlob({ fs, dir: f.dir, blob: text.encode('resolved text\n') });
+    const marked = await git.writeBlob({ fs, dir: f.dir, blob: text.encode('<<<<<<< cloud\nunresolved\n=======\ntheirs\n>>>>>>> machine\n') });
+    const tree = await git.writeTree({ fs, dir: f.dir, tree: [
+      { path: 'script', mode: '100644', type: 'blob', oid: clean },
+      { path: 'still-marked', mode: '100644', type: 'blob', oid: marked },
+    ] });
+    const commit = await git.writeCommit({ fs, dir: f.dir, commit: { tree, parent: [f.previous.worktreeCommit], author, committer: author, message: 'Recovered worktree with stale conflict flags\n' } });
+    const checkpoint = { ...f.previous, worktreeCommit: commit, trackedWorktreeCommit: commit, worktreeTree: tree, conflicts: ['removed', 'script', 'still-marked'] };
+    await git.writeRef({ fs, dir: f.dir, ref: checkpoint.checkpointRef, value: commit, force: true });
+    const plan = publication === 'no-inventory'
+      ? { machine: checkpoint, mutations: [] }
+      : await planSnapshotMerge(f.repo, checkpoint, checkpoint, checkpoint, { forcePublication: true });
+    if (publication === 'initial') await git.deleteRef({ fs, dir: f.dir, ref: checkpoint.checkpointRef });
+    const result = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: checkpoint, ...plan }, f.request);
+    if (result.isErr()) throw result.error;
+    expect(result.value.conflicts).toEqual(['still-marked']);
+  } finally { await f.close(); }
+});
 
 test('ordinary marker scanning reads only the changed blob in a large tree', async () => {
   const f = await fixture();

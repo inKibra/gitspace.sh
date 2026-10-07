@@ -26,7 +26,7 @@ export function BrowserApprovalCard({ request, requestDetails, machineName, conn
     <p className="break-words text-body font-medium">{request.groupName}</p>
     <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-caption">
       <dt className="text-muted-foreground">Approved origins</dt><dd className="break-all font-mono font-semibold">{request.origins.join(', ') || 'None'}</dd>
-      <dt className="text-muted-foreground">Machine</dt><dd className="break-words">{machineName ?? request.machineId}</dd>
+      <dt className="text-muted-foreground">Execution</dt><dd className="break-words">{'placement' in request ? request.placement.kind === 'cloud' ? 'Cloud headless browser' : 'Account Chrome extension' : machineName ?? request.machineId}</dd>
       <dt className="text-muted-foreground">Browser</dt><dd>{request.source === 'relay' ? 'Your Chrome profile · Browser Relay' : 'Workspace-owned headless profile'}</dd>
       <dt className="text-muted-foreground">Access</dt><dd>Only tabs in this workspace group. JavaScript and screenshots included.</dd>
       <dt className="text-muted-foreground">Expires</dt><dd className="tabular-nums"><time dateTime={request.expiresAt}>{new Date(request.expiresAt).toLocaleString()}</time>{expired ? '' : ` · ${Math.max(0, Math.ceil((Date.parse(request.expiresAt) - now) / 1000))}s`}</dd>
@@ -39,7 +39,7 @@ export function BrowserApprovalCard({ request, requestDetails, machineName, conn
   </section>;
 }
 
-type MachineStatus = { machineId: string; status: RuntimeBrowserStatus | null; error: string | null };
+type MachineStatus = { machineId: string | null; status: RuntimeBrowserStatus | null; error: string | null };
 export function RuntimeBrowserGroups({ snapshot, conversationId, machines }: { snapshot: RuntimeSnapshot; conversationId?: string; machines: readonly { id: string; label: string; kind: string }[] }) {
   const shape = useShape();
   const identity = useMemo(() => RuntimeIdentitySchema.parse(snapshot), [snapshot.projectId, snapshot.workspaceId]);
@@ -56,11 +56,11 @@ export function RuntimeBrowserGroups({ snapshot, conversationId, machines }: { s
   }, [identity, conversationId]);
   const refresh = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
-    const ids: string[] = JSON.parse(machineIds);
+    const ids: Array<string | null> = [null, ...snapshot.attachments.filter(attachment => attachment.state === 'ready' && attachment.capabilities.includes('browser.headless')).map(attachment => attachment.machineId)];
     try {
       const values = await Promise.all(ids.map(async machineId => {
         try {
-          const result = await request({ type: 'browserStatus', machineId }, signal);
+          const result = await request({ type: 'browserStatus', ...(machineId === null ? {} : { machineId }) }, signal);
           if (!result.browserStatus) throw new Error('The machine did not return browser status.');
           return { machineId, status: result.browserStatus, error: null };
         } catch (cause) { return { machineId, status: null, error: rpcErrorMessage(cause, 'Read browser groups') }; }
@@ -78,14 +78,13 @@ export function RuntimeBrowserGroups({ snapshot, conversationId, machines }: { s
   };
   return <section aria-label="Browser groups" className={`${shape.container} flex flex-col gap-3 bg-surface-2 p-4 shadow-surface-1`}>
     <div className="flex items-center justify-between gap-3"><h3 className="text-body font-medium">Browser access and recovery</h3><Button variant="ghost" loading={loading} disabled={loading || pending !== null} onClick={() => void refresh()}>Refresh browser status</Button></div>
-    <p className="text-caption text-muted-foreground">Headless browsing runs on an attached executor. Logged-in Chrome requires your own physical machine. Group grants expire automatically. Revocation stops new commands but does not erase agent history. Headless workspace profiles persist.</p>
-    {machineIds === '[]' ? <p className="text-caption text-muted-foreground">Attach a browser-capable machine to use browser control.</p> : null}
+    <p className="text-caption text-muted-foreground">Headless browsing runs in the cloud or on an attached executor. Your Chrome extension connects directly to your account. Group grants expire automatically. Revocation stops new commands but does not erase agent history.</p>
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
-    {rows.map(row => <div key={row.machineId} className="flex flex-col gap-3"><h4 className="text-caption font-semibold">{machines.find(machine => machine.id === row.machineId)?.label ?? row.machineId}</h4>
+    {rows.map(row => <div key={row.machineId ?? 'account'} className="flex flex-col gap-3"><h4 className="text-caption font-semibold">{row.machineId === null ? 'Account browsers' : machines.find(machine => machine.id === row.machineId)?.label ?? row.machineId}</h4>
       {row.error ? <p role="alert" className="text-caption text-destructive">{row.error}{row.status ? ' Last observed state shown; refresh to confirm.' : ''}</p> : null}
       {row.status && row.status.groups.length === 0 && row.status.records.length === 0 ? <p className="text-caption text-muted-foreground">No browser groups or recovery records.</p> : null}
-      {row.status?.groups.map(group => <div key={group.groupId} className="flex flex-wrap items-start gap-3 rounded-lg bg-surface-3 p-3"><div className="min-w-0 flex-1"><p className="break-words text-body">{group.groupName} <Badge color={group.state === 'active' ? 'green' : 'gray'}>{group.state}</Badge></p><p className="break-all font-mono text-caption">{group.source === 'headless' ? 'Unrestricted headless' : group.origins.join(', ')}</p><p className="mt-1 text-caption text-muted-foreground">{group.source === 'relay' ? 'Chrome relay · workspace group tabs only' : 'Headless workspace profile'}</p><p className="text-caption tabular-nums text-muted-foreground">Expires <time dateTime={group.expiresAt}>{new Date(group.expiresAt).toLocaleString()}</time></p>{group.reason ? <p className="text-caption text-muted-foreground">{group.reason}</p> : null}</div>{group.state === 'active' || group.state === 'fenced' ? <Button variant="secondary" disabled={pending !== null} loading={pending === group.groupId} onClick={() => void mutate(group.groupId, { type: 'browserRevoke', machineId: row.machineId, groupId: group.groupId })}>Revoke group access</Button> : null}</div>)}
-      {row.status?.records.map(record => <div key={record.id} className="flex flex-col gap-2 rounded-lg bg-surface-3 p-3"><div className="flex items-center gap-2"><Badge color={record.state === 'stopped' ? 'gray' : 'amber'}>{record.state}</Badge><span className="break-all font-mono text-caption">{record.id}</span></div><p className="text-caption">{record.reason}</p>{record.expiresAt ? <p className="text-caption tabular-nums text-muted-foreground">Fence expires <time dateTime={record.expiresAt}>{new Date(record.expiresAt).toLocaleString()}</time></p> : null}<div className="flex flex-wrap gap-2">{record.actions.includes('reconcile') ? <Button variant="secondary" disabled={pending !== null} loading={pending === record.id} onClick={() => void mutate(record.id, { type: 'browserReconcile', machineId: row.machineId, recordId: record.id })}>Reconcile process</Button> : null}{record.actions.includes('discard') ? <Button variant="ghost" disabled={pending !== null} onClick={() => void mutate(record.id, { type: 'browserDiscard', machineId: row.machineId, recordId: record.id })}>Discard stopped record</Button> : null}</div></div>)}
+      {row.status?.groups.map(group => <div key={group.groupId} className="flex flex-wrap items-start gap-3 rounded-lg bg-surface-3 p-3"><div className="min-w-0 flex-1"><p className="break-words text-body">{group.groupName} <Badge color={group.state === 'active' ? 'green' : 'gray'}>{group.state}</Badge></p><p className="break-all font-mono text-caption">{group.source === 'headless' ? 'Unrestricted headless' : group.origins.join(', ')}</p><p className="mt-1 text-caption text-muted-foreground">{group.source === 'relay' ? 'Chrome relay · workspace group tabs only' : 'Headless workspace profile'}</p><p className="text-caption tabular-nums text-muted-foreground">Expires <time dateTime={group.expiresAt}>{new Date(group.expiresAt).toLocaleString()}</time></p>{group.reason ? <p className="text-caption text-muted-foreground">{group.reason}</p> : null}</div>{group.state === 'active' || group.state === 'fenced' ? <Button variant="secondary" disabled={pending !== null} loading={pending === group.groupId} onClick={() => void mutate(group.groupId, { type: 'browserRevoke', ...(row.machineId === null ? {} : {machineId:row.machineId}), groupId: group.groupId })}>Revoke group access</Button> : null}</div>)}
+      {row.status?.records.map(record => <div key={record.id} className="flex flex-col gap-2 rounded-lg bg-surface-3 p-3"><div className="flex items-center gap-2"><Badge color={record.state === 'stopped' ? 'gray' : 'amber'}>{record.state}</Badge><span className="break-all font-mono text-caption">{record.id}</span></div><p className="text-caption">{record.reason}</p>{record.expiresAt ? <p className="text-caption tabular-nums text-muted-foreground">Fence expires <time dateTime={record.expiresAt}>{new Date(record.expiresAt).toLocaleString()}</time></p> : null}<div className="flex flex-wrap gap-2">{row.machineId !== null && record.actions.includes('reconcile') ? <Button variant="secondary" disabled={pending !== null} loading={pending === record.id} onClick={() => { const machineId = row.machineId; if (machineId !== null) void mutate(record.id, { type: 'browserReconcile', machineId, recordId: record.id }); }}>Reconcile process</Button> : null}{row.machineId !== null && record.actions.includes('discard') ? <Button variant="ghost" disabled={pending !== null} onClick={() => { const machineId = row.machineId; if (machineId !== null) void mutate(record.id, { type: 'browserDiscard', machineId, recordId: record.id }); }}>Discard stopped record</Button> : null}</div></div>)}
     </div>)}
   </section>;
 }

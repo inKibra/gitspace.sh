@@ -9,6 +9,16 @@ import { verticalSliceFixture } from './App.js';
 import type { SidebarWorkspace } from './AppSidebar.js';
 import { CreateWorkspaceDialog, type ProjectLifecycleView } from './GitSpaceShell.js';
 import type { Directory } from './useAccountDirectory.js';
+vi.mock('./browser-relay-client.js', () => ({
+  projectBrowserSettings: vi.fn(async (projectId: string) => ({
+    projectId, revision: 1, defaultPairingId: '00000000-0000-4000-8000-000000000001',
+    browsers: [
+      { pairingId: '00000000-0000-4000-8000-000000000001', generation: 1, name: 'Staging Chrome', note: 'staging admin account', connected: true, approved: true },
+      { pairingId: '00000000-0000-4000-8000-000000000002', generation: 1, name: 'Personal Chrome', note: 'customer login', connected: false, approved: false },
+    ],
+  })),
+  updateProjectBrowserSettings: vi.fn(),
+}));
 
 const stamp = '2026-09-12T00:00:00.000Z';
 const projects: ProjectLifecycleView[] = [
@@ -171,6 +181,17 @@ it('changes a project base branch from Settings at its current revision and keep
   expect(setBaseBranch).toHaveBeenCalledWith('beta', 7, 'release');
 });
 
+
+it('shows personal project Chrome approval, default, notes and offline identity in project settings', async () => {
+  await render('projects');
+  await click('Settings for Alpha');
+  expect(document.body.textContent).toContain('Staging Chrome');
+  expect(document.body.textContent).toContain('staging admin account');
+  expect(document.body.textContent).toContain('Personal Chrome');
+  expect(document.body.textContent).toContain('Offline');
+  expect(document.body.querySelector('[aria-label="Revoke Staging Chrome"]')).not.toBeNull();
+  expect(document.body.querySelector('[aria-label="Approve Personal Chrome"]')).not.toBeNull();
+});
 it('includes base-agent waits and component errors across projects while identifying incomplete coverage', async () => {
   directory.alpha!.baseSummary = { holder: { kind: 'held', machineId: 'remote', label: 'Remote' }, closedAt: null, freshness: 'fresh', status: { ...idle, primaryColor: 'orange', agents: { green: 0, blue: 1, orange: 1, red: 0 } } };
   directory.beta!.workspaces[0]!.summary = { holder: { kind: 'released' }, closedAt: null, freshness: 'stale', status: { ...idle, primaryColor: 'red', services: { green: 0, red: 2 }, terminals: { green: 0, red: 1 } } };

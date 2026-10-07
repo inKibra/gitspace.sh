@@ -32,6 +32,9 @@ const relayFrameMessageSchema = z.object({
 
 export const relaySocketMessageSchema = z.discriminatedUnion('type', [
   relayFrameMessageSchema,
+  z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.open'), requestId }),
+  z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.data'), requestId, data: z.string().max(MAX_ROUTED_PAYLOAD_CHARS), binary: z.boolean() }),
+  z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.close'), requestId, code: z.number().int(), reason: z.string().max(123) }),
   z.object({
     version: z.literal(RELAY_PROTOCOL_VERSION),
     type: z.literal('tunnel.response.start'),
@@ -61,6 +64,8 @@ export type RelaySocketMessage = z.infer<typeof relaySocketMessageSchema>;
 export type TunnelResponseMessage = Exclude<RelaySocketMessage, { type: 'frame' }>;
 
 export const tunnelRequestMessageSchema = z.discriminatedUnion('type', [
+  z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.data'), requestId, data: z.string().max(MAX_ROUTED_PAYLOAD_CHARS), binary: z.boolean() }),
+  z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.close'), requestId, code: z.number().int(), reason: z.string().max(123) }),
   z.object({
     version: z.literal(RELAY_PROTOCOL_VERSION),
     type: z.literal('tunnel.request.start'),
