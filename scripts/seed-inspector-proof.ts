@@ -3,6 +3,8 @@ import { createGitSpaceBrowserClient } from '../packages/account-web/src/rpc-cli
 const rpcUrl = process.env.GITSPACE_PROOF_RPC_URL ?? 'http://127.0.0.1:4510/rpc';
 const projectId = process.env.GITSPACE_PROOF_PROJECT ?? 'project-a';
 const workspaceId = process.env.GITSPACE_PROOF_WORKSPACE ?? 'workspace-a';
+// Terminal calls name the machine that runs them.
+const terminalTarget = { spaceId: workspaceId, machineId: process.env.GITSPACE_PROOF_MACHINE ?? 'machine-a' };
 const client = createGitSpaceBrowserClient({ url: rpcUrl });
 
 async function value<T>(result: Promise<{ status: 'ok'; value: T } | { status: 'error'; error: unknown }>): Promise<T> {
@@ -20,7 +22,7 @@ const existing = await value(client.inspector.overview({ spaceId: workspaceId, e
 const resuming = existing.goal?.id === 'inspector-proof';
 
 if (!resuming) {
-const terminal = await value(client.terminals.create({ spaceId: workspaceId }));
+const terminal = await value(client.terminals.create(terminalTarget));
 const baseSource = Buffer.from('export interface ProofRecord { id: string; state: "ready" | "blocked"; }\n').toString('base64');
 const finalSource = Buffer.from('export interface ProofRecord { id: string; state: "ready" | "blocked"; evidence: string[]; }\n\nexport function ready(record: ProofRecord): boolean {\n  return record.state === "ready" && record.evidence.length > 0;\n}\n').toString('base64');
 const testSource = Buffer.from('import { expect, test } from "bun:test";\nimport { ready } from "./proof";\ntest("requires evidence", () => expect(ready({ id: "a", state: "ready", evidence: ["report"] })).toBe(true));\n').toString('base64');
@@ -38,20 +40,20 @@ const shell = [
   'git commit -m "proof: connect evidence review" >/dev/null',
   'printf "__GITSPACE_PROOF_READY__\\n"',
 ].join(' && ');
-await value(client.terminals.send({ spaceId: workspaceId, name: terminal.name, data: `${shell}\n` }));
+await value(client.terminals.send({ ...terminalTarget, name: terminal.name, data: `${shell}\n` }));
 let terminalCursor: number | null = null;
 for (let attempt = 0; attempt < 100; attempt += 1) {
-  const output = await value(client.terminals.read({ spaceId: workspaceId, name: terminal.name, cursor: terminalCursor }));
+  const output = await value(client.terminals.read({ ...terminalTarget, name: terminal.name, cursor: terminalCursor }));
   terminalCursor = output.cursor;
   if (output.data.includes('__GITSPACE_PROOF_READY__')) break;
   if (attempt === 99) throw new Error('Timed out preparing Inspector proof repository');
   await Bun.sleep(100);
 }
-await value(client.terminals.stop({ spaceId: workspaceId, name: terminal.name }));
+await value(client.terminals.stop({ ...terminalTarget, name: terminal.name }));
 }
 
 if (resuming) {
-  const terminal = await value(client.terminals.create({ spaceId: workspaceId }));
+  const terminal = await value(client.terminals.create(terminalTarget));
   const proofFiles: Record<string, string> = {
     'src/authority.ts': 'export const authorityLayers = ["goal", "workflow", "rubric", "journal", "guide"] as const;\n',
     'src/renderer.ts': 'export function renderEvidence(label: string): string { return `Evidence: ${label}`; }\n',
@@ -65,16 +67,16 @@ if (resuming) {
     return `mkdir -p ${directory} && printf %s ${Buffer.from(source).toString('base64')} | base64 -d > ${path}`;
   });
   const shell = `if [ -z "$(git log --format=%H --grep='^proof: repair scrolling review$' -n 1)" ]; then ${writes.join(' && ')} && git add ${Object.keys(proofFiles).join(' ')} && git commit -m "proof: repair scrolling review" >/dev/null; fi && printf "__GITSPACE_PROOF_EXPANDED__\\n"`;
-  await value(client.terminals.send({ spaceId: workspaceId, name: terminal.name, data: `${shell}\n` }));
+  await value(client.terminals.send({ ...terminalTarget, name: terminal.name, data: `${shell}\n` }));
   let cursor: number | null = null;
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const output = await value(client.terminals.read({ spaceId: workspaceId, name: terminal.name, cursor }));
+    const output = await value(client.terminals.read({ ...terminalTarget, name: terminal.name, cursor }));
     cursor = output.cursor;
     if (output.data.includes('__GITSPACE_PROOF_EXPANDED__')) break;
     if (attempt === 99) throw new Error('Timed out expanding Inspector proof repository');
     await Bun.sleep(100);
   }
-  await value(client.terminals.stop({ spaceId: workspaceId, name: terminal.name }));
+  await value(client.terminals.stop({ ...terminalTarget, name: terminal.name }));
 }
 
 const firstWorksheet = await value(client.inspector.guide.analyze({ ...identity, expectedGeneration: generation, baseRef: 'HEAD~1' }));
