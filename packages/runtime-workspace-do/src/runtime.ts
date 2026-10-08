@@ -241,7 +241,11 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         const parentId = record.parent?.conversationId ?? record.owner?.conversationId;
         const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
         if (child) subagents.push({ conversationId: String(record.id), ...child });
-        conversations.push({ id: String(record.id), parentId: parentId === undefined ? null : String(parentId), title: record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`, status: inspection.tasks.some(task => task.record.conversationId === record.id && task.state.kind === 'running') ? 'running' : 'idle', messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))) });
+        const running = inspection.tasks.some(task => task.record.conversationId === record.id && task.state.kind === 'running');
+        // A rejected model request leaves an empty assistant message; its error is the user's only explanation.
+        const latest = entries.flatMap(entry => entry.model ?? []).findLast(message => message.role === 'assistant');
+        const failure = !running && latest?.role === 'assistant' && latest.stopReason === 'error' ? latest.errorMessage ?? 'The model request failed' : null;
+        conversations.push({ id: String(record.id), parentId: parentId === undefined ? null : String(parentId), title: record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`, status: running ? 'running' : failure ? 'failed' : 'idle', ...(failure ? { error: failure } : {}), messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))) });
         if (child) conversations[conversations.length - 1]!.title = child.name;
       }
       cursor = page.next;

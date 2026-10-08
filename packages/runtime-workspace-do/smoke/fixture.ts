@@ -24,6 +24,12 @@ const stream: StreamFunction = (_model, context) => {
   const last = context.messages.findLast(message => message.role !== 'system');
   const text = typeof last?.content === 'string' ? last.content : (last?.content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n');
   const ask = last?.role === 'user' && text === 'ask for a color';
+  if (last?.role === 'user' && text === 'fail the model') {
+    const failure: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: [], stopReason: 'error', errorMessage: 'fixture provider rejected the request', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
+    result.push({ type: 'error', reason: 'error', error: failure });
+    result.end();
+    return result;
+  }
   const plan = last?.role === 'user' && text === 'propose a plan';
   const output: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: ask || plan ? [{ type: 'toolCall', id: crypto.randomUUID(), name: plan ? 'propose_plan' : 'ask', arguments: { prompt: plan ? 'Approve this deterministic smoke plan?' : 'Choose a color', choices: plan ? ['Misleading model choice', 'Another model choice'] : ['blue', 'green'] } }] : [{ type: 'text', text: `fixture reply: ${text}` }], stopReason: ask || plan ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
   result.push({ type: 'start', partial: output });

@@ -96,6 +96,12 @@ try {
   assert(clearedDraft.revision > newerDraft.draft.revision);
   console.log('PASS draft watch delivery, device authorship, cold recovery and accepted-send clearing');
 
+  // A rejected model request must tell the user why instead of leaving an empty reply.
+  await request('/submit?text=fail%20the%20model');
+  const failed = await until(snapshot => snapshot.conversations.some(item => item.status === 'failed'));
+  assert.match(failed.conversations.find(item => item.status === 'failed')?.error ?? '', /fixture provider rejected the request/);
+  console.log('PASS failed model request surfaces its error');
+
   // Both public answer surfaces must restart a persisted suspended Pi task by themselves.
   for (const surface of ['session', 'answer'] as const) {
     const before = assistantReplies(RuntimeSnapshotSchema.parse(await request('/')));
