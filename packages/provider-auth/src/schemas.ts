@@ -7,19 +7,6 @@ export const upstreamOAuthProviderSchema = z.enum(['openai', 'github-copilot', '
 export type UpstreamOAuthProvider = z.infer<typeof upstreamOAuthProviderSchema>;
 export const workerOAuthProviderSchema = z.enum([...gitspaceOAuthProviderSchema.options, ...upstreamOAuthProviderSchema.options]);
 export type WorkerOAuthProvider = z.infer<typeof workerOAuthProviderSchema>;
-export const oauthProviderNames: Record<WorkerOAuthProvider, string> = {
-  anthropic: 'Anthropic (Claude Pro/Max)',
-  'openai-codex': 'OpenAI Codex (ChatGPT)',
-  'google-gemini-cli': 'Google Cloud Code Assist (Gemini CLI)',
-  'google-antigravity': 'Google Antigravity',
-  cursor: 'Cursor',
-  openai: 'OpenAI (Sign in with ChatGPT)',
-  'github-copilot': 'GitHub Copilot',
-  openrouter: 'OpenRouter',
-  xai: 'xAI (Grok/X subscription)',
-  'kimi-coding': 'Kimi Code (subscription)',
-  meta: 'Meta (Muse subscription)',
-};
 // Pi's flows keep provider-specific fields (e.g. ChatGPT's issued clientId) that refresh and request auth need.
 export const storedOAuthCredentialSchema = z.object({
   provider: workerOAuthProviderSchema, refresh: z.string().min(1), access: z.string().min(1), expires: z.number().finite(),

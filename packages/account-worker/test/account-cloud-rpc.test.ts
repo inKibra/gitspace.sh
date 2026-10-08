@@ -518,7 +518,7 @@ describe('account cloud RPC without machines', () => {
     const result = parse(text) as { status: 'ok'; value: { providers: ProviderView[] } };
     expect(result.value.providers.find(provider => provider.id === 'openai')).toMatchObject({ hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: true, accounts: [] });
     expect(result.value.providers.find(provider => provider.id === 'anthropic')).toMatchObject({ hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: true, accounts: [] });
-    expect(result.value.providers.find(provider => provider.id === 'openai-codex')).toMatchObject({ hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: false, accounts: [] });
+    expect(result.value.providers.find(provider => provider.id === 'openai-codex')).toMatchObject({ name: 'OpenAI Codex (ChatGPT)', hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: false, accounts: [] });
     expect(text).not.toContain('default-private-key');
     const missing = await SELF.fetch(fixture.request(single('providers.apiKey.set', { providerId: 'openai', key: 'unscoped-key' })));
     expect(parse(await missing.text())).toMatchObject({ status: 'error' });

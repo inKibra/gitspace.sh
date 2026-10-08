@@ -141,9 +141,11 @@ const signInProviders: Readonly<Record<string, true>> = {
 };
 /** Subscription-only providers whose API-key path would bypass the sign-in they require. */
 const signInOnlyProviders: Readonly<Record<string, true>> = { 'openai-codex': true, cursor: true, 'google-antigravity': true, 'google-gemini-cli': true };
+/** Pi labels Codex "(legacy)"; here it is the ChatGPT subscription's device-code sign-in. */
+const displayNames: Readonly<Record<string, string>> = { 'openai-codex': 'OpenAI Codex (ChatGPT)' };
 export function describeCloudProviders(settings: InferenceProfile['settings'] = {}) {
   return admitProfileProviders(settings, [...builtinProviders(), ...createLegacyCloudProviders()].map(applyProviderCatalog)).map(provider => ({
-    id: provider.id, name: provider.name, credentialProvider: provider.id,
+    id: provider.id, name: displayNames[provider.id] ?? provider.name, credentialProvider: provider.id,
     supportsApiKey: provider.auth.apiKey !== undefined && signInOnlyProviders[provider.id] !== true, supportsOAuth: signInProviders[provider.id] === true,
   }));
 }
