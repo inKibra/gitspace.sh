@@ -287,7 +287,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
 
 
   /** Release acknowledgements are history; only catalog members remain in the current fleet. */
-  async status(userId: string, worker: WorkerVersion, requestingMachineId?: string): Promise<DeploymentStatus> {
+  async status(userId: string, platformWorker: WorkerVersion, requestingMachineId?: string): Promise<DeploymentStatus> {
     const catalog = this.env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>;
     const fleet = await catalog.get(catalog.idFromName(userId)).listMachines();
     const cutover = await this.inferenceCutover();
@@ -302,8 +302,8 @@ export class TenantReleasesDO extends DurableObject<Env> {
       if (selected !== undefined) desired.machine = z.string().parse(selected);
     }
     // Self-update may interrupt the acknowledgement after the platform activated it.
-    if (worker.sha !== null && worker.sha === desired.worker) {
-      const record = this.findRelease(worker.sha);
+    if (platformWorker.sha !== null && platformWorker.sha === desired.worker) {
+      const record = this.findRelease(platformWorker.sha);
       if (record?.status.worker === 'pending' && (!cutover || record.inferenceVersion === 1)) {
         record.status.worker = 'applied';
         this.saveRecord(record);
@@ -318,7 +318,11 @@ export class TenantReleasesDO extends DurableObject<Env> {
       .map((row) => releaseRecordSchema.parse(JSON.parse(row.record_json)));
     const machineExecution: NonNullable<DeploymentStatus['machineExecution']> = {};
     for (const machineId of currentIds) machineExecution[machineId] = await this.machineExecutionAdmission(machineId);
-    return deploymentStatusSchema.parse({ desired, current: { worker, machines }, releases, machineExecution });
+    const version = WORKER_VERSION ?? null;
+    const worker = { sha: version === 'channel' || version?.startsWith('channel:') ? null : version, version };
+    return deploymentStatusSchema.parse({
+      desired, current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution,
+    });
   }
 
   /** The frontend tree to serve, or null when the tenant runs our channel build. */

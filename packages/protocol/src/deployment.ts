@@ -224,6 +224,8 @@ export const deploymentStatusSchema = z.object({
   current: z.object({
     /** Worker version string as reported by the tenant's own `/healthz`. */
     worker: z.object({ sha: z.string().nullable(), version: z.string().nullable() }),
+    /** Platform deployment record, included only when it differs from the answering Worker. */
+    platformWorker: z.object({ sha: z.string().nullable(), version: z.string().nullable() }).optional(),
     /** Last acknowledgements for machines still in the fleet, including offline members; release results retain removed-machine history. */
     machines: z.record(idSchema, z.object({ sha: z.string().nullable(), generation: z.string().nullable() })),
   }),

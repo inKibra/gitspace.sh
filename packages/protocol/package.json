@@ -12,6 +12,7 @@
     "./inference": "./src/inference.ts",
     "./device-grant": "./src/device-grant.ts",
     "./machine-pairing": "./src/machine-pairing.ts",
+    "./machine-discard": "./src/machine-discard.ts",
     "./client": "./src/client.ts",
     "./routed-transport": "./src/routed-transport.ts",
     "./relay": "./src/relay.ts",

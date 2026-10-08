@@ -177,6 +177,7 @@ export const controlOperationSchema = z.enum([
   'space.beginOpen',
   'space.commitOpen',
   'space.failOpen',
+  'space.releaseUnpublishedSource',
   'space.get',
   'crons.list',
   'crons.create',

@@ -13,6 +13,6 @@ export async function requireRuntimeIdentity(
   if (workspace?.lifecycle === 'deleting') throw new Error('Runtime workspace is unavailable');
   // Opening a cloud-only project or provisioning a new one bootstraps runtime state before the project turns active.
   const writableProject = project.lifecycle === 'active' || project.lifecycle === 'cloud-only' || project.lifecycle === 'provisioning';
-  if (write && (!writableProject || workspace?.lifecycle === 'archived')) throw new Error('Archived runtime state is read-only');
+  if (write && (!writableProject || workspace?.lifecycle === 'archiving' || workspace?.lifecycle === 'archived')) throw new Error('Archived runtime state is read-only');
   return { project, workspace, projectAuthority, authority: env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`) };
 }

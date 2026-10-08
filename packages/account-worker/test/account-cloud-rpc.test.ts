@@ -5,7 +5,7 @@ import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
 import { executionHash } from '@gitspace/protocol-environment';
-import { gitspaceContract, rpcErrors } from '@gitspace/protocol/rpc-contract';
+import { gitspaceContract, rpcErrors, UserSettingsViewCodec } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
 import { createBrowserClient, type BrowserClientOf } from 'result-rpc/client';
@@ -16,6 +16,7 @@ import { tenantRootPrivateKey } from './setup.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { z } from 'zod';
 
 afterEach(() => vi.restoreAllMocks());
 function emptyCommittedSource() {
@@ -48,6 +49,21 @@ async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.writ
 const single = (path: string, input: unknown = {}) => ({ v: 1, path, input });
 
 describe('cloud lifecycle inspection and explicit authorization', () => {
+  it('links internal RPC failures to server logs without exposing their private cause', async () => {
+    const fixture = await account();
+    const privateCause = 'private output-encoding failure';
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(UserSettingsViewCodec, 'encode').mockImplementation(() => { throw new Error(privateCause); });
+    const response = await worker.fetch(fixture.request(single('settings.get')), env);
+    const body = await response.text();
+    const line = logged.mock.calls.map(([entry]) => entry).find(entry => typeof entry === 'string' && entry.includes('"event":"rpc_internal_error"'));
+    if (typeof line !== 'string') throw new Error('Missing internal incident log');
+    const incident = z.object({ incidentId: z.string().min(1), phase: z.string().min(1), procedurePath: z.literal('settings.get'), message: z.string(), stack: z.string() }).parse(JSON.parse(line));
+    expect(line).toContain(privateCause);
+    expect(body).toContain(incident.incidentId);
+    expect(body).not.toContain(privateCause);
+  });
+
   it('reports pending inference activation until the platform health probe commits this Worker', async () => {
     const fixture = await account();
     const client = inspectorClient(fixture);
@@ -642,6 +658,54 @@ describe('account routing of machine work', () => {
       const batches = logs.mock.calls.flatMap(([line]): unknown[] => typeof line === 'string' && line.includes('"rpc_batch"') ? [JSON.parse(line)] : []);
       expect(batches).toEqual([expect.objectContaining({ event: 'rpc_batch', procedures: ['space.view'], status: 400, code: 'RPC_MIXED_HOLDER_BATCH' })]);
     } finally { logs.mockRestore(); }
+  });
+
+  async function creationFleet(defaultMachineId: string) {
+    const value = await fleet();
+    const settings = env.USER_SETTINGS.getByName(value.fixture.userId);
+    const current = await settings.get('test');
+    await settings.update('test', { ...current, expectedRevision: current.revision, defaults: { ...current.defaults, machineId: defaultMachineId } });
+    for (const id of ['machine-a', 'machine-b', 'machine-c']) {
+      await env.TENANT_RELEASES.getByName(value.fixture.userId).machineProtocol(id, { version: 1 });
+    }
+    return value;
+  }
+
+  it('creates a project on the compatible online configured default rather than the first machine', async () => {
+    const { fixture, reached } = await creationFleet('machine-b');
+    const response = await SELF.fetch(fixture.request(single('project.create', { name: 'Created', baseBranch: 'main', repositoryUrl: null })));
+    expect(await response.json()).toEqual({ machine: 'machine-b' });
+    expect(reached.map((entry) => entry.machine)).toEqual(['machine-b']);
+  });
+
+  it.each(['offline', 'incompatible'] as const)('falls back from an %s default only to a compatible online creation machine', async (reason) => {
+    const { fixture, catalog, reached } = await creationFleet('machine-b');
+    await env.TENANT_RELEASES.getByName(fixture.userId).machineProtocol('machine-a', { version: null });
+    if (reason === 'offline') await catalog.putMachine({ ...machine('machine-b'), state: 'offline', lifecycleRevision: 2 });
+    else await env.TENANT_RELEASES.getByName(fixture.userId).machineProtocol('machine-b', { version: null });
+    const response = await SELF.fetch(fixture.request(single('project.create', { name: 'Created', baseBranch: 'main', repositoryUrl: null })));
+    expect(await response.json()).toEqual({ machine: 'machine-c' });
+    expect(reached.map((entry) => entry.machine)).toEqual(['machine-c']);
+  });
+
+  it('rejects project creation without a compatible online machine before dispatch', async () => {
+    const { fixture, reached } = await creationFleet('machine-b');
+    for (const id of ['machine-a', 'machine-b', 'machine-c']) await env.TENANT_RELEASES.getByName(fixture.userId).machineProtocol(id, { version: null });
+    const response = await SELF.fetch(fixture.request(single('project.create', { name: 'Created', baseBranch: 'main', repositoryUrl: null })));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'FLEET_OFFLINE' } });
+    expect(reached).toEqual([]);
+  });
+
+  it('does not retry creation on another machine after an uncertain mutation failure', async () => {
+    const { fixture, reached } = await creationFleet('machine-b');
+    network.use(http.post('https://machine-b.test/rpc', () => {
+      reached.push({ machine: 'machine-b', signedTarget: '/rpc' });
+      return HttpResponse.json({ error: 'connection failed after creation' }, { status: 502 });
+    }));
+    const response = await SELF.fetch(fixture.request(single('project.create', { name: 'Created', baseBranch: 'main', repositoryUrl: null })));
+    expect(response.status).toBe(502);
+    expect(reached.map((entry) => entry.machine)).toEqual(['machine-b']);
   });
 
   it('sends work without a live holder to the first online machine', async () => {

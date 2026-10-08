@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
 import { inferenceSettingSection } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
+import { rpcErrors } from '@gitspace/protocol/rpc-contract';
+import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import type { ApiClientDraft } from './device.js';
 import type { McpAccessView } from '@gitspace/protocol/mcp-access';
 import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
@@ -88,8 +90,8 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   onChangeCloudImage: (machineId: string, selection: CloudImageSelection, previousOperationId?: string, discardUncheckpointedCandidate?: boolean) => Promise<void>;
   onRecoverCloudImage: (machineId: string, operationId: string, cancel: boolean) => Promise<void>;
   onSetCloudImageDefault: (selection: CloudImageSelection) => Promise<void>;
-  onControlMachine: (action: 'sleep' | 'resume', machineId: string) => Promise<void>;
-  onDestroyMachine: (machineId: string) => Promise<void>;
+  onControlMachine: (action: 'sleep' | 'resume', machineId: string, discardConfirmation?: MachineDiscardConfirmation) => Promise<void>;
+  onDestroyMachine: (machineId: string, discardConfirmation?: MachineDiscardConfirmation) => Promise<void>;
   /** Enrolled browsers and API clients; null while loading. */
   devices: readonly DeviceView[] | null;
   onRevokeDevice: (deviceId: string) => Promise<void>;
@@ -691,7 +693,7 @@ function CloudImagePicker({ value, onChange }: { value: CloudImageSelection; onC
   </div>;
 }
 
-function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControlMachine, onDestroyMachine, cloudImages, cloudImageDefault, cloudImageError, onChangeCloudImage, onRecoverCloudImage, onSetCloudImageDefault }: Pick<SettingsPageProps, 'machines' | 'onUpdateMachine' | 'onCreateSandbox' | 'onControlMachine' | 'onDestroyMachine' | 'cloudImages' | 'cloudImageDefault' | 'cloudImageError' | 'onChangeCloudImage' | 'onRecoverCloudImage' | 'onSetCloudImageDefault'>) {
+export function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControlMachine, onDestroyMachine, cloudImages, cloudImageDefault, cloudImageError, onChangeCloudImage, onRecoverCloudImage, onSetCloudImageDefault }: Pick<SettingsPageProps, 'machines' | 'onUpdateMachine' | 'onCreateSandbox' | 'onControlMachine' | 'onDestroyMachine' | 'cloudImages' | 'cloudImageDefault' | 'cloudImageError' | 'onChangeCloudImage' | 'onRecoverCloudImage' | 'onSetCloudImageDefault'>) {
   const shape = useShape();
   const [setup, setSetup] = useState(false);
   const [sandboxSetup, setSandboxSetup] = useState(false);
@@ -704,11 +706,24 @@ function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControl
   const [useAccountImage, setUseAccountImage] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [discardRequired, setDiscardRequired] = useState<Pick<MachineDiscardRequired, 'message' | 'confirmation' | 'workspaces'> | null>(null);
+  const [discardPhrase, setDiscardPhrase] = useState('');
+  const operationPending = useRef(false);
+  const discardMachine = discardRequired ? machines.find((machine) => machine.id === discardRequired.confirmation.machineId) : undefined;
+  const requiredPhrase = discardMachine?.label || discardRequired?.confirmation.machineId;
   const editingMachine = machines.find((machine) => machine.id === editing) ?? null;
   const run = async (key: string, action: () => Promise<void>) => {
+    if (operationPending.current) return;
+    operationPending.current = true;
     setPending(key); setActionError(null);
-    try { await action(); } catch (error) { setActionError(rpcErrorMessage(error, 'Machine settings operation')); }
-    finally { setPending(null); }
+    try { await action(); }
+    catch (error) {
+      if (rpcErrors.machineDiscardRequired.is(error) && error.data.confirmation.machineId === key) {
+        setDiscardRequired(error.data);
+        setDiscardPhrase('');
+      } else setActionError(rpcErrorMessage(error, 'Machine settings operation'));
+    }
+    finally { operationPending.current = false; setPending(null); }
   };
   return <>
     {cloudImageError || actionError ? <p role="alert" className="text-caption text-destructive">{actionError ?? cloudImageError}</p> : null}
@@ -761,6 +776,33 @@ function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControl
         <textarea aria-label="Machine notes" rows={4} value={notes} className={`${shape.input} w-full border border-border bg-surface-2 p-2 text-body text-foreground`} onChange={(event) => setNotes(event.currentTarget.value)} />
       </Panel> : null}
     </Group>
+    <Dialog open={discardRequired !== null} onOpenChange={(open) => { if (!open && !operationPending.current) { setDiscardRequired(null); setDiscardPhrase(''); } }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Unsaved work on {requiredPhrase}</DialogTitle>
+          <DialogDescription>The machine was not stopped or destroyed. Save or recover this work before trying again, or explicitly discard it below. Discarding cannot be undone.</DialogDescription>
+        </DialogHeader>
+        {discardRequired ? <>
+          <p role="alert" className="text-caption text-destructive">{discardRequired.message}</p>
+          <ul className="space-y-1 text-caption">{discardRequired.workspaces.map((scope) => <li key={`${scope.projectId}:${scope.workspaceId}`} className="[overflow-wrap:anywhere]">Project {scope.projectId} · workspace {scope.workspaceId} · generation {scope.generation}: unpublished local work will be lost.</li>)}</ul>
+          <p className="text-caption text-muted-foreground">Only completed checkpoints can be restored. Ignored files, installed packages, machine-local configuration, and other uncaptured files on this machine will also be lost.</p>
+          <label className="flex flex-col gap-2 text-caption">Type <strong>{requiredPhrase}</strong> to confirm this loss.
+            <input aria-label="Confirm machine name" autoComplete="off" value={discardPhrase} disabled={pending !== null} className={`${shape.input} min-h-10 border border-border bg-surface-2 px-3 text-body`} onChange={(event) => setDiscardPhrase(event.currentTarget.value)} />
+          </label>
+          <DialogFooter>
+            <Button variant="secondary" disabled={pending !== null} onClick={() => { setDiscardRequired(null); setDiscardPhrase(''); }}>Cancel discard</Button>
+            <Button variant="primary" disabled={pending !== null || discardPhrase !== requiredPhrase} onClick={() => {
+              if (operationPending.current || discardPhrase !== requiredPhrase) return;
+              const confirmation = discardRequired.confirmation;
+              setDiscardRequired(null); setDiscardPhrase('');
+              void run(confirmation.machineId, () => confirmation.action === 'sleep'
+                ? onControlMachine('sleep', confirmation.machineId, confirmation)
+                : onDestroyMachine(confirmation.machineId, confirmation));
+            }}>{discardRequired.confirmation.action === 'sleep' ? 'Discard and stop' : 'Discard and destroy'}</Button>
+          </DialogFooter>
+        </> : null}
+      </DialogContent>
+    </Dialog>
     {imageTarget ? <Panel title={imageTarget === 'default' ? 'Choose account cloud image' : `Change image · ${machines.find(machine => machine.id === imageTarget)?.label ?? imageTarget}`} description={imageTarget === 'default' ? 'Verify the provider can prepare this image before saving it for future machines.' : 'Only this machine will checkpoint, replace its ephemeral disk, and recover saved workspaces. Ignored files and machine-local changes are not preserved.'} footer={<><Button variant="secondary" disabled={pending !== null} onClick={() => setImageTarget(null)}>Close</Button><Button variant="primary" loading={pending === 'image'} disabled={pending !== null || !cloudImageSelectionSchema.safeParse(selection).success} onClick={() => void run('image', async () => {
       if (imageTarget === 'default') await onSetCloudImageDefault(selection);
       else {
@@ -823,6 +865,7 @@ export function SourceSettings({ deployment, onRevertDeployment, saving }: Pick<
     <Group title="Running"><SettingRows>
       <SettingRow title={<>This machine<Badge color="green">Home</Badge></>} description={<span className="font-mono">{deployment.thisMachine.machineId}</span>}><RunningBadge sha={deployment.thisMachine.sha} generation={deployment.thisMachine.generation} /></SettingRow>
       <SettingRow title="Worker" description="The tenant worker answering this account, by its own version stamp."><Badge color={deployment.current.worker.sha === null ? 'gray' : 'blue'}><span className="font-mono">{deployment.current.worker.version ?? 'unknown'}</span></Badge></SettingRow>
+      {deployment.current.platformWorker && deployment.current.platformWorker.version !== deployment.current.worker.version ? <SettingRow title="Platform record" description="The platform’s last recorded deployment differs from the Worker answering this request."><Badge color="gray"><span className="font-mono">{deployment.current.platformWorker.version ?? 'Not recorded'}</span></Badge></SettingRow> : null}
       {others.map(([machineId, running]) => <SettingRow key={machineId} title={machineId} description={`Machine ${running.sha ? shortSha(running.sha) : 'stable'}`}><RunningBadge sha={running.sha} generation={running.generation} /></SettingRow>)}
     </SettingRows></Group>
     {Object.entries(deployment.machineExecution ?? {}).filter(([, execution]) => execution.state !== 'ready').map(([machineId, execution]) => <Group key={machineId} title={execution.state === 'blocked' ? 'Machine update blocked' : 'Updating machine'}><SettingRows>

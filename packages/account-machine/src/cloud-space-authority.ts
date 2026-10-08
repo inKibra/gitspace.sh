@@ -9,6 +9,7 @@ import {
   type InferenceAssignInput,
 } from '@gitspace/protocol';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
+import { MachineDiscardRequired, machineDiscardRequiredSchema, type MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
 import { collectBytes, streamBytes, SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import {
   createSignedControlRequest,
@@ -779,16 +780,16 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
   createSandboxMachine(image?: CloudImageSelection): Promise<FleetMachineDefinition> {
     return this.call('catalog.sandbox.create', image === undefined ? {} : { image });
   }
-  sleepMachine(machineId: string): Promise<FleetMachineDefinition> {
-    return this.call('catalog.machine.sleep', { machineId });
+  sleepMachine(machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineDefinition> {
+    return this.call('catalog.machine.sleep', { machineId, discardConfirmation });
   }
 
   resumeMachine(machineId: string): Promise<FleetMachineDefinition> {
     return this.call('catalog.machine.resume', { machineId });
   }
 
-  destroyMachine(machineId: string): Promise<{ machineId: string; removed: boolean }> {
-    return this.call('catalog.machine.destroy', { machineId });
+  destroyMachine(machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<{ machineId: string; removed: boolean }> {
+    return this.call('catalog.machine.destroy', { machineId, discardConfirmation });
   }
   getUserSettings(): Promise<UserSettings> {
     return this.call('settings.get', {});
@@ -1166,6 +1167,10 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('space.bootstrap', { ...input, machineId: this.options.machineId });
   }
 
+  async releaseUnpublishedSource(input: { projectId: string; spaceId: string; expectedGeneration: number; sourceCommit: string }): Promise<void> {
+    await this.call('space.releaseUnpublishedSource', input);
+  }
+
   beginClose(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number }) {
     return this.call<{ revision: number; previousRevision: number | null }>('space.beginClose', input);
   }
@@ -1253,6 +1258,8 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
           const body = await response.json() as { status?: unknown; value?: unknown; error?: { code?: unknown; message?: unknown; [key: string]: unknown } };
           diagnostics.stage = response.ok ? 'application' : 'http';
           if (!response.ok || body.status !== 'ok') {
+            const discard = machineDiscardRequiredSchema.safeParse(body.error);
+            if (discard.success) throw new MachineDiscardRequired(discard.data);
             const environment = EnvironmentFailureSchema.safeParse(body.error);
             if (environment.success) throw new EnvironmentError(environment.data.code, environment.data.message, environment.data.context);
             const domainFailure = WorkspaceFailureSchema.safeParse(body.error);

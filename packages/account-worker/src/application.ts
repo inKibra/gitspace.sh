@@ -4,6 +4,7 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
 import { z } from 'zod';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
+import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, type LoginState } from '@gitspace/provider-auth';
@@ -2497,27 +2498,62 @@ export async function assertMachineHasNoOpenSpaces(env: Env, userId: string, cat
 async function checkpointAndStopFleetMachine(env: Env, userId: string, catalog: {
   listSpaces(): Promise<PortableSpaceDefinition[]>;
   putMachine(machine: FleetMachineDefinition): Promise<FleetMachineDefinition>;
-}, current: FleetMachineDefinition, observed?: FleetMachineDefinition): Promise<FleetMachineDefinition> {
+}, current: FleetMachineDefinition, observed?: FleetMachineDefinition, action: 'sleep' | 'destroy' = 'sleep', discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineDefinition> {
   const provider = machineProviderFor(env, userId, current);
   if (provider.id === 'physical') return provider.sleep(current);
+  const durableCatalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
+  const pendingDiscard = await durableCatalog.pendingMachineDiscard(current.id);
   // Offline intent is committed only after stopping. An interrupted or failed save
   // must never become permission for a later reconciliation to discard live work.
   const transition = await catalog.putMachine({
-    ...current, state: 'sleeping', desiredState: 'online',
+    ...current, state: 'sleeping', desiredState: pendingDiscard ? 'offline' : 'online',
     lifecycleRevision: current.lifecycleRevision + 1, operationId: crypto.randomUUID(), error: null,
   });
   let preparationAttempted = false;
+  let discard: MachineDiscardScope[] | undefined = pendingDiscard?.workspaces;
+  let discardStopAttempted = pendingDiscard !== null;
   try {
     observed ??= await provider.status(current);
     const alreadyStopped = observed.state === 'offline' && observed.desiredState === 'offline';
-    if (!alreadyStopped) {
+    if (!alreadyStopped && !pendingDiscard) {
       preparationAttempted = true;
-      await provider.prepareReplacement(transition);
+      discard = (await provider.prepareReplacement(transition, action, discardConfirmation)).discard;
+      if (discard && (!discardConfirmation || discardConfirmation.machineId !== current.id || discardConfirmation.action !== action)) {
+        throw new Error('Runtime returned discard permission without the matching explicit confirmation');
+      }
     }
     // Also check cloud ownership: a stale runtime cannot acknowledge spaces it
     // never loaded. An already stopped machine cannot save any remaining owners.
-    await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
+    if (!discard) await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
+    else {
+      for (const definition of await catalog.listSpaces()) {
+        const placement = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${definition.spaceId}`).get();
+        if (placement?.machineId === current.id && !discard.some(scope => scope.workspaceId === placement.spaceId && scope.projectId === placement.projectId && scope.generation === placement.generation)) {
+          throw new Error('Cloud ownership changed after discard confirmation');
+        }
+      }
+    }
+    if (discard && !pendingDiscard) {
+      if (!discardConfirmation) throw new Error('Explicit local discard confirmation is required');
+      // A lost persistence acknowledgement may already have authorized recovery;
+      // never reopen admission after crossing this uncertain-effect boundary.
+      discardStopAttempted = true;
+      await durableCatalog.beginMachineDiscard({ confirmation: discardConfirmation, workspaces: discard });
+    }
+    discardStopAttempted = discard !== undefined;
     const stopped = alreadyStopped ? observed : await provider.sleep(transition);
+    if (discard) {
+      for (const scope of discard) {
+        const authority = (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${scope.workspaceId}`);
+        const placement = await authority.get();
+        // Stale disk work is discarded locally; it cannot fence a different holder.
+        if (placement?.machineId !== current.id) continue;
+        const fenced = await authority.discardStoppedLocalWork({ userId, machineId: current.id, projectId: scope.projectId, spaceId: scope.workspaceId, expectedGeneration: scope.generation });
+        if (fenced.status === 'error') throw new Error(fenced.failure.message);
+      }
+      await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
+      await durableCatalog.finishMachineDiscard(current.id);
+    }
     return await catalog.putMachine({
       ...stopped, desiredState: 'offline', lifecycleRevision: Math.max(transition.lifecycleRevision, stopped.lifecycleRevision) + 1,
       operationId: null, error: null,
@@ -2525,7 +2561,7 @@ async function checkpointAndStopFleetMachine(env: Env, userId: string, catalog: 
   } catch (error) {
     let failure = error;
     let recovered = true;
-    if (preparationAttempted) {
+    if (preparationAttempted && !discardStopAttempted) {
       try {
         await provider.cancelReplacement(transition);
         observed = await provider.status(transition);
@@ -2536,7 +2572,7 @@ async function checkpointAndStopFleetMachine(env: Env, userId: string, catalog: 
       }
     }
     await catalog.putMachine({
-      ...(observed ?? current), state: recovered ? (observed ?? current).state : 'error', desiredState: 'online',
+      ...(observed ?? current), state: discardStopAttempted ? 'error' : recovered ? (observed ?? current).state : 'error', desiredState: discardStopAttempted ? 'offline' : 'online',
       lifecycleRevision: Math.max(transition.lifecycleRevision, observed?.lifecycleRevision ?? 0) + 1, operationId: null,
       error: failure instanceof Error ? failure.message : String(failure),
     });
@@ -2567,6 +2603,11 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
     const provider = machineProviderFor(env, userId, current);
     let stopping = false;
     try {
+      if (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).pendingMachineDiscard(current.id)) {
+        stopping = true;
+        await checkpointAndStopFleetMachine(env, userId, catalog, current);
+        continue;
+      }
       if (current.desiredState === 'removed') {
         await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
         await credentialVault(env, userId).removeManagedDevice(current.id);
@@ -2593,26 +2634,31 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
 }
 
 
-export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume'): Promise<FleetMachineDefinition>;
-export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'destroy'): Promise<{ machineId: string; removed: true }>;
-export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy'): Promise<FleetMachineDefinition | { machineId: string; removed: true }>;
-export async function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy'): Promise<FleetMachineDefinition | { machineId: string; removed: true }> {
+export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume', discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineDefinition>;
+export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'destroy', discardConfirmation?: MachineDiscardConfirmation): Promise<{ machineId: string; removed: true }>;
+export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy', discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineDefinition | { machineId: string; removed: true }>;
+export async function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy', discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineDefinition | { machineId: string; removed: true }> {
   if (userId !== env.ACCOUNT_ID) throw new Error('Machine belongs to another account');
   const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
   if (cloudImageOperationActive(await catalog.cloudImage(machineId))) throw new Error('Recover or cancel this machine’s cloud image operation before changing its lifecycle');
-  const existing = await catalog.getMachine(machineId);
+  let existing: FleetMachineDefinition | null = await catalog.getMachine(machineId);
   if (!existing) {
     if (action === 'destroy') return { machineId, removed: true };
     throw new Error('Machine does not exist');
   }
   if (action === 'resume') {
+    if (await catalog.pendingMachineDiscard(machineId)) throw new Error('Finish the confirmed local discard and provider-stop recovery before starting this machine');
     const provisioning = await catalog.resumeSandboxProvisioning(userId, machineId);
     if (provisioning) return provisioning;
   } else if (action === 'sleep' && await catalog.hasPendingSandbox(machineId)) {
     throw new Error('Finish sandbox provisioning before sleeping the machine');
   }
-  if (action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline') return existing;
-  if (action === 'sleep') return checkpointAndStopFleetMachine(env, userId, catalog, existing);
+  if (action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline' && !await catalog.pendingMachineDiscard(machineId)) return existing;
+  if (discardConfirmation && (discardConfirmation.machineId !== machineId || discardConfirmation.action !== action)) throw new Error('Discard confirmation does not match this machine operation');
+  if (action === 'sleep') return checkpointAndStopFleetMachine(env, userId, catalog, existing, undefined, action, discardConfirmation);
+  if (action === 'destroy' && existing.provider !== 'physical' && !await catalog.hasPendingSandbox(machineId)) {
+    existing = await checkpointAndStopFleetMachine(env, userId, catalog, existing, undefined, action, discardConfirmation);
+  }
   const desiredState = action === 'resume' ? 'online' : 'removed';
   if (action === 'destroy') await assertMachineHasNoOpenSpaces(env, userId, catalog, machineId);
   const transition = await catalog.putMachine({
@@ -2734,9 +2780,25 @@ async function routeAccountRpc(request: Request, env: Env): Promise<RoutedAccoun
   }
   const route = await handleAccountCloudRpc(request, env, userId);
   if (route.kind === 'response') return route;
-  // Work that names no live holder keeps its historical home: the first online machine.
-  const machine = route.holder ?? (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines())
-    .find((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
+  let machine = route.holder;
+  if (!machine) {
+    const available = (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines())
+      .filter((candidate) => candidate.state === 'online' && candidate.desiredState === 'online' && candidate.rpcEndpoint);
+    if (route.procedures.length === 1 && route.procedures[0] === 'project.create') {
+      const preferred = available.find((candidate) => candidate.id === settings.defaults.machineId);
+      const candidates = preferred ? [preferred, ...available.filter((candidate) => candidate !== preferred)] : available;
+      const releases = env.TENANT_RELEASES.getByName(userId);
+      for (const candidate of candidates) {
+        if ((await releases.machineExecutionAdmission(candidate.id)).state === 'ready') {
+          machine = candidate;
+          break;
+        }
+      }
+    } else {
+      // Existing workspace ownership and other machine operations keep their routing policy.
+      machine = available[0] ?? null;
+    }
+  }
   if (!machine) {
     return { response: Response.json(publicError('FLEET_OFFLINE', 'No account machine is available'), { status: 503 }), procedures: route.procedures };
   }
@@ -4042,7 +4104,9 @@ const worker = {
             case 'catalog.machine.sleep':
             case 'catalog.machine.resume':
             case 'catalog.machine.destroy':
-              value = await controlFleetMachine(env, body.userId, String(body.payload.machineId ?? ''), body.operation.slice('catalog.machine.'.length) as 'sleep' | 'resume' | 'destroy');
+              value = await controlFleetMachine(env, body.userId, String(body.payload.machineId ?? ''),
+                body.operation === 'catalog.machine.sleep' ? 'sleep' : body.operation === 'catalog.machine.resume' ? 'resume' : 'destroy',
+                body.payload.discardConfirmation === undefined ? undefined : machineDiscardConfirmationSchema.parse(body.payload.discardConfirmation));
               break;
             default: throw new Error('Unsupported catalog operation');
           }
@@ -4066,6 +4130,22 @@ const worker = {
         const authorityNamespace = env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>;
         const authority = authorityNamespace.get(authorityNamespace.idFromName(`${body.userId}:${spaceId}`));
         const common = { ...body.payload, machineId: body.machineId, projectId: String(body.payload.projectId ?? ''), spaceId };
+        if (body.operation === 'space.releaseUnpublishedSource') {
+          const projectAuthority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${body.userId}:${common.projectId}`);
+          const project = await projectAuthority.getProject();
+          const workspace = (await projectAuthority.listWorkspaces()).find(candidate => candidate.id === spaceId);
+          const sourceCommit = body.payload.sourceCommit;
+          const expectedGeneration = body.payload.expectedGeneration;
+          if (project?.role !== 'gitspace-source' || project.lifecycle !== 'cloud-only'
+            || spaceId !== project.id || typeof sourceCommit !== 'string' || !sourceCommit
+            || project.source?.commit !== sourceCommit || workspace?.sourceCommit !== sourceCommit
+            || typeof expectedGeneration !== 'number' || !Number.isSafeInteger(expectedGeneration)) {
+            throw new Error('Only the unchanged pinned source checkout can release its unpublished first placement');
+          }
+          const released = await authority.releaseUnpublishedSource({ projectId: common.projectId, spaceId, machineId: body.machineId, expectedGeneration });
+          if (released.status === 'error') return Response.json({ status: 'error', error: released.failure }, { status: 409, headers: { 'cache-control': 'no-store' } });
+          return Response.json(released, { headers: { 'cache-control': 'no-store' } });
+        }
         if (body.operation === 'space.bootstrap' || body.operation === 'space.beginOpen') {
           const projectAuthority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${body.userId}:${common.projectId}`);
           const project = await projectAuthority.getProject();
@@ -4074,6 +4154,15 @@ const worker = {
           const admitted = workspace?.lifecycle === 'active' || workspace?.lifecycle === 'provisioning';
           if (!project || project.lifecycle === 'archived' || project.lifecycle === 'deleting' || !admitted) {
             return Response.json(publicError('WORKSPACE_UNAVAILABLE', 'Only an active or provisioning workspace can be placed or opened'), { status: 409 });
+          }
+          if (body.operation === 'space.bootstrap' && project.role === 'gitspace-source' && project.lifecycle === 'cloud-only'
+            && spaceId === project.id && project.source?.commit && workspace?.sourceCommit === project.source.commit) {
+            const placement = await authority.get();
+            if (placement?.state === 'closed' && placement.publishedRevision === 0) {
+              const opened = await authority.bootstrapUnpublishedSource({ projectId: common.projectId, spaceId, machineId: body.machineId });
+              if (opened.status === 'error') return Response.json({ status: 'error', error: opened.failure }, { status: 409, headers: { 'cache-control': 'no-store' } });
+              return Response.json(opened, { headers: { 'cache-control': 'no-store' } });
+            }
           }
         }
         let result: SpaceAuthorityResult<unknown>;
@@ -4092,6 +4181,9 @@ const worker = {
         return Response.json({ status: 'ok', value: result.value }, { headers: { 'cache-control': 'no-store' } });
       } catch (error) {
         if (diagnostics) diagnostics.caughtError = true;
+        if (error instanceof MachineDiscardRequired) return Response.json({ status: 'error', error: {
+          _tag: error._tag, message: error.message, confirmation: error.confirmation, workspaces: error.workspaces,
+        } }, { status: 409, headers: { 'cache-control': 'no-store' } });
         const lifecycleFailure = environmentFailure(error);
         if (lifecycleFailure) return Response.json({ status: 'error', error: lifecycleFailure }, { status: 409 });
         if (error instanceof ProjectCronRevisionConflictError) {

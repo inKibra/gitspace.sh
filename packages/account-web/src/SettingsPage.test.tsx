@@ -25,6 +25,18 @@ it('keeps inference-owned runtime controls out of shared Advanced', () => {
 describe('SourceSettings', () => {
   const noop = async () => undefined;
 
+  it('distinguishes the answering Worker from a different platform record', () => {
+    const deployment = { ...deploymentStatusFixture, current: {
+      ...deploymentStatusFixture.current,
+      worker: { sha: 'answering-worker', version: 'answering-worker' },
+      platformWorker: { sha: 'platform-record', version: 'platform-record' },
+    } };
+    const html = renderToStaticMarkup(<SourceSettings deployment={deployment} onRevertDeployment={noop} saving={false} />);
+    expect(html).toContain('answering-worker');
+    expect(html).toContain('Platform record');
+    expect(html).toContain('platform-record');
+  });
+
 
   it('allows reset while any independently selected target remains', () => {
     const channel = { ...deploymentStatusFixture, desired: { worker: null, machine: null, frontend: null, updatedAt: deploymentStatusFixture.desired.updatedAt } };

@@ -101,6 +101,17 @@ async function tenant() {
 }
 
 describe('tenant releases', () => {
+  it('reports the answering Worker stamp separately from a different platform deployment record', async () => {
+    const { control } = await tenant();
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'platform-record' } })));
+    expect(await control('deploy.status', {})).toMatchObject({
+      current: {
+        worker: { sha: 'test-inference-worker', version: 'test-inference-worker' },
+        platformWorker: { sha: 'platform-record', version: 'platform-record' },
+      },
+    });
+  });
+
   it('rejects retired OMP staging, activation, and acknowledgements without changing the release', async () => {
     const { control } = await tenant();
     const input = stageInput('retired-target');
@@ -296,7 +307,10 @@ describe('tenant releases', () => {
 
     const status = deploymentStatusSchema.parse(await control('deploy.status', {}));
     expect(status.desired).toMatchObject({ worker: 'abc123', machine: 'abc123', frontend: 'abc123' });
-    expect(status.current).toEqual({ worker: { sha: null, version: null }, machines: {} });
+    expect(status.current).toEqual({
+      worker: { sha: 'test-inference-worker', version: 'test-inference-worker' },
+      platformWorker: { sha: null, version: null }, machines: {},
+    });
     expect(status.releases.map((release) => release.sha)).toEqual(['abc123']);
     expect(status.releases[0]!.status.worker).toBe('failed');
     expect(status.releases[0]!.error).toContain('HTTP 503');
@@ -421,15 +435,16 @@ describe('tenant releases', () => {
     await control('deploy.launch', { sha: 'machine333', targets: ['machine'] });
     const status = deploymentStatusSchema.parse(await control('deploy.status', {}, platform));
     expect(status.desired).toMatchObject({ worker: 'bad222', machine: 'machine333', frontend: 'bad222' });
-    expect(status.current.worker).toEqual({ sha: 'good111', version: 'good111' });
+    expect(status.current.worker).toEqual({ sha: 'test-inference-worker', version: 'test-inference-worker' });
+    expect(status.current.platformWorker).toEqual({ sha: 'good111', version: 'good111' });
 
     const reverted = deploymentStatusSchema.parse(await control('deploy.revert', {}, platform));
     expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
-    expect(reverted.current.worker).toEqual({ sha: null, version: 'channel:1' });
+    expect(reverted.current.platformWorker).toEqual({ sha: null, version: 'channel:1' });
     expect(reverts).toEqual([{ accountId: userId, to: 'channel' }]);
     serving = 'channel';
     const unversionedChannel = deploymentStatusSchema.parse(await control('deploy.status', {}, platform));
-    expect(unversionedChannel.current.worker).toEqual({ sha: null, version: 'channel' });
+    expect(unversionedChannel.current.platformWorker).toEqual({ sha: null, version: 'channel' });
   });
 
   it('deploys and reverts only the bound tenant despite caller-supplied routing', async () => {

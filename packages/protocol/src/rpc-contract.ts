@@ -76,8 +76,10 @@ import {
   McpConnectionViewCodec,
   ProjectMcpGrantViewCodec,
 } from './mcp-contract.js';
+import { MachineDiscardConfirmationCodec, MachineDiscardRequiredCodec } from './machine-discard.js';
 
 export const rpcErrors = defineErrors('gitspace', {
+  machineDiscardRequired: { data: MachineDiscardRequiredCodec, httpStatus: 409 },
   projectNotFound: {
     data: wire.object({ projectId: wire.string }),
     httpStatus: 404,
@@ -186,6 +188,7 @@ export const ProjectOperationViewCodec = wire.object({
   workspaceId: wire.nullable(wire.string),
   kind: wire.string,
   state: wire.enum(['queued', 'claimed', 'running', 'blocked', 'failed', 'succeeded', 'canceled']),
+  targetMachines: wire.array(wire.string),
   error: wire.nullable(wire.string),
   revision: wire.number,
   createdAt: wire.date,
@@ -835,9 +838,9 @@ export const updateMachineNotesContract = gitspaceRpc
 
 export const sleepMachineContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ machineId: wire.string }))
+  .input(wire.object({ machineId: wire.string, discardConfirmation: wire.optional(MachineDiscardConfirmationCodec) }))
   .output(FleetMachineViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ MachineDiscardRequired: rpcErrors.machineDiscardRequired, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const resumeMachineContract = gitspaceRpc
@@ -849,9 +852,9 @@ export const resumeMachineContract = gitspaceRpc
 
 export const destroyMachineContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ machineId: wire.string }))
+  .input(wire.object({ machineId: wire.string, discardConfirmation: wire.optional(MachineDiscardConfirmationCodec) }))
   .output(wire.object({ machineId: wire.string, removed: wire.boolean }))
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ MachineDiscardRequired: rpcErrors.machineDiscardRequired, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const getGitIdentityContract = gitspaceRpc
@@ -2119,6 +2122,7 @@ export const DeploymentStatusWireCodec = wire.object({
   desired: wire.object({ worker: wire.nullable(wire.string), machine: wire.nullable(wire.string), frontend: wire.nullable(wire.string), updatedAt: wire.string }),
   current: wire.object({
     worker: wire.object({ sha: wire.nullable(wire.string), version: wire.nullable(wire.string) }),
+    platformWorker: wire.optional(wire.object({ sha: wire.nullable(wire.string), version: wire.nullable(wire.string) })),
     machines: wire.record(wire.object({ sha: wire.nullable(wire.string), generation: wire.nullable(wire.string) })),
   }),
   releases: wire.array(ReleaseRecordWireCodec),

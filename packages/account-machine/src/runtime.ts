@@ -57,6 +57,8 @@ import { z } from 'zod';
 import { createMachineExecutor, type MachineExecutorRuntime } from './runtime-executor.js';
 import { machineOperationalTools } from './runtime-operations.js';
 import { RuntimeActionResultSchema, RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
+import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
+import { MachineDiscardGate, localWorkDigest } from './machine-discard.js';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -707,8 +709,8 @@ export async function startMachineRuntime() {
       return authority.putMachineDefinition({ ...current, notes });
     },
     createSandbox: (image) => authority.createSandboxMachine(image),
-    controlMachine: (action, targetMachineId) => action === 'sleep' ? authority.sleepMachine(targetMachineId) : authority.resumeMachine(targetMachineId),
-    destroyMachine: (targetMachineId) => authority.destroyMachine(targetMachineId),
+    controlMachine: (action, targetMachineId, confirmation) => action === 'sleep' ? authority.sleepMachine(targetMachineId, confirmation) : authority.resumeMachine(targetMachineId),
+    destroyMachine: (targetMachineId, confirmation) => authority.destroyMachine(targetMachineId, confirmation),
     settings,
     inference: authority,
     devices,
@@ -731,12 +733,47 @@ export async function startMachineRuntime() {
   let preparingReplacement = !startupCommitted;
   let activeRpcRequests = 0;
   let replacementControl: Promise<unknown> = Promise.resolve();
-  const prepareReplacement = async () => {
+  const discardGate = new MachineDiscardGate(machineId);
+  const prepareReplacement = async (action?: 'sleep' | 'destroy', confirmation?: MachineDiscardConfirmation) => {
     preparingReplacement = true;
     releases.stop();
     while (activeRpcRequests > 0) await Bun.sleep(25);
+    const captureDiscard = async () => {
+      if (!action) throw new Error('Discard is available only for an explicit Stop or Destroy operation');
+      if (database.listSpaceCleanupJobs().some(job => job.state === 'prepared')) throw new Error('Unresolved checkpoint outcomes prevent local discard');
+      const directory = await listActiveCloudSpaces(authority);
+      const workspaces: MachineDiscardScope[] = [];
+      const roots: string[] = [];
+      for (const project of database.listProjects()) for (const space of database.listSpaces(project.id)) {
+        if (!existsSync(join(space.rootPath, '.git'))) continue;
+        if (sessions.list(space.id).length > 0) await sessions.quiesceSpace(space.id, true);
+        await terminals.stopOwned(space.id);
+        roots.push(space.rootPath);
+        const cloud = directory.find(item => item.workspace.id === space.id)?.placement;
+        workspaces.push({ projectId: space.projectId, workspaceId: space.id, generation: cloud?.machineId === machineId ? cloud.generation : space.generation, reason: 'unpublished-local-work' });
+      }
+      await serviceManager.dispose();
+      await canonicalSessionWriter.flush();
+      await projectEventWriter.flush();
+      const digest = await localWorkDigest(roots, directory.map(item => ({ workspace: item.workspace.id, placement: item.placement })));
+      if (confirmation) {
+        discardGate.require(action, digest, workspaces, confirmation);
+        return { prepared: true, machineId, discard: workspaces };
+      }
+      throw discardGate.require(action, digest, workspaces);
+    };
+    if (confirmation) return captureDiscard();
+    try {
     if (database.listSpaceCleanupJobs().some((job) => job.state === 'prepared')) {
       throw new Error('Unresolved checkpoint outcomes prevent provider replacement');
+    }
+    for (const project of database.listProjects()) for (const space of database.listSpaces(project.id)) {
+      if (sessions.list(space.id).length > 0) await sessions.quiesceSpace(space.id, true);
+      await terminals.stopOwned(space.id);
+    }
+    await serviceManager.dispose();
+    for (const project of database.listProjects()) {
+      await projectLifecycle.releasePristineSource(project.id);
     }
     const directory = await listActiveCloudSpaces(authority);
     const placements = new Map(directory.map(({ workspace, placement }) => [workspace.id, placement]));
@@ -778,13 +815,18 @@ export async function startMachineRuntime() {
       checkpoints.push({ spaceId: workspace.id, generation: cloud.generation, checkpointRevision: cloud.publishedRevision });
     }
     return { prepared: true, machineId, spaces: checkpoints };
+    } catch (error) {
+      if (action && !database.listSpaceCleanupJobs().some(job => job.state === 'prepared')) return captureDiscard();
+      throw error;
+    }
   };
   const cancelReplacement = async () => {
     // Restart checkpoints outlive this process, including a partially failed startup.
     for (const { workspace, placement: cloud } of await listActiveCloudSpaces(authority)) {
       if (cloud?.state === 'closed' && cloud.resumeMachineId === machineId) {
         const local = database.getSpace(workspace.id);
-        if (local && existsSync(join(local.rootPath, '.git'))) throw new Error(`Space ${workspace.id} retains an unreconciled checkout`);
+        // Retained stale work blocks that workspace, not the whole runtime.
+        if (local && existsSync(join(local.rootPath, '.git'))) continue;
         await spaces.open(workspace.id, cloud.generation, { resumeOnMachineRestart: true });
       } else if (reconcileOpenSpaceProjection(database, workspace.id, machineId, cloud)) {
         sessions.resumeSpace(workspace.id);
@@ -837,10 +879,19 @@ export async function startMachineRuntime() {
         return Response.json({ stopMode });
       }
       if (url.pathname === '/__control/prepare-replacement' || url.pathname === '/__control/cancel-replacement') {
-        const operation = replacementControl.then(async () => url.pathname === '/__control/prepare-replacement' ? prepareReplacement() : cancelReplacement());
+        const controlSchema = z.object({ action: z.enum(['sleep', 'destroy']).optional(), discardConfirmation: machineDiscardConfirmationSchema.optional() });
+        const payload = controlSchema.parse(url.pathname === '/__control/prepare-replacement' ? await request.json().catch(() => ({})) : {});
+        const operation = replacementControl.then(async () => url.pathname === '/__control/prepare-replacement' ? prepareReplacement(payload.action, payload.discardConfirmation) : cancelReplacement());
         replacementControl = operation.catch(() => undefined);
         try { return Response.json(await operation); }
-        catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
+        catch (error) {
+          // A failed prepare is not a durable admission barrier. Provider cancellation
+          // remains idempotent and can retry partially completed checkpoint recovery.
+          try { await cancelReplacement(); } catch { /* Keep uncertain recovery fenced. */ }
+          return Response.json({ error: error instanceof MachineDiscardRequired
+            ? { _tag: error._tag, message: error.message, confirmation: error.confirmation, workspaces: error.workspaces }
+            : error instanceof Error ? error.message : String(error) }, { status: 409 });
+        }
       }
       if (preparingReplacement) return Response.json({ error: 'Provider replacement preparation is active' }, { status: 409 });
       if (url.pathname === '/__control/retire') {

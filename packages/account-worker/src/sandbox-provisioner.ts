@@ -1,9 +1,13 @@
 import type { FleetMachineDefinition } from './fleet-catalog.js';
 import { tenantProvider } from './tenant-platform.js';
+import { MachineDiscardRequired, machineDiscardRequiredSchema, machineReplacementPreparedSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
+import { z } from 'zod';
 
 export interface SandboxProvisionerService { fetch(request: Request): Promise<Response> }
 
 function providerFailure(error: unknown, fallback: string): Error {
+  const discard = machineDiscardRequiredSchema.safeParse(error);
+  if (discard.success) return new MachineDiscardRequired(discard.data);
   if (typeof error === 'string') return new Error(error);
   if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return new Error(error.message);
   return new Error(fallback);
@@ -66,14 +70,22 @@ export async function controlCloudflareSandboxReplacement(input: {
   machineId: string;
   action: 'prepare-replacement' | 'cancel-replacement';
   service?: SandboxProvisionerService;
-}): Promise<void> {
+  machineAction?: 'sleep' | 'destroy';
+  discardConfirmation?: MachineDiscardConfirmation;
+}): Promise<{ discard?: MachineDiscardScope[] }> {
   const service = input.service ?? tenantProvider(input.env);
   if (!service) throw new Error('Cloudflare Sandbox provisioner binding is unavailable');
   const response = await service.fetch(new Request(`https://sandbox.internal/v1/sandboxes/${encodeURIComponent(input.machineId)}/${input.action}`, {
     method: 'POST',
-    headers: { 'x-gitspace-user-id': input.userId },
+    headers: { 'x-gitspace-user-id': input.userId, 'content-type': 'application/json' },
+    body: JSON.stringify({ action: input.machineAction, discardConfirmation: input.discardConfirmation }),
   }));
-  const payload = await response.json() as { prepared?: unknown; error?: unknown };
-  if (!response.ok) throw providerFailure(payload.error, `Cloudflare Sandbox ${input.action} failed with ${response.status}`);
-  if (payload.prepared !== (input.action === 'prepare-replacement')) throw new Error(`Cloudflare Sandbox ${input.action} returned no acknowledgement`);
+  const payload: unknown = await response.json();
+  if (!response.ok) {
+    const failure = z.object({ error: z.unknown() }).safeParse(payload);
+    throw providerFailure(failure.success ? failure.data.error : payload, `Cloudflare Sandbox ${input.action} failed with ${response.status}`);
+  }
+  const receipt = machineReplacementPreparedSchema.parse(payload);
+  if (receipt.prepared !== (input.action === 'prepare-replacement')) throw new Error(`Cloudflare Sandbox ${input.action} returned no acknowledgement`);
+  return receipt;
 }

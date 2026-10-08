@@ -5,6 +5,8 @@ import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID } from '@gitspac
 import { ProjectAuthorityDO, UserProjectIndexDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
+import { requireRuntimeIdentity } from '../src/runtime-access.js';
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 
 const projectEnv = env as typeof env & {
   PROJECT_AUTHORITY: DurableObjectNamespace<ProjectAuthorityDO>;
@@ -293,6 +295,85 @@ describe('ProjectAuthorityDO', () => {
     }))).rejects.toThrow();
     expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listCanonicalSessions()))
       .toMatchObject([{ id: 'session-a', workspaceId: 'workspace-c', revision: 1 }]);
+  });
+
+  it.each([false, true])('scopes canonical conversation 1 to each space across cold starts (legacy=%s)', async legacy => {
+    const projectId = `session-scope-${legacy}`;
+    const stub = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+    await stub.bootstrap({ id: projectId, name: 'Session scopes', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+    const spaces = [projectId, `${projectId}-a`, `${projectId}-b`];
+    for (const id of spaces.slice(1)) {
+      await stub.putWorkspace({ id, projectId, kind: 'worktree', name: id, branch: id, phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    }
+    await runInDurableObject(stub, async (authority, state) => {
+      if (legacy) {
+        state.storage.sql.exec(`DROP TABLE canonical_sessions;
+          CREATE TABLE canonical_sessions(
+            session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL UNIQUE, omp_session_id TEXT NOT NULL UNIQUE,
+            machine_id TEXT, state TEXT NOT NULL, session_object_key TEXT, session_object_hash TEXT,
+            session_format_version TEXT, activity_json TEXT NOT NULL, health_json TEXT NOT NULL,
+            revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );`);
+      }
+      const initial = authority.putCanonicalSession({
+        id: `session-${projectId}`, workspaceId: projectId, ompSessionId: '1', machineId: 'machine-a',
+        state: 'active', sessionObjectKey: 'retained/session.jsonl', sessionObjectHash: `sha256:${'b'.repeat(64)}`,
+        sessionFormatVersion: 'omp-jsonl-1', activity: { active: true, reasons: [{ kind: 'turn' }] },
+        health: { revision: 3, issues: {} }, expectedRevision: 0,
+      });
+      const retained = authority.putCanonicalSession({ ...initial, id: `session-${projectId}-a`, workspaceId: `${projectId}-a`, ompSessionId: '2', machineId: null, state: 'closed', expectedRevision: 0 });
+      await authority.alarm();
+      let reopened = new ProjectAuthorityDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      expect(reopened.getCanonicalSession(initial.id)).toEqual(initial);
+      expect(reopened.getCanonicalSession(retained.id)).toEqual(retained);
+      for (const workspaceId of spaces.slice(1)) {
+        const existing = reopened.getCanonicalSession(`session-${workspaceId}`);
+        reopened.putCanonicalSession({ ...initial, id: `session-${workspaceId}`, workspaceId, expectedRevision: existing?.revision ?? 0 });
+      }
+      const beforeReopen = reopened.listCanonicalSessions();
+      expect(beforeReopen.map(session => session.workspaceId).sort()).toEqual([...spaces].sort());
+      expect(beforeReopen.map(session => session.ompSessionId)).toEqual(['1', '1', '1']);
+      expect(() => reopened.putCanonicalSession({ ...initial, id: 'duplicate-space', ompSessionId: '2', expectedRevision: 0 })).toThrow();
+      await reopened.alarm();
+      reopened = new ProjectAuthorityDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      expect(reopened.listCanonicalSessions()).toEqual(beforeReopen);
+      const updated = reopened.putCanonicalSession({ ...initial, state: 'closed', expectedRevision: initial.revision });
+      expect(updated).toEqual({ ...initial, state: 'closed', revision: initial.revision + 1, updatedAt: updated.updatedAt });
+      expect(() => reopened.putCanonicalSession({ ...initial, id: 'duplicate-after-reopen', ompSessionId: '3', expectedRevision: 0 })).toThrow();
+      await reopened.alarm();
+    });
+  });
+
+  it.each(['cloud-only', 'provisioning', 'active', 'archiving', 'archived', 'restoring', 'failed', 'deleting'] as const)(
+    'bounds runtime writes by project lifecycle %s', async lifecycle => {
+      const projectId = `runtime-project-${lifecycle}`;
+      const stub = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+      const project = await stub.bootstrap({ id: projectId, name: 'Runtime access', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+      await stub.setProjectLifecycle(project.revision, lifecycle);
+      const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId });
+      if (['cloud-only', 'provisioning', 'active'].includes(lifecycle)) {
+        expect((await requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, true)).project.lifecycle).toBe(lifecycle);
+      } else {
+        await expect(requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, true)).rejects.toThrow();
+      }
+      if (lifecycle === 'deleting') await expect(requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, false)).rejects.toThrow();
+      else expect((await requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, false)).project.lifecycle).toBe(lifecycle);
+    },
+  );
+
+  it.each(['archiving', 'archived', 'deleting'] as const)('keeps %s workspace runtime writes disabled', async lifecycle => {
+    const projectId = `runtime-workspace-${lifecycle}`;
+    const stub = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+    const project = await stub.bootstrap({ id: projectId, name: 'Runtime workspace', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+    await stub.setProjectLifecycle(project.revision, 'active');
+    const workspaceId = `${projectId}-branch`;
+    await stub.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: workspaceId, branch: 'feature', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle, goalId: null, expectedRevision: 0 });
+    const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId });
+    await expect(requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, true)).rejects.toThrow();
+    if (lifecycle === 'deleting') await expect(requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, false)).rejects.toThrow();
+    else expect((await requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, false)).workspace?.lifecycle).toBe(lifecycle);
   });
 
   it('advances canonical artifact manifests without accepting stale writers', async () => {

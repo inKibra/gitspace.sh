@@ -55,6 +55,12 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
     return record?.projectId === projectId ? record : null;
   }
 
+  async releaseUnpublishedSource(input: { projectId: string; spaceId: string; expectedGeneration: number; sourceCommit: string }) {
+    const current = this.spaces.get(input.spaceId)!;
+    expect(current).toMatchObject({ projectId: input.projectId, generation: input.expectedGeneration, publishedRevision: 0, state: 'open' });
+    this.spaces.set(input.spaceId, { ...current, state: 'closed', machineId: null, generation: current.generation + 1, revision: current.revision + 1 });
+  }
+
   async bootstrapInspector(input: { projectId: string; spaceId: string }) {
     this.inspectors.set(input.spaceId, input);
     return input;
@@ -696,6 +702,84 @@ describe('ProjectLifecycleManager', () => {
     authority.projects.set('source', { ...authority.projects.get('source')!, repositoryReference: source });
     expect((await manager.openProject('source')).project.lifecycle).toBe('active');
     database.close();
+  });
+
+  it.each(['pristine', 'edited', 'committed'] as const)('failed source publication releases only the proven unchanged clone: %s', async (scenario) => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-source-publication-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    const commit = git(source, 'rev-parse', 'HEAD');
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    authority.projects.set('source', {
+      id: 'source', name: 'GitSpace', lifecycle: 'cloud-only', repositoryReference: source, baseBranch: 'trunk',
+      role: 'gitspace-source', source: { release: commit, branch: 'trunk', commit },
+      revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
+    });
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), async () => {
+      const base = database.getBaseSpace('source')!;
+      if (scenario !== 'pristine') {
+        writeFileSync(join(base.rootPath, 'local.txt'), 'unpublished local work\n');
+        if (scenario === 'committed') {
+          git(base.rootPath, 'add', 'local.txt');
+          git(base.rootPath, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-m', 'local work');
+        }
+      }
+      throw new Error('Checkpoint upload failed');
+    });
+    try {
+      await expect(manager.openProject('source')).rejects.toThrow('Checkpoint upload failed');
+      expect(await authority.getProject('source')).toMatchObject({ lifecycle: 'cloud-only', role: 'gitspace-source' });
+      if (scenario === 'pristine') {
+        expect(existsSync(join(root, 'spaces', 'source'))).toBe(false);
+        expect(database.getBaseSpace('source')).toBeNull();
+        expect((await authority.getSpace('source', 'source'))?.machineId).not.toBe('machine-a');
+      } else {
+        const retained = database.getBaseSpace('source')!;
+        expect(readFileSync(join(retained.rootPath, 'local.txt'), 'utf8')).toBe('unpublished local work\n');
+        expect(await authority.getSpace('source', 'source')).toMatchObject({ state: 'open', machineId: 'machine-a' });
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each(['published-tags', 'release-ack-lost', 'local-tag', 'ignored-file', 'local-commit', 'different-holder'] as const)('recovers a previously stranded source clone without guessing about %s', async scenario => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-stranded-source-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    git(source, 'tag', 'published-release');
+    const commit = git(source, 'rev-parse', 'HEAD');
+    const managedRoot = join(root, 'spaces');
+    const repositoryPath = join(managedRoot, 'source', 'base');
+    mkdirSync(join(managedRoot, 'source'), { recursive: true });
+    git(root, 'clone', source, repositoryPath);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    authority.projects.set('source', {
+      id: 'source', name: 'GitSpace', lifecycle: 'cloud-only', repositoryReference: source, baseBranch: 'trunk',
+      role: 'gitspace-source', source: { release: commit, branch: 'trunk', commit },
+      revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
+    });
+    expect(database.createProject({ id: 'source', name: 'GitSpace', repositoryPath, baseBranch: 'trunk', repositoryReference: source }).status).toBe('ok');
+    expect(database.possessSpace('source', 'machine-a', repositoryPath).status).toBe('ok');
+    await authority.bootstrap({ projectId: 'source', spaceId: 'source' });
+    if (scenario === 'local-tag') git(repositoryPath, 'tag', 'private-tag');
+    if (scenario === 'ignored-file') {
+      writeFileSync(join(repositoryPath, '.git', 'info', 'exclude'), 'private.txt\n');
+      writeFileSync(join(repositoryPath, 'private.txt'), 'private ignored work\n');
+    }
+    if (scenario === 'local-commit') git(repositoryPath, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '--allow-empty', '-m', 'private commit');
+    if (scenario === 'different-holder') authority.spaces.set('source', { ...authority.spaces.get('source')!, machineId: 'machine-b', generation: 2 });
+    if (scenario === 'release-ack-lost') authority.spaces.set('source', { ...authority.spaces.get('source')!, state: 'closed', machineId: null, generation: 2 });
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', managedRoot);
+    try {
+      const pristine = scenario === 'published-tags' || scenario === 'release-ack-lost';
+      expect(await manager.releasePristineSource('source')).toBe(pristine);
+      expect(existsSync(repositoryPath)).toBe(!pristine);
+      expect(authority.projects.get('source')).toMatchObject({ lifecycle: 'cloud-only', source: { commit } });
+      expect(authority.spaces.get('source')?.machineId).toBe(pristine ? null : scenario === 'different-holder' ? 'machine-b' : 'machine-a');
+    } finally { database.close(); }
   });
 
   it('creates empty projects and sourced workspaces through durable operations, then permanently deletes archived state', async () => {

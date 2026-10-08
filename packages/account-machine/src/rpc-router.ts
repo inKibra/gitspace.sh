@@ -1,6 +1,7 @@
 import { inspectorReadArtifactPageContract, inspectorReadResourcePageContract, inspectorRepositoryTreePageContract } from '@gitspace/protocol/rpc-contract';
 import { snapshotPage } from '@gitspace/protocol/snapshot-page';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
+import { MachineDiscardRequired, type MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
 import {
   inferenceListContract,
   inferenceCreateContract,
@@ -421,8 +422,8 @@ export interface GitSpaceRpcRouterOptions {
   checkpointTranscriptContent?(projectId: string, spaceId: string, request: TranscriptContentRequest): Promise<TranscriptContentPage | null>;
   createSandbox?(image?: CloudImageSelection): Promise<FleetMachineRpcView>;
   updateMachine?(machineId: string, notes: string): Promise<FleetMachineRpcView>;
-  controlMachine?(action: 'sleep' | 'resume', machineId: string): Promise<FleetMachineRpcView>;
-  destroyMachine?(machineId: string): Promise<{ machineId: string; removed: boolean }>;
+  controlMachine?(action: 'sleep' | 'resume', machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineRpcView>;
+  destroyMachine?(machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<{ machineId: string; removed: boolean }>;
   settings?: CanonicalSettingsCoordinator;
   inference?: Pick<CloudSpaceCheckpointAuthority, 'listInferenceProfiles' | 'createInferenceProfile' | 'updateInferenceProfile' | 'deleteInferenceProfile' | 'assignInferenceProfile'>;
   devices?: DeviceRegistry;
@@ -510,6 +511,7 @@ function projectOperationView(operation: CloudProjectOperation) {
     workspaceId: operation.workspaceId,
     kind: operation.kind,
     state: operation.state,
+    targetMachines: operation.targetMachines,
     error: operation.error,
     revision: operation.revision,
     createdAt: new Date(operation.createdAt),
@@ -1296,8 +1298,11 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
 
   const sleepMachine = server.implement(sleepMachineContract).handler(async ({ input, errors }) => {
     if (!options.controlMachine) return err(errors.OperationFailed({ operation: 'sleep machine', message: 'Machine lifecycle is unavailable' }));
-    try { return ok(await options.controlMachine('sleep', input.machineId)); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'sleep machine', message: error instanceof Error ? error.message : 'Unable to sleep machine' })); }
+    try { return ok(await options.controlMachine('sleep', input.machineId, input.discardConfirmation)); }
+    catch (error) {
+      if (error instanceof MachineDiscardRequired) return err(errors.MachineDiscardRequired({ message: error.message, confirmation: error.confirmation, workspaces: error.workspaces }));
+      return err(errors.OperationFailed({ operation: 'sleep machine', message: error instanceof Error ? error.message : 'Unable to sleep machine' }));
+    }
   });
   const resumeMachine = server.implement(resumeMachineContract).handler(async ({ input, errors }) => {
     if (!options.controlMachine) return err(errors.OperationFailed({ operation: 'resume machine', message: 'Machine lifecycle is unavailable' }));
@@ -1306,8 +1311,11 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const destroyMachine = server.implement(destroyMachineContract).handler(async ({ input, errors }) => {
     if (!options.destroyMachine) return err(errors.OperationFailed({ operation: 'destroy machine', message: 'Machine lifecycle is unavailable' }));
-    try { return ok(await options.destroyMachine(input.machineId)); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'destroy machine', message: error instanceof Error ? error.message : 'Unable to destroy machine' })); }
+    try { return ok(await options.destroyMachine(input.machineId, input.discardConfirmation)); }
+    catch (error) {
+      if (error instanceof MachineDiscardRequired) return err(errors.MachineDiscardRequired({ message: error.message, confirmation: error.confirmation, workspaces: error.workspaces }));
+      return err(errors.OperationFailed({ operation: 'destroy machine', message: error instanceof Error ? error.message : 'Unable to destroy machine' }));
+    }
   });
 
   const promptSession = server.implement(promptSessionContract).handler(async ({ input, errors }) => {

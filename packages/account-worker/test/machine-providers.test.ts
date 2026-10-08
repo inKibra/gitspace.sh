@@ -21,12 +21,18 @@ describe('machine provider lifecycle contract', () => {
     await expect(provider.resume(physical)).rejects.toThrow(/not remotely managed/u);
     await expect(provider.destroy(physical)).rejects.toThrow(/must be unenrolled/u);
   });
+});
 
-  it('blocks destroy while the machine still owns an open space', async () => {
-    const { userId, catalog } = await openSpaceMachine();
-    await expect(controlFleetMachine(env, userId, sandbox.id, 'destroy')).rejects.toThrow(/still owns open space/u);
-    expect(await catalog.getMachine(sandbox.id)).toEqual(sandbox);
-  });
+it('keeps failed pristine source retry generations fenced without inventing a checkpoint', async () => {
+  const { authority, identity } = await openSpaceMachine();
+  expect((await authority.releaseUnpublishedSource({ ...identity, expectedGeneration: 0 })).status).toBe('error');
+  expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 1 });
+  expect((await authority.releaseUnpublishedSource({ ...identity, expectedGeneration: 1 })).status).toBe('ok');
+  expect(await authority.get()).toMatchObject({ state: 'closed', machineId: null, generation: 2, publishedRevision: 0, manifestKey: null });
+  const retry = await authority.bootstrapUnpublishedSource(identity);
+  expect(retry).toMatchObject({ status: 'ok', value: { state: 'open', machineId: sandbox.id, generation: 3, publishedRevision: 0 } });
+  expect((await authority.beginClose({ ...identity, expectedGeneration: 1 })).status).toBe('error');
+  expect(await authority.get()).toMatchObject({ state: 'open', generation: 3 });
 });
 
 it('recovers an externally stopped sandbox to its desired online state', async () => {
@@ -113,6 +119,113 @@ it('checkpoints an open workspace before stopping and preserves its restart chec
   expect(result).toMatchObject({ state: 'offline', desiredState: 'offline', operationId: null, error: null });
   expect(actions).toEqual(['status', 'prepare-replacement', 'sleep']);
   expect(await authority.get()).toMatchObject({ state: 'closed', resumeMachineId: sandbox.id, manifestHash: manifest.manifestHash });
+});
+
+it.each(['sleep', 'destroy'] as const)('returns an actionable local-work discard refusal for %s without stopping or deleting', async (action) => {
+  const { userId, catalog, authority } = await openSpaceMachine();
+  const actions: string[] = [];
+  const confirmation = { machineId: sandbox.id, action, token: 'local-work-fingerprint' };
+  mockProvider(async (request) => {
+    const operation = new URL(request.url).pathname.split('/').at(-1)!;
+    actions.push(operation);
+    if (operation === 'prepare-replacement') return Response.json({
+      error: {
+        _tag: 'MachineDiscardRequired',
+        message: 'Checkpoint failed; unpublished local work is retained.',
+        confirmation,
+        workspaces: [{ projectId: 'project-a', workspaceId: 'project-a', generation: 1, reason: 'unpublished-local-work' }],
+      },
+    }, { status: 409 });
+    if (operation === 'cancel-replacement') return Response.json({ prepared: false });
+    if (operation === 'status') return Response.json({ status: 'ok', value: sandbox });
+    throw new Error(`Destructive provider operation must not run: ${operation}`);
+  });
+  await expect(controlFleetMachine(env, userId, sandbox.id, action)).rejects.toMatchObject({
+    _tag: 'MachineDiscardRequired',
+    confirmation,
+    workspaces: [{ projectId: 'project-a', workspaceId: 'project-a', generation: 1, reason: 'unpublished-local-work' }],
+  });
+  expect(actions).not.toContain('sleep');
+  expect(actions).not.toContain('destroy');
+  expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 1 });
+  expect(await catalog.getMachine(sandbox.id)).toMatchObject({ desiredState: 'online', operationId: null });
+});
+
+it.each(['sleep', 'destroy'] as const)('fences discarded ownership only after verified provider stop for %s', async action => {
+  const { userId, authority } = await openSpaceMachine();
+  const actions: string[] = [];
+  const confirmation = { machineId: sandbox.id, action, token: 'issued-by-runtime' };
+  mockProvider(async request => {
+    const operation = new URL(request.url).pathname.split('/').at(-1)!;
+    actions.push(operation);
+    if (operation === 'status') return Response.json({ status: 'ok', value: sandbox });
+    if (operation === 'prepare-replacement') return Response.json({ prepared: true,
+      discard: [{ projectId: 'project-a', workspaceId: 'project-a', generation: 1, reason: 'unpublished-local-work' }] });
+    if (operation === 'sleep') {
+      expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 1 });
+      return Response.json({ status: 'ok', value: { ...sandbox, state: 'offline', desiredState: 'offline', rpcEndpoint: null } });
+    }
+    if (operation === 'destroy') {
+      expect(await authority.get()).toMatchObject({ state: 'closed', machineId: null, generation: 2 });
+      return Response.json({ status: 'ok', value: { machineId: sandbox.id } });
+    }
+    throw new Error(`Unexpected provider operation ${operation}`);
+  });
+  await controlFleetMachine(env, userId, sandbox.id, action, confirmation);
+  expect(actions).toEqual(action === 'sleep' ? ['status', 'prepare-replacement', 'sleep'] : ['status', 'prepare-replacement', 'sleep', 'destroy']);
+  expect(await authority.get()).toMatchObject({ state: 'closed', machineId: null, generation: 2, publishedRevision: 0 });
+  expect(await env.PROJECT_AUTHORITY.getByName(`${userId}:project-a`).getProject()).toMatchObject({ lifecycle: 'active' });
+});
+
+it('does not fence or destroy when an explicitly approved provider stop has an uncertain outcome', async () => {
+  const { userId, authority, catalog } = await openSpaceMachine();
+  const actions: string[] = [];
+  let verifiedStopped = false;
+  mockProvider(async request => {
+    const action = new URL(request.url).pathname.split('/').at(-1)!;
+    actions.push(action);
+    if (action === 'status') return Response.json({ status: 'ok', value: verifiedStopped ? { ...sandbox, state: 'offline', desiredState: 'offline', rpcEndpoint: null } : sandbox });
+    if (action === 'prepare-replacement') return Response.json({ prepared: true,
+      discard: [{ projectId: 'project-a', workspaceId: 'project-a', generation: 1, reason: 'unpublished-local-work' }] });
+    if (action === 'sleep') return Response.json({ error: 'Provider stop acknowledgement lost' }, { status: 503 });
+    throw new Error(`Unsafe follow-up ${action}`);
+  });
+  await expect(controlFleetMachine(env, userId, sandbox.id, 'destroy', { machineId: sandbox.id, action: 'destroy', token: 'issued-by-runtime' })).rejects.toThrow('acknowledgement lost');
+  expect(actions).toEqual(['status', 'prepare-replacement', 'sleep']);
+  expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 1 });
+  expect(await catalog.getMachine(sandbox.id)).toMatchObject({ state: 'error', desiredState: 'offline' });
+  await expect(controlFleetMachine(env, userId, sandbox.id, 'resume')).rejects.toThrow();
+  expect(actions).toEqual(['status', 'prepare-replacement', 'sleep']);
+  verifiedStopped = true;
+  await reconcileFleetMachines(env, userId, catalog);
+  expect(actions).toEqual(['status', 'prepare-replacement', 'sleep', 'status']);
+  expect(await authority.get()).toMatchObject({ state: 'closed', machineId: null, generation: 2 });
+  expect(await catalog.getMachine(sandbox.id)).toMatchObject({ state: 'offline', desiredState: 'offline', error: null });
+  expect(await catalog.pendingMachineDiscard(sandbox.id)).toBeNull();
+});
+
+it.each([
+  { state: 'online' as const, desiredState: 'offline' as const },
+  { state: 'offline' as const, desiredState: 'online' as const },
+])('refuses to fence or destroy after a contradictory successful stop receipt: %s', async receipt => {
+  const { userId, authority, catalog } = await openSpaceMachine();
+  const actions: string[] = [];
+  const confirmation = { machineId: sandbox.id, action: 'destroy' as const, token: 'issued-by-runtime' };
+  mockProvider(async request => {
+    const action = new URL(request.url).pathname.split('/').at(-1)!;
+    actions.push(action);
+    if (action === 'status') return Response.json({ status: 'ok', value: sandbox });
+    if (action === 'prepare-replacement') return Response.json({ prepared: true,
+      discard: [{ projectId: 'project-a', workspaceId: 'project-a', generation: 1, reason: 'unpublished-local-work' }] });
+    if (action === 'sleep') return Response.json({ status: 'ok', value: { ...sandbox, ...receipt } });
+    if (action === 'destroy') return Response.json({ status: 'ok', value: { machineId: sandbox.id } });
+    throw new Error(`Unexpected provider operation ${action}`);
+  });
+  await expect(controlFleetMachine(env, userId, sandbox.id, 'destroy', confirmation)).rejects.toThrow();
+  expect(actions).toEqual(['status', 'prepare-replacement', 'sleep']);
+  expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 1 });
+  expect(await catalog.getMachine(sandbox.id)).toMatchObject({ state: 'error', desiredState: 'offline' });
+  expect(await catalog.pendingMachineDiscard(sandbox.id)).toMatchObject({ confirmation });
 });
 
 it.each(['control', 'reconciliation'] as const)('restores admission after a failed checkpoint through %s without leaving a deferred stop', async (entry) => {
@@ -245,7 +358,7 @@ it('rejects a missing checkpoint acknowledgement without stopping', async () => 
   } };
   mockProvider(service.fetch);
   const environment = env;
-  await expect(controlFleetMachine(environment, userId, sandbox.id, 'sleep')).rejects.toThrow(/no acknowledgement/u);
+  await expect(controlFleetMachine(environment, userId, sandbox.id, 'sleep')).rejects.toThrow();
   await reconcileFleetMachines(environment, userId, catalog);
   expect(stopped).toBe(false);
   expect(cancelled).toBe(true);

@@ -14,6 +14,7 @@ import { readGitCheckpointHead } from './git-checkpoint.js';
 
 export interface ProjectLifecycleAuthority extends Pick<CloudSpaceCheckpointAuthority, 'getSpace'> {
   bootstrap(input: { projectId: string; spaceId: string }): Promise<unknown>;
+  releaseUnpublishedSource(input: { projectId: string; spaceId: string; expectedGeneration: number; sourceCommit: string }): Promise<void>;
   bootstrapInspector(input: { projectId: string; spaceId: string }): Promise<unknown>;
   listProjects(lifecycle?: 'active' | 'archived'): Promise<CloudProjectSummary[]>;
   bootstrapProject(input: { projectId: string; name: string; repositoryReference: string | null; baseBranch: string }): Promise<CloudProjectSummary>;
@@ -196,6 +197,39 @@ export class ProjectLifecycleManager {
     return operation;
   }
 
+  /** Recover old failed-open clones only from immutable canonical provenance. */
+  async releasePristineSource(projectId: string): Promise<boolean> {
+    const project = await this.authority.getProject(projectId);
+    const base = this.database.getBaseSpace(projectId);
+    if (project?.role !== 'gitspace-source' || project.lifecycle !== 'cloud-only' || !project.source?.commit
+      || !base || base.rootPath !== join(this.managedRoot, projectId, 'base')
+      || this.database.listSpaces(projectId).length !== 1
+      || this.database.listSpaceCleanupJobs().some(job => job.projectId === projectId)) return false;
+    const placement = await this.authority.getSpace(projectId, projectId);
+    if (!placement || placement.publishedRevision !== 0 || placement.manifestKey !== null || placement.manifestHash !== null) return false;
+    const held = placement.state === 'open' && placement.machineId === this.machineId && placement.generation === base.generation;
+    const released = placement.state === 'closed' && placement.machineId === null && placement.generation === base.generation + 1;
+    if (!held && !released) return false;
+    if (await runGit(['rev-parse', 'HEAD'], base.rootPath) !== project.source.commit
+      || await runGit(['status', '--porcelain', '--untracked-files=all', '--ignored'], base.rootPath) !== ''
+      || await runGit(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads'], base.rootPath) !== `refs/heads/${project.baseBranch} ${project.source.commit}`) return false;
+    const localTags = await runGit(['for-each-ref', '--format=%(objectname)%09%(refname)', 'refs/tags'], base.rootPath);
+    if (localTags) {
+      if (!project.repositoryReference) return false;
+      // A stranded clone may include published tags; only locally unique tag
+      // history requires explicit discard. A failed origin check proves nothing.
+      const publishedTags = await runGit(['ls-remote', '--tags', '--', project.repositoryReference], undefined,
+        await this.gitEnvironment?.(project.repositoryReference) ?? {}).catch(() => null);
+      if (publishedTags === null) return false;
+      const published = new Set(publishedTags.split('\n'));
+      if (localTags.split('\n').some(tag => !published.has(tag))) return false;
+    }
+    if (held) await this.authority.releaseUnpublishedSource({ projectId, spaceId: projectId, expectedGeneration: placement.generation, sourceCommit: project.source.commit });
+    this.database.deleteProject(projectId);
+    await rm(join(this.managedRoot, projectId), { recursive: true, force: true });
+    return true;
+  }
+
   private async materializeSourceProject(projectId: string): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation | null }> {
     const project = await this.authority.getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} does not exist`);
@@ -208,6 +242,7 @@ export class ProjectLifecycleManager {
     let ownsRoot = false;
     let createdLocal = false;
     let checkpointAttempted = false;
+    let baseline: { commit: string; refs: string } | null = null;
     let operation = await this.authority.createProjectOperation(projectId, {
       projectId, workspaceId: null, kind: 'project.open', targetMachines: [this.machineId],
       steps: [{ id: 'repository', label: 'Clone GitSpace source' }, { id: 'projection', label: 'Open project space' }],
@@ -233,6 +268,7 @@ export class ProjectLifecycleManager {
           await runGit(['checkout', '-B', baseBranch, commit, '--'], repositoryPath);
         }
         sourceCommit = await runGit(['rev-parse', '--verify', 'HEAD^{commit}'], repositoryPath);
+        baseline = { commit: sourceCommit, refs: await runGit(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags'], repositoryPath) };
         const created = this.database.createProject({
           id: projectId, name: project.name, repositoryPath, baseBranch, repositoryReference: project.repositoryReference,
         });
@@ -263,6 +299,17 @@ export class ProjectLifecycleManager {
         throw new Error('GitSpace source branch changed while opening. Retry after the other operation finishes.');
       }
       await this.authority.bootstrap({ projectId, spaceId: projectId });
+      const placement = await this.authority.getSpace(projectId, projectId);
+      const localPlacement = this.database.getSpace(projectId);
+      if (createdLocal && placement?.state === 'open' && placement.machineId === this.machineId && localPlacement
+        && placement.generation !== localPlacement.generation) {
+        const fenced = this.database.invalidateSpacePossession({ spaceId: projectId, holderId: this.machineId, expectedGeneration: localPlacement.generation });
+        if (fenced.status === 'error') throw fenced.error;
+        const aligned = this.database.alignClosedSpaceProjection(projectId, placement.generation);
+        if (aligned.status === 'error') throw aligned.error;
+        const adopted = this.database.adoptOpenSpaceProjection({ spaceId: projectId, holderId: this.machineId, expectedGeneration: placement.generation, rootPath: localPlacement.rootPath });
+        if (adopted.status === 'error') throw adopted.error;
+      }
       await this.authority.bootstrapInspector({ projectId, spaceId: projectId });
       checkpointAttempted = true;
       await this.checkpointSpace?.(projectId);
@@ -276,9 +323,22 @@ export class ProjectLifecycleManager {
       return { project: active, operation };
     } catch (error) {
       await this.failed(projectId, operation, error);
-      // The mandatory cloud definition survives failed clones. Once a portable
-      // checkpoint may have committed, preserve the real checkout for recovery.
-      if (!checkpointAttempted) {
+      // A failed first upload is not unpublished user work when this invocation
+      // still has the exact clean clone. Ambiguous checkpoint outcomes stay put.
+      let removeLocal = !checkpointAttempted;
+      if (checkpointAttempted && createdLocal && ownsRoot && baseline && project.source?.commit === baseline.commit
+        && !this.database.listSpaceCleanupJobs().some(job => job.spaceId === projectId && job.state === 'prepared')) {
+        const placement = await this.authority.getSpace(projectId, projectId);
+        if (placement?.state === 'open' && placement.machineId === this.machineId && placement.publishedRevision === 0
+          && placement.manifestKey === null && placement.manifestHash === null
+          && await runGit(['rev-parse', 'HEAD'], repositoryPath) === baseline.commit
+          && await runGit(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags'], repositoryPath) === baseline.refs
+          && await runGit(['status', '--porcelain', '--untracked-files=all', '--ignored'], repositoryPath) === '') {
+          await this.authority.releaseUnpublishedSource({ projectId, spaceId: projectId, expectedGeneration: placement.generation, sourceCommit: baseline.commit });
+          removeLocal = true;
+        }
+      }
+      if (removeLocal) {
         if (createdLocal) this.database.deleteProject(projectId);
         if (ownsRoot) await rm(projectRoot, { recursive: true, force: true });
       }

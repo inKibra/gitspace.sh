@@ -270,6 +270,11 @@ describe('GitSpace Result RPC', () => {
       baseBranch: 'main', role: null, source: null, revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
     };
     const requested: string[] = [];
+    const operation: CloudProjectOperation = {
+      id: crypto.randomUUID(), projectId: cloudProject.id, workspaceId: null, kind: 'project.open', state: 'succeeded',
+      targetMachines: ['actual-machine-b'], steps: [], claimToken: null, leaseExpiresAt: null, error: null,
+      revision: 1, createdBy: 'actual-machine-b', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+    };
     const rpc = createGitSpaceRpcHandler({
       database, handlers, artifacts, sessions, factEvents: events, machineId: 'machine-a',
       terminals: {} as WorkspaceHubTerminalCoordinator,
@@ -277,7 +282,7 @@ describe('GitSpace Result RPC', () => {
       serviceManager: { list: async () => [], start: unavailable, stop: unavailable },
       secrets: { listProjectSecrets: async () => [], putProjectSecret: unavailable, deleteProjectSecret: unavailable, materializeProjectSecrets: unavailable },
       projects: {
-        list: async () => [cloudProject], createProject: unavailable, openProject: unavailable,
+        list: async () => [cloudProject], createProject: unavailable, openProject: async () => ({ project: cloudProject, operation }),
         createWorkspace: async (input) => { requested.push(input.projectId); throw new Error('clone deferred in fixture'); },
         retryCreateWorkspace: unavailable, findWorkspace: async () => null,
         archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, setBaseBranch: unavailable,
@@ -296,6 +301,8 @@ describe('GitSpace Result RPC', () => {
       const unknown = await client.workspace.create({ projectId: 'missing-project', name: 'Nope', branch: 'nope', sourceKind: 'base', sourceRef: 'main' });
       expect(unknown).toMatchObject({ status: 'error', error: { _tag: 'gitspace/project-not-found' } });
       expect(requested).toEqual(['cloud-project']);
+      const opened = await client.project.open({ projectId: cloudProject.id });
+      expect(opened).toMatchObject({ status: 'ok', value: { operation: { targetMachines: ['actual-machine-b'] } } });
     } finally {
       await http.stop();
       database.close();
@@ -319,7 +326,7 @@ describe('GitSpace Result RPC', () => {
     const operations = new Map<string, CloudProjectOperation>();
     const unavailable = async (): Promise<never> => { throw new Error('Not configured in archive fixture'); };
     const authority: ProjectLifecycleAuthority = {
-      bootstrap: unavailable, bootstrapInspector: unavailable, bootstrapProject: unavailable,
+      bootstrap: unavailable, releaseUnpublishedSource: unavailable, bootstrapInspector: unavailable, bootstrapProject: unavailable,
       activateSourceProject: unavailable, setProjectBaseBranch: unavailable, setProjectLifecycle: unavailable, deleteProject: unavailable,
       removeProjectWorkspace: unavailable,
       listProjects: async () => [],

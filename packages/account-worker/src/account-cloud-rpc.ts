@@ -4,6 +4,7 @@ import { activeAccount } from './account-access.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import type { LifecycleState } from '@gitspace/protocol-environment';
 import type { CloudImageState } from '@gitspace/protocol/cloud-image';
+import { MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import {
   credentialProtocolBase64, deviceCanAdminister, requiredCapability, requiresImageSelectionControl, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
   parseRuntimeSettings, runtimeSettingsView, type RuntimeConfigDocument,
@@ -288,16 +289,22 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     catch (error) { return err(errors.OperationFailed({ operation: 'recover with another cloud image', message: message(error) })); }
   });
   const sleep = server.implement(sleepMachineContract).handler(async ({ input, errors }) => {
-    try { return ok(await controlFleetMachine(env, userId, input.machineId, 'sleep')); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'sleep machine', message: message(error) })); }
+    try { return ok(await controlFleetMachine(env, userId, input.machineId, 'sleep', input.discardConfirmation)); }
+    catch (error) {
+      if (error instanceof MachineDiscardRequired) return err(errors.MachineDiscardRequired({ message: error.message, confirmation: error.confirmation, workspaces: error.workspaces }));
+      return err(errors.OperationFailed({ operation: 'sleep machine', message: message(error) }));
+    }
   });
   const resume = server.implement(resumeMachineContract).handler(async ({ input, errors }) => {
     try { return ok(await controlFleetMachine(env, userId, input.machineId, 'resume')); }
     catch (error) { return err(errors.OperationFailed({ operation: 'resume machine', message: message(error) })); }
   });
   const destroy = server.implement(destroyMachineContract).handler(async ({ input, errors }) => {
-    try { return ok(await controlFleetMachine(env, userId, input.machineId, 'destroy')); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'destroy machine', message: message(error) })); }
+    try { return ok(await controlFleetMachine(env, userId, input.machineId, 'destroy', input.discardConfirmation)); }
+    catch (error) {
+      if (error instanceof MachineDiscardRequired) return err(errors.MachineDiscardRequired({ message: error.message, confirmation: error.confirmation, workspaces: error.workspaces }));
+      return err(errors.OperationFailed({ operation: 'destroy machine', message: message(error) }));
+    }
   });
   const updateNotes = server.implement(updateMachineNotesContract).handler(async ({ input, errors }) => {
     try {

@@ -4,7 +4,7 @@ import type { PendingAskAnswer, SessionControlView } from '@gitspace/protocol';
 import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { SessionControlView as RuntimeSessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
-import type { WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
+import type { CloudProjectOperation, WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
 import {
   Badge,
   Button,
@@ -479,6 +479,14 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
 }
 
 // ── Projects ──
+export function ProjectCreationNotice({ targetMachines, onDismiss }: { targetMachines: Readonly<CloudProjectOperation['targetMachines']>; onDismiss(): void }) {
+  if (targetMachines.length === 0) return null;
+  return <div className="flex shrink-0 flex-wrap items-center gap-2 px-4 py-2 text-caption">
+    <p role="status" className="min-w-0 [overflow-wrap:anywhere]">Project created on {targetMachines.join(', ')}.</p>
+    <Button variant="ghost" size="compact" className="min-h-10" onClick={onDismiss}>Dismiss</Button>
+  </div>;
+}
+
 export function CreateProjectDialog({ open, onOpenChange, onSubmit, pending, error }: { open: boolean; onOpenChange(open: boolean): void; onSubmit(input: CreateProjectInput): Promise<void>; pending: boolean; error: string | null }) {
   const [form, setForm] = useState<Record<'name' | 'baseBranch' | 'repositoryUrl', string>>({ name: '', baseBranch: '', repositoryUrl: '' });
   const set = (key: keyof typeof form) => (value: string) => setForm((current) => ({ ...current, [key]: value }));

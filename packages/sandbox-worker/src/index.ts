@@ -1,5 +1,6 @@
 import { getSandbox, Sandbox as CloudflareSandbox } from '@cloudflare/sandbox';
 import { sandboxObjectId, type SandboxMachineRecord } from './provision.js';
+import { machineDiscardConfirmationSchema, machineReplacementPreparedSchema, type MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
 
 export * from './provision.js';
 
@@ -12,6 +13,7 @@ interface ImageState {
   operationId: string | null;
   prepared: boolean;
   checkpointPrepared: boolean;
+  discardPrepared?: boolean;
   runtimeStarted: boolean | null;
   inherited: boolean;
   retired: boolean;
@@ -260,7 +262,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
     return container.getTcpPort(8081).fetch(request);
   }
 
-  async prepareReplacement(): Promise<Response> {
+  async prepareReplacement(action?: 'sleep' | 'destroy', discardConfirmation?: MachineDiscardConfirmation): Promise<Response> {
     return this.controlled('prepare-replacement', async () => {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
@@ -270,12 +272,15 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
       if (state.retired) throw new Error('Machine is already retired; reconcile its image operation');
       const token = input.environment.GITSPACE_CONTROL_TOKEN;
       if (!token) return Response.json({ error: 'Machine has no replacement control credential' }, { status: 409 });
-      const response = await this.replacementControl('prepare-replacement', token);
+      const response = await this.replacementControl('prepare-replacement', token, { action, discardConfirmation });
       if (response.ok) {
-        const result = await response.clone().json() as { prepared?: boolean; machineId?: string };
-        if (result.prepared !== true || result.machineId !== input.machineId) throw new Error('Machine returned an invalid preparation receipt');
+        const payload: unknown = await response.clone().json();
+        const result = machineReplacementPreparedSchema.parse(payload);
+        if (result.prepared !== true || !payload || typeof payload !== 'object' || !('machineId' in payload) || payload.machineId !== input.machineId) throw new Error('Machine returned an invalid preparation receipt');
+        if (result.discard && (!discardConfirmation || discardConfirmation.machineId !== input.machineId || discardConfirmation.action !== action)) throw new Error('Machine discard receipt lacks matching explicit approval');
         state.prepared = true;
-        state.checkpointPrepared = true;
+        state.checkpointPrepared = result.discard === undefined;
+        state.discardPrepared = result.discard !== undefined;
         await this.ctx.storage.put(IMAGE_STATE_KEY, state);
         await this.lifecycle('checkpoint.prepared');
       }
@@ -296,6 +301,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
         if (result.prepared !== false || result.machineId !== input.machineId) throw new Error('Machine returned an invalid cancellation receipt');
         state.prepared = false;
         state.checkpointPrepared = false;
+        state.discardPrepared = false;
         await this.ctx.storage.put(IMAGE_STATE_KEY, state);
         await this.lifecycle('checkpoint.cancelled');
       }
@@ -303,12 +309,12 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
     });
   }
 
-  private async replacementControl(action: 'prepare-replacement' | 'cancel-replacement', token: string): Promise<Response> {
+  private async replacementControl(action: 'prepare-replacement' | 'cancel-replacement', token: string, input?: { action?: 'sleep' | 'destroy'; discardConfirmation?: MachineDiscardConfirmation }): Promise<Response> {
     const container = this.ctx.container;
     if (!container?.running) return Response.json({ error: 'The cloud machine is stopped; replacement control cannot start a new VM' }, { status: 409 });
     // Control acts on this disk only. SDK containerFetch may boot another VM or replay a rejected request.
     const response = await container.getTcpPort(8081).fetch(new Request(`http://localhost/__control/${action}`, {
-      method: 'POST', headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(300_000),
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(input ?? {}), signal: AbortSignal.timeout(300_000),
     }));
     await this.lifecycle('checkpoint.response', { httpStatus: response.status });
     return response;
@@ -318,7 +324,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
     return this.controlled('resume', async () => {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
-      if (state.retired || state.checkpointPrepared) throw new Error('Prepared source must be cancelled or handed off before resuming');
+      if (state.retired || state.checkpointPrepared || state.discardPrepared) throw new Error('Prepared source must be cancelled or handed off before resuming');
       const record = await this.startMachine(input);
       const deadline = Date.now() + 120_000;
       while (Date.now() < deadline) {
@@ -342,7 +348,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
       // Sleeping discards the VM's ephemeral disk, not just its native process.
-      if (this.ctx.container?.running && !state.checkpointPrepared && !(state.inherited && state.runtimeStarted === false)) {
+      if (this.ctx.container?.running && !state.checkpointPrepared && !state.discardPrepared && !(state.inherited && state.runtimeStarted === false)) {
         throw new Error('Cloud machine must checkpoint before sleeping');
       }
       await this.lifecycle('vm.stop-requested', { signal: 'SIGTERM' });
@@ -358,6 +364,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
       await this.lifecycle('vm.stop-confirmed');
       state.prepared = state.inherited && state.runtimeStarted === false;
       state.checkpointPrepared = false;
+      state.discardPrepared = false;
       await this.ctx.storage.put(IMAGE_STATE_KEY, state);
       return this.record(input, 'offline', null, 'Temporary cloud machine stopped.', 'offline');
     });
@@ -389,7 +396,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
     const state = await this.imageState();
     if (state.retired) throw new Error('Retired image instance cannot be restarted');
     // Enrollment retries share this path with resume and must not bypass a prepared source's fence.
-    if (state.checkpointPrepared) throw new Error('Prepared source must be cancelled or handed off before resuming');
+    if (state.checkpointPrepared || state.discardPrepared) throw new Error('Prepared source must be cancelled or handed off before resuming');
     // A custom ENTRYPOINT/CMD can run tenant code before host.js. Fence even an uncertain VM-start request.
     state.runtimeStarted = true;
     await this.ctx.storage.put(IMAGE_STATE_KEY, state);
@@ -500,7 +507,14 @@ export default {
         return await stub.discardCandidate(body.operationId, body.recoveryOperationId);
       }
       if (action === 'image/status') return await stub.imageStatus();
-      if (action === 'prepare-replacement') return await stub.prepareReplacement();
+      if (action === 'prepare-replacement') {
+        const body: unknown = await request.json().catch(() => ({}));
+        if (!body || typeof body !== 'object') throw new Error('Replacement control body is invalid');
+        const machineAction = 'action' in body ? body.action : undefined;
+        if (machineAction !== undefined && machineAction !== 'sleep' && machineAction !== 'destroy') throw new Error('Machine lifecycle action is invalid');
+        const confirmation = 'discardConfirmation' in body && body.discardConfirmation !== undefined ? machineDiscardConfirmationSchema.parse(body.discardConfirmation) : undefined;
+        return await stub.prepareReplacement(machineAction, confirmation);
+      }
       if (action === 'cancel-replacement') return await stub.cancelReplacement();
       if (action === 'rpc') {
         const headers = new Headers(request.headers);

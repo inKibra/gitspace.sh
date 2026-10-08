@@ -326,6 +326,21 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     });
   }
 
+  bootstrapUnpublishedSource(input: VerifiedSpaceAuthorityIdentity): SpaceAuthorityResult<SpaceAuthorityRecord> {
+    return this.commit(() => {
+      const current = this.get();
+      if (!current || current.projectId !== input.projectId || current.spaceId !== input.spaceId
+        || current.state !== 'closed' || current.machineId !== null || current.publishedRevision !== 0
+        || current.manifestKey !== null || current.manifestHash !== null) {
+        throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_POSSESSION_DENIED', message: 'Source placement changed before retrying its first publication', context: { spaceId: input.spaceId, machineId: input.machineId } });
+      }
+      const opened: SpaceAuthorityRecord = { ...current, state: 'open', machineId: input.machineId,
+        generation: current.generation + 1, revision: current.revision + 1, updatedAt: new Date().toISOString() };
+      this.save(opened);
+      return opened;
+    });
+  }
+
   beginClose(input: SpaceAuthorityMutation): SpaceAuthorityResult<{ revision: number; previousRevision: number | null }> {
     return this.commit(() => {
       const next = beginSpaceClose(this.get(), input, new Date().toISOString());
@@ -412,6 +427,36 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   failOpen(input: SpaceAuthorityMutation & { revision: number; message: string }): SpaceAuthorityResult<void> {
     return this.commit(() => this.save(failSpaceOpen(this.get(), input, new Date().toISOString())));
+  }
+
+  releaseUnpublishedSource(input: SpaceAuthorityMutation): SpaceAuthorityResult<void> {
+    return this.commit(() => {
+      const current = this.get();
+      if (!current || current.projectId !== input.projectId || current.spaceId !== input.spaceId
+        || current.state !== 'open' || current.machineId !== input.machineId || current.generation !== input.expectedGeneration
+        || current.publishedRevision !== 0 || current.manifestKey !== null || current.manifestHash !== null) {
+        throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_POSSESSION_DENIED', message: 'Unpublished source placement changed; local checkout must be retained', context: { spaceId: input.spaceId, machineId: input.machineId, generation: input.expectedGeneration } });
+      }
+      this.save({ ...current, state: 'closed', machineId: null, resumeMachineId: null,
+        generation: current.generation + 1, revision: current.revision + 1, updatedAt: new Date().toISOString() });
+    });
+  }
+
+  /** Account-only call after provider acknowledgement that the VM has stopped.
+   * Deliberately absent from signed machine control; canonical content is retained. */
+  discardStoppedLocalWork(input: { userId: string; machineId: string; projectId: string; spaceId: string; expectedGeneration: number }): SpaceAuthorityResult<void> {
+    if (input.userId !== this.env.ACCOUNT_ID) throw new Error('Machine discard belongs to another account');
+    return this.commit(() => {
+      const current = this.get();
+      if (!current || current.projectId !== input.projectId || current.spaceId !== input.spaceId
+        || current.machineId !== input.machineId || current.generation !== input.expectedGeneration) {
+        throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_POSSESSION_DENIED', message: 'Machine discard ownership changed; refusing to fence another generation', context: { spaceId: input.spaceId, machineId: input.machineId, generation: input.expectedGeneration } });
+      }
+      this.save({ ...current, state: 'closed', machineId: null,
+        resumeMachineId: current.publishedRevision > 0 ? input.machineId : null,
+        generation: current.generation + 1, revision: current.revision + 1, updatedAt: new Date().toISOString(),
+        failures: { open: null, close: null } });
+    });
   }
 
   /** Account-only recovery after a provider-verified stop and explicit discard approval.

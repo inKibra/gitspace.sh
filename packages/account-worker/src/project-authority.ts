@@ -717,7 +717,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS canonical_sessions(
           session_id TEXT PRIMARY KEY,
           workspace_id TEXT NOT NULL UNIQUE,
-          omp_session_id TEXT NOT NULL UNIQUE,
+          omp_session_id TEXT NOT NULL,
           machine_id TEXT,
           state TEXT NOT NULL,
           session_object_key TEXT,
@@ -785,6 +785,41 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
           PRIMARY KEY(project_id, connection_id)
         );
       `);
+      // Conversation numbers belong to a space. Older authorities enforced a
+      // project-wide UNIQUE column, whose SQLite autoindex cannot be dropped.
+      const sessionIndexes = this.ctx.storage.sql.exec<{ name: string; unique: number }>('PRAGMA index_list(canonical_sessions)').toArray();
+      const hasGlobalConversationIndex = sessionIndexes.some(index => {
+        if (!index.unique) return false;
+        const columns = this.ctx.storage.sql.exec<{ name: string }>(`PRAGMA index_info("${index.name.replaceAll('"', '""')}")`).toArray();
+        return columns.length === 1 && columns[0]?.name === 'omp_session_id';
+      });
+      if (hasGlobalConversationIndex) {
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec(`
+            CREATE TABLE canonical_sessions_scoped(
+              session_id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL UNIQUE,
+              omp_session_id TEXT NOT NULL,
+              machine_id TEXT,
+              state TEXT NOT NULL,
+              session_object_key TEXT,
+              session_object_hash TEXT,
+              session_format_version TEXT,
+              activity_json TEXT NOT NULL,
+              health_json TEXT NOT NULL,
+              revision INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO canonical_sessions_scoped
+              SELECT session_id,workspace_id,omp_session_id,machine_id,state,session_object_key,
+                session_object_hash,session_format_version,activity_json,health_json,revision,created_at,updated_at
+              FROM canonical_sessions;
+            DROP TABLE canonical_sessions;
+            ALTER TABLE canonical_sessions_scoped RENAME TO canonical_sessions;
+          `);
+        });
+      }
       for (const column of ['role TEXT', 'source_json TEXT']) {
         try { this.ctx.storage.sql.exec(`ALTER TABLE project ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }

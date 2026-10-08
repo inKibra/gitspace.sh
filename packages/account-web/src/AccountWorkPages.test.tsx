@@ -7,7 +7,7 @@ import type { WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { AccountWorkPages, type AccountWorkPagesProps } from './AccountWorkPages.js';
 import { verticalSliceFixture } from './App.js';
 import type { SidebarWorkspace } from './AppSidebar.js';
-import { CreateWorkspaceDialog, type ProjectLifecycleView } from './GitSpaceShell.js';
+import { CreateWorkspaceDialog, ProjectCreationNotice, type ProjectLifecycleView } from './GitSpaceShell.js';
 import type { Directory } from './useAccountDirectory.js';
 vi.mock('./browser-relay-client.js', () => ({
   projectBrowserSettings: vi.fn(async (projectId: string) => ({
@@ -104,6 +104,12 @@ it('requires a project choice on board creation and submits the chosen project a
   });
   await act(() => { document.body.querySelector<HTMLFormElement>('#create-workspace-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
   expect(create).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'beta', phase: 'plan', name: 'chosen-work', branch: 'feature/chosen-work' }));
+});
+
+it('shows the creation operation target rather than an inferred default machine', async () => {
+  await act(() => root.render(<ProjectCreationNotice targetMachines={['machine-b']} onDismiss={vi.fn()} />));
+  expect(container.querySelector('[role="status"]')?.textContent).toContain('machine-b');
+  expect(container.textContent).not.toContain('machine-a');
 });
 
 it.each([

@@ -9,11 +9,14 @@ import { EnvironmentBundleSchema, executionHash, projectEnvironmentState, lifecy
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
+import type { CloudProjectOperation } from '@gitspace/protocol/project-authority';
+import type { MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
+import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ContextType, type ReactNode } from 'react';
 import { isTaggedError } from 'result-rpc';
 import { ResultRpcProvider, useResultMutation, useResultQuery, useResultRuntime } from 'result-rpc/react';
-import { CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, type GitSpaceShellProps } from './GitSpaceShell.js';
+import { CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, ProjectCreationNotice, type GitSpaceShellProps } from './GitSpaceShell.js';
 import { AccountWorkPages } from './AccountWorkPages.js';
 import { createGitSpaceBrowserClient, rpcClient } from './rpc-client.js';
 import { currentDevice, DEVICE_REJECTED_EVENT, deviceRejected, setCurrentDevice } from './device-session.js';
@@ -762,7 +765,8 @@ function AccountFrame({ children }: { children: ReactNode }) {
     refresh: refreshInspection,
   }), [projectValues, directory, acceptRuntime, projects.state]);
   const lfsTransition = useLfsTransition();
-  const actions = useAccountWorkActions(accountDirectory, lfsTransition.confirm);
+  const [createdProjectMachines, setCreatedProjectMachines] = useState<Readonly<CloudProjectOperation['targetMachines']> | null>(null);
+  const actions = useAccountWorkActions(accountDirectory, lfsTransition.confirm, setCreatedProjectMachines);
   const runSidebarAction = async (operation: () => void | Promise<void>): Promise<void> => {
     setSidebarActionError(null);
     try { await operation(); }
@@ -794,6 +798,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
         {projects.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>{rpcErrorMessage(projects.error, 'Load project directory')}</span><Button variant="ghost" size="compact" onClick={() => void projects.refetch()}>Retry</Button></div> : null}
         {sidebarActionError ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>Workspace action: {sidebarActionError}</span><Button variant="ghost" size="compact" onClick={() => setSidebarActionError(null)}>Dismiss</Button></div> : null}
+        {createdProjectMachines ? <ProjectCreationNotice targetMachines={createdProjectMachines} onDismiss={() => setCreatedProjectMachines(null)} /> : null}
         {children}
         {lfsTransition.dialog}
       </SidebarInset>
@@ -1078,21 +1083,22 @@ function GitSpaceProduct() {
     if (result.status === 'error') { setSettingsError(rpcErrorMessage(result.error, 'machine.image.defaults.set')); throw result.error; }
     await imageDefaultQuery.refetch();
   };
-  const controlMachine = async (action: 'sleep' | 'resume', machineId: string): Promise<void> => {
+  const controlMachine = async (action: 'sleep' | 'resume', machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<void> => {
     setSettingsError(null);
-    const mutation = action === 'sleep' ? sleepMachine : resumeMachine;
-    const result = await mutation.mutateAsync({ machineId });
+    const result = action === 'sleep'
+      ? await sleepMachine.mutateAsync({ machineId, discardConfirmation })
+      : await resumeMachine.mutateAsync({ machineId });
     if (result.status === 'error') {
-      setSettingsError(rpcErrorMessage(result.error, action === 'sleep' ? 'Sleep machine' : 'Resume machine'));
+      if (!rpcErrors.machineDiscardRequired.is(result.error)) setSettingsError(rpcErrorMessage(result.error, action === 'sleep' ? 'Sleep machine' : 'Resume machine'));
       throw result.error;
     }
     await machinesQuery.refetch();
   };
-  const removeMachine = async (machineId: string): Promise<void> => {
+  const removeMachine = async (machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<void> => {
     setSettingsError(null);
-    const result = await destroyMachine.mutateAsync({ machineId });
+    const result = await destroyMachine.mutateAsync({ machineId, discardConfirmation });
     if (result.status === 'error') {
-      setSettingsError(rpcErrorMessage(result.error, 'Destroy machine'));
+      if (!rpcErrors.machineDiscardRequired.is(result.error)) setSettingsError(rpcErrorMessage(result.error, 'Destroy machine'));
       throw result.error;
     }
     await machinesQuery.refetch();
@@ -1430,7 +1436,7 @@ const accountSecretsApi: Omit<ProjectSecretsProps, 'projects'> = {
   deleteValue: async (target, name) => { await configurationResult(rpcClient.configuration.values.delete({ ...target, name })); },
 };
 
-function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDirectoryContext>>, confirmLfs: ConfirmLfsTransition): AccountWorkActions {
+function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDirectoryContext>>, confirmLfs: ConfirmLfsTransition, onProjectCreated: (targetMachines: Readonly<CloudProjectOperation['targetMachines']>) => void): AccountWorkActions {
   const openingSpaces = useRef(new Map<string, Promise<void>>());
   const uncertainOpenings = useRef(new Set<string>());
 
@@ -1485,6 +1491,7 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
   const actions = {
     onCreateProject: async (input) => {
       const result = await mutate(rpcClient.project.create(input));
+      onProjectCreated(result.operation.targetMachines);
       selectInspection(result.project.id, null);
     },
     onCreateWorkspace: async (input) => {

@@ -60,6 +60,8 @@ Moving or restarting a machine does not move the cloud conversation. Default `re
 
 The workspace **Environment** chip opens **Inspector > Environment**, combining setup and machine state. Normal machine attachments are equal caches of the cloud's canonical working tree, with one copy at the standard workspace path on each machine. The default machine is a routing preference, not exclusive ownership. Commands skip machines whose last heartbeat is more than 30 seconds old; an explicitly selected offline machine fails clearly. Runners use a fixed checkpoint; delegates use a separate branch. Their explicit placements do not silently follow a different working copy. Process controls stay on the process's original machine.
 
+Creating a project without an attached workspace prefers the configured default machine when it is online and compatible. Otherwise GitSpace chooses another compatible online machine. The completion notice names the machine that handled the request. No compatible online machine means creation fails before dispatch.
+
 Each cache catches up before use. Commands publish their changes on completion; running services and processes publish periodically. Continuous sync lasts through active work and a 15-minute grace period. A human file watcher runs only while a terminal is attached or **Work locally** is enabled, not merely because a browser is viewing the workspace. Idle caches pause, then become eligible for reclaim after 24 hours by default. The workspace cache policy can change that delay. Low disk space can trigger earlier reclaim of an idle cache. Reclaim requires a final acknowledged snapshot and stops for held-back LFS changes or unresolved effects. The next use rebuilds the copy and runs its approved setup again.
 
 Hosted service URLs are private. Opening one redirects to account login and approval, then exchanges a short-lived ticket on that exact hostname for a host-only, HttpOnly, Secure cookie. The same authorization protects HTTP and WebSockets; no parent-domain cookie is issued. Cloud tools use an internal tunnel. Another machine owned by the same account can use a loopback forward over its authenticated device relay. The serving machine checks a signed assertion bound to the tenant, hostname, caller, request, and expiry. `proc` services declared with `ready.port` use the same route and policy.
@@ -104,7 +106,11 @@ Session history loads only when you open it. The explorer reads up to 200 entrie
 
 Cloud machines are temporary. In **Settings > Machines**, **Stop** saves supported workspace state before stopping the machine. If saving fails, the machine stays online. **Start** runs a fresh machine environment and restores saved workspaces, not the old machine disk.
 
+If a checkpoint fails because local work cannot be published, Stop and Destroy show the affected workspaces and offer an explicit discard. Type the machine name to approve that loss. Approval applies only to that machine, action, workspace generations, and captured local state; changed work needs a new confirmation. GitSpace confirms the provider stopped the machine before releasing those generations. An uncertain stop keeps the approval pending and blocks Start until recovery establishes what happened.
+
 Workspace checkpoints save the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, and GitSpace artifacts, with references to the durable cloud conversation. Uncommitted LFS changes are an exception: they stay on the machine until committed, even during a move or detach. Checkpoints do not save installed packages, machine-local configuration, ignored files, or arbitrary files elsewhere on the machine, including its home directory. Ask a normal workspace agent to install tools as needed; those changes are temporary. Code repositories use Artifacts; encrypted `local://` evidence remains a separate store.
+
+Large Artifacts checkpoints upload in bounded packs through temporary `refs/gitspace/upload/*` refs. This includes splitting the objects of a single large commit; the final checkpoint keeps the original commit and history. Each upload removes only its own temporary ref. A Git blob larger than 32,000,000 bytes fails before publication with its path and size. Commit large files through Git LFS instead.
 
 Projects created from scratch by GitSpace start with a real initial commit. Imported empty repositories can remain unborn: checkpoints preserve their symbolic branch, staged and unstaged files, and portable untracked files without inventing a HEAD commit. Cloud edits and machine handoffs preserve that state. The first real commit becomes HEAD in the next checkpoint.
 
@@ -124,7 +130,9 @@ Committed pointer inventories are cached on disk by HEAD. Unchanged captures reu
 
 Origin receipts and snapshot endpoint metadata contain no URL userinfo, query, or fragment. Restore gets endpoint credentials from matching machine Git configuration or credential helpers. Accepted runtime and portable snapshots persist the real uploader's publication identity; their retention outbox releases that pin after retention succeeds, even if the machine never receives the response.
 
-Closing a workspace, stopping a cloud machine, and destroying a machine are different operations. Controlled workspace close, Stop, and provider replacement publish durable checkpoints before releasing ownership. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
+Closing a workspace, stopping a cloud machine, and destroying a machine are different operations. Normal workspace close, Stop, and provider replacement publish durable checkpoints before releasing ownership. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
+
+A failed first open of the GitSpace source project can remove its fresh clone and release its placement only after proving it still matches the pinned source with no local work or published checkpoint. Recovery also checks already-stranded clones, including their tags against origin. Edits, private commits or tags, ignored files, changed ownership, and uncertain evidence keep the checkout protected. The project definition and cloud conversation remain available for another open.
 
 ## Security
 
@@ -176,6 +184,8 @@ bun packages/deployment/src/default-release-cli.ts --fake
 Use `--help` for build, native-input, `--publish`, and rollback options. A real build pushes its cloud image; publication and rollback require separate platform authorization.
 
 Account deployment progress comes from `DeploymentLauncher` through `deployment.status` and project `deployment` events. The client uses these for its Source indicator and launch progress sheet. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
+
+In **Settings > Source > Running**, **Worker** reports the version stamp of the Worker answering the request. A separate **Platform record** row appears when the platform's last recorded deployment differs. The platform record does not prove which Worker answered.
 
 Do not manually write runtime-selection files or call `/__environment/launch` as an alternate deployment procedure. Those are implementation details of the product's replacement path. If the supported path fails, diagnose that failure and fix the path rather than bypassing it. **Back to stable** uses the account's `deployment.revert` operation.
 
@@ -254,7 +264,7 @@ Local runtime checks do not prove a live deployment. Artifacts bindings are remo
 
 Native replacement requires the old process to acknowledge retained workspace ownership before termination. The host keeps its deployment journal in `deployment.db`, outside the runtime database rollback set; runtime snapshots include committed SQLite WAL pages. Failed candidate startup must stop before the old database is restored.
 
-Cloud VM stop and image replacement discard the ephemeral disk. Running machines must acknowledge a checkpoint before Stop; explicit destructive removal remains separate. Inspection and checkpoint control do not automatically boot a stopped VM.
+Cloud VM stop and image replacement discard the ephemeral disk. Normal Stop requires a checkpoint acknowledgement. Explicit discard requires the scoped confirmation above; it does not waive the stopped-writer check. Inspection and checkpoint control do not automatically boot a stopped VM.
 
 Worker uploads enable persisted invocation and application logs with query-string redaction. Follow `cloud_image_operation` and `cloud_image_provider_request` in the tenant Worker, `sandbox.lifecycle` in the selected provider Worker, and `native_replacement` in the machine host. Correlate machine, image operation, native generation, request ID, and Cloudflare Ray ID where available. A native readiness event is not proof that every workspace restored; the cloud image admission barrier remains until the recorded workspaces reopen.
 

@@ -3,6 +3,7 @@ import { subscriptionIdentity, subscriptionActive } from './account-access.js';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
+import { machineDiscardConfirmationSchema, machineDiscardScopeSchema } from '@gitspace/protocol/machine-discard';
 import { cloudImageProviderCall, prepareCloudImage, resolveCloudImage, runCloudImageOperation } from './sandbox-rollout.js';
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from './sandbox-provisioner.js';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
@@ -29,6 +30,11 @@ interface SandboxEnrollment {
   choice: CloudImageChoice;
   environment: Record<string, string>;
 }
+
+const pendingMachineDiscardSchema = z.object({
+  confirmation: machineDiscardConfirmationSchema,
+  workspaces: z.array(machineDiscardScopeSchema),
+});
 
 export class FleetCatalogDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
@@ -68,6 +74,22 @@ export class FleetCatalogDO extends DurableObject<Env> {
       }
       this.directoryOutbox.kick();
     });
+  }
+
+  async pendingMachineDiscard(machineId: string): Promise<z.infer<typeof pendingMachineDiscardSchema> | null> {
+    const stored = await this.ctx.storage.get(`machine-discard:${machineId}`);
+    return stored === undefined ? null : pendingMachineDiscardSchema.parse(stored);
+  }
+
+  async beginMachineDiscard(input: z.infer<typeof pendingMachineDiscardSchema>): Promise<void> {
+    const validated = pendingMachineDiscardSchema.parse(input);
+    const prior = await this.pendingMachineDiscard(validated.confirmation.machineId);
+    if (prior && JSON.stringify(prior) !== JSON.stringify(validated)) throw new Error('Another confirmed discard is awaiting provider stop recovery');
+    await this.ctx.storage.put(`machine-discard:${validated.confirmation.machineId}`, validated);
+  }
+
+  async finishMachineDiscard(machineId: string): Promise<void> {
+    await this.ctx.storage.delete(`machine-discard:${machineId}`);
   }
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'fleet' }> {
