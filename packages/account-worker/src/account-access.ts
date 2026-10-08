@@ -1,17 +1,18 @@
 import { SIGNED_REQUEST_MAX_AGE_MS, signedControlRequestSchema, type SignedControlRequest } from '@gitspace/protocol';
-import { tenantPlatformJson } from './tenant-platform.js';
-import type { AccountStateDO, AccountRecord } from './account-state.js';
+import type { AccountStateDO, AccountRecord, AccountAuthorization } from './account-state.js';
 import type { CredentialVaultDO, CredentialVaultResult } from './application.js';
 
 /** Tenant ownership is immutable; platform control also fences existing subscriptions. */
-export async function activeAccount(env: Env, userId: string): Promise<CredentialVaultResult<AccountRecord>> {
+export async function activeAccount(env: Env, userId: string): Promise<CredentialVaultResult<AccountRecord & { authorization: Extract<AccountAuthorization, { status: 'active' }> }>> {
   if (userId !== env.ACCOUNT_ID) return { status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account does not own this tenant' } };
   try {
-    const state = await tenantPlatformJson<{ control: { status: string } }>(env, '/state');
-    if (state.control.status !== 'active') return { status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account is blocked by the platform' } };
-    const account = await (env.ACCOUNT_STATE as DurableObjectNamespace<AccountStateDO>).getByName('account').get(userId);
+    const state = (env.ACCOUNT_STATE as DurableObjectNamespace<AccountStateDO>).getByName('account');
+    const authority = await state.authorization(userId);
+    if (authority.status === 'unavailable') return { status: 'error', error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE', message: 'Account authorization authority is unavailable' } };
+    if (authority.status === 'blocked') return { status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account is blocked by the platform' } };
+    const account = await state.get(userId);
     if (!account) throw new Error('Tenant identity is unavailable');
-    return { status: 'ok', value: account };
+    return { status: 'ok', value: { ...account, authorization: authority } };
   } catch {
     return { status: 'error', error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE', message: 'Account authorization authority is unavailable' } };
   }

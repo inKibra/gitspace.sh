@@ -1,3 +1,6 @@
+import { activeAccount } from './account-access.js';
+import type { AccountAuthorization } from './account-state.js';
+import { machineProtocolInputSchema } from '@gitspace/protocol/deployment';
 import { DurableObject } from 'cloudflare:workers';
 import {
   RELAY_HEARTBEAT_LEASE_MS,
@@ -23,7 +26,6 @@ import {
 import { WORKER_VERSION_HEADER } from '@gitspace/protocol/deployment';
 import application, { CredentialVaultDO, REQUEST_MAX_BYTES } from './application.js';
 import { forwardTunnelRequest, relayRequest, tunnelTarget, verifiedTunnelBody, TUNNEL_MAX_BODY_BYTES, TunnelBodyProofSchema, INTERNAL_TUNNEL_BODY_PROOF, INTERNAL_NONCE, INTERNAL_TIMESTAMP, INTERNAL_TUNNEL_MACHINE, INTERNAL_TUNNEL_PATH, INTERNAL_SIGNED_TARGET, INTERNAL_SERVICE_SESSION } from './relay-request.js';
-import type { TenantReleasesDO } from './tenant-releases.js';
 import { handleMcpRequest } from './mcp-server.js';
 import { z } from 'zod';
 import { rpcBodySha256 } from '@gitspace/protocol/device-grant';
@@ -84,6 +86,7 @@ interface RelaySocketAttachment extends SocketAttachment {
   machineGrant?: SignedCredentialAuthorityGrant;
   authorizedUntil?: number;
   heartbeatExpiresAt?: number;
+  accountAuthorization?: Extract<AccountAuthorization, { status: 'active' }>;
 }
 
 function machineAuthorizationDeadline(grant: SignedCredentialAuthorityGrant): number {
@@ -105,13 +108,6 @@ async function currentMachineAuthority(
     const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID);
     const result = await vault.authorizeRelayGrant(grant, capability);
     if (result.status === 'ok') {
-      // Every lease renewal re-fences space control, so an already-open tunnel cannot outlive a cutover.
-      if (capability === 'space.control' && await vault.inferenceCutover()) {
-        const releases = env.TENANT_RELEASES as DurableObjectNamespace<TenantReleasesDO>;
-        if (!await releases.get(releases.idFromName(env.ACCOUNT_ID)).machineInferenceCompatible(grant.grant.machineId)) {
-          return jsonError(409, 'INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP before admitting profile-managed work');
-        }
-      }
       return null;
     }
     return jsonError(401, 'MACHINE_GRANT_REJECTED', result.error.message);
@@ -493,6 +489,8 @@ export class UserRelayDO extends DurableObject<Env> {
     if (machineGrant) {
       const rejected = await currentMachineAuthority(this.env, machineGrant, 'space.control');
       if (rejected || authorizedUntil <= Date.now()) return rejected ?? jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine grant has expired');
+      const version = new URL(request.url).searchParams.get('machineProtocol');
+      await this.env.TENANT_RELEASES.getByName(this.env.ACCOUNT_ID).machineProtocol(machineGrant.grant.machineId, machineProtocolInputSchema.parse({ version: version === null ? null : Number(version), platform: new URL(request.url).searchParams.get('machinePlatform') }));
     }
 
     const tag = endpointTag(parsed.data);
@@ -721,19 +719,39 @@ export class UserRelayDO extends DurableObject<Env> {
       this.rejectMachineSocket(socket, { check: attachment?.machineGrant ? 'grant-machine-mismatch' : 'grant-missing' });
       return false;
     }
+    const now = Date.now();
+    const accountAuthorization = attachment.accountAuthorization;
+    const accountFresh = accountAuthorization !== undefined && accountAuthorization.checkedAt <= now
+      && now < accountAuthorization.refreshAt && now < accountAuthorization.expiresAt;
     const checking = this.machineChecks.get(socket);
     if (checking) return checking;
-    if (!force && (attachment.authorizedUntil ?? 0) > Date.now()) return true;
+    if (!force && accountFresh && (attachment.authorizedUntil ?? 0) > now) return true;
     const check = (async () => {
-      const authorizedUntil = machineAuthorizationDeadline(attachment.machineGrant!);
-      const rejected = await currentMachineAuthority(this.env, attachment.machineGrant!, 'space.control');
-      const rejection = rejected ? await authorityRejection(rejected) : null;
-      if (rejection || authorizedUntil <= Date.now() || socket.readyState !== 1) {
-        this.rejectMachineSocket(socket, rejection
-          ?? (authorizedUntil <= Date.now() ? { check: 'authorization-expired', authorizedUntil } : { check: 'socket-closed' }));
+      let accountLease = accountAuthorization;
+      if (!accountFresh) {
+        const account = await activeAccount(this.env, this.env.ACCOUNT_ID);
+        if (account.status === 'error') {
+          this.rejectMachineSocket(socket, { check: 'authority-rejected', status: account.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' ? 503 : 403, code: account.error.code, message: account.error.message });
+          return false;
+        }
+        accountLease = account.value.authorization;
+      }
+      let authorizedUntil = attachment.authorizedUntil ?? 0;
+      if (force || authorizedUntil <= Date.now()) {
+        authorizedUntil = machineAuthorizationDeadline(attachment.machineGrant!);
+        const rejected = await currentMachineAuthority(this.env, attachment.machineGrant!, 'space.control');
+        const rejection = rejected ? await authorityRejection(rejected) : null;
+        if (rejection || authorizedUntil <= Date.now() || socket.readyState !== 1) {
+          this.rejectMachineSocket(socket, rejection
+            ?? (authorizedUntil <= Date.now() ? { check: 'authorization-expired', authorizedUntil } : { check: 'socket-closed' }));
+          return false;
+        }
+      }
+      if (!accountLease || Date.now() < accountLease.checkedAt || Date.now() >= accountLease.expiresAt || socket.readyState !== 1) {
+        this.rejectMachineSocket(socket, { check: 'authorization-expired', authorizedUntil: accountLease?.expiresAt ?? 0 });
         return false;
       }
-      socket.serializeAttachment({ ...this.socketAttachment(socket), authorizedUntil });
+      socket.serializeAttachment({ ...this.socketAttachment(socket), authorizedUntil, accountAuthorization: accountLease });
       return true;
     })();
     this.machineChecks.set(socket, check);

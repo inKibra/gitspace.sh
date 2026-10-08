@@ -102,6 +102,10 @@ export async function createAccountWorkspaceRuntime(
     attachments: {
       seal: (secret, scope) => vault.sealRuntimeGrant(secret, scope),
       open: (ciphertext, scope) => vault.openRuntimeGrant(ciphertext, scope),
+      async admitExecution(machineId) {
+        const admission = await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).machineExecutionAdmission(machineId);
+        if (admission.state !== 'ready') throw new Error(admission.error ?? `Updating machine: executor protocol ${admission.required} is required before agent execution.`);
+      },
       async dispatch(input) {
         const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(input.machineId);
         if (!machine || machine.state !== 'online' || machine.desiredState !== 'online') throw new Error('Assigned executor is unavailable');

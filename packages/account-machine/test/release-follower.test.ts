@@ -106,6 +106,7 @@ function fakeAuthority(status: DeploymentStatus) {
   return {
     reports,
     channelReports,
+    machineProtocol: async (input: { version: number | null }) => ({ version: input.version, required: 1 as const, state: 'ready' as const, releaseSha: status.desired.machine, error: null }),
     reportMachineChannelApplied: async (input: { target: 'machine'; generation: string }) => { channelReports.push(input); },
     deploymentStatus: async () => status,
     reportMachineApplied: async (input: { sha: string; target: 'machine'; generation: string; status: 'applied' | 'failed'; error?: string }) => {
@@ -141,6 +142,45 @@ async function executable(sha: string, target: 'machine', files: Record<string, 
 }
 
 describe('release follower', () => {
+  it('automatically applies a negotiated native default through the verified complete-host updater', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-default-follower-'));
+    roots.push(root);
+    const sha = `${'a'.repeat(40)}-${process.platform}-${process.arch}`;
+    const built = await executable(sha, 'machine', {
+      'machine.js': 'machine-default', 'machine-worker.js': 'worker-default',
+      'host-runtime.js': 'host-default', 'machine-update.js': 'updater-default',
+      'machine-bootstrap.js': 'bootstrap-default', 'drizzle/meta/_journal.json': '{"entries":[]}',
+    });
+    const manifestKey = `distribution/v1/releases/default/${process.platform}-${process.arch}/machine/manifest.json`;
+    const artifact = { ...built.artifact, key: manifestKey };
+    const status: DeploymentStatus = {
+      desired: { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() },
+      current: { worker: { sha: null, version: null }, machines: {} }, releases: [],
+    };
+    const baseAuthority = fakeAuthority(status);
+    const authority = {
+      ...baseAuthority,
+      machineProtocol: async (input: { version: number | null; platform?: string | null }) => {
+        if (input.platform !== `${process.platform}-${process.arch}`) throw new Error('Native platform was not negotiated');
+        status.desired.machine = sha;
+        status.releases = [release(sha, artifact, null)];
+        return { version: input.version, required: 1 as const, state: 'ready' as const, releaseSha: sha, error: null };
+      },
+    };
+    const host = fakeHost('applied');
+    const follower = new ReleaseFollower({
+      authority, blobs: { get: async key => built.objects[key === manifestKey ? built.artifact.key : key] ?? null },
+      machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
+      runningMachineSha: null, generation: null, onError: error => { throw error; },
+    });
+    await follower.nudge();
+    follower.stop();
+    expect(host.launches).toHaveLength(1);
+    expect(host.launches[0]).toMatchObject({ entrypoint: 'machine-daemon', target: 'machine', applies: ['machine'], sha, hash: built.manifest.treeHash });
+    expect(await readFile(join(host.launches[0]!.path, 'host-runtime.js'), 'utf8')).toBe('host-default');
+    expect(await readFile(join(host.launches[0]!.path, 'machine-update.js'), 'utf8')).toBe('updater-default');
+    expect(authority.reports).toEqual([]);
+  });
   it('downloads the machine bundle and migrations, verifies them, and asks the host to swap', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-'));
     roots.push(root);

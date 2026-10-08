@@ -48,6 +48,44 @@ async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.writ
 const single = (path: string, input: unknown = {}) => ({ v: 1, path, input });
 
 describe('cloud lifecycle inspection and explicit authorization', () => {
+  it('reports pending inference activation until the platform health probe commits this Worker', async () => {
+    const fixture = await account();
+    const client = inspectorClient(fixture);
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'previous-worker' } })));
+    expect(await client.inference.list({})).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inference-activation-pending' } });
+    expect(await fixture.vault.inferenceCutover()).toBe(false);
+    const controller = new AbortController();
+    const stream = client.inference.events({ after: null }, { signal: controller.signal })[Symbol.asyncIterator]();
+    try {
+      expect(await stream.next()).toMatchObject({ done: false, value: { status: 'error', error: { _tag: 'gitspace/inference-activation-pending' } } });
+    } finally {
+      controller.abort();
+      await stream.return?.();
+    }
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
+    expect(await client.inference.list({})).toMatchObject({ status: 'ok', value: { profiles: [{ id: 'default' }] } });
+    expect(await fixture.vault.inferenceCutover()).toBe(true);
+  });
+
+  it('fences an established environment stream before disclosing suspended account changes', async () => {
+    const fixture = await account();
+    const { spaceId, authority } = await inspectorWorkspace(fixture.userId);
+    const client = inspectorClient(fixture);
+    const controller = new AbortController();
+    const stream = client.environment.events({ spaceId, after: null }, { signal: controller.signal })[Symbol.asyncIterator]();
+    try {
+      expect(await stream.next()).toMatchObject({ done: false, value: { status: 'ok' } });
+      network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'suspended' } })));
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
+      const pending = stream.next();
+      await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true });
+      expect(await pending).toMatchObject({ done: false, value: { status: 'error' } });
+    } finally {
+      controller.abort();
+      await stream.return?.();
+    }
+  });
+
   it('streams committed environment changes and replays changes missed while disconnected', async () => {
     const fixture = await account();
     const { spaceId, authority } = await inspectorWorkspace(fixture.userId);

@@ -70,6 +70,8 @@ Device-signed tunnel uploads require `Content-Length` and accept at most 64 MiB.
 
 Service sessions expire, follow the approving browser device's authority, and end on `POST /__gitspace/logout`. Revocation and expiry also close open service WebSockets. Application login cookies and Authorization headers pass through; GitSpace strips only its own credentials. Loopback forwards require their per-forward secret, exact loopback Host, and a loopback Origin when one is present. A live service lease cannot be replaced by another machine, and stale generations cannot update or release it.
 
+Account authorization caches the platform's tenant status for 15 seconds. During a platform outage, a known active status remains usable for at most 60 seconds after the last successful check. A failed refresh never extends that deadline. Uninitialized or expired authority fails closed. Existing streams and relay frames use the same checks before disclosing more data; device signatures and revocation remain separate checks.
+
 Model choices retain their default, role, or explicit-model intent. New requests resolve that intent against the current profile and catalog; admitted requests keep their model. If a selected model disappears, the next request records its fallback in the transcript. Catalog reads and admissions refresh published Pi metadata once its four-hour cache expires, using ETags. Bundled Pi models remain the fallback catalog.
 
 Headless browser tools run in cloud Browser Rendering or on an attached machine. Tests, previews, scraping, and tasks that do not need your signed-in accounts use headless, without browser approval in any mode. Both backends reach private workspace services through authenticated internal forwarding. Subagents can use headless only. Machine Chrome uses private inherited pipes, not a localhost debugging port. Its persistent profiles live outside the environment root, under `~/.gitspace-browser-profiles/`, with owner-only directory permissions.
@@ -156,6 +158,20 @@ Use the product's deployment entrypoints, not a new upload or activation script.
 | Platform/operator-managed releases | Use the existing platform/operator deployment workflow for that component. Tenant Worker deploys and reverts use the authenticated `/__platform/operator/tenants/:tenant/deploy` and `/revert` routes. Native distributions and cloud images use their existing GitHub publication and rollout workflows. |
 
 The active account targets are `worker` (the tenant Worker and Pi runtime), `machine` (tool execution), and `frontend`. Historical OMP release fields remain readable but are not launch targets. Shared-contract changes require a compatible set of these targets. The shared operator/control Worker is not the account's `worker` target.
+
+Machine execution uses a separate protocol negotiation at enrollment and connection. An older machine can still create or open workspaces, build, and launch releases. The account selects its pinned native release for that machine's platform; the existing verified host updater applies it. Older clients can identify their platform through a published runtime generation. Unrecognized generations or missing native artifacts show a concrete update blocker rather than guessing a platform. Only new agent effects wait for a compatible machine; receipt and recovery operations remain available.
+
+Inference activation still waits until the platform's active Worker version matches the running Worker. This keeps the irreversible credential migration behind deployment health checks and automatic rollback. The browser shows **Verifying the new release…** with **Check again** while that check is pending.
+
+Platform maintainers assemble new-account defaults with `packages/deployment/src/default-release-cli.ts`. One manifest pins the Worker bundle and metadata, account UI, cloud image digest, and four native platform artifacts to the same commit. The script requires a clean checkout and published native outputs from the existing distribution workflow. It validates hashes and provenance before atomically replacing the default pointer; rollback restores the previous complete set. Existing accounts keep their pinned UI and image when the default changes. This does not replace account **Launch**.
+
+Run the default-release flow with local fakes, without publishing:
+
+```sh
+bun packages/deployment/src/default-release-cli.ts --fake
+```
+
+Use `--help` for build, native-input, publish, and rollback options. A real build pushes its cloud image; publication and rollback require separate platform authorization.
 
 Account deployment progress comes from `DeploymentLauncher` through `deployment.status` and project `deployment` events. The client uses these for its Source indicator and launch progress sheet. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
 

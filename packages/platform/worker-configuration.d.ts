@@ -3,7 +3,6 @@ interface Env {
   DISPATCHER: DispatchNamespace;
   COMPUTE: Fetcher;
   COMPUTE_TEMPLATE_SCRIPT: string;
-  COMPUTE_DEFAULT_IMAGE: string;
   COMPUTE_SANDBOX_HOSTNAME: string;
   COMPUTE_MAX_MACHINES: string | number;
   COMPUTE_MAX_IMAGE_DEPLOYMENTS: string | number;

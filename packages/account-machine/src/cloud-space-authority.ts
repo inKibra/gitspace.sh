@@ -1,3 +1,4 @@
+import { machineExecutionAdmissionSchema, type machineProtocolInputSchema, type MachineExecutionAdmission } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
 import {
   inferenceStateSchema,
@@ -1219,17 +1220,21 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call<DeploymentStatus>('deploy.status', {});
   }
 
+  async machineProtocol(input: z.input<typeof machineProtocolInputSchema>): Promise<MachineExecutionAdmission> {
+    return machineExecutionAdmissionSchema.parse(await this.call('deploy.machineProtocol', input));
+  }
+
   revertRelease(): Promise<DeploymentStatus> {
     return this.call<DeploymentStatus>('deploy.revert', {});
   }
 
   /** This machine's verdict on a release generation; the machine id comes from the signed request. */
-  reportMachineApplied(input: { sha: string; target: 'machine' | 'omp'; generation: string; status: 'applied' | 'failed'; error?: string }): Promise<ReleaseRecord> {
+  reportMachineApplied(input: { sha: string; target: 'machine'; generation: string; status: 'applied' | 'failed'; error?: string }): Promise<ReleaseRecord> {
     return this.call<ReleaseRecord>('deploy.machineApplied', input);
   }
 
   /** Clear only the target that this healthy machine confirmed running from its channel artifact. */
-  async reportMachineChannelApplied(input: { target: 'machine' | 'omp'; generation: string }): Promise<void> {
+  async reportMachineChannelApplied(input: { target: 'machine'; generation: string }): Promise<void> {
     await this.call('deploy.machineChannelApplied', input);
   }
 

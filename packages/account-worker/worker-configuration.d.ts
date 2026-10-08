@@ -28,6 +28,7 @@ interface Env {
   ACCOUNT_URL: string;
   RELAY_URL: string;
   PLATFORM_URL: string;
+  DEFAULT_ACCOUNT_RELEASE?: string;
   PLATFORM_SERVICE?: Fetcher;
   PLATFORM_TOKEN: string;
   STORAGE_BUCKET: string;

@@ -825,6 +825,9 @@ export function SourceSettings({ deployment, onRevertDeployment, saving }: Pick<
       <SettingRow title="Worker" description="The tenant worker answering this account, by its own version stamp."><Badge color={deployment.current.worker.sha === null ? 'gray' : 'blue'}><span className="font-mono">{deployment.current.worker.version ?? 'unknown'}</span></Badge></SettingRow>
       {others.map(([machineId, running]) => <SettingRow key={machineId} title={machineId} description={`Machine ${running.sha ? shortSha(running.sha) : 'stable'}`}><RunningBadge sha={running.sha} generation={running.generation} /></SettingRow>)}
     </SettingRows></Group>
+    {Object.entries(deployment.machineExecution ?? {}).filter(([, execution]) => execution.state !== 'ready').map(([machineId, execution]) => <Group key={machineId} title={execution.state === 'blocked' ? 'Machine update blocked' : 'Updating machine'}><SettingRows>
+      <SettingRow title={machineId} description={execution.error ?? `Updating to ${execution.releaseSha ? shortSha(execution.releaseSha) : 'the current channel release'} before agent execution. Workspaces, builds, and Launch remain available.`}><Badge color={execution.state === 'blocked' ? 'red' : 'blue'}>{execution.state === 'blocked' ? 'Needs attention' : 'Updating'}</Badge></SettingRow>
+    </SettingRows></Group>)}
     <Group title="Desired"><SettingRows>
       {RELEASE_TARGETS.map((target) => <SettingRow key={target} title={RELEASE_TARGET_LABEL[target]} description={desiredLabel(deployment, target)}><Badge color={deployment.desired[target] === null ? 'gray' : 'blue'}>{deployment.desired[target] === null ? 'Channel' : 'Release'}</Badge></SettingRow>)}
       <SettingRow title="All targets" description={`Selections updated ${new Date(deployment.desired.updatedAt).toLocaleString()}`}>

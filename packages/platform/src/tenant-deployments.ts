@@ -6,7 +6,7 @@ import { TenantComputeProvider } from './compute-provider.js';
 export interface TenantDeployRecord {
   id: number;
   sha: string;
-  /** Object key in RELEASES (`tenants/<tenant>/<sha>/worker.bundle.json` or `channel/worker.bundle.json`). */
+  /** Object key in RELEASES (`tenants/<tenant>/<sha>/worker.bundle.json` or `defaults/releases/<sha>/worker.bundle.json`). */
   bundleKey: string;
   metadata: WorkerReleaseMetadata;
   uploadedAt: string;
@@ -127,7 +127,10 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
     if (this.computeProvider && (this.computeProvider.tenant !== tenant || this.computeProvider.accountId !== accountId)) {
       throw new Error('Compute namespace identity does not match this tenant');
     }
-    this.computeProvider ??= new TenantComputeProvider(this.ctx.storage, this.env, tenant, accountId);
+    this.computeProvider ??= new TenantComputeProvider(this.ctx.storage, this.env, tenant, accountId, () => {
+      const pin = this.getState().active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
+      return pin?.source === 'literal' ? pin.value ?? null : null;
+    });
     return this.computeProvider.fetch(request);
   }
 

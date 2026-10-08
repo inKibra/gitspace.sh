@@ -80,7 +80,6 @@
     "DEPLOY_SETTLEMENT_MICROS": 1000,
     "DEPLOY_PROBE_DELAY_MS": 2000,
     "COMPUTE_TEMPLATE_SCRIPT": "gitspace-sandbox-worker",
-    "COMPUTE_DEFAULT_IMAGE": "registry.cloudflare.com/2ed07d2f77ecb2aa43ca99a9c970597c/gitspace-onboarding@sha256:1722e0de5ca7e500bfd18a1cf05cc6d1735c0a64da5f830e101adffb490ae65c",
     "COMPUTE_SANDBOX_HOSTNAME": "sandboxes.gitspace.sh",
     "COMPUTE_MAX_MACHINES": 20,
     "COMPUTE_MAX_IMAGE_DEPLOYMENTS": 16,

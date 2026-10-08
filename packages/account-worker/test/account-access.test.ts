@@ -1,3 +1,4 @@
+import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
@@ -5,13 +6,15 @@ import {
   createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant,
   signDeviceInvite, type ControlOperation, type SignedControlRequest,
 } from '@gitspace/protocol';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { HttpResponse, http } from 'msw';
-import worker, { CredentialVaultDO } from '../src/index.js';
+import { CredentialVaultDO } from '../src/index.js';
+import { AccountStateDO } from '../src/account-state.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 
+afterEach(() => vi.restoreAllMocks());
 function platformState(status: string) {
   network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status } })));
 }
@@ -123,6 +126,65 @@ function nextSocketEvent(socket: WebSocket): Promise<{ type: 'close' | 'message'
 }
 
 describe('account lifecycle authorization', () => {
+  it('keeps authorized calls available during bounded platform outages, then expires and recovers', async () => {
+    const a = await account();
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    let reads = 0;
+    let available = true;
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => {
+      reads++;
+      return available ? HttpResponse.json({ control: { status: 'active' } }) : new HttpResponse(null, { status: 503 });
+    }));
+    const request = () => SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('settings.get')) });
+    expect((await request()).status).toBe(200);
+    available = false;
+    expect((await request()).status).toBe(200);
+    expect(reads).toBe(1);
+    clock.mockReturnValue(now + 15_001);
+    expect((await Promise.all(Array.from({ length: 5 }, request))).map(response => response.status)).toEqual([200, 200, 200, 200, 200]);
+    expect(reads).toBe(2);
+    clock.mockReturnValue(now + 60_001);
+    const expired = await request();
+    expect(expired.status).toBe(503);
+    expect(await expired.json()).toMatchObject({ error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE' } });
+    available = true;
+    clock.mockReturnValue(now + 65_002);
+    expect((await request()).status).toBe(200);
+  });
+
+  it('preserves the authority deadline across reconstruction and rejects a different tenant cache', async () => {
+    const state = env.ACCOUNT_STATE.getByName('account');
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    expect(await state.authorization(env.ACCOUNT_ID)).toEqual({ status: 'active', checkedAt: now, refreshAt: now + 15_000, expiresAt: now + 60_000 });
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => new HttpResponse(null, { status: 503 })));
+    expect(await runInDurableObject(state, (_instance, context) => new AccountStateDO(context, env).authorization(env.ACCOUNT_ID))).toEqual({ status: 'active', checkedAt: now, refreshAt: now + 15_000, expiresAt: now + 60_000 });
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/different-tenant/state`, () => new HttpResponse(null, { status: 503 })));
+    expect(await runInDurableObject(state, (_instance, context) => new AccountStateDO(context, { ...env, TENANT_ID: 'different-tenant' }).authorization(env.ACCOUNT_ID))).toEqual({ status: 'unavailable' });
+    clock.mockReturnValue(now + 60_001);
+    expect(await runInDurableObject(state, (_instance, context) => new AccountStateDO(context, env).authorization(env.ACCOUNT_ID))).toEqual({ status: 'unavailable' });
+  });
+
+  it('never grants an uninitialized tenant authority during a platform outage', async () => {
+    const a = await account();
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => new HttpResponse(null, { status: 503 })));
+    const response = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('settings.get')) });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE' } });
+  });
+
+  it('does not let a warm authority cache bypass tenant ownership, signatures, or device revocation', async () => {
+    const a = await account();
+    const request = (proof: SignedControlRequest) => SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(proof) });
+    expect((await request(a.signed('settings.get'))).status).toBe(200);
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => new HttpResponse(null, { status: 503 })));
+    expect((await request(a.signed('settings.get'))).status).toBe(200);
+    expect((await request({ ...a.signed('settings.get'), userId: `u-${'0'.repeat(32)}` })).status).not.toBe(200);
+    expect((await request({ ...a.signed('settings.get'), signature: credentialProtocolBase64.encode(new Uint8Array(64)) })).status).toBe(401);
+    await a.vault.removeManagedDevice('machine');
+    expect((await request(a.signed('settings.get'))).status).toBe(401);
+  });
   it('allows signed RPC preflight while exposing account suspension to the browser', async () => {
     const a = await account();
     platformState('suspended');
@@ -214,6 +276,7 @@ describe('account lifecycle authorization', () => {
     const a = await account();
     expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
     platformState(status);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
     for (const response of await a.requests()) {
       expect([401, 403]).toContain(response.status);
       expect(await response.json()).toMatchObject({ status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE' } });
@@ -233,26 +296,40 @@ describe('account lifecycle authorization', () => {
     expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
   });
 
-  it('blocks incompatible machine RPC and workspace admissions after cutover without blocking deployment control', async () => {
+  it('keeps legacy machines able to create and open workspaces and recover after inference cutover', async () => {
     const a = await account();
     await a.vault.ensureInference();
-    for (const operation of ['space.bootstrap', 'space.beginOpen'] as const) {
-      const response = await SELF.fetch('https://auth.test/v1/control', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(a.signed(operation, { projectId: 'new-project', spaceId: 'new-space' })),
-      });
-      expect(response.status).toBe(409);
-      expect(await response.json()).toMatchObject({ status: 'error', error: { code: 'INFERENCE_UPGRADE_REQUIRED' } });
-    }
-    const runtime = await SELF.fetch(`https://auth.test/__sandbox/${a.userId}/sandbox-old/rpc`, { method: 'POST', body: '{}' });
-    expect(runtime.status).toBe(409);
-    expect(await runtime.json()).toMatchObject({ error: { code: 'INFERENCE_UPGRADE_REQUIRED' } });
+    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:new-project`);
+    await authority.bootstrap({ id: 'new-project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
+    await authority.putWorkspace({ id: 'new-space', projectId: 'new-project', kind: 'worktree', name: 'Workspace', branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    const request = (operation: ControlOperation, payload: Record<string, unknown> = {}) => SELF.fetch('https://auth.test/v1/control', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation, payload)),
+    });
+    const created = await request('space.bootstrap', { projectId: 'new-project', spaceId: 'new-space' });
+    expect(created.status).toBe(200);
+    expect(await created.json()).toMatchObject({ status: 'ok', value: { machineId: 'machine', state: 'open' } });
+    const placement = env.SPACE_AUTHORITY.getByName(`${a.userId}:new-space`);
+    const identity = { projectId: 'new-project', spaceId: 'new-space', machineId: 'machine', expectedGeneration: 1 };
+    await placement.beginClose(identity);
+    const checkpoint = await persistPortableCheckpoint(identity.projectId, identity.spaceId, 1);
+    await placement.commitClosed({ ...identity, revision: 1, ...checkpoint });
+    const reopened = await request('space.beginOpen', { projectId: 'new-project', spaceId: 'new-space', expectedGeneration: 2 });
+    expect(reopened.status).toBe(200);
+    expect(await reopened.json()).toMatchObject({ status: 'ok', value: { revision: 1 } });
     const relay = await SELF.fetch('https://auth.test/v1/relay/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant: a.grant, capability: 'space.control' }) });
-    expect(relay.status).toBe(409);
-    expect(await relay.json()).toMatchObject({ error: { code: 'INFERENCE_UPGRADE_REQUIRED' } });
-    expect(await env.PROJECT_AUTHORITY.getByName(`${a.userId}:new-project`).getProject()).toBe(null);
-    const control = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('deploy.status')) });
-    expect(control.status).toBe(200);
+    expect(relay.status).toBe(200);
+    expect(await relay.json()).toMatchObject({ status: 'ok' });
+    expect((await request('deploy.status')).status).toBe(200);
+    const key = `objects/sha256/${'b'.repeat(64)}`;
+    const hash = `sha256:${'b'.repeat(64)}`;
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/machine-release/blob`, ({ request: download }) => {
+      expect(download.headers.get('authorization')).toBe(`Bearer ${env.PLATFORM_TOKEN}`);
+      expect(new URL(download.url).searchParams.get('key')).toBe(key);
+      return new HttpResponse('verified native chunk', { headers: { 'x-gitspace-sha256': hash } });
+    }));
+    const download = await SELF.fetch(`https://auth.test/v1/data/${key}`, { headers: { 'x-gitspace-control': btoa(JSON.stringify(a.signed('data.get', { key, hash }))) } });
+    expect(download.status).toBe(200);
+    expect(await download.text()).toBe('verified native chunk');
   });
 
   it('requires configuration authority for signed profile management and returns typed CAS conflicts', async () => {
@@ -301,57 +378,41 @@ describe('account lifecycle authorization', () => {
 
   it.each(['settings.get', 'artifacts.key.get'] as const)('allows active tenant control but still denies revoked devices for %s', async operation => {
     const a = await account();
-    const platform = { ...env, PLATFORM_URL: 'https://authority.test', PLATFORM_TOKEN: 'authority-token' };
-    network.use(
-      http.get(`https://authority.test/__platform/tenants/${env.TENANT_ID}/state`, ({ request }) => request.headers.get('authorization') === 'Bearer authority-token'
-        ? HttpResponse.json({ control: { status: 'active' } })
-        : new HttpResponse(null, { status: 401 })),
-    );
-    const response = await worker.fetch(new Request('https://auth.test/v1/control', {
+    const response = await SELF.fetch('https://auth.test/v1/control', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)),
-    }), platform);
+    });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ status: 'ok' });
     await a.vault.removeManagedDevice('machine');
-    const revoked = await worker.fetch(new Request('https://auth.test/v1/control', {
+    const revoked = await SELF.fetch('https://auth.test/v1/control', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)),
-    }), platform);
+    });
     expect(revoked.status).toBe(401);
     expect(await revoked.json()).toMatchObject({ status: 'error' });
   });
 
   it.each(['settings.get', 'artifacts.key.get'] as const)('fails closed on missing, unavailable, or malformed platform access authority for %s', async operation => {
     const a = await account();
-    const platform = { ...env, PLATFORM_URL: 'https://authority.test', PLATFORM_TOKEN: 'authority-token' };
-    network.use(http.get(`https://authority.test/__platform/tenants/${env.TENANT_ID}/state`, ({ request }) => request.headers.get('authorization') === 'Bearer authority-token'
-      ? HttpResponse.json({ control: { status: 'active' } })
-      : new HttpResponse(null, { status: 401 })));
-    const missingToken = await worker.fetch(new Request('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)),
-    }), { ...platform, PLATFORM_TOKEN: '' });
-    expect(missingToken.status).toBe(503);
-    expect(await missingToken.json()).toMatchObject({ error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE' } });
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
     for (const result of [
+      () => new HttpResponse(null, { status: 401 }),
       () => new HttpResponse(null, { status: 404 }),
       () => new HttpResponse(null, { status: 503 }),
       () => HttpResponse.error(),
       () => new HttpResponse('not JSON'),
       () => HttpResponse.json(null),
       () => HttpResponse.json({}),
+      () => HttpResponse.json({ control: { status: ['active'] } }),
     ]) {
-      network.use(http.get(`https://authority.test/__platform/tenants/${env.TENANT_ID}/state`, result));
-      const response = await worker.fetch(new Request('https://auth.test/v1/control', {
+      clock.mockReturnValue(now += 5_001);
+      network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, result));
+      const response = await SELF.fetch('https://auth.test/v1/control', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)),
-      }), platform);
+      });
       expect(response.status).toBe(503);
       expect(await response.json()).toMatchObject({ error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE' } });
     }
-    network.use(http.get(`https://authority.test/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: ['active'] } })));
-    const malformedControl = await worker.fetch(new Request('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)),
-    }), platform);
-    expect(malformedControl.status).toBe(403);
-    expect(await malformedControl.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
   });
 
   it.each(['settings', 'fleet'] as const)('ends stale %s subscriptions before disclosing another event', async kind => {
@@ -366,6 +427,7 @@ describe('account lifecycle authorization', () => {
     expect(await activeEvent).toMatchObject({ type: 'message', data: expect.stringContaining(kind === 'settings' ? 'settings.changed' : 'upsert') });
     const suspendedEvent = nextSocketEvent(socket);
     platformState('suspended');
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
     if (kind === 'settings') {
       await env.USER_SETTINGS.getByName(a.userId).updateGitIdentity('fixture', { expectedGeneration: 1, privateKey: 'q'.repeat(64), publicKey: 'ssh-ed25519 updated', fingerprint: 'SHA256:updated' });
     } else {

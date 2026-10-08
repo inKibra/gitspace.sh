@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { defaultNativeArtifactSchema } from '@gitspace/protocol/default-release';
 
 /** Native dependency graphs are built on each target, never cross-labelled. Linux hosts use glibc; static tools may use musl. */
 export const DISTRIBUTION_PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64'] as const;
@@ -38,7 +39,9 @@ export const distributionManifestSchema = z.object({
   client: digest,
   runtime: digest.extend({ files: z.array(distributionFileSchema).min(1).max(100_000) }),
   provenance: digest,
+  machine: defaultNativeArtifactSchema.optional(),
 }).strict().superRefine((manifest, context) => {
+  if (manifest.machine && (manifest.machine.platform !== manifest.platform || !manifest.machine.artifact.key.startsWith(`distribution/v1/releases/${manifest.release}/${manifest.platform}/`))) context.addIssue({ code: 'custom', message: 'Native machine distribution identity mismatch' });
   const paths = new Set<string>();
   let total = 0;
   for (const file of manifest.runtime.files) {

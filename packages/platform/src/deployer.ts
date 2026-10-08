@@ -7,12 +7,10 @@ import {
 } from '@gitspace/protocol/deployment';
 import type { TenantDeployRecord, TenantDeploymentsDO, TenantDeploymentState } from './tenant-deployments.js';
 import { decodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
+import { defaultReleaseReader } from './default-release.js';
+import { loadDefaultRelease, verifyDefaultObject } from '@gitspace/protocol/default-release';
 
 export const CLOUDFLARE_API = 'https://api.cloudflare.com/client/v4';
-/** Our channel build, placed in RELEASES by the GitSpace release pipeline. */
-export const CHANNEL_BUNDLE_KEY = 'channel/worker.bundle.json';
-export const CHANNEL_METADATA_KEY = 'channel/metadata.json';
-export const CHANNEL_SHA = 'channel';
 
 
 // Dispatchers can still serve the predecessor after upload; allow 30 seconds at the production interval.
@@ -213,7 +211,7 @@ async function probeHealth(env: Env, tenant: string, expectedSha: string): Promi
       version = response.headers.get(WORKER_VERSION_HEADER);
       // Release this invocation before looking up the next Worker version.
       await response.body?.cancel();
-      const matches = version === expectedSha || (expectedSha === CHANNEL_SHA && version?.startsWith(`${CHANNEL_SHA}:`) === true);
+      const matches = version === expectedSha;
       if (response.ok && matches) return { healthy: true, version };
     } catch (error) {
       console.error(JSON.stringify({ event: 'deploy-probe-failed', tenant, attempt, message: error instanceof Error ? error.message : String(error) }));
@@ -223,7 +221,7 @@ async function probeHealth(env: Env, tenant: string, expectedSha: string): Promi
 }
 
 interface Candidate {
-  /** Release sha, or `channel` for our build (whose stamp is only known after the probe). */
+  /** Exact Worker build identity, checked by the post-upload health probe. */
   sha: string;
   bundleKey: string;
   bundle: ArrayBuffer;
@@ -242,11 +240,16 @@ async function loadFallback(env: Env, state: TenantDeploymentState, exclude: str
 }
 
 async function loadChannel(env: Env): Promise<Candidate | null> {
-  const [bundle, metadata] = await Promise.all([env.RELEASES.get(CHANNEL_BUNDLE_KEY), env.RELEASES.get(CHANNEL_METADATA_KEY)]);
-  if (!bundle || !metadata) return null;
-  const parsed = workerReleaseMetadataSchema.safeParse(await metadata.json());
-  if (!parsed.success) return null;
-  return { sha: CHANNEL_SHA, bundleKey: CHANNEL_BUNDLE_KEY, bundle: await bundle.arrayBuffer(), metadata: parsed.data };
+  try {
+    const reader = defaultReleaseReader(env.RELEASES);
+    const manifest = await loadDefaultRelease(reader);
+    const bundle = await verifyDefaultObject(reader, manifest.worker.bundle);
+    const metadata = workerReleaseMetadataSchema.parse({
+      ...manifest.worker.metadata,
+      resources: [...manifest.worker.metadata.resources.filter(resource => resource.name !== 'DEFAULT_ACCOUNT_RELEASE'), { name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: manifest.commit }],
+    });
+    return { sha: manifest.worker.version, bundleKey: manifest.worker.bundle.key, bundle: new Uint8Array(bundle).buffer, metadata };
+  } catch { return null; }
 }
 
 /**
@@ -260,6 +263,10 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
   if (!tenantConfig) {
     await deployments.releaseLease();
     return { status: 'error', error: { status: 409, code: 'TENANT_UNCONFIGURED', message: 'Tenant bindings are not configured' } };
+  }
+  const defaultPin = state.active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
+  if (defaultPin && !candidate.metadata.resources.some(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE')) {
+    candidate = { ...candidate, metadata: { ...candidate.metadata, resources: [...candidate.metadata.resources, defaultPin] } };
   }
   const delta = migrationDelta(candidate.metadata.migrations, state.appliedMigrationTag);
   const accountKey = Uint8Array.from(atob(tenantConfig.rootPublicKey), character => character.charCodeAt(0));

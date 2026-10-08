@@ -7,6 +7,7 @@ export type GrantScope = Pick<RuntimeAttachment, 'projectId' | 'workspaceId' | '
 export type AttachmentServices = {
   seal(secret: string, scope: GrantScope): Promise<string>;
   open(ciphertext: string, scope: GrantScope): Promise<string>;
+  admitExecution?(machineId: RuntimeAttachment['machineId']): Promise<void>;
   dispatch(input: { machineId: RuntimeAttachment['machineId']; path: '/runtime/execute' | '/runtime/receipt'; body: string; signature: string; signal: AbortSignal }): Promise<RuntimeReceiptTransport>;
 };
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
@@ -422,10 +423,18 @@ export class AttachmentStore {
     let receipt: RuntimeExecutorReceipt;
     if (prior) receipt = await this.reconcile(dispatch, signal);
     else {
-      this.storage.sql.exec("INSERT INTO runtime_attempts(id,dispatch,status) VALUES(?,?,'dispatched')", dispatch.attemptId, JSON.stringify(dispatch));
-      await this.storage.sync();
-      try { receipt = await this.accept(dispatch, await this.exchange(dispatch, 'execute', signal)); }
-      catch { receipt = await this.reconcile(dispatch, signal); }
+      await this.services.admitExecution?.(dispatch.machineId);
+      signal.throwIfAborted();
+      const raced = this.getAttempt(dispatch.attemptId);
+      if (raced) {
+        if (canonicalJson(raced.dispatch) !== canonicalJson(dispatch)) throw new Error('Attempt identity changed');
+        receipt = await this.reconcile(dispatch, signal);
+      } else {
+        this.storage.sql.exec("INSERT INTO runtime_attempts(id,dispatch,status) VALUES(?,?,'dispatched')", dispatch.attemptId, JSON.stringify(dispatch));
+        await this.storage.sync();
+        try { receipt = await this.accept(dispatch, await this.exchange(dispatch, 'execute', signal)); }
+        catch { receipt = await this.reconcile(dispatch, signal); }
+      }
     }
     for (;;) {
       if (receipt.state === 'terminal') return receipt.result;

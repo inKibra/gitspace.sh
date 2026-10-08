@@ -11,6 +11,9 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { buildInitialRuntime, workspaceSha } from './builders.js';
+import { createDefaultNativeArtifact } from './default-native.js';
+import { readExecutableFile } from './executable-manifest.js';
+import { defaultNativeArtifactSchema, defaultNativeProvenanceSchema, verifyDefaultNativeArtifact } from '@gitspace/protocol/default-release';
 import {
   DISTRIBUTION_BUN_VERSION,
   currentDistributionPlatform,
@@ -153,6 +156,18 @@ export async function buildDistribution(options: { release: string; output: stri
     const bun = await packageBun(platform, staging);
     await compileClient(platform, bun, client);
     const initial = await buildInitialRuntime(ROOT, runtime);
+    const native = createDefaultNativeArtifact(revision, release, platform, initial.machine.manifest);
+    await mkdir(join(artifacts, 'machine/objects/sha256'), { recursive: true });
+    await writeFile(join(artifacts, 'machine/manifest.json'), JSON.stringify(initial.machine.manifest));
+    await writeFile(join(artifacts, 'native-default.json'), JSON.stringify(native));
+    for (const file of initial.machine.manifest.files) {
+      let index = 0;
+      for await (const bytes of readExecutableFile(join(initial.machine.path, file.path))) {
+        const chunk = file.chunks[index++];
+        if (!chunk) throw new Error('Native executable chunk inventory changed during publication');
+        await writeFile(join(artifacts, 'machine', chunk.key), bytes);
+      }
+    }
     await mkdir(join(runtime, 'bin'));
     // A private Bun preserves process.execPath for machine and supervisor children.
     await cp(bun, join(runtime, 'bin/bun'));
@@ -181,6 +196,7 @@ export async function buildDistribution(options: { release: string; output: stri
       schemaVersion: 1, release, platform, bunVersion: Bun.version, minimumGlibc: glibc,
       client: await digest(client), runtime: { ...await digest(payload), files },
       provenance: await digest(join(artifacts, 'provenance.json')),
+      machine: native,
     });
     await writeFile(join(artifacts, 'manifest.json'), JSON.stringify(manifest));
     const channel = distributionChannelSchema.parse({ schemaVersion: 1, release, platform, manifest: await digest(join(artifacts, 'manifest.json')) });
@@ -188,6 +204,7 @@ export async function buildDistribution(options: { release: string; output: stri
     await writeFile(join(artifacts, 'channel.txt'), `gitspace-distribution-v1\n${release}\n${manifest.client.sha256}\n`);
     // Existing releases are immutable. All output becomes visible together only after the complete native build.
     if (await Bun.file(join(output, 'manifest.json')).exists()) throw new Error(`Release output already exists: ${output}. Use a new release/output, do not overwrite published artifacts.`);
+    if (await workspaceSha(ROOT) !== revision) throw new Error('Native build checkout changed during build');
     await rename(artifacts, output);
     return output;
   } finally {
@@ -199,6 +216,16 @@ function requiredEnvironment(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required to publish distribution objects to R2`);
   return value;
+}
+
+/** Shared authenticated R2 transport for immutable release publishers. */
+export function releaseStorageClient(): S3Client {
+  return new S3Client({
+    region: 'auto', forcePathStyle: true, maxAttempts: 1,
+    endpoint: `https://${requiredEnvironment('CLOUDFLARE_ACCOUNT_ID')}.r2.cloudflarestorage.com`,
+    credentials: { accessKeyId: requiredEnvironment('R2_ACCESS_KEY_ID'), secretAccessKey: requiredEnvironment('R2_SECRET_ACCESS_KEY') },
+    requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
+  });
 }
 
 export async function publishDistribution(directory: string, activate: boolean, options: {
@@ -216,13 +243,7 @@ export async function publishDistribution(directory: string, activate: boolean, 
   }
   const expectedText = `gitspace-distribution-v1\n${manifest.release}\n${manifest.client.sha256}\n`;
   if (await readFile(join(directory, 'channel.txt'), 'utf8') !== expectedText) throw new Error('Installer channel does not match the release');
-  const client = options.client ?? new S3Client({
-    region: 'auto', forcePathStyle: true, maxAttempts: 1,
-    endpoint: `https://${requiredEnvironment('CLOUDFLARE_ACCOUNT_ID')}.r2.cloudflarestorage.com`,
-    credentials: { accessKeyId: requiredEnvironment('R2_ACCESS_KEY_ID'), secretAccessKey: requiredEnvironment('R2_SECRET_ACCESS_KEY') },
-    // SHA-256 is checked locally and on readback; do not add optional streaming checksums.
-    requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
-  });
+  const client = options.client ?? releaseStorageClient();
   const Bucket = options.bucket ?? process.env.R2_BUCKET ?? 'gitspace-data';
   const prefix = `distribution/v1/releases/${manifest.release}/${manifest.platform}/`;
   const signal = options.signal ?? AbortSignal.timeout(10 * 60_000);
@@ -382,6 +403,49 @@ export async function publishDistribution(directory: string, activate: boolean, 
       }
       if (!remote) throw new Error(`Distribution object ${key} is missing after upload`);
       verify(key, remote, expected);
+    }
+    if (manifest.machine) {
+      const native = defaultNativeArtifactSchema.parse(JSON.parse(await readFile(join(directory, 'native-default.json'), 'utf8')));
+      if (JSON.stringify(native) !== JSON.stringify(manifest.machine)) throw new Error('Native distribution descriptor mismatch');
+      const provenance = defaultNativeProvenanceSchema.parse(JSON.parse(await readFile(join(directory, 'provenance.json'), 'utf8')));
+      if (provenance.sourceRevision !== native.commit || provenance.platform !== native.platform || provenance.machine.treeHash !== native.generation) throw new Error('Native distribution provenance mismatch');
+      await verifyDefaultNativeArtifact({ async get(key) { return { bytes: await readFile(join(directory, key.slice(prefix.length))), etag: '' }; } }, native);
+      for (const object of [native.artifact, ...native.chunks]) {
+        const path = join(directory, object.key.slice(prefix.length));
+        verify(path, await digest(path), object);
+        let remote = await remoteDigest(object.key, object.size);
+        if (!remote) {
+          if (published) throw new Error(`Published native object ${object.key} is missing`);
+          await put(object.key, { path }, 'application/octet-stream', object.size, true);
+          remote = await remoteDigest(object.key, object.size);
+        }
+        if (!remote) throw new Error(`Native object ${object.key} missing after upload`);
+        verify(object.key, remote, object);
+      }
+      const descriptor = JSON.stringify(native);
+      const expected = { sha256: createHash('sha256').update(descriptor).digest('hex'), size: Buffer.byteLength(descriptor) };
+      const descriptorKey = `${prefix}native-default.json`;
+      let descriptorDigest = await remoteDigest(descriptorKey, expected.size);
+      if (!descriptorDigest) {
+        await put(descriptorKey, descriptor, 'application/json', expected.size, true);
+        descriptorDigest = await remoteDigest(descriptorKey, expected.size);
+      }
+      if (!descriptorDigest) throw new Error(`Native descriptor ${descriptorKey} missing after upload`);
+      verify(descriptorKey, descriptorDigest, expected);
+      const indexKey = `distribution/v1/generations/${native.generation.slice(7)}.json`;
+      const readIndex = () => request('GetNativeGeneration', indexKey, null, async deadline => {
+        let response;
+        try { response = await client.send(new GetObjectCommand({ Bucket, Key: indexKey }), { abortSignal: deadline }); }
+        catch (error) { if (error instanceof S3ServiceException && error.$metadata.httpStatusCode === 404) return null; throw error; }
+        if (!response.Body) throw new Error('Native generation index has no body');
+        const chunks: Uint8Array[] = [];
+        await response.Body.transformToWebStream().pipeTo(new WritableStream<Uint8Array>({ write(chunk) { chunks.push(chunk); } }), { signal: deadline });
+        return defaultNativeArtifactSchema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      });
+      let existing = await readIndex();
+      if (!existing) { await put(indexKey, descriptor, 'application/json', expected.size, true); existing = await readIndex(); }
+      // A repeat build may have the same tree under a new release. Keep its first immutable proof.
+      if (!existing || existing.generation !== native.generation || existing.platform !== native.platform) throw new Error('Native generation index collision');
     }
     if (!published) {
       await put(publishedKey, manifestBytes, 'application/json', expectedManifest.size, true);

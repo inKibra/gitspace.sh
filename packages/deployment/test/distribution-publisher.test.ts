@@ -1,11 +1,13 @@
 import { afterEach, expect, test } from 'bun:test';
 import { S3Client, type GetObjectCommandOutput } from '@aws-sdk/client-s3';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { publishDistribution } from '../src/release.js';
+import { createDefaultNativeArtifact } from '../src/default-native.js';
+import { distributionManifestSchema } from '../src/distribution.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
@@ -164,5 +166,38 @@ test('rejects mismatched retained objects rather than overwriting or publishing 
   await expect(publishDistribution(f.directory, false, { client: f.client, bucket: 'fixture' })).rejects.toThrow('integrity mismatch');
   expect(f.objects.get(`${f.prefix}gitspace`)).toEqual(new Uint8Array([9, 9, 9]));
   expect(f.objects.has(`${f.prefix}manifest.json`)).toBe(false);
+  expect(f.mutations).toEqual([]);
+});
+
+test('publishes the verified native follower graph before making the distribution visible', async () => {
+  const f = await fixture();
+  const commit = 'a'.repeat(40);
+  const bytes = Buffer.from('native machine fixture');
+  const hash = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const executable = {
+    version: 1, target: 'machine', inferenceVersion: 1, entrypoint: 'machine.js',
+    compatibility: { platform: 'linux', arch: 'x64', bunVersion: '1.4.0', protocolVersion: 1, nativeAbi: { platform: 'linux', arch: 'x64', minimumVersion: '2.35' } },
+    treeHash: hash, files: [{ path: 'machine.js', hash, size: bytes.byteLength, mode: 420, chunks: [{ key: `objects/sha256/${hash.slice(7)}`, hash, size: bytes.byteLength }] }], omp: null,
+  };
+  const native = createDefaultNativeArtifact(commit, 'publisher-fixture', 'linux-x64', executable);
+  const provenance = Buffer.from(JSON.stringify({ sourceRevision: commit, platform: 'linux-x64', machine: { treeHash: hash } }));
+  const manifest = distributionManifestSchema.parse({ ...JSON.parse(f.manifestBytes.toString('utf8')), machine: native, provenance: { sha256: createHash('sha256').update(provenance).digest('hex'), size: provenance.byteLength } });
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  await mkdir(join(f.directory, 'machine/objects/sha256'), { recursive: true });
+  await Promise.all([
+    writeFile(join(f.directory, 'machine/manifest.json'), JSON.stringify(executable)),
+    writeFile(join(f.directory, `machine/objects/sha256/${hash.slice(7)}`), bytes),
+    writeFile(join(f.directory, 'native-default.json'), JSON.stringify(native)),
+    writeFile(join(f.directory, 'provenance.json'), provenance),
+    writeFile(join(f.directory, 'manifest.json'), manifestBytes),
+    writeFile(join(f.directory, 'channel.json'), JSON.stringify({ schemaVersion: 1, release: manifest.release, platform: manifest.platform, manifest: { sha256: createHash('sha256').update(manifestBytes).digest('hex'), size: manifestBytes.byteLength } })),
+  ]);
+  await publishDistribution(f.directory, false, { client: f.client, bucket: 'fixture' });
+  expect(f.objects.get(native.chunks[0]!.key)).toEqual(bytes);
+  expect(f.objects.get(native.artifact.key)).toEqual(Buffer.from(JSON.stringify(executable)));
+  expect(f.objects.has(`distribution/v1/generations/${hash.slice(7)}.json`)).toBe(true);
+  expect(f.mutations.at(-1)).toBe(`${f.prefix}manifest.json`);
+  f.mutations.length = 0;
+  await publishDistribution(f.directory, false, { client: f.client, bucket: 'fixture' });
   expect(f.mutations).toEqual([]);
 });

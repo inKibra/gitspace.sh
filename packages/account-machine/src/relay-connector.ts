@@ -1,3 +1,4 @@
+import { MACHINE_EXECUTION_PROTOCOL_VERSION, machineNativePlatformSchema } from '@gitspace/protocol/deployment';
 import {
   RELAY_HEARTBEAT_INTERVAL_MS,
   RELAY_HEARTBEAT_MODE,
@@ -49,7 +50,7 @@ function socketUrl(relayUrl: string, machineId: string): URL {
   const url = new URL(relayUrl);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = `${url.pathname.replace(/\/+$/u, '')}/ws`;
-  url.search = new URLSearchParams({ role: 'machine', id: machineId, heartbeat: RELAY_HEARTBEAT_MODE }).toString();
+  url.search = new URLSearchParams({ role: 'machine', id: machineId, heartbeat: RELAY_HEARTBEAT_MODE, machineProtocol: String(MACHINE_EXECUTION_PROTOCOL_VERSION), machinePlatform: machineNativePlatformSchema.parse(`${process.platform}-${process.arch}`) }).toString();
   return url;
 }
 

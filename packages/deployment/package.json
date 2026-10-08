@@ -12,7 +12,8 @@
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
     "test": "bun ../../scripts/test-isolated.ts test",
     "release:build": "bun src/release.ts build",
-    "release:publish": "bun src/release.ts publish"
+    "release:publish": "bun src/release.ts publish",
+    "release:default": "bun src/default-release-cli.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1132.0",

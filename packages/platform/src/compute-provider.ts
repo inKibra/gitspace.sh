@@ -1,6 +1,8 @@
 import { cloudImageReferenceSchema, cloudImageProviderStatusSchema } from '@gitspace/protocol/cloud-image';
 import { z } from 'zod';
 import { ComputeProviderError, prepareComputeImage, type ComputeImageDeployment } from './compute-images.js';
+import { defaultReleaseReader } from './default-release.js';
+import { loadPinnedDefaultRelease } from '@gitspace/protocol/default-release';
 
 interface ComputeTarget { deploymentId: string | null; script: string | null; image: string | null; instance: string | null }
 interface ImageTransfer { operationId: string; target: ComputeTarget; staged: boolean }
@@ -13,7 +15,7 @@ const emptyTarget: ComputeTarget = { deploymentId: null, script: null, image: nu
 export class TenantComputeProvider {
   private control: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly storage: DurableObjectStorage, private readonly env: Env, readonly tenant: string, readonly accountId: string) {
+  constructor(private readonly storage: DurableObjectStorage, private readonly env: Env, readonly tenant: string, readonly accountId: string, private readonly defaultReleaseCommit: () => string | null) {
     storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS compute_images (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS compute_machines (machine_id TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -74,9 +76,15 @@ export class TenantComputeProvider {
   }
   private ok(value: unknown): Response { return Response.json({ status: 'ok', value }); }
 
+  private async defaultImage(): Promise<string> {
+    const commit = this.defaultReleaseCommit();
+    if (!commit) throw new ComputeProviderError('DEFAULT_RELEASE_UNAVAILABLE', 'Tenant has no pinned complete default release', 503);
+    return (await loadPinnedDefaultRelease(defaultReleaseReader(this.env.RELEASES), commit)).image.image;
+  }
+
   private async handle(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
-    if (path === '/v1/images/default') return this.ok({ image: cloudImageReferenceSchema.parse(this.env.COMPUTE_DEFAULT_IMAGE) });
+    if (path === '/v1/images/default') return this.ok({ image: await this.defaultImage() });
     if (path === '/v1/images/prepare') {
       const body = z.object({ image: cloudImageReferenceSchema }).strict().parse(await request.json());
       const deployment = await this.prepare(body.image);
@@ -87,7 +95,7 @@ export class TenantComputeProvider {
       const machineId = machineIdSchema.parse(body.machineId);
       if (body.userId !== undefined && body.userId !== this.accountId) throw new ComputeProviderError('COMPUTE_ACCOUNT_MISMATCH', 'Machine does not belong to this provider account', 403);
       const environment = z.record(z.string(), z.string()).parse(body.environment);
-      const image = cloudImageReferenceSchema.parse(body.image ?? this.env.COMPUTE_DEFAULT_IMAGE);
+      const image = cloudImageReferenceSchema.parse(body.image ?? await this.defaultImage());
       let placement = this.placement(machineId);
       if (placement && (placement.image !== image || placement.transfer)) throw new ComputeProviderError('COMPUTE_MACHINE_EXISTS', 'Machine already has a different image or an active handoff');
       if (!placement) {

@@ -3,6 +3,7 @@ import { runtimeMachineControl } from './account-runtime-control.js';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
 import { z } from 'zod';
+import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, type LoginState } from '@gitspace/provider-auth';
 import { collectUsage, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
@@ -68,6 +69,7 @@ import { consumeDurableStream, DurableChangeLog, type DurableStreamSubscription 
 import {
   platformDeployResponseSchema,
   stageReleaseInputSchema,
+  machineProtocolInputSchema,
   WORKER_VERSION_HEADER,
   type PlatformDeployRequest,
   type ReleaseStatus,
@@ -505,11 +507,20 @@ export class CredentialVaultDO extends DurableObject<Env> {
     try { return await this.inferenceMigration; } finally { this.inferenceMigration = null; }
   }
 
+  /** Preserve expected readiness across Durable Object RPC's Error serialization. */
+  async inferenceReadiness(): Promise<{ status: 'ready'; value: InferenceState } | { status: 'waiting' }> {
+    try { return { status: 'ready', value: await this.ensureInference() }; }
+    catch (cause) {
+      if (rpcErrors.inferenceActivationPending.is(cause)) return { status: 'waiting' };
+      throw cause;
+    }
+  }
+
   private async migrateInference(): Promise<InferenceState> {
     const config = this.config();
     if (!config) throw new Error('Account credential vault is unavailable');
     const platform = await tenantPlatformJson<{ deployment: { active: string | null } }>(this.env, '/state');
-    if (!WORKER_VERSION || platform.deployment?.active !== WORKER_VERSION) throw new Error('Inference activation requires a committed profile-compatible Worker release; wait for deployment health verification');
+    if (!WORKER_VERSION || platform.deployment?.active !== WORKER_VERSION) throw rpcErrors.inferenceActivationPending({});
     const settings = (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id);
     const prepared = await settings.prepareInferenceMigration();
     const projects = await (this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(config.user_id).list();
@@ -2157,8 +2168,24 @@ const FRONTEND_CONTENT_TYPES: Record<string, string> = {
   wasm: 'application/wasm',
 };
 
-/** Fetch the account tree directly through ASSETS; canonical redirects stay inside that tree. */
-async function accountChannelResponse(request: Request, assets: Fetcher, pathname: string): Promise<Response> {
+/** Default accounts pin immutable UI files; development assets retain their own namespace. */
+async function accountChannelResponse(request: Request, env: Env, pathname: string): Promise<Response> {
+  if (env.DEFAULT_ACCOUNT_RELEASE !== undefined) {
+    const commit = env.DEFAULT_ACCOUNT_RELEASE;
+    if (!/^[a-f0-9]{40}$/u.test(commit)) return new Response('Pinned account frontend unavailable', { status: 503 });
+    try {
+      const target = new URL(`/v1/default-releases/${commit}/frontend/${pathname.slice(1)}`, env.PLATFORM_URL);
+      const assetRequest = new Request(target, { method: request.method, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+      const response = await (env.PLATFORM_SERVICE ? env.PLATFORM_SERVICE.fetch(assetRequest) : fetch(assetRequest));
+      if ((response.status >= 300 && response.status < 400) || (response.ok && response.headers.get('x-gitspace-frontend-release') !== commit)) {
+        await response.body?.cancel();
+        return new Response('Pinned account frontend unavailable', { status: 503 });
+      }
+      return response;
+    } catch { return new Response('Pinned account frontend unavailable', { status: 503 }); }
+  }
+  const assets = env.ASSETS;
+  if (!assets) return new Response('Account frontend unavailable', { status: 503 });
   const asset = pathname.startsWith('/assets/') || pathname.startsWith('/fonts/')
     || (/\.[a-z0-9]+$/iu.test(pathname) && !/\.html?$/iu.test(pathname));
   let target = new URL(request.url);
@@ -2201,16 +2228,15 @@ async function releaseFrontendResponse(request: Request, env: Env, pathname: str
     const ownerId = account.userId;
   const frontend = await tenantReleases(env, ownerId).frontend();
     if (frontend === null) {
-      if (!env.ASSETS) return new Response('Account frontend unavailable', { status: 503 });
-      return accountChannelResponse(request, env.ASSETS, pathname);
+      return accountChannelResponse(request, env, pathname);
     }
   const prefix = `users/${ownerId}/${frontend.keyPrefix}/`;
   const requested = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
   if (requested.includes('..')) return new Response('Not found', { status: 404 });
   let path = requested;
   let object = await env.DATA.get(prefix + path);
-  if (!object && env.ASSETS && (requested === 'favicon.png' || requested === 'favicon.ico')) {
-    return accountChannelResponse(request, env.ASSETS, pathname);
+  if (!object && (requested === 'favicon.png' || requested === 'favicon.ico')) {
+    return accountChannelResponse(request, env, pathname);
   }
   if (!object && !/\.[a-z0-9]+$/iu.test(requested)) {
     path = 'index.html';
@@ -2389,7 +2415,26 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   }
   if (diagnostics) diagnostics.stage = operation === 'data.head' ? 'r2.head' : 'r2.get';
   const object = operation === 'data.head' ? await env.DATA.head(objectKey) : await env.DATA.get(objectKey);
-  if (!object) return new Response(null, { status: 404 });
+  if (!object) {
+    if (keyFromPath.startsWith('distribution/v1/releases/') || /^objects\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
+      const target = new URL(`/__platform/tenants/${encodeURIComponent(env.TENANT_ID)}/machine-release/blob`, env.PLATFORM_URL);
+      target.searchParams.set('key', keyFromPath);
+      const response = await (env.PLATFORM_SERVICE ?? { fetch }).fetch(new Request(target, {
+        headers: { authorization: `Bearer ${env.PLATFORM_TOKEN}` }, redirect: 'manual', signal: request.signal,
+      }));
+      const expectedHash = signed.payload.hash;
+      if (response.ok && expectedHash !== undefined && expectedHash !== response.headers.get('x-gitspace-sha256')) {
+        await response.body?.cancel();
+        return Response.json({ status: 'error', error: { code: 'HASH_MISMATCH', message: 'Machine release object hash does not match' } }, { status: 409 });
+      }
+      if (operation === 'data.head') {
+        await response.body?.cancel();
+        return new Response(null, { status: response.status, headers: response.headers });
+      }
+      return response;
+    }
+    return new Response(null, { status: 404 });
+  }
   const expectedHash = signed.payload.hash;
   if (expectedHash !== undefined && expectedHash !== object.customMetadata?.sha256) {
     return Response.json({ status: 'error', error: { code: 'HASH_MISMATCH', message: 'Application object hash does not match' } }, { status: 409 });
@@ -2640,9 +2685,6 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
 
 /** Forward once: a transport error cannot prove that the signed operation did not run. */
 export async function proxyAccountMachineRpc(request: Request, env: Env, userId: string, machine: FleetMachineDefinition): Promise<Response> {
-  if (await credentialVault(env, userId).inferenceCutover() && !await tenantReleases(env, userId).machineInferenceCompatible(machine.id)) {
-    return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP to a committed inference-profile-compatible release before admitting work'), { status: 409, headers: { 'cache-control': 'private, no-store' } });
-  }
   if (machine.provider === 'cloudflare-sandbox' && (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).cloudImage(machine.id))?.operation?.barrier) {
     return Response.json(publicError('CLOUD_IMAGE_IN_PROGRESS', 'This cloud machine is checkpointing or recovering'), { status: 503, headers: { 'cache-control': 'private, no-store' } });
   }
@@ -2863,9 +2905,6 @@ const worker = {
       }
       const denied = accountAccessResponse(await activeAccount(env, userId));
       if (denied) return new Response(denied.body, { status: denied.status, headers: { ...Object.fromEntries(denied.headers), ...cors } });
-      if (await credentialVault(env, userId).inferenceCutover() && !await tenantReleases(env, userId).machineInferenceCompatible(machineId)) {
-        return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP before admitting profile-managed work'), { status: 409, headers: cors });
-      }
       if ((await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).cloudImage(machineId))?.operation?.barrier) {
         return Response.json(publicError('CLOUD_IMAGE_IN_PROGRESS', 'This cloud machine is checkpointing or recovering'), { status: 503, headers: cors });
       }
@@ -2894,11 +2933,6 @@ const worker = {
         const account = await activeAccount(env, grant.grant.userId);
         if (account.status === 'error') return Response.json(account, { status: account.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' ? 503 : 401 });
         const result = await credentialVault(env, grant.grant.userId).authorizeRelayGrant(grant, body.capability);
-        if (result.status === 'ok' && body.capability === 'space.control'
-          && await credentialVault(env, grant.grant.userId).inferenceCutover()
-          && !await tenantReleases(env, grant.grant.userId).machineInferenceCompatible(grant.grant.machineId)) {
-          return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP before admitting profile-managed work'), { status: 409, headers: { 'cache-control': 'no-store' } });
-        }
         return Response.json(result, { status: result.status === 'ok' ? 200 : 401, headers: { 'cache-control': 'no-store' } });
       } catch {
         return Response.json(publicError('DEVICE_UNAUTHORIZED', 'Invalid relay authorization'), { status: 401 });
@@ -2965,7 +2999,7 @@ const worker = {
     }
     if (url.pathname === '/v1/machines/enroll' && request.method === 'POST') {
       try {
-        const body = await readBoundedJson(request) as { userId?: unknown; label?: unknown; deviceGrant?: unknown };
+        const body = await readBoundedJson(request) as { userId?: unknown; label?: unknown; deviceGrant?: unknown; machineProtocol?: unknown; machinePlatform?: unknown };
         if (typeof body.userId !== 'string' || typeof body.label !== 'string') {
           return Response.json(publicError('INVALID_MACHINE', 'Machine identity and label are required'), { status: 400 });
         }
@@ -3000,7 +3034,8 @@ const worker = {
           operationId: null,
           error: null,
         });
-        return Response.json({ status: 'ok', value: { machine, relayUrl } }, { headers: { 'cache-control': 'private, no-store' } });
+        const machineExecution = await tenantReleases(env, body.userId).machineProtocol(machine.id, machineProtocolInputSchema.parse({ version: body.machineProtocol ?? null, platform: body.machinePlatform ?? null }));
+        return Response.json({ status: 'ok', value: { machine, relayUrl, machineExecution } }, { headers: { 'cache-control': 'private, no-store' } });
       } catch (error) {
         return Response.json(publicError('INVALID_MACHINE', error instanceof Error ? error.message : 'Machine enrollment failed'), { status: 400 });
       }
@@ -3200,11 +3235,6 @@ const worker = {
           const value = await runtimeMachineControl(env, body);
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
         }
-        if (['space.bootstrap', 'space.beginOpen'].includes(body.operation)
-          && await credentialVault(env, body.userId).inferenceCutover()
-          && !await tenantReleases(env, body.userId).machineInferenceCompatible(body.machineId)) {
-          return Response.json(publicError('INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine to a committed inference-profile-compatible release before admitting work'), { status: 409, headers: { 'cache-control': 'private, no-store' } });
-        }
         if (diagnostics) diagnostics.stage = 'rollout';
         if (body.operation === 'space.bootstrap' || body.operation === 'space.beginOpen') {
           const spaceId = String(body.payload.spaceId ?? '');
@@ -3271,6 +3301,9 @@ const worker = {
           const releases = tenantReleases(env, body.userId);
           let value: unknown;
           switch (body.operation) {
+            case 'deploy.machineProtocol':
+              value = await releases.machineProtocol(body.machineId, machineProtocolInputSchema.parse(body.payload));
+              break;
             case 'deploy.stage':
               value = await releases.stage(stageReleaseInputSchema.parse(body.payload), body.machineId);
               break;
@@ -3278,7 +3311,7 @@ const worker = {
               value = await launchRelease(env, body.userId, body.payload);
               break;
             case 'deploy.status':
-              value = await releases.status(body.userId, await tenantWorkerVersion(env, body.userId));
+              value = await releases.status(body.userId, await tenantWorkerVersion(env, body.userId), body.machineId);
               break;
             case 'deploy.revert': {
               await releases.assertChannelCompatible();

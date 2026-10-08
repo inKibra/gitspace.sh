@@ -5,8 +5,9 @@ import { createRelayAuthorization } from '@gitspace/protocol/relay';
 import type { PlatformDeployResponse, WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../src/index.js';
-import { CHANNEL_BUNDLE_KEY, CHANNEL_METADATA_KEY, migrationDelta, type ScriptUploadMetadata } from '../src/deployer.js';
+import { migrationDelta, type ScriptUploadMetadata } from '../src/deployer.js';
 import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
+import { DEFAULT_ACCOUNT_POINTER } from '@gitspace/protocol/default-release';
 
 const { secretKey, publicKey } = ed25519.keygen();
 const ADMIN_PUBLIC_KEY = btoa(String.fromCharCode(...publicKey));
@@ -110,6 +111,43 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
     migrations: migrationTags.map((tag) => ({ tag, newSqliteClasses: [`Class${tag}`] })),
   };
 }
+
+async function publishDefault(commit: string, tags: string[]) {
+  const prefix = `defaults/releases/${commit}/`;
+  async function object(name: string, text: string) {
+    const key = prefix + name;
+    await env.RELEASES.put(key, text);
+    return { key, size: new TextEncoder().encode(text).byteLength, sha256: (await sha256(text)).slice(7) };
+  }
+  const bundle = await object('worker.bundle.json', bundleArtifact(commit));
+  const frontend = await object('frontend/index.html', `<html>${commit}</html>`);
+  const provenance = await object('image-provenance.json', JSON.stringify({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` }));
+  const manifest = await object('manifest.json', JSON.stringify({
+    schemaVersion: 1, commit,
+    worker: { commit, version: commit, bundle, metadata: metadata(tags) },
+    frontend: { commit, files: [{ ...frontend, path: 'index.html', contentType: 'text/html' }] },
+    image: { commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance },
+  }));
+  await env.RELEASES.put(DEFAULT_ACCOUNT_POINTER, JSON.stringify({ schemaVersion: 1, current: manifest, previous: null }));
+}
+
+it('serves immutable default UI by explicit commit and rejects missing or corrupt assets', async () => {
+  const commit = 'f'.repeat(40);
+  await publishDefault(commit, ['v1']);
+  await publishDefault('e'.repeat(40), ['v1']);
+  async function get(path: string, method = 'GET') {
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(new Request(`https://platform.test/v1/default-releases/${commit}/frontend/${path}`, { method }), testEnv, ctx);
+    await waitOnExecutionContext(ctx);
+    return response;
+  }
+  expect(await (await get('')).text()).toBe(`<html>${commit}</html>`);
+  expect((await get('', 'HEAD')).status).toBe(200);
+  expect(await (await get('', 'HEAD')).text()).toBe('');
+  expect((await get('missing.js')).status).toBe(404);
+  await env.RELEASES.put(`defaults/releases/${commit}/frontend/index.html`, 'corrupt');
+  expect((await get('')).status).toBe(503);
+});
 
 async function adminPost(tenant: string, body?: unknown): Promise<Response> {
   const path = `/__platform/admin/tenants/${tenant}/token`;
@@ -413,39 +451,55 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
   });
 
   it('falls back to the channel bundle when a first deploy is unhealthy', async () => {
-    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleArtifact('channel:9.9.9'));
-    await env.RELEASES.put(CHANNEL_METADATA_KEY, JSON.stringify(metadata(['v1'])));
+    const commit = 'a'.repeat(40);
+    await publishDefault(commit, ['v1']);
     const token = await mintToken('golf');
     const result = await deploy('golf', token, 'unhealthy', ['v1'], 'nope');
-    expect(result).toEqual({ sha: 'unhealthy', healthy: false, revertedTo: 'channel:9.9.9', appliedMigrationTag: 'v1' });
-    expect(uploads[1]!.module).toBe(bundleSource('channel:9.9.9'));
-    expect(uploads[1]!.metadata.tags).toEqual(['golf', 'channel']);
+    expect(result).toEqual({ sha: 'unhealthy', healthy: false, revertedTo: commit, appliedMigrationTag: 'v1' });
+    expect(uploads[1]!.module).toBe(bundleSource(commit));
+    expect(uploads[1]!.metadata.tags).toEqual(['golf', commit]);
   });
 });
 
 describe('POST /__platform/tenants/:tenant/revert', () => {
+  it('refuses legacy split channel objects without a coherent default pointer', async () => {
+    await env.RELEASES.delete(DEFAULT_ACCOUNT_POINTER);
+    await env.RELEASES.put('channel/worker.bundle.json', bundleArtifact('channel:split'));
+    await env.RELEASES.put('channel/metadata.json', JSON.stringify(metadata(['v1'])));
+    const token = await mintToken('split-default');
+    const response = await tenantPost('split-default', 'revert', token, { to: 'channel' });
+    expect(response.status).toBe(409);
+    expect(uploads).toHaveLength(0);
+  });
   it('reverts to the complete channel module graph and its metadata', async () => {
-    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleArtifact('channel:1.2.3'));
-    await env.RELEASES.put(CHANNEL_METADATA_KEY, JSON.stringify(metadata(['v1', 'v2'])));
+    const commit = 'b'.repeat(40);
+    await publishDefault(commit, ['v1', 'v2']);
     const token = await mintToken('hotel', 'v2');
     await deploy('hotel', token, 'h1', ['v1', 'v2']);
     probeVersions.set(`${env.DISPATCH_NAMESPACE}-tenant-hotel`, ['h1']);
 
     const response = await tenantPost('hotel', 'revert', token, { to: 'channel' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ sha: 'channel:1.2.3', healthy: true, revertedTo: null, appliedMigrationTag: 'v2' });
+    expect(await response.json()).toEqual({ sha: commit, healthy: true, revertedTo: null, appliedMigrationTag: 'v2' });
 
     const upload = uploads[1]!;
-    expect(upload.module).toBe(bundleSource('channel:1.2.3'));
-    expect(upload.metadata.tags).toEqual(['hotel', 'channel']);
+    expect(upload.module).toBe(bundleSource(commit));
+    expect(upload.metadata.tags).toEqual(['hotel', commit]);
     expect(upload.metadata.migrations).toBeUndefined();
-    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-hotel`)).toBe(bundleSource('channel:1.2.3'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-hotel`)).toBe(bundleSource(commit));
     const state = await env.DEPLOYMENTS.getByName('hotel').getState();
-    expect(state.active?.sha).toBe('channel:1.2.3');
+    expect(state.active?.sha).toBe(commit);
+    await publishDefault('e'.repeat(40), ['v1', 'v2']);
+    await deploy('hotel', token, 'hot-worker', ['v1', 'v2']);
+    const defaultImage = await env.DEPLOYMENTS.getByName('hotel').compute('hotel', `u-${'f'.repeat(32)}`, new Request('https://compute.internal/v1/images/default', { method: 'POST' }));
+    expect(defaultImage.status).toBe(200);
+    expect(await defaultImage.json()).toMatchObject({ value: { image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` } });
+    const pin = (await env.DEPLOYMENTS.getByName('hotel').getState()).active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
+    expect(pin).toMatchObject({ source: 'literal', value: commit });
   });
 
   it('refuses a channel revert when the channel bundle is not published', async () => {
-    await env.RELEASES.delete([CHANNEL_BUNDLE_KEY, CHANNEL_METADATA_KEY]);
+    await env.RELEASES.delete(DEFAULT_ACCOUNT_POINTER);
     const token = await mintToken('india');
     const response = await tenantPost('india', 'revert', token, { to: 'channel' });
     expect(response.status).toBe(409);
@@ -497,13 +551,13 @@ describe('operator account-bound deployment', () => {
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${a}`)).toBe(bundleSource('account-a'));
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource('account-b'));
 
-    await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleArtifact('channel:isolated'));
-    await env.RELEASES.put(CHANNEL_METADATA_KEY, JSON.stringify(metadata(['v1'])));
+    const commit = 'd'.repeat(40);
+    await publishDefault(commit, ['v1']);
     expect((await post(b, 'revert', { accountId: bId, to: 'channel' })).status).toBe(200);
-    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource('channel:isolated'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource(commit));
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${a}`)).toBe(bundleSource('account-a'));
     expect(await env.DEPLOYMENTS.getByName(a).getState()).toEqual(aState);
-    expect((await env.DEPLOYMENTS.getByName(b).getState()).active?.sha).toBe('channel:isolated');
+    expect((await env.DEPLOYMENTS.getByName(b).getState()).active?.sha).toBe(commit);
   });
 
   it('preserves the account-owned release on bootstrap retry and never reopens a quarantined tenant', async () => {

@@ -124,6 +124,7 @@ export const controlOperationSchema = z.enum([
   'deploy.revert',
   'deploy.machineApplied',
   'deploy.machineChannelApplied',
+  'deploy.machineProtocol',
   'space.bootstrap',
   'data.head',
   'data.get',

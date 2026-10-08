@@ -16,6 +16,7 @@
     "./routed-transport": "./src/routed-transport.ts",
     "./relay": "./src/relay.ts",
     "./deployment": "./src/deployment.ts",
+    "./default-release": "./src/default-release.ts",
     "./worker-bundle": "./src/worker-bundle.ts",
     "./cron-contract": "./src/cron-contract.ts",
     "./inspector-contract": "./src/inspector-contract.ts",

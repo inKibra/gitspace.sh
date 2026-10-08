@@ -9,6 +9,7 @@ import {
   type ExecutableArtifactManifest,
 } from '@gitspace/deployment/manifest';
 import type { DeploymentStatus, ReleaseArtifact, ReleaseRecord } from '@gitspace/protocol';
+import { MACHINE_EXECUTION_PROTOCOL_VERSION, machineNativePlatformSchema, type MachineExecutionAdmission, type machineProtocolInputSchema } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
 import { environmentLaunchResponseSchema, environmentStatusSchema, type EnvironmentLaunchRequest, type EnvironmentStatus } from './replacement-environment.js';
 import { readJson, requestMachineUpdate } from './machine-update.js';
@@ -33,6 +34,7 @@ export interface ReleaseFollowerAuthority {
   deploymentStatus(): Promise<DeploymentStatus>;
   reportMachineApplied(input: { sha: string; target: 'machine'; generation: string; status: 'applied' | 'failed'; error?: string }): Promise<ReleaseRecord>;
   reportMachineChannelApplied(input: { target: 'machine'; generation: string }): Promise<void>;
+  machineProtocol(input: z.input<typeof machineProtocolInputSchema>): Promise<MachineExecutionAdmission>;
 }
 
 export interface ReleaseBlobReader {
@@ -128,6 +130,11 @@ export class ReleaseFollower {
 
   private async converge(): Promise<void> {
     if (this.stopped) return;
+    const protocol = await this.options.authority.machineProtocol({
+      version: MACHINE_EXECUTION_PROTOCOL_VERSION,
+      platform: machineNativePlatformSchema.parse(`${process.platform}-${process.arch}`),
+      blocker: !this.options.hostUrl || !this.options.controlToken ? 'This machine has no replacement host. Restart it using the installed GitSpace launcher to enable automatic updates.' : null,
+    });
     const status = await this.options.authority.deploymentStatus();
     // The child becomes healthy before its complete host is committed. It must not
     // report success or request another update in that window.
@@ -160,7 +167,7 @@ export class ReleaseFollower {
       await this.reportFailure(desired.machine, 'machine', host.lastLaunch.error ?? 'Host rolled the release back');
     }
     if (desired.frontend === null && host.frontendReleaseSha !== null) await this.launchChannel('frontend');
-    if (desired.machine === null && host.machineReleaseSha !== null) await this.launchChannel('machine');
+    if (desired.machine === null && (host.machineReleaseSha !== null || protocol.state === 'updating')) await this.launchChannel('machine');
     const wantsMachine = machineRecord?.artifacts.machine
       && machineRecord.status.machines[this.options.machineId] !== 'failed'
       && !this.reportedFailures.has(`machine:${machineRecord.sha}`)

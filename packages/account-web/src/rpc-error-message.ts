@@ -1,6 +1,8 @@
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { isTaggedError } from 'result-rpc';
 
+export const inferenceActivationWaitMessage = 'The new Worker is still passing health checks. Inference will be available after deployment is confirmed. Workspaces and deployment controls remain available.';
+
 const frameworkMessages: Readonly<Record<string, string>> = {
   'server/internal': 'The server could not complete this request.',
   'server/bad-request': 'The server rejected this request. Refresh and try again.',
@@ -14,6 +16,7 @@ const frameworkMessages: Readonly<Record<string, string>> = {
 };
 
 const domainMessages: Readonly<Record<string, string>> = {
+  [rpcErrors.inferenceActivationPending.tag]: inferenceActivationWaitMessage,
   [rpcErrors.projectNotFound.tag]: 'This project is no longer available. Refresh the project directory.',
   [rpcErrors.workspaceNotFound.tag]: 'This workspace is no longer available. Refresh the workspace directory.',
   [rpcErrors.sessionNotFound.tag]: 'This session is no longer available. Refresh the workspace.',

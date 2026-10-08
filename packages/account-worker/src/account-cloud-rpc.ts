@@ -1,5 +1,6 @@
 import { ACCOUNT_CLOUD_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
 import { consumeDurableStream } from './durable-stream.js';
+import { activeAccount } from './account-access.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import type { LifecycleState } from '@gitspace/protocol-environment';
 import type { CloudImageState } from '@gitspace/protocol/cloud-image';
@@ -121,9 +122,10 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     if (!deviceCanAdminister(device, capability)) throw new Error(`Account scope, rpc.write and ${capability} authorization are required`);
     return device!;
   };
-  // Account dispatch authorizes the tenant once. Long-lived delivery checks the
-  // tenant-local grant chain and revocation, not a shared application policy.
+  // Every delivery consumes the same bounded tenant authority as request admission.
   const requireSubscription = async () => {
+    const account = await activeAccount(env, userId);
+    if (account.status === 'error') throw new Error(account.error.message);
     const devices = await deviceRecords();
     const device = devices.find(({ record }) => record.binding.deviceId === deviceId)?.verified;
     if (!device || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.read')) {
@@ -417,7 +419,10 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     catch (error) { return err(errors.OperationFailed({ operation: 'delete Composio setup', message: message(error) })); }
   });
   const inferenceList = server.implement(inferenceListContract).handler(async ({ errors }) => {
-    try { return ok(await vault.ensureInference()); }
+    try {
+      const readiness = await vault.inferenceReadiness();
+      return readiness.status === 'waiting' ? err(errors.InferenceActivationPending({})) : ok(readiness.value);
+    }
     catch (error) { return err(errors.OperationFailed({ operation: 'list inference profiles', message: message(error) })); }
   });
   const inferenceCreate = server.implement(inferenceCreateContract).handler(async ({ input, errors }) => {
@@ -451,6 +456,10 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   const inferenceEvents = server.implement(inferenceEventsContract).stream(async function* ({ input, signal, errors }) {
     try {
       await requireSubscription();
+      if ((await vault.inferenceReadiness()).status === 'waiting') {
+        yield err(errors.InferenceActivationPending({}));
+        return;
+      }
       for await (const event of consumeDurableStream<InferenceState>(await vault.watchInference(input.after), signal)) {
         await requireSubscription();
         yield ok(event);

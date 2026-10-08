@@ -2,13 +2,7 @@
 import { z } from 'zod';
 import type { StoredOAuthCredential, WorkerOAuthProvider } from './schemas';
 
-export const anthropicClientId = atob('OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl');
-export const codexClientId = 'app_EMoamEEZ73f0CkXaXp7hrann';
-export function googleClient(provider: 'google-gemini-cli' | 'google-antigravity') {
-  return provider === 'google-gemini-cli'
-    ? { client_id: atob('NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t'), client_secret: atob('R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw=') }
-    : { client_id: atob('MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ=='), client_secret: atob('R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=') };
-}
+import { oauthClient, requireCursorPolicy } from './catalog';
 export class ProviderRefreshError extends Error {
   constructor(readonly provider: WorkerOAuthProvider, readonly kind: 'network' | 'rejected' | 'invalid-response', message: string, readonly status?: number) {
     super(message); this.name = 'ProviderRefreshError';
@@ -61,11 +55,12 @@ export function cursorExpiry(token: string): number {
 export async function refreshCredential(credential: StoredOAuthCredential, fetcher: typeof fetch = fetch): Promise<StoredOAuthCredential> {
   const provider = credential.provider;
   if (provider === 'cursor') {
+    requireCursorPolicy();
     const data = parseProvider(provider, cursorTokenSchema, await request(provider, 'https://api2.cursor.sh/auth/exchange_user_api_key', { method: 'POST', headers: { Authorization: `Bearer ${credential.refresh}`, 'Content-Type': 'application/json' }, body: '{}' }, fetcher));
     return { ...credential, access: data.accessToken, refresh: data.refreshToken || credential.refresh, expires: cursorExpiry(data.accessToken) };
   }
   const anthropic = provider === 'anthropic';
-  const fields = { grant_type: 'refresh_token', refresh_token: credential.refresh, ...(anthropic ? { client_id: anthropicClientId } : provider === 'openai-codex' ? { client_id: codexClientId } : googleClient(provider)) };
+  const fields = { grant_type: 'refresh_token', refresh_token: credential.refresh, ...oauthClient(provider) };
   const url = anthropic ? 'https://api.anthropic.com/v1/oauth/token' : provider === 'openai-codex' ? 'https://auth.openai.com/oauth/token' : 'https://oauth2.googleapis.com/token';
   const data = parseProvider(provider, tokenSchema, await request(provider, url, { method: 'POST', headers: anthropic ? { 'content-type': 'application/json', 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': 'anthropic-sdk-typescript/0.94.0 userOAuthProvider' } : { 'content-type': 'application/x-www-form-urlencoded' }, body: anthropic ? JSON.stringify(fields) : new URLSearchParams(fields) }, fetcher));
   if (provider === 'openai-codex' && !data.refresh_token) throw new ProviderRefreshError(provider, 'invalid-response', 'Provider omitted rotated refresh token', 200);

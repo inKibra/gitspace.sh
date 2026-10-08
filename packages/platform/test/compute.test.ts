@@ -23,7 +23,7 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
   const holders = new Map<string, Holder>();
   const faults = { applicationResponse: false, enrollmentResponse: false, retirementResponse: false };
   let applicationCreates = 0;
-  const bindings = { ...env, COMPUTE_TEMPLATE_SCRIPT: 'trusted-template', COMPUTE_DEFAULT_IMAGE: imageA,
+  const bindings = { ...env, COMPUTE_TEMPLATE_SCRIPT: 'trusted-template',
     COMPUTE_SANDBOX_HOSTNAME: 'sandbox.example', COMPUTE_MAX_MACHINES: 20, COMPUTE_MAX_IMAGE_DEPLOYMENTS: maxImages } as unknown as Env;
   globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
@@ -107,11 +107,11 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
   });
   bindings.DISPATCHER = { get: fetcher } as unknown as DispatchNamespace;
   bindings.COMPUTE = fetcher(null) as Fetcher;
-  let provider = new TenantComputeProvider(storage, bindings, 'tenant-a', accountId);
+  let provider = new TenantComputeProvider(storage, bindings, 'tenant-a', accountId, () => null);
   return {
     applications, holders, faults,
     creates: () => applicationCreates,
-    restart: () => { provider = new TenantComputeProvider(storage, bindings, 'tenant-a', accountId); },
+    restart: () => { provider = new TenantComputeProvider(storage, bindings, 'tenant-a', accountId, () => null); },
     post: (path: string, body?: unknown) => provider.fetch(new Request(`https://compute.test${path}`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-gitspace-user-id': 'foreign', 'x-gitspace-provider-token': 'must-not-leak', 'x-gitspace-image-incarnation': crypto.randomUUID() },
       body: body === undefined ? undefined : JSON.stringify(body),

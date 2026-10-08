@@ -2,9 +2,11 @@ import { env, SELF } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { HttpResponse, http } from 'msw';
 import { createRelayAuthorization, credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol';
-import { expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
+
+afterEach(() => vi.restoreAllMocks());
 
 it('recovers the tenant account without provisioning, but rejects foreign keys and platform-suspended accounts', async () => {
   const privateKey = tenantRootPrivateKey;
@@ -27,6 +29,7 @@ it('recovers the tenant account without provisioning, but rejects foreign keys a
   expect(await (await recover(privateKey, 'https://another-account.gitspace.sh')).json()).toMatchObject({ error: { code: 'ACCOUNT_HOST_MISMATCH' } });
   expect((await recover(ed25519.utils.randomSecretKey())).status).toBe(401);
   network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'suspended' } })));
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
   const suspended = await recover();
   expect(suspended.status).toBe(403);
   expect(await suspended.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
@@ -57,5 +60,6 @@ it('denies revoked and superseded machine grants at the relay authority', async 
   expect((await authorize(rotated)).status).toBe(401);
   await vault.registerDevice(signCredentialAuthorityGrant({ ...grant.grant, generation: 3 }, root));
   network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'suspended' } })));
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
   expect((await authorize(signCredentialAuthorityGrant({ ...grant.grant, generation: 3 }, root))).status).toBe(401);
 });

@@ -6,6 +6,9 @@ import {
   releaseTargetSchema,
   stageReleaseInputSchema,
   tenantDesiredSchema,
+  MACHINE_EXECUTION_PROTOCOL_VERSION,
+  machineProtocolInputSchema,
+  type MachineExecutionAdmission,
   type DeploymentStatus,
   type ReleaseRecord,
   type ReleaseStatus,
@@ -16,6 +19,8 @@ import {
 import { z } from 'zod';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { CredentialVaultDO } from './application.js';
+import { defaultMachineReleaseSchema } from '@gitspace/protocol/default-release';
+import { tenantPlatformJson } from './tenant-platform.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
 
@@ -120,7 +125,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
       .some((target) => input.artifacts[target] === null && previous.artifacts[target] !== null);
     // The running Worker's own sha fingerprints the whole source tree that contains this check.
     const inferenceVersion = input.sha === WORKER_VERSION || (input.inferenceVersion === 1 && (!retainsArtifacts || previous?.inferenceVersion === 1)) ? 1 : undefined;
-    this.requireInferenceCompatibility(inferenceVersion, input.sha, cutover);
+    if (input.artifacts.worker !== null) this.requireInferenceCompatibility(inferenceVersion, input.sha, cutover);
     const record = releaseRecordSchema.parse({
       ...input,
       inferenceVersion,
@@ -153,7 +158,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
     const input = launchReleaseInputSchema.parse(inputValue);
     const record = this.findRelease(input.sha);
     if (!record) return null;
-    this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
+    if (input.targets.includes('worker')) this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
     const targets: ReleaseTarget[] = [...new Set(input.targets)];
     for (const target of targets) {
       if (record.artifacts[target] === null || (target === 'worker' && record.worker === null)) {
@@ -186,10 +191,8 @@ export class TenantReleasesDO extends DurableObject<Env> {
 
   async machineApplied(machineId: string, inputValue: MachineAppliedInput): Promise<ReleaseRecord | null> {
     const input = machineAppliedInputSchema.parse(inputValue);
-    const cutover = input.status === 'applied' && await this.inferenceCutover();
     const record = this.findRelease(input.sha);
     if (!record) return null;
-    this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
     record.status.machines[machineId] = input.status;
     if (input.status === 'failed') {
       record.error = input.error ?? `Machine ${machineId} failed to apply ${input.sha}`;
@@ -206,21 +209,56 @@ export class TenantReleasesDO extends DurableObject<Env> {
   /** Actual healthy channel activation, acknowledged by the enrolled machine after draining. */
   async machineChannelApplied(machineId: string, inputValue: MachineChannelAppliedInput): Promise<void> {
     const input = machineChannelAppliedInputSchema.parse(inputValue);
-    await this.assertChannelCompatible();
     this.ctx.storage.sql.exec(
       'INSERT INTO machines(machine_id, sha, generation, updated_at) VALUES (?, NULL, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET sha = NULL, generation = excluded.generation, updated_at = excluded.updated_at',
       machineId, input.generation, new Date().toISOString(),
     );
   }
 
-  /** Executor admission trusts the acknowledged machine binary, not an obsolete OMP selection. */
-  machineInferenceCompatible(machineId: string): boolean {
-    const current = this.ctx.storage.sql.exec<Pick<MachineRow, 'sha'>>(
-      'SELECT sha FROM machines WHERE machine_id=?', machineId,
-    ).toArray()[0];
-    if (!current?.sha) return false;
-    const machine = this.findRelease(current.sha);
-    return machine?.inferenceVersion === 1 && machine.artifacts.machine !== null;
+  async machineProtocol(machineId: string, inputValue: z.input<typeof machineProtocolInputSchema>): Promise<MachineExecutionAdmission> {
+    const input = machineProtocolInputSchema.parse(inputValue);
+    await this.ctx.storage.put(`machine-protocol:${machineId}`, input);
+    if (input.version !== MACHINE_EXECUTION_PROTOCOL_VERSION) await this.resolveMachineDefault(machineId);
+    return this.machineExecutionAdmission(machineId);
+  }
+
+  private async resolveMachineDefault(machineId: string): Promise<void> {
+    if (this.desired().machine !== null) return;
+    const stored = await this.ctx.storage.get(`machine-protocol:${machineId}`);
+    const protocol = stored === undefined ? null : machineProtocolInputSchema.parse(stored);
+    const generation = this.ctx.storage.sql.exec<Pick<MachineRow, 'generation'>>('SELECT generation FROM machines WHERE machine_id=?', machineId).toArray()[0]?.generation;
+    if (!protocol?.platform && (!generation || !/^sha256:[a-f0-9]{64}$/u.test(generation))) {
+      await this.ctx.storage.put(`machine-default-error:${machineId}`, 'This legacy machine has not reported a verifiable native generation. Automatic updating is waiting for its healthy host acknowledgement.');
+      return;
+    }
+    try {
+      const selected = defaultMachineReleaseSchema.parse(await tenantPlatformJson<unknown>(this.env, '/machine-release', {
+        method: 'POST', body: JSON.stringify(protocol?.platform ? { platform: protocol.platform } : { generation }),
+      }));
+      await this.stage({
+        sha: selected.sha, label: `Default ${selected.commit}`, workspaceId: null,
+        artifacts: { worker: null, machine: selected.artifact, frontend: null }, worker: null,
+      }, 'platform-default');
+      await this.ctx.storage.put(`machine-default:${machineId}`, selected.sha);
+      await this.ctx.storage.delete(`machine-default-error:${machineId}`);
+    } catch (error) {
+      await this.ctx.storage.put(`machine-default-error:${machineId}`, `Automatic machine update unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4096));
+    }
+  }
+
+  async machineExecutionAdmission(machineId: string): Promise<MachineExecutionAdmission> {
+    const stored = await this.ctx.storage.get(`machine-protocol:${machineId}`);
+    const protocol = stored === undefined ? { version: null, blocker: null } : machineProtocolInputSchema.parse(stored);
+    const selected = await this.ctx.storage.get(`machine-default:${machineId}`);
+    const releaseSha = this.desired().machine ?? (selected === undefined ? null : z.string().parse(selected));
+    if (protocol.version === MACHINE_EXECUTION_PROTOCOL_VERSION) return { version: protocol.version, required: MACHINE_EXECUTION_PROTOCOL_VERSION, state: 'ready', releaseSha, error: null };
+    const record = releaseSha === null ? null : this.findRelease(releaseSha);
+    const updateError = this.desired().machine === null ? await this.ctx.storage.get(`machine-default-error:${machineId}`) : undefined;
+    const error = protocol.blocker ?? (updateError !== undefined ? z.string().parse(updateError)
+      : record?.status.machines[machineId] === 'failed' ? record.error ?? 'Machine update failed; select a repaired release to retry.'
+      : !record?.artifacts.machine ? 'Waiting for the authenticated machine to negotiate its native update target.'
+      : null);
+    return { version: protocol.version, required: MACHINE_EXECUTION_PROTOCOL_VERSION, state: error ? 'blocked' : 'updating', releaseSha, error };
   }
 
   async revert(): Promise<TenantDesired> {
@@ -249,7 +287,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
 
 
   /** Release acknowledgements are history; only catalog members remain in the current fleet. */
-  async status(userId: string, worker: WorkerVersion): Promise<DeploymentStatus> {
+  async status(userId: string, worker: WorkerVersion, requestingMachineId?: string): Promise<DeploymentStatus> {
     const catalog = this.env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>;
     const fleet = await catalog.get(catalog.idFromName(userId)).listMachines();
     const cutover = await this.inferenceCutover();
@@ -258,6 +296,11 @@ export class TenantReleasesDO extends DurableObject<Env> {
       if (machine.desiredState !== 'removed') currentIds.add(machine.id);
     }
     const desired = this.desired();
+    if (requestingMachineId && desired.machine === null) {
+      await this.resolveMachineDefault(requestingMachineId);
+      const selected = await this.ctx.storage.get(`machine-default:${requestingMachineId}`);
+      if (selected !== undefined) desired.machine = z.string().parse(selected);
+    }
     // Self-update may interrupt the acknowledgement after the platform activated it.
     if (worker.sha !== null && worker.sha === desired.worker) {
       const record = this.findRelease(worker.sha);
@@ -273,7 +316,9 @@ export class TenantReleasesDO extends DurableObject<Env> {
     }
     const releases = this.ctx.storage.sql.exec<ReleaseRow>('SELECT record_json FROM releases ORDER BY created_at DESC, sha').toArray()
       .map((row) => releaseRecordSchema.parse(JSON.parse(row.record_json)));
-    return deploymentStatusSchema.parse({ desired, current: { worker, machines }, releases });
+    const machineExecution: NonNullable<DeploymentStatus['machineExecution']> = {};
+    for (const machineId of currentIds) machineExecution[machineId] = await this.machineExecutionAdmission(machineId);
+    return deploymentStatusSchema.parse({ desired, current: { worker, machines }, releases, machineExecution });
   }
 
   /** The frontend tree to serve, or null when the tenant runs our channel build. */

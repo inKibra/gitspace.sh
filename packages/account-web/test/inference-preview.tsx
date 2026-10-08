@@ -68,7 +68,7 @@ function Preview() {
     throw new Error('Settings changed since you loaded them. Refresh before saving again.');
   };
   const controller: InferenceController = {
-    state, loading: false, pending: false, error,
+    state, loading: false, pending: false, activationPending: false, error,
     refresh: async () => { setError(null); },
     create: async (name, sourceProfileId) => {
       const current = latest.current;

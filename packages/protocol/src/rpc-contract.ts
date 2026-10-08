@@ -110,6 +110,11 @@ export const rpcErrors = defineErrors('gitspace', {
     data: wire.object({ operation: wire.string, message: wire.string }),
     httpStatus: 500,
   },
+  inferenceActivationPending: {
+    data: wire.object({}),
+    httpStatus: 409,
+    retry: 'transient',
+  },
   environmentFailure: {
     data: wire.serializable((value): value is EnvironmentFailure => EnvironmentFailureSchema.safeParse(value).success, { id: 'gitspace/environment-failure/v1', jsonSchema: EnvironmentFailureSchema }),
     httpStatus: 409,
@@ -804,7 +809,7 @@ export const getRuntimeSettingsContract = gitspaceRpc
 
 export const inferenceListContract = gitspaceRpc.procedure()
   .input(wire.object({})).output(InferenceStateCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
+  .errors({ InferenceActivationPending: rpcErrors.inferenceActivationPending, OperationFailed: rpcErrors.operationFailed }).query();
 export const inferenceCreateContract = gitspaceRpc.procedure()
   .input(InferenceCreateInputCodec).output(InferenceStateCodec)
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed }).mutation();
@@ -819,7 +824,7 @@ export const inferenceAssignContract = gitspaceRpc.procedure()
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const inferenceEventsContract = gitspaceRpc.procedure()
   .input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(streamCodec(InferenceStateCodec))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+  .errors({ InferenceActivationPending: rpcErrors.inferenceActivationPending, OperationFailed: rpcErrors.operationFailed }).subscription();
 
 export const updateMachineNotesContract = gitspaceRpc
   .procedure()
@@ -2117,6 +2122,11 @@ export const DeploymentStatusWireCodec = wire.object({
     machines: wire.record(wire.object({ sha: wire.nullable(wire.string), generation: wire.nullable(wire.string) })),
   }),
   releases: wire.array(ReleaseRecordWireCodec),
+  machineExecution: wire.optional(wire.record(wire.object({
+    version: wire.nullable(wire.number), required: wire.literal(1),
+    state: wire.enum(['ready', 'updating', 'blocked']),
+    releaseSha: wire.nullable(wire.string), error: wire.nullable(wire.string),
+  }))),
   /** This machine's own running generation, so the caller can tell home from the fleet. */
   thisMachine: wire.object({ machineId: wire.string, sha: wire.nullable(wire.string), generation: wire.nullable(wire.string) }),
   launch: wire.nullable(LaunchProgressWireCodec),

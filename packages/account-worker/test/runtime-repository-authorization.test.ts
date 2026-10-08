@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant, type ControlOperation } from '@gitspace/protocol';
-import { RuntimeAttachInputSchema, RuntimeHeartbeatInputSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachInputSchema, RuntimeHeartbeatInputSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore, type AttachmentServices } from '@gitspace/runtime-workspace-do';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
@@ -50,6 +50,21 @@ async function fixture(capabilities: Array<'storage.access' | 'space.control'>) 
 }
 
 describe('signed repository credential authority', () => {
+  it('refuses incompatible execution before admitting an effect and leaves recovery observable', async () => {
+    const f = await fixture(['space.control']);
+    await runInDurableObject(f.authority, async (_instance, state) => {
+      let dispatched = false;
+      const store = new AttachmentStore(state.storage, {
+        seal: async secret => secret, open: async secret => secret,
+        admitExecution: async () => { throw new Error('Updating machine: executor protocol 1 is required'); },
+        dispatch: async () => { dispatched = true; throw new Error('Unexpected dispatch'); },
+      });
+      const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, conversationKind: 'main', conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId, workspaceId, machineId: 'assigned', generation: 1, requestId: 'request', attemptId: 'protocol-refusal', tool: 'bash', args: { command: 'effect' }, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' });
+      await expect(store.execute(dispatch, AbortSignal.timeout(1000))).rejects.toThrow('Updating machine');
+      expect(store.getAttempt(dispatch.attemptId)).toBe(null);
+      expect(dispatched).toBe(false);
+    });
+  });
   it('pins checkpoint attachments to the durable commit rather than resolving custom refs through the binding', async () => {
     const f = await fixture(['space.control']);
     await runInDurableObject(f.authority, async (_instance, state) => {

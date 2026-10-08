@@ -5,6 +5,8 @@ import { CloudflareR2PlatformClient } from './storage-provider.js';
 import { CreditLedgerDO, isCreditLedgerRecord, type CreditLedgerRecord } from './credit-ledger.js';
 import { deployChannelTenant, deployTenantWorker, revertTenantWorker, type DeployResult } from './deployer.js';
 import { TenantControlDO } from './tenant-control.js';
+import { defaultFrontendResponse } from './default-release.js';
+import { defaultMachineResponse } from './default-native.js';
 
 export { CreditLedgerDO } from './credit-ledger.js';
 export { TenantDeploymentsDO } from './tenant-deployments.js';
@@ -342,6 +344,7 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
   if (denied) return denied;
   const config = await deployments.tenantConfig();
   if (!config) return platformError(409, 'TENANT_UNPROVISIONED', 'Tenant resource namespace is missing');
+  if (path === '/machine-release' || path === '/machine-release/blob') return defaultMachineResponse(request, env, tenant);
   if (path === '/state' && request.method === 'GET') {
     const [control, deployment] = await Promise.all([env.TENANT_CONTROL.getByName(tenant).get(), deployments.getState()]);
     return Response.json({ control, deployment: { active: deployment.active?.sha ?? null } }, { headers: { 'cache-control': 'private, no-store' } });
@@ -374,8 +377,10 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/__platform/health') return Response.json({ status: 'ok' });
+    const defaultFrontend = await defaultFrontendResponse(request, env.RELEASES);
+    if (defaultFrontend) return defaultFrontend;
 
-    const resource = /^\/__platform\/tenants\/([a-z0-9-]+)(\/(?:state|storage|provider)(?:\/.*)?)$/u.exec(url.pathname);
+    const resource = /^\/__platform\/tenants\/([a-z0-9-]+)(\/(?:state|storage|provider|machine-release)(?:\/.*)?)$/u.exec(url.pathname);
     if (resource && tenantIdSchema.safeParse(resource[1]).success) return handleTenantResource(request, env, resource[1]!, resource[2]!);
     const adminMatch = CREDIT_ADMIN_PATH.exec(url.pathname);
     if (adminMatch) return handleCreditAdmin(request, env, adminMatch[1]!);

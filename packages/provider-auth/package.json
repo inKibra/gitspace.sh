@@ -6,7 +6,7 @@
   "exports": { ".": "./src/index.ts", "./schemas": "./src/schemas.ts" },
   "scripts": {
     "test": "bun ../../scripts/test-isolated.ts src",
-    "typecheck": "tsgo --noEmit -p tsconfig.json"
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json"
   },
-  "dependencies": { "zod": "^4.4.3" }
+  "dependencies": { "@oh-my-pi/pi-catalog": "18.2.11", "zod": "^4.4.3" }
 }

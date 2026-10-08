@@ -1656,6 +1656,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     desired: status.desired,
     current: status.current,
     releases: status.releases.map(releaseView),
+    machineExecution: status.machineExecution,
     thisMachine: { machineId: options.machineId, ...options.deployment!.thisMachine },
     launch: options.deployment!.launchProgress(),
   });

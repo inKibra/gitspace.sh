@@ -6,7 +6,7 @@ import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { RuntimeSettingsEditor, type RuntimeSettingView } from './SettingsPage.js';
 import type { ProvidersSectionProps } from './ProvidersSection.js';
 import { useInference, type InferenceController } from './InferenceContext.js';
-import { rpcErrorMessage } from './rpc-error-message.js';
+import { inferenceActivationWaitMessage, rpcErrorMessage } from './rpc-error-message.js';
 import { profileSettingViews, updatedProfileSettings } from './inference-settings.js';
 
 /** Used on both the profile detail and project settings; no second assignment store. */
@@ -28,7 +28,7 @@ export function ProjectInferenceSelector({ projectId, projectName }: { projectId
         {(inference.state?.profiles ?? []).map((entry, index) => <SelectItem key={entry.id} value={entry.id} index={index + (assignment && !profile ? 1 : 0)}>{entry.name}</SelectItem>)}
       </SelectContent>
     </Select>
-    {!inference.loading && (!assignment || !profile) ? <p role="alert" className="text-caption text-destructive">The canonical inference assignment is unavailable. Refresh profiles; no Default fallback will be used.</p> : null}
+    {inference.activationPending ? <p role="status" className="text-caption text-muted-foreground">{inferenceActivationWaitMessage}</p> : !inference.loading && (!assignment || !profile) ? <p role="alert" className="text-caption text-destructive">The canonical inference assignment is unavailable. Refresh profiles; no Default fallback will be used.</p> : null}
     {error || inference.error ? <p role="alert" className="text-caption text-destructive">{error ?? inference.error}</p> : null}
     {error || inference.error || !assignment ? <Button variant="ghost" size="compact" disabled={inference.loading} onClick={() => { setError(null); void inference.refresh(); }}>Refresh profiles</Button> : null}
   </div>;
@@ -88,7 +88,7 @@ export function InferencePage({ inference, selectedProfileId, onSelectProfile, p
   };
   const content = <>
     {inference.error ? <div role="alert" className="flex flex-wrap items-center gap-2 text-caption text-destructive"><span>{inference.error}</span><Button variant="ghost" disabled={inference.loading} onClick={() => void inference.refresh()}>Refresh profiles</Button></div> : null}
-    {!state ? <EmptyState icon={inference.loading ? <ThinkingIndicator /> : undefined} title={inference.loading ? 'Loading inference profiles…' : 'Inference profiles are unavailable'} description="Canonical configuration must be ready before profiles can be edited or used." /> : <>
+    {!state ? inference.activationPending ? <section role="status" className="flex flex-col items-center gap-3"><EmptyState icon={<ThinkingIndicator />} title="Verifying the new release…" description={inferenceActivationWaitMessage} /><Button variant="secondary" disabled={inference.loading} onClick={() => void inference.refresh()}>Check again</Button></section> : <EmptyState icon={inference.loading ? <ThinkingIndicator /> : undefined} title={inference.loading ? 'Loading inference profiles…' : 'Inference profiles are unavailable'} description="Canonical configuration must be ready before profiles can be edited or used." /> : <>
       {!onboarding ? <section aria-label="Inference profiles" className="flex flex-col gap-3">
         <CardGroup orientation="inline" border="outlined" separated>{state.profiles.map((entry, index) => {
           const assigned = state.assignments.filter((item) => item.profileId === entry.id);

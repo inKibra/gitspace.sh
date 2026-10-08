@@ -1,5 +1,5 @@
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, credentialProtocolBase64, RPC_DEVICE_HEADER, signDeviceInvite, signRpcRequest, type CloudProjectSummary, type CloudWorkspaceDefinition, type DeviceInvite } from '@gitspace/protocol';
 import { accountDirectoryEventSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
@@ -11,6 +11,8 @@ import { DurableChangeLog } from '../src/durable-stream.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
+
+afterEach(() => vi.restoreAllMocks());
 
 const timestamp = '2026-09-01T00:00:00.000Z';
 const project: CloudProjectSummary = { id: 'directory-project', name: 'Directory', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, archivedAt: null, updatedAt: timestamp, role: null, source: null };
@@ -315,12 +317,17 @@ describe('directory WebSocket authentication and replay', () => {
     expect(await (await SELF.fetch(device.request(undefined, false))).json()).toMatchObject({ error: { code: 'RPC_DEVICE_UNKNOWN' } });
   });
 
-  it('fails closed when account authority is unavailable after wake rather than disclosing a committed change', async () => {
+  it('survives bounded authority outages after wake, then fails closed before disclosing an expired change', async () => {
     const device = await browserDevice();
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
     const opened = await openDirectory(device.request());
     await opened.events.next();
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => new HttpResponse(null, { status: 503 })));
     await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 1 });
+    expect(await opened.events.next()).toMatchObject({ type: 'message', value: { type: 'change', value: { workspaces: [workspace] } } });
+    clock.mockReturnValue(now + 60_001);
+    await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 2 });
     expect(await opened.events.next()).toEqual({ type: 'close', code: 1013 });
   });
 });

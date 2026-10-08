@@ -202,6 +202,23 @@ export const tenantDesiredSchema = z.object({
 });
 export type TenantDesired = z.infer<typeof tenantDesiredSchema>;
 
+/** Native executor protocol, independent of relay framing and cloud inference. */
+export const MACHINE_EXECUTION_PROTOCOL_VERSION = 1;
+export const machineNativePlatformSchema = z.enum(['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64']);
+export const machineProtocolInputSchema = z.object({
+  version: z.number().int().positive().nullable(),
+  blocker: z.string().max(4_096).nullable().optional(),
+  platform: machineNativePlatformSchema.nullable().optional(),
+});
+export const machineExecutionAdmissionSchema = z.object({
+  version: z.number().int().positive().nullable(),
+  required: z.literal(MACHINE_EXECUTION_PROTOCOL_VERSION),
+  state: z.enum(['ready', 'updating', 'blocked']),
+  releaseSha: z.string().nullable(),
+  error: z.string().nullable(),
+});
+export type MachineExecutionAdmission = z.infer<typeof machineExecutionAdmissionSchema>;
+
 export const deploymentStatusSchema = z.object({
   desired: tenantDesiredSchema,
   current: z.object({
@@ -211,6 +228,7 @@ export const deploymentStatusSchema = z.object({
     machines: z.record(idSchema, z.object({ sha: z.string().nullable(), generation: z.string().nullable() })),
   }),
   releases: z.array(releaseRecordSchema),
+  machineExecution: z.record(idSchema, machineExecutionAdmissionSchema).optional(),
 });
 export type DeploymentStatus = z.infer<typeof deploymentStatusSchema>;
 

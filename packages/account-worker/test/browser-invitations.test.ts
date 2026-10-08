@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { env, SELF, runInDurableObject } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import {
@@ -9,6 +9,8 @@ import type { CredentialVaultDO } from '../src/index.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { tenantRootPrivateKey as rootKey } from './setup.js';
+
+afterEach(() => vi.restoreAllMocks());
 
 interface TestAccount {
   userId: string;
@@ -231,6 +233,7 @@ describe('registered browser invitations', () => {
     const owner = await account();
     const suspended = await register(owner);
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'suspended' } })));
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
     expect(await (await SELF.fetch(signedRequest(owner, 'cancel', { inviteId: suspended.invite.inviteId }))).json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
     expect(await (await redeem(suspended)).json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
   });
