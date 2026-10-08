@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
@@ -17,6 +17,19 @@ afterEach(async () => {
 });
 
 describe('WorkspaceHubTerminalCoordinator', () => {
+  it('runs workspace hooks in an attached cache checkout that the machine does not hold as a space', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-cache-'));
+    roots.push(root);
+    const checkout = join(root, 'workspace');
+    mkdirSync(checkout, { recursive: true });
+    const coordinator = new WorkspaceHubTerminalCoordinator(new GitSpaceDatabase(join(root, 'gitspace.db')), 'machine-a');
+    const result = await coordinator.runLifecyclePlan('cloud-workspace', 'workspace/materialize', [{
+      id: 'materialize', kind: 'script', command: '/approved/materialize.sh', content: "printf 'materialized' > marker",
+    }], { PATH: process.env.PATH ?? '' }, { directory: checkout });
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(join(checkout, 'marker'), 'utf8')).toBe('materialized');
+  }, 20_000);
+
   it('creates, attaches, writes, and stops a real GitSpace supervisor PTY', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-'));
     roots.push(root);
