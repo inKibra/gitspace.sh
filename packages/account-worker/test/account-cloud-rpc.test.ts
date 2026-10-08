@@ -644,6 +644,14 @@ describe('account routing of machine work', () => {
     ]);
   });
 
+  it('keeps cloud runtime work on the account even while a machine holds the space', async () => {
+    const { fixture, held, reached } = await fleet();
+    for (const path of ['runtime.draft', 'runtime.cachePolicy', 'runtime.attachment.detach']) {
+      await SELF.fetch(fixture.request(single(path, { projectId: held.projectId, workspaceId: held.spaceId })));
+    }
+    expect(reached).toEqual([]);
+  });
+
   it('rejects one signed batch naming spaces held by different machines', async () => {
     const { fixture, held, reached } = await fleet();
     const logs = vi.spyOn(console, 'log');

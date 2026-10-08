@@ -1,6 +1,6 @@
 import { deserialize } from 'result-rpc';
 import { batchFetchTransport, fetchTransport, type ClientTransport } from 'result-rpc/client';
-import { ACCOUNT_CLOUD_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
+import { isAccountCloudRpcPath, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
 
 /**
  * One client, every machine. Every call goes to the account endpoint, which
@@ -82,7 +82,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
         path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' ||
         (path.startsWith('machine.image.') && path !== 'machine.image.list' && path !== 'machine.image.events')) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
-    if (Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path)) return account;
+    if (isAccountCloudRpcPath(path)) return account;
     if (isSpaceCloudRpcPath(path)) return queue(`inspector:${spaceCloudRpcSpaceId(input) ?? ''}`);
     const target = rpcCallTarget(path, input);
     if (!target) return home;

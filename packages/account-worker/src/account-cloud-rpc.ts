@@ -1,4 +1,4 @@
-import { ACCOUNT_CLOUD_RPC_PATHS, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
+import { isAccountCloudRpcPath, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
 import { consumeDurableStream } from './durable-stream.js';
 import { activeAccount } from './account-access.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
@@ -530,7 +530,7 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
       }
     }
   }
-  const cloud = items.filter((item) => Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, item.path) || isSpaceCloudRpcPath(item.path));
+  const cloud = items.filter((item) => isAccountCloudRpcPath(item.path) || isSpaceCloudRpcPath(item.path));
   if (cloud.length === 0) {
     const holders = await liveHolders(env, userId, items);
     if (holders.length > 1) return reject(400, 'RPC_MIXED_HOLDER_BATCH', `This batch names spaces held by different machines (${holders.map((machine) => machine.id).join(', ')}); send calls for each space or session in a separate signed batch`);

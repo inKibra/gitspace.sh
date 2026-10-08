@@ -1,12 +1,7 @@
 /** Account authority operations have a separate batch queue from machine work.
- * A signed envelope cannot be split or rewritten after signing. */
-export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
-  'runtime.snapshot': true, 'runtime.submit': true, 'runtime.cancel': true,
-  'runtime.answer': true, 'runtime.watch': true,
-  'runtime.browserTrust': true, 'runtime.browserTargets': true, 'runtime.browserSelect': true,
-  'runtime.session': true, 'runtime.executionMachine': true, 'runtime.qa': true,
-  'runtime.services': true,
-  'runtime.attachment.request': true,
+ * A signed envelope cannot be split or rewritten after signing. Every `runtime.*`
+ * procedure is the account's cloud runtime; machines implement none of them. */
+const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'providers.login.start': true, 'providers.login.events': true,
   'providers.login.respond': true, 'providers.login.cancel': true,
   'providers.usage': true, 'providers.models': true,
@@ -52,6 +47,10 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'environment.events': true, 'environment.cancelRun': true,
 };
 
+/** The account, not a machine, serves this procedure. */
+export function isAccountCloudRpcPath(path: string): boolean {
+  return path.startsWith('runtime.') || Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path);
+}
 
 /** Workspace reads use cloud state when there is no live holder.
  * Per-space queues remain separate from account mutations and runtime work. */
