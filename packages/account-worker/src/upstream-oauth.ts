@@ -73,11 +73,24 @@ export async function upstreamRequestAuth(provider: UpstreamOAuthProvider, crede
 /** Pi's interaction events in the shape the sign-in dialog already renders. */
 export function upstreamLoginEvent(event: AuthEvent): ProviderLoginEvent {
   switch (event.type) {
-    case 'auth_url': return { type: 'auth', url: event.url, launchUrl: event.url, instructions: event.instructions ?? 'Complete sign-in in your browser' };
+    case 'auth_url': {
+      // Pi names itself on OpenAI's consent screen; the hint is display-only and outside PKCE and state.
+      const url = new URL(event.url);
+      if (url.searchParams.has('agent_name_hint')) url.searchParams.set('agent_name_hint', 'GitSpace');
+      return { type: 'auth', url: url.toString(), launchUrl: url.toString(), instructions: event.instructions ?? 'Complete sign-in in your browser' };
+    }
     case 'device_code': return { type: 'auth', url: event.verificationUri, launchUrl: event.verificationUri, instructions: `Enter code ${event.userCode}` };
     case 'info': return { type: 'progress', message: event.message };
     case 'progress': return { type: 'progress', message: event.message };
   }
+}
+
+/** Browsers in HTTPS-First mode show a loopback callback as https://; providers registered the http:// address. */
+export function loopbackCallback(value: string): string {
+  const url = URL.parse(value.trim());
+  if (!url || url.protocol !== 'https:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return value;
+  url.protocol = 'http:';
+  return url.toString();
 }
 
 export function upstreamPromptText(prompt: AuthPrompt): { message: string; placeholder: string } {

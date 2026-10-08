@@ -8,7 +8,7 @@ import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineD
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
-import { isUpstreamOAuthProvider, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
+import { isUpstreamOAuthProvider, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
 import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
 import type { CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
@@ -1635,7 +1635,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       running.answer = null;
       // Retire the answered prompt so the dialog stops offering it.
       this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET revision = revision + 1, events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ?", JSON.stringify({ type: 'progress', message: 'Authorization response received' }), row.flow_id);
-      resolve(response.value);
+      resolve(loopbackCallback(response.value));
       return;
     }
     if (row.status === 'busy' && this.activeLoginAttempts.has(row.flow_id)) return;

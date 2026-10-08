@@ -140,7 +140,8 @@ describe('Cloud inference credential authority', () => {
       const access = `header.${btoa(JSON.stringify({ 'https://api.openai.com/profile': { email } }))}.signature`;
       return HttpResponse.json({ access_token: access, refresh_token: `${email}-refresh`, id_token: 'id', expires_in: 3600, scope: 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct' });
     }));
-    async function signIn(code: string): Promise<void> {
+    // Chrome's HTTPS-First mode shows the loopback callback as https://; the paste must still work.
+    async function signIn(code: string, scheme: 'http' | 'https'): Promise<void> {
       const { flowId } = await vault.cloudLoginStart({ profileId: 'default', providerId: 'openai' });
       let pending = await vault.cloudLoginEvents({ profileId: 'default', flowId });
       for (let attempt = 0; attempt < 20 && !pending.events.some(event => event.type === 'prompt'); attempt += 1) {
@@ -151,15 +152,16 @@ describe('Cloud inference credential authority', () => {
       if (!auth || !prompt) throw new Error('ChatGPT sign-in must expose the authorization link and the redirect-URL prompt');
       const authorization = new URL(auth.url);
       expect(authorization.origin).toBe('https://auth.openai.com');
+      expect(authorization.searchParams.get('agent_name_hint')).toBe('GitSpace');
       const state = authorization.searchParams.get('state');
-      await vault.cloudLoginRespond({ profileId: 'default', flowId, promptId: prompt.promptId, value: `http://127.0.0.1:1455/auth/callback?code=${code}&state=${state}&client_id=issued-${code}` });
+      await vault.cloudLoginRespond({ profileId: 'default', flowId, promptId: prompt.promptId, value: `${scheme}://127.0.0.1:1455/auth/callback?code=${code}&state=${state}&client_id=issued-${code}` });
       let done = await vault.cloudLoginEvents({ profileId: 'default', flowId });
       for (let attempt = 0; attempt < 20 && !done.done; attempt += 1) done = await vault.cloudLoginEvents({ profileId: 'default', flowId });
       expect(done.events).toContainEqual(expect.objectContaining({ type: 'done', ok: true }));
     }
-    await signIn('first-code');
+    await signIn('first-code', 'https');
     email = 'second@example.com';
-    await signIn('second-code');
+    await signIn('second-code', 'http');
     expect(exchanged).toEqual([{ clientId: 'issued-first-code', code: 'first-code' }, { clientId: 'issued-second-code', code: 'second-code' }]);
     const accounts = await vault.cloudCredentialAccounts('default', 'openai');
     expect(accounts.map(account => account.identity)).toEqual(['email:first@example.com', 'email:second@example.com']);
