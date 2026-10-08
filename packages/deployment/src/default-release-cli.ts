@@ -7,7 +7,8 @@ import { z } from 'zod';
 import { buildWorkerBundle, buildFrontendTree, workerMetadataFromWrangler, workspaceSha } from './builders.js';
 import { releaseStorageClient } from './release.js';
 import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from './default-release.js';
-import { defaultCommitSchema, defaultReleaseSchema, defaultNativeArtifactSchema } from '@gitspace/protocol/default-release';
+import { defaultNativeArtifactSchema } from '@gitspace/protocol/default-release';
+import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 import { DISTRIBUTION_PLATFORMS } from './distribution.js';
 
 export function defaultReleaseStorage(bucket: string): DefaultReleaseStorage & { close(): void } {
@@ -44,8 +45,9 @@ async function files(root: string, prefix = ''): Promise<{ path: string; bytes: 
   return result;
 }
 export async function runDefaultRelease(args: string[]): Promise<void> {
+  if (args[0] === 'publish' || args.some(arg => arg === '--from' || arg.startsWith('--from='))) throw new Error('Saved-directory publication and --from are not supported; use build --publish to build and publish in one invocation');
   if (args.includes('--help') || args.length === 0) {
-    console.log('Usage: bun packages/deployment/src/default-release-cli.ts build --commit <40hex> --image <registry/repository> --native <native-builds-directory> [--root <checkout>] [--out <directory>] [--publish --bucket <R2 bucket>]\n       bun packages/deployment/src/default-release-cli.ts publish --from <saved directory> --commit <40hex> --bucket <R2 bucket>\n       bun packages/deployment/src/default-release-cli.ts rollback --bucket <R2 bucket>\n       bun packages/deployment/src/default-release-cli.ts --fake\nBuild requires a clean checkout at --commit. --native contains darwin-arm64, darwin-x64, linux-arm64 and linux-x64 directories produced by release.ts build on native runners and published with release.ts publish. All four must match --commit. Docker buildx pushes the same-commit OCI image; immutable R2 objects publish only with --publish. Retry with publish --from to reuse exact artifacts without rebuilding. --fake is a local no-network build/publish/rollback smoke.');
+    console.log('Usage: bun packages/deployment/src/default-release-cli.ts build --commit <40hex> --image <registry/repository> --native <native-builds-directory> [--root <checkout>] [--out <directory>] [--publish --bucket <R2 bucket>]\n       bun packages/deployment/src/default-release-cli.ts rollback --bucket <R2 bucket>\n       bun packages/deployment/src/default-release-cli.ts --fake\nBuild requires a clean checkout at --commit. --native contains darwin-arm64, darwin-x64, linux-arm64 and linux-x64 directories produced by release.ts build on native runners and published with release.ts publish. All four must match --commit. Docker buildx pushes the same-commit OCI image; immutable R2 objects publish only with build --publish in the same invocation. Saved output is for inspection, not later publication. --fake is a local no-network build/publish/rollback smoke.');
     return;
   }
   const option = (name: string) => { const index = args.indexOf(name); return index === -1 ? undefined : args[index + 1]; };
@@ -57,7 +59,7 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
       const encoder = new TextEncoder();
       const build = await buildDefaultRelease(commit, {
         verifyCommit: async () => commit,
-        worker: async () => ({ commit, version: commit, bytes: encoder.encode(`worker:${commit}`), metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
+        worker: async () => ({ commit, version: commit, bytes: encodeWorkerBundle([{ name: 'worker.mjs', type: 'esm', content: encoder.encode(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(commit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }]), metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
         frontend: async () => ({ commit, files: [{ path: 'index.html', bytes: encoder.encode(commit), contentType: 'text/html' }] }),
         image: async () => ({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance: encoder.encode(JSON.stringify({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` })) }),
       });
@@ -74,21 +76,7 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
     try { await rollbackDefaultRelease(storage); } finally { storage.close(); }
     return;
   }
-  if (args[0] === 'publish') {
-    const directory = option('--from');
-    const commit = defaultCommitSchema.parse(option('--commit'));
-    if (!directory || !bucket) throw new Error('--from and --bucket are required');
-    const manifestKey = `defaults/releases/${commit}/manifest.json`;
-    const bytes = await readFile(join(resolve(directory), manifestKey));
-    const manifest = defaultReleaseSchema.parse(JSON.parse(bytes.toString('utf8')));
-    if (manifest.commit !== commit) throw new Error('Saved default release commit mismatch');
-    const objects = new Map<string, Uint8Array>([[manifestKey, bytes]]);
-    for (const object of [manifest.worker.bundle, ...manifest.frontend.files, manifest.image.provenance]) objects.set(object.key, await readFile(join(resolve(directory), object.key)));
-    const storage = defaultReleaseStorage(bucket);
-    try { await publishDefaultRelease({ manifest, objects }, storage); } finally { storage.close(); }
-    return;
-  }
-  if (args[0] !== 'build') throw new Error('Expected build, publish, rollback or --fake');
+  if (args[0] !== 'build') throw new Error('Expected build, rollback or --fake');
   const root = resolve(option('--root') ?? resolve(import.meta.dir, '../../..'));
   const commit = option('--commit');
   const imageRepository = option('--image');

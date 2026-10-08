@@ -59,7 +59,7 @@ async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: st
     target: 'browser',
     outdir: outDir,
     naming: 'worker.mjs',
-    external: ['cloudflare:workers'],
+    external: ['cloudflare:workers', 'node:*'],
     conditions: ['workerd'],
     define: { GITSPACE_WORKER_SHA: JSON.stringify(sha) },
     plugins: [{

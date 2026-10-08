@@ -39,6 +39,12 @@ export const defaultReleaseSchema = z.object({
 export type DefaultRelease = z.infer<typeof defaultReleaseSchema>;
 export type DefaultObject = z.infer<typeof defaultObjectSchema>;
 export const defaultPointerSchema = z.object({ schemaVersion: z.literal(1), current: defaultObjectSchema, previous: defaultObjectSchema.nullable() }).strict();
+export const defaultReleasePinSchema = z.string().regex(/^[a-f0-9]{40}:[a-f0-9]{64}$/u);
+export function defaultReleasePin(reference: DefaultObject): string {
+  const match = /^defaults\/releases\/([a-f0-9]{40})\/manifest.json$/u.exec(reference.key);
+  if (!match) throw new Error('Default manifest namespace mismatch');
+  return defaultReleasePinSchema.parse(`${match[1]}:${reference.sha256}`);
+}
 export type DefaultReleaseReader = { get(key: string): Promise<{ bytes: Uint8Array; etag: string } | null> };
 export async function verifyDefaultObject(reader: DefaultReleaseReader, object: DefaultObject): Promise<Uint8Array> {
   const result = await reader.get(object.key);
@@ -75,23 +81,28 @@ export async function verifyDefaultNativeArtifact(reader: DefaultReleaseReader, 
 
 export const defaultNativeSelectionSchema = z.object({ platform: machineNativePlatformSchema.optional(), generation: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional() }).strict();
 type NativeSelection = z.infer<typeof defaultNativeSelectionSchema>;
-export async function loadDefaultRelease(reader: DefaultReleaseReader): Promise<DefaultRelease> {
+export async function resolveDefaultRelease(reader: DefaultReleaseReader, pin?: string | null): Promise<{ release: DefaultRelease; pin: string }> {
+  if (pin !== undefined && pin !== null) return { release: await loadPinnedDefaultRelease(reader, pin), pin };
   const pointer = await reader.get(DEFAULT_ACCOUNT_POINTER);
   if (!pointer) throw new Error('Default release pointer missing');
   const selected = defaultPointerSchema.parse(JSON.parse(new TextDecoder().decode(pointer.bytes)));
-  const manifest = await readDefaultManifest(reader, selected.current);
-  // Native chunks were verified before activation and are verified again on each
-  // authenticated download, not all four multi-gigabyte trees on every signup.
-  await verifyDefaultReleaseContents(reader, manifest, 'manifests');
-  return manifest;
+  const release = await readDefaultManifest(reader, selected.current);
+  // Chunks are authenticated at publication and again on download.
+  await verifyDefaultReleaseContents(reader, release, 'manifests');
+  return { release, pin: defaultReleasePin(selected.current) };
 }
-export async function loadPinnedDefaultRelease(reader: DefaultReleaseReader, commit: string): Promise<DefaultRelease> {
-  defaultCommitSchema.parse(commit);
-  const object = await reader.get(`defaults/releases/${commit}/manifest.json`);
+export async function loadDefaultRelease(reader: DefaultReleaseReader): Promise<DefaultRelease> {
+  return (await resolveDefaultRelease(reader)).release;
+}
+export async function loadPinnedDefaultRelease(reader: DefaultReleaseReader, pin: string): Promise<DefaultRelease> {
+  defaultReleasePinSchema.parse(pin);
+  const commit = pin.slice(0, 40);
+  const key = `defaults/releases/${commit}/manifest.json`;
+  const object = await reader.get(key);
   if (!object) throw new Error('Pinned default release missing');
-  const manifest = defaultReleaseSchema.parse(JSON.parse(new TextDecoder().decode(object.bytes)));
-  if (manifest.commit !== commit) throw new Error('Pinned default commit mismatch');
-  return manifest;
+  const reference = { key, sha256: pin.slice(41), size: object.bytes.byteLength };
+  // Reuse the exact bytes read above while retaining the canonical hash verifier.
+  return readDefaultManifest({ get: async requested => requested === key ? object : reader.get(requested) }, reference);
 }
 type NativeRelease = Pick<DefaultRelease, 'commit' | 'machines'>;
 export async function defaultMachineRelease(reader: DefaultReleaseReader, release: NativeRelease, selection: NativeSelection) {

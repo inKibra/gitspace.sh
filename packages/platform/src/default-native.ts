@@ -1,9 +1,36 @@
 import { z } from 'zod';
 import { machineNativePlatformSchema } from '@gitspace/protocol/deployment';
-import { defaultMachineRelease, defaultMachineObject, defaultNativeSelectionSchema, loadPinnedDefaultRelease, verifyDefaultObject } from '@gitspace/protocol/default-release';
+import { defaultMachineRelease, defaultMachineObject, defaultNativeSelectionSchema, resolveDefaultRelease, verifyDefaultObject } from '@gitspace/protocol/default-release';
 import { defaultReleaseReader } from './default-release.js';
 
 type NativeSelection = z.infer<typeof defaultNativeSelectionSchema>;
+const historicalCache = new WeakMap<R2Bucket, Map<string, { expires: number; platform: Promise<NativeSelection['platform']> }>>();
+const HISTORICAL_CACHE_LIMIT = 256;
+const HISTORICAL_CACHE_TTL = 60_000;
+async function cachedHistoricalPlatform(bucket: R2Bucket, tenant: string, generation: string): Promise<NativeSelection['platform']> {
+  let cache = historicalCache.get(bucket);
+  if (!cache) { cache = new Map(); historicalCache.set(bucket, cache); }
+  const key = `${tenant}:${generation}`;
+  const cached = cache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.platform;
+  cache.delete(key);
+  if (cache.size >= HISTORICAL_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  // A pending scan is shared until it settles; the result window starts when it does.
+  const platform = historicalPlatform(bucket, generation);
+  const entry = { expires: Number.POSITIVE_INFINITY, platform };
+  cache.set(key, entry);
+  try {
+    const result = await platform;
+    entry.expires = Date.now() + HISTORICAL_CACHE_TTL;
+    return result;
+  } catch (error) {
+    if (cache.get(key) === entry) cache.delete(key);
+    throw error;
+  }
+}
 async function historicalPlatform(bucket: R2Bucket, generation: string): Promise<NativeSelection['platform']> {
   const reader = defaultReleaseReader(bucket);
   let cursor: string | undefined;
@@ -31,9 +58,9 @@ export async function defaultMachineResponse(request: Request, env: Env, tenant:
   try {
     const active = (await env.DEPLOYMENTS.getByName(tenant).getState()).active;
     const pin = active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
-    if (pin?.source !== 'literal' || !pin.value) throw new Error('Tenant has no pinned default release');
+    if (pin && (pin.source !== 'literal' || pin.value === undefined)) throw new Error('Invalid tenant default release pin');
     const reader = defaultReleaseReader(env.RELEASES);
-    const release = await loadPinnedDefaultRelease(reader, pin.value);
+    const { release } = await resolveDefaultRelease(reader, pin?.source === 'literal' ? pin.value : undefined);
     const url = new URL(request.url);
     if (url.pathname.endsWith('/blob')) {
       if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method not allowed', { status: 405 });
@@ -49,7 +76,7 @@ export async function defaultMachineResponse(request: Request, env: Env, tenant:
     }
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
     const selection = defaultNativeSelectionSchema.parse(await request.json());
-    if (!selection.platform && selection.generation && !await reader.get(`distribution/v1/generations/${selection.generation.slice(7)}.json`)) selection.platform = await historicalPlatform(env.RELEASES, selection.generation);
+    if (!selection.platform && selection.generation && !await reader.get(`distribution/v1/generations/${selection.generation.slice(7)}.json`)) selection.platform = await cachedHistoricalPlatform(env.RELEASES, tenant, selection.generation);
     return Response.json(await defaultMachineRelease(reader, release, selection));
   } catch (error) { return Response.json({ error: { code: 'DEFAULT_MACHINE_UNAVAILABLE', message: error instanceof Error ? error.message : 'Default machine unavailable' } }, { status: 409 }); }
 }

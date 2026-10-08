@@ -129,15 +129,16 @@ async function publishDefault(commit: string, tags: string[]) {
     image: { commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance },
   }));
   await env.RELEASES.put(DEFAULT_ACCOUNT_POINTER, JSON.stringify({ schemaVersion: 1, current: manifest, previous: null }));
+  return `${commit}:${manifest.sha256}`;
 }
 
-it('serves immutable default UI by explicit commit and rejects missing or corrupt assets', async () => {
+it('serves immutable default UI by explicit hash-anchored pin and rejects missing or corrupt assets', async () => {
   const commit = 'f'.repeat(40);
-  await publishDefault(commit, ['v1']);
+  const pin = await publishDefault(commit, ['v1']);
   await publishDefault('e'.repeat(40), ['v1']);
   async function get(path: string, method = 'GET') {
     const ctx = createExecutionContext();
-    const response = await worker.fetch(new Request(`https://platform.test/v1/default-releases/${commit}/frontend/${path}`, { method }), testEnv, ctx);
+    const response = await worker.fetch(new Request(`https://platform.test/v1/default-releases/${pin}/frontend/${path}`, { method }), testEnv, ctx);
     await waitOnExecutionContext(ctx);
     return response;
   }
@@ -310,6 +311,21 @@ describe('tenant deployment token', () => {
 });
 
 describe('POST /__platform/tenants/:tenant/deploy', () => {
+  it('next deploy records a hash-anchored default pin for a pre-pin tenant', async () => {
+    const token = await mintToken('pre-pin-deploy');
+    await env.RELEASES.delete(DEFAULT_ACCOUNT_POINTER);
+    await deploy('pre-pin-deploy', token, 'old', ['v1']);
+    const commit = 'd'.repeat(40);
+    await publishDefault(commit, ['v1']);
+    const manifest = await env.RELEASES.get(`defaults/releases/${commit}/manifest.json`);
+    if (!manifest) throw new Error('Fixture manifest missing');
+    const digest = (await sha256(await manifest.text())).slice(7);
+    await deploy('pre-pin-deploy', token, 'next', ['v1']);
+    const active = (await env.DEPLOYMENTS.getByName('pre-pin-deploy').getState()).active;
+    expect(active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE')).toEqual({
+      name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: `${commit}:${digest}`,
+    });
+  });
   it('binds distinct account roots to isolated namespaces across releases', async () => {
     const first = await mintToken('artifacts-first');
     const otherRoot = ed25519.keygen().publicKey;
@@ -473,7 +489,7 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
   });
   it('reverts to the complete channel module graph and its metadata', async () => {
     const commit = 'b'.repeat(40);
-    await publishDefault(commit, ['v1', 'v2']);
+    const expectedPin = await publishDefault(commit, ['v1', 'v2']);
     const token = await mintToken('hotel', 'v2');
     await deploy('hotel', token, 'h1', ['v1', 'v2']);
     probeVersions.set(`${env.DISPATCH_NAMESPACE}-tenant-hotel`, ['h1']);
@@ -495,7 +511,7 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     expect(defaultImage.status).toBe(200);
     expect(await defaultImage.json()).toMatchObject({ value: { image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` } });
     const pin = (await env.DEPLOYMENTS.getByName('hotel').getState()).active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
-    expect(pin).toMatchObject({ source: 'literal', value: commit });
+    expect(pin).toMatchObject({ source: 'literal', value: expectedPin });
   });
 
   it('refuses a channel revert when the channel bundle is not published', async () => {

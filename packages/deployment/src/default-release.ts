@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DEFAULT_ACCOUNT_POINTER, defaultCommitSchema, defaultPointerSchema, defaultReleaseSchema, defaultImageProvenanceSchema, readDefaultManifest, verifyDefaultObject, verifyDefaultReleaseContents, type DefaultRelease, type DefaultReleaseReader, type DefaultObject } from '@gitspace/protocol/default-release';
 import type { WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { decodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 
 export type DefaultReleaseStorage = DefaultReleaseReader & { put(key: string, bytes: Uint8Array, expectedEtag: string | null): Promise<void> };
 export type DefaultReleaseBuild = { manifest: DefaultRelease; objects: Map<string, Uint8Array> };
@@ -18,6 +19,15 @@ export async function buildDefaultRelease(commit: string, builders: DefaultRelea
   defaultCommitSchema.parse(commit);
   if (await builders.verifyCommit() !== commit) throw new Error('Build checkout commit mismatch or dirty tree');
   const worker = await builders.worker();
+  const decoded = decodeWorkerBundle(new Uint8Array(worker.bytes).buffer, worker.metadata.mainModule);
+  if (decoded.isErr()) throw new Error(`Worker bundle validation failed: ${decoded.error.message}`);
+  const main = decoded.value.find(module => module.name === worker.metadata.mainModule && module.type === 'esm');
+  if (!main) throw new Error('Worker bundle has no declared main module');
+  // Bun's non-minified Worker build folds GITSPACE_WORKER_SHA into these
+  // declarations, including renamed copies from other bundled modules.
+  const source = new TextDecoder('utf-8', { fatal: true }).decode(main.content);
+  const versions = [...source.matchAll(/^(?:var|const|let) WORKER_VERSION(?:\d+)? = ([^\n]+);$/gmu)];
+  if (versions.length === 0 || versions.some(match => match[1] !== JSON.stringify(commit))) throw new Error('Worker embedded version commit mismatch');
   const frontend = await builders.frontend();
   const image = await builders.image();
   const machines = builders.machines ? await builders.machines() : [];

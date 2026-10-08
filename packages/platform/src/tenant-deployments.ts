@@ -129,7 +129,9 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
     }
     this.computeProvider ??= new TenantComputeProvider(this.ctx.storage, this.env, tenant, accountId, () => {
       const pin = this.getState().active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
-      return pin?.source === 'literal' ? pin.value ?? null : null;
+      if (!pin) return null;
+      if (pin.source !== 'literal' || pin.value === undefined) throw new Error('Invalid tenant default release pin');
+      return pin.value;
     });
     return this.computeProvider.fetch(request);
   }

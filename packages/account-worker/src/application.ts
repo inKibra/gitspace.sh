@@ -4,6 +4,7 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
 import { z } from 'zod';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
+import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, type LoginState } from '@gitspace/provider-auth';
 import { collectUsage, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
@@ -2171,13 +2172,13 @@ const FRONTEND_CONTENT_TYPES: Record<string, string> = {
 /** Default accounts pin immutable UI files; development assets retain their own namespace. */
 async function accountChannelResponse(request: Request, env: Env, pathname: string): Promise<Response> {
   if (env.DEFAULT_ACCOUNT_RELEASE !== undefined) {
-    const commit = env.DEFAULT_ACCOUNT_RELEASE;
-    if (!/^[a-f0-9]{40}$/u.test(commit)) return new Response('Pinned account frontend unavailable', { status: 503 });
+    const pin = env.DEFAULT_ACCOUNT_RELEASE;
+    if (!defaultReleasePinSchema.safeParse(pin).success) return new Response('Pinned account frontend unavailable', { status: 503 });
     try {
-      const target = new URL(`/v1/default-releases/${commit}/frontend/${pathname.slice(1)}`, env.PLATFORM_URL);
+      const target = new URL(`/v1/default-releases/${pin}/frontend/${pathname.slice(1)}`, env.PLATFORM_URL);
       const assetRequest = new Request(target, { method: request.method, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
       const response = await (env.PLATFORM_SERVICE ? env.PLATFORM_SERVICE.fetch(assetRequest) : fetch(assetRequest));
-      if ((response.status >= 300 && response.status < 400) || (response.ok && response.headers.get('x-gitspace-frontend-release') !== commit)) {
+      if ((response.status >= 300 && response.status < 400) || (response.ok && response.headers.get('x-gitspace-frontend-release') !== pin)) {
         await response.body?.cancel();
         return new Response('Pinned account frontend unavailable', { status: 503 });
       }

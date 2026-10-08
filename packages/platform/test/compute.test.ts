@@ -2,6 +2,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, expect, it } from 'vitest';
 import { TenantComputeProvider } from '../src/compute-provider.js';
+import { publishDefaultFixture } from './default-release-fixture.js';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -118,6 +119,17 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
     })),
   };
 }
+
+it('pre-pin tenant creates a cloud machine using the authenticated current default image', async () => {
+  const published = await publishDefaultFixture(env.RELEASES);
+  await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
+    const f = fixture(state.storage);
+    const response = await f.post('/v1/sandboxes', { machineId: 'sandbox-default', environment: {} });
+    expect(response.status).toBe(200);
+    expect([...f.applications.values()].map(application => application.configuration.image)).toEqual([published.image]);
+    expect([...f.holders.values()].find(holder => holder.enrollment?.machineId === 'sandbox-default')?.runtimeStarted).toBe(true);
+  });
+});
 
 it('reconciles a lost application-create response after namespace pagination without allocating twice', async () => {
   await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {

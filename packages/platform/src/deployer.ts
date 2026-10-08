@@ -8,7 +8,7 @@ import {
 import type { TenantDeployRecord, TenantDeploymentsDO, TenantDeploymentState } from './tenant-deployments.js';
 import { decodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 import { defaultReleaseReader } from './default-release.js';
-import { loadDefaultRelease, verifyDefaultObject } from '@gitspace/protocol/default-release';
+import { DEFAULT_ACCOUNT_POINTER, resolveDefaultRelease, verifyDefaultObject } from '@gitspace/protocol/default-release';
 
 export const CLOUDFLARE_API = 'https://api.cloudflare.com/client/v4';
 
@@ -242,11 +242,11 @@ async function loadFallback(env: Env, state: TenantDeploymentState, exclude: str
 async function loadChannel(env: Env): Promise<Candidate | null> {
   try {
     const reader = defaultReleaseReader(env.RELEASES);
-    const manifest = await loadDefaultRelease(reader);
+    const { release: manifest, pin } = await resolveDefaultRelease(reader);
     const bundle = await verifyDefaultObject(reader, manifest.worker.bundle);
     const metadata = workerReleaseMetadataSchema.parse({
       ...manifest.worker.metadata,
-      resources: [...manifest.worker.metadata.resources.filter(resource => resource.name !== 'DEFAULT_ACCOUNT_RELEASE'), { name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: manifest.commit }],
+      resources: [...manifest.worker.metadata.resources.filter(resource => resource.name !== 'DEFAULT_ACCOUNT_RELEASE'), { name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: pin }],
     });
     return { sha: manifest.worker.version, bundleKey: manifest.worker.bundle.key, bundle: new Uint8Array(bundle).buffer, metadata };
   } catch { return null; }
@@ -264,9 +264,21 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
     await deployments.releaseLease();
     return { status: 'error', error: { status: 409, code: 'TENANT_UNCONFIGURED', message: 'Tenant bindings are not configured' } };
   }
-  const defaultPin = state.active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
-  if (defaultPin && !candidate.metadata.resources.some(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE')) {
-    candidate = { ...candidate, metadata: { ...candidate.metadata, resources: [...candidate.metadata.resources, defaultPin] } };
+  const candidatePin = candidate.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
+  const defaultPin = candidatePin ?? state.active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
+  try {
+    if (defaultPin && (defaultPin.source !== 'literal' || defaultPin.value === undefined)) throw new Error('Invalid tenant default release pin');
+    const reader = defaultReleaseReader(env.RELEASES);
+    if (defaultPin || await reader.get(DEFAULT_ACCOUNT_POINTER)) {
+      const { pin } = await resolveDefaultRelease(reader, defaultPin?.source === 'literal' ? defaultPin.value : undefined);
+      candidate = { ...candidate, metadata: { ...candidate.metadata, resources: [
+        ...candidate.metadata.resources.filter(resource => resource.name !== 'DEFAULT_ACCOUNT_RELEASE'),
+        { name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: pin },
+      ] } };
+    }
+  } catch (error) {
+    await deployments.releaseLease();
+    return { status: 'error', error: { status: 409, code: 'DEFAULT_RELEASE_UNAVAILABLE', message: error instanceof Error ? error.message : 'Default release unavailable' } };
   }
   const delta = migrationDelta(candidate.metadata.migrations, state.appliedMigrationTag);
   const accountKey = Uint8Array.from(atob(tenantConfig.rootPublicKey), character => character.charCodeAt(0));

@@ -161,9 +161,11 @@ The active account targets are `worker` (the tenant Worker and Pi runtime), `mac
 
 Machine execution uses a separate protocol negotiation at enrollment and connection. An older machine can still create or open workspaces, build, and launch releases. The account selects its pinned native release for that machine's platform; the existing verified host updater applies it. Older clients can identify their platform through a published runtime generation. Unrecognized generations or missing native artifacts show a concrete update blocker rather than guessing a platform. Only new agent effects wait for a compatible machine; receipt and recovery operations remain available.
 
-Inference activation still waits until the platform's active Worker version matches the running Worker. This keeps the irreversible credential migration behind deployment health checks and automatic rollback. The browser shows **Verifying the new release…** with **Check again** while that check is pending.
+Inference activation still waits until the platform's active Worker version matches the running Worker. This keeps the irreversible credential migration behind deployment health checks and automatic rollback. The Inference page and workspace composer show **Verifying the new release…** with **Check again** while that check is pending. The composer cannot send until its inference profile is available.
 
-Platform maintainers assemble new-account defaults with `packages/deployment/src/default-release-cli.ts`. One manifest pins the Worker bundle and metadata, account UI, cloud image digest, and four native platform artifacts to the same commit. The script requires a clean checkout and published native outputs from the existing distribution workflow. It validates hashes and provenance before atomically replacing the default pointer; rollback restores the previous complete set. Existing accounts keep their pinned UI and image when the default changes. This does not replace account **Launch**.
+Platform maintainers assemble new-account defaults with `packages/deployment/src/default-release-cli.ts`. One manifest pins the Worker bundle and metadata, account UI, cloud image digest, and four native platform artifacts to the same commit. The script requires a clean checkout and published native outputs from the existing distribution workflow. It checks the bundle's embedded Worker version, hashes, and provenance before atomically replacing the default pointer; rollback restores the previous complete set. Build and publication run together with `build --publish`; saved-directory `publish --from` is not supported. This does not replace account **Launch**.
+
+Tenant pins contain the release commit and manifest SHA-256. Existing tenants without a pin use the current verified default for native updates and default-image cloud machines; their next deploy records that pin. Pinned accounts keep their selected UI and image when the default changes. Invalid pins or changed manifest bytes fail closed rather than selecting another release. Native generation lookups use the published index first; historical lookup results, including misses, are cached per tenant and generation for 60 seconds, with at most 256 entries per Worker isolate.
 
 Run the default-release flow with local fakes, without publishing:
 
@@ -171,7 +173,7 @@ Run the default-release flow with local fakes, without publishing:
 bun packages/deployment/src/default-release-cli.ts --fake
 ```
 
-Use `--help` for build, native-input, publish, and rollback options. A real build pushes its cloud image; publication and rollback require separate platform authorization.
+Use `--help` for build, native-input, `--publish`, and rollback options. A real build pushes its cloud image; publication and rollback require separate platform authorization.
 
 Account deployment progress comes from `DeploymentLauncher` through `deployment.status` and project `deployment` events. The client uses these for its Source indicator and launch progress sheet. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
 

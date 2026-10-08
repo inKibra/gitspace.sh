@@ -4,7 +4,7 @@ import { Attachment01, CpuChip01, DotsHorizontal, Zap } from '@untitledui/icons'
 import { useMemo, useState, type ReactNode } from 'react';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
-import { rpcErrorMessage } from './rpc-error-message.js';
+import { inferenceActivationWaitMessage, rpcErrorMessage } from './rpc-error-message.js';
 import { SessionTreeExplorer } from './SessionTreeExplorer.js';
 import { ModelCombobox, modelOptions } from './ModelCombobox.js';
 import { navigateProductUrl, setProductRoute } from './routes.js';
@@ -187,7 +187,10 @@ export function Composer({ workspace, controls, providers, skills = [], running,
 
   return <div className="pointer-events-none mx-auto flex w-full max-w-xl flex-col gap-2 [&>*]:pointer-events-auto">
     {controlsError ? <div role="alert" className="flex max-h-40 min-w-0 flex-col gap-2 overflow-y-auto rounded-lg bg-surface-3 p-3 text-caption shadow-surface-1"><p className="whitespace-pre-wrap break-words text-destructive">{controlsError}</p>{onRetryControls ? <Button variant="ghost" size="compact" className="self-start" disabled={pending} onClick={onRetryControls}>Retry provider catalog and controls</Button> : null}</div> : null}
-    {!controlsError && inference && !profile ? <div className="flex flex-wrap items-center justify-between gap-2 text-caption">
+    {!controlsError && inference?.activationPending ? <div role="status" className="flex flex-wrap items-center justify-between gap-2 text-caption text-muted-foreground">
+      <div className="flex min-w-0 flex-col gap-1"><span>Verifying the new release…</span><span>{inferenceActivationWaitMessage}</span></div>
+      <Button variant="ghost" size="compact" className="min-h-10" disabled={inference.loading} onClick={() => void inference.refresh()}>Check again</Button>
+    </div> : !controlsError && inference && !profile ? <div className="flex flex-wrap items-center justify-between gap-2 text-caption">
       <span role="alert" className="text-destructive">{inference.loading ? 'Loading inference profile…' : inference.error ?? 'The project’s inference assignment is unavailable. Refresh before sending.'}<Button variant="ghost" size="compact" disabled={inference.loading} onClick={() => void inference.refresh()}>Refresh profiles</Button></span>
     </div> : null}
     {invalidModel ? <p role="status" className="text-caption text-muted-foreground">The selected model {selectedModelKey} is no longer available. The next run will use an authorized fallback and record the model change in the conversation.</p> : null}

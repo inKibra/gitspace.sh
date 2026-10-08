@@ -6,7 +6,7 @@ export function defaultReleaseReader(bucket: R2Bucket): DefaultReleaseReader {
 /** Public immutable UI assets contain no tenant data; version selection is always explicit. */
 export async function defaultFrontendResponse(request: Request, bucket: R2Bucket): Promise<Response | null> {
   const url = new URL(request.url);
-  const match = /^\/v1\/default-releases\/([a-f0-9]{40})\/frontend\/(.*)$/u.exec(url.pathname);
+  const match = /^\/v1\/default-releases\/([^/]+)\/frontend\/(.*)$/u.exec(url.pathname);
   if (!match) return null;
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405 });
   try {
@@ -17,6 +17,6 @@ export async function defaultFrontendResponse(request: Request, bucket: R2Bucket
     const file = manifest.frontend.files.find(file => file.path === path) ?? (!/\.[a-z0-9]+$/iu.test(path) ? manifest.frontend.files.find(file => file.path === 'index.html') : undefined);
     if (!file) return new Response('Not found', { status: 404 });
     const bytes = await verifyDefaultObject(reader, file);
-    return new Response(request.method === 'HEAD' ? null : new Uint8Array(bytes), { headers: { 'content-type': file.contentType, 'cache-control': 'public, max-age=31536000, immutable', 'x-gitspace-frontend-release': manifest.commit } });
+    return new Response(request.method === 'HEAD' ? null : new Uint8Array(bytes), { headers: { 'content-type': file.contentType, 'cache-control': 'public, max-age=31536000, immutable', 'x-gitspace-frontend-release': match[1]! } });
   } catch { return new Response('Pinned account frontend unavailable', { status: 503 }); }
 }

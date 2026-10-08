@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from '../src/default-release.js';
 import { loadDefaultRelease } from '@gitspace/protocol/default-release';
+import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 
 const sha = 'a'.repeat(40);
 const nextSha = 'b'.repeat(40);
@@ -20,10 +21,10 @@ function storage() {
   };
   return { api, objects, fail(key: string) { failKey = key; } };
 }
-async function build(commit = sha, imageCommit = commit) {
+async function build(commit = sha, imageCommit = commit, embeddedCommit = commit) {
   return buildDefaultRelease(commit, {
     verifyCommit: async () => commit,
-    worker: async () => ({ commit, version: commit, bytes: bytes(`worker:${commit}`), metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
+    worker: async () => ({ commit, version: commit, bytes: encodeWorkerBundle([{ name: 'worker.mjs', type: 'esm', content: bytes(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(embeddedCommit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }]), metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
     frontend: async () => ({ commit, files: [{ path: 'index.html', bytes: bytes(`ui:${commit}`), contentType: 'text/html' }] }),
     image: async () => ({ commit: imageCommit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance: bytes(JSON.stringify({ commit: imageCommit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` })) }),
   });
@@ -44,6 +45,11 @@ describe('coherent default account releases', () => {
   });
   test('rejects cross-commit image provenance before writing anything', async () => {
     await expect(build(sha, nextSha)).rejects.toThrow('commit');
+  });
+  test('rejects a mismatched embedded Worker version before publication', async () => {
+    const f = storage();
+    await expect(build(sha, sha, nextSha).then(release => publishDefaultRelease(release, f.api))).rejects.toThrow('Worker');
+    expect(f.objects.size).toBe(0);
   });
   test('failed partial publication leaves existing bootstrap consumers on the previous complete release', async () => {
     const f = storage();

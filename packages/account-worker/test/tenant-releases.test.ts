@@ -475,17 +475,18 @@ describe('tenant releases', () => {
   it('serves the pinned default frontend without following a moving asset tree or forwarding credentials', async () => {
     const { origin } = await tenant();
     const commit = 'a'.repeat(40);
-    const runtime = { ...env, DEFAULT_ACCOUNT_RELEASE: commit };
+    const pin = `${commit}:${'b'.repeat(64)}`;
+    const runtime = { ...env, DEFAULT_ACCOUNT_RELEASE: pin };
     let available = true;
-    network.use(http.get(`${env.PLATFORM_URL}/v1/default-releases/${commit}/frontend/`, ({ request }) => {
+    network.use(http.get(`${env.PLATFORM_URL}/v1/default-releases/${pin}/frontend/`, ({ request }) => {
       expect(request.headers.get('authorization')).toBeNull();
       expect(request.headers.get('cookie')).toBeNull();
-      return available ? new HttpResponse('<main>Pinned default</main>', { headers: { 'content-type': 'text/html', 'x-gitspace-frontend-release': commit } }) : new HttpResponse(null, { status: 503 });
+      return available ? new HttpResponse('<main>Pinned default</main>', { headers: { 'content-type': 'text/html', 'x-gitspace-frontend-release': pin } }) : new HttpResponse(null, { status: 503 });
     }));
     const response = await worker.fetch(new Request(`${origin}/`, { headers: { authorization: 'Bearer private-browser-token', cookie: 'private-cookie' } }), runtime);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('<main>Pinned default</main>');
-    expect(response.headers.get('x-gitspace-frontend-release')).toBe(commit);
+    expect(response.headers.get('x-gitspace-frontend-release')).toBe(pin);
     available = false;
     expect((await worker.fetch(new Request(`${origin}/`), runtime)).status).toBe(503);
   });

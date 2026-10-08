@@ -2,7 +2,7 @@ import { cloudImageReferenceSchema, cloudImageProviderStatusSchema } from '@gits
 import { z } from 'zod';
 import { ComputeProviderError, prepareComputeImage, type ComputeImageDeployment } from './compute-images.js';
 import { defaultReleaseReader } from './default-release.js';
-import { loadPinnedDefaultRelease } from '@gitspace/protocol/default-release';
+import { resolveDefaultRelease } from '@gitspace/protocol/default-release';
 
 interface ComputeTarget { deploymentId: string | null; script: string | null; image: string | null; instance: string | null }
 interface ImageTransfer { operationId: string; target: ComputeTarget; staged: boolean }
@@ -15,7 +15,7 @@ const emptyTarget: ComputeTarget = { deploymentId: null, script: null, image: nu
 export class TenantComputeProvider {
   private control: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly storage: DurableObjectStorage, private readonly env: Env, readonly tenant: string, readonly accountId: string, private readonly defaultReleaseCommit: () => string | null) {
+  constructor(private readonly storage: DurableObjectStorage, private readonly env: Env, readonly tenant: string, readonly accountId: string, private readonly defaultReleasePin: () => string | null) {
     storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS compute_images (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS compute_machines (machine_id TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -77,9 +77,8 @@ export class TenantComputeProvider {
   private ok(value: unknown): Response { return Response.json({ status: 'ok', value }); }
 
   private async defaultImage(): Promise<string> {
-    const commit = this.defaultReleaseCommit();
-    if (!commit) throw new ComputeProviderError('DEFAULT_RELEASE_UNAVAILABLE', 'Tenant has no pinned complete default release', 503);
-    return (await loadPinnedDefaultRelease(defaultReleaseReader(this.env.RELEASES), commit)).image.image;
+    const { release } = await resolveDefaultRelease(defaultReleaseReader(this.env.RELEASES), this.defaultReleasePin());
+    return release.image.image;
   }
 
   private async handle(request: Request): Promise<Response> {
