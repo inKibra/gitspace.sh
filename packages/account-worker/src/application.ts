@@ -4294,7 +4294,10 @@ const worker = {
           _tag: error._tag, message: error.message, confirmation: error.confirmation, workspaces: error.workspaces,
         } }, { status: 409, headers: { 'cache-control': 'no-store' } });
         const lifecycleFailure = environmentFailure(error);
-        if (lifecycleFailure) return Response.json({ status: 'error', error: lifecycleFailure }, { status: 409 });
+        if (lifecycleFailure) {
+          console.error(JSON.stringify({ event: 'control_request_failed', operation: signedControl?.operation ?? null, machineId: signedControl?.machineId ?? null, code: lifecycleFailure.code, message: lifecycleFailure.message }));
+          return Response.json({ status: 'error', error: lifecycleFailure }, { status: 409 });
+        }
         if (error instanceof ProjectCronRevisionConflictError) {
           return Response.json({ status: 'error', error: { code: 'CRON_REVISION_CONFLICT', message: error.message, cronId: error.cronId, expected: error.expected, actual: error.actual } }, { status: 409 });
         }
