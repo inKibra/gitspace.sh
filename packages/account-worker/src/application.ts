@@ -3371,9 +3371,11 @@ const worker = {
       }
     }
     if (url.pathname === '/v1/control' && request.method === 'POST') {
+      let signedControl: SignedControlRequest | null = null;
       try {
         if (diagnostics) diagnostics.stage = 'parse';
         const body = signedControlRequestSchema.parse(await readBoundedJson(request));
+        signedControl = body;
         recordSyncRequestParsed(diagnostics, body);
         const capability = body.operation.startsWith('inference.') && body.operation !== 'inference.list' ? 'credential.manage'
           : body.operation === 'secrets.materialize' || body.operation === 'mcp.composio.materialize' ? 'credential.access'
@@ -4341,7 +4343,9 @@ const worker = {
         if (error instanceof McpConnectionValidationError) {
           return Response.json({ status: 'error', error: { code: 'MCP_INVALID', message: error.message, field: error.field } }, { status: 400 });
         }
-        return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: error instanceof Error ? error.message : 'Control request is invalid' } }, { status: 400 });
+        const message = error instanceof Error ? error.message : 'Control request is invalid';
+        console.error(JSON.stringify({ event: 'control_request_failed', operation: signedControl?.operation ?? null, machineId: signedControl?.machineId ?? null, message }));
+        return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message } }, { status: 400 });
       }
     }
     if ((request.method === 'GET' || request.method === 'HEAD')
