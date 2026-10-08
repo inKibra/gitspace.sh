@@ -134,6 +134,13 @@ it('keeps the workspace view on its main agent without a conversation picker', a
   expect(mocks.shell?.mainAgent?.title).toBe('Workspace agent');
 });
 
+it('renders a brand-new workspace whose execution and code documents are still null', async () => {
+  snapshot.documents = { 'gitspace.execution': null, 'gitspace.code': null };
+  await act(async () => { render(); });
+  expect(mocks.shell).not.toBeNull();
+  expect(container.querySelector('button[aria-label^="Environment"]')).not.toBeNull();
+});
+
 it('changes the Environment chip to offline without another snapshot render', async () => {
   vi.useFakeTimers();
   try {

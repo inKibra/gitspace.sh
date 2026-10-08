@@ -7,7 +7,7 @@ import { Button, Dialog, DialogContent, DialogDescription, DialogHeader, DialogT
 export type ConfirmLfsTransition = (heldBack: readonly GitLfsHeldBack[], onCommit: () => void | Promise<void>, blockedReason?: string | null) => Promise<boolean>;
 export function runtimeLfsHeldBack(snapshot: RuntimeSnapshot | undefined): GitLfsHeldBack[] {
   const document = snapshot?.documents['gitspace.code'];
-  if (document === undefined) return [];
+  if (document === undefined || document === null) return [];
   return RuntimeGitCheckpointSchema.parse(document).lfs?.heldBack ?? [];
 }
 

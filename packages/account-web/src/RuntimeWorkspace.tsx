@@ -141,8 +141,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     }
   };
   const attached = inspection.machines.filter(machine => snapshot.attachments.some(item => item.machineId === machine.id && item.state === 'ready'));
-  const execution = snapshot.documents['gitspace.execution'] === undefined ? { defaultMachineId: null } : RuntimeExecutionDocumentSchema.parse(snapshot.documents['gitspace.execution']);
-  const checkpoint = snapshot.documents['gitspace.code'] === undefined ? null : RuntimeGitCheckpointSchema.parse(snapshot.documents['gitspace.code']);
+  // A new workspace reports these documents as null until the first execution/checkpoint is written.
+  const execution = RuntimeExecutionDocumentSchema.parse(snapshot.documents['gitspace.execution'] ?? { defaultMachineId: null });
+  const codeDocument = snapshot.documents['gitspace.code'];
+  const checkpoint = codeDocument === undefined || codeDocument === null ? null : RuntimeGitCheckpointSchema.parse(codeDocument);
   const machine = terminalMachineId ? attached.find(item => item.id === terminalMachineId) : execution.defaultMachineId ? attached.find(item => item.id === execution.defaultMachineId) : attached.find(machine => snapshot.attachments.some(attachment => attachment.machineId === machine.id && attachment.state === 'ready' && attachment.role === 'cache'));
   const terminalClient = useMemo(() => machine?.rpcEndpoint ? createGitSpaceBrowserClient({ url: machine.rpcEndpoint }) : null, [machine?.rpcEndpoint]);
   const spaceId = snapshot.workspaceId;
