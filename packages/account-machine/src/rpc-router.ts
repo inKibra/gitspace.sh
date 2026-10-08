@@ -1058,7 +1058,10 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const createWorkspace = server.implement(createWorkspaceContract).handler(async ({ input, errors }) => {
     try {
-      if (!options.database.getProject(input.projectId)) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      // A cloud-only project is cloned on demand by projects.createWorkspace; only unknown projects are rejected here.
+      if (!options.database.getProject(input.projectId) && !(await options.projects.list('all')).some((project) => project.id === input.projectId)) {
+        return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      }
       const created = await options.projects.createWorkspace(input);
       const session = await options.sessions.create(created.workspace.id);
       if (session.status === 'error') throw session.error;

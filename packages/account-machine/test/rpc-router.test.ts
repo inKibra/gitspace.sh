@@ -17,6 +17,7 @@ import {
 import { ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_MAX_BYTES, createDeviceBinding, createEncryptedRpcFetch, createSignedRpcFetch, credentialProtocolBase64, gitspaceContract, rpcErrors, signDeviceInvite, type CloudProjectOperation, type CloudWorkspaceDefinition, type DeviceCapability, type DeviceGrantRecord, type ProjectEvent } from '@gitspace/protocol';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
 import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
+import type { CloudProjectSummary } from '@gitspace/protocol/project-authority';
 import { applyStreamEvent, initialStreamState } from '@gitspace/protocol-sync';
 import { WorkspaceDomainError } from '@gitspace/protocol-workspace';
 import { emptyLifecycleState, isLifecycleRunActive, transitionLifecycle, type LifecycleRunRecord, type LifecycleState } from '@gitspace/protocol-environment';
@@ -254,6 +255,52 @@ describe('GitSpace Result RPC', () => {
       database.close();
     }
   }, 20_000);
+
+  it('creates workspaces for cloud-only projects this machine has not cloned, and still rejects unknown projects', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-cloud-only-create-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const artifacts = new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32));
+    const events = new FactEventStore(database);
+    const handlers = new GitSpaceHandlers(database, artifacts, events);
+    const sessions = new MachineSessionCoordinator(database, artifacts, new RpcFakeOmpRuntime(), 'machine-a', join(root, 'runtime'), events);
+    const unavailable = async (): Promise<never> => { throw new Error('Not configured in cloud-only fixture'); };
+    const cloudProject: CloudProjectSummary = {
+      id: 'cloud-project', name: 'GitSpace', lifecycle: 'cloud-only', repositoryReference: 'https://github.com/inKibra/gitspace.sh.git',
+      baseBranch: 'main', role: null, source: null, revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
+    };
+    const requested: string[] = [];
+    const rpc = createGitSpaceRpcHandler({
+      database, handlers, artifacts, sessions, factEvents: events, machineId: 'machine-a',
+      terminals: {} as WorkspaceHubTerminalCoordinator,
+      spaces: { close: unavailable, release: unavailable, open: unavailable },
+      serviceManager: { list: async () => [], start: unavailable, stop: unavailable },
+      secrets: { listProjectSecrets: async () => [], putProjectSecret: unavailable, deleteProjectSecret: unavailable, materializeProjectSecrets: unavailable },
+      projects: {
+        list: async () => [cloudProject], createProject: unavailable, openProject: unavailable,
+        createWorkspace: async (input) => { requested.push(input.projectId); throw new Error('clone deferred in fixture'); },
+        retryCreateWorkspace: unavailable, findWorkspace: async () => null,
+        archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, setBaseBranch: unavailable,
+        deleteProject: unavailable, deleteWorkspace: unavailable, setWorkspaceLifecycle: unavailable,
+        setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
+      },
+      projectEvents: { appendProjectEvent: unavailable, listProjectEvents: async () => [], latestProjectEventOffset: async () => 0 },
+      machines: async () => [], spacePlacements: async () => [],
+    });
+    const http = startGitSpaceRpcHttpServer({ handler: rpc.handler });
+    const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({ url: `${http.url}/rpc` }) });
+    try {
+      const cloudOnly = await client.workspace.create({ projectId: 'cloud-project', name: 'Pi smoke', branch: 'pi-smoke', sourceKind: 'base', sourceRef: 'main' });
+      expect(cloudOnly).toMatchObject({ status: 'error', error: { _tag: 'gitspace/operation-failed', data: { message: 'clone deferred in fixture' } } });
+      expect(requested).toEqual(['cloud-project']);
+      const unknown = await client.workspace.create({ projectId: 'missing-project', name: 'Nope', branch: 'nope', sourceKind: 'base', sourceRef: 'main' });
+      expect(unknown).toMatchObject({ status: 'error', error: { _tag: 'gitspace/project-not-found' } });
+      expect(requested).toEqual(['cloud-project']);
+    } finally {
+      await http.stop();
+      database.close();
+    }
+  });
 
   it('archives a failed canonical workspace over HTTP without creating a local placement', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-archive-rpc-'));
