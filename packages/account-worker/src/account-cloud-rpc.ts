@@ -547,7 +547,13 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
     ? await vault.authorizeWorkspaceRuntimeRequest(proof)
     : await vault.authorizeAccountDeviceRequest(proof);
   if (authorized.status === 'error') return reject(authorized.error.code === 'REQUEST_REPLAY' ? 409 : authorized.error.code === 'RPC_FORBIDDEN' ? 403 : 401, authorized.error.code, authorized.error.message);
-  const handler = createFetchHandler({ router: accountRouter(env, userId, authorized.value.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: CONTRACT_VERSION, createContext: () => ({}) });
+  const handler = createFetchHandler({
+    router: accountRouter(env, userId, authorized.value.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: CONTRACT_VERSION, createContext: () => ({}),
+    // Incident IDs shown to users must lead somewhere: log the cause server-side, never in the response.
+    onInternalError: ({ incidentId, phase, cause, procedurePath }) => {
+      console.error(JSON.stringify({ event: 'rpc_internal_error', incidentId, phase, procedurePath, message: cause instanceof Error ? cause.message : String(cause), stack: cause instanceof Error ? cause.stack : undefined }));
+    },
+  });
   const response = await handler(request);
   response.headers.set('cache-control', 'private, no-store');
   return { kind: 'response', response, procedures, target: 'cloud' };
