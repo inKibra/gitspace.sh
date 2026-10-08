@@ -58,9 +58,16 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
       if (!attachment || !['attaching', 'ready', 'draining'].includes(attachment.state)) throw new Error('Repository lease requires a current assigned checkout');
       if (input.scope === 'write' && (attachment.role === 'runner' || !['ready', 'draining'].includes(attachment.state))) throw new Error('This attachment cannot publish repository changes');
     } else {
+      // Machine git remotes bind only the repository. The legacy placement holder qualifies, and so does any machine
+      // with a live cache attachment: cloud workspaces have no holder, and caches publish their baseline before ready.
       const placement = await access.authority.get();
-      if (!placement || placement.machineId !== machine || !['open', 'opening', 'closing'].includes(placement.state)
-        || (input.generation !== undefined && placement.generation !== input.generation)) throw new Error('Repository lease requires current checkout ownership');
+      const holder = placement?.machineId === machine && ['open', 'opening', 'closing'].includes(placement.state)
+        && (input.generation === undefined || placement.generation === input.generation);
+      if (!holder) {
+        const attachments = await access.authority.runtimeAttachments(identity);
+        if (!attachments.some(item => item.machineId === machine && item.role === 'cache' && ['attaching', 'ready', 'draining'].includes(item.state)
+          && (input.generation === undefined || item.generation === input.generation))) throw new Error('Repository lease requires current checkout ownership');
+      }
     }
     await ensureRuntimeCodeRepository(env, userId, identity);
     return new ArtifactsCodeStore(env.ARTIFACTS).credentials(repository, input.scope);

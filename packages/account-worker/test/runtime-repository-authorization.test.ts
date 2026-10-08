@@ -202,6 +202,32 @@ describe('signed repository credential authority', () => {
     expect((await f.request(assigned)).status).toBe(400);
   });
 
+  it('leases the workspace repository to an attached cache machine that does not hold the legacy placement', async () => {
+    const f = await fixture(['storage.access']);
+    const services: AttachmentServices = {
+      seal: async () => 'test-sealed-execution-secret',
+      open: async () => { throw new Error('This fixture does not recover execution secrets'); },
+      dispatch: async () => { throw new Error('Repository authorization must not dispatch tools'); },
+    };
+    // The machine git remote binds only the repository; it carries no attachment or placement generation.
+    const binding = { workspaceId: undefined, generation: undefined, repository: `workspace-${workspaceId}` };
+    expect((await f.request(binding, 'unassigned')).status).toBe(400);
+    const runner = await runInDurableObject(f.authority, async (_instance, state) => {
+      const store = new AttachmentStore(state.storage, services);
+      return (await store.attach(RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'unassigned', generation: 1, role: 'runner', checkout: { kind: 'snapshot', commit: 'a'.repeat(40) }, capabilities: [] }))).attachment;
+    });
+    expect((await f.request(binding, 'unassigned')).status).toBe(400);
+    await runInDurableObject(f.authority, async (_instance, state) => {
+      const store = new AttachmentStore(state.storage, services);
+      store.detach({ ...runner, state: 'lost' });
+      await store.attach(RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'unassigned', generation: 2, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }));
+    });
+    const read = await f.request(binding, 'unassigned');
+    expect(read.status, await read.text()).toBe(200);
+    const write = await f.request({ ...binding, scope: 'write' }, 'unassigned');
+    expect(write.status, await write.text()).toBe(200);
+  });
+
   it('independent machine caches coexist while the same shared checkout requires a completed drain before replacement', async () => {
     const f = await fixture(['space.control']);
     await runInDurableObject(f.authority, async (_instance, state) => {
