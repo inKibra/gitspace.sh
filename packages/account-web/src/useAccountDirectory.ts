@@ -150,6 +150,8 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         const holders = new Map<string, SpacePlacementView>();
         const errors = directoryError ? [`Directory unavailable: ${directoryError}`] : [];
         const summarize = (id: string, closedAt: Date | null, previous: SidebarSpaceSummary | undefined): SidebarSpaceSummary => {
+          // A cloud workspace reports status from its runtime (the open pane); the directory has no placement or machine for it.
+          if (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud') return { closedAt, holder: { kind: 'cloud' }, freshness: 'unknown', refreshing: false };
           const placement = placements.get(id);
           if (closedAt) return { closedAt, holder: { kind: 'released' }, generation: placement?.generation, freshness: 'fresh' };
           if (!placement) return { closedAt, holder: { kind: 'unknown' }, freshness: 'unknown', refreshing: false, detail: 'Placement unavailable' };

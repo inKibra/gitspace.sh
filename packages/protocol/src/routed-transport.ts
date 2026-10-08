@@ -86,7 +86,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
     if (isSpaceCloudRpcPath(path)) return queue(`inspector:${spaceCloudRpcSpaceId(input) ?? ''}`);
     const target = rpcCallTarget(path, input);
     if (!target) return home;
-    return queue(target.kind === 'space' ? `space:${target.spaceId}` : `session:${target.sessionId}`);
+    return queue(target.kind === 'space' ? `space:${target.spaceId}` : target.kind === 'terminal' ? `terminal:${target.spaceId}:${target.machineId}` : `session:${target.sessionId}`);
   };
 
   return {

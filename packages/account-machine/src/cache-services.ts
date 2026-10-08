@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { daemonClientForProject, type DaemonResponse } from '@gitspace/supervisor';
-import { checkoutPath, type LocalAttachment } from '@gitspace/runtime-machine';
+import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, type LocalAttachment } from '@gitspace/runtime-machine';
 import { RuntimeServiceOperationSchema, type RuntimeService } from '@gitspace/protocol-runtime/services';
 import type { z } from 'zod';
 import type { WorkspaceServiceManager } from './workspace-services.js';
@@ -67,7 +67,7 @@ export async function cacheServiceOperation(manager: WorkspaceServiceManager, lo
   if (operation.op === 'restart' && current.state !== 'stopped') await client.request({ op: 'stop', name: current.terminalName });
   const cwd = await checkoutPath(local.rootPath, definition.cwd);
   const ports = await manager.allocateDefinitionPorts(attachment.workspaceId, definition);
-  const env: Record<string, string> = { ...definition.env, GITSPACE_PORTS_JSON: JSON.stringify(Object.fromEntries(ports.map(port => [port.name, port.port]))) };
+  const env: Record<string, string> = { ...await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()), ...definition.env, GITSPACE_PORTS_JSON: JSON.stringify(Object.fromEntries(ports.map(port => [port.name, port.port]))) };
   if (ports[0]) env.PORT = String(ports[0].port);
   for (const port of ports) env[`GITSPACE_PORT_${port.name.toUpperCase().replace(/[^A-Z0-9]/gu, '_')}`] = String(port.port);
   const ready = ports[0] ? { port: ports[0].port, host: '127.0.0.1', timeoutMs: 30_000 } : undefined;

@@ -9,6 +9,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../src/styles.css';
 import { WorkspaceTerminals, type WorkspaceTerminalsProps, type WorkspaceTerminalView } from '../src/WorkspaceTerminals.js';
+import { terminalStreamResource } from '@gitspace/protocol/rpc-contract';
 import { SynchronizationContext } from '../src/SynchronizationProvider.js';
 import { SynchronizationOwner } from '../src/synchronization.js';
 import './workbench-preview.css';
@@ -151,14 +152,17 @@ let terminalRevision = 0;
 function changedTerminals() { terminalRevision++; terminalChanges.dispatchEvent(new Event('change')); }
 const workbenchTerminalApi: WorkspaceTerminalsProps = {
   spaceId: 'workspace-a',
-  async *events(name, _after, signal) {
+  machines: [{ id: 'local-machine', label: 'Local machine' }],
+  machineId: 'local-machine',
+  onSelectMachine: () => {},
+  async *events(machineId, name, _after, signal) {
     let next = Promise.withResolvers<void>();
     const changed = () => next.resolve();
     terminalChanges.addEventListener('change', changed);
     signal.addEventListener('abort', changed);
     try {
       while (!signal.aborted) {
-        yield { status: 'ok', value: { type: 'snapshot', resource: `terminals:workspace-a:${name ?? ''}`, cursor: terminalRevision, revision: terminalRevision, previous: null,
+        yield { status: 'ok', value: { type: 'snapshot', resource: terminalStreamResource('workspace-a', machineId, name), cursor: terminalRevision, revision: terminalRevision, previous: null,
           value: { terminals: mockHubTerminals, output: name === null ? null : { spaceId: 'workspace-a', name, state: mockHubTerminals.find(terminal => terminal.name === name)?.state ?? 'exited', cursor: (mockHubOutput.get(name) ?? '').length, data: mockHubOutput.get(name) ?? '' } } } };
         await next.promise;
         next = Promise.withResolvers<void>();
@@ -178,8 +182,8 @@ const workbenchTerminalApi: WorkspaceTerminalsProps = {
     changedTerminals();
     return terminal;
   },
-  send: async (name, data) => { mockHubOutput.set(name, `${mockHubOutput.get(name) ?? ''}${data}`); changedTerminals(); },
-  stop: async (name) => { mockHubTerminals = mockHubTerminals.map((terminal) => terminal.name === name ? { ...terminal, state: 'exited', exitCode: 0 } : terminal); changedTerminals(); },
+  send: async (_machineId, name, data) => { mockHubOutput.set(name, `${mockHubOutput.get(name) ?? ''}${data}`); changedTerminals(); },
+  stop: async (_machineId, name) => { mockHubTerminals = mockHubTerminals.map((terminal) => terminal.name === name ? { ...terminal, state: 'exited', exitCode: 0 } : terminal); changedTerminals(); },
 };
 function TerminalsSurface({ requestedId }: { requestedId: string | null }) {
   const [owner] = useState(() => new SynchronizationOwner());

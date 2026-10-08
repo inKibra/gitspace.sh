@@ -40,7 +40,7 @@ import { createContext, useContext, useState, type Dispatch, type SetStateAction
 import { glyph } from './glyph.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
-import { spaceHolderLabel, StatusDot, workspaceStatusColor, workspaceStatusLabel, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
+import { StatusDot, workspaceStatusColor, workspaceStatusLabel, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
 
 const NAV: Array<{ view: Exclude<AppView, 'agent'>; icon: IconComponent }> = [
   { view: 'kanban', icon: glyph(Columns03) },
@@ -187,15 +187,16 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
     finally { setMovePending(false); }
   };
   const archived = !!summary?.closedAt;
+  // Close, reopen and move manage a legacy machine-held space; a cloud workspace lives in the cloud and offers none of them.
   const released = !archived && summary?.holder.kind === 'released';
-  const active = !!runtime && !archived && summary?.holder.kind === 'held';
-  const launchable = active && kind === 'workspace' && deployment?.isGitSpaceProject === true;
+  const held = !!runtime && !archived && summary?.holder.kind === 'held';
+  const launchable = (held || (!archived && summary?.holder.kind === 'cloud')) && kind === 'workspace' && deployment?.isGitSpaceProject === true;
   const canReopen = released && !!onReopen;
   const canClose = !archived && summary?.holder.kind === 'held' && !!onClose;
   const outstanding = !!summary?.status && summary.status.agents.green + summary.status.agents.orange + summary.status.agents.red > 0;
   const canRestore = kind === 'workspace' && archived && !!onRestore;
   const canArchive = kind === 'workspace' && !archived && !summary?.creation && !!onArchive;
-  const canMove = active && !!onMove && machines.length > 0;
+  const canMove = held && !!onMove && machines.length > 0;
   if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !canReopen && !canClose && !canRestore && !canArchive && !canMove && !launchable) return null;
   const launching = deployment?.launch?.status === 'running';
   let index = 0;
@@ -271,21 +272,21 @@ function ProjectRows({ project, collapsed, onCollapse, selected, machines, deplo
   const baseSummary = project.baseSummary ?? base;
   const baseReleased = baseSummary && !baseSummary.closedAt && baseSummary.holder.kind === 'released';
   const createWorkspace = onNewWorkspace && project.lifecycle !== 'archived' && project.lifecycle !== 'deleting' ? () => onNewWorkspace(project.id) : undefined;
-  const running = workspaces.filter(({ runtime, summary = runtime }) => summary && !summary.closedAt && summary.holder.kind === 'held' && summary.status?.primaryColor === 'green').length;
+  const running = workspaces.filter(({ runtime, summary = runtime }) => summary && !summary.closedAt && (summary.holder.kind === 'held' || summary.holder.kind === 'cloud') && summary.status?.primaryColor === 'green').length;
   const row = (workspace: SidebarWorkspace) => {
     const runtime = workspace.runtime;
     const supplied: SidebarSpaceSummary | undefined = workspace.summary ?? runtime;
     const summary = workspace.closedAt ? { ...supplied, closedAt: workspace.closedAt, holder: supplied?.holder ?? { kind: 'unknown' as const } } : supplied;
     const released = summary?.holder.kind === 'released';
-    const holder = summary ? spaceHolderLabel(summary) : null;
+    const suffix = released && !summary?.closedAt;
     return <SpaceSummaryContext.Provider key={workspace.id} value={summary}><SidebarMenuSubItem>
-      <SidebarMenuSubButton className={released ? 'text-muted-foreground' : undefined} render={<button type="button" onClick={() => onSelectWorkspace(workspace)} />} isActive={selected?.projectId === workspace.projectId && selected.workspaceId === workspace.id} icon={SpaceStatusGlyph} title={`${workspace.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${holder ? ` · ${holder}` : ''}`} aria-description={summary?.detail ?? undefined}>{workspace.name}{launchedFrom(deployment, workspace.id) ? <LaunchedGlyph /> : null}{holder ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· {holder}</span> : null}</SidebarMenuSubButton>
+      <SidebarMenuSubButton className={released ? 'text-muted-foreground' : undefined} render={<button type="button" onClick={() => onSelectWorkspace(workspace)} />} isActive={selected?.projectId === workspace.projectId && selected.workspaceId === workspace.id} icon={SpaceStatusGlyph} title={`${workspace.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${suffix ? ' · released' : ''}`} aria-description={summary?.detail ?? undefined}>{workspace.name}{launchedFrom(deployment, workspace.id) ? <LaunchedGlyph /> : null}{suffix ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuSubButton>
       <SidebarMenuActions showOnHover><SpaceMenu space={workspace} kind="workspace" runtime={runtime} summary={summary} machines={machines} deployment={deployment} onClose={onClose} closePendingSpaceId={closePendingSpaceId} onReopen={onReopen} onArchive={onArchive} onRestore={onRestore} onMove={onMove} /></SidebarMenuActions>
     </SidebarMenuSubItem></SpaceSummaryContext.Provider>;
   };
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
-      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${spaceHolderLabel(baseSummary) ? ` · ${spaceHolderLabel(baseSummary)}` : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}{baseSummary && spaceHolderLabel(baseSummary) ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· {spaceHolderLabel(baseSummary)}</span> : null}</SidebarMenuButton>
+      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
     </SpaceSummaryContext.Provider>
     {running ? <SidebarMenuBadge title={`${running} ${running === 1 ? 'workspace' : 'workspaces'} last reported working`}>{running}</SidebarMenuBadge> : null}
     <SidebarMenuActions showOnHover={open}>

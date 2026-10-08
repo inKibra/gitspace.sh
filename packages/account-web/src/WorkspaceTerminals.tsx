@@ -5,7 +5,7 @@ import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type R
 import { glyph } from './glyph.js';
 import { EmptyState } from './GitSpaceShell.js';
 import type { StreamEvent } from '@gitspace/protocol-sync';
-import type { ProtectedTerminalEvent, ProtectedTerminalStep } from '@gitspace/protocol/rpc-contract';
+import { terminalStreamResource, type ProtectedTerminalEvent, type ProtectedTerminalStep } from '@gitspace/protocol/rpc-contract';
 import { useSynchronizedResource } from './SynchronizationProvider.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
@@ -35,15 +35,30 @@ export interface WorkspaceTerminalOutput {
   data: string;
 }
 
+/** A machine that may run this workspace's terminals: one attached to it as a ready cache. */
+export interface WorkspaceTerminalMachine {
+  id: string;
+  label: string;
+}
+
+type ProtectedTerminalStream = AsyncIterable<{ status: 'ok'; value: ProtectedTerminalEvent } | { status: 'error'; error: Error }>;
+
+/** Terminals run only on the machine the user picks; there is no implicit default machine. */
 export interface WorkspaceTerminalsProps {
   spaceId: string;
-  events(name: string | null, after: number | null, signal: AbortSignal): AsyncIterable<{ status: 'ok'; value: StreamEvent<{ terminals: readonly WorkspaceTerminalView[]; output: WorkspaceTerminalOutput | null }> } | { status: 'error'; error: Error }>;
-  live(name: string, signal: AbortSignal): AsyncIterable<{ status: 'ok'; value: ProtectedTerminalEvent } | { status: 'error'; error: Error }>;
+  machines: readonly WorkspaceTerminalMachine[];
+  /** The user's pick; terminals stay closed until it names one of `machines`. */
+  machineId: string | null;
+  onSelectMachine(machineId: string): void;
+  /** Opens the workspace's machine controls, where a machine is attached. */
+  onAttachMachine?: () => void;
+  events(machineId: string, name: string | null, after: number | null, signal: AbortSignal): AsyncIterable<{ status: 'ok'; value: StreamEvent<{ terminals: readonly WorkspaceTerminalView[]; output: WorkspaceTerminalOutput | null }> } | { status: 'error'; error: Error }>;
+  live(machineId: string, name: string, signal: AbortSignal): ProtectedTerminalStream;
   requestedName?: string | null;
-  create(): Promise<WorkspaceTerminalView>;
-  send(name: string, data: string): Promise<void>;
+  create(machineId: string): Promise<WorkspaceTerminalView>;
+  send(machineId: string, name: string, data: string): Promise<void>;
   onClose?: () => void;
-  stop(name: string): Promise<void>;
+  stop(machineId: string, name: string): Promise<void>;
 }
 
 function isRunning(state: WorkspaceTerminalState): boolean {
@@ -445,7 +460,7 @@ class TerminalErrorBoundary extends Component<{ children: ReactNode; resetKey: s
 }
 
 
-function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect }: { name: string; running: boolean; live: WorkspaceTerminalsProps['live']; onData(data: string): void; onError(error: Error): void; onDisconnect(): void }) {
+function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect }: { name: string; running: boolean; live(name: string, signal: AbortSignal): ProtectedTerminalStream; onData(data: string): void; onError(error: Error): void; onDisconnect(): void }) {
   const [frame, setFrame] = useState<{ data: string; epoch: number; connected: boolean; steps: readonly ProtectedTerminalStep[]; exitCode: number | null; disconnected: boolean }>({ data: '', epoch: 0, connected: false, steps: [], exitCode: null, disconnected: false });
   const liveRef = useRef(live);
   liveRef.current = live;
@@ -518,10 +533,26 @@ function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect 
 }
 
 export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
-  const { spaceId, events, create: createTerminal, send, stop: stopTerminal } = props;
+  const machine = props.machines.find((item) => item.id === props.machineId);
+  if (machine) return <MachineTerminals key={machine.id} {...props} machine={machine} />;
+  return <section className="flex h-full min-h-0 flex-col bg-surface-1" aria-label="Hub terminals">
+    <header className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
+      <strong className="flex-1 pl-1 text-caption font-semibold text-foreground">Hub terminals</strong>
+      {props.onClose ? <Button variant="ghost" size="icon-compact" aria-label="Close terminals" onClick={props.onClose}><XClose width={16} height={16} strokeWidth={1.5} /></Button> : null}
+    </header>
+    <div className="flex min-h-0 flex-1 items-center justify-center p-6">{props.machines.length > 0
+      ? <EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="Choose a machine" description="Terminals run on one machine attached to this workspace. Choose where to open them."
+          action={<div className="flex flex-wrap justify-center gap-2">{props.machines.map((item) => <Button key={item.id} variant="secondary" size="compact" onClick={() => props.onSelectMachine(item.id)}>{item.label}</Button>)}</div>} />
+      : <EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="Attach a machine to open a terminal" description="Terminals run on a machine attached to this workspace as a ready cache. Cloud files and conversations stay available without one."
+          action={props.onAttachMachine ? <Button variant="secondary" size="compact" onClick={props.onAttachMachine}>Attach a machine</Button> : undefined} />}</div>
+  </section>;
+}
+
+function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceTerminalMachine }) {
+  const { spaceId, machine, events, create: createTerminal, send, stop: stopTerminal } = props;
   const [terminals, setTerminals] = useState<readonly WorkspaceTerminalView[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(props.requestedName ?? null);
-  const synchronized = useSynchronizedResource(`terminals:${spaceId}:${selectedName ?? ''}`, (after, signal) => events(selectedName, after, signal));
+  const synchronized = useSynchronizedResource(terminalStreamResource(spaceId, machine.id, selectedName), (after, signal) => events(machine.id, selectedName, after, signal));
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const pendingInput = useRef<Array<{ name: string; chunks: string[]; send: WorkspaceTerminalsProps['send'] }>>([]);
@@ -550,7 +581,7 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
   const create = async (): Promise<void> => {
     setCreating(true);
     try {
-      const terminal = await createTerminal();
+      const terminal = await createTerminal(machine.id);
       setTerminals((current) => [terminal, ...current.filter((item) => item.name !== terminal.name)]);
       setSelectedName(terminal.name);
       setError(null);
@@ -578,7 +609,7 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
         while (pendingInput.current.length > 0) {
           const next = pendingInput.current.shift()!;
           if (!mountedRef.current || selectionRef.current?.name !== next.name || !isRunning(selectionRef.current.state)) continue;
-          await next.send(next.name, next.chunks.join(''));
+          await next.send(machine.id, next.name, next.chunks.join(''));
         }
         setError(null);
       } catch (cause) {
@@ -594,7 +625,7 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
   const stop = async (): Promise<void> => {
     if (!selected || !isRunning(selected.state)) return;
     try {
-      await stopTerminal(selected.name);
+      await stopTerminal(machine.id, selected.name);
       if (selected.kind !== 'lifecycle') setTerminals((current) => current.filter((terminal) => terminal.name !== selected.name));
       if (selected.kind !== 'lifecycle') setSelectedName(null);
       setError(null);
@@ -613,6 +644,7 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
         <strong className="text-caption font-semibold text-foreground">Hub terminals</strong>
         <span className="text-caption tabular-nums text-muted-foreground">{running} running</span>
       </span>
+      <select aria-label="Terminal machine" className="max-w-40 shrink-0 bg-transparent text-caption text-muted-foreground" value={machine.id} onChange={(event) => props.onSelectMachine(event.target.value)}>{props.machines.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
       {terminals.length > 0
         ? <TabsSubtle size="compact" idPrefix="terminals" selectedIndex={selectedIndex} onSelect={(index) => setSelectedName(terminals[index]?.name ?? null)} className="min-w-0 flex-1">
             {terminals.map((terminal, index) => <TabsSubtleItem key={terminal.name} index={index} label={terminal.protected && terminal.kind === 'lifecycle' ? 'Environment' : terminal.name} icon={KIND[terminal.kind].icon} />)}
@@ -629,8 +661,8 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
         <code className="min-w-0 truncate font-mono text-foreground">{selected.command}</code>
         <span className="ml-auto shrink-0">Machine <span className="font-mono text-foreground">{selected.machineId}</span></span>
       </div>
-      <TerminalErrorBoundary resetKey={selected.id} onError={() => setError('Terminal display unavailable. Close and reopen to reconnect.')}><div className="flex min-h-0 flex-1 flex-col" key={selected.id}>{selected.protected ? <ProtectedTerminal name={selected.name} running={isRunning(selected.state)} live={props.live} onData={sendInput} onDisconnect={() => { pendingInput.current.length = 0; }} onError={() => setError('Protected terminal display unavailable. Close and reopen to reconnect.')} /> : <HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} />}</div></TerminalErrorBoundary>
-    </> : <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="No terminals" description="Open a terminal in this workspace to start an OMP Hub PTY." action={newTerminal} /></div>}
+      <TerminalErrorBoundary resetKey={selected.id} onError={() => setError('Terminal display unavailable. Close and reopen to reconnect.')}><div className="flex min-h-0 flex-1 flex-col" key={selected.id}>{selected.protected ? <ProtectedTerminal name={selected.name} running={isRunning(selected.state)} live={(name, signal) => props.live(machine.id, name, signal)} onData={sendInput} onDisconnect={() => { pendingInput.current.length = 0; }} onError={() => setError('Protected terminal display unavailable. Close and reopen to reconnect.')} /> : <HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} />}</div></TerminalErrorBoundary>
+    </> : <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="No terminals" description={`Open a terminal on ${machine.label} in this workspace's checkout.`} action={newTerminal} /></div>}
     {error ? <div className="shrink-0 bg-destructive-light px-3 py-1.5 text-caption text-destructive" role="alert">{error}</div> : null}
     {synchronized.transportError ? <div className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground" role="status">{selected?.protected ? 'Terminal status disconnected; reconnecting.' : 'Terminal delivery disconnected. Last received output is retained; reconnecting.'}</div> : null}
   </section>;

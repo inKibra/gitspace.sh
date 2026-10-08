@@ -64,7 +64,7 @@ describe('account directory projection', () => {
     expect(await index.publishDirectory({ ...source, cursor: 2 })).toBe(false);
     expect(await index.publishDirectory({ ...source, cursor: 0 })).toBe(false);
     expect(await index.directorySnapshot()).toMatchObject({ workspaces: [], projectRevisions: { [project.id]: 3 } });
-    expect(before.workspaces).toEqual([workspace]);
+    expect(before.workspaces).toEqual([{ ...workspace, cloudRuntime: false }]);
     await index.publishDirectory({ ...source, cursor: 4, project: { ...project, revision: 2, lifecycle: 'deleting' }, workspaces: [] });
     // Even an erroneously later source publication cannot bypass an account tombstone.
     await index.publishDirectory({ ...source, cursor: 5 });
@@ -152,6 +152,26 @@ describe('account directory projection', () => {
     expect(await index.directorySnapshot()).toMatchObject({ workspaces: [], placements: [] });
   });
 
+  it('marks a space as a cloud workspace once it has runtime state and stops publishing its stale legacy placement', async () => {
+    const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
+    const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${project.id}`);
+    await authority.bootstrap({ ...project, createdBy: machine.id });
+    await authority.putWorkspace({ ...workspace, expectedRevision: 0 });
+    const space = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.id}`);
+    await space.bootstrap({ projectId: project.id, spaceId: workspace.id, machineId: machine.id });
+    await runInDurableObject(authority, (instance) => instance.alarm());
+    await runInDurableObject(space, (instance) => instance.alarm());
+    expect(await index.directorySnapshot()).toMatchObject({ workspaces: [{ id: workspace.id, cloudRuntime: false }], placements: [{ spaceId: workspace.id, holderId: machine.id }] });
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(41)) });
+    await space.runtimeAttachments({ projectId: project.id, workspaceId: workspace.id });
+    await runInDurableObject(space, (instance) => instance.alarm());
+    expect(await index.directorySnapshot()).toMatchObject({ workspaces: [{ id: workspace.id, cloudRuntime: true }], placements: [] });
+    // A later legacy commit keeps the space a cloud workspace.
+    await space.beginClose({ projectId: project.id, spaceId: workspace.id, machineId: machine.id, expectedGeneration: 1 });
+    await runInDurableObject(space, (instance) => instance.alarm());
+    expect(await index.directorySnapshot()).toMatchObject({ workspaces: [{ id: workspace.id, cloudRuntime: true }], placements: [] });
+  });
+
   it('retries durable unacknowledged publication after reconstruction and stops alarms when drained', async () => {
     const receiver = env.USER_PROJECTS.getByName('outbox-receiver');
     const sender = env.USER_PROJECTS.getByName('outbox-sender');
@@ -162,7 +182,7 @@ describe('account directory projection', () => {
       await outbox.flush();
       expect(await state.storage.getAlarm()).not.toBeNull();
     });
-    expect((await receiver.directorySnapshot()).workspaces).toEqual([workspace]);
+    expect((await receiver.directorySnapshot()).workspaces).toEqual([{ ...workspace, cloudRuntime: false }]);
     await runInDurableObject(sender, async (_instance, state) => {
       const recovered = new DirectoryOutbox(state, { ...env, USER_PROJECTS: { getByName: () => env.USER_PROJECTS.getByName('outbox-receiver') } } as unknown as Env);
       await recovered.flush();
@@ -305,7 +325,7 @@ describe('directory WebSocket authentication and replay', () => {
     await runInDurableObject(index, async (_instance, state) => {
       const restarted = new UserProjectIndexDO(state, env);
       await state.blockConcurrencyWhile(async () => {});
-      const snapshot: AccountDirectorySnapshot = { projects: [project], workspaces: [workspace], placements: [], machines: [], projectRevisions: { [project.id]: 1 } };
+      const snapshot: AccountDirectorySnapshot = { projects: [project], workspaces: [{ ...workspace, cloudRuntime: false }], placements: [], machines: [], projectRevisions: { [project.id]: 1 } };
       // A commit survived eviction immediately before its socket notification.
       state.storage.transactionSync(() => new DurableChangeLog(state.storage).append('account-directory', snapshot));
       await restarted.alarm();

@@ -5,6 +5,7 @@ import type { ServiceView } from '@gitspace/protocol/inspector-contract';
 import type { HostedServiceRoute } from '@gitspace/protocol';
 import { SERVICE_ASSERTION_HEADER, stripGitSpaceCredentials, verifyServiceAssertion } from '@gitspace/protocol/service-access';
 import type { WorkspaceTerminalView } from './workspace-hub.js';
+import { checkoutTerminalEnvironment, inheritedCommandEnvironment } from '@gitspace/runtime-machine';
 
 const MIN_SERVICE_PORT = 17_000;
 const MAX_SERVICE_PORT = 47_000;
@@ -231,7 +232,7 @@ export class WorkspaceServiceManager {
     if (!inside(space.rootPath, cwd)) throw new Error(`Service ${serviceName} cwd escapes the workspace`);
     const ports = await this.allocatedPorts(spaceId, definition, true);
     const portMap = Object.fromEntries(ports.map((port) => [port.name, port.port]));
-    const env: Record<string, string> = { ...definition.env, GITSPACE_SERVICE_NAME: definition.name, GITSPACE_PORTS_JSON: JSON.stringify(portMap) };
+    const env: Record<string, string> = { ...await checkoutTerminalEnvironment(space.rootPath, inheritedCommandEnvironment()), ...definition.env, GITSPACE_SERVICE_NAME: definition.name, GITSPACE_PORTS_JSON: JSON.stringify(portMap) };
     if (ports[0]) env.PORT = String(ports[0].port);
     for (const port of ports) env[`GITSPACE_PORT_${port.name.toUpperCase().replace(/[^A-Z0-9]/gu, '_')}`] = String(port.port);
     const terminal = await this.terminals.startService(spaceId, definition.name, definition.command, definition.args, cwd, env);

@@ -3,7 +3,7 @@ import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/
 import { useResultQuery } from 'result-rpc/react';
 import type { InspectorView } from '@gitspace/protocol';
 import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { RuntimeExecutionDocumentSchema, RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
@@ -12,10 +12,10 @@ import { useCloudSessionControls } from './useCloudSessionControls.js';
 import { useTranscriptHistory } from './useTranscriptHistory.js';
 import { useInference } from './InferenceContext.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
-import { rpcClient, createGitSpaceBrowserClient } from './rpc-client.js';
+import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
-import { environmentCacheSummary } from './environment/cache-presentation.js';
+import { cachePresentation, environmentCacheSummary } from './environment/cache-presentation.js';
 import { useCacheFreshnessClock } from './environment/useCacheFreshnessClock.js';
 import { BrowserApprovalCard } from './RuntimeBrowser.js';
 import { RELEASE_TARGETS } from './release.js';
@@ -72,7 +72,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const relationQuery = useResultQuery(rpcClient.space.view, { projectId: props.projectId, workspaceId: inspection.workspace.kind === 'base' ? null : props.workspaceId });
   const relationValue = useRetainedQueryValue(relationQuery, JSON.stringify([props.projectId, props.workspaceId]));
   const [actionError, setActionError] = useState<string | null>(null);
-  const [terminalMachineId, setTerminalMachineId] = useState<string>();
+  const [terminalChoice, setTerminalChoice] = useState<{ spaceId: string; machineId: string } | null>(null);
   const scope = useMemo(() => runtimeScope(snapshot, inspection, relationValue?.workspaces), [snapshot, inspection, relationValue]);
   const relationsEditable = relationQuery.state === 'success' && relationQuery.fetch !== 'fetching' && scope.relationsReady;
   const relationAuthority = useRef({ value: relationValue, editable: relationsEditable });
@@ -140,16 +140,15 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       await Promise.all([relationQuery.refetch(), refreshInspection()]);
     }
   };
-  const attached = inspection.machines.filter(machine => snapshot.attachments.some(item => item.machineId === machine.id && item.state === 'ready'));
-  // A new workspace reports these documents as null until the first execution/checkpoint is written.
-  const execution = RuntimeExecutionDocumentSchema.parse(snapshot.documents['gitspace.execution'] ?? { defaultMachineId: null });
+  // A new workspace reports its code document as null until the first checkpoint is written.
   const codeDocument = snapshot.documents['gitspace.code'];
   const checkpoint = codeDocument === undefined || codeDocument === null ? null : RuntimeGitCheckpointSchema.parse(codeDocument);
-  const machine = terminalMachineId ? attached.find(item => item.id === terminalMachineId) : execution.defaultMachineId ? attached.find(item => item.id === execution.defaultMachineId) : attached.find(machine => snapshot.attachments.some(attachment => attachment.machineId === machine.id && attachment.state === 'ready' && attachment.role === 'cache'));
-  const terminalClient = useMemo(() => machine?.rpcEndpoint ? createGitSpaceBrowserClient({ url: machine.rpcEndpoint }) : null, [machine?.rpcEndpoint]);
   const spaceId = snapshot.workspaceId;
   const now = useCacheFreshnessClock();
   const environment = environmentCacheSummary(snapshot, now);
+  // Terminals open only on a ready cache the user picked for this workspace: never a default machine or a placement holder.
+  const terminalMachines = snapshot.attachments.filter(item => item.role === 'cache' && cachePresentation(item, now).ready)
+    .map(item => ({ id: item.machineId, label: inspection.machines.find(machine => machine.id === item.machineId)?.label ?? item.machineId }));
   return <>
     {props.creation}
     {actionError ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
@@ -171,8 +170,16 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       onSetWorkspaceRelations={relationsEditable ? setRelations : undefined}
       deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', onLaunch: workspaceId => perform(() => launch.start(workspaceId, RELEASE_TARGETS)), onRevert: () => perform(launch.revert) } : null}
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onRevert={() => perform(launch.revert)} onDismiss={launch.dismiss} /> : undefined}
-      renderEnvironmentStatus={onInspect => <><Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>{attached.length > 1 ? <select aria-label="Terminal machine" className="min-h-10 max-w-40 bg-transparent text-caption" value={machine?.id} onChange={event => setTerminalMachineId(event.target.value)}>{attached.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select> : null}</>}
-      terminals={terminalClient ? { spaceId, events: (name, after, signal) => terminalClient.terminals.events({ spaceId, name, after }, { signal }), live: (name, signal) => terminalClient.terminals.live({ spaceId, name }, { signal }), create: async () => { const result = await terminalClient.terminals.create({ spaceId }); if (result.status === 'error') throw result.error; return result.value; }, send: async (name, data) => { const result = await terminalClient.terminals.send({ spaceId, name, data }); if (result.status === 'error') throw result.error; }, stop: async name => { const result = await terminalClient.terminals.stop({ spaceId, name }); if (result.status === 'error') throw result.error; } } : undefined}
+      renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
+      terminals={{
+        spaceId, machines: terminalMachines, machineId: terminalChoice?.spaceId === spaceId ? terminalChoice.machineId : null,
+        onSelectMachine: machineId => setTerminalChoice({ spaceId, machineId }),
+        events: (machineId, name, after, signal) => rpcClient.terminals.events({ spaceId, machineId, name, after }, { signal }),
+        live: (machineId, name, signal) => rpcClient.terminals.live({ spaceId, machineId, name }, { signal }),
+        create: async machineId => { const result = await rpcClient.terminals.create({ spaceId, machineId }); if (result.status === 'error') throw result.error; return result.value; },
+        send: async (machineId, name, data) => { const result = await rpcClient.terminals.send({ spaceId, machineId, name, data }); if (result.status === 'error') throw result.error; },
+        stop: async (machineId, name) => { const result = await rpcClient.terminals.stop({ spaceId, machineId, name }); if (result.status === 'error') throw result.error; },
+      }}
       renderInspector={(onClose, initialView, resourceRequest) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest })}
     />
     {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open} onOpenChange={launch.setOpen} onRetry={() => perform(() => launch.start(launch.launch!.workspaceId, launch.launch!.targets))} /> : null}

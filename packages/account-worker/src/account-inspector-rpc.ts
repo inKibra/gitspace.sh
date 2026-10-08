@@ -55,6 +55,8 @@ import { InspectorCloudArtifacts, InspectorGenerationConflict, InspectorWorkspac
 import { readSavedInspectorTranscriptContent, readSavedInspectorTranscriptPage } from './account-inspector-data.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
+import { cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, readCloudCheckout } from './cloud-repository.js';
+import type { RepositoryMode } from '@gitspace/protocol/inspector-contract';
 
 export function inspectorCloudProcedures(env: Env, userId: string, requireSubscription: () => Promise<void>, currentDevice: () => Promise<VerifiedDevice>) {
   const server = serverRpc.context<GitSpaceRpcContext>();
@@ -469,16 +471,77 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
       return err(errors.OperationFailed({ operation: 'revoke artifact share', message: error instanceof Error ? error.message : String(error) }));
     }
   });
-  const repositoryTree = server.implement(inspectorRepositoryTreeContract).stream(async function* ({ errors }) {
-    yield err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' }));
+  // Only a legacy machine-held space without a live holder reaches these handlers without cloud runtime state.
+  const legacyRuntimeUnavailable = 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.';
+  const repositoryCheckout = async (input: { spaceId: string; expectedGeneration: number; mode: RepositoryMode }) => {
+    const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+    if (!await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).hasCloudRuntime()) return null;
+    return readCloudCheckout(env, userId, source, input.mode);
+  };
+  const repositoryTree = server.implement(inspectorRepositoryTreeContract).stream(async function* ({ input, errors, signal }) {
+    try {
+      const checkout = await repositoryCheckout(input);
+      if (!checkout) { yield err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable })); return; }
+      const entries = cloudRepositoryTree(checkout, input.mode, input.path);
+      // Sixteen entries per frame stay below the frame limit, as on a machine.
+      if (entries.length === 0 && !signal.aborted) yield ok([]);
+      for (let offset = 0; offset < entries.length && !signal.aborted; offset += 16) yield ok(entries.slice(offset, offset + 16));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) { yield err(errors.WorkspaceNotFound({ workspaceId: error.spaceId })); return; }
+      if (error instanceof InspectorGenerationConflict) { yield err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual })); return; }
+      yield err(errors.OperationFailed({ operation: 'read Inspector repository tree', message: error instanceof Error ? error.message : String(error) }));
+    }
   });
-  const repositoryTreePage = server.implement(inspectorRepositoryTreePageContract).handler(({ errors }) =>
-    err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
+  const repositoryTreePage = server.implement(inspectorRepositoryTreePageContract).handler(async ({ input, errors }) => {
+    try {
+      const checkout = await repositoryCheckout(input);
+      if (!checkout) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      const entries = cloudRepositoryTree(checkout, input.mode, input.path);
+      const frames = [];
+      for (let offset = 0; offset < entries.length; offset += 16) frames.push(entries.slice(offset, offset + 16));
+      const { cursor, limit, ...identity } = input;
+      return ok(await snapshotPage(frames, { identity, cursor, limit }));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'read Inspector repository tree page', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   const readResourcePage = server.implement(inspectorReadResourcePageContract).handler(({ errors }) =>
     err(errors.InspectorState({ resource: 'runtime', message: 'Session resources require the live workspace and originating session.' })));
-  const repositoryStatus = server.implement(inspectorRepositoryStatusContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
-  const repositoryFile = server.implement(inspectorRepositoryFileContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
-  const repositoryDiff = server.implement(inspectorRepositoryDiffContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
+  const repositoryStatus = server.implement(inspectorRepositoryStatusContract).handler(async ({ input, errors }) => {
+    try {
+      const checkout = await repositoryCheckout(input);
+      if (!checkout) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      return ok(cloudRepositoryStatus(checkout, input.mode, input.path));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'read Inspector repository status', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const repositoryFile = server.implement(inspectorRepositoryFileContract).handler(async ({ input, errors }) => {
+    try {
+      const checkout = await repositoryCheckout(input);
+      if (!checkout) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      return ok(await cloudRepositoryFile(env, userId, checkout, input.mode, input.path));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'read Inspector repository file', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const repositoryDiff = server.implement(inspectorRepositoryDiffContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      if (!await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).hasCloudRuntime()) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      return err(errors.InspectorState({ resource: 'repository', message: 'Diffs are not available for cloud workspaces yet. The Files view lists each changed path with its status, and opening a file shows its committed content.' }));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'read Inspector repository diff', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   const analyzeGuide = server.implement(inspectorAnalyzeChangeGuideContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
   const submitGuide = server.implement(inspectorSubmitChangeGuideContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
   const listServices = server.implement(inspectorServicesContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));

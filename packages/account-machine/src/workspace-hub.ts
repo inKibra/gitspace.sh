@@ -7,8 +7,9 @@ import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
 import { TerminalSnapshotJournal, type TerminalSnapshot } from './terminal-stream.js';
 import { PROTECTED_LIFECYCLE_SOCKET, protectedLifecycleLive, protectedLifecycleWrapper, sendProtectedLifecycleInput } from './protected-lifecycle.js';
 import type { GitSpaceDatabase } from '@gitspace/core';
-import type { ProtectedTerminalEvent } from '@gitspace/protocol';
+import { terminalStreamResource, type ProtectedTerminalEvent } from '@gitspace/protocol';
 import { DEFAULT_LIFECYCLE_TIMEOUT_MS, LifecycleLogReader, type LifecycleRun, type LifecycleRunPhase } from '@gitspace/protocol-environment';
+import { checkoutTerminalEnvironment, inheritedCommandEnvironment } from '@gitspace/runtime-machine';
 import {
   daemonClientForProject,
   type DaemonBrokerClient,
@@ -158,7 +159,7 @@ export class WorkspaceHubTerminalCoordinator {
     if (after !== null) streamCursorSchema.parse(after);
     const scope = await this.scope(spaceId);
     if (signal.aborted) return;
-    const resource = `terminals:${spaceId}:${name ?? ''}`;
+    const resource = terminalStreamResource(spaceId, this.machineId, name);
     let observer = this.terminalObservers.get(resource);
     if (!observer) {
       observer = { controller: new AbortController(), references: 0, failure: null };
@@ -267,6 +268,8 @@ export class WorkspaceHubTerminalCoordinator {
     }
   }
 
+  /** A user shell in the space's checkout on this machine (its ready cache, else a legacy held placement),
+   * with the checkout's `.gitspace/bundle.json` terminal PATH and variables applied. */
   async createShell(spaceId: string): Promise<WorkspaceTerminalView> {
     await this.cache?.use(spaceId);
     const scope = await this.scope(spaceId);
@@ -275,7 +278,7 @@ export class WorkspaceHubTerminalCoordinator {
       name: `gitspace-${spaceId.slice(0, 8)}-${crypto.randomUUID().slice(0, 8)}`,
       application: shell,
       args: [],
-      env: {},
+      env: await checkoutTerminalEnvironment(scope.space.rootPath, inheritedCommandEnvironment()),
       cwd: scope.space.rootPath,
       pty: true,
       restart: 'no',

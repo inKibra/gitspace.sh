@@ -104,6 +104,40 @@ describe('WorkspaceServiceManager', () => {
     expect(existsSync(allocationsPath)).toBe(false);
     database.close();
   });
+
+  it('starts services with the bundle terminal PATH and env beneath service env and port variables', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-service-bundle-'));
+    roots.push(root);
+    const workspace = join(root, 'workspace');
+    mkdirSync(join(workspace, '.gitspace'), { recursive: true });
+    mkdirSync(join(workspace, 'node_modules', '.bin'), { recursive: true });
+    writeFileSync(join(workspace, 'node_modules', '.bin', 'bundle-web'), '#!/bin/sh\necho "mode=$BUNDLE_MODE region=$REGION"\n', { mode: 0o755 });
+    writeFileSync(join(workspace, '.gitspace', 'services.json'), JSON.stringify({ services: [{ name: 'web', command: 'bundle-web', env: { REGION: 'service' }, ports: [{ name: 'web', protocol: 'http' }] }] }));
+    writeFileSync(join(workspace, '.gitspace', 'bundle.json'), JSON.stringify({ version: 1, profiles: { base: {} }, terminal: { path: ['node_modules/.bin'], env: { BUNDLE_MODE: 'preview', REGION: 'bundle' } } }));
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const project = database.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(root, 'repo') });
+    if (project.status === 'error') throw project.error;
+    const created = database.createWorkspace({ id: 'space-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: workspace });
+    if (created.status === 'error') throw created.error;
+    let output = '';
+    const possessed = database.possessSpace('space-a', 'machine-a');
+    if (possessed.status === 'error') throw possessed.error;
+    const terminals = {
+      list: async () => [],
+      startService: async (spaceId: string, serviceName: string, application: string, args: string[], cwd: string, env: Record<string, string>) => {
+        // The supervisor resolves the bare command through the supplied PATH.
+        const child = Bun.spawnSync([application, ...args], { cwd, env });
+        output = child.stdout.toString();
+        return terminal(spaceId, `gitspace-svc-${spaceId}-${serviceName}`, 'exited', `gitspace:${spaceId}:service:${serviceName}`);
+      },
+      stop: async () => terminal('space-a', 'gitspace-svc-space-a-web', 'exited', 'gitspace:space-a:service:web'),
+    };
+    const manager = new WorkspaceServiceManager(database, terminals, 'machine-a', join(root, 'runtime'), null, null);
+    try {
+      await manager.start('space-a', 'web');
+      expect(output).toBe('mode=preview region=service\n');
+    } finally { await manager.dispose(); database.close(); }
+  });
 });
 
 describe('loopback service forwarding boundary', () => {

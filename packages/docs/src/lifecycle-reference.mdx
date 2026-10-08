@@ -39,6 +39,10 @@ Repository configuration uses `.gitspace/bundle.json` version 1 and scripts unde
   "values": {
     "APP_MODE": { "default": "development", "description": "Application mode" },
     "PREVIEW_REPOSITORY": { "description": "Existing GitHub owner/repository to adopt" }
+  },
+  "terminal": {
+    "path": ["node_modules/.bin", ".gitspace/bin", "~/.cargo/bin"],
+    "env": { "NODE_ENV": "development" }
   }
 }
 ```
@@ -52,6 +56,7 @@ Repository configuration uses `.gitspace/bundle.json` version 1 and scripts unde
 | Profile `notes` | Optional text, up to 2,000 characters |
 | `checks` | Named built-in or command checks. Referenced check IDs must exist |
 | `values` | Named non-secret values with optional `default` and `description`. Referenced value names must exist |
+| `terminal` | Optional. `path` and `env` for agent bash commands, declared services, and workspace terminals. See [Terminal environment](#terminal-environment) |
 
 Profile and check IDs start with a lowercase letter and contain lowercase letters, digits, or hyphens, up to 64 characters. Value and secret names start with an uppercase letter and contain uppercase letters, digits, or underscores, up to 128 characters. Unknown fields reject.
 
@@ -62,6 +67,17 @@ A command check requires `kind: "command"`, a `label`, and a `command`. Checks n
 Values resolve in this order, from lowest to highest priority: bundle default, account value, project value, workspace value. Only values declared by the effective profile enter the lifecycle environment.
 
 Profiles name required secrets; they do not store secret material in the bundle. A project secret takes priority over an account secret of the same name. The account secret needs an explicit project grant that covers the current project space or workspace. Without either source, the requirement remains missing.
+
+## Terminal environment
+
+The optional `terminal` section makes project tools available to the commands that run in a checkout: agent bash commands, services from `.gitspace/services.json`, and workspace terminals. Lifecycle scripts are unaffected.
+
+| Field | Rules |
+| --- | --- |
+| `path` | Up to 64 directories. Each entry is checkout-relative, such as `node_modules/.bin`, or starts with `~/` for the machine user's home. Absolute paths, `.` or `..` segments, empty segments, and `:` reject. Entries lead `PATH` in listed order, ahead of the inherited `PATH`; duplicates keep their first position |
+| `env` | Plain, non-secret string values. Names contain letters, digits, or underscores and do not start with a digit. `PATH` (use `path`), `GITSPACE_*` names, secret-like names, credential-looking values, and names declared in `values` or as profile secrets reject |
+
+With `"path": ["node_modules/.bin"]`, a service can declare `"command": "vite"`, and a bash command can run `vite build` without `npx`. Service `env` entries override `terminal.env`. Secrets keep using profiles and grants. If `bundle.json` is missing or invalid, commands still run with no additions.
 
 ## Script paths and ordering
 

@@ -1543,30 +1543,33 @@ export const subagentTranscriptContentContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, subagentId: wire.string, ...TranscriptContentRequestFields }))
   .output(TranscriptContentPageCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).query();
+/** A terminal runs on the one machine the caller names. The account forwards these calls only to
+ * that machine, and for a cloud workspace only while it is a ready cache attachment of the workspace. */
+const terminalPlacementFields = { spaceId: wire.string, machineId: wire.string };
 export const listWorkspaceTerminalsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string }))
+  .input(wire.object(terminalPlacementFields))
   .output(wire.array(WorkspaceTerminalViewCodec))
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
 export const createWorkspaceTerminalContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string }))
+  .input(wire.object(terminalPlacementFields))
   .output(WorkspaceTerminalViewCodec)
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const readWorkspaceTerminalContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, name: wire.string, cursor: wire.nullable(wire.number) }))
+  .input(wire.object({ ...terminalPlacementFields, name: wire.string, cursor: wire.nullable(wire.number) }))
   .output(WorkspaceTerminalOutputCodec)
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, TerminalNotFound: rpcErrors.terminalNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
 export const sendWorkspaceTerminalContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, name: wire.string, data: wire.string }))
+  .input(wire.object({ ...terminalPlacementFields, name: wire.string, data: wire.string }))
   .output(WorkspaceTerminalViewCodec)
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, TerminalNotFound: rpcErrors.terminalNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
@@ -1574,7 +1577,7 @@ export const sendWorkspaceTerminalContract = gitspaceRpc
 
 export const stopWorkspaceTerminalContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, name: wire.string }))
+  .input(wire.object({ ...terminalPlacementFields, name: wire.string }))
   .output(WorkspaceTerminalViewCodec)
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, TerminalNotFound: rpcErrors.terminalNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
@@ -2183,9 +2186,13 @@ export const recordIncidentContract = gitspaceRpc.procedure()
   .output(wire.object({ eventId: wire.string }))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const terminalEventsContract = gitspaceRpc.procedure()
-  .input(wire.object({ spaceId: wire.string, name: wire.nullable(wire.string), after: wire.nullable(StreamCursorCodec) }))
+  .input(wire.object({ ...terminalPlacementFields, name: wire.nullable(wire.string), after: wire.nullable(StreamCursorCodec) }))
   .output(streamCodec(wire.object({ terminals: wire.array(WorkspaceTerminalViewCodec), output: wire.nullable(WorkspaceTerminalOutputCodec) })))
   .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+/** Stream resource of `terminals.events`. It names the machine: each attached machine runs its own terminals. */
+export function terminalStreamResource(spaceId: string, machineId: string, name: string | null): string {
+  return `terminals:${spaceId}:${machineId}:${name ?? ''}`;
+}
 /** Safe progress metadata surrounds live-only protected output; completion is distinct from transport loss. */
 export const ProtectedTerminalStepCodec = wire.object({
   id: wire.string,
@@ -2200,7 +2207,7 @@ export const ProtectedTerminalEventCodec = wire.union([
 ]);
 export type ProtectedTerminalEvent = InputOf<typeof ProtectedTerminalEventCodec>;
 export const terminalLiveContract = gitspaceRpc.procedure()
-  .input(wire.object({ spaceId: wire.string, name: wire.string }))
+  .input(wire.object({ ...terminalPlacementFields, name: wire.string }))
   .output(ProtectedTerminalEventCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
 

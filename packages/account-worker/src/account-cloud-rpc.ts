@@ -1,4 +1,4 @@
-import { isAccountCloudRpcPath, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
+import { isAccountCloudRpcPath, isTerminalRpcPath, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
 import { consumeDurableStream } from './durable-stream.js';
 import { activeAccount } from './account-access.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
@@ -92,7 +92,7 @@ async function liveHolders(env: Env, userId: string, items: readonly { path: str
   for (const item of items) {
     const target = rpcCallTarget(item.path, item.input);
     if (target?.kind === 'space') spaceIds.add(target.spaceId);
-    else if (target) sessionIds.add(target.sessionId);
+    else if (target?.kind === 'session') sessionIds.add(target.sessionId);
   }
   for (const spaceId of await Promise.all([...sessionIds].map((sessionId) => sessionSpaceId(env, userId, sessionId)))) {
     if (spaceId) spaceIds.add(spaceId);
@@ -515,14 +515,36 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   catch { return { kind: 'response', response: transportError(400, 'RPC_ENVELOPE_INVALID', 'RPC request envelope is invalid') }; }
   const procedures = [...new Set(items.map((item) => item.path))];
   const reject = (status: number, code: string, text: string): AccountRpcRoute => ({ kind: 'response', response: transportError(status, code, text), procedures });
+  const terminals = items.filter((item) => isTerminalRpcPath(item.path));
+  if (terminals.length > 0) {
+    // A terminal runs where the caller chose; it never follows a placement holder or an arbitrary online machine.
+    if (terminals.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Terminal operations require a separate signed batch');
+    const targets = items.map((item) => rpcCallTarget(item.path, item.input));
+    const target = targets[0];
+    if (target?.kind !== 'terminal') return reject(400, 'TERMINAL_MACHINE_REQUIRED', 'Terminal operations must name the machine that runs the terminal');
+    if (targets.some((other) => other?.kind !== 'terminal' || other.spaceId !== target.spaceId || other.machineId !== target.machineId)) {
+      return reject(400, 'RPC_MIXED_TERMINAL_BATCH', 'Terminal operations for different workspaces or machines require separate signed batches');
+    }
+    const authority = (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${target.spaceId}`);
+    if (!await authority.runtimeTerminalMachine(target.machineId)) {
+      if (await authority.hasCloudRuntime()) return reject(409, 'TERMINAL_MACHINE_NOT_ATTACHED', `Machine ${target.machineId} is not a ready cache of this workspace; attach it to open terminals there`);
+      const placement = await authority.get();
+      if (placement?.state !== 'open' || placement.machineId !== target.machineId) return reject(409, 'TERMINAL_MACHINE_NOT_HOLDER', `Machine ${target.machineId} does not hold this workspace`);
+    }
+    const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).getMachine(target.machineId);
+    if (machine?.state !== 'online' || machine.desiredState !== 'online' || !machine.rpcEndpoint) return reject(503, 'TERMINAL_MACHINE_OFFLINE', `Machine ${target.machineId} is not online`);
+    return { kind: 'machine', procedures, holder: machine };
+  }
   const spaceReads = items.filter((item) => isSpaceCloudRpcPath(item.path));
   if (spaceReads.length > 0) {
     if (spaceReads.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads and other operations require separate signed batches');
     const spaceId = spaceCloudRpcSpaceId(spaceReads[0]!.input);
     if (spaceReads.some((item) => spaceCloudRpcSpaceId(item.input) !== spaceId)) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads require separate signed batches');
     if (spaceId) {
-      const placement = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${spaceId}`).get();
-      if (placement?.state === 'open' && placement.machineId) {
+      // A cloud workspace's checkout lives in the cloud: a legacy placement never answers for it.
+      const authority = (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${spaceId}`);
+      const placement = await authority.get();
+      if (placement?.state === 'open' && placement.machineId && !await authority.hasCloudRuntime()) {
         const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).getMachine(placement.machineId);
         if (machine?.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint) {
           return { kind: 'machine', procedures, holder: machine };

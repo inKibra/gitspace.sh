@@ -58,6 +58,29 @@ export const EnvironmentProfileSchema = z.object({
   notes: z.string().max(2_000).optional(),
 }).strict();
 
+const secretLikeName = /secret|password|token|credential|private.?key|api.?key/iu;
+const credentialMaterial = /-----BEGIN .*PRIVATE KEY-----|:\/\/[^/\s:@]+:[^/\s@]+@|[?&](?:token|password|secret|api[_-]?key)=|\b(?:Bearer\s+\S+|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})/iu;
+
+/** Checkout-relative (`node_modules/.bin`) or home-relative (`~/.cargo/bin`) directory; never absolute or escaping. */
+export const BundleTerminalPathSchema = z.string().min(1).max(1_024).refine((entry) => {
+  if (/[:\0\\]/u.test(entry)) return false;
+  const relativePath = entry.startsWith('~/') ? entry.slice(2) : entry;
+  return relativePath.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..' && !segment.startsWith('~'));
+}, { message: 'Use a checkout-relative path or ~/path without empty, ., .., or absolute segments' });
+
+export const BundleTerminalSectionSchema = z.object({
+  path: z.array(BundleTerminalPathSchema).max(64).optional(),
+  env: z.record(z.string().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), z.string().max(16_384)).superRefine((env, context) => {
+    for (const [name, value] of Object.entries(env)) {
+      if (name === 'PATH') context.addIssue({ code: 'custom', path: [name], message: 'Set PATH entries with terminal.path' });
+      else if (name.startsWith('GITSPACE_')) context.addIssue({ code: 'custom', path: [name], message: 'GITSPACE_ environment names are reserved' });
+      else if (secretLikeName.test(name) || credentialMaterial.test(value)) context.addIssue({ code: 'custom', path: [name], message: 'Terminal env holds plain values; declare secrets in profiles' });
+    }
+  }).optional(),
+}).strict();
+
+export type BundleTerminalSection = z.infer<typeof BundleTerminalSectionSchema>;
+
 export const EnvironmentBundleSchema = z.object({
   version: z.literal(1),
   defaultProfile: identifierSchema.default('base'),
@@ -65,6 +88,7 @@ export const EnvironmentBundleSchema = z.object({
   checks: z.record(identifierSchema, EnvironmentCheckDefinitionSchema).default({}),
   values: z.record(environmentNameSchema, EnvironmentValueDefinitionSchema).default({}),
   browser: z.object({ origins: z.array(BrowserOriginPatternSchema).max(256).default([]) }).strict().default({ origins: [] }),
+  terminal: BundleTerminalSectionSchema.optional(),
 }).strict().superRefine((bundle, context) => {
   if (!bundle.profiles.base) context.addIssue({ code: 'custom', path: ['profiles', 'base'], message: 'A reserved base profile is required' });
   if (!bundle.profiles[bundle.defaultProfile]) context.addIssue({ code: 'custom', path: ['defaultProfile'], message: 'Default profile must exist' });
@@ -74,6 +98,11 @@ export const EnvironmentBundleSchema = z.object({
     }
     for (const value of profile.values) {
       if (!bundle.values[value]) context.addIssue({ code: 'custom', path: ['profiles', profileName, 'values'], message: `Unknown value: ${value}` });
+    }
+  }
+  for (const name of Object.keys(bundle.terminal?.env ?? {})) {
+    if (bundle.values[name] || Object.values(bundle.profiles).some((profile) => profile.secrets.includes(name))) {
+      context.addIssue({ code: 'custom', path: ['terminal', 'env', name], message: `Terminal env cannot redefine declared value or secret: ${name}` });
     }
   }
 });
@@ -93,6 +122,25 @@ export function parseEnvironmentBundleJson(json: string): EnvironmentBundle {
   let source: unknown;
   try { source = JSON.parse(json); } catch { throw new EnvironmentError('InvalidBundle', 'Environment bundle is not valid JSON'); }
   return loadEnvironmentBundle(source);
+}
+
+/** Lenient read for command environments: a missing, malformed, or invalid bundle contributes nothing. */
+export function bundleTerminalSection(json: string | null): BundleTerminalSection | null {
+  if (json === null) return null;
+  let source: unknown;
+  try { source = JSON.parse(json); } catch { return null; }
+  const parsed = EnvironmentBundleSchema.safeParse(source);
+  return parsed.success ? parsed.data.terminal ?? null : null;
+}
+
+/** Full environment for a checkout command: bundle `terminal.path` (absolute, in order) prepended to inherited PATH, plus `terminal.env`. */
+export function terminalEnvironment(input: { checkoutRoot: string; home: string; inherited: Record<string, string>; bundle: BundleTerminalSection | null }): Record<string, string> {
+  const environment = { ...input.inherited, ...input.bundle?.env };
+  const entries = (input.bundle?.path ?? []).map((entry) => entry.startsWith('~/')
+    ? `${input.home.replace(/\/+$/u, '')}/${entry.slice(2)}`
+    : `${input.checkoutRoot.replace(/\/+$/u, '')}/${entry}`);
+  if (entries.length > 0) environment.PATH = [...new Set([...entries, ...(input.inherited.PATH ?? '').split(':').filter(Boolean)])].join(':');
+  return environment;
 }
 
 export interface EffectiveEnvironmentProfile {
@@ -207,8 +255,8 @@ export const LifecycleBindingsSchema = z.record(
 ).superRefine((bindings, context) => {
   for (const [name, value] of Object.entries(bindings)) {
     if (['__proto__', 'constructor', 'prototype'].includes(name)
-      || (/secret|password|token|credential|private.?key|api.?key/iu.test(name) && !/^secret:[A-Z][A-Z0-9_]*$/u.test(value))
-      || /-----BEGIN .*PRIVATE KEY-----|:\/\/[^/\s:@]+:[^/\s@]+@|[?&](?:token|password|secret|api[_-]?key)=|\b(?:Bearer\s+\S+|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})/iu.test(value)) {
+      || (secretLikeName.test(name) && !/^secret:[A-Z][A-Z0-9_]*$/u.test(value))
+      || credentialMaterial.test(value)) {
       context.addIssue({ code: 'custom', path: [name], message: 'Bindings must contain non-secret resource identifiers or secret:NAME references' });
     }
   }

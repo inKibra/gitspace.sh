@@ -1,14 +1,16 @@
 import { z } from 'zod';
-import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gitspace/protocol/project-authority';
+import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema, type CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { accountDirectorySnapshotSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
 import { SpaceAuthorityRecordSchema } from '@gitspace/protocol-workspace';
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import type { CloudProjectSummary } from '@gitspace/protocol';
 import type { UserProjectIndexDO } from './project-authority.js';
 
 export const directoryPublicationSchema = z.discriminatedUnion('source', [
   z.object({ source: z.literal('project'), cursor: streamCursorSchema, project: cloudProjectSummarySchema, workspaces: z.array(cloudWorkspaceDefinitionSchema) }),
-  z.object({ source: z.literal('space'), cursor: streamCursorSchema, state: SpaceAuthorityRecordSchema }),
+  /** `runtime` is set once the space has cloud runtime state; such a workspace lives in the cloud and its legacy placement is ignored. */
+  z.object({ source: z.literal('space'), cursor: streamCursorSchema, state: SpaceAuthorityRecordSchema.nullable(), runtime: RuntimeIdentitySchema.nullable().default(null) }),
   z.object({ source: z.literal('fleet'), cursor: streamCursorSchema, machines: accountDirectorySnapshotSchema.shape.machines }),
 ]);
 export type DirectoryPublication = z.infer<typeof directoryPublicationSchema>;
@@ -84,7 +86,8 @@ export class AccountDirectoryProjection {
   }
   finishHydration(): void { this.storage.sql.exec('INSERT OR IGNORE INTO directory_metadata(name,value) VALUES(\'hydrated\',1)'); }
   apply(publication: DirectoryPublication): boolean {
-    const id = publication.source === 'project' ? publication.project.id : publication.source === 'space' ? publication.state.spaceId : 'fleet';
+    const id = publication.source === 'project' ? publication.project.id : publication.source === 'space' ? publication.state?.spaceId ?? publication.runtime?.workspaceId : 'fleet';
+    if (id === undefined) return false;
     return this.storage.sql.exec(`INSERT INTO directory_sources(source,source_id,cursor,value_json) VALUES(?,?,?,?)
       ON CONFLICT(source,source_id) DO UPDATE SET cursor=excluded.cursor,value_json=excluded.value_json WHERE excluded.cursor>directory_sources.cursor`,
     publication.source, id, publication.cursor, JSON.stringify(publication)).rowsWritten > 0;
@@ -94,24 +97,28 @@ export class AccountDirectoryProjection {
     const ids = new Set(visible.map((project) => project.id));
     const sources = this.storage.sql.exec<SourceRow>('SELECT cursor,value_json FROM directory_sources ORDER BY source,source_id').toArray()
       .map((row) => JSON.parse(row.value_json) as DirectoryPublication);
-    const workspaces: AccountDirectorySnapshot['workspaces'] = [];
+    const definitions: CloudWorkspaceDefinition[] = [];
     const projectRevisions: Record<string, number> = Object.fromEntries(visible.map((project) => [project.id, 0]));
     let machines: AccountDirectorySnapshot['machines'] = [];
     for (const source of sources) {
       if (source.source === 'fleet') machines = source.machines;
       if (source.source === 'project' && ids.has(source.project.id)) {
         projectRevisions[source.project.id] = source.cursor;
-        workspaces.push(...source.workspaces.filter((workspace) => workspace.projectId === source.project.id));
+        definitions.push(...source.workspaces.filter((workspace) => workspace.projectId === source.project.id));
       }
     }
+    // Rows stored before `runtime` existed decode without it.
+    const cloud = new Set<string>(sources.flatMap((source) => source.source === 'space' && source.runtime ? [source.runtime.workspaceId] : []));
+    const workspaces = definitions.map((workspace) => ({ ...workspace, cloudRuntime: cloud.has(workspace.id) }));
     const bySpace = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
     const byMachine = new Map(machines.map((machine) => [machine.id, machine]));
     const placements: AccountDirectorySnapshot['placements'] = [];
     for (const source of sources) {
-      if (source.source !== 'space') continue;
+      if (source.source !== 'space' || !source.state) continue;
       const state = source.state;
       const definition = bySpace.get(state.spaceId);
-      if (!definition || definition.projectId !== state.projectId) continue;
+      // A cloud workspace has no placement: machines only attach to it as execution caches.
+      if (!definition || definition.projectId !== state.projectId || definition.cloudRuntime) continue;
       const machine = state.machineId ? byMachine.get(state.machineId) : undefined;
       placements.push({ spaceId: state.spaceId, projectId: state.projectId, kind: definition.kind, holderId: state.machineId ?? 'unassigned', state: state.state, generation: state.generation,
         endpoint: machine?.state === 'online' && machine.desiredState === 'online' ? machine.rpcEndpoint : null });

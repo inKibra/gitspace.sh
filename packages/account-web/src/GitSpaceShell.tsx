@@ -46,8 +46,12 @@ import { glyph } from './glyph.js';
 import { ResourceLink, ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
 import type { WorkspaceDraftBinding, WorkspaceDraftCapture } from './workspace-draft.js';
 
-/** Where a space lives right now, from the account-wide placement table: held by a machine, released to the cloud, or not yet known. */
+/**
+ * Where a space lives right now. A cloud runtime workspace lives in the cloud and reports its own status (machines are
+ * only execution caches); a legacy space is held by a machine, released, or not yet known from the account placement table.
+ */
 export type SpaceHolderView =
+  | { kind: 'cloud' }
   | { kind: 'held'; machineId: string; label: string }
   | { kind: 'released' }
   | { kind: 'unknown' };
@@ -219,6 +223,8 @@ export function workspaceStatusColor(space: SpaceStatusView): WorkspaceStatusCol
   if (space.closedAt || space.holder.kind === 'released') return 'dim';
   if (space.creation) return CREATION_STATUS[space.creation].color;
   if (space.status?.agents.red) return 'red';
+  // A cloud workspace's status comes only from its runtime; without one read yet there is nothing to flag.
+  if (space.holder.kind === 'cloud' && !space.status) return 'dim';
   if (space.holder.kind === 'unknown' || space.freshness === 'stale' || space.freshness === 'unknown' || !space.status || space.status.primaryColor === 'dim') return 'orange';
   return space.status.primaryColor;
 }
@@ -228,6 +234,7 @@ export function workspaceStatusLabel(space: SpaceStatusView): string {
   if (space.creation) return CREATION_STATUS[space.creation].label;
   if (space.holder.kind === 'released') return 'Closed';
   if (space.status?.agents.red) return 'Failed';
+  if (space.holder.kind === 'cloud' && !space.status) return 'Cloud workspace';
   if (space.freshness === 'stale') return 'Status unavailable · last known status';
   if (space.holder.kind === 'unknown' || space.freshness === 'unknown' || !space.status) return 'Status unavailable';
   switch (space.status?.primaryColor) {
@@ -255,12 +262,13 @@ export function pendingProfileChange(
   return admitted.profileRevision === next.revision ? null : `Next turn uses updated ${next.name}`;
 }
 
-/** Row suffix: the machine holding the space, or `released` when it is closed in the cloud but not archived. */
+/** Row suffix: the machine holding a legacy space, or `released` when it is closed in the cloud but not archived. */
 export function spaceHolderLabel(space: Pick<AgentScopeView, 'closedAt' | 'holder'>): string | null {
   if (space.closedAt) return null;
   switch (space.holder.kind) {
     case 'held': return space.holder.label;
     case 'released': return 'released';
+    case 'cloud':
     case 'unknown': return null;
   }
 }
@@ -744,7 +752,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined)}</aside> : null}
             </div>
-            {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onClose={() => setTerminalOpen(false)} /></section></> : null}
+            {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? () => { setInspectorSection('environment'); setInspectorOpen(true); } : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
     </div>
     {onCreateProject ? <CreateProjectDialog open={newProject} onOpenChange={(open) => { setNewProject(open); if (!open) setCreateError(null); }} pending={createPending} error={newProject ? createError : null} onSubmit={async (input) => {

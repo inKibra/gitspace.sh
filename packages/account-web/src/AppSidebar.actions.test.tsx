@@ -70,6 +70,15 @@ it('does not offer reopen or machine controls when placement is unknown', async 
   expect(await showActions({ ...saved, summary: { closedAt: null, holder: { kind: 'unknown' }, freshness: 'unknown' } })).toEqual(['Archive workspace']);
 });
 
+it('offers no close, reopen or move for a cloud workspace, but keeps them for a machine-held space', async () => {
+  if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
+  const runtime = { ...verticalSliceFixture.workspace, id: saved.id, projectId: saved.projectId, name: saved.name };
+  expect(await showActions({ ...saved, runtime, summary: { closedAt: null, holder: { kind: 'cloud' }, freshness: 'unknown' } })).toEqual(['Archive workspace']);
+  await act(() => root.unmount());
+  root = createRoot(container);
+  expect(await showActions({ ...saved, runtime, summary: { closedAt: null, holder: { kind: 'held', machineId: 'origin', label: 'Origin' }, freshness: 'fresh' } })).toEqual(['Close space', 'Archive workspace', 'Move to Desk']);
+});
+
 it('blocks a workspace move until its own saved LFS list is explicitly accepted', async () => {
   if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
   const commit = 'a'.repeat(40);

@@ -110,6 +110,29 @@ describe('AppSidebar selected status', () => {
       deployment={null}
     /></SidebarProvider>);
     expect(html).toContain('title="main · Status unavailable"');
-    expect(html).toContain('title="main · Waiting · Desk"');
+    expect(html).toContain('title="main · Waiting"');
+  });
+
+  it('never names a machine, and shows a cloud workspace by its runtime status alone', () => {
+    const status = { ...verticalSliceFixture.baseSpace.status, primaryColor: 'blue' as const };
+    const held = { kind: 'held' as const, machineId: 'cloudflare-1234', label: 'Cloudflare 1234' };
+    const row = { projectId: 'active', branch: 'main', closedAt: null };
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar
+      {...base}
+      selected={{ projectId: 'active', workspaceId: 'open' }}
+      selectedSummary={{ holder: { kind: 'cloud' }, closedAt: null, status, freshness: 'fresh' }}
+      projects={[{ id: 'active', name: 'Active project', baseSummary: { holder: held, closedAt: null, status, freshness: 'fresh' }, workspaces: [
+        { ...row, id: 'open', name: 'Open cloud workspace' },
+        { ...row, id: 'idle', name: 'Other cloud workspace', branch: 'idle', summary: { holder: { kind: 'cloud' }, closedAt: null, freshness: 'unknown' } },
+        { ...row, id: 'legacy', name: 'Legacy workspace', branch: 'legacy', summary: { holder: held, closedAt: null, status, freshness: 'fresh' } },
+      ] }]}
+      deployment={null}
+    /></SidebarProvider>);
+    expect(html).toContain('title="main · Waiting"');
+    expect(html).toContain('title="idle · Cloud workspace"');
+    expect(html).toContain('title="legacy · Waiting"');
+    expect(html).toContain('title="Base · Waiting"');
+    expect(html).not.toContain('Status unavailable');
+    expect(html).not.toContain('Cloudflare 1234');
   });
 });

@@ -9,19 +9,24 @@ export class ExecutorEffectUncertain extends Error {
 }
 class ExecutorStopped extends Error {}
 
+/** Machine variables a supervised command may inherit; everything else is explicit. */
+export function inheritedCommandEnvironment(): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TERM', 'TZ', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME']) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  return environment;
+}
+
 /** Stable process names permit observation, never a second launch, after a lost reply. */
 export const runSupervisorCommand: RunExecutorCommand = async command => {
   const client = await daemonClientForProject(command.cwd);
   const name = `exec-${createHash('sha256').update(`${command.attemptId}:${command.sequence}`).digest('hex').slice(0, 40)}`;
   const remaining = () => Math.max(1, Math.min(2_147_483_647, Date.parse(command.deadlineAt) - Date.now()));
   if (command.signal.aborted || Date.parse(command.deadlineAt) <= Date.now()) throw new Error('Command canceled or deadline expired before launch');
-  const environment: Record<string, string> = {};
-  for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TERM', 'TZ', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME']) {
-    const value = process.env[key];
-    if (value !== undefined) environment[key] = value;
-  }
   try {
-    await client.request({ op: 'start', owner: command.attemptId, spec: { name, application: command.application, args: command.args, cwd: command.cwd, inheritEnv: false, env: { ...environment, ...command.env }, pty: false, restart: 'no', persist: true, detached: false } });
+    await client.request({ op: 'start', owner: command.attemptId, spec: { name, application: command.application, args: command.args, cwd: command.cwd, inheritEnv: false, env: { ...inheritedCommandEnvironment(), ...command.env }, pty: false, restart: 'no', persist: true, detached: false } });
   } catch (error) { throw new ExecutorEffectUncertain('Supervisor launch outcome is uncertain', { cause: error }); }
   let abortStop: Promise<unknown> | undefined;
   const abort = () => { abortStop = client.request({ op: 'stop', name, timeoutMs: 5000 }); void abortStop.catch(() => {}); };

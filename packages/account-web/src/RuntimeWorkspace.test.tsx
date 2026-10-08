@@ -10,7 +10,8 @@ import type { GitSpaceShellProps } from './GitSpaceShell.js';
 import { RuntimeWorkspaceShell } from './RuntimeWorkspace.js';
 
 const mocks = vi.hoisted((): { setRelations: ReturnType<typeof vi.fn>; refresh: ReturnType<typeof vi.fn>; shell: GitSpaceShellProps | null; saved: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), shell: null, saved: null, failed: false, pending: false }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, workspace: { setRelations: mocks.setRelations } }, createGitSpaceBrowserClient: vi.fn() }));
+const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal } } }));
 vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: procedure === 'relations' && mocks.failed ? 'failure' : procedure === 'relations' && mocks.pending ? 'pending' : 'success', error: new Error('relations unavailable'), value: procedure === 'relations' ? mocks.saved : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: null, run: vi.fn(), error: null }) }));
@@ -156,4 +157,23 @@ it('changes the Environment chip to offline without another snapshot render', as
     await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
     expect(chip?.getAttribute('aria-label')).toMatch(/offline/i);
   } finally { vi.useRealTimers(); }
+});
+
+it('offers only live ready caches as terminal machines and opens terminals on the explicit pick', async () => {
+  const now = new Date().toISOString();
+  const cache = RuntimeSnapshotSchema.shape.attachments.element.parse({
+    projectId: project.id, workspaceId: workspace.id, attachmentId: 'cache-a', machineId: 'cache-a', generation: 1,
+    role: 'cache', checkout: { kind: 'shared', branch: 'work' }, state: 'ready', capabilities: [], updatedAt: now, heartbeatAt: now,
+    cache: { state: 'live', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: null, reclaimAt: null, lastSyncAt: now, localWorkOptIn: false, setup: [] },
+  });
+  snapshot.attachments = [cache, RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-b', machineId: 'cache-b', heartbeatAt: new Date(Date.now() - 60_000).toISOString() })];
+  // The execution default never chooses where a terminal opens.
+  snapshot.documents = { 'gitspace.execution': { defaultMachineId: 'cache-a' } };
+  await act(async () => { render(); });
+  expect(mocks.shell?.terminals?.machines).toEqual([{ id: 'cache-a', label: 'cache-a' }]);
+  expect(mocks.shell?.terminals?.machineId).toBeNull();
+  await act(async () => { mocks.shell?.terminals?.onSelectMachine('cache-a'); });
+  expect(mocks.shell?.terminals?.machineId).toBe('cache-a');
+  await mocks.shell?.terminals?.create('cache-a');
+  expect(createTerminal).toHaveBeenCalledWith({ spaceId: workspace.id, machineId: 'cache-a' });
 });

@@ -1757,8 +1757,13 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       yield ok({ type: 'change', resource, cursor, revision: cursor, previous, value: { ...fact, createdAt: new Date(event.createdAt) } });
     }
   });
+  /** The account forwards a terminal call to the machine it names; no other machine answers for it. */
+  const requireTerminalMachine = (machineId: string) => {
+    if (machineId !== options.machineId) throw new Error(`Terminal request for machine ${machineId} reached machine ${options.machineId}`);
+  };
   const terminalEvents = server.implement(terminalEventsContract).stream(async function* ({ input, errors, signal }) {
     try {
+      requireTerminalMachine(input.machineId);
       for await (const event of options.terminals.events(input.spaceId, input.name, input.after, signal)) yield ok(event);
     } catch (error) {
       if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'follow workspace terminals', message: error instanceof Error ? error.message : 'Unable to follow workspace terminals' }));
@@ -1766,6 +1771,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const terminalLive = server.implement(terminalLiveContract).stream(async function* ({ input, errors, signal, context }) {
     try {
+      requireTerminalMachine(input.machineId);
       if (context.caller?.kind !== 'browser') throw new Error('Protected terminal output requires a browser session');
       for await (const output of options.terminals.live(input.spaceId, input.name, signal)) yield ok(output);
     } catch (error) {
@@ -1997,6 +2003,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
 
   const listTerminals = server.implement(listWorkspaceTerminalsContract).handler(async ({ input, errors }) => {
     try {
+      requireTerminalMachine(input.machineId);
       return ok(await options.terminals.list(input.spaceId));
     } catch (error) {
       if (error instanceof WorkspaceHubSpaceUnavailable) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
@@ -2005,6 +2012,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const createTerminal = server.implement(createWorkspaceTerminalContract).handler(async ({ input, errors }) => {
     try {
+      requireTerminalMachine(input.machineId);
       return ok(await options.terminals.createShell(input.spaceId));
     } catch (error) {
       if (error instanceof WorkspaceHubSpaceUnavailable) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
@@ -2013,6 +2021,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const readTerminal = server.implement(readWorkspaceTerminalContract).handler(async ({ input, errors }) => {
     try {
+      requireTerminalMachine(input.machineId);
       return ok(await options.terminals.read(input.spaceId, input.name, input.cursor));
     } catch (error) {
       if (error instanceof WorkspaceHubSpaceUnavailable) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
@@ -2022,6 +2031,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const sendTerminal = server.implement(sendWorkspaceTerminalContract).handler(async ({ input, errors, context }) => {
     try {
+      requireTerminalMachine(input.machineId);
       const terminal = (await options.terminals.list(input.spaceId)).find((entry) => entry.name === input.name);
       if (terminal?.protected && context.caller?.kind !== 'browser') throw new Error('Protected terminal input requires a browser session');
       return ok(await options.terminals.send(input.spaceId, input.name, input.data));
@@ -2033,6 +2043,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const stopTerminal = server.implement(stopWorkspaceTerminalContract).handler(async ({ input, errors, context }) => {
     try {
+      requireTerminalMachine(input.machineId);
       const terminal = (await options.terminals.list(input.spaceId)).find((entry) => entry.name === input.name);
       if (terminal?.kind === 'lifecycle') {
         if (!deviceCanAdminister(context.caller, 'lifecycle.control')) throw new Error('Lifecycle terminal cancellation requires lifecycle-control authority');

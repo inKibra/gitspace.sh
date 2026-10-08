@@ -315,7 +315,7 @@ Only one run per cron may be queued or running. Queue time does not count as exe
 | `terminals.events` | `rpc.read` | T | - | - | F | Bounded | Live stream: bounded wait/page with cursor and cancellation; preserve expiration/resync signals and recheck grants. |
 | `terminals.live` | Browser session + `rpc.read` | T | - | - | F | Excluded | Protected lifecycle output is live-only, with no persistent log or replay. Never expose authentication output to MCP. |
 | `terminals.list`<br>`terminals.read` | `rpc.read` | T | - | - | F | Tool | Bounded inspection; preserve resource ownership and generation checks. Never implicitly open a space or start its runtime. |
-| `terminals.create` | `rpc.write` | F | F | F | F | Tool | Starts a new shell; nothing runs until input is sent. |
+| `terminals.create` | `rpc.write` | F | F | F | F | Tool | Starts a new shell on the named `machineId`, which must be a ready cache of a cloud workspace; nothing runs until input is sent. Every terminal call names its machine. |
 | `terminals.send` | `rpc.write` | F | T | F | T | Tool | May execute or release arbitrary code/model work. Protected lifecycle input additionally requires a browser session. Never auto-retry terminal input after uncertain delivery. |
 | `terminals.stop` | `rpc.write`; lifecycle cancellation also requires `lifecycle.control` | F | T | T | F | Tool | Lifecycle terminals route through durable environment cancellation; stopping a terminal is not permission to bypass run ownership. Ordinary terminals stop their supervised process. |
 

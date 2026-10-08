@@ -1,13 +1,13 @@
 // @vitest-environment happy-dom
 import type { ProtectedTerminalEvent } from '@gitspace/protocol/rpc-contract';
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { WorkspaceTerminals, type WorkspaceTerminalView, type WorkspaceTerminalsProps } from './WorkspaceTerminals.js';
 
 const synchronized = vi.hoisted(() => ({ value: { terminals: [] as WorkspaceTerminalView[], output: null }, cursor: 0, transportError: null }));
 vi.mock('./SynchronizationProvider.js', () => ({ useSynchronizedResource: () => synchronized }));
-vi.mock('./GitSpaceShell.js', () => ({ EmptyState: () => null }));
+vi.mock('./GitSpaceShell.js', () => ({ EmptyState: ({ title, description, action }: { title: ReactNode; description?: ReactNode; action?: ReactNode }) => <div>{title}{description}{action}</div> }));
 vi.mock('ghostty-web', () => ({
   init: async () => undefined,
   Terminal: class {
@@ -63,7 +63,7 @@ function channel() {
   type Item = IteratorResult<{ status: 'ok'; value: ProtectedTerminalEvent }>;
   let waiting = Promise.withResolvers<Item>();
   return {
-    live: vi.fn((_name: string, _signal: AbortSignal) => ({
+    live: vi.fn((_machineId: string, _name: string, _signal: AbortSignal) => ({
       [Symbol.asyncIterator]() { return this; },
       next: () => waiting.promise,
       return: async () => ({ done: true as const, value: undefined }),
@@ -91,7 +91,11 @@ async function flushFrames() {
 }
 
 function props(live: WorkspaceTerminalsProps['live']): WorkspaceTerminalsProps {
-  return { spaceId: 'space', events: async function* () {}, live, create: async () => terminal, send: vi.fn(async () => undefined), stop: async () => undefined };
+  return { spaceId: 'space', machines: [{ id: 'machine', label: 'Machine' }], machineId: 'machine', onSelectMachine: vi.fn(), events: async function* () {}, live, create: async () => terminal, send: vi.fn(async () => undefined), stop: async () => undefined };
+}
+
+function button(text: string): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent === text);
 }
 
 async function render(options: WorkspaceTerminalsProps) {
@@ -140,7 +144,7 @@ it('clears private output on transport loss and reconnects without enabling inpu
   expect(options.send).not.toHaveBeenCalled();
   await stream.emit({ type: 'state', steps: [] });
   await act(() => display.dispatchEvent(new CustomEvent('terminal-input', { detail: 'after' })));
-  expect(options.send).toHaveBeenCalledWith('environment', 'after');
+  expect(options.send).toHaveBeenCalledWith('machine', 'environment', 'after');
   await stream.emit({ type: 'complete', exitCode: 0 });
   await act(() => display.dispatchEvent(new CustomEvent('terminal-input', { detail: 'ended' })));
   expect(options.send).toHaveBeenCalledTimes(1);
@@ -154,4 +158,32 @@ it('does not retry an already ended run when live delivery is unavailable', asyn
   await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
   expect(stream.live).toHaveBeenCalledTimes(1);
   expect(container.textContent).toContain('The Environment run has ended.');
+});
+
+it('offers the attach action instead of a terminal when no machine is attached as a ready cache', async () => {
+  const onAttachMachine = vi.fn();
+  const create = vi.fn(async () => terminal);
+  await render({ ...props(channel().live), machines: [], machineId: null, onAttachMachine, create });
+  expect(container.textContent).toContain('Attach a machine to open a terminal');
+  expect(button('New terminal')).toBeUndefined();
+  await act(() => button('Attach a machine')?.click());
+  expect(onAttachMachine).toHaveBeenCalledTimes(1);
+  expect(create).not.toHaveBeenCalled();
+});
+
+it('opens terminals only on the attached machine the user picks', async () => {
+  synchronized.value = { terminals: [], output: null };
+  const onSelectMachine = vi.fn();
+  const create = vi.fn(async () => terminal);
+  const options = { ...props(channel().live), machines: [{ id: 'cache-a', label: 'Cache A' }, { id: 'cache-b', label: 'Cache B' }], machineId: null, onSelectMachine, create };
+  await render(options);
+  // Two ready caches and no pick: nothing is chosen for the user.
+  expect(container.textContent).toContain('Choose a machine');
+  expect(button('New terminal')).toBeUndefined();
+  await act(() => button('Cache B')?.click());
+  expect(onSelectMachine).toHaveBeenCalledWith('cache-b');
+  await render({ ...options, machineId: 'cache-b' });
+  expect(container.querySelector<HTMLSelectElement>('select[aria-label="Terminal machine"]')?.value).toBe('cache-b');
+  await act(() => button('New terminal')?.click());
+  expect(create).toHaveBeenCalledWith('cache-b');
 });

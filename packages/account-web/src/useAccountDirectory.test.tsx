@@ -26,6 +26,8 @@ type RuntimeReply = { status: 'ok'; value: RuntimeSnapshot } | { status: 'error'
 interface Fixture {
   projects: DirectoryProject[];
   saved: { a: CloudWorkspaceDefinition[]; b: CloudWorkspaceDefinition[] };
+  /** Workspace ids whose space authority has cloud runtime state. */
+  cloud: Set<string>;
   placements: Array<{ -readonly [Key in keyof SpacePlacementView]: SpacePlacementView[Key] }>;
   machines: Array<{ id: string; label: string; state: 'online' | 'offline'; desiredState: 'online' | 'offline' }>;
   runtime: RuntimeSnapshot;
@@ -59,10 +61,11 @@ function fixture(): Fixture {
     }],
   };
   const failures = { directory: null as string | null, runtime: null as string | null };
+  const cloud = new Set<string>();
   const revisions = { a: 1, b: 1 };
   const snapshot = (): AccountDirectorySnapshot => structuredClone({
     projects: projects.map((project) => ({ ...project, repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 1, archivedAt: null, updatedAt: savedMetadata.updatedAt })),
-    workspaces: [...saved.a, ...saved.b], placements,
+    workspaces: [...saved.a, ...saved.b].map((space) => ({ ...space, cloudRuntime: cloud.has(space.id) })), placements,
     machines: machines.map((machine) => ({ ...machine, rpcEndpoint: `/machine/${machine.id}/rpc`, kind: 'physical', notes: '', provider: 'physical', lifecycleRevision: 1, operationId: null, error: null })),
     projectRevisions: revisions,
   });
@@ -92,7 +95,7 @@ function fixture(): Fixture {
   };
   const spaceView = vi.fn<() => Promise<RuntimeReply>>(async () => failures.runtime ? { status: 'error', error: new Error(failures.runtime) } : { status: 'ok', value: structuredClone(runtime) });
   const client: DirectoryClient = { spaceView };
-  return { projects, saved, placements, machines, runtime, failures, spaceView, client, source, revisions, publish };
+  return { projects, saved, cloud, placements, machines, runtime, failures, spaceView, client, source, revisions, publish };
 }
 
 let container: HTMLDivElement;
@@ -161,6 +164,17 @@ it('populates every project and holder independently of the selected pane', asyn
   await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="agent" />); });
   expect(row('Beta work').querySelector('.status-dot')).toBe(betaCircle);
   expect(directory.b?.workspaces[0]?.summary?.status).toBeUndefined();
+});
+
+it('shows a cloud workspace without its stale legacy placement or any machine', async () => {
+  const scene = fixture();
+  scene.cloud.add('a-work');
+  await act(async () => { root.render(<Probe scene={scene} />); });
+  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, freshness: 'unknown', refreshing: false });
+  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
+  expect(directory.a?.baseSummary?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Desk machine' });
+  expect(row('Alpha work').getAttribute('title')).toBe('feature · Cloud workspace');
+  expect(container.textContent).not.toContain('Desk machine');
 });
 
 it('retains accepted activity across navigation and older reads, then converges on a newer read', async () => {

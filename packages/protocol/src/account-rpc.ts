@@ -68,8 +68,16 @@ export function spaceCloudRpcSpaceId(input: unknown): string | null {
 }
 
 /** The space or session a machine-bound call names. The account Worker forwards
- * each signed batch whole to that target's holder, so a batch names one target. */
-export type RpcCallTarget = { kind: 'space'; spaceId: string } | { kind: 'session'; sessionId: string };
+ * each signed batch whole to that target's holder, so a batch names one target.
+ * Terminal calls name their machine explicitly and never follow a holder. */
+export type RpcCallTarget =
+  | { kind: 'space'; spaceId: string }
+  | { kind: 'session'; sessionId: string }
+  | { kind: 'terminal'; spaceId: string; machineId: string };
+
+export function isTerminalRpcPath(path: string): boolean {
+  return path.startsWith('terminals.');
+}
 
 /** Project-level calls whose `projectId` names the project's base space. */
 const BASE_SPACE_RPC_PATHS: Readonly<Record<string, true>> = {
@@ -79,6 +87,11 @@ const BASE_SPACE_RPC_PATHS: Readonly<Record<string, true>> = {
 
 export function rpcCallTarget(path: string, input: unknown): RpcCallTarget | null {
   if (!input || typeof input !== 'object') return null;
+  if (isTerminalRpcPath(path)) {
+    return 'spaceId' in input && typeof input.spaceId === 'string' && 'machineId' in input && typeof input.machineId === 'string'
+      ? { kind: 'terminal', spaceId: input.spaceId, machineId: input.machineId }
+      : null;
+  }
   const named = 'spaceId' in input && typeof input.spaceId === 'string' ? input.spaceId
     : 'workspaceId' in input && typeof input.workspaceId === 'string' ? input.workspaceId
     : null;

@@ -17,6 +17,7 @@ import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
+import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
 
 afterEach(() => vi.restoreAllMocks());
 function emptyCommittedSource() {
@@ -652,6 +653,89 @@ describe('account routing of machine work', () => {
       await SELF.fetch(fixture.request(single(path, { projectId: held.projectId, workspaceId: held.spaceId })));
     }
     expect(reached).toEqual([]);
+  });
+
+  /** HEAD and index hold README.md and src/app.ts; the worktree edits src/app.ts and adds untracked notes.txt. */
+  function committedCheckout(spaceId: string) {
+    const id = (digit: string) => digit.repeat(40);
+    const checkpoint = { checkpointRef: `refs/gitspace/spaces/${spaceId}/checkpoints`, headCommit: id('1'), branch: 'review', indexCommit: id('2'), trackedWorktreeCommit: id('3'), worktreeCommit: id('4'), indexTree: id('5'), worktreeTree: id('6') };
+    const committed = { 'README.md': id('a'), 'src/app.ts': id('b') };
+    const trees: Record<string, Record<string, string>> = { [id('7')]: committed, [id('5')]: committed, [id('6')]: { 'README.md': id('a'), 'src/app.ts': id('c'), 'notes.txt': id('d') } };
+    const blobs: Record<string, string> = { [id('a')]: '# Review\n', [id('b')]: "export const source = 'head';\n", [id('c')]: "export const source = 'cloud checkpoint';\n", [id('d')]: 'scratch\n' };
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (_repository, hash) => hash === checkpoint.headCommit
+      ? { hash, treeHash: id('7'), message: 'head', author: { name: 'a', email: 'a@test' }, committer: { name: 'a', email: 'a@test' }, parents: [], authoredAt: 0, committedAt: 0 }
+      : null);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotInventories').mockImplementation(async (_repository, requested) => requested.map(tree =>
+      new Map(Object.entries(trees[tree] ?? {}).map(([path, oid]) => [path, { oid, mode: '100644', type: 'blob' as const }]))));
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readBlob').mockImplementation(async (_repository, oid) => blobs[oid] === undefined ? null : new Blob([blobs[oid]]));
+    return { checkpoint, worktreeContent: blobs[id('c')] };
+  }
+
+  it('reads a cloud workspace repository from its committed checkpoint, never from a legacy holder', async () => {
+    const { fixture, held, reached } = await fleet();
+    const { checkpoint, worktreeContent } = committedCheckout(held.spaceId);
+    await runInDurableObject(held.placement, (_instance, state) => {
+      state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
+      state.storage.sql.exec('INSERT INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
+    });
+    const client = inspectorClient(fixture);
+    const read = { spaceId: held.spaceId, expectedGeneration: 1, mode: 'current' as const };
+    const tree: Array<{ path: string; kind: string; status: string }> = [];
+    for await (const chunk of client.inspector.repository.tree({ ...read, path: null })) {
+      if (chunk.status === 'error') throw chunk.error;
+      for (const entry of chunk.value) tree.push({ path: entry.path, kind: entry.kind, status: entry.status });
+    }
+    expect(tree).toEqual([
+      { path: 'notes.txt', kind: 'file', status: 'untracked' },
+      { path: 'README.md', kind: 'file', status: 'clean' },
+      { path: 'src', kind: 'directory', status: 'modified' },
+      { path: 'src/app.ts', kind: 'file', status: 'modified' },
+    ]);
+    expect(await client.inspector.repository.status({ ...read, path: null })).toEqual({ status: 'ok', value: [
+      { spaceId: held.spaceId, generation: 1, mode: 'current', path: 'notes.txt', status: 'untracked', oldPath: null, staged: false, working: true },
+      { spaceId: held.spaceId, generation: 1, mode: 'current', path: 'src/app.ts', status: 'modified', oldPath: null, staged: false, working: true },
+    ] });
+    // A cloud-specific refusal, not the legacy "open the workspace" runtime stub.
+    expect(await client.inspector.repository.diff({ ...read, mode: 'working', path: null, baseRef: null })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state', data: { resource: 'repository' } } });
+    expect(await client.inspector.repository.file({ ...read, path: 'src/app.ts' })).toMatchObject({ status: 'ok', value: {
+      path: 'src/app.ts', content: worktreeContent, encoding: 'utf-8', binary: false, blobId: 'c'.repeat(40), commitId: checkpoint.headCommit, headCommit: checkpoint.headCommit, status: 'modified',
+    } });
+    expect(await client.inspector.repository.file({ ...read, mode: 'staged', path: 'src/app.ts' })).toMatchObject({ status: 'ok', value: { content: "export const source = 'head';\n", status: 'clean' } });
+    expect(reached).toEqual([]);
+  });
+
+  it('still forwards a legacy machine-held space repository read to its holder', async () => {
+    const { fixture, held, reached } = await fleet();
+    const response = await SELF.fetch(fixture.request(single('inspector.repository.status', { spaceId: held.spaceId, expectedGeneration: 1, mode: 'current', path: null })));
+    expect(await response.json()).toEqual({ machine: 'machine-b' });
+    expect(reached.map((entry) => entry.machine)).toEqual(['machine-b']);
+  });
+
+  it('forwards terminal work only to the chosen machine while it is a ready cache of the cloud workspace', async () => {
+    const { fixture, held, reached } = await fleet();
+    // The cloud runtime owns this workspace, so machine-b's legacy placement must not attract its terminals.
+    await held.placement.runtimeAttachments({ projectId: held.projectId, workspaceId: held.spaceId });
+    const ready = RuntimeAttachmentSchema.parse({
+      projectId: held.projectId, workspaceId: held.spaceId, attachmentId: 'cache-c', machineId: 'machine-c', generation: 1, role: 'cache', state: 'ready',
+      checkout: { kind: 'shared', branch: 'review' }, capabilities: [], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+    });
+    const stale = { ...ready, attachmentId: 'cache-a', machineId: 'machine-a', heartbeatAt: new Date(Date.now() - 60_000).toISOString() };
+    await runInDurableObject(held.placement, (_instance, state) => {
+      for (const attachment of [ready, stale]) {
+        state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
+      }
+    });
+    const created = await SELF.fetch(fixture.request(single('terminals.create', { spaceId: held.spaceId, machineId: 'machine-c' })));
+    expect(await created.json()).toEqual({ machine: 'machine-c' });
+    // The legacy placement holder and a cache whose heartbeat went stale are both refused before dispatch.
+    for (const machineId of ['machine-b', 'machine-a']) {
+      const refused = await SELF.fetch(fixture.request(single('terminals.send', { spaceId: held.spaceId, machineId, name: 'shell', data: 'ls\r' })));
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ error: { code: 'TERMINAL_MACHINE_NOT_ATTACHED' } });
+    }
+    const unnamed = await SELF.fetch(fixture.request(single('terminals.list', { spaceId: held.spaceId })));
+    expect(await unnamed.json()).toMatchObject({ error: { code: 'TERMINAL_MACHINE_REQUIRED' } });
+    expect(reached.map((entry) => entry.machine)).toEqual(['machine-c']);
   });
 
   it('rejects one signed batch naming spaces held by different machines', async () => {

@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { resourceLinkHref } from '@gitspace/protocol/resource-uri';
 import { verticalSliceFixture } from './App.js';
-import { GitSpaceShell, pendingProfileChange, workspaceStatusColor, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
+import { GitSpaceShell, pendingProfileChange, workspaceStatusColor, workspaceStatusLabel, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
 import { OverviewView } from './inspector/index.js';
 
 
@@ -19,6 +19,15 @@ describe('GitSpaceShell', () => {
     expect(workspaceStatusColor({ ...scope, freshness: 'unknown' })).toBe('orange');
     expect(workspaceStatusColor({ ...scope, holder: { kind: 'released' } })).toBe('dim');
     expect(workspaceStatusColor({ ...scope, freshness: 'fresh' })).toBe('green');
+  });
+
+  it('labels a cloud workspace by its runtime status, never as unavailable for lack of a machine', () => {
+    const cloud = { ...verticalSliceFixture.workspace, holder: { kind: 'cloud' as const }, freshness: 'fresh' as const };
+    expect(workspaceStatusLabel({ ...cloud, status: { ...cloud.status, primaryColor: 'green' } })).toBe('Working');
+    expect(workspaceStatusLabel({ ...cloud, status: { ...cloud.status, primaryColor: 'blue' } })).toBe('Waiting');
+    expect(workspaceStatusLabel({ ...cloud, status: { ...cloud.status, agents: { ...cloud.status.agents, red: 1 } } })).toBe('Failed');
+    expect(workspaceStatusLabel({ ...cloud, status: undefined, freshness: 'unknown' })).toBe('Cloud workspace');
+    expect(workspaceStatusColor({ ...cloud, status: undefined, freshness: 'unknown' })).toBe('dim');
   });
 
   it('mentions the inference profile only while the next turn would use a different one', () => {
@@ -133,6 +142,9 @@ describe('GitSpaceShell', () => {
       {...verticalSliceFixture}
       terminals={{
         spaceId: 'space',
+        machines: [],
+        machineId: null,
+        onSelectMachine: () => {},
         events: () => { throw new Error('not called during server render'); },
         live: () => { throw new Error('not called during server render'); },
         create: async () => { throw new Error('not called during server render'); },

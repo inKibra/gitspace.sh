@@ -1177,8 +1177,10 @@ describe('GitSpace Result RPC', () => {
     if (missingRun.status === 'ok') throw new Error('Expected unknown lifecycle run failure');
     expect(rpcErrors.environmentFailure.is(missingRun.error)).toBe(true);
     expect(missingRun.error.data).toMatchObject({ code: 'NotFound', context: { runId: 'unknown-run' } });
-    const terminalInput = { spaceId: 'workspace-a', name: acceptedChecks.value.terminalName! };
+    const terminalInput = { spaceId: 'workspace-a', machineId: 'machine-a', name: acceptedChecks.value.terminalName! };
     expect((await writer.terminals.stop(terminalInput)).status).toBe('error');
+    // A terminal call names its machine; this machine refuses one addressed to another, with no effect.
+    expect((await client.terminals.stop({ ...terminalInput, machineId: 'machine-b' })).status).toBe('error');
     const stillRunning = await client.environment.get({ spaceId: 'workspace-a' });
     if (stillRunning.status === 'error') throw stillRunning.error;
     expect(stillRunning.value.runs[0]?.cancelRequestedAt).toBeNull();
@@ -1206,7 +1208,7 @@ describe('GitSpace Result RPC', () => {
     expect(isLifecycleRunActive(acceptedPhase.value)).toBe(true);
     expect(acceptedPhase.value).toMatchObject({ id: phaseInput.runId, phase: phaseInput.phase, deadlineAt: phaseInput.deadlineAt, finishedAt: null });
     await runnerStarted.promise;
-    const protectedInput = { spaceId: 'workspace-a', name: acceptedPhase.value.terminalName! };
+    const protectedInput = { spaceId: 'workspace-a', machineId: 'machine-a', name: acceptedPhase.value.terminalName! };
     const deniedLive = await writer.terminals.live(protectedInput)[Symbol.asyncIterator]().next();
     expect(deniedLive.value?.status).toBe('error');
     expect((await writer.terminals.send({ ...protectedInput, data: 'fake-code\n' })).status).toBe('error');

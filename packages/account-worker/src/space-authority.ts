@@ -26,6 +26,9 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
   private readonly directoryOutbox: DirectoryOutbox;
   private runtime: Promise<WorkspaceRuntime> | undefined;
+  /** Loaded before any request; set once the space has cloud runtime state (see `hasCloudRuntime`). */
+  private cloudRuntime: z.infer<typeof RuntimeIdentitySchema> | null = null;
+  private cloudRuntimePublished = false;
   private alarmLine: Promise<void> = Promise.resolve();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -42,6 +45,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       )`);
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_recovery_receipts(operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS portable_lfs_outbox(snapshot_id TEXT PRIMARY KEY,inventory TEXT NOT NULL)');
+      const state = this.get();
+      const identity = await this.ctx.storage.get('runtime.identity') ?? (state ? { projectId: state.projectId, workspaceId: state.spaceId } : null);
+      this.cloudRuntime = identity !== null && await this.hasCloudRuntime() ? RuntimeIdentitySchema.parse(identity) : null;
+      this.cloudRuntimePublished = await this.ctx.storage.get('directory.runtimePublished') === true;
       this.ctx.waitUntil(this.flushPortableLfs());
       this.directoryOutbox.kick();
     });
@@ -49,7 +56,17 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'space' }> | null {
     const state = this.get();
-    return state ? { source: 'space', cursor: this.directoryOutbox.head(), state } : null;
+    return state || this.cloudRuntime ? { source: 'space', cursor: this.directoryOutbox.head(), state, runtime: this.cloudRuntime } : null;
+  }
+
+  /** The account directory learns once that this space is a cloud workspace; it then ignores the legacy placement. */
+  private publishCloudRuntime(identity: z.infer<typeof RuntimeIdentitySchema>): void {
+    this.cloudRuntime = identity;
+    if (this.cloudRuntimePublished) return;
+    this.cloudRuntimePublished = true;
+    this.ctx.storage.transactionSync(() => this.directoryOutbox.enqueue({ source: 'space', state: this.get(), runtime: identity }));
+    void this.ctx.storage.put('directory.runtimePublished', true);
+    this.directoryOutbox.kick();
   }
 
   private scheduleAlarm(owner: string, timestamp: number | null): Promise<void> {
@@ -85,6 +102,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       const previous = RuntimeIdentitySchema.parse(stored);
       if (previous.projectId !== identity.projectId || previous.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
     } else await this.ctx.storage.put('runtime.identity', identity);
+    this.publishCloudRuntime(identity);
     if (!this.runtime) {
       this.runtime = createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp));
       this.runtime.catch(() => { this.runtime = undefined; });
@@ -104,6 +122,28 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       if (previous.projectId !== identity.projectId || previous.workspaceId !== identity.workspaceId) throw new Error('Checkpoint runtime identity mismatch');
     }
     return readCurrentCheckpoint(this.ctx.storage);
+  }
+  /** The committed checkout the Inspector reads. A cloud workspace whose runtime has not yet
+   * touched files gets its source initialized here, as file execution would. */
+  async runtimeRepositoryCheckpoint(raw: unknown) {
+    const committed = await this.runtimeCodeCheckpoint(raw);
+    if (committed) return committed;
+    const checkpoint = await (await this.getRuntime(raw)).cloudFiles.initializeSnapshot();
+    if (!checkpoint) throw new Error('This workspace has no committed source in the cloud yet.');
+    return checkpoint;
+  }
+  /** A cloud workspace's checkout lives in this DO's runtime; machines only attach as caches.
+   * Spaces without cloud runtime state are legacy machine-held placements. */
+  async hasCloudRuntime(): Promise<boolean> {
+    return await this.ctx.storage.get('runtime.identity') !== undefined || await readCurrentCheckpoint(this.ctx.storage) !== null;
+  }
+  /** A cloud workspace's terminals run only on a cache attachment that is ready and heartbeating. */
+  async runtimeTerminalMachine(machineId: string): Promise<boolean> {
+    const identity = await this.ctx.storage.get('runtime.identity');
+    if (identity === undefined) return false;
+    const now = Date.now();
+    return (await this.getRuntime(identity)).attachments.list().some(item => item.machineId === machineId && item.role === 'cache' && item.state === 'ready'
+      && item.heartbeatAt !== null && now - Date.parse(item.heartbeatAt) <= 30_000);
   }
   async runtimeDraft(raw: unknown, actor: { deviceId: string }) { const input = RuntimeDraftSaveInputSchema.parse(raw); return (await this.getRuntime(input)).saveDraft(input, actor.deviceId); }
   async runtimeSubmit(raw: unknown, actor?: { deviceId: string }) { const input = RuntimeSubmitInputSchema.parse(raw); return (await this.getRuntime(input)).submit(input, actor?.deviceId); }
@@ -305,7 +345,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         const state = this.get();
         if (state) {
           this.changes.append(`space:${state.spaceId}`, state);
-          this.directoryOutbox.enqueue({ source: 'space', state });
+          this.directoryOutbox.enqueue({ source: 'space', state, runtime: this.cloudRuntime });
         }
         return value;
       });

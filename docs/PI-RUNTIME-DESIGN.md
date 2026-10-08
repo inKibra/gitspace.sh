@@ -460,6 +460,10 @@ Each origin is an independent, domain-separated content-hash item in the existin
 
 Project-scope approval on the base workspace applies only where a workspace's committed bundle lists that origin. Branches created before base added an origin inherit the grant once they merge or rebase base and include the entry. An entry found only on a branch gets workspace approval, not project approval. After merge, the user or an authorized lifecycle-control API/MCP client may approve it on base for project-wide use. The agent proposes an edit to `.gitspace/bundle.json` when it needs a missing host; even in yolo, that new item needs lifecycle-control approval before it grants access.
 
+### 10.10 Terminal environment
+
+Bundle version 1 accepts an optional `terminal: { "path": ["node_modules/.bin", "~/.cargo/bin"], "env": { "NODE_ENV": "development" } }`. Path entries are checkout-relative or `~/`-relative, never absolute or escaping; they lead `PATH` in order. `env` holds plain values and cannot set `PATH`, `GITSPACE_*`, secret-like names, or declared values and secrets. `terminalEnvironment` in `protocol-environment` resolves it purely; machines apply it to agent bash commands, declared services, and workspace terminals, reading the checkout's own `.gitspace/bundle.json`. A missing or invalid bundle adds nothing.
+
 
 ## 11. Machines, supervisor, terminals
 
@@ -539,6 +543,7 @@ A classifier role defaulting to TypeSafe Jev (available through `typesafe`, `ope
 - **Agent setup:** the main cloud session reads committed definitions from `.agents/agents/*.md` and the supported legacy `.omp/agents/*.md` location. The frontmatter `name`, or filename when absent, identifies each agent. For duplicate names, `.agents/agents` wins regardless of discovery order; Inspector names both paths in a diagnostic. Save keeps a revision-checked cloud override for the same path and future starts; it does not write or commit a repository file. Existing children keep their retained definition.
 - **Usage:** recorded root and descendant token and cost totals remain available without machines. Provider account limits and their refresh stay separate from session cost.
 - **Services:** Inspector lists declared services and agent processes across caches. Running services offer Stop, Restart and Logs; stopped or failed services offer Start and Logs. Starting, restarting and stopping services show progress and offer Logs only. Offline machines show the reason and disable service controls. Actions target an exact machine, attachment and generation. Private URLs include the machine identity and use the existing cookie-bound service login.
+- **Files:** Inspector's file tree, status and file reads for a cloud workspace come from its committed cloud checkpoint (HEAD, index and worktree trees in Artifacts), never from a machine holding a legacy placement. Modes compare the same pairs as on a machine; untracked means present in the worktree but not the index. File reads follow the cloud `read` limits: 8 MiB, LFS pointers hydrated from cloud LFS storage or refused with a machine hint. Diffs are not served in the cloud yet and return an explicit error.
 - **Subagent identity:** Inspector uses the requested spawn name, then the retained definition name, then the role. Generated messaging addresses remain unique. Older records retain their saved address as the display name. Role and model have explicit labels; definition revisions show eight characters with the full value available on hover and copy.
 - **Creation progress:** long creation calls keep streaming progress instead of failing the request (the UI currently reports "request timed out" while creation succeeds).
 

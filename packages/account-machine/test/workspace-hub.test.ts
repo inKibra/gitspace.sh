@@ -91,4 +91,32 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     expect(described.daemon.state).toBe('exited');
 
   }, 20_000);
+
+  it('starts a user shell in the ready cache checkout with the bundle terminal PATH and variables', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-'));
+    roots.push(root);
+    const cachePath = join(root, 'workspace');
+    mkdirSync(join(cachePath, '.gitspace'), { recursive: true });
+    mkdirSync(join(cachePath, 'tools', 'bin'), { recursive: true });
+    writeFileSync(join(cachePath, '.gitspace', 'bundle.json'), JSON.stringify({ version: 1, profiles: { base: {} }, terminal: { path: ['tools/bin'], env: { HUB_FIXTURE_GREETING: 'bundle-env' } } }));
+    writeFileSync(join(cachePath, 'tools', 'bin', 'hub-fixture-tool'), "#!/bin/sh\nprintf 'bundle-tool:%s\\n' \"$HUB_FIXTURE_GREETING\"\n", { mode: 0o755 });
+    // No local placement holds this workspace: only its ready cache checkout can host the shell.
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const used: string[] = [];
+    const coordinator = new WorkspaceHubTerminalCoordinator(database, 'machine-a', undefined, {
+      path: (spaceId) => spaceId === 'workspace-a' ? cachePath : null,
+      use: async (spaceId) => { used.push(spaceId); },
+      changed: async () => {},
+    });
+    const terminal = await coordinator.createShell('workspace-a');
+    expect(used).toEqual(['workspace-a']);
+    expect(terminal).toMatchObject({ kind: 'user', cwd: cachePath, machineId: 'machine-a' });
+
+    await coordinator.send('workspace-a', terminal.name, 'hub-fixture-tool; exit\r');
+    const hub = await daemonClientForProject(cachePath);
+    const exited = await hub.request({ op: 'wait', name: terminal.name, for: 'exit', timeoutMs: 10_000 });
+    expect(exited).toMatchObject({ op: 'wait', timedOut: false });
+    expect((await coordinator.read('workspace-a', terminal.name, null)).data).toContain('bundle-tool:bundle-env');
+    database.close();
+  }, 20_000);
 });

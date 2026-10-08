@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gitspace/protocol/project-authority';
 import { runtimeScope, runtimeSubagents, runtimeTurns } from './runtime-shell-adapter.js';
-import { GitSpaceShell } from './GitSpaceShell.js';
+import { GitSpaceShell, workspaceStatusColor, workspaceStatusLabel } from './GitSpaceShell.js';
 import type { SpaceViewCodec } from '@gitspace/protocol/rpc-contract';
 import type { InputOf } from 'result-rpc';
 
@@ -32,31 +32,37 @@ describe('runtime to existing shell adapter', () => {
     const snapshot = fixture();
     snapshot.attachments = [RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: project.id, workspaceId: workspace.id, attachmentId: 'cache', machineId: 'offline', generation: 2, ownershipGeneration: 8, role: 'cache', checkout: { kind: 'shared', branch: 'runtime' }, state: 'lost', capabilities: [], updatedAt: stamp })];
     const scope = runtimeScope(snapshot, inspection);
-    expect(scope.workspace.holder).toEqual({ kind: 'held', machineId: 'offline', label: 'offline' });
+    expect(scope.workspace.holder).toEqual({ kind: 'cloud' });
+    expect(scope.workspace.possessedBy).toBe('offline');
     expect(scope.workspace.generation).toBe(8);
     expect(scope.workspace.phase).toBe('review');
     snapshot.documents['gitspace.workspace'] = { phase: 'ship' };
     expect(runtimeScope(snapshot, inspection).workspace.phase).toBe('ship');
   });
 
-  it('uses the default equal cache for presentation without closing cloud scope or substituting its lease generation', () => {
+  it('routes tools to the default equal cache without closing cloud scope or substituting its lease generation', () => {
     const snapshot = fixture();
     snapshot.attachments = ['first', 'preferred'].map(machineId => RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: project.id, workspaceId: workspace.id, attachmentId: machineId, machineId, generation: machineId === 'first' ? 90 : 200, role: 'cache', checkout: { kind: 'shared', branch: 'runtime' }, state: 'ready', capabilities: [], updatedAt: stamp }));
     snapshot.documents['gitspace.execution'] = { defaultMachineId: 'preferred' };
     const scope = runtimeScope(snapshot, inspection);
-    expect(scope.workspace.holder).toEqual({ kind: 'held', machineId: 'preferred', label: 'preferred' });
+    expect(scope.workspace.possessedBy).toBe('preferred');
     expect(scope.workspace.generation).toBe(0);
     expect(scope.workspace.closedAt).toBeNull();
     snapshot.attachments = [];
     expect(runtimeScope(snapshot, inspection).workspace.closedAt).toBeNull();
-    expect(runtimeScope(snapshot, inspection).workspace.holder).toEqual({ kind: 'unknown' });
+    expect(runtimeScope(snapshot, inspection).workspace.possessedBy).toBe('');
   });
 
-  it('names the open placement holder without a cache, as the sidebar directory does', () => {
+  it('reports the runtime status of a cloud workspace with no attached machine, ignoring a stale legacy placement', () => {
     const machine = { id: 'desk', label: 'Desk', kind: 'physical' as const, provider: 'physical' as const, state: 'online' as const, desiredState: 'online' as const, rpcEndpoint: 'https://desk.test/rpc', notes: '', lifecycleRevision: 1, operationId: null, error: null };
-    const placed = { ...inspection, machines: [machine], placement: { state: 'open' as const, machineId: 'desk', generation: 4, updatedAt: stamp } };
-    expect(runtimeScope(fixture(), placed).workspace.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Desk' });
-    expect(runtimeScope(fixture(), { ...placed, placement: { ...placed.placement, state: 'closed' as const } }).workspace.holder).toEqual({ kind: 'unknown' });
+    const stale = { ...inspection, machines: [machine], placement: { state: 'open' as const, machineId: 'desk', generation: 4, updatedAt: stamp } };
+    const scope = runtimeScope(fixture(), stale).workspace;
+    expect(scope.holder).toEqual({ kind: 'cloud' });
+    expect(workspaceStatusLabel({ ...scope, freshness: 'fresh' })).toBe('Waiting');
+    expect(workspaceStatusColor({ ...scope, freshness: 'fresh' })).toBe('blue');
+    const failed = fixture();
+    failed.conversations[0]!.status = 'failed';
+    expect(workspaceStatusLabel({ ...runtimeScope(failed, stale).workspace, freshness: 'fresh' })).toBe('Failed');
   });
 
   it('uses authoritative relations and stack findings instead of erasing the graph', () => {

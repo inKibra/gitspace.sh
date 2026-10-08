@@ -2,13 +2,14 @@ import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { z } from 'zod';
 import { RuntimeContentSchema, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { ApplyPatchArgumentsSchema, prepareV4APatch, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeBashCommandArgumentsSchema, RuntimeFindArgumentsSchema, RuntimeGrepArgumentsSchema, RuntimeAstGrepArgumentsSchema, RuntimeAstEditArgumentsSchema, RuntimeAstResolveArgumentsSchema } from '@gitspace/protocol-runtime';
+import { bundleTerminalSection, terminalEnvironment } from '@gitspace/protocol-environment';
 import type { LocalAttachment, ExecutorJournal } from './journal.js';
 import { proposalPath, stageProposal, resolveProposal } from './ast-proposals.js';
-import type { RunExecutorCommand } from './commands.js';
+import { inheritedCommandEnvironment, type RunExecutorCommand } from './commands.js';
 import { machineRipgrepPath } from '../../deployment/src/native-runtime.js';
 import { searchRipgrepArguments, searchRipgrepOutput } from '../../protocol-runtime/src/search-ripgrep.js';
 import { materializeSearchSnapshot } from './search-snapshot.js';
@@ -40,11 +41,32 @@ export async function checkoutPath(root: string, path: string): Promise<string> 
   }
 }
 
+/**
+ * Applies the checkout's committed `.gitspace/bundle.json` terminal section; an unreadable or invalid bundle adds nothing.
+ * Path entries must exist and resolve (through symlinks) inside the canonical checkout or home; others are dropped.
+ */
+export async function checkoutTerminalEnvironment(rootPath: string, inherited: Record<string, string>): Promise<Record<string, string>> {
+  const json = await checkoutPath(rootPath, '.gitspace/bundle.json').then(path => readFile(path, 'utf8')).catch(() => null);
+  const bundle = bundleTerminalSection(json);
+  const root = await realpath(rootPath).catch(() => null);
+  if (bundle === null || root === null) return { ...inherited };
+  const home = await realpath(inherited.HOME ?? homedir()).catch(() => null);
+  const path: string[] = [];
+  for (const entry of bundle.path ?? []) {
+    const base = entry.startsWith('~/') ? home : root;
+    if (base === null) continue;
+    const resolved = await realpath(join(base, entry.startsWith('~/') ? entry.slice(2) : entry)).catch(() => null);
+    const fromBase = resolved === null ? '..' : relative(base, resolved);
+    if (fromBase !== '..' && !fromBase.startsWith('../') && !isAbsolute(fromBase)) path.push(entry);
+  }
+  return terminalEnvironment({ checkoutRoot: root, home: home ?? '', inherited, bundle: { ...bundle, path } });
+}
+
 export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: LocalAttachment, signal: AbortSignal, options: MachineToolOptions): Promise<ExecutorContent> {
   const env = new NodeExecutionEnv({ cwd: local.rootPath });
   const context = withAbortSignal(signal, BACKGROUND_CONTEXT);
   let sequence = 0;
-  const command = (application: string, args: string[], cwd = local.rootPath) => options.runCommand({ application, args, cwd, attemptId: dispatch.attemptId, sequence: sequence++, deadlineAt: dispatch.deadlineAt, signal });
+  const command = (application: string, args: string[], cwd = local.rootPath, environment?: Record<string, string>) => options.runCommand({ application, args, cwd, attemptId: dispatch.attemptId, sequence: sequence++, deadlineAt: dispatch.deadlineAt, signal, env: environment });
   const text = (value: string): ExecutorContent => [{ type: 'text', text: value }];
   const read = async (path: string) => {
     const result = await env.readTextFile(await checkoutPath(local.rootPath, path), context);
@@ -116,7 +138,7 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
         return operation(dispatch, local, signal);
       }
       const args = RuntimeBashCommandArgumentsSchema.parse(dispatch.args);
-      const result = await command('/bin/bash', ['-c', args.command], args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath);
+      const result = await command('/bin/bash', ['-c', args.command], args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()));
       return text(`Exit code: ${result.exitCode}\n${result.output}`);
     }
     case 'grep': {

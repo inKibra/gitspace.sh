@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor';
-import { checkoutPath, mergeDelegateCommit, runSupervisorCommand, ExecutorEffectUncertain, type ExecutorJournal, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
+import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, mergeDelegateCommit, runSupervisorCommand, ExecutorEffectUncertain, type ExecutorJournal, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
 import { cacheServiceOperation } from './cache-services.js';
@@ -93,7 +93,7 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
         z.object({ op: z.enum(['logs', 'cancel']), attemptId: z.string().min(1), lines: z.number().int().positive().max(10_000).optional(), head: z.boolean().optional(), cursor: z.number().int().nonnegative().optional() }).strict(),
       ]).parse(dispatch.args);
       if ('command' in args) {
-        const result = await runSupervisorCommand({ application: '/bin/bash', args: ['-c', args.command], cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, attemptId: dispatch.attemptId, sequence: 0, deadlineAt: dispatch.deadlineAt, signal });
+        const result = await runSupervisorCommand({ application: '/bin/bash', args: ['-c', args.command], cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, env: await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()), attemptId: dispatch.attemptId, sequence: 0, deadlineAt: dispatch.deadlineAt, signal });
         return [{ type: 'text', text: JSON.stringify(result) }];
       }
       const control = options.journal().jobControl(dispatch);

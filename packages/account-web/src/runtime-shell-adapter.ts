@@ -10,7 +10,7 @@ import { deriveWorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { AgentScopeView, ProjectAgentView, WorkspaceView } from './GitSpaceShell.js';
 
 /** Runtime ownership is cloud-owned, independently of any attached working copy. */
-export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<InspectorView, 'project' | 'workspace' | 'workspaces' | 'machines' | 'placement'>, relationWorkspaces: InputOf<typeof SpaceViewCodec>['workspaces'] = []): { workspace: AgentScopeView; baseSpace: ProjectAgentView; workspaces: WorkspaceView[]; relationsReady: boolean } {
+export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<InspectorView, 'project' | 'workspace' | 'workspaces' | 'placement'>, relationWorkspaces: InputOf<typeof SpaceViewCodec>['workspaces'] = []): { workspace: AgentScopeView; baseSpace: ProjectAgentView; workspaces: WorkspaceView[]; relationsReady: boolean } {
   const execution = RuntimeExecutionDocumentSchema.parse(snapshot.documents['gitspace.execution'] ?? { defaultMachineId: null });
   const caches = snapshot.attachments.filter(item => item.role === 'cache' && item.state !== 'detached');
   const cache = caches.find(item => item.machineId === execution.defaultMachineId) ?? caches.find(item => item.state === 'ready') ?? caches[0];
@@ -18,9 +18,8 @@ export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<Inspect
   const phaseValue = document && typeof document === 'object' && !Array.isArray(document) ? document.phase : null;
   const phase = phaseValue === 'plan' || phaseValue === 'code' || phaseValue === 'review' || phaseValue === 'ship' ? phaseValue : inspection.workspace.phase ?? 'plan';
   const status = deriveWorkspaceStatusSummary({ agents: snapshot.conversations.map(item => ({ state: item.status === 'running' ? 'running' : item.status === 'waiting' ? 'permission-needed' : 'waiting', ...(item.status === 'failed' ? { failure: { code: 'RUNTIME_FAILED', message: 'Conversation failed' } } : {}) })) });
-  // The account placement names the holder (as the sidebar directory does); a cache attachment only stands in without one.
-  const holderId = (inspection.placement?.state === 'open' ? inspection.placement.machineId : null) ?? cache?.machineId ?? null;
-  const common = { projectId: inspection.project.id, projectName: inspection.project.name, generation: inspection.placement?.generation ?? cache?.ownershipGeneration ?? 0, possessedBy: cache?.machineId ?? '', holder: holderId ? { kind: 'held' as const, machineId: holderId, label: inspection.machines.find(item => item.id === holderId)?.label ?? holderId } : { kind: 'unknown' as const }, status };
+  // The workspace lives in the cloud whatever machines are attached; a cache only routes tools (`possessedBy`).
+  const common = { projectId: inspection.project.id, projectName: inspection.project.name, generation: inspection.placement?.generation ?? cache?.ownershipGeneration ?? 0, possessedBy: cache?.machineId ?? '', holder: { kind: 'cloud' as const }, status };
   const baseSpace: ProjectAgentView = { ...common, kind: 'project', id: inspection.project.id, name: inspection.project.name, branch: inspection.project.baseBranch, phase: null, closedAt: inspection.project.archivedAt ? new Date(inspection.project.archivedAt) : null };
   const definitions = inspection.workspaces.some(item => item.id === inspection.workspace.id) ? inspection.workspaces : [...inspection.workspaces, inspection.workspace];
   const workspaces: WorkspaceView[] = definitions.filter(item => item.kind === 'worktree').map(item => {

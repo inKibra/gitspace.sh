@@ -75,6 +75,22 @@ export class ArtifactsCodeStore {
     finally { await disposeArtifactsRepository(repo); }
   }
 
+  /** Inventories of several trees through one repository handle; subtrees they share are read once. */
+  async listSnapshotInventories(repository: string, trees: readonly string[]) {
+    const repo = await this.binding.get(repositorySchema.parse(repository));
+    try {
+      const read = new Map<string, Promise<ArtifactsTreeEntry[] | null>>();
+      const reader = {
+        readTree(oid: string) {
+          let entries = read.get(oid);
+          if (!entries) { entries = repo.readTree(commitSchema.parse(oid)); read.set(oid, entries); }
+          return entries;
+        },
+      };
+      return await Promise.all(trees.map(tree => snapshotEntries(reader, tree)));
+    } finally { await disposeArtifactsRepository(repo); }
+  }
+
   async info(repository: string) {
     const repo = await this.binding.get(repositorySchema.parse(repository));
     try { return await repo.info(); }
