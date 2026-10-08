@@ -116,6 +116,10 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const harness = await Harness.open(options.storage, { models: options.models, registry: ruleGenerationRegistry(registry), settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name), followUpMode: 'one-at-a-time' }, onReport: options.onReport }, BACKGROUND_CONTEXT);
   const modelTools = (model: ModelRef) => tools.filter(tool => tool.name !== (options.editTool(model) === 'edit' ? 'apply_patch' : 'edit'));
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: options.model, tools: modelTools(options.model) } });
+  // Pi stores tool names; a renamed or newly added tool would otherwise never reach an existing workspace.
+  const rootAgent = await root.agent(BACKGROUND_CONTEXT);
+  const rootTools = modelTools(rootAgent.model ?? options.model);
+  if (rootAgent.tools.map(tool => tool.name).sort().join('\n') !== rootTools.map(tool => tool.name).sort().join('\n')) await root.configure({ tools: rootTools }, BACKGROUND_CONTEXT);
   const configureModel = async (conversationId: ConversationId, model: ModelRef) => {
     const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
     if (!conversation) throw new Error('Conversation not found');
