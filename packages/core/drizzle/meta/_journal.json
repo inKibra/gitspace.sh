@@ -57,6 +57,13 @@
       "when": 1789700000000,
       "tag": "0007_space_cleanup_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1791450000000,
+      "tag": "0008_space_scoped_conversations",
+      "breakpoints": true
     }
   ]
 }

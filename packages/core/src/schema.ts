@@ -137,7 +137,6 @@ export const agentSessions = sqliteTable('agent_sessions', {
   health: text('health_json', { mode: 'json' }).notNull().$type<AgentHealthState>().default({ revision: 0, issues: {} }),
   ...timestamps,
 }, (table) => [
-  uniqueIndex('agent_sessions_omp_session_unique').on(table.ompSessionId),
   uniqueIndex('agent_sessions_space_unique').on(table.spaceId),
   check('agent_sessions_state_check', sql`${table.state} IN ('opening', 'active', 'draining', 'closed', 'failed')`),
 ]);
