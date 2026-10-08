@@ -11,7 +11,7 @@ export const credentialAccountSchema = z.object({
 export type CredentialAccount = z.infer<typeof credentialAccountSchema>;
 export type ResolvedCredential = {
   id: string; provider: string; revision: number;
-  credential: { type: 'api_key'; key: string } | { type: 'oauth'; access: string; expires: number; accountId?: string; projectId?: string; email?: string; orgId?: string };
+  credential: { type: 'api_key'; key: string } | { type: 'oauth'; access: string; expires: number; accountId?: string; projectId?: string; email?: string; orgId?: string; baseUrl?: string; headers?: Record<string, string> };
 };
 export type VaultAccess = {
   list(profileId: string, provider?: string): Promise<readonly CredentialAccount[]>;

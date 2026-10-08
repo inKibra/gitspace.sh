@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
-export const workerOAuthProviderSchema = z.enum(['anthropic', 'openai-codex', 'google-gemini-cli', 'google-antigravity', 'cursor']);
+/** Sign-in flows GitSpace implements itself (cloud state machines in login.ts). */
+export const gitspaceOAuthProviderSchema = z.enum(['anthropic', 'openai-codex', 'google-gemini-cli', 'google-antigravity', 'cursor']);
+/** Sign-in flows run from Pi's own provider registry (@earendil-works/pi-ai). */
+export const upstreamOAuthProviderSchema = z.enum(['openai', 'github-copilot', 'openrouter', 'xai', 'kimi-coding', 'meta']);
+export type UpstreamOAuthProvider = z.infer<typeof upstreamOAuthProviderSchema>;
+export const workerOAuthProviderSchema = z.enum([...gitspaceOAuthProviderSchema.options, ...upstreamOAuthProviderSchema.options]);
 export type WorkerOAuthProvider = z.infer<typeof workerOAuthProviderSchema>;
 export const oauthProviderNames: Record<WorkerOAuthProvider, string> = {
   anthropic: 'Anthropic (Claude Pro/Max)',
@@ -8,13 +13,20 @@ export const oauthProviderNames: Record<WorkerOAuthProvider, string> = {
   'google-gemini-cli': 'Google Cloud Code Assist (Gemini CLI)',
   'google-antigravity': 'Google Antigravity',
   cursor: 'Cursor',
+  openai: 'OpenAI (Sign in with ChatGPT)',
+  'github-copilot': 'GitHub Copilot',
+  openrouter: 'OpenRouter',
+  xai: 'xAI (Grok/X subscription)',
+  'kimi-coding': 'Kimi Code (subscription)',
+  meta: 'Meta (Muse subscription)',
 };
+// Pi's flows keep provider-specific fields (e.g. ChatGPT's issued clientId) that refresh and request auth need.
 export const storedOAuthCredentialSchema = z.object({
   provider: workerOAuthProviderSchema, refresh: z.string().min(1), access: z.string().min(1), expires: z.number().finite(),
   accountId: z.string().optional(), email: z.string().optional(), orgId: z.string().optional(), projectId: z.string().optional(),
-});
+}).loose();
 export type StoredOAuthCredential = z.infer<typeof storedOAuthCredentialSchema>;
-const base = { provider: workerOAuthProviderSchema, expiresAt: z.iso.datetime() };
+const base = { provider: gitspaceOAuthProviderSchema, expiresAt: z.iso.datetime() };
 const pending = { ...base, authorizationUrl: z.url(), nextPollAt: z.iso.datetime() };
 /** Secret server-side state. Encrypt at rest; never return this through management RPC. */
 export const loginStateSchema = z.discriminatedUnion('kind', [
@@ -36,7 +48,7 @@ export const loginViewSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('cancelled') }),
 ]);
 export type LoginView = z.infer<typeof loginViewSchema>;
-export const beginLoginInputSchema = z.object({ provider: workerOAuthProviderSchema, projectId: z.string().min(1).optional() });
+export const beginLoginInputSchema = z.object({ provider: gitspaceOAuthProviderSchema, projectId: z.string().min(1).optional() });
 export const loginResponseSchema = z.object({ code: z.string().min(1).max(16_384) });
 export const loginTransitionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('pending'), state: loginStateSchema, view: loginViewSchema }),

@@ -7,7 +7,8 @@ import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
-import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, type LoginState } from '@gitspace/provider-auth';
+import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
+import { isUpstreamOAuthProvider, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
 import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
 import type { CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
@@ -156,7 +157,7 @@ const DATA_OBJECT_MAX_BYTES = 64 * 1024 * 1024;
 const DATA_REQUEST_HEADER_MAX_BYTES = 8 * 1024;
 const REFRESH_LEASE_MS = 20_000;
 const ACCESS_REFRESH_SKEW_MS = 60_000;
-const SUPPORTED_PROVIDERS = new Set(['anthropic', 'openai-codex', 'google-gemini-cli', 'google-antigravity', 'cursor']);
+const SUPPORTED_PROVIDERS = new Set<string>(workerOAuthProviderSchema.options);
 const REMOTE_REFRESH_SENTINEL = '__remote__' as const;
 const ACCOUNT_ID_BYTES = 16;
 
@@ -351,6 +352,7 @@ async function openVaultText(sealedValue: string, vaultKey: Uint8Array, context:
   return new TextDecoder().decode(plaintext);
 }
 
+type UpstreamLogin = { abort: AbortController; answer: { promptId: string; resolve(value: string): void } | null };
 type CloudLoginRow = {
   flow_id: string; profile_id: string; provider: string; revision: number; sealed_state: string;
   events_json: string; status: 'pending' | 'busy' | 'done'; expires_at: number;
@@ -364,6 +366,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
   private inferenceMigration: Promise<InferenceState> | null = null;
   private readonly inferenceChanges: DurableChangeLog;
   private readonly activeLoginAttempts = new Set<string>();
+  /** Pi sign-in flows run in this object's memory; a restart abandons them (the row then reports an interruption). */
+  private readonly upstreamLogins = new Map<string, UpstreamLogin>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.inferenceChanges = new DurableChangeLog(ctx.storage);
@@ -1379,9 +1383,12 @@ export class CredentialVaultDO extends DurableObject<Env> {
     this.assertProfileAccess(input.profileId);
     const current = this.credential(row.id, input.profileId);
     if (!current || current.state !== 'active' || current.revision !== row.revision) throw new Error('Credential changed during resolution');
+    // Pi's providers derive request auth themselves (e.g. GitHub Copilot's per-account endpoint, Kimi's headers).
+    const auth = credential.type !== 'api_key' && isUpstreamOAuthProvider(credential.provider) ? await upstreamRequestAuth(credential.provider, credential) : null;
+    const headers = auth?.headers ? Object.fromEntries(Object.entries(auth.headers).filter((entry): entry is [string, string] => typeof entry[1] === 'string')) : null;
     return { id: input.credentialId, provider: credential.provider, revision: row.revision, credential: credential.type === 'api_key'
       ? { type: 'api_key', key: credential.key }
-      : { type: 'oauth', access: credential.access, expires: credential.expires, ...(credential.accountId ? { accountId: credential.accountId } : {}), ...(credential.projectId ? { projectId: credential.projectId } : {}), ...(credential.email ? { email: credential.email } : {}), ...(credential.orgId ? { orgId: credential.orgId } : {}) } };
+      : { type: 'oauth', access: auth?.apiKey ?? credential.access, expires: credential.expires, ...(credential.accountId ? { accountId: credential.accountId } : {}), ...(credential.projectId ? { projectId: credential.projectId } : {}), ...(credential.email ? { email: credential.email } : {}), ...(credential.orgId ? { orgId: credential.orgId } : {}), ...(auth?.baseUrl ? { baseUrl: auth.baseUrl } : {}), ...(headers ? { headers } : {}) } };
   }
 
   async cloudProviders(profileId: string): Promise<ProviderView[]> {
@@ -1504,6 +1511,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       let next = Infinity;
       for (const row of pending) {
         if (row.status === 'busy') { next = Math.min(next, Date.now() + 30_000); continue; }
+        if (isUpstreamOAuthProvider(row.provider)) { next = Math.min(next, Date.now() + 20_000, row.expires_at); continue; }
         if (!config) throw new Error('Vault is not configured');
         const state = loginStateSchema.parse(JSON.parse(await openVaultText(row.sealed_state, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['provider-login/v1', row.profile_id, row.flow_id, row.revision]))));
         next = Math.min(next, Date.parse(state.expiresAt), 'nextPollAt' in state ? Date.parse(state.nextPollAt) : Infinity);
@@ -1537,10 +1545,66 @@ export class CredentialVaultDO extends DurableObject<Env> {
     }
   }
 
+  /** OpenAI identifies each installation ("agent host") by a stable UUID; one per GitSpace account. */
+  private async agentHostId(): Promise<string> {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`gitspace-agent-host/v1\n${this.env.ACCOUNT_ID}`)));
+    digest[6] = (digest[6]! & 0x0f) | 0x40;
+    digest[8] = (digest[8]! & 0x3f) | 0x80;
+    const hex = Array.from(digest.subarray(0, 16), byte => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  private async startUpstreamLogin(profileId: string, provider: UpstreamOAuthProvider): Promise<{ flowId: string }> {
+    const flowId = crypto.randomUUID();
+    const deviceId = await this.agentHostId();
+    this.ensureCloudLoginStorage();
+    this.assertProfileAccess(profileId);
+    // Nothing secret persists for these flows: their state lives in this object's memory.
+    this.ctx.storage.sql.exec("INSERT INTO cloud_provider_logins VALUES (?, ?, ?, 0, '', '[]', 'pending', ?)", flowId, profileId, provider, Date.now() + 15 * 60_000);
+    const running: UpstreamLogin = { abort: new AbortController(), answer: null };
+    this.upstreamLogins.set(flowId, running);
+    const append = (event: ProviderLoginEvent) => this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND status != 'done'", JSON.stringify(event), flowId);
+    const finish = (event: ProviderLoginEvent) => this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND status != 'done'", JSON.stringify(event), flowId);
+    void (async () => {
+      try {
+        const credential = await upstreamOAuth(provider).login({
+          signal: running.abort.signal,
+          notify: event => { append(upstreamLoginEvent(event)); },
+          prompt: prompt => {
+            const { promise, resolve, reject } = Promise.withResolvers<string>();
+            const cancel = () => reject(new Error('Login prompt was cancelled'));
+            prompt.signal?.addEventListener('abort', cancel, { once: true });
+            running.abort.signal.addEventListener('abort', cancel, { once: true });
+            const revision = this.ctx.storage.sql.exec<{ revision: number }>("UPDATE cloud_provider_logins SET revision = revision + 1 WHERE flow_id = ? RETURNING revision", flowId).one().revision;
+            const promptId = `${flowId}:${revision}`;
+            running.answer = { promptId, resolve };
+            append({ type: 'prompt', promptId, ...upstreamPromptText(prompt) });
+            return promise;
+          },
+        }, { getDeviceId: () => deviceId });
+        await this.ctx.blockConcurrencyWhile(async () => {
+          if (this.loginRow(profileId, flowId).status === 'done') return;
+          await this.uploadCredential(profileId, { provider, credential: { ...storedUpstreamCredential(provider, credential), type: 'oauth' } });
+          const view = (await this.cloudProviders(profileId)).find(candidate => candidate.id === provider);
+          finish(view ? { type: 'done', ok: true, provider: view } : { type: 'done', ok: false, error: 'Authorized provider is unavailable' });
+        });
+      } catch (error) {
+        const reason = running.abort.signal.reason instanceof Error ? running.abort.signal.reason.message : null;
+        finish({ type: 'done', ok: false, error: reason ?? `Sign-in failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 240)}` });
+      } finally {
+        this.upstreamLogins.delete(flowId);
+      }
+    })();
+    // Alarms keep this object resident while the in-memory flow waits on the provider.
+    await this.scheduleLoginAlarm(Date.now() + 20_000);
+    return { flowId };
+  }
+
   async cloudLoginStart(input: { profileId: string; providerId: string }): Promise<{ flowId: string }> {
     await this.ensureInference();
     this.assertProfileAccess(input.profileId);
-    const provider = workerOAuthProviderSchema.parse(input.providerId);
+    if (isUpstreamOAuthProvider(input.providerId)) return this.startUpstreamLogin(input.profileId, input.providerId);
+    const provider = gitspaceOAuthProviderSchema.parse(input.providerId);
     const transition = await beginLogin({ provider });
     this.assertProfileAccess(input.profileId);
     const flowId = crypto.randomUUID();
@@ -1558,6 +1622,22 @@ export class CredentialVaultDO extends DurableObject<Env> {
   private async advanceCloudLogin(input: { profileId: string; flowId: string }, response?: { promptId: string; value: string }): Promise<void> {
     const row = this.loginRow(input.profileId, input.flowId);
     if (row.status === 'done') return;
+    if (isUpstreamOAuthProvider(row.provider)) {
+      const running = this.upstreamLogins.get(row.flow_id);
+      if (!running) {
+        this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND status != 'done'", JSON.stringify({ type: 'done', ok: false, error: 'Sign-in was interrupted; start again' }), row.flow_id);
+        return;
+      }
+      if (row.expires_at <= Date.now()) { running.abort.abort(new Error('Login expired; start again')); return; }
+      if (!response) return;
+      if (!running.answer || running.answer.promptId !== response.promptId) throw new Error('Login prompt is no longer current');
+      const { resolve } = running.answer;
+      running.answer = null;
+      // Retire the answered prompt so the dialog stops offering it.
+      this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET revision = revision + 1, events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ?", JSON.stringify({ type: 'progress', message: 'Authorization response received' }), row.flow_id);
+      resolve(response.value);
+      return;
+    }
     if (row.status === 'busy' && this.activeLoginAttempts.has(row.flow_id)) return;
     if (row.status === 'busy') {
       this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', sealed_state = '', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND revision = ?", JSON.stringify({ type: 'done', ok: false, error: 'Authorization was interrupted; start a new login' }), row.flow_id, row.revision);
@@ -1606,6 +1686,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const row = this.loginRow(input.profileId, input.flowId);
     if (row.status === 'done') return;
     this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', revision = revision + 1, sealed_state = '', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ?", JSON.stringify({ type: 'done', ok: false, error: 'Login cancelled' }), row.flow_id);
+    this.upstreamLogins.get(row.flow_id)?.abort.abort();
   }
 
   async cloudLoginEvents(input: { profileId: string; flowId: string; after?: number }): Promise<{ events: ProviderLoginEvent[]; done: boolean }> {
@@ -1706,7 +1787,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (!this.acquireRefreshLease(row, owner)) throw new Error('Credential refresh is already in progress');
     let refreshed: StoredVaultOAuthCredential;
     try {
-      refreshed = await refreshCredential(credential);
+      refreshed = isUpstreamOAuthProvider(credential.provider) ? await refreshUpstreamCredential(credential.provider, credential) : await refreshCredential(credential);
     } catch (error) {
       this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ? AND owner = ?', row.id, owner);
       if (!(error instanceof ProviderRefreshError) || error.kind !== 'rejected') {

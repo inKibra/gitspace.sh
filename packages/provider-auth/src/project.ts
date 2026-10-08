@@ -17,11 +17,11 @@ export async function discoverProject(state: LoginState, credential: StoredOAuth
   if (load.currentTier) {
     const projectId = load.cloudaicompanionProject || credential.projectId;
     if (projectId) return completed(state, { ...credential, projectId });
-    return pending({ kind: 'project-input', provider: credential.provider, expiresAt: state.expiresAt, credential });
+    return pending({ kind: 'project-input', provider: state.provider, expiresAt: state.expiresAt, credential });
   }
   const tierId = credential.provider === 'google-antigravity' ? 'free-tier' : (load.allowedTiers?.find(t => t.isDefault)?.id ?? 'legacy-tier');
   if (credential.provider === 'google-antigravity' && !load.allowedTiers?.some(t => t.id === 'free-tier') && load.ineligibleTiers?.some(t => t.tierId === 'free-tier')) throw new ProviderRefreshError(credential.provider, 'rejected', 'This account is not eligible for Antigravity; complete provider account verification before signing in again');
-  if (tierId !== 'free-tier' && !credential.projectId) return pending({ kind: 'project-input', provider: credential.provider, expiresAt: state.expiresAt, credential });
+  if (tierId !== 'free-tier' && !credential.projectId) return pending({ kind: 'project-input', provider: state.provider, expiresAt: state.expiresAt, credential });
   const operation = parseProvider(credential.provider, operationSchema, await request(credential.provider, `${endpoint}/v1internal:onboardUser`, { method: 'POST', headers, body: JSON.stringify({ tierId, metadata, ...(tierId !== 'free-tier' ? { cloudaicompanionProject: credential.projectId } : {}) }) }, fetcher));
   return finishOperation(state, credential, operation, fetcher);
 }
@@ -29,7 +29,7 @@ async function finishOperation(state: LoginState, credential: StoredOAuthCredent
   if (operation.error) throw new ProviderRefreshError(credential.provider, 'rejected', 'Google project provisioning failed');
   if (!operation.done) {
     if (!operation.name || !/^operations\/[A-Za-z0-9_./-]+$/.test(operation.name) || operation.name.includes('..')) throw new ProviderRefreshError(credential.provider, 'invalid-response', 'Invalid Google provisioning operation');
-    return pending({ kind: 'project', provider: credential.provider, expiresAt: state.kind === 'project' ? state.expiresAt : new Date(Math.min(Date.parse(state.expiresAt), Date.now() + 120_000)).toISOString(), credential, operation: operation.name, nextPollAt: new Date(Date.now() + 5000).toISOString() });
+    return pending({ kind: 'project', provider: state.provider, expiresAt: state.kind === 'project' ? state.expiresAt : new Date(Math.min(Date.parse(state.expiresAt), Date.now() + 120_000)).toISOString(), credential, operation: operation.name, nextPollAt: new Date(Date.now() + 5000).toISOString() });
   }
   if (credential.provider === 'google-antigravity') {
     const { endpoint, headers, metadata } = config(credential);

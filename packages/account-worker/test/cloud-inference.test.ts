@@ -128,6 +128,55 @@ describe('Cloud inference credential authority', () => {
     } finally { clock.mockRestore(); }
   });
 
+  it('signs in with ChatGPT through Pi\'s OpenAI flow and keeps several accounts side by side', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([]));
+    const providers = await vault.cloudProviders('default');
+    expect(providers.find(provider => provider.id === 'openai')).toMatchObject({ supportsOAuth: true, supportsApiKey: true });
+    let email = 'first@example.com';
+    const exchanged: Array<{ clientId: string | null; code: string | null }> = [];
+    network.use(http.post('https://auth.openai.com/api/accounts/oauth/token', async ({ request }) => {
+      const body = new URLSearchParams(await request.text());
+      exchanged.push({ clientId: body.get('client_id'), code: body.get('code') });
+      const access = `header.${btoa(JSON.stringify({ 'https://api.openai.com/profile': { email } }))}.signature`;
+      return HttpResponse.json({ access_token: access, refresh_token: `${email}-refresh`, id_token: 'id', expires_in: 3600, scope: 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct' });
+    }));
+    async function signIn(code: string): Promise<void> {
+      const { flowId } = await vault.cloudLoginStart({ profileId: 'default', providerId: 'openai' });
+      let pending = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+      for (let attempt = 0; attempt < 20 && !pending.events.some(event => event.type === 'prompt'); attempt += 1) {
+        pending = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+      }
+      const auth = pending.events.find(event => event.type === 'auth');
+      const prompt = pending.events.find(event => event.type === 'prompt');
+      if (!auth || !prompt) throw new Error('ChatGPT sign-in must expose the authorization link and the redirect-URL prompt');
+      const authorization = new URL(auth.url);
+      expect(authorization.origin).toBe('https://auth.openai.com');
+      const state = authorization.searchParams.get('state');
+      await vault.cloudLoginRespond({ profileId: 'default', flowId, promptId: prompt.promptId, value: `http://127.0.0.1:1455/auth/callback?code=${code}&state=${state}&client_id=issued-${code}` });
+      let done = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+      for (let attempt = 0; attempt < 20 && !done.done; attempt += 1) done = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+      expect(done.events).toContainEqual(expect.objectContaining({ type: 'done', ok: true }));
+    }
+    await signIn('first-code');
+    email = 'second@example.com';
+    await signIn('second-code');
+    expect(exchanged).toEqual([{ clientId: 'issued-first-code', code: 'first-code' }, { clientId: 'issued-second-code', code: 'second-code' }]);
+    const accounts = await vault.cloudCredentialAccounts('default', 'openai');
+    expect(accounts.map(account => account.identity)).toEqual(['email:first@example.com', 'email:second@example.com']);
+    const resolved = await vault.cloudResolveCredential({ profileId: 'default', credentialId: accounts[1]!.id });
+    expect(resolved.credential).toMatchObject({ type: 'oauth', email: 'second@example.com' });
+    expect(JSON.stringify(resolved)).not.toContain('refresh');
+    const refreshes: Array<{ grant: string | null; clientId: string | null; refresh: string | null }> = [];
+    network.use(http.post('https://auth.openai.com/api/accounts/oauth/token', async ({ request }) => {
+      const body = new URLSearchParams(await request.text());
+      refreshes.push({ grant: body.get('grant_type'), clientId: body.get('client_id'), refresh: body.get('refresh_token') });
+      return HttpResponse.json({ access_token: 'refreshed-access', refresh_token: 'rotated', expires_in: 3600, scope: 'openid chatgpt.tokens.use.direct' });
+    }));
+    const refreshed = await vault.cloudResolveCredential({ profileId: 'default', credentialId: accounts[0]!.id, forceRefresh: true });
+    expect(refreshes).toEqual([{ grant: 'refresh_token', clientId: 'issued-first-code', refresh: 'first@example.com-refresh' }]);
+    expect(refreshed.credential).toMatchObject({ type: 'oauth', access: 'refreshed-access', email: 'first@example.com' });
+  });
+
   it('commits rotated grants once and retains refresh tokens only in the vault', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'rotating', provider: 'openai-codex', access: 'old' }]));
     const account = (await vault.cloudCredentialAccounts('default'))[0]!;

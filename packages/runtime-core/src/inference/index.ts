@@ -56,7 +56,7 @@ function requestAuth(resolved: ResolvedCredential): ModelAuth {
     case 'openai-codex':
       if (!credential.accountId) throw new Error('Codex OAuth account has no account identity');
       return { apiKey: credential.access, headers: { 'ChatGPT-Account-ID': credential.accountId } };
-    default: return { apiKey: credential.access };
+    default: return { apiKey: credential.access, ...(credential.baseUrl ? { baseUrl: credential.baseUrl } : {}), ...(credential.headers ? { headers: credential.headers } : {}) };
   }
 }
 

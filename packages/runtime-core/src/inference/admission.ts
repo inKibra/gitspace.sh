@@ -134,11 +134,17 @@ export function admitProfileProviders(settings: InferenceProfile['settings'], pr
   }));
 }
 
-const oauthProviders: Readonly<Record<string, true>> = { anthropic: true, 'openai-codex': true, cursor: true, 'google-antigravity': true, 'google-gemini-cli': true };
+/** Providers the account Worker can sign in to: GitSpace's own flows plus Pi's subscription flows. */
+const signInProviders: Readonly<Record<string, true>> = {
+  anthropic: true, 'openai-codex': true, cursor: true, 'google-antigravity': true, 'google-gemini-cli': true,
+  openai: true, 'github-copilot': true, openrouter: true, xai: true, 'kimi-coding': true, meta: true,
+};
+/** Subscription-only providers whose API-key path would bypass the sign-in they require. */
+const signInOnlyProviders: Readonly<Record<string, true>> = { 'openai-codex': true, cursor: true, 'google-antigravity': true, 'google-gemini-cli': true };
 export function describeCloudProviders(settings: InferenceProfile['settings'] = {}) {
   return admitProfileProviders(settings, [...builtinProviders(), ...createLegacyCloudProviders()].map(applyProviderCatalog)).map(provider => ({
     id: provider.id, name: provider.name, credentialProvider: provider.id,
-    supportsApiKey: provider.auth.apiKey !== undefined && (oauthProviders[provider.id] !== true || provider.id === 'anthropic'), supportsOAuth: oauthProviders[provider.id] === true,
+    supportsApiKey: provider.auth.apiKey !== undefined && signInOnlyProviders[provider.id] !== true, supportsOAuth: signInProviders[provider.id] === true,
   }));
 }
 
