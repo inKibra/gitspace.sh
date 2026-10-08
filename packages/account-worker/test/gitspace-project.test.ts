@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID } from '@gitspace/protocol';
 import { ensureAccountGitSpaceProject } from '../src/gitspace-project.js';
+import { requireRuntimeIdentity } from '../src/runtime-access.js';
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { tenantRootPrivateKey } from './setup.js';
 
 describe('account GitSpace source provenance', () => {
@@ -38,6 +40,16 @@ describe('account GitSpace source provenance', () => {
     const project = await ensureAccountGitSpaceProject(cloudEnv, userId, { sourceBranch: 'unrelated', sourceCommit: 'c'.repeat(40) });
     expect(project).toMatchObject({ lifecycle: 'cloud-only', baseBranch: metadata.branch, source: metadata });
     expect(await env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`).listWorkspaces()).toEqual([]);
+  });
+
+  it('lets a machine write runtime state while it opens the cloud-only source project', async () => {
+    const userId = env.ACCOUNT_ID;
+    const metadata = { release: 'b'.repeat(40), branch: 'main', commit: 'b'.repeat(40) };
+    const cloudEnv = { ...env, ASSETS: { fetch: async () => Response.json(metadata), connect: (address, options) => env.ASSETS.connect(address, options) } satisfies Fetcher };
+    const project = await ensureAccountGitSpaceProject(cloudEnv, userId);
+    expect(project.lifecycle).toBe('cloud-only');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    await expect(requireRuntimeIdentity(env, userId, identity, true)).resolves.toMatchObject({ project: { id: project.id } });
   });
 
   it('pins the selected account frontend and its source branch instead of the channel build', async () => {
