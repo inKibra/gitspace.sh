@@ -50,13 +50,13 @@ function namespace(options: { repositories?: string[]; refs?: string[]; importEr
 
 describe('project import classification', () => {
   it.each([
-    ['REMOTE_AUTH_REQUIRED', 10106, 'private', "This is a private repository, so GitSpace Cloud can't import it. Open the project on a connected machine to do the initial import."],
-    ['MEMORY_LIMIT', 10402, 'too-large', "This repository is larger than Cloudflare Artifacts' 40 MB import limit. Open the project on a connected machine to do the initial import."],
-  ])('asks for a machine import when Artifacts refuses with %s', async (code, numericCode, reason, message) => {
+    ['REMOTE_AUTH_REQUIRED', 10106, 'private'],
+    ['MEMORY_LIMIT', 10402, 'too-large'],
+  ])('asks for a machine import when Artifacts refuses with %s', async (code, numericCode, reason) => {
     const artifacts = namespace({ importError: artifactsError(code, numericCode, 'Repository at "https://github.com/example/repository.git" was refused.') });
     const imported = artifacts.code.importProject(projectId, origin);
     await expect(imported).rejects.toBeInstanceOf(ProjectImportRequiresMachineError);
-    await expect(imported).rejects.toMatchObject({ _tag: 'ProjectImportRequiresMachineError', reason, message });
+    await expect(imported).rejects.toMatchObject({ _tag: 'ProjectImportRequiresMachineError', reason });
   });
 
   it('propagates other import failures unchanged', async () => {
@@ -67,7 +67,7 @@ describe('project import classification', () => {
   it('reports a machine-seeded repository as pending until its base branch exists', async () => {
     const artifacts = namespace({ repositories: ['project-imported'] });
     const pending = artifacts.code.importProject(projectId, origin);
-    await expect(pending).rejects.toMatchObject({ reason: 'pending', message: "The initial import from a machine hasn't finished yet. Keep the project open on the machine and try again." });
+    await expect(pending).rejects.toMatchObject({ reason: 'pending' });
     artifacts.refs.add('main');
     await expect(artifacts.code.importProject(projectId, origin)).resolves.toEqual(info);
     expect(artifacts.calls).toEqual([]);

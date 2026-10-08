@@ -4239,8 +4239,11 @@ const worker = {
           if (body.operation === 'space.bootstrap' && project.role === 'gitspace-source' && project.lifecycle === 'cloud-only'
             && spaceId === project.id && project.source?.commit && workspace?.sourceCommit === project.source.commit) {
             const placement = await authority.get();
-            if (placement?.state === 'closed' && placement.publishedRevision === 0) {
-              const opened = await authority.bootstrapUnpublishedSource({ projectId: common.projectId, spaceId, machineId: body.machineId });
+            // A removed machine can never publish or release what it opened; its unpublished source is free.
+            const orphaned = placement?.state === 'open' && placement.publishedRevision === 0 && placement.machineId !== null && placement.machineId !== body.machineId
+              && !await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).getMachine(placement.machineId);
+            if ((placement?.state === 'closed' && placement.publishedRevision === 0) || orphaned) {
+              const opened = await authority.bootstrapUnpublishedSource({ projectId: common.projectId, spaceId, machineId: body.machineId }, orphaned ? placement.machineId ?? undefined : undefined);
               if (opened.status === 'error') return Response.json({ status: 'error', error: opened.failure }, { status: 409, headers: { 'cache-control': 'no-store' } });
               return Response.json(opened, { headers: { 'cache-control': 'no-store' } });
             }

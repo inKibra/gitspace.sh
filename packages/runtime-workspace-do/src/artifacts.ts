@@ -23,9 +23,9 @@ export function artifactsWorkspaceRepository(workspaceId: string): string {
 
 export type ProjectImportRequiresMachineReason = 'private' | 'too-large' | 'pending';
 const PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES: Record<ProjectImportRequiresMachineReason, string> = {
-  private: "This is a private repository, so GitSpace Cloud can't import it. Open the project on a connected machine to do the initial import.",
-  'too-large': "This repository is larger than Cloudflare Artifacts' 40 MB import limit. Open the project on a connected machine to do the initial import.",
-  pending: "The initial import from a machine hasn't finished yet. Keep the project open on the machine and try again.",
+  private: "This is a private repository, so GitSpace Cloud can't import it. Create a workspace in this project with a machine connected; the machine does the initial import.",
+  'too-large': "This repository is larger than Cloudflare Artifacts' 40 MB import limit. Create a workspace in this project with a machine connected; the machine does the initial import.",
+  pending: "The initial import from a machine hasn't finished yet. Keep that machine online and try again shortly.",
 };
 /** Artifacts cannot import this origin itself: a connected machine seeds the project repository. */
 export class ProjectImportRequiresMachineError extends TaggedError('ProjectImportRequiresMachineError')<{ reason: ProjectImportRequiresMachineReason; message: string }> {

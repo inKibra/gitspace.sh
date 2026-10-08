@@ -35,6 +35,16 @@ it('keeps failed pristine source retry generations fenced without inventing a ch
   expect(await authority.get()).toMatchObject({ state: 'open', generation: 3 });
 });
 
+it('hands an unpublished source left open by a removed machine to the next machine, and only that one', async () => {
+  const { authority, identity } = await openSpaceMachine();
+  const next = { ...identity, machineId: 'sandbox-b' };
+  expect((await authority.bootstrapUnpublishedSource(next)).status).toBe('error');
+  expect((await authority.bootstrapUnpublishedSource(next, 'sandbox-other')).status).toBe('error');
+  expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 1 });
+  expect(await authority.bootstrapUnpublishedSource(next, sandbox.id)).toMatchObject({ status: 'ok', value: { state: 'open', machineId: 'sandbox-b', generation: 2, publishedRevision: 0 } });
+  expect((await authority.beginClose({ ...identity, expectedGeneration: 1 })).status).toBe('error');
+});
+
 it('recovers an externally stopped sandbox to its desired online state', async () => {
   let current: FleetMachineDefinition = { ...sandbox, state: 'resuming', operationId: 'interrupted-resume', lifecycleRevision: 4 };
   const actions: string[] = [];

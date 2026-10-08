@@ -326,11 +326,14 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  bootstrapUnpublishedSource(input: VerifiedSpaceAuthorityIdentity): SpaceAuthorityResult<SpaceAuthorityRecord> {
+  /** First publication of a GitSpace source base: from a released retry, or (`orphanedHolderId`) from a
+   *  removed machine that opened it and published nothing. The caller proves that machine is gone. */
+  bootstrapUnpublishedSource(input: VerifiedSpaceAuthorityIdentity, orphanedHolderId?: string): SpaceAuthorityResult<SpaceAuthorityRecord> {
     return this.commit(() => {
       const current = this.get();
+      const holder = current?.state === 'closed' ? null : current?.state === 'open' && orphanedHolderId !== undefined ? orphanedHolderId : undefined;
       if (!current || current.projectId !== input.projectId || current.spaceId !== input.spaceId
-        || current.state !== 'closed' || current.machineId !== null || current.publishedRevision !== 0
+        || holder === undefined || current.machineId !== holder || current.publishedRevision !== 0
         || current.manifestKey !== null || current.manifestHash !== null) {
         throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_POSSESSION_DENIED', message: 'Source placement changed before retrying its first publication', context: { spaceId: input.spaceId, machineId: input.machineId } });
       }
