@@ -7,9 +7,11 @@ import { DaemonStartSpecSchema } from '@gitspace/supervisor/protocol';
 
 const path = z.string().min(1);
 export const RuntimeReadArgumentsSchema = z.object({ path, offset: z.number().int().positive().optional(), limit: z.number().int().positive().optional() });
-export const RuntimeWriteArgumentsSchema = z.object({ path, content: z.string() });
-export const RuntimeEditArgumentsSchema = z.object({ path, edits: z.array(z.object({ oldText: z.string().min(1), newText: z.string() })).min(1) });
-export const ApplyPatchArgumentsSchema = z.object({ patch: z.string().min(1) });
+/** One line describing the change; it becomes the message of the change's edit-history commit. */
+const message = z.string().trim().min(1).max(500).optional();
+export const RuntimeWriteArgumentsSchema = z.object({ path, content: z.string(), message });
+export const RuntimeEditArgumentsSchema = z.object({ path, edits: z.array(z.object({ oldText: z.string().min(1), newText: z.string() })).min(1), message });
+export const ApplyPatchArgumentsSchema = z.object({ patch: z.string().min(1), message });
 export const RuntimeBashCommandArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ command: path, cwd: path.optional(), background: z.boolean().optional() }).strict();
 export const RuntimeBashControlArgumentsSchema = z.discriminatedUnion('op', [
   z.strictObject({ op: z.literal('list') }),

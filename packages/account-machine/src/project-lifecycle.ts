@@ -11,6 +11,7 @@ import type {
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { PublishedSpaceHeadResolver } from './inspector-base.js';
 import { readGitCheckpointHead } from './git-checkpoint.js';
+import { ArtifactsBranchDivergedError, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 
 export interface ProjectLifecycleAuthority extends Pick<CloudSpaceCheckpointAuthority, 'getSpace'> {
   bootstrap(input: { projectId: string; spaceId: string }): Promise<unknown>;
@@ -174,7 +175,22 @@ export class ProjectLifecycleManager {
     private readonly checkpointSpace?: (spaceId: string) => Promise<void>,
     private readonly gitEnvironment?: (repositoryUrl: string) => Record<string, string> | Promise<Record<string, string>>,
     private readonly resolvePublishedHead?: PublishedSpaceHeadResolver,
+    /** Seeds `project-<projectId>` with the base history this machine cloned. */
+    private readonly projectRepository?: Pick<ArtifactsGitRemote, 'publishBranch'>,
   ) {}
+
+  /** Publishes the base branch's full history to `project-<projectId>` so cloud workspaces can fork
+   * private or over-limit origins. A branch the cloud import (or another seed) already published
+   * is never overwritten: equal history is a no-op, other history is kept with a warning. */
+  private async seedProjectRepository(projectId: string, repositoryPath: string, branch: string, commit: string): Promise<void> {
+    if (!this.projectRepository) return;
+    try {
+      await this.projectRepository.publishBranch({ binding: { projectId, repository: `project-${projectId}` }, repositoryPath, branch, commit });
+    } catch (error) {
+      if (!(error instanceof ArtifactsBranchDivergedError)) throw error;
+      console.warn('[gitspace-project] project repository already holds other base history; keeping it', projectId, error.message);
+    }
+  }
 
   list(lifecycle: 'all' | 'active' | 'archived'): Promise<CloudProjectSummary[]> {
     return this.authority.listProjects(lifecycle === 'all' ? undefined : lifecycle);
@@ -311,6 +327,10 @@ export class ProjectLifecycleManager {
         if (adopted.status === 'error') throw adopted.error;
       }
       await this.authority.bootstrapInspector({ projectId, spaceId: projectId });
+      // The first checkpoint forks `project-<id>`: seed it from the clone's provenance commit,
+      // never from later work a retained retry checkout may hold.
+      await this.seedProjectRepository(projectId, base.rootPath, baseBranch,
+        sourceCommit ?? definition?.sourceCommit ?? await runGit(['rev-parse', '--verify', `refs/heads/${baseBranch}^{commit}`], base.rootPath));
       checkpointAttempted = true;
       await this.checkpointSpace?.(projectId);
       const current = await this.authority.getProject(projectId);
@@ -432,6 +452,8 @@ export class ProjectLifecycleManager {
       });
       await this.authority.bootstrap({ projectId, spaceId: projectId });
       await this.authority.bootstrapInspector({ projectId, spaceId: projectId });
+      // The first checkpoint forks `project-<id>`; an empty remote has no history to seed.
+      if (repositoryUrl && sourceCommit) await this.seedProjectRepository(projectId, repositoryPath, baseBranch, sourceCommit);
       await this.checkpointSpace?.(projectId);
       project = await this.authority.setProjectLifecycle(projectId, project.revision, 'active');
       operation = await this.succeeded(projectId, operation);

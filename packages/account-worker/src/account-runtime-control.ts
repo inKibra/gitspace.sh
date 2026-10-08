@@ -4,10 +4,25 @@ import { RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema } 
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeCacheAttachmentRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
-import { RuntimeRepositoryCredentialsInputSchema } from '@gitspace/protocol-runtime/machine-controls';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
+import { RuntimeRepositoryCredentialsInputSchema, type RuntimeRepositoryCredentialsInput } from '@gitspace/protocol-runtime/machine-controls';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 import { requireRuntimeIdentity } from './runtime-access.js';
 import { ensureRuntimeCodeRepository } from './account-runtime-host.js';
+
+/** Only the open holder of the project's base space may seed `project-<projectId>`. The repository
+ * is created empty (no import, no initial commit): the machine publishes the base branch's history. */
+async function projectRepositoryCredentials(env: Env, userId: string, machine: string, input: RuntimeRepositoryCredentialsInput) {
+  if (userId !== env.ACCOUNT_ID) throw new Error('Repository lease belongs to a different account');
+  const base = RuntimeIdentitySchema.parse({ projectId: input.projectId, workspaceId: input.projectId });
+  const access = await requireRuntimeIdentity(env, userId, base, input.scope === 'write');
+  if (access.project.repositoryReference === null) throw new Error('Only imported projects are seeded from a machine');
+  const placement = await access.authority.get();
+  if (!placement || placement.machineId !== machine || placement.state !== 'open'
+    || (input.generation !== undefined && placement.generation !== input.generation)) throw new Error('Project repository lease requires the open base space holder');
+  const code = new ArtifactsCodeStore(env.ARTIFACTS);
+  await code.ensureMachineSeedTarget(access.project.id, access.project.baseBranch);
+  return code.credentials(artifactsProjectRepository(access.project.id), input.scope);
+}
 
 /** Called after authorizeControl verifies the signed envelope and operation-specific capability. */
 export async function runtimeMachineControl(env: Env, request: SignedControlRequest): Promise<unknown> {
@@ -31,6 +46,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
   }
   if (operation === 'runtime.repository.credentials') {
     const input = RuntimeRepositoryCredentialsInputSchema.parse(payload);
+    if (input.repository?.startsWith('project-')) return projectRepositoryCredentials(env, userId, machine, input);
     const workspaceId = input.workspaceId ?? (input.repository?.startsWith('workspace-') ? input.repository.slice('workspace-'.length) : undefined);
     const identity = RuntimeIdentitySchema.parse({ projectId: input.projectId, workspaceId });
     const repository = artifactsWorkspaceRepository(identity.workspaceId);

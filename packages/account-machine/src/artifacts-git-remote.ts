@@ -11,6 +11,14 @@ export class ArtifactsGitError extends Error {
   }
 }
 
+/** The remote branch already names other history; publication never moves it. */
+export class ArtifactsBranchDivergedError extends ArtifactsGitError {
+  constructor(readonly branch: string, readonly remoteCommit: string, readonly commit: string) {
+    super('branch', `Remote branch ${branch} is at ${remoteCommit}, not ${commit}; refusing to overwrite it`);
+    this.name = 'ArtifactsBranchDivergedError';
+  }
+}
+
 async function git(repositoryPath: string, args: string[], environment: Record<string, string> = {}, input?: string): Promise<string> {
   const child = Bun.spawn(['git', ...args], { cwd: repositoryPath, env: { ...Bun.env, ...environment }, stdin: input === undefined ? 'ignore' : new Blob([input]), stdout: 'pipe', stderr: 'pipe' });
   const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
@@ -121,6 +129,60 @@ async function stagingCommit(repositoryPath: string, objects: UploadObject[], pr
   return { commit, trees };
 }
 
+/** Pushes `commit` to `targetRef` through receive-pack-sized packs, never forced. Oversized graphs
+ * travel as synthetic commits on an owned `refs/gitspace/upload/*` ref, which is always removed. */
+async function publishBounded(repositoryPath: string, commit: string, objects: UploadObject[], targetRef: string, auth: { remote: string; environment: Record<string, string> }): Promise<void> {
+  const push = (refspec: string) => git(repositoryPath, [...PACK_CONFIG, '-c', 'core.hooksPath=/dev/null', 'push', auth.remote, refspec], { ...auth.environment, GIT_LFS_SKIP_PUSH: '1' });
+  if (await packFits(repositoryPath, commit)) {
+    await push(`${commit}:${targetRef}`);
+    return;
+  }
+  const temporaryRef = `refs/gitspace/upload/${crypto.randomUUID()}`;
+  let previous: UploadState | undefined;
+  let attemptedUpload = false;
+  let failure: unknown;
+  async function upload(batch: UploadObject[]): Promise<void> {
+    const synthetic = await stagingCommit(repositoryPath, batch, previous);
+    if (!await packFits(repositoryPath, synthetic.commit, previous?.commit)) {
+      if (batch.length === 1) throw new ArtifactsGitError('checkpoint', `Git ${batch[0]?.kind} object ${batch[0]?.oid} (${batch[0]?.size} bytes) cannot fit the ${MAX_PACK_BYTES}-byte upload pack limit`);
+      const middle = Math.floor(batch.length / 2);
+      await upload(batch.slice(0, middle));
+      await upload(batch.slice(middle));
+      return;
+    }
+    attemptedUpload = true;
+    await push(`${synthetic.commit}:${temporaryRef}`);
+    previous = synthetic;
+  }
+  try {
+    let batch: UploadObject[] = [];
+    let bytes = 0;
+    for (const object of objects) {
+      // A bounded entry/parent count also bounds mktree input and argv size.
+      if (batch.length && (bytes + object.size + 256 > BATCH_BYTES || batch.length >= 128)) {
+        await upload(batch);
+        batch = [];
+        bytes = 0;
+      }
+      batch.push(object);
+      bytes += object.size + 256;
+    }
+    if (batch.length) await upload(batch);
+    if (!await packFits(repositoryPath, commit, previous?.commit)) throw new ArtifactsGitError('checkpoint', 'Final checkpoint exceeds the bounded upload limit');
+    await push(`${commit}:${targetRef}`);
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    if (attemptedUpload) {
+      try { await push(`:${temporaryRef}`); }
+      catch (cleanupError) {
+        throw new AggregateError(failure === undefined ? [cleanupError] : [failure, cleanupError], `Could not remove owned upload ref ${temporaryRef}`);
+      }
+    }
+  }
+}
+
 /** No daemon, S3 authority, persisted credential URL, or credential cache. */
 export class ArtifactsGitRemote {
   constructor(private readonly options: ArtifactsGitRemoteOptions) {}
@@ -131,56 +193,27 @@ export class ArtifactsGitRemote {
     // graph after validation or make the final push publish unchecked bytes.
     const commit = await git(input.repositoryPath, ['rev-parse', '--verify', `${input.checkpointRef}^{commit}`]);
     const objects = await uploadInventory(input.repositoryPath, commit);
-    const auth = await this.auth(input.binding, 'write');
-    const push = (refspec: string) => git(input.repositoryPath, [...PACK_CONFIG, '-c', 'core.hooksPath=/dev/null', 'push', auth.remote, refspec], { ...auth.environment, GIT_LFS_SKIP_PUSH: '1' });
-    if (await packFits(input.repositoryPath, commit)) {
-      await push(`${commit}:${input.checkpointRef}`);
-      return;
-    }
-    const temporaryRef = `refs/gitspace/upload/${crypto.randomUUID()}`;
-    let previous: UploadState | undefined;
-    let attemptedUpload = false;
-    let failure: unknown;
-    async function upload(batch: UploadObject[]): Promise<void> {
-      const synthetic = await stagingCommit(input.repositoryPath, batch, previous);
-      if (!await packFits(input.repositoryPath, synthetic.commit, previous?.commit)) {
-        if (batch.length === 1) throw new ArtifactsGitError('checkpoint', `Git ${batch[0]?.kind} object ${batch[0]?.oid} (${batch[0]?.size} bytes) cannot fit the ${MAX_PACK_BYTES}-byte upload pack limit`);
-        const middle = Math.floor(batch.length / 2);
-        await upload(batch.slice(0, middle));
-        await upload(batch.slice(middle));
-        return;
-      }
-      attemptedUpload = true;
-      await push(`${synthetic.commit}:${temporaryRef}`);
-      previous = synthetic;
-    }
-    try {
-      let batch: UploadObject[] = [];
-      let bytes = 0;
-      for (const object of objects) {
-        // A bounded entry/parent count also bounds mktree input and argv size.
-        if (batch.length && (bytes + object.size + 256 > BATCH_BYTES || batch.length >= 128)) {
-          await upload(batch);
-          batch = [];
-          bytes = 0;
-        }
-        batch.push(object);
-        bytes += object.size + 256;
-      }
-      if (batch.length) await upload(batch);
-      if (!await packFits(input.repositoryPath, commit, previous?.commit)) throw new ArtifactsGitError('checkpoint', 'Final checkpoint exceeds the bounded upload limit');
-      await push(`${commit}:${input.checkpointRef}`);
-    } catch (error) {
-      failure = error;
-      throw error;
-    } finally {
-      if (attemptedUpload) {
-        try { await push(`:${temporaryRef}`); }
-        catch (cleanupError) {
-          throw new AggregateError(failure === undefined ? [cleanupError] : [failure, cleanupError], `Could not remove owned upload ref ${temporaryRef}`);
-        }
-      }
-    }
+    await publishBounded(input.repositoryPath, commit, objects, input.checkpointRef, await this.auth(input.binding, 'write'));
+  }
+
+  /** Publishes a branch's full history through the same bounded packs as checkpoints.
+   * Never moves an existing remote branch: equal is a no-op, any other commit is refused. */
+  async publishBranch(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; branch: string; commit: string }): Promise<void> {
+    if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new ArtifactsGitError('branch', 'Invalid branch commit');
+    const ref = `refs/heads/${input.branch}`;
+    await git(input.repositoryPath, ['check-ref-format', ref]);
+    await git(input.repositoryPath, ['cat-file', '-e', `${input.commit}^{commit}`]);
+    // Shallow parents can never reach the remote, so its connectivity check would refuse the branch.
+    if (await git(input.repositoryPath, ['rev-parse', '--is-shallow-repository']) === 'true') throw new ArtifactsGitError('branch', 'A shallow clone cannot publish full branch history');
+    const probe = await this.auth(input.binding, 'read');
+    const advertised = await git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, ref], probe.environment);
+    // ls-remote patterns match ref suffixes; only the exact branch counts.
+    const current = advertised.split('\n').map(line => line.split('\t')).find(([, name]) => name === ref)?.[0];
+    if (current === input.commit) return;
+    if (current !== undefined) throw new ArtifactsBranchDivergedError(input.branch, current, input.commit);
+    const objects = await uploadInventory(input.repositoryPath, input.commit);
+    // A branch created concurrently since the probe is only ever fast-forwarded.
+    await publishBounded(input.repositoryPath, input.commit, objects, ref, await this.auth(input.binding, 'write'));
   }
 
   async fetchCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string; commit?: string }): Promise<void> {

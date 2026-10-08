@@ -14,6 +14,7 @@ export class CloudFilesProof extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     await this.ctx.storage.deleteAll();
     let caches: RuntimeAttachment[] = [], failPush = false, pushes = 0;
+    const messages: Array<string | undefined> = [];
     let pause: { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } | undefined;
     let loseResponse = false, rejectWrite = false;
     let mergedCheckpoint: typeof checkpoint | undefined, observedMergeBase: typeof checkpoint | undefined;
@@ -86,6 +87,7 @@ export class CloudFilesProof extends DurableObject {
           return Result.ok(input.previous);
         }
         pushes++;
+        messages.push(input.message);
         for (const mutation of input.mutations) { if (mutation.content === null) files.delete(mutation.path); else files.set(mutation.path, new TextDecoder().decode(mutation.content)); }
         const next = { ...input.previous, worktreeCommit: pushes.toString(16).padStart(40, '0'), worktreeTree: '7'.repeat(40) };
         published.set(key, next);
@@ -128,10 +130,11 @@ export class CloudFilesProof extends DurableObject {
     assert.equal((await invoke('edit', { path: 'repeat.txt', edits: [{ oldText: 'same', newText: 'other' }] })).status, 'failed');
     assert.equal((await invoke('edit', { path: 'file.txt', edits: [{ oldText: 'one\ntwo', newText: 'other' }, { oldText: 'two', newText: 'overlap' }] })).status, 'failed');
     assert.equal((await invoke('write', { path: '../escape', content: 'bad' })).status, 'failed');
-    const written = await invoke('write', { path: 'new.txt', content: 'written' }, 'write-once');
+    const written = await invoke('write', { path: 'new.txt', content: 'written', message: 'Add the new greeting file' }, 'write-once');
     assert.equal(written.status, 'completed');
-    assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written' }, 'write-once'), written);
+    assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written', message: 'Add the new greeting file' }, 'write-once'), written);
     assert.equal(pushes, 1);
+    assert.deepEqual(messages, ['Add the new greeting file\n\nGitSpace-Tool: write\n']);
     await assert.rejects(invoke('write', { path: 'new.txt', content: 'different' }, 'write-once'));
     const first = await store.snapshot(); assert(first);
     assert.equal(first.headCommit, checkpoint.headCommit); assert.equal(first.indexCommit, checkpoint.indexCommit);
@@ -155,6 +158,7 @@ export class CloudFilesProof extends DurableObject {
     assert.deepEqual(ancestry(), beforeNoop);
     assert.equal((await invoke('edit', { path: 'file.txt', edits: [{ oldText: 'two', newText: 'changed' }] })).status, 'completed');
     assert.equal(files.get('file.txt'), 'one\nchanged\nthree');
+    assert.equal(messages.at(-1), 'edit file.txt\n\nGitSpace-Tool: edit\n');
     failPush = true;
     await assert.rejects(invoke('write', { path: 'retry.txt', content: 'durable' }, 'retry'));
     assert.equal((await invoke('write', { path: 'other.txt', content: 'blocked' })).status, 'failed');
@@ -212,7 +216,7 @@ export class CloudFilesProof extends DurableObject {
     assert.equal(store.hasAttempt('write-once'), true);
     assert.equal(store.hasAttempt('never-dispatched'), false);
     const replayPushes = pushes;
-    assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written' }, 'write-once'), written);
+    assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written', message: 'Add the new greeting file' }, 'write-once'), written);
     assert.equal(pushes, replayPushes);
     attachments.transition(attached.attachmentId, attached.generation, 'lost'); caches = attachments.list();
     assert.equal((await invoke('write', { path: 'lost.txt', content: 'with lost cache' })).status, 'completed');

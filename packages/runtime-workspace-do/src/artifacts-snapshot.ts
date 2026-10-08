@@ -7,7 +7,7 @@ import { hasSnapshotConflictMarkers, isCleanSnapshotContent, isSnapshotTextEntry
 
 export type RuntimeGitCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?: string; oid?: string; type?: 'blob' | 'commit' };
-export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean };
+export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; /** Edit-history message for the tool change; absent for merges and system snapshots. */ message?: string; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean };
 export interface ArtifactsFetch { (input: string, init?: RequestInit): Promise<Response> }
 export class ArtifactsSnapshotError extends TaggedError('ArtifactsSnapshotError')<{ operation: string; message: string; certainty: 'not-published' | 'unknown' }> {}
 
@@ -212,13 +212,15 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     if (!trackedParent) throw new Error('Previous tracked snapshot is missing');
     const trackedTree = await editTree(trackedParent.treeHash, input.trackedMutations ?? mutations, input.trackedMutations === undefined);
     const identity = { name: 'GitSpace Checkpoint', email: 'checkpoint@gitspace.invalid', timestamp: parent.committedAt + 1, timezoneOffset: 0 };
+    // A tool change is authored by the agent; GitSpace stays the committer of every checkpoint.
+    const author = input.message === undefined ? identity : { ...identity, name: 'GitSpace Agent', email: 'agent@gitspace.invalid' };
     const indexTree = input.indexMutations ? await editTree(previous.indexTree, input.indexMutations, false) : previous.indexTree;
     if (!input.forcePublication && input.machine && worktreeTree === previous.worktreeTree && trackedTree === trackedParent.treeHash && indexTree === previous.indexTree && input.machine.headCommit === previous.headCommit && input.machine.branch === previous.branch && JSON.stringify(input.machine.lfs) === JSON.stringify(previous.lfs) && !conflictsChanged) return previous;
     const indexCommit = input.machine && indexTree === input.machine.indexTree ? input.machine.indexCommit : indexTree === previous.indexTree ? previous.indexCommit : await git.writeCommit({ fs, dir, commit: { tree: indexTree, parent: [previous.indexCommit, ...(input.machine ? [input.machine.indexCommit] : [])], author: identity, committer: identity, message: 'GitSpace merged index snapshot\n' } });
     if (indexCommit !== previous.indexCommit && indexCommit !== input.machine?.indexCommit) oids.add(indexCommit);
-    const trackedWorktreeCommit = await git.writeCommit({ fs, dir, commit: { tree: trackedTree, parent: [previous.trackedWorktreeCommit], author: identity, committer: identity, message: 'GitSpace cloud tracked worktree snapshot\n' } });
+    const trackedWorktreeCommit = await git.writeCommit({ fs, dir, commit: { tree: trackedTree, parent: [previous.trackedWorktreeCommit], author, committer: identity, message: input.message ?? 'GitSpace cloud tracked worktree snapshot\n' } });
     oids.add(trackedWorktreeCommit);
-    const worktreeCommit = await git.writeCommit({ fs, dir, commit: { tree: worktreeTree, parent: [...new Set([previous.worktreeCommit, trackedWorktreeCommit, indexCommit, ...(input.machine ? [input.machine.worktreeCommit] : [])])], author: identity, committer: identity, message: 'GitSpace cloud worktree snapshot\n' } });
+    const worktreeCommit = await git.writeCommit({ fs, dir, commit: { tree: worktreeTree, parent: [...new Set([previous.worktreeCommit, trackedWorktreeCommit, indexCommit, ...(input.machine ? [input.machine.worktreeCommit] : [])])], author, committer: identity, message: input.message ?? 'GitSpace cloud worktree snapshot\n' } });
     oids.add(worktreeCommit);
     const packed = await git.packObjects({ fs, dir, oids: [...oids] });
     if (!packed.packfile) throw new Error('Git pack writer returned no pack');

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,7 @@ import { ProjectLifecycleManager, type ProjectLifecycleAuthority } from '../src/
 import type { CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
 import { createPublishedSpaceHeadResolver } from '../src/inspector-base.js';
 import { createGitIntermediateCheckpoint, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
+import { ArtifactsGitRemote, type ArtifactsRepositoryBinding } from '../src/artifacts-git-remote.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -136,6 +137,26 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
     this.operations.set(operation.id, operation);
     return operation;
   }
+}
+
+/** Every `project-<id>` lease resolves to one local bare repository until `restore()`. */
+function projectRepositoryRemote(root: string) {
+  const remote = join(root, 'project.git');
+  git(root, 'init', '--bare', remote);
+  const config = join(root, 'gitconfig');
+  writeFileSync(config, `[url "${remote}"]\n\tinsteadOf = https://artifacts.invalid/project\n`);
+  const previous = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = config;
+  const leases: Array<ArtifactsRepositoryBinding & { scope: 'read' | 'write' }> = [];
+  const gitRemote = new ArtifactsGitRemote({ credentials: async (binding, scope) => {
+    leases.push({ ...binding, scope });
+    return { remote: 'https://artifacts.invalid/project', plaintext: 'offline', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+  } });
+  const restore = () => {
+    if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previous;
+  };
+  return { remote, leases, gitRemote, restore };
 }
 
 function archiveFixture(lifecycle: CloudWorkspaceDefinition['lifecycle'] = 'failed', authority = new MemoryProjectAuthority()) {
@@ -681,6 +702,36 @@ describe('ProjectLifecycleManager', () => {
     database.close();
   });
 
+  it('seeds the project repository with the pinned source history before the first checkpoint', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-source-seed-'));
+    roots.push(root);
+    const source = seedRepository(root, 'release/test');
+    const commit = git(source, 'rev-parse', 'HEAD');
+    writeFileSync(join(source, 'README.txt'), 'newer branch content\n');
+    git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-am', 'advance branch');
+    const project = projectRepositoryRemote(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    try {
+      const authority = new MemoryProjectAuthority();
+      authority.projects.set('source', {
+        id: 'source', name: 'GitSpace', lifecycle: 'cloud-only', repositoryReference: source, baseBranch: 'release/test',
+        role: 'gitspace-source', source: { release: commit, branch: 'release/test', commit },
+        revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
+      });
+      const publishedAtCheckpoint: string[] = [];
+      const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), async () => {
+        publishedAtCheckpoint.push(git(project.remote, 'for-each-ref', '--format=%(refname) %(objectname)'));
+      }, undefined, undefined, project.gitRemote);
+      expect((await manager.openProject('source')).project.lifecycle).toBe('active');
+      expect(publishedAtCheckpoint).toEqual([`refs/heads/release/test ${commit}`]);
+      expect(git(project.remote, 'rev-list', '--parents', 'refs/heads/release/test')).toBe(git(source, 'rev-list', '--parents', commit));
+      expect(project.leases.map(({ repository, scope }) => `${repository}:${scope}`)).toEqual(['project-source:read', 'project-source:write']);
+    } finally {
+      project.restore();
+      database.close();
+    }
+  });
+
   it('preserves a cloud-only definition and leaves no fake local repository after a failed source clone', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-source-failed-'));
     roots.push(root);
@@ -1103,6 +1154,33 @@ describe('ProjectLifecycleManager', () => {
       expect(git(source, 'symbolic-ref', 'HEAD')).toBe('refs/heads/trunk');
       expect(git(source, 'rev-list', '--count', 'HEAD')).toBe('1');
     } finally {
+      database.close();
+    }
+  });
+
+  it('keeps a project repository branch that already holds other history and still imports', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-seed-diverged-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    const project = projectRepositoryRemote(root);
+    const other = join(root, 'other');
+    mkdirSync(other);
+    git(other, 'init', '-b', 'trunk');
+    git(other, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '--allow-empty', '-m', 'cloud import');
+    git(other, 'push', project.remote, 'trunk');
+    const published = git(project.remote, 'for-each-ref', '--format=%(refname) %(objectname)');
+    const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    try {
+      const manager = new ProjectLifecycleManager(database, new MemoryProjectAuthority(), 'machine-a', join(root, 'spaces'), undefined, undefined, undefined, project.gitRemote);
+      const imported = await manager.createProject({ name: 'Imported', baseBranch: null, repositoryUrl: source });
+      expect(imported.project).toMatchObject({ lifecycle: 'active', baseBranch: 'trunk' });
+      expect(git(project.remote, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(published);
+      expect(warnings).toHaveBeenCalledTimes(1);
+      expect(project.leases.map(({ repository, scope }) => `${repository}:${scope}`)).toEqual([`project-${imported.project.id}:read`]);
+    } finally {
+      warnings.mockRestore();
+      project.restore();
       database.close();
     }
   });

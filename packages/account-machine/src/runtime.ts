@@ -634,7 +634,7 @@ export async function startMachineRuntime() {
     await canonicalSessionWriter.flush({ projectId, spaceId });
   };
   const resolvePublishedHead = createPublishedSpaceHeadResolver({ authority, blobs: encryptedCheckpointBlobs, gitRemote, binding: gitBinding });
-  const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl), resolvePublishedHead);
+  const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl), resolvePublishedHead, gitRemote);
 
   const handlers = new GitSpaceHandlers(database, artifacts, projectEventWriter);
   workspaceControls.resolve(createSpaceWorkspaceControls({

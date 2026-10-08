@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
+import { ArtifactsBranchDivergedError, ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -19,11 +19,58 @@ function fixture() {
   // receive-pack enforces the actual incoming pack byte limit, not estimated object sizes.
   git(remote, 'config', 'receive.maxInputSize', String(64 * 1024 * 1024));
   git(root, 'config', `url.${remote}.insteadOf`, 'https://artifacts.invalid/repository');
-  const publication = new ArtifactsGitRemote({ credentials: async () => ({ remote: 'https://artifacts.invalid/repository', plaintext: 'offline', expiresAt: new Date(Date.now() + 3_600_000).toISOString() }) });
+  const scopes: string[] = [];
+  const publication = new ArtifactsGitRemote({ credentials: async (_binding, scope) => {
+    scopes.push(scope);
+    return { remote: 'https://artifacts.invalid/repository', plaintext: 'offline', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+  } });
   const checkpointRef = 'refs/gitspace/checkpoints/test';
   const publish = () => publication.publishCheckpoint({ repositoryPath: root, binding: { projectId: 'test', repository: 'test' }, checkpointRef });
-  return { root, remote, checkpointRef, publish };
+  const publishBranch = (commit: string) => publication.publishBranch({ repositoryPath: root, binding: { projectId: 'test', repository: 'project-test' }, branch: 'main', commit });
+  return { root, remote, checkpointRef, publish, publishBranch, scopes };
 }
+function rejectPushes(remote: string) {
+  const hook = join(remote, 'hooks/pre-receive');
+  writeFileSync(hook, '#!/bin/sh\nexit 1\n'); chmodSync(hook, 0o755);
+}
+
+it('publishes branch history larger than the receive limit in bounded packs without leaving upload refs', async () => {
+  const f = fixture();
+  for (let i = 0; i < 5; i++) {
+    writeFileSync(join(f.root, `payload-${i}`), randomBytes(15 * 1024 * 1024));
+    git(f.root, 'add', `payload-${i}`); git(f.root, 'commit', '-m', `payload ${i}`);
+  }
+  const commit = git(f.root, 'rev-parse', 'HEAD');
+  await f.publishBranch(commit);
+  expect(git(f.remote, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(`refs/heads/main ${commit}`);
+  expect(git(f.remote, 'rev-list', '--parents', 'refs/heads/main')).toBe(git(f.root, 'rev-list', '--parents', commit));
+  expect(git(f.remote, 'ls-tree', '-r', 'refs/heads/main')).toBe(git(f.root, 'ls-tree', '-r', commit));
+}, 120_000);
+
+it('treats a remote branch already at the commit as published without requesting write access', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'file'), 'seeded'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'seeded');
+  const commit = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'push', f.remote, `${commit}:refs/heads/main`);
+  rejectPushes(f.remote);
+  await f.publishBranch(commit);
+  expect(f.scopes).toEqual(['read']);
+  expect(git(f.remote, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(`refs/heads/main ${commit}`);
+});
+
+it('refuses to move a remote branch that holds different history', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'file'), 'base'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'base');
+  const base = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'push', f.remote, `${base}:refs/heads/main`);
+  writeFileSync(join(f.root, 'file'), 'local'); git(f.root, 'commit', '-am', 'local');
+  const local = git(f.root, 'rev-parse', 'HEAD');
+  const refused = f.publishBranch(local);
+  await expect(refused).rejects.toBeInstanceOf(ArtifactsBranchDivergedError);
+  await expect(refused).rejects.toMatchObject({ branch: 'main', remoteCommit: base, commit: local });
+  expect(git(f.remote, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(`refs/heads/main ${base}`);
+  expect(f.scopes).toEqual(['read']);
+});
 for (const singleCommit of [false, true]) it(`publishes bounded packs preserving ${singleCommit ? 'an oversized single commit' : 'oversized history'} and local state`, async () => {
   const f = fixture();
   for (let i = 0; i < 5; i++) {

@@ -14,17 +14,18 @@ const workspaceId = 'repository-workspace';
 const signingKey = new Uint8Array(32).fill(41);
 const lease = { remote: 'https://artifacts.test/workspace-repository-workspace.git', plaintext: 'test-scoped-repository-token', expiresAt: '2099-01-01T00:00:00.000Z' };
 
+const repository = { id: 'test-repo', name: 'test-repo', description: null, defaultBranch: 'main', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', lastPushAt: null, source: null, readOnly: false, remote: lease.remote };
+
 beforeEach(() => {
   // Keep the real signed route, device grants and workspace authority. Only the
   // external Artifacts service is replaced; no test mints a live credential.
-  const repository = { id: 'test-repo', name: 'test-repo', description: null, defaultBranch: 'main', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', lastPushAt: null, source: null, readOnly: false, remote: lease.remote };
   vi.spyOn(ArtifactsCodeStore.prototype, 'ensureEmptyProject').mockResolvedValue(repository);
   vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(repository);
   vi.spyOn(ArtifactsCodeStore.prototype, 'credentials').mockResolvedValue(lease);
 });
 afterEach(() => vi.restoreAllMocks());
 
-async function fixture(capabilities: Array<'storage.access' | 'space.control'>) {
+async function fixture(capabilities: Array<'storage.access' | 'space.control'>, repositoryReference: string | null = null) {
   const userId = env.ACCOUNT_ID;
   const vault = env.CREDENTIALS.getByName(userId);
   await vault.bootstrap({ userId, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(tenantRootPrivateKey)), vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(19)) });
@@ -36,7 +37,7 @@ async function fixture(capabilities: Array<'storage.access' | 'space.control'>) 
     }, tenantRootPrivateKey));
   }
   const project = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
-  const created = await project.bootstrap({ id: projectId, name: 'Repository authorization', repositoryReference: null, baseBranch: 'main', createdBy: 'assigned' });
+  const created = await project.bootstrap({ id: projectId, name: 'Repository authorization', repositoryReference, baseBranch: 'main', createdBy: 'assigned' });
   await project.setProjectLifecycle(created.revision, 'active');
   const workspace = { id: workspaceId, projectId, kind: 'worktree' as const, name: 'Repository', branch: 'main', phase: null, sourceKind: 'branch' as const, sourceRef: 'main', sourceCommit: null, lifecycle: 'active' as const, goalId: null, expectedRevision: 0 };
   await project.putWorkspace(workspace);
@@ -129,6 +130,52 @@ describe('signed repository credential authority', () => {
     await f.project.putWorkspace({ ...f.workspace, lifecycle: 'archived', expectedRevision: 1 });
     expect((await f.request()).status).toBe(200);
     expect((await f.request({ scope: 'write' })).status).toBe(400);
+  });
+
+  describe('project repository leases', () => {
+    const seedLease = { workspaceId: undefined, generation: undefined, repository: `project-${projectId}`, scope: 'write' };
+    async function seeding(baseHolder: string, repositoryReference: string | null = 'https://github.com/example/private.git') {
+      const f = await fixture(['storage.access'], repositoryReference);
+      await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).bootstrap({ projectId, spaceId: projectId, machineId: baseHolder });
+      const seedTarget = vi.spyOn(ArtifactsCodeStore.prototype, 'ensureMachineSeedTarget').mockResolvedValue(repository);
+      const imported = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject').mockRejectedValue(new Error('A seed lease must never import'));
+      return { ...f, seedTarget, imported, credentials: vi.spyOn(ArtifactsCodeStore.prototype, 'credentials') };
+    }
+
+    it('grants write to the open base space holder without importing the origin', async () => {
+      const f = await seeding('assigned');
+      const granted = await f.request(seedLease);
+      expect({ status: granted.status, body: await granted.json() }).toEqual({ status: 200, body: { status: 'ok', value: lease } });
+      expect(f.seedTarget).toHaveBeenCalledWith(projectId, 'main');
+      expect(f.credentials).toHaveBeenCalledWith(`project-${projectId}`, 'write');
+      expect(f.imported).not.toHaveBeenCalled();
+      expect(ArtifactsCodeStore.prototype.ensureEmptyProject).not.toHaveBeenCalled();
+      expect(ArtifactsCodeStore.prototype.forkWorkspace).not.toHaveBeenCalled();
+    });
+
+    it('refuses machines that do not hold the open base space, even a workspace holder', async () => {
+      const f = await seeding('unassigned');
+      expect((await f.request(seedLease, 'assigned')).status).toBe(400);
+      expect((await f.request({ ...seedLease, generation: 2 }, 'unassigned')).status).toBe(400);
+      expect(f.credentials).not.toHaveBeenCalled();
+      expect((await f.request(seedLease, 'unassigned')).status).toBe(200);
+    });
+
+    it('refuses foreign project repositories and project leases mixed with workspace or attachment identity', async () => {
+      const f = await seeding('assigned');
+      for (const payload of [
+        { ...seedLease, repository: 'project-foreign' },
+        { ...seedLease, workspaceId },
+        { ...seedLease, attachmentId: 'attachment', generation: 1 },
+      ]) expect((await f.request(payload)).status).toBe(400);
+      expect(f.credentials).not.toHaveBeenCalled();
+    });
+
+    it('refuses scratch projects, whose repository is never machine-seeded', async () => {
+      const f = await seeding('assigned', null);
+      expect((await f.request(seedLease)).status).toBe(400);
+      expect(f.seedTarget).not.toHaveBeenCalled();
+    });
   });
 
   it('fences attachment generation and state and prevents runner publication', async () => {

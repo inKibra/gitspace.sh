@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Result } from 'better-result';
+import { Result, TaggedError } from 'better-result';
 import { ArtifactsSnapshotError, initializeArtifactsRepository, validateSnapshotPath, writeArtifactsSnapshot, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
 import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
@@ -20,6 +20,22 @@ export function artifactsProjectRepository(projectId: string): string {
 export function artifactsWorkspaceRepository(workspaceId: string): string {
   return repositorySchema.parse(`workspace-${workspaceId}`);
 }
+
+export type ProjectImportRequiresMachineReason = 'private' | 'too-large' | 'pending';
+const PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES: Record<ProjectImportRequiresMachineReason, string> = {
+  private: "This is a private repository, so GitSpace Cloud can't import it. Open the project on a connected machine to do the initial import.",
+  'too-large': "This repository is larger than Cloudflare Artifacts' 40 MB import limit. Open the project on a connected machine to do the initial import.",
+  pending: "The initial import from a machine hasn't finished yet. Keep the project open on the machine and try again.",
+};
+/** Artifacts cannot import this origin itself: a connected machine seeds the project repository. */
+export class ProjectImportRequiresMachineError extends TaggedError('ProjectImportRequiresMachineError')<{ reason: ProjectImportRequiresMachineReason; message: string }> {
+  constructor(reason: ProjectImportRequiresMachineReason) {
+    super({ reason, message: PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES[reason] });
+  }
+}
+const ArtifactsImportRefusalSchema = z.object({ name: z.literal('ArtifactsError'), code: z.enum(['REMOTE_AUTH_REQUIRED', 'MEMORY_LIMIT']) });
+const IMPORT_REFUSAL_REASONS: Record<z.infer<typeof ArtifactsImportRefusalSchema>['code'], ProjectImportRequiresMachineReason> = { REMOTE_AUTH_REQUIRED: 'private', MEMORY_LIMIT: 'too-large' };
+const ArtifactsAlreadyExistsSchema = z.object({ name: z.literal('ArtifactsError'), code: z.literal('ALREADY_EXISTS') });
 
 /** The binding is supplied by the tenant Worker, never an account control-plane token. */
 export class ArtifactsCodeStore {
@@ -107,13 +123,42 @@ export class ArtifactsCodeStore {
     } finally { await disposeArtifactsRepository(repo); }
   }
   async importProject(projectId: string, source: { url: string; branch?: string }) {
+    const name = artifactsProjectRepository(projectId);
+    if (await this.find(name)) {
+      // A machine seed creates the repository before pushing history: until the base
+      // branch exists it is not an import a workspace may fork. A resolvable default
+      // branch keeps a completed import usable after the project's base branch changes.
+      const base = source.branch === undefined || source.branch === 'HEAD' ? 'HEAD' : `refs/heads/${source.branch}`;
+      if (await this.resolveRef(name, base) === null && (base === 'HEAD' || await this.resolveRef(name, 'HEAD') === null)) throw new ProjectImportRequiresMachineError('pending');
+      return this.info(name);
+    }
     const url = new URL(source.url);
     if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Project import requires a credential-free HTTPS origin');
-    const name = artifactsProjectRepository(projectId);
-    const existing = await this.find(name);
-    if (existing) return this.info(name);
-    const created = await this.binding.import({ source, target: { name } });
+    const created = await this.binding.import({ source, target: { name } }).catch((error: unknown) => {
+      const refusal = ArtifactsImportRefusalSchema.safeParse(error);
+      throw refusal.success ? new ProjectImportRequiresMachineError(IMPORT_REFUSAL_REASONS[refusal.data.code]) : error;
+    });
     // Initial tokens are not persisted or exposed: callers mint explicitly scoped leases.
+    const repo = await this.binding.get(name);
+    try {
+      await repo.revokeToken(created.token);
+      return await repo.info();
+    } finally { await disposeArtifactsRepository(repo); }
+  }
+
+  /** The empty repository a connected machine seeds with the base branch's full history.
+   * Never imports or commits: importProject reports 'pending' until the branch exists. */
+  async ensureMachineSeedTarget(projectId: string, branch: string) {
+    const name = artifactsProjectRepository(projectId);
+    if (await this.find(name)) return this.info(name);
+    // An unresolved gitspace-source branch is recorded as 'HEAD', never a branch name.
+    const created = await this.binding.create(name, { ...(branch === 'HEAD' ? {} : { setDefaultBranch: branch }), readOnly: false, description: `GitSpace machine-seeded project ${projectId} (${branch})` })
+      .catch((error: unknown) => {
+        // A concurrent seed or cloud import created it first; it is not ours to initialize.
+        if (ArtifactsAlreadyExistsSchema.safeParse(error).success) return null;
+        throw error;
+      });
+    if (created === null) return this.info(name);
     const repo = await this.binding.get(name);
     try {
       await repo.revokeToken(created.token);

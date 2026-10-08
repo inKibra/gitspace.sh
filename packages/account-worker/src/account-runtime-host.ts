@@ -27,6 +27,23 @@ export async function ensureRuntimeCodeRepository(env: Env, userId: string, iden
   return code.forkWorkspace(project.id, identity.workspaceId);
 }
 
+/** Resolves the workspace branch ref once its code repository exists. A failed preparation
+ * is not cached: an import waiting on a machine seed succeeds on a later call. */
+export function runtimeWorkspaceCodeRef(env: Env, identity: RuntimeIdentity): () => Promise<string> {
+  const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+  let codeReady: Promise<unknown> | undefined;
+  return async () => {
+    codeReady ??= ensureRuntimeCodeRepository(env, env.ACCOUNT_ID, identity).catch((error: unknown) => {
+      codeReady = undefined;
+      throw error;
+    });
+    await codeReady;
+    const workspace = (await project.listWorkspaces()).find(item => item.id === identity.workspaceId);
+    if (!workspace) throw new Error('Canonical workspace code source is unavailable');
+    return `refs/heads/${workspace.branch}`;
+  };
+}
+
 /** The SpaceAuthority actor supplies storage and its coalesced outbox/runtime alarm. */
 export async function createAccountWorkspaceRuntime(
   ctx: DurableObjectState,
@@ -54,14 +71,7 @@ export async function createAccountWorkspaceRuntime(
   };
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   const repository = artifactsWorkspaceRepository(identity.workspaceId);
-  let codeReady: Promise<unknown> | undefined;
-  const ref = async () => {
-    codeReady ??= ensureRuntimeCodeRepository(env, env.ACCOUNT_ID, identity);
-    await codeReady;
-    const workspace = (await project.listWorkspaces()).find(item => item.id === identity.workspaceId);
-    if (!workspace) throw new Error('Canonical workspace code source is unavailable');
-    return `refs/heads/${workspace.branch}`;
-  };
+  const ref = runtimeWorkspaceCodeRef(env, identity);
   const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   let runtime: WorkspaceRuntime | undefined;

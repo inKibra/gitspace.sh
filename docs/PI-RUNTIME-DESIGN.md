@@ -359,7 +359,7 @@ For Pass 12, the owner reports that the real-service lookup checks and live chec
 ### 9.2 Layout
 
 - **Namespace per tenant**, bound to the tenant Worker by the platform deployer alongside the tenant's R2 bucket.
-- **Project repo:** imported from the project's origin.
+- **Project repo:** imported from the project's origin by the binding's one-shot `import`, which refuses private origins (`REMOTE_AUTH_REQUIRED`) and origins over its 40 MB limit (`MEMORY_LIMIT`). For those, the user opens the project on a connected machine. A machine that clones an imported project, at creation or first open, seeds the repository itself. Only the open holder of the project's base space can lease `project-<projectId>`; the Worker creates it empty, with no import and no initial commit. The machine publishes the base branch's full history in bounded packs before the base space's first checkpoint and never moves an existing branch. Until that branch exists, cloud runtimes report the import as pending and retry on the next request.
 - **Workspace repo:** a fork of the project repo; machines receive short-lived write tokens for that fork only, minted by the Workspace DO.
 - **Account storage ceiling:** all tenants share the platform account's 1 TB; request an increase before scale.
 

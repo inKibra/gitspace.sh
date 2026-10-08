@@ -343,7 +343,11 @@ export class CloudFileStore {
     const { input, fence, previous } = pending;
     const lease = this.storage.sql.exec<{ fence: number; attempt: string | null }>('SELECT fence,attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
     if (lease?.attempt !== input.attemptId || lease.fence !== fence) throw new Error('Cloud writer fence is stale');
-    const written = await this.code.writeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous, mutations: pending.mutations.map(mutation => ({ path: mutation.path, content: mutation.content === null ? null : new TextEncoder().encode(mutation.content) })) });
+    // Derived only from the durable pending record, so a recovered publication reproduces the same commit.
+    const supplied = input.tool === 'write' ? RuntimeWriteArgumentsSchema.parse(input.args).message : input.tool === 'edit' ? RuntimeEditArgumentsSchema.parse(input.args).message : input.tool === 'apply_patch' ? ApplyPatchArgumentsSchema.parse(input.args).message : undefined;
+    const changed = [...new Set(pending.mutations.map(mutation => mutation.path))];
+    const subject = supplied ?? `${input.tool} ${changed.length <= 3 ? changed.join(', ') : `${changed.slice(0, 3).join(', ')} and ${changed.length - 3} more`}`;
+    const written = await this.code.writeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous, message: `${subject}\n\nGitSpace-Tool: ${input.tool}\n`, mutations: pending.mutations.map(mutation => ({ path: mutation.path, content: mutation.content === null ? null : new TextEncoder().encode(mutation.content) })) });
     if (written.isErr()) {
       if (written.error.certainty === 'unknown') throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: written.error.message });
       const failed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: written.error.message }], error: { code: 'HOST_OPERATION_FAILED', message: written.error.message } };
