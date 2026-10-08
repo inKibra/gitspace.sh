@@ -5,7 +5,7 @@ import {
   RuntimeWatchEventSchema, RuntimeActionResultSchema,
 } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema, AgentDefinitionDiagnosticSchema } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeQaActionResultSchema, RuntimeCachePolicyInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeQaActionResultSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentRequestResultSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema, RuntimeCacheActionInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeDraftSaveInputSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema, RuntimeServiceResultSchema } from '@gitspace/protocol-runtime/services';
@@ -288,6 +288,7 @@ export const UserSettingsViewCodec = wire.object({
   profile: wire.object({ displayName: wire.string, handle: wire.nullable(wire.string) }),
   git: wire.object({ authorName: wire.string, authorEmail: wire.string }),
   defaults: wire.object({ machineId: wire.nullable(wire.string), enterAction: wire.enum(['queue', 'steer']), appearance: wire.enum(['system', 'light', 'dark']) }),
+  machines: wire.object({ cacheReclaimSeconds: wire.number }),
   updatedAt: wire.string,
   updatedBy: wire.string,
 });
@@ -627,10 +628,6 @@ export const runtimeCacheActionContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeCacheActionInputSchema, 'gitspace/runtime-cache-action/v1'))
   .output(runtimeWire(RuntimeAttachmentRequestResultSchema, 'gitspace/runtime-attachment-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
-export const runtimeCachePolicyContract = gitspaceRpc.procedure()
-  .input(runtimeWire(RuntimeCachePolicyInputSchema, 'gitspace/runtime-cache-policy/v1'))
-  .output(runtimeWire(RuntimeActionResultSchema, 'gitspace/runtime-action/v1'))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const runtimeDraftContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeDraftSaveInputSchema, 'gitspace/runtime-draft-save/v1'))
   .output(runtimeWire(WorkspaceDraftSaveResultSchema, 'gitspace/runtime-draft-result/v1'))
@@ -791,6 +788,7 @@ export const updateUserSettingsContract = gitspaceRpc
     profile: wire.object({ displayName: wire.string, handle: wire.nullable(wire.string) }),
     git: wire.object({ authorName: wire.string, authorEmail: wire.string }),
     defaults: wire.object({ machineId: wire.nullable(wire.string), enterAction: wire.enum(['queue', 'steer']), appearance: wire.enum(['system', 'light', 'dark']) }),
+    machines: wire.object({ cacheReclaimSeconds: wire.number }),
   }))
   .output(UserSettingsViewCodec)
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed })
@@ -2224,7 +2222,6 @@ export const gitspaceContract = gitspaceRpc.contract({
     services: runtimeServicesContract,
     executionMachine: runtimeExecutionMachineContract,
     qa: runtimeQaContract,
-    cachePolicy: runtimeCachePolicyContract,
     attachment: { request: runtimeAttachmentRequestContract, cache: { request: runtimeCacheAttachmentRequestContract }, action: runtimeCacheActionContract, detach: runtimeAttachmentDetachRequestContract },
   },
   transcript: transcriptContract,

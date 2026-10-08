@@ -24,7 +24,7 @@ export const RuntimeCacheObservationSchema = z.object({
   lastActivityAt: z.iso.datetime(), pausedAt: z.iso.datetime().nullable(), reclaimAt: z.iso.datetime().nullable(), lastSyncAt: z.iso.datetime().nullable(),
   localWorkOptIn: z.boolean(),
   reclaimBlocked: z.string().nullable().default(null),
-  setup: z.array(z.object({ phase: z.enum(['machine/prepare', 'checks', 'workspace/materialize']), state: z.enum(['pending', 'waiting-for-approval', 'running', 'succeeded', 'failed']), runId: z.string().nullable() })),
+  setup: z.array(z.object({ phase: z.enum(['machine/prepare', 'checks', 'workspace/materialize']), state: z.enum(['pending', 'waiting-for-approval', 'running', 'succeeded', 'failed']), runId: z.string().nullable(), error: z.string().max(2000).nullable().default(null) })),
 });
 export const RuntimeCachePolicySchema = z.object({ idleGraceSeconds: z.number().int().nonnegative().default(900), reclaimSeconds: z.number().int().nonnegative().default(86400) });
 export const RuntimeCacheActionSchema = z.object({ requestId: z.string().min(1), action: z.enum(['setup', 'reclaim']), status: z.enum(['requested', 'running', 'completed', 'failed']), error: z.string().nullable(), discardHeldBack: z.boolean().optional() });

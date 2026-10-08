@@ -30,6 +30,21 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     expect(readFileSync(join(checkout, 'marker'), 'utf8')).toBe('materialized');
   }, 20_000);
 
+  it('cancels a cache lifecycle run by its checkout without a held space', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-cancel-'));
+    roots.push(root);
+    const checkout = join(root, 'workspace');
+    mkdirSync(checkout, { recursive: true });
+    const coordinator = new WorkspaceHubTerminalCoordinator(new GitSpaceDatabase(join(root, 'gitspace.db')), 'machine-a');
+    const started = Promise.withResolvers<void>();
+    const execution = coordinator.runLifecyclePlan('cloud-workspace', 'workspace/materialize', [{
+      id: 'wait', kind: 'script', command: '/approved/wait.sh', content: 'sleep 30',
+    }], { PATH: process.env.PATH ?? '' }, { directory: checkout, runId: 'cache-cancel', onStarted: async () => started.resolve() });
+    await started.promise;
+    await coordinator.cancelLifecycleRun('cloud-workspace', 'life-cache-cancel', checkout);
+    expect((await execution).exitCode).not.toBe(0);
+  }, 20_000);
+
   it('creates, attaches, writes, and stops a real GitSpace supervisor PTY', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-'));
     roots.push(root);

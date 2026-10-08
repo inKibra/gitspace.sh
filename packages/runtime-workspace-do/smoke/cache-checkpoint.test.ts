@@ -33,7 +33,7 @@ for (const scenario of ['source', 'empty', 'unborn']) test(`first cache reaches 
     worker = new Miniflare({
       modules: await wranglerWorkerModules(join(directory, 'bundle'), 'cache-checkpoint-fixture.js'), modulesRoot: join(directory, 'bundle'),
       compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], bindings: { ACCOUNT_ID: 'account' },
-      durableObjects: { PROOF: { className: 'CacheCheckpointProof', useSQLite: true }, SPACE_AUTHORITY: { className: 'CacheCheckpointProof', useSQLite: true }, PROJECT_AUTHORITY: { className: 'CheckpointMetadata', useSQLite: true }, FLEET_CATALOG: { className: 'CheckpointMetadata', useSQLite: true }, CREDENTIALS: { className: 'CheckpointMetadata', useSQLite: true } },
+      durableObjects: { PROOF: { className: 'CacheCheckpointProof', useSQLite: true }, SPACE_AUTHORITY: { className: 'CacheCheckpointProof', useSQLite: true }, PROJECT_AUTHORITY: { className: 'CheckpointMetadata', useSQLite: true }, FLEET_CATALOG: { className: 'CheckpointMetadata', useSQLite: true }, CREDENTIALS: { className: 'CheckpointMetadata', useSQLite: true }, USER_SETTINGS: { className: 'UserSettingsDO', useSQLite: true } },
       outboundService: () => { throw new Error('Live provider access forbidden'); },
     });
     const response = await worker.dispatchFetch(`http://proof/${scenario}`, { method: 'POST', body: JSON.stringify(checkpoint) });

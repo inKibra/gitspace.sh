@@ -11,6 +11,7 @@ const settings = {
   profile: { displayName: 'Brad', handle: 'brad' },
   git: { authorName: 'Brad', authorEmail: 'brad@example.com' },
   defaults: { machineId: 'local-machine', enterAction: 'steer' as const, appearance: 'system' as const },
+  machines: { cacheReclaimSeconds: 86400 },
   updatedAt: new Date().toISOString(),
   updatedBy: 'local-machine',
 };

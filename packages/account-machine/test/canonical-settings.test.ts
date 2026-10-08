@@ -5,7 +5,7 @@ import { CanonicalSettingsConflict, CanonicalSettingsCoordinator, type Canonical
 
 function cloudSettings(): CanonicalSettingsCloud {
   let document: RuntimeConfigDocument = { generation: 0, content: '{}', checksum: `sha256:${createHash('sha256').update('{}').digest('hex')}`, updatedAt: new Date(0).toISOString(), updatedBy: 'cloud' };
-  const user: UserSettings = { version: 1, revision: 0, onboardingComplete: false, profile: { displayName: '', handle: null }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, updatedAt: new Date(0).toISOString(), updatedBy: 'cloud' };
+  const user: UserSettings = { version: 1, revision: 0, onboardingComplete: false, profile: { displayName: '', handle: null }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, machines: { cacheReclaimSeconds: 86400 }, updatedAt: new Date(0).toISOString(), updatedBy: 'cloud' };
   return {
     async getUserSettings() { return user; },
     async updateUserSettings(input) { return { ...user, ...input, revision: user.revision + 1 }; },

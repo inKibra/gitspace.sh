@@ -25,6 +25,7 @@ describe('canonical user settings', () => {
       profile: { displayName: 'Brad', handle: null },
       git: { authorName: 'Brad', authorEmail: 'brad@example.com' },
       defaults: { machineId: 'machine-a', enterAction: 'steer', appearance: 'system' },
+      machines: { cacheReclaimSeconds: 86400 },
     });
     expect(result).toMatchObject({ status: 'ok', value: { revision: 1, onboardingComplete: true, updatedBy: 'machine-a' } });
     expect(await stub.update('machine-b', {
@@ -33,7 +34,17 @@ describe('canonical user settings', () => {
       profile: { displayName: '', handle: null },
       git: { authorName: '', authorEmail: '' },
       defaults: { machineId: null, enterAction: 'queue', appearance: 'system' },
+      machines: { cacheReclaimSeconds: 86400 },
     })).toEqual({ status: 'conflict', resource: 'user-settings', expected: 0, actual: 1 });
+  });
+
+  it('reads settings stored before account machine settings existed with the 24 hour cache default', async () => {
+    const stub = settingsStub(`legacy-${crypto.randomUUID()}`);
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec('INSERT INTO user_settings(id, revision, settings_json, updated_at, updated_by) VALUES (1, 4, ?, ?, ?)',
+        JSON.stringify({ version: 1, onboardingComplete: true, profile: { displayName: 'Brad', handle: null }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'dark' } }), new Date(0).toISOString(), 'machine-a');
+    });
+    expect(await stub.get('machine-a')).toMatchObject({ revision: 4, defaults: { appearance: 'dark' }, machines: { cacheReclaimSeconds: 86400 } });
   });
 
   it('stores runtime configuration and rejects stale generations and invalid checksums', async () => {

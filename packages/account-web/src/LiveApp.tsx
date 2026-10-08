@@ -1027,6 +1027,7 @@ function GitSpaceProduct() {
         profile: { displayName: next.profile.displayName, handle: current.profile.handle },
         git: next.git,
         defaults: next.defaults,
+        machines: next.machines,
       });
       if (updated.status === 'error') throw updated.error;
       setDraft({ ...updated.value });

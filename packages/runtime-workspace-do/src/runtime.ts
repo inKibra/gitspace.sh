@@ -9,7 +9,7 @@ import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, type AttachmentServices } from './attachments.js';
 import { createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeSessionCommand, RuntimeSessionResult, TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, RuntimeExecutionDocumentSchema, RuntimeMachineIdSchema, RuntimeCachePolicySchema, type RuntimeCachePolicy, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
+import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, RuntimeExecutionDocumentSchema, RuntimeMachineIdSchema, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { createCronRuntime, type RuntimeCronInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord';
@@ -38,8 +38,6 @@ export type WorkspaceRuntime = {
   session(conversationId: string | undefined, command: RuntimeSessionCommand, canApprove?: boolean, deviceId?: string): Promise<RuntimeSessionResult>;
   setExecutionMachine(machineId: string | null): Promise<void>;
   defaultExecutionMachine(): string | null;
-  cachePolicy(): RuntimeCachePolicy;
-  setCachePolicy(reclaimSeconds: number): Promise<void>;
   waitForSnapshot(commit: string): Promise<void>;
   cacheReady(attachmentId: string, generation: number): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
@@ -64,7 +62,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const { harness } = runtime;
   const attachments = new AttachmentStore(options.storage, options.attachments);
   const execution = RuntimeExecutionDocumentSchema.parse(await options.storage.get('runtime.execution') ?? { defaultMachineId: null });
-  const cachePolicy = RuntimeCachePolicySchema.parse(await options.storage.get('runtime.cachePolicy') ?? {});
   const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.lfs, async (checkpoint, publicationId) => {
     try { await options.retainLfs(checkpoint, publicationId); }
     catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
@@ -273,7 +270,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     const workspace = await harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT);
     const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
-    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.execution': execution, 'gitspace.draft': drafts.snapshot(), cachePolicy } });
+    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.execution': execution, 'gitspace.draft': drafts.snapshot() } });
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops: diffRevisions(snapshot, next) });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
@@ -397,12 +394,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       return result;
     },
     defaultExecutionMachine: () => execution.defaultMachineId,
-    cachePolicy: () => cachePolicy,
-    async setCachePolicy(reclaimSeconds) {
-      cachePolicy.reclaimSeconds = RuntimeCachePolicySchema.shape.reclaimSeconds.parse(reclaimSeconds);
-      await options.storage.put('runtime.cachePolicy', cachePolicy);
-      publish(); await line;
-    },
     async cacheReady(attachmentId, generation) {
       const attachment = attachments.list().find(item => item.attachmentId === attachmentId && item.generation === generation && item.state === 'ready');
       if (!attachment?.lfsRestored?.length) return;

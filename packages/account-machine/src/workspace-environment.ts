@@ -296,7 +296,7 @@ export class WorkspaceEnvironmentManager {
     for (const phase of ['machine/prepare', 'checks', 'workspace/materialize'] as const) {
       signal.throwIfAborted();
       const runId = `attachment:${attachmentId}:${generation}:${local.attachment.cacheAction?.action === 'setup' ? `${local.attachment.cacheAction.requestId}:` : ''}${phase}`;
-      await progress?.({ phase, state: 'running', runId });
+      await progress?.({ phase, state: 'running', runId, error: null });
       let cancellation: Promise<unknown> | undefined;
       const cancel = () => { cancellation ??= this.authority.mutateLifecycleState(projectId, workspaceId, { op: 'cancel', runId }); void cancellation.catch(() => {}); };
       signal.addEventListener('abort', cancel, { once: true });
@@ -307,10 +307,11 @@ export class WorkspaceEnvironmentManager {
         }, local);
         if (results.some(result => result.exitCode !== 0)) throw new EnvironmentError('ExecutionFailed', 'Attachment preparation failed', { attachmentId, phase });
         signal.throwIfAborted();
-        await progress?.({ phase, state: 'succeeded', runId });
+        await progress?.({ phase, state: 'succeeded', runId, error: null });
       } catch (error) {
         const waiting = error instanceof EnvironmentError && ['ApprovalRequired', 'RunConflict'].includes(error.code);
-        await progress?.({ phase, state: waiting ? 'waiting-for-approval' : 'failed', runId });
+        const message = error instanceof Error ? error.message : String(error);
+        await progress?.({ phase, state: waiting ? 'waiting-for-approval' : 'failed', runId, error: message.slice(0, 2000) });
         throw error;
       } finally {
         signal.removeEventListener('abort', cancel);

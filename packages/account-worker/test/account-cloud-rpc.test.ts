@@ -583,7 +583,7 @@ describe('account cloud RPC without machines', () => {
     const before = await env.USER_SETTINGS.getByName(fixture.userId).get('check');
     const denied = await SELF.fetch(fixture.request({ v: 1, batch: [
       { ...single('settings.get'), id: 'read' },
-      { ...single('settings.update', { expectedRevision: before.revision, onboardingComplete: true, profile: before.profile, git: before.git, defaults: before.defaults }), id: 'write' },
+      { ...single('settings.update', { expectedRevision: before.revision, onboardingComplete: true, profile: before.profile, git: before.git, defaults: before.defaults, machines: before.machines }), id: 'write' },
     ] }));
     expect(denied.status).toBe(403);
     expect((await env.USER_SETTINGS.getByName(fixture.userId).get('check')).onboardingComplete).toBe(false);
@@ -649,7 +649,7 @@ describe('account routing of machine work', () => {
 
   it('keeps cloud runtime work on the account even while a machine holds the space', async () => {
     const { fixture, held, reached } = await fleet();
-    for (const path of ['runtime.draft', 'runtime.cachePolicy', 'runtime.attachment.detach']) {
+    for (const path of ['runtime.draft', 'runtime.attachment.detach']) {
       await SELF.fetch(fixture.request(single(path, { projectId: held.projectId, workspaceId: held.spaceId })));
     }
     expect(reached).toEqual([]);

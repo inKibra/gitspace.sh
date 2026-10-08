@@ -9,7 +9,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   "runtime.snapshot": { readOnlyHint: true, openWorldHint: false },
   "runtime.watch": { readOnlyHint: true, openWorldHint: false },
   "runtime.draft": { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-  "runtime.cachePolicy": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   "runtime.attachment.action": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   "runtime.submit": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   "runtime.cancel": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },

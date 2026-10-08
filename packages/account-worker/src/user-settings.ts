@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { parseDocument, stringify } from 'yaml';
+import { z } from 'zod';
 import {
   extractInferenceSettings,
   inferenceCredentialPaths,
@@ -11,6 +12,7 @@ import {
   runtimeSettingsView,
   setRuntimeSetting,
   stripInferenceSettings,
+  userMachineSettingsSchema,
   userSettingsUpdateSchema,
   type GitIdentityDocument,
   type RuntimeConfigDocument,
@@ -30,8 +32,10 @@ export class SettingsRevisionConflict extends Error {
 export class HandleUnavailable extends Error { constructor(readonly handle: string) { super(`Handle ${handle} is already reserved`); this.name = 'HandleUnavailable'; } }
 export interface SettingsSnapshot { user: UserSettings; runtime: RuntimeConfigDocument; git: Omit<GitIdentityDocument, 'privateKey'> | null; inferenceRevision: number }
 export type SettingsWriteResult<T> = { status: 'ok'; value: T } | { status: 'conflict'; resource: 'user-settings' | 'runtime-config'; expected: number; actual: number };
+/** Rows written before account machine settings existed read as their defaults. */
+const StoredMachineSettingsSchema = z.object({ machines: userMachineSettingsSchema.prefault({}) });
 function defaultSettings(machineId: string): UserSettings {
-  return { version: 1, revision: 0, onboardingComplete: false, profile: { displayName: '', handle: null }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, updatedAt: new Date(0).toISOString(), updatedBy: machineId };
+  return { version: 1, revision: 0, onboardingComplete: false, profile: { displayName: '', handle: null }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, machines: userMachineSettingsSchema.parse({}), updatedAt: new Date(0).toISOString(), updatedBy: machineId };
 }
 async function sha256(content: string): Promise<`sha256:${string}`> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content)));
@@ -126,9 +130,9 @@ export class UserSettingsDO extends DurableObject<Env> {
   get(machineId: string): UserSettings {
     const row = this.ctx.storage.sql.exec<StoredSettingsRow>('SELECT revision, settings_json, updated_at, updated_by FROM user_settings WHERE id = 1').toArray()[0];
     if (!row) return defaultSettings(machineId);
-    const value = JSON.parse(row.settings_json) as Omit<UserSettings, 'revision' | 'updatedAt' | 'updatedBy' | 'defaults'> & { defaults: Partial<UserSettings['defaults']> & Omit<UserSettings['defaults'], 'appearance'> };
+    const value = JSON.parse(row.settings_json) as Omit<UserSettings, 'revision' | 'updatedAt' | 'updatedBy' | 'defaults' | 'machines'> & { defaults: Partial<UserSettings['defaults']> & Omit<UserSettings['defaults'], 'appearance'> };
     // Rows written before `appearance` existed read as the system scheme.
-    return { ...value, defaults: { appearance: 'system', ...value.defaults }, revision: row.revision, updatedAt: row.updated_at, updatedBy: row.updated_by };
+    return { ...value, defaults: { appearance: 'system', ...value.defaults }, machines: StoredMachineSettingsSchema.parse(value).machines, revision: row.revision, updatedAt: row.updated_at, updatedBy: row.updated_by };
   }
   update(machineId: string, input: UserSettingsUpdate): SettingsWriteResult<UserSettings> {
     const parsed = userSettingsUpdateSchema.parse(input);
@@ -136,7 +140,7 @@ export class UserSettingsDO extends DurableObject<Env> {
     if (parsed.expectedRevision !== current.revision) return { status: 'conflict', resource: 'user-settings', expected: parsed.expectedRevision, actual: current.revision };
     const revision = current.revision + 1;
     const updatedAt = new Date().toISOString();
-    const stored = { version: 1 as const, onboardingComplete: parsed.onboardingComplete, profile: parsed.profile, git: parsed.git, defaults: parsed.defaults };
+    const stored = { version: 1 as const, onboardingComplete: parsed.onboardingComplete, profile: parsed.profile, git: parsed.git, defaults: parsed.defaults, machines: parsed.machines };
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(`INSERT INTO user_settings(id, revision, settings_json, updated_at, updated_by) VALUES (1, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, settings_json = excluded.settings_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`, revision, JSON.stringify(stored), updatedAt, machineId);
@@ -150,7 +154,7 @@ export class UserSettingsDO extends DurableObject<Env> {
   setHandle(machineId: string, expectedRevision: number, handle: string): SettingsWriteResult<UserSettings> {
     const current = this.get(machineId);
     if (expectedRevision !== current.revision) return { status: 'conflict', resource: 'user-settings', expected: expectedRevision, actual: current.revision };
-    return this.update(machineId, { expectedRevision, onboardingComplete: current.onboardingComplete, profile: { ...current.profile, handle }, git: current.git, defaults: current.defaults });
+    return this.update(machineId, { expectedRevision, onboardingComplete: current.onboardingComplete, profile: { ...current.profile, handle }, git: current.git, defaults: current.defaults, machines: current.machines });
   }
   private readOmp(): RuntimeConfigDocument {
     const row = this.ctx.storage.sql.exec<StoredOmpRow>('SELECT generation, content, checksum, updated_at, updated_by FROM omp_config WHERE id = 1').toArray()[0];

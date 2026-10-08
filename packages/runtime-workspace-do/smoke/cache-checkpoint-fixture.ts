@@ -4,6 +4,7 @@ import { createModels } from '@earendil-works/pi-ai';
 import { RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime';
 import { bootstrapSpaceAuthority, GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 import { SpaceAuthorityDO } from '../../account-worker/src/space-authority.js';
+export { UserSettingsDO } from '../../account-worker/src/user-settings.js';
 import { createWorkspaceRuntime } from '../src/runtime.js';
 import { CloudFileStore } from '../src/cloud-files.js';
 import { GitLfsRetention } from '../../account-worker/src/git-lfs-retention.js';

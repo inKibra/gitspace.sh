@@ -6,8 +6,8 @@ import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeMachines } from './RuntimeMachines.js';
 
-const rpc = vi.hoisted(() => ({ request: vi.fn(), cache: vi.fn(), action: vi.fn(), cachePolicy: vi.fn(), detach: vi.fn(), executionMachine: vi.fn() }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: { attachment: { request: rpc.request, cache: { request: rpc.cache }, action: rpc.action, detach: rpc.detach }, executionMachine: rpc.executionMachine, cachePolicy: rpc.cachePolicy } } }));
+const rpc = vi.hoisted(() => ({ request: vi.fn(), cache: vi.fn(), action: vi.fn(), detach: vi.fn(), executionMachine: vi.fn() }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: { attachment: { request: rpc.request, cache: { request: rpc.cache }, action: rpc.action, detach: rpc.detach }, executionMachine: rpc.executionMachine } } }));
 vi.mock('./SynchronizationProvider.js', () => ({ useAccountMachines: () => ({ state: 'success', value: [{ id: 'runner', label: 'Runner workstation', state: 'online' }], refetch: vi.fn() }) }));
 const stamp = '2026-10-03T00:00:00.000Z';
 const commit = 'a'.repeat(40);
@@ -163,6 +163,17 @@ it('shows paused cache and setup approval blockers beside its machine without re
   expect(rpc.action).toHaveBeenLastCalledWith(expect.objectContaining({ attachmentId: 'cache', generation: 4, action: { kind: 'reclaim' } }));
   await act(() => container.querySelector<HTMLInputElement>('[aria-label="Work locally on Runner workstation"]')!.click());
   expect(rpc.action).toHaveBeenLastCalledWith(expect.objectContaining({ attachmentId: 'cache', generation: 4, action: { kind: 'local-work', enabled: true } }));
+});
+
+it('shows why a machine setup step failed', async () => {
+  const snapshot = fixture();
+  snapshot.attachments.push(RuntimeSnapshotSchema.shape.attachments.element.parse({
+    projectId: 'project', workspaceId: 'workspace', attachmentId: 'cache', machineId: 'runner', generation: 4,
+    role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: [], updatedAt: stamp, heartbeatAt: stamp,
+    cache: { state: 'setup', platform: 'linux', activity: [], lastActivityAt: stamp, pausedAt: null, reclaimAt: null, lastSyncAt: stamp, localWorkOptIn: false, setup: [{ phase: 'machine/prepare', state: 'failed', runId: null, error: 'Workspace Hub lifecycle execution is unavailable' }] },
+  }));
+  await act(() => root.render(<RuntimeMachines snapshot={snapshot} />));
+  expect(container.querySelector('[aria-label="Machine setup progress"] [role="status"]')?.textContent).toBe('Workspace Hub lifecycle execution is unavailable');
 });
 
 

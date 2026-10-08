@@ -478,9 +478,10 @@ export class WorkspaceHubTerminalCoordinator {
   }
 
   async cancelLifecycleRun(spaceId: string, terminalName: string, directory?: string): Promise<void> {
-    const space = this.database.getSpace(spaceId);
-    if (!space) throw new WorkspaceHubSpaceUnavailable(spaceId);
-    const client = await this.clientForProject(directory ?? space.rootPath);
+    // Cache and recovery runs name their checkout; only runs in a held legacy space need the local space record.
+    const root = directory ?? this.database.getSpace(spaceId)?.rootPath;
+    if (!root) throw new WorkspaceHubSpaceUnavailable(spaceId);
+    const client = await this.clientForProject(root);
     const listed = await client.request({ op: 'list' });
     if (listed.op !== 'list') throw new Error('Unable to verify lifecycle runner existence');
     if (!listed.daemons.some((daemon) => daemon.name === terminalName)) return;

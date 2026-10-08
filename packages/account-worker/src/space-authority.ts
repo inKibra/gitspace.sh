@@ -3,14 +3,14 @@ import { abortSpaceClose, beginSpaceClose, beginSpaceOpen, bootstrapSpaceAuthori
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
-import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeCachePolicySchema, RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema } from '@gitspace/protocol-runtime/services';
 import { runtimeServiceControl } from './runtime-service-control.js';
-import { RuntimeGitCheckpointSchema, RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema, RuntimeCachePolicyInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeGitCheckpointSchema, RuntimeExecutionMachineInputSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema, RuntimeCacheActionInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
@@ -233,13 +233,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return result;
   }
 
-  async runtimeCachePolicy(raw: unknown) {
-    const input = RuntimeCachePolicyInputSchema.parse(raw);
-    const runtime = await this.getRuntime(input);
-    await runtime.setCachePolicy(input.reclaimSeconds);
-    return { accepted: true as const, cursor: (await runtime.snapshot()).cursor };
-  }
-
   async runtimeAttachmentDetachRequest(raw: unknown) {
     const input = RuntimeAttachmentDetachRequestInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
@@ -258,7 +251,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       await runtime.waitForSnapshot(input.afterSnapshot);
     }
     const result = await (await this.attachmentController(identity)).assignments(input);
-    const cachePolicy = (await this.getRuntime(identity)).cachePolicy();
+    if (!result.assignments.length) return { assignments: [] };
+    // One account-wide policy governs every workspace cache; machines receive it with each assignment.
+    const { machines } = await this.env.USER_SETTINGS.getByName(this.env.ACCOUNT_ID).get('runtime-assignments');
+    const cachePolicy = RuntimeCachePolicySchema.parse({ reclaimSeconds: machines.cacheReclaimSeconds });
     return { assignments: result.assignments.map(assignment => ({ ...assignment, cachePolicy })) };
   }
 

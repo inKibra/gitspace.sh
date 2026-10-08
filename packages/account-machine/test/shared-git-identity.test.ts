@@ -42,6 +42,7 @@ describe('shared Git identity', () => {
       profile: { displayName: 'Brad', handle: 'brad' },
       git: { authorName: 'Brad', authorEmail: 'brad@example.com' },
       defaults: { machineId: null, enterAction: 'queue', appearance: 'system' },
+      machines: { cacheReclaimSeconds: 86400 },
       updatedAt: new Date().toISOString(),
       updatedBy: 'machine-a',
     };
@@ -72,6 +73,7 @@ describe('shared Git identity', () => {
       profile: { displayName: 'Brad', handle: 'brad' },
       git: { authorName, authorEmail: 'brad@example.com' },
       defaults: { machineId: null, enterAction: 'queue', appearance: 'system' },
+      machines: { cacheReclaimSeconds: 86400 },
       updatedAt: new Date().toISOString(),
       updatedBy: 'machine-a',
     });

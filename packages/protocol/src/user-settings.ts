@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RuntimeCachePolicySchema } from '@gitspace/protocol-runtime';
 
 export const userProfileSettingsSchema = z.object({
   displayName: z.string().trim().max(160),
@@ -17,6 +18,11 @@ export const userDefaultSettingsSchema = z.object({
   appearance: z.enum(['system', 'light', 'dark']).default('system'),
 });
 
+export const userMachineSettingsSchema = z.object({
+  /** Seconds a paused machine cache is retained before safe reclamation, for every workspace. */
+  cacheReclaimSeconds: RuntimeCachePolicySchema.shape.reclaimSeconds,
+});
+
 export const userSettingsSchema = z.object({
   version: z.literal(1),
   revision: z.number().int().nonnegative(),
@@ -24,6 +30,7 @@ export const userSettingsSchema = z.object({
   profile: userProfileSettingsSchema,
   git: userGitSettingsSchema,
   defaults: userDefaultSettingsSchema,
+  machines: userMachineSettingsSchema,
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1).max(160),
 });
@@ -35,6 +42,7 @@ export const userSettingsUpdateSchema = z.object({
   profile: userProfileSettingsSchema,
   git: userGitSettingsSchema,
   defaults: userDefaultSettingsSchema,
+  machines: userMachineSettingsSchema,
 });
 export type UserSettingsUpdate = z.infer<typeof userSettingsUpdateSchema>;
 

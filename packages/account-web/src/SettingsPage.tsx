@@ -9,7 +9,7 @@ import type { McpAccessView } from '@gitspace/protocol/mcp-access';
 import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { rpcClient } from './rpc-client.js';
-import type { RuntimeAccountBrowserRelayStatus } from '@gitspace/protocol-runtime';
+import { RuntimeCachePolicySchema, type RuntimeAccountBrowserRelayStatus } from '@gitspace/protocol-runtime';
 import { pairAccountBrowser, confirmAccountBrowser } from './browser-relay-client.js';
 import {
   Accordion,
@@ -693,7 +693,10 @@ function CloudImagePicker({ value, onChange }: { value: CloudImageSelection; onC
   </div>;
 }
 
-export function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControlMachine, onDestroyMachine, cloudImages, cloudImageDefault, cloudImageError, onChangeCloudImage, onRecoverCloudImage, onSetCloudImageDefault }: Pick<SettingsPageProps, 'machines' | 'onUpdateMachine' | 'onCreateSandbox' | 'onControlMachine' | 'onDestroyMachine' | 'cloudImages' | 'cloudImageDefault' | 'cloudImageError' | 'onChangeCloudImage' | 'onRecoverCloudImage' | 'onSetCloudImageDefault'>) {
+/** Account-wide retention choices for paused machine caches: 1, 6, 24, 72, and 168 hours. */
+const CACHE_RECLAIM_SECONDS: readonly number[] = [3600, 21600, 86400, 259200, 604800];
+const CACHE_IDLE_MINUTES = RuntimeCachePolicySchema.parse({}).idleGraceSeconds / 60;
+export function MachineSettings({ settings, onChange, machines, onUpdateMachine, onCreateSandbox, onControlMachine, onDestroyMachine, cloudImages, cloudImageDefault, cloudImageError, onChangeCloudImage, onRecoverCloudImage, onSetCloudImageDefault }: Pick<SettingsPageProps, 'settings' | 'onChange' | 'machines' | 'onUpdateMachine' | 'onCreateSandbox' | 'onControlMachine' | 'onDestroyMachine' | 'cloudImages' | 'cloudImageDefault' | 'cloudImageError' | 'onChangeCloudImage' | 'onRecoverCloudImage' | 'onSetCloudImageDefault'>) {
   const shape = useShape();
   const [setup, setSetup] = useState(false);
   const [sandboxSetup, setSandboxSetup] = useState(false);
@@ -725,6 +728,9 @@ export function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, on
     }
     finally { operationPending.current = false; setPending(null); }
   };
+  const reclaimSeconds = settings.machines.cacheReclaimSeconds;
+  // A value set outside these choices (for example through MCP) stays visible rather than silently displaying another option.
+  const reclaimChoices = CACHE_RECLAIM_SECONDS.includes(reclaimSeconds) ? CACHE_RECLAIM_SECONDS : [...CACHE_RECLAIM_SECONDS, reclaimSeconds].sort((left, right) => left - right);
   return <>
     {cloudImageError || actionError ? <p role="alert" className="text-caption text-destructive">{actionError ?? cloudImageError}</p> : null}
     <Group title="Cloud image default">
@@ -732,6 +738,11 @@ export function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, on
       <p className="break-all font-mono text-caption">{cloudImageDefault?.image ?? 'Loading pinned account image…'}</p>
       <Button variant="secondary" disabled={pending !== null} onClick={() => { setImageTarget('default'); setSelection({ kind: 'platform-default' }); }}>Choose account image</Button>
     </Group>
+    <Group title="Paused caches"><SettingRows>
+      <SettingRow title="Reclaim paused caches after" description={`Applies to every workspace. Caches pause after ${CACHE_IDLE_MINUTES} idle minutes. Reclamation waits for safe final publication; low disk may reclaim earlier.`}>
+        <Select value={String(reclaimSeconds)} onValueChange={(value) => onChange(replace(settings, 'machines', { ...settings.machines, cacheReclaimSeconds: Number(value) }))}><SelectTrigger aria-label="Reclaim paused caches after" />{selectOptions(reclaimChoices.map((seconds) => ({ value: String(seconds), label: seconds === 3600 ? '1 hour' : `${seconds / 3600} hours` })))}</Select>
+      </SettingRow>
+    </SettingRows></Group>
     <Group title="Your machines">
       <p className="text-caption text-muted-foreground">Cloud machines are temporary. Stop saves supported workspace state before discarding the machine disk. Start runs a fresh machine environment and restores saved workspaces, not installed packages or machine-local configuration.</p>
       <p className="text-caption text-muted-foreground">GitSpace does not save ignored files or other files outside its workspace checkpoints, including files in the machine&apos;s home directory. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Bake persistent tools into your selected image.</p>

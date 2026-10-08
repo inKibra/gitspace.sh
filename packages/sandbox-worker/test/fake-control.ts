@@ -23,7 +23,7 @@ Bun.serve({
     let value: unknown;
     switch (body.operation) {
       case 'settings.runtime.get': value = { generation: 0, content: '', checksum: 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', updatedAt: new Date(0).toISOString(), updatedBy: 'fixture' }; break;
-      case 'settings.get': value = { version: 1, revision: 0, onboardingComplete: false, profile: { displayName: '', handle: null }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, updatedAt: new Date(0).toISOString(), updatedBy: 'fixture' }; break;
+      case 'settings.get': value = { version: 1, revision: 0, onboardingComplete: false, profile: { displayName: '', handle: null }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, machines: { cacheReclaimSeconds: 86400 }, updatedAt: new Date(0).toISOString(), updatedBy: 'fixture' }; break;
       case 'settings.git.get': value = gitIdentity; break;
       case 'settings.git.update': gitIdentity = { ...payload, generation: 1, updatedAt: new Date().toISOString(), updatedBy: body.machineId ?? 'sandbox' }; delete gitIdentity.expectedGeneration; value = gitIdentity; break;
       case 'storage.binding': value = { bucket: 'gitspace-test', endpoint: 'http://host.docker.internal:9000', region: 'us-east-1' }; break;

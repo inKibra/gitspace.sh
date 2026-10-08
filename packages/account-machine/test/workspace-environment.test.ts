@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
 import { cloudWorkspaceDefinitionSchema, type CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { transitionLifecycle, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunRecord } from '@gitspace/protocol-environment';
+import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
 import { WorkspaceEnvironmentManager, type EnvironmentLifecycleRunner } from '../src/workspace-environment.js';
 
 const roots: string[] = [];
@@ -299,5 +300,15 @@ printf '%s' "$GITSPACE_LIFECYCLE_OUTPUT" > run-output-path.txt
     expect(existsSync(accidentalProvision)).toBeFalse();
     expect(context.database.getSpace('workspace-a')?.placementState).toBe('closed');
     expect(existsSync(context.checkout)).toBeFalse();
+  });
+
+  it('reports why a cache setup step failed', async () => {
+    const context = fixture("printf 'toolchain missing' >&2; exit 3\n", 'machine/prepare');
+    await approveActive(context.manager, context.ledger);
+    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache', machineId: 'machine-a', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'feature' }, state: 'attaching', capabilities: [], updatedAt: new Date().toISOString() });
+    const steps: Array<{ phase: string; state: string; error: string | null }> = [];
+    const failure = await context.manager.prepareAttachment({ attachment, rootPath: context.checkout, executionSecret: 'secret', prerequisitesComplete: false }, new AbortController().signal, async (step) => { steps.push({ phase: step.phase, state: step.state, error: step.error }); }).then(() => null, (error: unknown) => error);
+    if (!(failure instanceof Error)) throw new Error('Cache setup unexpectedly succeeded');
+    expect(steps.at(-1)).toEqual({ phase: 'machine/prepare', state: 'failed', error: failure.message });
   });
 });

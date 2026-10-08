@@ -3,7 +3,7 @@ import {
   runtimeSnapshotContract, runtimeSubmitContract, runtimeCancelContract,
   runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract,
   runtimeExecutionMachineContract, runtimeQaContract, runtimeAttachmentRequestContract, runtimeCacheAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
-  runtimeBrowserTrustContract, runtimeCacheActionContract, runtimeCachePolicyContract, runtimeDraftContract,
+  runtimeBrowserTrustContract, runtimeCacheActionContract, runtimeDraftContract,
   runtimeServicesContract,
 } from '@gitspace/protocol/rpc-contract';
 import { RuntimeIdentitySchema, RuntimeWatchEventSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
@@ -155,12 +155,6 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(await authority.runtimeCacheAction(input));
     } catch (error) { return err(errors.OperationFailed({ operation: 'request cache action', message: message(error) })); }
   });
-  const cachePolicy = server.implement(runtimeCachePolicyContract).handler(async ({ input, errors }) => {
-    try {
-      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
-      return ok(await authority.runtimeCachePolicy(input));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'configure cache policy', message: message(error) })); }
-  });
   const watch = server.implement(runtimeWatchContract).stream(async function* ({ input, signal, errors }) {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.read');
@@ -172,5 +166,5 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'watch cloud runtime', message: message(error) }));
     }
   });
-  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, executionMachine, qa, cachePolicy, attachment: { request: requestAttachment, cache: { request: requestCacheAttachment }, action: cacheAction, detach: detachAttachment }, watch };
+  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, executionMachine, qa, attachment: { request: requestAttachment, cache: { request: requestCacheAttachment }, action: cacheAction, detach: detachAttachment }, watch };
 }
