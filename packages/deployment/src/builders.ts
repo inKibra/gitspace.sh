@@ -60,6 +60,9 @@ async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: st
     outdir: outDir,
     naming: 'worker.mjs',
     external: ['cloudflare:workers', 'node:*'],
+    // CommonJS dependencies (memfs) call require('node:*'); workerd ESM has no global require and no import.meta.url,
+    // so supply nodejs_compat's require anchored at the bundle root.
+    banner: "import { createRequire as __gitspaceCreateRequire } from 'node:module';\nconst require = __gitspaceCreateRequire('/worker.mjs');",
     conditions: ['workerd'],
     define: { GITSPACE_WORKER_SHA: JSON.stringify(sha) },
     plugins: [{
