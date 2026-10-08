@@ -8,7 +8,7 @@ import { OverviewView } from './inspector/index.js';
 
 describe('GitSpaceShell', () => {
   it('renders the saved workspace draft instead of an empty composer', () => {
-    const draft = { text: 'Saved on the other device', error: null, saving: false, onChange: () => undefined, onBlur: () => undefined, onDiscard: () => undefined, capture: () => ({ generation: 0, draftRevision: 0 }), accepted: () => undefined };
+    const draft = { text: 'Saved on the other device', error: null, saving: false, onChange: () => undefined, onBlur: () => undefined, capture: () => ({ generation: 0, draftRevision: 0 }), accepted: () => undefined };
     const props = { ...verticalSliceFixture, draft, onSend: async () => undefined };
     const html = renderToStaticMarkup(<GitSpaceShell {...props} />);
     expect(html).toContain('Saved on the other device');

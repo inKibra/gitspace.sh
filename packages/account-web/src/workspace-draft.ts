@@ -2,10 +2,10 @@ import { z } from 'zod';
 import { emptyWorkspaceDraft, WorkspaceDraftSchema, WorkspaceDraftTextSchema, WORKSPACE_DRAFT_MAX_LENGTH, type WorkspaceDraft, type WorkspaceDraftSave, type WorkspaceDraftSaveResult } from '@gitspace/protocol-runtime/draft';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
-const LocalDraftSchema = z.object({ draft: WorkspaceDraftSchema, text: z.string(), dirty: z.boolean(), discardRevision: z.number().int().nonnegative().optional() });
+const LocalDraftSchema = z.object({ draft: WorkspaceDraftSchema, text: z.string(), dirty: z.boolean() });
 export type WorkspaceDraftState = { text: string; dirty: boolean; saving: boolean; error: string | null };
 export type WorkspaceDraftCapture = { generation: number; draftRevision: number | undefined };
-export type WorkspaceDraftBinding = { text: string; saving: boolean; error: string | null; onChange(text: string): void; onBlur(): void; onDiscard(): void; capture(): WorkspaceDraftCapture; accepted(capture: WorkspaceDraftCapture): void };
+export type WorkspaceDraftBinding = { text: string; saving: boolean; error: string | null; onChange(text: string): void; onBlur(): void; capture(): WorkspaceDraftCapture; accepted(capture: WorkspaceDraftCapture): void };
 type Options = { deviceId: string; key: string; storage: Pick<Storage, 'getItem' | 'setItem'> | null; save(input: WorkspaceDraftSave): Promise<WorkspaceDraftSaveResult> };
 
 /** One owner per workspace/device. Remote revisions never replace unacknowledged local edits. */
@@ -13,7 +13,6 @@ export class WorkspaceDraftController {
   private draft = emptyWorkspaceDraft();
   private state: WorkspaceDraftState = { text: '', dirty: false, saving: false, error: null };
   private generation = 0;
-  private discardRevision: number | undefined;
   private connected = false;
   private received = false;
   private disposed = false;
@@ -25,7 +24,7 @@ export class WorkspaceDraftController {
       const saved = options.storage?.getItem(options.key);
       if (saved) {
         const parsed = LocalDraftSchema.safeParse(JSON.parse(saved));
-        if (parsed.success) { this.draft = parsed.data.draft; this.discardRevision = parsed.data.discardRevision; this.state = { ...this.state, text: parsed.data.text, dirty: parsed.data.dirty }; }
+        if (parsed.success) { this.draft = parsed.data.draft; this.state = { ...this.state, text: parsed.data.text, dirty: parsed.data.dirty }; }
         else this.state = { ...this.state, error: 'Saved local draft could not be read.' };
       }
     } catch (error) { this.state = { ...this.state, error: rpcErrorMessage(error, 'Read local draft') }; }
@@ -34,7 +33,7 @@ export class WorkspaceDraftController {
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<WorkspaceDraftState>): void {
     this.state = { ...this.state, ...patch };
-    try { this.options.storage?.setItem(this.options.key, JSON.stringify({ draft: this.draft, text: this.state.text, dirty: this.state.dirty, discardRevision: this.discardRevision })); }
+    try { this.options.storage?.setItem(this.options.key, JSON.stringify({ draft: this.draft, text: this.state.text, dirty: this.state.dirty })); }
     catch (error) { this.state = { ...this.state, error: rpcErrorMessage(error, 'Save local draft') }; }
     for (const listener of this.listeners) listener();
   }
@@ -44,7 +43,6 @@ export class WorkspaceDraftController {
   }
   edit(text: string): void {
     this.generation++;
-    this.discardRevision = undefined;
     this.update({ text, dirty: true, error: null });
     this.schedule();
   }
@@ -53,15 +51,8 @@ export class WorkspaceDraftController {
     if (capture.generation !== this.generation) return;
     clearTimeout(this.timer);
     this.generation++;
-    this.discardRevision = undefined;
     // The server owns the revision-fenced clear; never turn acceptance into a new edit.
     this.update({ text: this.draft.revision === capture.draftRevision ? '' : this.draft.text, dirty: false, error: null });
-  }
-  discard(): void {
-    this.generation++;
-    this.discardRevision = this.draft.revision;
-    this.update({ text: '', dirty: true, error: null });
-    void this.flush();
   }
   receive(raw: WorkspaceDraft): void {
     const draft = WorkspaceDraftSchema.parse(raw);
@@ -93,13 +84,11 @@ export class WorkspaceDraftController {
       while (this.connected && !this.disposed && this.state.dirty) {
         const generation = this.generation;
         const text = this.state.text;
-        const discardRevision = this.discardRevision;
         const valid = WorkspaceDraftTextSchema.safeParse(text);
         if (!valid.success) { this.update({ error: `Draft is too long to sync (maximum ${WORKSPACE_DRAFT_MAX_LENGTH} characters).` }); break; }
-        const result = await this.options.save({ text: valid.data, expectedRevision: discardRevision ?? this.draft.revision });
+        const result = await this.options.save({ text: valid.data, expectedRevision: this.draft.revision });
         this.receive(result.draft);
-        if (generation === this.generation && (result.status === 'saved' || discardRevision !== undefined)) {
-          this.discardRevision = undefined;
+        if (generation === this.generation && result.status === 'saved') {
           this.update({ dirty: false, text: this.draft.text, error: null });
         }
       }

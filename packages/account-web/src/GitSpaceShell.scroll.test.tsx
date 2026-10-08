@@ -113,7 +113,7 @@ it('preserves newer controlled text when a streaming queued send is accepted', a
   function View() {
     const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
     return <Composer workspace={verticalSliceFixture.workspace} controls={controls} running pending={false} onSend={send}
-      draft={{ ...state, onChange: text => controller.edit(text), onBlur: () => undefined, onDiscard: () => controller.discard(), capture: () => controller.capture(), accepted: capture => controller.accepted(capture) }} />;
+      draft={{ ...state, onChange: text => controller.edit(text), onBlur: () => undefined, capture: () => controller.capture(), accepted: capture => controller.accepted(capture) }} />;
   }
   await act(() => root.render(<View />));
   const textarea = container.querySelector('textarea')!;

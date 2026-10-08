@@ -199,7 +199,6 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}
     {selectedProvider && !selectedProvider.hasAuth ? <ProviderNotice provider={selectedProvider} profileId={profile?.id} /> : null}
     {workspaceDraft?.error ? <p role="alert" className="text-caption text-destructive">{workspaceDraft.error}</p> : null}
-    {workspaceDraft && message ? <Button variant="ghost" size="compact" className="min-h-10" onClick={workspaceDraft.onDiscard}>Discard draft</Button> : null}
     <InputMessage
       data-slot="input-message"
       onBlurCapture={() => workspaceDraft?.onBlur()}

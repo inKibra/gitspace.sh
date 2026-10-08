@@ -52,5 +52,5 @@ export function useWorkspaceDraft(snapshot: RuntimeSnapshot, connected: boolean,
     current.controller.setConnected(draft.success && connected);
   }, [key, snapshot, connected]);
   if (view?.key !== key) return undefined;
-  return { text: view.state.text, saving: view.state.saving, error: view.state.error, onChange: text => view.controller.edit(text), onBlur: () => { void view.controller.flush(); }, onDiscard: () => view.controller.discard(), capture: () => view.controller.capture(), accepted: capture => view.controller.accepted(capture) };
+  return { text: view.state.text, saving: view.state.saving, error: view.state.error, onChange: text => view.controller.edit(text), onBlur: () => { void view.controller.flush(); }, capture: () => view.controller.capture(), accepted: capture => view.controller.accepted(capture) };
 }

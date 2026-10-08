@@ -29,10 +29,10 @@ it('reconciles offline text by saving it after the newest remote revision', asyn
   expect(b.snapshot().text).toBe('offline B'); b.setConnected(true); await b.flush();
   expect(a.snapshot().text).toBe('offline B'); a.dispose(); b.dispose();
 });
-it('clears discard and accepted sends but preserves typing after send starts', async () => {
+it('clears an erased draft and accepted sends but preserves typing after send starts', async () => {
   const { make } = fixture(); const a = make('a'); const b = make('b');
   a.edit('send me'); const sent = a.capture(); await a.flush(); a.edit('next message'); a.accepted(sent); await a.flush();
-  expect(b.snapshot().text).toBe('next message'); a.discard(); await a.flush(); expect(b.snapshot().text).toBe('');
+  expect(b.snapshot().text).toBe('next message'); a.edit(''); await a.flush(); expect(b.snapshot().text).toBe('');
   a.edit('sent'); await a.flush(); const next = a.capture(); a.accepted(next); await a.flush(); expect(a.snapshot().text).toBe(''); expect(b.snapshot().text).toBe('sent'); a.dispose(); b.dispose();
 });
 it('does not clear another device newer saved draft when an older send finishes', async () => {
@@ -65,28 +65,6 @@ it('retains failed saves locally and retries without replacing text with remote 
   expect(reopened.snapshot().text).toBe('retained'); fail = false; reopened.setConnected(true); await reopened.flush();
   expect(reopened.snapshot()).toMatchObject({ text: 'retained', dirty: false, error: null }); reopened.dispose();
 });
-it('adopts B newer draft after one stale discard without retrying an empty edit', async () => {
-  let remote: WorkspaceDraft = { text: 'old', revision: 1, updatedAt: null, deviceId: 'a' };
-  const inputs: WorkspaceDraftSave[] = [];
-  const a = new WorkspaceDraftController({ deviceId: 'a', key: 'a', storage: null, save: async input => {
-    inputs.push(input);
-    if (input.expectedRevision !== remote.revision) return { status: 'conflict', draft: remote };
-    remote = { ...remote, text: input.text, revision: remote.revision + 1 };
-    return { status: 'saved', draft: remote };
-  } });
-  const b = new WorkspaceDraftController({ deviceId: 'b', key: 'b', storage: null, save: async input => {
-    remote = { ...remote, text: input.text, revision: remote.revision + 1 };
-    return { status: 'saved', draft: remote };
-  } });
-  a.receive(remote); b.receive(remote); a.setConnected(true); b.setConnected(true);
-  b.edit('new from B'); await b.flush();
-  a.discard(); await a.flush();
-  expect(remote.text).toBe('new from B');
-  expect(inputs).toEqual([{ text: '', expectedRevision: 1 }]);
-  expect(a.snapshot()).toMatchObject({ text: 'new from B', dirty: false });
-  expect(b.snapshot().text).toBe(a.snapshot().text);
-  a.dispose(); b.dispose();
-});
 it('does not save an empty draft after an accepted send with an unseen B revision', async () => {
   const saves: WorkspaceDraftSave[] = [];
   let newer: WorkspaceDraft = { text: 'new from B', revision: 2, updatedAt: null, deviceId: 'b' };
@@ -104,37 +82,4 @@ it('does not save an empty draft after an accepted send with an unseen B revisio
   a.receive(newer);
   expect(a.snapshot()).toMatchObject({ text: 'new from B', dirty: false });
   a.dispose();
-});
-it('preserves typing while a revision-fenced discard receives a conflict', async () => {
-  const pending = Promise.withResolvers<WorkspaceDraftSaveResult>();
-  const inputs: WorkspaceDraftSave[] = [];
-  const a = new WorkspaceDraftController({ deviceId: 'a', key: 'a', storage: null, save: async input => {
-    inputs.push(input);
-    return inputs.length === 1 ? pending.promise : { status: 'saved', draft: { text: input.text, revision: 3, updatedAt: null, deviceId: 'a' } };
-  } });
-  a.receive({ text: 'old', revision: 1, updatedAt: null, deviceId: 'a' }); a.setConnected(true);
-  a.discard(); const clearing = a.flush(); a.edit('typed while clearing');
-  pending.resolve({ status: 'conflict', draft: { text: 'new from B', revision: 2, updatedAt: null, deviceId: 'b' } });
-  await clearing;
-  expect(a.snapshot().text).toBe('typed while clearing');
-  expect(inputs).toEqual([{ text: '', expectedRevision: 1 }, { text: 'typed while clearing', expectedRevision: 2 }]);
-  a.dispose();
-});
-it('keeps an offline discard revision fenced across reopening', async () => {
-  const storage = new Map<string, string>();
-  const inputs: WorkspaceDraftSave[] = [];
-  let remote: WorkspaceDraft = { text: 'old', revision: 1, updatedAt: null, deviceId: 'a' };
-  const options = { deviceId: 'a', key: 'a', storage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => { storage.set(key, value); } }, save: async (input: WorkspaceDraftSave): Promise<WorkspaceDraftSaveResult> => {
-    inputs.push(input);
-    if (input.expectedRevision !== remote.revision) return { status: 'conflict', draft: remote };
-    remote = { ...remote, text: input.text, revision: remote.revision + 1 };
-    return { status: 'saved', draft: remote };
-  } };
-  const a = new WorkspaceDraftController(options); a.receive(remote); a.discard(); a.dispose();
-  remote = { ...remote, text: 'new from B', revision: 2, deviceId: 'b' };
-  const reopened = new WorkspaceDraftController(options); reopened.receive(remote); reopened.setConnected(true); await reopened.flush();
-  expect(inputs).toEqual([{ text: '', expectedRevision: 1 }]);
-  expect(reopened.snapshot()).toMatchObject({ text: 'new from B', dirty: false });
-  expect(remote.text).toBe('new from B');
-  reopened.dispose();
 });
