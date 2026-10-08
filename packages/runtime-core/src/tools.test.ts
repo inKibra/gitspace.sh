@@ -30,7 +30,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   ast_edit: { ops: [{ pat: 'foo($A)', out: 'bar($A)' }], paths: ['src/main.ts'], language: 'typescript' }, ast_resolve: { proposalId: 'proposal', action: 'reject' },
   history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, report_issue: { message: 'Observed concrete failure' },
   checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' }, delegate_export: { commit: 'a'.repeat(40) },
-  mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, browser: { action: 'tabs' },
+  mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'] },
 };
 async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = []) {
@@ -66,7 +66,8 @@ test('every registered tool advertises its real object contract and executes thr
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.map(result => result.toolCallId).sort()).toEqual(Object.keys(samples).sort());
     expect(results.filter(result => result.isError)).toEqual([]);
-    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan'].includes(name)).sort());
+    // Models call web_browser (OpenAI reserves `browser`); dispatch keeps the signed protocol name.
+    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);
     expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'ask']);
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');

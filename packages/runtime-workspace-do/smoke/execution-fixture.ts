@@ -39,10 +39,10 @@ const stream: StreamFunction = (_model, context, options) => {
   if (last?.role === 'user' && text === 'hold child') {
     const offered = context.messages.flatMap(message => message.role === 'system' ? message.toolsAdded ?? [] : []);
     const names = offered.map(tool => tool.name);
-    if (!names.includes('agents') || names.some(name => !['read', 'find', 'grep', 'ast_grep', 'history_search', 'history_read', 'web_search', 'todo', 'browser', 'agents'].includes(name))) throw new Error(`Child received invalid tool registration: ${JSON.stringify(names)}`);
+    if (!names.includes('agents') || names.some(name => !['read', 'find', 'grep', 'ast_grep', 'history_search', 'history_read', 'web_search', 'todo', 'web_browser', 'agents'].includes(name))) throw new Error(`Child received invalid tool registration: ${JSON.stringify(names)}`);
     const messaging = offered.findLast(tool => tool.name === 'agents');
     if (!messaging || JSON.stringify(messaging.parameters).includes('"spawn"')) throw new Error('Child was offered nested spawn');
-    const browser = offered.findLast(tool => tool.name === 'browser');
+    const browser = offered.findLast(tool => tool.name === 'web_browser');
     if (!browser || JSON.stringify(browser.parameters).includes('"relay"')) throw new Error('Child was offered the user relay browser');
   }
   if (last?.role === 'toolResult' && last.toolCallId === 'child-ready') {

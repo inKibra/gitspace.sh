@@ -1,7 +1,7 @@
 import { Harness, createRegistry, defineDoc, defineExtension, hook, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessOptions, type ModelRef, type Storage, type ConversationId, type Cursor } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord';
-import { createRuntimeTools, type ToolServices } from './tools.js';
+import { BROWSER_TOOL_NAME, createRuntimeTools, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
@@ -97,7 +97,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const [firstBrowserAction, ...otherBrowserActions] = RuntimeBrowserArgumentsSchema.options;
   const headlessSource = { source: z.literal('headless').default('headless') };
   const headlessBrowser = z.discriminatedUnion('action', [firstBrowserAction.extend(headlessSource), ...otherBrowserActions.map(option => option.extend(headlessSource))]);
-  const childExtension = defineExtension({ name: 'gitspace.child-tools', tools: tools.filter(tool => tool.name === 'agents' || tool.name === 'browser').map(tool => {
+  const childExtension = defineExtension({ name: 'gitspace.child-tools', tools: tools.filter(tool => tool.name === 'agents' || tool.name === BROWSER_TOOL_NAME).map(tool => {
     const schema = tool.name === 'agents' ? RuntimeChildAgentsArgumentsSchema : headlessBrowser;
     return {
       ...tool,
@@ -120,7 +120,8 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
     if (!conversation) throw new Error('Conversation not found');
     const child = (await harness.snapshot(AgentDefinitionContextDoc, conversationId, BACKGROUND_CONTEXT))?.child;
-    const selected = child ? modelTools(model).filter(tool => isSubagentReadonlyTool(tool.name) && child.tools.includes(tool.name)) : modelTools(model);
+    // Definitions and the read-only ceiling name the browser by its dispatch name, not the model alias.
+    const selected = child ? modelTools(model).filter(tool => { const name = tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name; return isSubagentReadonlyTool(name) && child.tools.includes(name); }) : modelTools(model);
     await conversation.configure({ model, tools: selected, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
   };
   const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, async wake() { await options.operations.wakeAt(Date.now() + 1000); harness.resume(); } });

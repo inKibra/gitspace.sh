@@ -79,6 +79,9 @@ const contracts = {
   mcp_invoke: contract(Arguments.RuntimeMcpInvokeArgumentsSchema, 'Invoke a discovered tool by connectionId and name, with its schema-conforming arguments object. Credentials remain in the authorized host. Invocation can have external effects and cannot be blindly replayed.'),
   browser: contract(RuntimeBrowserArgumentsSchema, 'Browser defaults to headless with a persistent workspace-isolated profile and no approval prompts in any mode. Use source:"relay" explicitly only when the task needs the user’s logged-in Chrome; relay is main-agent-only. browser_control status lists your project-approved Chrome names, pairingIds, connection status and notes. Relay requires personal project approval in Settings in every mode, including yolo. Omit pairingId to use the project default, or pass an approved pairingId explicitly; offline Chrome is unavailable and never silently replaced. Each workspace gets one automatic group per Chrome without an extra workspace approval. open {url?,targetId?,source?,pairingId?}; tabs {source?,pairingId?}; other actions require targetId and the same source and pairingId: navigate {url}, observe {screenshot?,offset?,limit?}, act {ref,operation:click|fill|press,value?}, screenshot, evaluate {expression}, close. Re-observe stale refs. Approved environment browser.origins govern all relay navigation and actions. Missing origin access requires proposing .gitspace/bundle.json browser.origins changes for human environment approval, even in yolo. JavaScript and screenshots need no extra grant. Tabs dragged out of the group become inaccessible. Human group revocation is not a model tool.'),
 };
+/** OpenAI Responses (including ChatGPT Codex) rejects a function named after one of its reserved namespaces. */
+export const BROWSER_TOOL_NAME = 'web_browser';
+const modelToolNames: Readonly<Record<string, string>> = { browser: BROWSER_TOOL_NAME };
 export function createRuntimeTools(services: ToolServices, operations: JobServices, abortTask: Harness['abortTask'], admitCodemodeTool: (call: { id: string; name: string; arguments: Record<string, unknown> }, api: ToolExecutionApi, context: Context) => Promise<void>): ToolRegistration[] {
   const jobs = createJobTool(operations);
   // One queue per conversation, shared by every registered mutator and every tool round.
@@ -94,7 +97,8 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     finally { release.resolve(); if (mutations.get(conversationId) === tail) mutations.delete(conversationId); }
   }
   const tools: ToolRegistration[] = Object.entries(contracts).map(([name, contract]) => defineTool({
-    name, description: contract.description,
+    // `name` stays the dispatch identity (signed browser envelopes, approvals, policies); only models see the alias.
+    name: modelToolNames[name] ?? name, description: contract.description,
     // JSON Schema is derived from the parser owner, without pretending it has a static TypeBox type.
     parameters: { ...z.toJSONSchema(contract.schema, { io: 'input' }), type: 'object' },
     // Preserve the owner parser's rejection semantics instead of generic model-argument coercion.

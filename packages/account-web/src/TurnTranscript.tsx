@@ -80,7 +80,8 @@ function ToolCall({ block, state, onStateChange }: { block: ToolCallBlock } & It
   const hasDetail = hasArgs || (block.input?.length ?? 0) + (block.result?.length ?? 0) > 0;
   const hasImage = block.input?.some((content) => content.type === 'image') || block.result?.some((content) => content.type === 'image');
   const failed = block.status === 'error';
-  const chrome = block.tool === 'browser' ? browserExecutionDetails.safeParse(block.details) : null;
+  // Cloud agents call it web_browser (an OpenAI-reserved name otherwise); machine sessions keep browser.
+  const chrome = block.tool === 'browser' || block.tool === 'web_browser' ? browserExecutionDetails.safeParse(block.details) : null;
   return <ThinkingSteps className="w-full" defaultOpen={failed} open={state?.open} onOpenChange={(open) => onStateChange?.({ open })}>
     <ThinkingStepsHeader>{block.tool}{chrome?.success ? <span className="ml-2 text-caption font-normal" title={chrome.data.browser.pairingId}>· {chrome.data.browser.name}</span> : null}</ThinkingStepsHeader>
     <ThinkingStepsContent>
