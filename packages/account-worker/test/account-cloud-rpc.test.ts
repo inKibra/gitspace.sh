@@ -482,6 +482,8 @@ describe('account cloud RPC without machines', () => {
     const logout = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai-codex', credentialId: first.id })));
     expect(parse(await logout.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: true, accounts: [{ id: first.id, disabled: true }, { id: second.id, disabled: false }] } } });
     expect((await fixture.vault.cloudCredentialAccounts('default', 'openai-codex')).map(account => account.id)).toEqual([second.id]);
+    const removal = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai-codex', credentialId: first.id })));
+    expect(parse(await removal.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: true, accounts: [{ id: second.id, disabled: false }] } } });
   });
 
   it('manages inference profiles with typed conflicts and refuses account API clients provider/profile writes', async () => {

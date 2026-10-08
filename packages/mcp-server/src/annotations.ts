@@ -221,7 +221,7 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   "providers.logout": {
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": true,
+    "idempotentHint": false,
     "openWorldHint": false
   },
   "providers.apiKey.set": {

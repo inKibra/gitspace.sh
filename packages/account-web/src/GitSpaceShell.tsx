@@ -44,7 +44,7 @@ import { WorkspaceTerminals, type WorkspaceTerminalsProps } from './WorkspaceTer
 import { WorkspacePicker, type WorkspacePickerItem } from './WorkspacePicker.js';
 import { glyph } from './glyph.js';
 import { ResourceLink, ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
-import type { WorkspaceDraftBinding } from './workspace-draft.js';
+import type { WorkspaceDraftBinding, WorkspaceDraftCapture } from './workspace-draft.js';
 
 /** Where a space lives right now, from the account-wide placement table: held by a machine, released to the cloud, or not yet known. */
 export type SpaceHolderView =
@@ -145,7 +145,7 @@ export interface GitSpaceShellProps {
   /** Cloud runtime status is independent of the directory's machine placement projection. */
   runtimeSummary?: SidebarSpaceSummary;
   machines?: Array<{ id: string; label: string }>;
-  onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>, draftRevision?: number) => void | Promise<void>;
+  onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>) => void | Promise<void>;
   draft?: WorkspaceDraftBinding;
   sessionControls?: SessionControlsProps;
   approvalCard?: ReactNode;

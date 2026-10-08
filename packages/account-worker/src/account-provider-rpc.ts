@@ -31,7 +31,7 @@ export function providerCloudProcedures(env: Env, userId: string, requireAdminis
       await requireAdministration();
       const selected = (await vault.cloudProviders(input.profileId)).find(entry => entry.id === input.providerId);
       if (!selected) throw new Error('Provider is unavailable');
-      await vault.disableBrowserCredentials(input.profileId, selected.credentialProvider, input.credentialId);
+      await vault.logoutBrowserCredentials(input.profileId, selected.credentialProvider, input.credentialId);
       const provider = (await vault.cloudProviders(input.profileId)).find(entry => entry.id === input.providerId);
       if (!provider) throw new Error('Provider is unavailable');
       return ok({ provider });

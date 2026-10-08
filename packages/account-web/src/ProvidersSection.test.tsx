@@ -50,7 +50,7 @@ describe('ProvidersSection', () => {
     const html = renderToStaticMarkup(<ProvidersSection {...props()} />);
     expect(html).toContain('Anthropic');
     expect(html).toContain('Connected');
-    expect(html).toContain('aria-label="Remove Claude Max"');
+    expect(html).toContain('aria-label="Disable Claude Max"');
     expect(html).toContain('Add account');
     expect(html).toContain('OpenAI Codex');
     expect(html).toContain('Not signed in');
@@ -86,10 +86,25 @@ describe('ProvidersSection', () => {
       usage: { ...usage, reports: [{ ...usage.reports[0]!, provider: connected.id }], errors: [] },
     })} />);
     expect(html).toContain('Anthropic');
-    expect(html.match(/aria-label="Remove /g)).toHaveLength(3);
-    expect(html).toContain('aria-label="Remove same@example.com · Personal"');
-    expect(html).toContain('aria-label="Remove same@example.com · Team"');
+    expect(html.match(/aria-label="Disable /g)).toHaveLength(3);
+    expect(html).toContain('aria-label="Disable same@example.com · Personal"');
+    expect(html).toContain('aria-label="Disable same@example.com · Team"');
     expect(html.match(/62% used/g)).toHaveLength(1);
+  });
+
+  it('disables an active account and removes an already disabled one from the same button', () => {
+    const accounts: ProviderView['accounts'] = [
+      { id: 'active', type: 'oauth', label: 'live@example.com', email: 'live@example.com', disabled: false },
+      { id: 'off', type: 'oauth', label: 'old@example.com', email: 'old@example.com', disabled: true },
+    ];
+    const html = renderToStaticMarkup(<ProvidersSection {...props({ providers: [provider({ ...codex, hasAuth: true, accounts })] })} />);
+    expect(html).toContain('aria-label="Disable live@example.com"');
+    expect(html).toContain('aria-label="Remove old@example.com"');
+    expect(html).not.toContain('aria-label="Remove live@example.com"');
+    expect(html).not.toContain('aria-label="Disable old@example.com"');
+    const disabled = renderToStaticMarkup(<ProvidersSection {...props({ providers: [provider({ ...codex, accounts: [accounts[1]!] })] })} />);
+    expect(disabled).toContain('Disabled');
+    expect(disabled).toContain('aria-label="Remove old@example.com"');
   });
 
   it('renders usage limits with meters and resets without errors for disconnected providers', () => {

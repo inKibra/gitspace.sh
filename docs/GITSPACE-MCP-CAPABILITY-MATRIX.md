@@ -166,7 +166,7 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | `providers.list` | `rpc.read` | T | - | - | F | Tool | Provider snapshots can initialize or refresh managed provider context as housekeeping; no secret values are returned. |
 | `providers.login.start`<br>`providers.login.respond`<br>`providers.login.cancel` | `rpc.write` | F | T | F | T | Excluded | Interactive provider authorization is outside this effort. Existing browser behavior is unchanged. |
 | `providers.login.events` | `rpc.read` | T | - | - | F | Excluded | Part of the excluded provider authorization workflow. |
-| `providers.logout` | `rpc.write` + `account.admin` for clients | F | T | T | F | Tool | Explicit account administration authority; credential values must not enter responses or logs. |
+| `providers.logout` | `rpc.write` + `account.admin` for clients | F | T | F | F | Tool | Explicit account administration authority; a repeated call removes an already disabled credential; credential values must not enter responses or logs. |
 | `providers.apiKey.set` | `rpc.write` + `account.admin` for clients | F | T | F | F | Tool | Explicit account administration authority; credential values must not enter responses or logs. |
 | `providers.usage` | `rpc.read` | T | - | - | T | Tool | Reads may contact external provider/catalog APIs; retain filtering, byte limits and safe output handling. |
 | `providers.models` | `rpc.read` | T | - | - | F | Tool | Read saved state or metadata. Secrets/private keys must not enter outputs; status is not a live probe unless explicitly documented. |

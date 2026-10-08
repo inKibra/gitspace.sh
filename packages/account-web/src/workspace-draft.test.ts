@@ -43,6 +43,28 @@ it('does not clear another device newer saved draft when an older send finishes'
   expect(a.snapshot().text).toBe('next from B'); expect(b.snapshot().text).toBe('next from B');
   a.dispose(); b.dispose();
 });
+it.each(['before', 'after'] as const)('empties the composer when the save of the sent text lands %s the send is accepted, and keeps a later draft from another device', async (order) => {
+  const pending = Promise.withResolvers<WorkspaceDraftSaveResult>();
+  const a = new WorkspaceDraftController({ deviceId: 'a', key: 'a', storage: null, save: () => pending.promise });
+  a.receive({ text: '', revision: 0, updatedAt: null, deviceId: null }); a.setConnected(true);
+  a.edit('send me'); const saving = a.flush(); const sent = a.capture();
+  const saved = { text: 'send me', revision: 1, updatedAt: new Date().toISOString(), deviceId: 'a' };
+  if (order === 'before') { pending.resolve({ status: 'saved', draft: saved }); await saving; a.accepted(sent); }
+  else { a.accepted(sent); pending.resolve({ status: 'saved', draft: saved }); await saving; }
+  expect(a.snapshot()).toMatchObject({ text: '', dirty: false });
+  a.receive({ text: '', revision: 2, updatedAt: new Date().toISOString(), deviceId: 'a' });
+  expect(a.snapshot().text).toBe('');
+  a.receive({ text: 'next from B', revision: 3, updatedAt: new Date().toISOString(), deviceId: 'b' });
+  expect(a.snapshot()).toMatchObject({ text: 'next from B', dirty: false }); a.dispose();
+});
+it('keeps a newer draft from another device holding the same text when the send is accepted', async () => {
+  const a = new WorkspaceDraftController({ deviceId: 'a', key: 'a', storage: null, save: async () => { throw new Error('unexpected save'); } });
+  a.receive({ text: 'same text', revision: 1, updatedAt: null, deviceId: 'a' }); a.setConnected(true);
+  const sent = a.capture();
+  a.receive({ text: 'same text', revision: 2, updatedAt: new Date().toISOString(), deviceId: 'b' });
+  a.accepted(sent);
+  expect(a.snapshot()).toMatchObject({ text: 'same text', dirty: false }); a.dispose();
+});
 it('protects keystrokes while a save is in flight and ignores stale echoes', async () => {
   const pending = Promise.withResolvers<WorkspaceDraftSaveResult>(); let calls = 0;
   const a = new WorkspaceDraftController({ deviceId: 'a', key: 'a', storage: null, save: async (input) => ++calls === 1 ? pending.promise : { status: 'saved', draft: { text: input.text, revision: 3, updatedAt: new Date().toISOString(), deviceId: 'a' } } });

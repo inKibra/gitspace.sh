@@ -112,7 +112,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         if (file.type.startsWith('text/') && file.size <= 256 * 1024) return `<attachment name="${file.name}">\n${await file.text()}\n</attachment>`;
         return `<attachment name="${file.name}" type="${file.type || 'application/octet-stream'}" size="${file.size}" />`;
       }));
-      await onSend([text, ...attached].join('\n\n'), behavior, images, sentDraft?.draftRevision);
+      await onSend([text, ...attached].join('\n\n'), behavior, images, sentDraft);
       if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
       else setLocalMessage(current => current === draft ? '' : current);
       setAttachments([]);

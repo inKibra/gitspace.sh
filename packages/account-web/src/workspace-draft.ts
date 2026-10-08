@@ -4,7 +4,8 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 
 const LocalDraftSchema = z.object({ draft: WorkspaceDraftSchema, text: z.string(), dirty: z.boolean() });
 export type WorkspaceDraftState = { text: string; dirty: boolean; saving: boolean; error: string | null };
-export type WorkspaceDraftCapture = { generation: number; draftRevision: number | undefined };
+/** `text` is the exact draft text being sent; the runtime may clear this device's save of it even at a newer revision. */
+export type WorkspaceDraftCapture = { generation: number; draftRevision: number | undefined; text: string };
 export type WorkspaceDraftBinding = { text: string; saving: boolean; error: string | null; onChange(text: string): void; onBlur(): void; capture(): WorkspaceDraftCapture; accepted(capture: WorkspaceDraftCapture): void };
 type Options = { deviceId: string; key: string; storage: Pick<Storage, 'getItem' | 'setItem'> | null; save(input: WorkspaceDraftSave): Promise<WorkspaceDraftSaveResult> };
 
@@ -18,6 +19,8 @@ export class WorkspaceDraftController {
   private disposed = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private flight: Promise<void> | null = null;
+  /** Text of the last accepted send; this device's late saves of it must not refill the composer. */
+  private sent: string | null = null;
   private listeners = new Set<() => void>();
   constructor(private readonly options: Options) {
     try {
@@ -43,24 +46,28 @@ export class WorkspaceDraftController {
   }
   edit(text: string): void {
     this.generation++;
+    this.sent = null;
     this.update({ text, dirty: true, error: null });
     this.schedule();
   }
-  capture(): WorkspaceDraftCapture { return { generation: this.generation, draftRevision: this.received ? this.draft.revision : undefined }; }
+  capture(): WorkspaceDraftCapture { return { generation: this.generation, draftRevision: this.received ? this.draft.revision : undefined, text: this.state.text }; }
   accepted(capture: WorkspaceDraftCapture): void {
     if (capture.generation !== this.generation) return;
     clearTimeout(this.timer);
     this.generation++;
-    // The server owns the revision-fenced clear; never turn acceptance into a new edit.
-    this.update({ text: this.draft.revision === capture.draftRevision ? '' : this.draft.text, dirty: false, error: null });
+    this.sent = capture.text;
+    // The server owns the clear; never turn acceptance into a new edit. Only another device's newer draft survives.
+    this.update({ text: this.draft.revision === capture.draftRevision || (this.draft.deviceId === this.options.deviceId && this.draft.text === capture.text) ? '' : this.draft.text, dirty: false, error: null });
   }
   receive(raw: WorkspaceDraft): void {
     const draft = WorkspaceDraftSchema.parse(raw);
     if (draft.revision < this.draft.revision || (this.received && draft.revision === this.draft.revision)) return;
     this.received = true;
+    const echo = this.sent !== null && draft.deviceId === this.options.deviceId && draft.text === this.sent;
+    if (!echo) this.sent = null;
     if (!this.state.dirty) this.generation++;
     this.draft = draft;
-    this.update(this.state.dirty ? {} : { text: draft.text });
+    this.update(this.state.dirty || echo ? {} : { text: draft.text });
   }
   setConnected(connected: boolean): void {
     if (connected === this.connected) return;

@@ -152,7 +152,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         return Response.json(inspection.tasks.map(task => ({ id: String(task.record.id), conversationId: String(task.record.conversationId), kind: task.record.kind, state: task.record.state.status })));
       }
       if (url.pathname === '/submit') {
-        await runtime.submit({ ...identity, requestId: url.searchParams.get('requestId') ?? crypto.randomUUID(), text: url.searchParams.get('text') ?? '', conversationId: url.searchParams.get('conversationId') ?? undefined, ...(url.searchParams.has('draftRevision') ? { draftRevision: Number(url.searchParams.get('draftRevision')) } : {}) }, 'fixture-browser');
+        await runtime.submit({ ...identity, requestId: url.searchParams.get('requestId') ?? crypto.randomUUID(), text: url.searchParams.get('text') ?? '', conversationId: url.searchParams.get('conversationId') ?? undefined, ...(url.searchParams.has('draftRevision') ? { draftRevision: Number(url.searchParams.get('draftRevision')) } : {}), draftText: url.searchParams.get('draftText') ?? undefined }, 'fixture-browser');
       }
       if (url.pathname === '/fallback-notices') {
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);

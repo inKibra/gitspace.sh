@@ -392,7 +392,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       const wakesTasks = ['prompt', 'answerAsk', 'compact', 'promoteQueuedMessage', 'resume'].includes(command.type);
       const result = await controls.execute(conversationId, command, canApprove);
       if (wakesTasks) await options.schedule(Date.now() + 1000);
-      if (clearsDraft && command.type === 'prompt' && command.draftRevision !== undefined) { await drafts.clear(command.draftRevision, deviceId); publish(); await line; }
+      if (clearsDraft && command.type === 'prompt' && command.draftRevision !== undefined) { await drafts.clear(command.draftRevision, deviceId, command.draftText); publish(); await line; }
       if (wakesTasks) { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); }
       return result;
     },
@@ -454,7 +454,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         await runtime.configureModel(target.id, admitted);
         await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, BACKGROUND_CONTEXT);
       });
-      if (deviceId !== undefined && input.draftRevision !== undefined && target.id === runtime.root.id) { await drafts.clear(input.draftRevision, deviceId); publish(); }
+      if (deviceId !== undefined && input.draftRevision !== undefined && target.id === runtime.root.id) { await drafts.clear(input.draftRevision, deviceId, input.draftText); publish(); }
       options.waitUntil(target.waitForIdle(BACKGROUND_CONTEXT));
       await line;
       return { accepted: true as const, cursor: snapshot.cursor, conversationId: String(target.id) };

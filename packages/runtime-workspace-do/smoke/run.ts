@@ -94,7 +94,19 @@ try {
   const clearedDraft = WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']);
   assert.equal(clearedDraft.text, '');
   assert(clearedDraft.revision > newerDraft.draft.revision);
-  console.log('PASS draft watch delivery, device authorship, cold recovery and accepted-send clearing');
+  // The debounced save of the sent text can land before the send's clear: only the sender's own save of exactly that text is cleared.
+  const otherDeviceDraft = await saveDraft('Racing draft', clearedDraft.revision, 'device-b');
+  await request('/session', { ...identity, command: { type: 'prompt', text: 'Racing draft', draftRevision: clearedDraft.revision, draftText: 'Racing draft' } });
+  assert.deepEqual(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']), otherDeviceDraft.draft, 'A send erased the same text saved by another device');
+  const differentTextDraft = await saveDraft('Typed after send', otherDeviceDraft.draft.revision, 'fixture-browser');
+  await request(`/submit?text=Sent%20text&draftRevision=${otherDeviceDraft.draft.revision}&draftText=Sent%20text`);
+  assert.deepEqual(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']), differentTextDraft.draft, 'A send erased different text from the sending device');
+  const inFlightDraft = await saveDraft('Sent while saving', differentTextDraft.draft.revision, 'fixture-browser');
+  await request('/session', { ...identity, command: { type: 'prompt', text: 'Sent while saving', draftRevision: differentTextDraft.draft.revision, draftText: 'Sent while saving' } });
+  const racedDraft = WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']);
+  assert.equal(racedDraft.text, '', 'A send left its own in-flight saved text in the draft');
+  assert(racedDraft.revision > inFlightDraft.draft.revision);
+  console.log('PASS draft watch delivery, device authorship, cold recovery, accepted-send clearing and in-flight sent-text clearing');
 
   // A rejected model request must tell the user why instead of leaving an empty reply.
   await request('/submit?text=fail%20the%20model');

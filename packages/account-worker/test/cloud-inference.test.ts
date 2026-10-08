@@ -48,20 +48,59 @@ describe('Cloud inference credential authority', () => {
     await runInDurableObject(vault, async instance => {
       await expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: client.id })).rejects.toThrow();
     });
-    await vault.disableBrowserCredentials('default', 'openai', client.id);
+    await vault.logoutBrowserCredentials('default', 'openai', client.id);
     expect((await vault.cloudResolveCredential({ profileId: profile.id, credentialId: client.id })).credential).toEqual({ type: 'api_key', key: 'client-secret' });
     const encrypted = await runInDurableObject(vault, (_instance, state) => state.storage.sql.exec('SELECT sealed_json FROM inference_credentials').toArray());
     expect(JSON.stringify(encrypted)).not.toContain('client-secret');
-    await vault.disableBrowserCredentials('default', 'openai', original.id);
+    await vault.logoutBrowserCredentials('default', 'openai', original.id);
     await vault.putBrowserApiKey('default', 'openai', 'replacement');
     const replacement = (await vault.cloudCredentialAccounts('default'))[0]!;
     expect(replacement.id).not.toBe(original.id);
-    await vault.disableBrowserCredentials('default', 'openai', original.id);
+    await vault.logoutBrowserCredentials('default', 'openai', original.id);
     expect((await vault.cloudResolveCredential({ profileId: 'default', credentialId: replacement.id, forceRefresh: true })).credential).toEqual({ type: 'api_key', key: 'replacement' });
     await vault.deleteInferenceProfile({ profileId: profile.id, expectedRevision: 0 });
     await runInDurableObject(vault, async instance => {
       await expect(instance.cloudResolveCredential({ profileId: profile.id, credentialId: client.id })).rejects.toThrow();
     });
+  });
+
+  it('disables an active account on the first logout and permanently removes it on the second', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([
+      { id: 'kept', provider: 'openai-codex', access: 'access-kept', accountId: 'account-kept' },
+      { id: 'removed', provider: 'openai-codex', access: 'access-removed', accountId: 'account-removed' },
+    ]));
+    const [kept, removed] = await vault.cloudCredentialAccounts('default');
+    await vault.cloudCredentialFailure({ profileId: 'default', credentialId: removed!.id, kind: 'refresh' });
+    const codexAccounts = async () => (await vault.cloudProviders('default')).find(provider => provider.id === 'openai-codex')!.accounts.map(account => ({ id: account.id, disabled: account.disabled }));
+
+    await vault.logoutBrowserCredentials('default', 'openai-codex', removed!.id);
+    expect(await codexAccounts()).toEqual([{ id: kept!.id, disabled: false }, { id: removed!.id, disabled: true }]);
+    await runInDurableObject(vault, async (instance, state) => {
+      await expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: removed!.id })).rejects.toThrow();
+      expect(state.storage.sql.exec("SELECT state FROM inference_credentials WHERE id = 'removed'").toArray()).toEqual([{ state: 'disabled' }]);
+      state.storage.sql.exec("INSERT INTO refresh_leases(credential_id, owner, revision, expires_at) VALUES ('removed', 'stale', 1, ?)", Date.now() + 60_000);
+    });
+
+    await vault.logoutBrowserCredentials('default', 'openai-codex', removed!.id);
+    expect(await codexAccounts()).toEqual([{ id: kept!.id, disabled: false }]);
+    expect((await vault.cloudCredentialAccounts('default')).map(account => account.id)).toEqual([kept!.id]);
+    await runInDurableObject(vault, (_instance, state) => {
+      expect(state.storage.sql.exec("SELECT id FROM inference_credentials WHERE id = 'removed'").toArray()).toEqual([]);
+      expect(state.storage.sql.exec("SELECT credential_id FROM refresh_leases WHERE credential_id = 'removed'").toArray()).toEqual([]);
+      expect(state.storage.sql.exec('SELECT credential_id FROM cloud_account_health WHERE credential_id = ?', removed!.id).toArray()).toEqual([]);
+    });
+    // The removed account held the highest id; a later upload must not inherit it.
+    await vault.putBrowserApiKey('default', 'openai', 'later-key');
+    expect((await vault.cloudCredentialAccounts('default', 'openai')).map(account => account.id)).not.toContain(removed!.id);
+  });
+
+  it('signing out a whole provider only disables its accounts', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'only', provider: 'openai-codex', access: 'access-only', accountId: 'account-only' }]));
+    const [account] = await vault.cloudCredentialAccounts('default');
+    await vault.logoutBrowserCredentials('default', 'openai-codex', null);
+    await vault.logoutBrowserCredentials('default', 'openai-codex', null);
+    expect((await vault.cloudProviders('default')).find(provider => provider.id === 'openai-codex')).toMatchObject({ hasAuth: false, accounts: [{ id: account!.id, disabled: true }] });
+    expect(await vault.cloudCredentialAccounts('default')).toEqual([]);
   });
 
   it('completes machine-free copy-code login and upserts distinct organizations independently', async () => {
@@ -245,7 +284,7 @@ describe('Cloud inference credential authority', () => {
       const deadline = Date.now() + 2000;
       while (!started && !settled && Date.now() < deadline) await scheduler.wait(5);
       expect(started).toBe(true);
-      await vault.disableBrowserCredentials('default', 'openai-codex', account.id);
+      await vault.logoutBrowserCredentials('default', 'openai-codex', account.id);
     } finally {
       released = true;
       expect(await refresh).toEqual({ rejected: true });

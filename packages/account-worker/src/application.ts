@@ -443,6 +443,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
           revision INTEGER NOT NULL,
           expires_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS retired_credential_rowid (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          row_id INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS credential_snapshot (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           generation INTEGER NOT NULL
@@ -1308,8 +1312,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       if (scoped !== this.inferenceCutover()) throw new Error('Credential scope migrated; retry through profile management');
       this.ctx.storage.sql.exec(`
-        INSERT INTO ${table}(id, provider, sealed_json, revision, expires_at, state, updated_at, profile_id)
-        VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+        INSERT INTO ${table}(rowid, id, provider, sealed_json, revision, expires_at, state, updated_at, profile_id)
+        VALUES ((SELECT MAX(row_id) + 1 FROM (SELECT MAX(rowid) AS row_id FROM ${table} UNION ALL SELECT row_id FROM retired_credential_rowid)), ?, ?, ?, ?, ?, 'active', ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           provider = excluded.provider, sealed_json = excluded.sealed_json, revision = excluded.revision,
           expires_at = excluded.expires_at, state = 'active', updated_at = excluded.updated_at
@@ -1709,14 +1713,33 @@ export class CredentialVaultDO extends DurableObject<Env> {
     await this.ctx.blockConcurrencyWhile(() => this.uploadCredential(profileId, { provider, credential: { type: 'api_key', key } }));
   }
 
-  async disableBrowserCredentials(profileId: string, provider: string, credentialId: string | null): Promise<void> {
+  /** Signing out a provider disables its active accounts; a specific account is disabled first and removed when it is already inactive. */
+  async logoutBrowserCredentials(profileId: string, provider: string, credentialId: string | null): Promise<void> {
     await this.ensureInference();
     this.requireInferenceProfile(profileId);
-    const rows = credentialId === null
-      ? this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM inference_credentials WHERE profile_id = ? AND provider = ? AND state = 'active'", profileId, provider).toArray()
-      : this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM inference_credentials WHERE profile_id = ? AND provider = ? AND rowid = ? AND state = 'active'", profileId, provider, Number(credentialId)).toArray();
+    if (credentialId === null) {
+      const rows = this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM inference_credentials WHERE profile_id = ? AND provider = ? AND state = 'active'", profileId, provider).toArray();
+      this.ctx.storage.transactionSync(() => {
+        for (const row of rows) this.disableCredentialRow(profileId, row.row_id);
+      });
+      return;
+    }
+    const rowId = Number(credentialId);
+    if (!Number.isSafeInteger(rowId) || rowId <= 0) return;
+    this.ensureCloudAccountHealth();
     this.ctx.storage.transactionSync(() => {
-      for (const row of rows) this.disableCredentialRow(profileId, row.row_id);
+      const row = this.ctx.storage.sql.exec<{ id: string; state: string }>('SELECT id, state FROM inference_credentials WHERE profile_id = ? AND provider = ? AND rowid = ?', profileId, provider, rowId).toArray()[0];
+      if (!row) return;
+      if (row.state === 'active') {
+        this.disableCredentialRow(profileId, rowId);
+        return;
+      }
+      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ?', row.id);
+      this.ctx.storage.sql.exec('DELETE FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(rowId));
+      this.ctx.storage.sql.exec('DELETE FROM inference_credentials WHERE profile_id = ? AND rowid = ?', profileId, rowId);
+      // Account ids are rowids: never hand a removed account's id to a later upload.
+      this.ctx.storage.sql.exec('INSERT INTO retired_credential_rowid(id, row_id) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET row_id = MAX(row_id, excluded.row_id)', rowId);
+      this.credentialsChanged(profileId);
     });
   }
 

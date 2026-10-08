@@ -23,6 +23,7 @@ import {
   InputGroup,
   MenuItem,
   ThinkingIndicator,
+  Tooltip,
 } from '@gitspace/ui';
 import { ChevronDown, CpuChip01, RefreshCcw01, XClose } from '@untitledui/icons';
 import { useEffect, useState, type ReactNode } from 'react';
@@ -174,7 +175,10 @@ function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAcc
             </DropdownContent>
           </DropdownMenu>
         : signInMethods.map((method) => <Button key={method.id} variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} onClick={() => onSignIn(method.id)}>{signInLabel}</Button>)}
-      {provider.accounts.map((account) => <Button key={account.id} variant="ghost" size="icon-compact" type="button" aria-label={`Remove ${account.label}`} disabled={pending !== null} loading={pending === `logout:${provider.id}:${account.id}`} onClick={() => onSignOut(account.id)}>{icon(XClose)}</Button>)}
+      {provider.accounts.map((account) => {
+        const action = `${account.disabled ? 'Remove' : 'Disable'} ${account.label}`;
+        return <Tooltip key={account.id} content={action}><Button variant="ghost" size="icon-compact" type="button" aria-label={action} disabled={pending !== null} loading={pending === `logout:${provider.id}:${account.id}`} onClick={() => onSignOut(account.id)}>{icon(XClose)}</Button></Tooltip>;
+      })}
     </CardFooter>
     {showUsage ? <UsageReports reports={reports} errors={usageErrors} missingAccounts={missingAccounts} supported={provider.hasUsage} status={usageStatus} now={now} /> : null}
   </Card>;
