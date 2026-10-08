@@ -52,6 +52,13 @@ describe('runtime to existing shell adapter', () => {
     expect(runtimeScope(snapshot, inspection).workspace.holder).toEqual({ kind: 'unknown' });
   });
 
+  it('names the open placement holder without a cache, as the sidebar directory does', () => {
+    const machine = { id: 'desk', label: 'Desk', kind: 'physical' as const, provider: 'physical' as const, state: 'online' as const, desiredState: 'online' as const, rpcEndpoint: 'https://desk.test/rpc', notes: '', lifecycleRevision: 1, operationId: null, error: null };
+    const placed = { ...inspection, machines: [machine], placement: { state: 'open' as const, machineId: 'desk', generation: 4, updatedAt: stamp } };
+    expect(runtimeScope(fixture(), placed).workspace.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Desk' });
+    expect(runtimeScope(fixture(), { ...placed, placement: { ...placed.placement, state: 'closed' as const } }).workspace.holder).toEqual({ kind: 'unknown' });
+  });
+
   it('uses authoritative relations and stack findings instead of erasing the graph', () => {
     const parent = { ...workspace, id: 'parent', name: 'Parent' };
     const saved: InputOf<typeof SpaceViewCodec>['workspaces'][number] = {

@@ -696,6 +696,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     view: 'agent',
     onView: navigate,
     selected: { projectId: workspace.projectId, workspaceId: workspace.kind === 'workspace' ? workspace.id : null },
+    selectedSummary,
     projects: sidebarProjects,
     machines,
     onSelectProject,

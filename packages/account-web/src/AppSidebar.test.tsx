@@ -96,3 +96,20 @@ describe('AppSidebar Source pill', () => {
     expect(html).toContain('aria-description="Status read timed out"');
   });
 });
+
+describe('AppSidebar selected status', () => {
+  it('renders the open pane status for the selected row, even when the directory last saw something else', () => {
+    const status = { ...verticalSliceFixture.baseSpace.status, primaryColor: 'blue' as const };
+    const holder = { kind: 'held' as const, machineId: 'desk', label: 'Desk' };
+    const directoryRow = { id: 'open', projectId: 'active', name: 'Open workspace', branch: 'main', closedAt: null, summary: { holder, closedAt: null, status, freshness: 'fresh' as const } };
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar
+      {...base}
+      selected={{ projectId: 'active', workspaceId: 'open' }}
+      selectedSummary={{ holder: { kind: 'unknown' }, closedAt: null, status, freshness: 'fresh' }}
+      projects={[{ id: 'active', name: 'Active project', workspaces: [directoryRow, { ...directoryRow, id: 'other', name: 'Other workspace' }] }]}
+      deployment={null}
+    /></SidebarProvider>);
+    expect(html).toContain('title="main · Status unavailable"');
+    expect(html).toContain('title="main · Waiting · Desk"');
+  });
+});

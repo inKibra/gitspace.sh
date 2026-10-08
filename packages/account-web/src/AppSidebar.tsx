@@ -134,6 +134,8 @@ export interface AppSidebarProps {
   view: ProductRoute;
   onView(view: AppView): void;
   selected: { projectId: string; workspaceId: string | null } | null;
+  /** The open pane's status (the header's exact object); the selected row renders it, so the two cannot disagree. */
+  selectedSummary?: SidebarSpaceSummary;
   projects: readonly SidebarProject[];
   machines: Array<{ id: string; label: string }>;
   onSelectProject?(projectId: string): void;
@@ -312,7 +314,7 @@ function readCollapsedProjects(): ReadonlySet<string> {
   return new Set(Array.isArray(parsed) ? parsed.filter((id: unknown): id is string => typeof id === 'string') : []);
 }
 
-export function AppSidebar({ view, onView, selected, projects, machines, onSelectProject, onSelectWorkspace, onClose, closePendingSpaceId = null, onReopen, onArchive, onRestore, onMove, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, user, deployment }: AppSidebarProps) {
+export function AppSidebar({ view, onView, selected, selectedSummary, projects, machines, onSelectProject, onSelectWorkspace, onClose, closePendingSpaceId = null, onReopen, onArchive, onRestore, onMove, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, user, deployment }: AppSidebarProps) {
   const userName = user?.name || 'Your account';
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const collapseProject = (projectId: string, collapse: boolean): void => {
@@ -345,7 +347,11 @@ export function AppSidebar({ view, onView, selected, projects, machines, onSelec
           </Tooltip> : null}
         </SidebarGroupActions>
         <SidebarMenu>
-          {projects.map((project) => <ProjectRows key={project.id} project={project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} machines={machines} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onClose={onClose} closePendingSpaceId={closePendingSpaceId} onReopen={onReopen} onArchive={onArchive} onRestore={onRestore} onMove={onMove} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} />)}
+          {projects.map((project) => <ProjectRows key={project.id} project={selectedSummary && selected?.projectId === project.id
+            ? selected.workspaceId === null
+              ? { ...project, baseSummary: selectedSummary }
+              : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: selectedSummary } : workspace) }
+            : project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} machines={machines} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onClose={onClose} closePendingSpaceId={closePendingSpaceId} onReopen={onReopen} onArchive={onArchive} onRestore={onRestore} onMove={onMove} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} />)}
         </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>
