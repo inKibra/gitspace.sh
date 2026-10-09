@@ -2977,25 +2977,9 @@ async function routeAccountRpc(request: Request, env: Env): Promise<RoutedAccoun
   }
   const route = await handleAccountCloudRpc(request, env, userId);
   if (route.kind === 'response') return route;
-  let machine = route.holder;
-  if (!machine) {
-    const available = (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines())
-      .filter((candidate) => candidate.state === 'online' && candidate.desiredState === 'online' && candidate.rpcEndpoint);
-    if (route.procedures.length === 1 && route.procedures[0] === 'project.create') {
-      const preferred = available.find((candidate) => candidate.id === settings.defaults.machineId);
-      const candidates = preferred ? [preferred, ...available.filter((candidate) => candidate !== preferred)] : available;
-      const releases = env.TENANT_RELEASES.getByName(userId);
-      for (const candidate of candidates) {
-        if ((await releases.machineExecutionAdmission(candidate.id)).state === 'ready') {
-          machine = candidate;
-          break;
-        }
-      }
-    } else {
-      // Existing workspace ownership and other machine operations keep their routing policy.
-      machine = available[0] ?? null;
-    }
-  }
+  // Existing workspace ownership and other machine operations keep their routing policy.
+  const machine = route.holder ?? (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines())
+    .find((candidate) => candidate.state === 'online' && candidate.desiredState === 'online' && candidate.rpcEndpoint) ?? null;
   if (!machine) {
     return { response: Response.json(publicError('FLEET_OFFLINE', 'No account machine is available'), { status: 503 }), procedures: route.procedures };
   }

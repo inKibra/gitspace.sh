@@ -15,7 +15,7 @@ const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'machine.image.list': true, 'machine.image.events': true, 'machine.image.set': true,
   'machine.image.retry': true, 'machine.image.cancel': true, 'machine.image.recover': true,
   'machine.image.defaults.get': true, 'machine.image.defaults.set': true,
-  'project.list': true, 'devices.list': true, 'devices.revoke': true,
+  'project.list': true, 'project.create': true, 'devices.list': true, 'devices.revoke': true,
   'project.events': true, 'project.directoryEvents': true, 'space.events': true, 'incidents.record': true,
   'providers.list': true, 'providers.apiKey.set': true, 'providers.logout': true,
   'mcp.composio.setup.get': true, 'mcp.composio.setup.put': true, 'mcp.composio.setup.delete': true,
@@ -52,19 +52,22 @@ export function isAccountCloudRpcPath(path: string): boolean {
   return path.startsWith('runtime.') || Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path);
 }
 
-/** Workspace reads use cloud state when there is no live holder.
+/** Read and edited in cloud state unless the space they name is a legacy space held open by an online machine.
  * Per-space queues remain separate from account mutations and runtime work. */
+const SPACE_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = { 'environment.get': true, 'space.view': true, 'workspace.setRelations': true };
 export function isSpaceCloudRpcPath(path: string): boolean {
-  return path === 'environment.get' || (path.startsWith('inspector.') && !Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path));
+  return Object.hasOwn(SPACE_CLOUD_RPC_PATHS, path) || (path.startsWith('inspector.') && !Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path));
 }
 
-export function spaceCloudRpcSpaceId(input: unknown): string | null {
+export function spaceCloudRpcSpaceId(path: string, input: unknown): string | null {
   if (!input || typeof input !== 'object') return null;
   const outer = input as Record<string, unknown>;
   const record = outer.input && typeof outer.input === 'object'
     ? outer.input as Record<string, unknown>
     : outer;
-  return typeof record.spaceId === 'string' ? record.spaceId : null;
+  if (typeof record.spaceId === 'string') return record.spaceId;
+  const target = rpcCallTarget(path, record);
+  return target?.kind === 'space' ? target.spaceId : null;
 }
 
 /** The space or session a machine-bound call names. The account Worker forwards

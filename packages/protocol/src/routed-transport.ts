@@ -83,7 +83,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
         (path.startsWith('machine.image.') && path !== 'machine.image.list' && path !== 'machine.image.events')) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
     if (isAccountCloudRpcPath(path)) return account;
-    if (isSpaceCloudRpcPath(path)) return queue(`inspector:${spaceCloudRpcSpaceId(input) ?? ''}`);
+    if (isSpaceCloudRpcPath(path)) return queue(`inspector:${spaceCloudRpcSpaceId(path, input) ?? ''}`);
     const target = rpcCallTarget(path, input);
     if (!target) return home;
     return queue(target.kind === 'space' ? `space:${target.spaceId}` : target.kind === 'terminal' ? `terminal:${target.spaceId}:${target.machineId}` : `session:${target.sessionId}`);

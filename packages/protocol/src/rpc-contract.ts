@@ -542,6 +542,7 @@ export const SpaceViewCodec = wire.object({
   /** Set when history is read from the checkpoint of a closed space (`mainAgent` is null then). */
   checkpoint: wire.nullable(SpaceCheckpointViewCodec),
 });
+export type SpaceView = InputOf<typeof SpaceViewCodec>;
 
 export const FactEventCodec = wire.object({
   offset: wire.number,

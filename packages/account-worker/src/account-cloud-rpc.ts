@@ -20,6 +20,7 @@ import {
   listProjectsContract, listDevicesContract, revokeDeviceContract,
   getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
   ensureGitSpaceProjectContract, placementsContract, locateSessionContract, type SpacePlacementView,
+  spaceViewContract, setWorkspaceRelationsContract, createProjectContract,
   projectEventsContract, projectDirectoryEventsContract, environmentEventsContract, spaceEventsContract, recordIncidentContract,
 } from '@gitspace/protocol/rpc-contract';
 import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract, inferenceEventsContract } from '@gitspace/protocol/rpc-contract';
@@ -41,6 +42,7 @@ import { environmentCloudProcedures } from './account-environment-rpc.js';
 import { configurationCloudProcedures } from './account-configuration-rpc.js';
 import { runtimeCloudProcedures } from './account-runtime-rpc.js';
 import { providerCloudProcedures } from './account-provider-rpc.js';
+import { createCloudProject, readCloudSpaceView } from './cloud-project.js';
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_BATCH_ITEMS = 32;
@@ -325,6 +327,37 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     if (!(await projectIndex.list()).some((project) => project.id === projectId)) throw new Error('Project does not belong to this account');
     return (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${userId}:${projectId}`);
   };
+  const createProject = server.implement(createProjectContract).handler(async ({ input, errors }) => {
+    try {
+      const { project, operation } = await createCloudProject(env, userId, input);
+      return ok({
+        project: { ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null },
+        operation: {
+          id: operation.id, projectId: operation.projectId, workspaceId: operation.workspaceId, kind: operation.kind, state: operation.state,
+          targetMachines: operation.targetMachines, error: operation.error, revision: operation.revision,
+          createdAt: new Date(operation.createdAt), updatedAt: new Date(operation.updatedAt),
+        },
+      });
+    } catch (error) { return err(errors.OperationFailed({ operation: 'create project', message: message(error) })); }
+  });
+  const spaceView = server.implement(spaceViewContract).handler(async ({ input, errors }) => {
+    try {
+      if (!(await projectIndex.list()).some((project) => project.id === input.projectId)) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      const view = await readCloudSpaceView(env, userId, input.projectId);
+      if (input.workspaceId !== null && !view.workspaces.some((workspace) => workspace.id === input.workspaceId)) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+      return ok(view);
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read workspace relations', message: message(error) })); }
+  });
+  const setRelations = server.implement(setWorkspaceRelationsContract).handler(async ({ input, errors }) => {
+    try {
+      const projectId = await projectIndex.locateWorkspace(input.workspaceId);
+      if (!projectId) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+      const updated = await (await authorityFor(projectId)).setWorkspaceRelations(input.workspaceId, { dependsOn: input.dependsOn, relatedTo: input.relatedTo, stackedOn: input.stackedOn });
+      if (updated.status === 'error') return err(errors.WorkspaceFailure(updated.failure));
+      const workspace = (await readCloudSpaceView(env, userId, projectId)).workspaces.find((candidate) => candidate.id === input.workspaceId);
+      return workspace ? ok(workspace) : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'set workspace relations', message: message(error) })); }
+  });
   const directoryEvents = server.implement(projectDirectoryEventsContract).stream(async function* ({ input, signal, errors }) {
     try {
       await requireSubscription();
@@ -480,8 +513,8 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign, events: inferenceEvents },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, events: settingsEvents },
-    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, ensureGitSpace, events: projectEvents, directoryEvents },
-    space: { events: spaceEvents }, incidents: { record: recordIncident },
+    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, events: projectEvents, directoryEvents },
+    space: { events: spaceEvents, view: spaceView }, workspace: { setRelations }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, providers: providerCloudProcedures(env, userId, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
     inspector: inspectorCloudProcedures(env, userId, requireSubscription, async () => {
@@ -538,8 +571,8 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   const spaceReads = items.filter((item) => isSpaceCloudRpcPath(item.path));
   if (spaceReads.length > 0) {
     if (spaceReads.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads and other operations require separate signed batches');
-    const spaceId = spaceCloudRpcSpaceId(spaceReads[0]!.input);
-    if (spaceReads.some((item) => spaceCloudRpcSpaceId(item.input) !== spaceId)) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads require separate signed batches');
+    const spaceId = spaceCloudRpcSpaceId(spaceReads[0]!.path, spaceReads[0]!.input);
+    if (spaceReads.some((item) => spaceCloudRpcSpaceId(item.path, item.input) !== spaceId)) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads require separate signed batches');
     if (spaceId) {
       // A cloud workspace's checkout lives in the cloud: a legacy placement never answers for it.
       const authority = (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${spaceId}`);

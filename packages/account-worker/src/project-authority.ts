@@ -29,7 +29,7 @@ import { activeAccount, accountAccessResponse } from './account-access.js';
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
-import { GitLfsSnapshotSchema, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject } from '@gitspace/protocol-workspace';
+import { GitLfsSnapshotSchema, WorkspaceDomainError, WorkspaceRelationsSchema, resolveWorkspaceRelations, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspaceRelations, type WorkspaceRelationsInput } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { canonicalLfsObjects } from './git-lfs-reachability.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
@@ -829,6 +829,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN project_space_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN workspaces_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS deleted_workspaces(workspace_id TEXT PRIMARY KEY)');
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_relations(workspace_id TEXT PRIMARY KEY,relations_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS lfs_origin_confirmations(origin TEXT NOT NULL,endpoint TEXT NOT NULL,oid TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(origin,endpoint,oid))');
       this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
       this.directoryOutbox.kick();
@@ -1201,6 +1202,30 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).toArray().map(workspaceDefinition);
   }
 
+  /** The canonical relation graph of this project's workspaces, keyed by workspace id. */
+  listWorkspaceRelations(): Record<string, WorkspaceRelations> {
+    return Object.fromEntries(this.ctx.storage.sql.exec<{ workspace_id: string; relations_json: string }>('SELECT workspace_id,relations_json FROM workspace_relations').toArray()
+      .map(row => [row.workspace_id, WorkspaceRelationsSchema.parse(JSON.parse(row.relations_json))]));
+  }
+
+  /** Replaces a workspace's relations after validating them against the project's workspaces (no unknown targets, no
+   * cycles). A domain refusal is returned, not thrown, so its typed failure survives the Durable Object boundary. */
+  setWorkspaceRelations(workspaceId: string, input: WorkspaceRelationsInput): { status: 'ok'; value: WorkspaceRelations } | { status: 'error'; failure: WorkspaceFailure } {
+    try {
+      return { status: 'ok', value: this.commit('workspace', workspaceId, () => {
+        const project = this.requireProject();
+        if (project.lifecycle === 'archived' || project.lifecycle === 'deleting') throw new Error(`Cannot change workspace relations of a ${project.lifecycle} project`);
+        const workspaces = this.listWorkspaces().filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting');
+        const relations = resolveWorkspaceRelations(workspaceId, input, workspaces, new Map(Object.entries(this.listWorkspaceRelations())));
+        this.ctx.storage.sql.exec('INSERT INTO workspace_relations(workspace_id,relations_json) VALUES(?,?) ON CONFLICT(workspace_id) DO UPDATE SET relations_json=excluded.relations_json', workspaceId, JSON.stringify(relations));
+        return relations;
+      }) };
+    } catch (error) {
+      if (error instanceof WorkspaceDomainError) return { status: 'error', failure: error.toJSON() };
+      throw error;
+    }
+  }
+
   /** Initializes canonical base metadata only; never creates or acquires a checkout. */
   ensureBaseWorkspace(input: { userId: string; projectId: string }): CloudWorkspaceDefinition {
     if (input.userId !== this.env.ACCOUNT_ID) throw new Error('Account does not own this project authority');
@@ -1304,6 +1329,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE workspace_id=? AND revoked_at IS NULL', new Date().toISOString(), workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM hosted_routes WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM workspaces WHERE workspace_id=?', workspaceId);
+    this.ctx.storage.sql.exec('DELETE FROM workspace_relations WHERE workspace_id=?', workspaceId);
     return true;
     });
   }

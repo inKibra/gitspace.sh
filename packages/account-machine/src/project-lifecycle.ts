@@ -3,10 +3,12 @@ import { mkdir, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import type { GitSpaceDatabase, MaterializedSpace, Workspace } from '@gitspace/core';
 import { assertWorkspacePhase, WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
-import type {
-  CloudProjectOperation,
-  CloudProjectSummary,
-  CloudWorkspaceDefinition,
+import {
+  cloudResourceId,
+  normalizeRemoteRepositoryUrl,
+  type CloudProjectOperation,
+  type CloudProjectSummary,
+  type CloudWorkspaceDefinition,
 } from '@gitspace/protocol';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { PublishedSpaceHeadResolver } from './inspector-base.js';
@@ -66,60 +68,11 @@ const WORKSPACE_CREATE_STEPS = [
   { id: 'activate', label: 'Activate workspace' },
 ];
 
-function resourceId(name: string): string {
-  const label = name.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 48) || 'space';
-  return `${label}-${crypto.randomUUID().slice(0, 8)}`;
-}
-
+/** A machine also imports from an explicit local path; every other address is a remote repository. */
 function normalizeRepositoryUrl(input: string): string {
   const address = input.trim();
-  if (!address || address.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(address)) {
-    throw new Error('Enter a repository root HTTPS/SSH URL or GitHub owner/repo, not a Git option.');
-  }
-  // Keep explicit local paths usable for local imports; bare owner/repo is GitHub shorthand.
-  if (isAbsolute(address) || address.startsWith('./') || address.startsWith('../')) return address;
-  if (/^[a-z0-9][a-z0-9-]*\/[a-z0-9_.-]+\/?$/iu.test(address)) {
-    return normalizeRepositoryUrl(`https://github.com/${address}`);
-  }
-  const scp = /^(?:[a-z0-9_.-]+@)?([a-z0-9][a-z0-9.-]*):([^:].*)$/iu.exec(address);
-  if (scp && !address.includes('://')) {
-    normalizeRepositoryUrl(`ssh://${address.slice(0, address.indexOf(':'))}/${scp[2]!.replace(/^\/+/u, '')}`);
-    return address;
-  }
-  let url: URL;
-  try {
-    url = new URL(address);
-  } catch {
-    throw new Error('Enter a repository root HTTPS/SSH URL or GitHub owner/repo.');
-  }
-  if (!['https:', 'http:', 'ssh:'].includes(url.protocol) || !url.hostname || url.hostname.startsWith('-') || /\s/u.test(address)) {
-    throw new Error('Use a repository HTTPS/SSH URL, an explicit local path, or GitHub owner/repo.');
-  }
-  if (url.password || (url.protocol !== 'ssh:' && url.username)) {
-    throw new Error('Do not include credentials in the repository URL. Use the account SSH key instead.');
-  }
-  if (url.search || url.hash) {
-    throw new Error('Use the repository root URL without a query or fragment, not a file or branch page.');
-  }
-  let path: string;
-  try {
-    path = decodeURIComponent(url.pathname).replace(/\/+$/u, '');
-  } catch {
-    throw new Error('The repository URL contains an invalid path.');
-  }
-  if (!path || /[\u0000-\u001f\u007f]/u.test(path) || /^\/[^/]+\/[^/]+\/(?:-\/)?(?:tree|blob|raw)(?:\/|$)/u.test(path)) {
-    throw new Error('Use the repository root URL, not a file or branch page.');
-  }
-  if (url.hostname === 'github.com' || url.hostname === 'www.github.com') {
-    if (!/^\/[a-z0-9][a-z0-9-]*\/[a-z0-9_.-]+$/iu.test(path) || /\/(?:\.|\.\.)(?:\.git)?$/u.test(path)) {
-      throw new Error('Use the GitHub repository root URL: https://github.com/owner/repo, not a file or branch page.');
-    }
-    url.hostname = 'github.com';
-    if (url.protocol !== 'ssh:') url.pathname = `${path.replace(/\.git$/u, '')}.git`;
-  } else {
-    url.pathname = url.pathname.replace(/\/+$/u, '');
-  }
-  return url.toString();
+  if (!/[\u0000-\u001f\u007f]/u.test(address) && (isAbsolute(address) || address.startsWith('./') || address.startsWith('../'))) return address;
+  return normalizeRemoteRepositoryUrl(address);
 }
 
 async function runGit(args: string[], cwd?: string, environment: Record<string, string> = {}): Promise<string> {
@@ -368,7 +321,7 @@ export class ProjectLifecycleManager {
 
   async createProject(input: CreateProjectInput): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation }> {
     const repositoryUrl = input.repositoryUrl === null ? null : normalizeRepositoryUrl(input.repositoryUrl);
-    const projectId = resourceId(input.name);
+    const projectId = cloudResourceId(input.name);
     const projectRoot = join(this.managedRoot, projectId);
     const repositoryPath = join(projectRoot, 'base');
     let baseBranch = input.baseBranch ?? 'main';
@@ -504,7 +457,7 @@ export class ProjectLifecycleManager {
       return dependency;
     });
     assertWorkspacePhase(phase, dependencies);
-    const workspaceId = resourceId(input.name);
+    const workspaceId = cloudResourceId(input.name);
     const rootPath = join(this.managedRoot, input.projectId, workspaceId);
     this.creating.add(workspaceId);
     try {

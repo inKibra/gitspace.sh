@@ -142,15 +142,15 @@ it('sends machine work for each space or session in its own tagged batch to the 
   }) as typeof fetch;
   const transport = createRoutedTransport({ homeUrl: 'https://account.test/rpc', fetch: fetcher });
   await Promise.all([
-    transport.request({ v: 1, path: 'space.view', input: { projectId: 'project', workspaceId: 'space-a' } }),
-    transport.request({ v: 1, path: 'space.view', input: { projectId: 'project', workspaceId: 'space-b' } }),
+    transport.request({ v: 1, path: 'transcriptContent', input: { projectId: 'project', workspaceId: 'space-a' } }),
+    transport.request({ v: 1, path: 'transcriptPage', input: { projectId: 'project', workspaceId: 'space-b' } }),
     transport.request({ v: 1, path: 'transcriptPage', input: { projectId: 'project', workspaceId: 'space-a' } }),
     transport.request({ v: 1, path: 'session.control', input: { sessionId: 'session-a' } }),
   ]);
   expect(requests).toHaveLength(3);
   expect(requests).toEqual(expect.arrayContaining([
-    { url: 'https://account.test/rpc?p=space.view,transcriptPage', paths: ['space.view', 'transcriptPage'] },
-    { url: 'https://account.test/rpc?p=space.view', paths: ['space.view'] },
+    { url: 'https://account.test/rpc?p=transcriptContent,transcriptPage', paths: ['transcriptContent', 'transcriptPage'] },
+    { url: 'https://account.test/rpc?p=transcriptPage', paths: ['transcriptPage'] },
     { url: 'https://account.test/rpc?p=session.control', paths: ['session.control'] },
   ]));
 });

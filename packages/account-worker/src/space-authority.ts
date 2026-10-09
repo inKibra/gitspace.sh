@@ -4,7 +4,7 @@ import { DurableChangeLog, type DurableStreamSubscription } from './durable-stre
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
 import { RuntimeAttachmentSchema, RuntimeCachePolicySchema, RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeAttachmentLossReason, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, readRuntimeLfsRoots, readRuntimeSnapshot, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
@@ -17,7 +17,7 @@ import { RuntimeAttachmentController, executorCapabilities } from './runtime-att
 import { requireRuntimeIdentity } from './runtime-access.js';
 import { z } from 'zod';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
-import { parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type GitLfsConfirmedObject } from '@gitspace/protocol-workspace';
+import { deriveWorkspaceStatusSummary, parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type GitLfsConfirmedObject, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { readEncryptedCheckpoint } from './git-lfs-store.js';
 import { attachmentMachineKind } from './runtime-machine-loss.js';
@@ -173,6 +173,14 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (await this.ctx.storage.get('runtime.identity') === undefined) return [];
     if (!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_attachments'").toArray().length) return [];
     return this.ctx.storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments').toArray().map(row => RuntimeAttachmentSchema.parse(JSON.parse(row.record)));
+  }
+
+  /** Agent status of this cloud workspace from its last published runtime snapshot, without opening the runtime;
+   * null when the workspace has no cloud runtime state yet. */
+  async runtimeWorkspaceStatus(): Promise<WorkspaceStatusSummary | null> {
+    if (await this.ctx.storage.get('runtime.identity') === undefined) return null;
+    const snapshot = readRuntimeSnapshot(this.ctx.storage);
+    return deriveWorkspaceStatusSummary({ agents: (snapshot?.conversations ?? []).map(item => ({ state: item.status === 'running' ? 'running' : item.status === 'waiting' ? 'permission-needed' : 'waiting', ...(item.status === 'failed' ? { failure: { code: 'RUNTIME_FAILED', message: item.error ?? 'Conversation failed' } } : {}) })) });
   }
 
   async runtimeMachineAttachments(machineId: string): Promise<RuntimeAttachment[]> {

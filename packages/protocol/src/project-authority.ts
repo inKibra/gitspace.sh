@@ -35,6 +35,63 @@ export function isGitSpaceSourceRepository(reference: string | null): boolean {
   return reference !== null && /^(?:(?:https?:\/\/(?:www\.)?github\.com\/)|(?:git@github\.com:)|(?:ssh:\/\/git@github\.com\/))inkibra\/gitspace\.sh(?:\.git)?\/?$/iu.test(reference.trim());
 }
 
+/** A new project or workspace identity: a readable label from its name plus a random suffix. */
+export function cloudResourceId(name: string): string {
+  const label = name.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 48) || 'space';
+  return `${label}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+/** Canonical address of a remote repository: an HTTPS/SSH root URL, an scp-style SSH address, or GitHub `owner/repo`.
+ * Rejects Git options, credentials, and file or branch pages. */
+export function normalizeRemoteRepositoryUrl(input: string): string {
+  const address = input.trim();
+  if (!address || address.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(address)) {
+    throw new Error('Enter a repository root HTTPS/SSH URL or GitHub owner/repo, not a Git option.');
+  }
+  if (/^[a-z0-9][a-z0-9-]*\/[a-z0-9_.-]+\/?$/iu.test(address)) {
+    return normalizeRemoteRepositoryUrl(`https://github.com/${address}`);
+  }
+  const scp = /^(?:[a-z0-9_.-]+@)?([a-z0-9][a-z0-9.-]*):([^:].*)$/iu.exec(address);
+  if (scp && !address.includes('://')) {
+    normalizeRemoteRepositoryUrl(`ssh://${address.slice(0, address.indexOf(':'))}/${scp[2]!.replace(/^\/+/u, '')}`);
+    return address;
+  }
+  let url: URL;
+  try {
+    url = new URL(address);
+  } catch {
+    throw new Error('Enter a repository root HTTPS/SSH URL or GitHub owner/repo.');
+  }
+  if (!['https:', 'http:', 'ssh:'].includes(url.protocol) || !url.hostname || url.hostname.startsWith('-') || /\s/u.test(address)) {
+    throw new Error('Use a repository HTTPS/SSH URL or GitHub owner/repo.');
+  }
+  if (url.password || (url.protocol !== 'ssh:' && url.username)) {
+    throw new Error('Do not include credentials in the repository URL. Use the account SSH key instead.');
+  }
+  if (url.search || url.hash) {
+    throw new Error('Use the repository root URL without a query or fragment, not a file or branch page.');
+  }
+  let path: string;
+  try {
+    path = decodeURIComponent(url.pathname).replace(/\/+$/u, '');
+  } catch {
+    throw new Error('The repository URL contains an invalid path.');
+  }
+  if (!path || /[\u0000-\u001f\u007f]/u.test(path) || /^\/[^/]+\/[^/]+\/(?:-\/)?(?:tree|blob|raw)(?:\/|$)/u.test(path)) {
+    throw new Error('Use the repository root URL, not a file or branch page.');
+  }
+  if (url.hostname === 'github.com' || url.hostname === 'www.github.com') {
+    if (!/^\/[a-z0-9][a-z0-9-]*\/[a-z0-9_.-]+$/iu.test(path) || /\/(?:\.|\.\.)(?:\.git)?$/u.test(path)) {
+      throw new Error('Use the GitHub repository root URL: https://github.com/owner/repo, not a file or branch page.');
+    }
+    url.hostname = 'github.com';
+    if (url.protocol !== 'ssh:') url.pathname = `${path.replace(/\.git$/u, '')}.git`;
+  } else {
+    url.pathname = url.pathname.replace(/\/+$/u, '');
+  }
+  return url.toString();
+}
+
 export const gitSpaceSourceProvenanceSchema = z.object({
   release: z.string().min(1).max(160).nullable(),
   branch: z.string().min(1).max(512).nullable(),

@@ -781,72 +781,79 @@ describe('account routing of machine work', () => {
     const logs = vi.spyOn(console, 'log');
     try {
       const response = await SELF.fetch(fixture.request({ v: 1, batch: [
-        { ...single('space.view', { projectId: held.projectId, workspaceId: held.spaceId }), id: 'held' },
-        { ...single('space.view', { projectId: held.projectId, workspaceId: null }), id: 'base' },
+        { ...single('transcriptPage', { projectId: held.projectId, workspaceId: held.spaceId }), id: 'held' },
+        { ...single('transcriptPage', { projectId: held.projectId, workspaceId: null }), id: 'base' },
       ] }));
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ error: { code: 'RPC_MIXED_HOLDER_BATCH' } });
       expect(reached).toEqual([]);
       const batches = logs.mock.calls.flatMap(([line]): unknown[] => typeof line === 'string' && line.includes('"rpc_batch"') ? [JSON.parse(line)] : []);
-      expect(batches).toEqual([expect.objectContaining({ event: 'rpc_batch', procedures: ['space.view'], status: 400, code: 'RPC_MIXED_HOLDER_BATCH' })]);
+      expect(batches).toEqual([expect.objectContaining({ event: 'rpc_batch', procedures: ['transcriptPage'], status: 400, code: 'RPC_MIXED_HOLDER_BATCH' })]);
     } finally { logs.mockRestore(); }
   });
 
-  async function creationFleet(defaultMachineId: string) {
-    const value = await fleet();
-    const settings = env.USER_SETTINGS.getByName(value.fixture.userId);
-    const current = await settings.get('test');
-    await settings.update('test', { ...current, expectedRevision: current.revision, defaults: { ...current.defaults, machineId: defaultMachineId } });
-    for (const id of ['machine-a', 'machine-b', 'machine-c']) {
-      await env.TENANT_RELEASES.getByName(value.fixture.userId).machineProtocol(id, { version: 1 });
-    }
-    return value;
-  }
-
-  it('creates a project on the compatible online configured default rather than the first machine', async () => {
-    const { fixture, reached } = await creationFleet('machine-b');
-    const response = await SELF.fetch(fixture.request(single('project.create', { name: 'Created', baseBranch: 'main', repositoryUrl: null })));
-    expect(await response.json()).toEqual({ machine: 'machine-b' });
-    expect(reached.map((entry) => entry.machine)).toEqual(['machine-b']);
-  });
-
-  it.each(['offline', 'incompatible'] as const)('falls back from an %s default only to a compatible online creation machine', async (reason) => {
-    const { fixture, catalog, reached } = await creationFleet('machine-b');
-    await env.TENANT_RELEASES.getByName(fixture.userId).machineProtocol('machine-a', { version: null });
-    if (reason === 'offline') await catalog.putMachine({ ...machine('machine-b'), state: 'offline', lifecycleRevision: 2 });
-    else await env.TENANT_RELEASES.getByName(fixture.userId).machineProtocol('machine-b', { version: null });
-    const response = await SELF.fetch(fixture.request(single('project.create', { name: 'Created', baseBranch: 'main', repositoryUrl: null })));
-    expect(await response.json()).toEqual({ machine: 'machine-c' });
-    expect(reached.map((entry) => entry.machine)).toEqual(['machine-c']);
-  });
-
-  it('rejects project creation without a compatible online machine before dispatch', async () => {
-    const { fixture, reached } = await creationFleet('machine-b');
-    for (const id of ['machine-a', 'machine-b', 'machine-c']) await env.TENANT_RELEASES.getByName(fixture.userId).machineProtocol(id, { version: null });
-    const response = await SELF.fetch(fixture.request(single('project.create', { name: 'Created', baseBranch: 'main', repositoryUrl: null })));
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ error: { code: 'FLEET_OFFLINE' } });
-    expect(reached).toEqual([]);
-  });
-
-  it('does not retry creation on another machine after an uncertain mutation failure', async () => {
-    const { fixture, reached } = await creationFleet('machine-b');
-    network.use(http.post('https://machine-b.test/rpc', () => {
-      reached.push({ machine: 'machine-b', signedTarget: '/rpc' });
-      return HttpResponse.json({ error: 'connection failed after creation' }, { status: 502 });
-    }));
-    const response = await SELF.fetch(fixture.request(single('project.create', { name: 'Created', baseBranch: 'main', repositoryUrl: null })));
-    expect(response.status).toBe(502);
-    expect(reached.map((entry) => entry.machine)).toEqual(['machine-b']);
-  });
-
   it('sends work without a live holder to the first online machine', async () => {
-    const { fixture, catalog, held, reached } = await fleet();
+    const { fixture, held, reached } = await fleet();
     await SELF.fetch(fixture.request(single('project.open', { projectId: held.projectId })));
     await SELF.fetch(fixture.request(single('space.reopen', { spaceId: 'never-placed', expectedGeneration: 1 })));
-    await catalog.putMachine({ ...machine('machine-b'), state: 'offline', lifecycleRevision: 2 });
-    await SELF.fetch(fixture.request(single('space.view', { projectId: held.projectId, workspaceId: held.spaceId })));
-    expect(reached.map((entry) => entry.machine)).toEqual(['machine-a', 'machine-a', 'machine-a']);
+    expect(reached.map((entry) => entry.machine)).toEqual(['machine-a', 'machine-a']);
+  });
+});
+
+describe('cloud projects and workspace relations with no machines', () => {
+  it('creates an empty project in the cloud and reads its workspaces without any machine', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const client = inspectorClient(fixture);
+    const created = await client.project.create({ name: 'Pantry tracker', baseBranch: null, repositoryUrl: null });
+    if (created.status === 'error') throw created.error;
+    expect(created.value).toMatchObject({
+      project: { name: 'Pantry tracker', lifecycle: 'active', repositoryReference: null, baseBranch: 'main' },
+      operation: { kind: 'project.create', state: 'succeeded', targetMachines: [] },
+    });
+    const projectId = created.value.project.id;
+    expect(projectId).toMatch(/^pantry-tracker-[0-9a-f]{8}$/u);
+    expect((await env.USER_PROJECTS.getByName(fixture.userId).list()).map((project) => project.id)).toContain(projectId);
+    expect(await client.space.view({ projectId, workspaceId: null })).toMatchObject({ status: 'ok', value: {
+      project: { id: projectId, baseBranch: 'main', connected: true },
+      baseSpace: { id: projectId, kind: 'base', branch: 'main', possessedBy: null, closedAt: null, status: { primaryColor: 'dim' } },
+      workspaces: [], mainAgent: null,
+    } });
+  });
+
+  it('saves workspace relations in the cloud and derives the stack they block', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { projectId, spaceId: parentId, authority } = await inspectorWorkspace(fixture.userId);
+    const childId = `space-${crypto.randomUUID()}`;
+    await authority.putWorkspace({ id: childId, projectId, kind: 'worktree', name: 'Child', branch: 'child', phase: 'plan', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(childId, projectId);
+    const client = inspectorClient(fixture);
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [], relatedTo: [], stackedOn: parentId })).toMatchObject({ status: 'ok', value: {
+      id: childId, phase: 'plan', relations: { dependsOn: [parentId], relatedTo: [], stackedOn: parentId }, stack: { blockedBy: [parentId], blocking: [] },
+    } });
+    const view = await client.space.view({ projectId, workspaceId: parentId });
+    if (view.status === 'error') throw view.error;
+    expect(view.value.workspaces.find((workspace) => workspace.id === parentId)?.stack.blocking).toEqual([childId]);
+    expect(await client.workspace.setRelations({ workspaceId: parentId, dependsOn: [childId], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'error', error: { data: { code: 'WORKSPACE_DEPENDENCY_CYCLE' } } });
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: ['missing'], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'error', error: { data: { code: 'WORKSPACE_NOT_FOUND' } } });
+    expect(await client.space.view({ projectId, workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { data: { workspaceId: 'missing' } } });
+  });
+
+  it('imports a public repository at its advertised default branch and asks for the branch it cannot read', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const client = inspectorClient(fixture);
+    network.use(
+      http.get('https://github.com/example/public.git/info/refs', () => new HttpResponse(`001e# service=git-upload-pack\n0000${'a'.repeat(40)} HEAD\0multi_ack symref=HEAD:refs/heads/trunk agent=git/github\n0000`)),
+      http.get('https://github.com/example/private.git/info/refs', () => new HttpResponse(null, { status: 401 })),
+    );
+    expect(await client.project.create({ name: 'Public', baseBranch: null, repositoryUrl: 'example/public' })).toMatchObject({ status: 'ok', value: {
+      project: { repositoryReference: 'https://github.com/example/public.git', baseBranch: 'trunk', lifecycle: 'active' },
+      operation: { kind: 'project.import', state: 'succeeded', targetMachines: [] },
+    } });
+    expect(await client.project.create({ name: 'Private', baseBranch: null, repositoryUrl: 'git@github.com:example/private.git' }))
+      .toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Enter its base branch') } } });
+    expect(await client.project.create({ name: 'Private', baseBranch: 'release', repositoryUrl: 'git@github.com:example/private.git' })).toMatchObject({ status: 'ok', value: {
+      project: { repositoryReference: 'git@github.com:example/private.git', baseBranch: 'release', lifecycle: 'active' },
+    } });
   });
 });
 

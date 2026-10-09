@@ -1,4 +1,4 @@
-import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { RuntimeSnapshotSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 
 /** Snapshot and delta payloads may exceed SQLite's per-value limit. */
 export function createReplicaStore(storage: DurableObjectStorage) {
@@ -67,4 +67,11 @@ export function createReplicaStore(storage: DurableObjectStorage) {
       return events;
     },
   };
+}
+
+/** The last published runtime snapshot, read without opening the runtime; null before its first publication. */
+export function readRuntimeSnapshot(storage: DurableObjectStorage): RuntimeSnapshot | null {
+  if (!storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_replica'").toArray().length) return null;
+  const parts = storage.sql.exec<{ payload: string }>("SELECT payload FROM runtime_replica WHERE kind='snapshot' ORDER BY part").toArray();
+  return parts.length ? RuntimeSnapshotSchema.parse(JSON.parse(parts.map(row => row.payload).join(''))) : null;
 }
