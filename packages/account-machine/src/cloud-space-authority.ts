@@ -1,4 +1,4 @@
-import { machineExecutionAdmissionSchema, type machineProtocolInputSchema, type MachineExecutionAdmission } from '@gitspace/protocol/deployment';
+import { machineExecutionAdmissionSchema, type LaunchProgress, type machineProtocolInputSchema, type MachineExecutionAdmission } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
 import {
   inferenceStateSchema,
@@ -1214,8 +1214,8 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return machineExecutionAdmissionSchema.parse(await this.call('deploy.machineProtocol', input));
   }
 
-  revertRelease(): Promise<DeploymentStatus> {
-    return this.call<DeploymentStatus>('deploy.revert', {});
+  async reportLaunchProgress(progress: LaunchProgress): Promise<void> {
+    await this.call('deploy.launchProgress', progress);
   }
 
   /** This machine's verdict on a release generation; the machine id comes from the signed request. */

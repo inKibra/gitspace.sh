@@ -27,7 +27,7 @@ import type { ProviderLoginFlow, ProvidersSectionProps } from './ProvidersSectio
 import { forgetProviderLogin, readProviderLogin, saveProviderLogin, type RecoverableProviderLogin } from './provider-login-recovery.js';
 import { SettingsPage } from './SettingsPage.js';
 import { InferenceProvider, useInference } from './InferenceContext.js';
-import { InferencePage } from './InferencePage.js';
+import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
 import { EnvironmentView } from './environment/EnvironmentView.js';
 import { LifecycleLogDialog } from './environment/LifecycleLogDialog.js';
 import { partitionAttachments } from './environment/cache-presentation.js';
@@ -1237,6 +1237,7 @@ function GitSpaceProduct() {
     onSetApiKey: saveProviderApiKey,
     login: { flow: loginFlow?.profileId === profileId ? loginFlow : null, respond: respondLogin, cancel: dismissLogin, reconnect: () => { if (loginFlow) connectProviderLogin(loginFlow); } },
   };
+  const profileModels = { models: modelsValue?.models ?? [], modelsReady: modelsValue !== undefined, modelsError: modelsQuery.state === 'failure' ? rpcErrorMessage(modelsQuery.error, 'providers.models') : null };
   const inferencePage = (onboarding = false) => <InferencePage
     inference={inference} selectedProfileId={profileId} onSelectProfile={(id) => {
       const url = setProductRoute(new URL(window.location.href), 'inference');
@@ -1247,8 +1248,7 @@ function GitSpaceProduct() {
     schema={inferenceSettingMetadata.map(({ value, description, options, ...item }) => ({ ...item, valueJson: JSON.stringify(value), description: description ?? null, options: options ?? [] }))} schemaLoading={false}
     schemaError={null}
     onRefreshSchema={() => { void modelsQuery.refetch(); }}
-    models={modelsValue?.models ?? []} modelsReady={modelsValue !== undefined} modelsLoading={modelsQuery.state === 'pending'}
-    modelsError={modelsQuery.state === 'failure' ? rpcErrorMessage(modelsQuery.error, 'providers.models') : null}
+    {...profileModels} modelsLoading={modelsQuery.state === 'pending'}
     providers={providersSection} onboarding={onboarding}
     initialTab={onboarding || location.searchParams.get('section') === 'providers' ? 'Providers' : undefined}
   />;
@@ -1279,6 +1279,7 @@ function GitSpaceProduct() {
     machines={machinesValue ?? []}
     runtimeSettings={settingsRuntimeValue.schema}
     inferenceSetup={inferencePage(true)}
+    inferenceReady={onboardingInferenceGate({ profile: activeProfile, ...profileModels, providers: providersSection }) === 'ready'}
     runtimeGeneration={settingsRuntimeValue.document.generation}
     runtimeSync={settingsRuntimeValue.sync}
     gitIdentity={settingsGitIdentityValue}

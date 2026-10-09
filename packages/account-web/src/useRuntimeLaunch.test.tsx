@@ -23,7 +23,6 @@ function initial(): DeploymentStatusView {
   return {
     ...value,
     launch: { ...value.launch!, launchId: 'attempt-1', status: 'running', phase: 'build', message: 'building tenant worker', sha: value.releases[0]!.sha },
-    thisMachine: { ...value.thisMachine, sha: null },
   };
 }
 beforeEach(() => {
@@ -44,8 +43,8 @@ it('retains launch history and polls through restart until the selected frontend
   await act(() => root.render(<View status={status} />));
   expect(state.launch?.log.map(entry => entry.phase)).toEqual(['build', 'launched', 'restart']);
   expect(reload).not.toHaveBeenCalled();
-  // A restarted machine can lose its local launch record. The accepted track survives.
-  status = { ...status, launch: null, thisMachine: { ...status.thisMachine, sha: state.launch!.sha }, desired: { ...status.desired, frontend: null } };
+  // Every fleet machine swaps; the accepted track survives a status that no longer carries launch progress.
+  status = { ...status, launch: null, current: { ...status.current, machines: Object.fromEntries(Object.entries(status.current.machines).map(([machineId, machine]) => [machineId, { ...machine, sha: state.launch!.sha }])) }, desired: { ...status.desired, frontend: null } };
   await act(() => root.render(<View status={status} />));
   await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
   expect(refresh).toHaveBeenCalledTimes(2);

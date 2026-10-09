@@ -847,11 +847,6 @@ describe('GitSpace Result RPC', () => {
     });
     await devices.start();
     const launches: Array<{ workspaceId: string; targets: string[] }> = [];
-    const tenantDeployment = {
-      desired: { worker: null, machine: 'rel-1', frontend: null, updatedAt: '2026-08-31T00:00:00.000Z' },
-      current: { worker: { sha: null, version: 'dev' }, machines: { 'machine-a': { sha: 'rel-1', generation: 'sha256:' + 'c'.repeat(64) } } },
-      releases: [],
-    };
     const cloudPlacements: Array<{ spaceId: string; projectId: string; kind: 'base' | 'worktree'; holderId: string; state: string; generation: number }> = [];
     let savedInspectorBase: string | null = null;
     let lifecycle = emptyLifecycleState('project-a', 'workspace-a');
@@ -961,13 +956,7 @@ describe('GitSpace Result RPC', () => {
       },
       machineId: 'machine-a',
       devices,
-      deployment: {
-        status: async () => tenantDeployment,
-        launch: (input) => { launches.push(input); throw new Error('not built in tests'); },
-        launchProgress: () => null,
-        revert: async () => ({ ...tenantDeployment, desired: { worker: null, machine: null, frontend: null, updatedAt: '2026-08-31T00:00:00.000Z' } }),
-        thisMachine: { sha: 'rel-1', generation: 'sha256:' + 'c'.repeat(64) },
-      },
+      deployment: { launch: (input) => { launches.push(input); throw new Error('not built in tests'); } },
     });
     const handler = createSignedRpcHandler({
       handler: rpc.handler,
@@ -1017,11 +1006,6 @@ describe('GitSpace Result RPC', () => {
     expect(unsignedTranscript.value?.status).toBe('error');
     expect((await tunneledClient.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('ok');
     expect((await reader.secrets.put({ projectId: 'project-a', name: 'X', value: 'y' })).status).toBe('error');
-    const deploymentStatus = await reader.deployment.status({});
-    if (deploymentStatus.status === 'error') throw deploymentStatus.error;
-    expect(deploymentStatus.value.thisMachine).toMatchObject({ machineId: 'machine-a', sha: 'rel-1' });
-    expect(deploymentStatus.value.desired).toEqual({ worker: null, machine: 'rel-1', frontend: null, updatedAt: '2026-08-31T00:00:00.000Z' });
-    expect(deploymentStatus.value.current.machines['machine-a']).toMatchObject({ sha: 'rel-1' });
     // Launching is a `deployment.control` mutation: a read-only device is refused before the launcher runs.
     expect((await reader.deployment.launch({ workspaceId: 'workspace-a', targets: ['machine'] })).status).toBe('error');
     expect(launches).toEqual([]);

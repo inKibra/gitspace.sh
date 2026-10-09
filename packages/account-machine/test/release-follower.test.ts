@@ -154,7 +154,7 @@ describe('release follower', () => {
     const manifestKey = `distribution/v1/releases/default/${process.platform}-${process.arch}/machine/manifest.json`;
     const artifact = { ...built.artifact, key: manifestKey };
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} }, releases: [],
     };
     const baseAuthority = fakeAuthority(status);
@@ -197,7 +197,7 @@ describe('release follower', () => {
     });
     const fetched: string[] = [];
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, artifact, null)],
     };
@@ -272,7 +272,7 @@ describe('release follower', () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-channel-follower-'));
     roots.push(root);
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [],
     };
@@ -320,7 +320,7 @@ describe('release follower', () => {
     native.set(new TextEncoder().encode('lastEnd'), EXECUTABLE_CHUNK_BYTES);
     const { artifact, manifest, objects } = await executable('chunked', 'machine', { 'machine.js': 'console.log(1)', 'native.node': native });
     const authority = fakeAuthority({
-      desired: { worker: null, machine: 'chunked', frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: null, machine: 'chunked', frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release('chunked', artifact, null)],
     });
@@ -348,7 +348,7 @@ describe('release follower', () => {
     const migration = manifest.files.find((file) => file.path.endsWith('.sql'))!;
     objects[migration.chunks[0]!.key] = new TextEncoder().encode('DROP TABLE t;');
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, artifact, null)],
     };
@@ -377,7 +377,7 @@ describe('release follower', () => {
     built.objects[built.artifact.key] = bytes;
     const artifact = { ...built.artifact, hash: sha256(bytes), size: bytes.byteLength };
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, artifact, null)],
     };
@@ -402,7 +402,7 @@ describe('release follower', () => {
     const sha = 'def456';
     const { artifact, objects } = await executable(sha, 'machine', { 'machine.js': 'throw new Error("boom")' });
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, artifact, null)],
     };
@@ -450,7 +450,7 @@ describe('release follower', () => {
     for (const [path, bytes] of Object.entries(files)) await Bun.write(join(expectedRoot, path), bytes);
     const treeHash = await hashArtifactPath(expectedRoot);
     const status: DeploymentStatus = {
-      desired: { worker: null, machine: null, frontend: sha, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: null, machine: null, frontend: sha, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} },
       releases: [release(sha, null, { key: keys.frontend, hash: treeHash, size: 0 })],
     };

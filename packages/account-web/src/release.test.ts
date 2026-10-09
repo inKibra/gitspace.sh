@@ -8,8 +8,7 @@ function splitReleaseStatus(): DeploymentStatusView {
   return {
     ...deploymentStatusFixture,
     desired: { worker: null, frontend: null, machine: 'machine-release', updatedAt: record.createdAt },
-    current: { worker: { sha: null, version: 'channel' }, machines: {} },
-    thisMachine: { machineId: 'home', sha: 'machine-release', generation: 'generation-a' },
+    current: { worker: { sha: null, version: 'channel' }, machines: { home: { sha: 'machine-release', generation: 'generation-a' } } },
     releases: [
       { ...record, sha: 'machine-release', status: { ...record.status, machines: { home: 'applied' }, omps: {} } },
       { ...record, sha: 'omp-release', status: { ...record.status, machines: {}, omps: { home: 'failed' } } },
@@ -23,16 +22,22 @@ describe('independent target convergence', () => {
     let status = splitReleaseStatus();
     expect(converging(status)).toBe(false);
     expect(machineConvergence(status)).toEqual({ applied: 1, total: 1 });
-    status = { ...status, thisMachine: { ...status.thisMachine, sha: 'previous-machine' } };
+    status = { ...status, current: { ...status.current, machines: { home: { sha: 'previous-machine', generation: 'generation-a' } } } };
     expect(converging(status)).toBe(true);
     expect(machineConvergence(status)).toEqual({ applied: 0, total: 1 });
+  });
+
+  it('has converged with no machines in the fleet', () => {
+    const status = { ...splitReleaseStatus(), current: { worker: { sha: null, version: 'channel' }, machines: {} } };
+    expect(converging(status)).toBe(false);
+    expect(machineConvergence(status)).toEqual({ applied: 0, total: 0 });
   });
 
   it('continues polling a channel reset until the machine has reverted', () => {
     let status = splitReleaseStatus();
     status = { ...status, desired: { ...status.desired, machine: null } };
     expect(converging(status)).toBe(true);
-    status = { ...status, thisMachine: { ...status.thisMachine, sha: null } };
+    status = { ...status, current: { ...status.current, machines: { home: { sha: null, generation: 'generation-a' } } } };
     expect(converging(status)).toBe(false);
   });
 
@@ -40,7 +45,7 @@ describe('independent target convergence', () => {
     let status = splitReleaseStatus();
     status = {
       ...status,
-      thisMachine: { ...status.thisMachine, sha: 'previous-machine' },
+      current: { ...status.current, machines: { home: { sha: 'previous-machine', generation: 'generation-a' } } },
       releases: status.releases.map((record) => record.sha === status.desired.machine
         ? { ...record, status: { ...record.status, machines: { home: 'failed' } } }
         : record),
@@ -53,7 +58,7 @@ describe('independent target convergence', () => {
     let status = splitReleaseStatus();
     status = {
       ...status,
-      current: { ...status.current, machines: { pending: { sha: 'previous-machine', generation: 'previous' } } },
+      current: { ...status.current, machines: { ...status.current.machines, pending: { sha: 'previous-machine', generation: 'previous' } } },
       releases: status.releases.map((record) => ({
         ...record,
         status: {
@@ -65,7 +70,7 @@ describe('independent target convergence', () => {
     expect(converging(status)).toBe(true);
     expect(machineConvergence(status)).toEqual({ applied: 1, total: 2 });
 
-    status = { ...status, current: { ...status.current, machines: {} } };
+    status = { ...status, current: { ...status.current, machines: { home: { sha: 'machine-release', generation: 'generation-a' } } } };
     expect(converging(status)).toBe(false);
     expect(machineConvergence(status)).toEqual({ applied: 1, total: 1 });
     expect(machineRollup(status.releases[0]!).status).toBe('pending');

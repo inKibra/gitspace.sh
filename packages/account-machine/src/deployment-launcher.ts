@@ -5,7 +5,7 @@ import type { AppendFactEvent, GitSpaceDatabase } from '@gitspace/core';
 import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { hashArtifactPath, workspaceSha } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
-import { releaseTargetSchema, workerReleaseMetadataSchema, type ReleaseArtifact, type ReleaseRecord, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { releaseTargetSchema, workerReleaseMetadataSchema, type LaunchProgress, type ReleaseArtifact, type ReleaseRecord, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-follower.js';
 import { z } from 'zod';
 
@@ -73,6 +73,8 @@ export class DeploymentLaunchError extends Error {
 export interface ReleaseAuthority {
   stageRelease(input: StageReleaseInput): Promise<ReleaseRecord>;
   launchRelease(sha: string, targets: ReleaseTarget[]): Promise<{ record: ReleaseRecord; desired: TenantDesired }>;
+  /** The account keeps the latest launch so every browser can follow it, whichever machine answers or none does. */
+  reportLaunchProgress(progress: LaunchProgress): Promise<void>;
 }
 
 export interface ReleaseBlobWriter {
@@ -109,28 +111,19 @@ async function filesUnder(root: string, current = root): Promise<string[]> {
   return files;
 }
 
-export interface LaunchProgress {
-  launchId: string;
-  workspaceId: string;
-  targets: ReleaseTarget[];
-  sha: string | null;
-  phase: string;
-  message: string;
-  status: 'running' | 'succeeded' | 'failed';
-  error: string | null;
-  startedAt: string;
-  updatedAt: string;
-}
-
 export class DeploymentLauncher {
   private active: Promise<ReleaseRecord> | null = null;
   private progress: LaunchProgress | null = null;
+  private reporting: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: DeploymentLauncherOptions) {}
 
-  /** The launch in flight, or the last one this process ran. */
-  status(): LaunchProgress | null {
-    return this.progress;
+  /** Reports in order without blocking the build; a lost report is logged and the next one carries newer state. */
+  private report(progress: LaunchProgress): void {
+    const snapshot = { ...progress, targets: [...progress.targets], message: progress.message.slice(0, 4_096), error: progress.error?.slice(0, 4_096) ?? null };
+    this.reporting = this.reporting
+      .then(() => this.options.authority.reportLaunchProgress(snapshot))
+      .catch((error: unknown) => console.error('[gitspace-deploy] launch progress report failed', error));
   }
 
   /**
@@ -148,6 +141,7 @@ export class DeploymentLauncher {
     if (targets.length === 0) throw new DeploymentLaunchError('NOT_GITSPACE', 'A release needs at least one target');
     const now = new Date().toISOString();
     this.progress = { launchId: crypto.randomUUID(), workspaceId: workspace.id, targets, sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: now, updatedAt: now };
+    this.report(this.progress);
     this.active = this.run(workspace, targets).finally(() => { this.active = null; });
     this.active.catch(() => undefined);
     return this.progress;
@@ -175,6 +169,7 @@ export class DeploymentLauncher {
       current.status = status;
       current.updatedAt = new Date().toISOString();
       if (status === 'failed') current.error = message;
+      this.report(current);
       this.options.events.append({
         projectId: workspace.projectId,
         scope: 'code',

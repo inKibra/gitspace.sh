@@ -239,7 +239,7 @@ function SourcePill({ deployment, onOpenSettings }: { deployment: SidebarDeploym
       ? `converging ${machines.applied}/${machines.total} machines`
       : 'Applying releases…';
   }
-  const tooltip = `${status.thisMachine.sha ?? 'channel build'} · generation ${status.thisMachine.generation ?? 'unknown'}`;
+  const tooltip = `Worker ${status.current.worker.version ?? 'unknown'}`;
   return <SidebarMenu>
     <SidebarMenuItem>
       <Tooltip content={tooltip} side="top">

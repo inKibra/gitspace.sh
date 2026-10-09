@@ -57,7 +57,7 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
   useEffect(() => {
     if (!status || !launch?.sha || launch.status !== 'succeeded' || followed.current !== launch.launchId || reloaded.current === launch.launchId) return;
     const at = new Date().toISOString();
-    if (launch.targets.includes('machine') && status.thisMachine.sha !== launch.sha) {
+    if (launch.targets.includes('machine') && Object.entries(status.current.machines).some(([machineId, machine]) => machine.sha !== launch.sha && status.releases.find(release => release.sha === launch.sha)?.status.machines[machineId] !== 'failed')) {
       setLaunch(previous => previous && previous.log.some(entry => entry.phase === 'restart') ? previous : previous && appendLaunchProgress(previous, { phase: 'restart', message: 'Waiting for the machine to swap', at }));
       return;
     }

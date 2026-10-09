@@ -1,9 +1,9 @@
-import { useState } from 'react';
-import { DEFAULT_INFERENCE_PROFILE_ID, type InferenceProfile } from '@gitspace/protocol/inference';
+import { useEffect, useState } from 'react';
+import { applyInferenceSettings, DEFAULT_INFERENCE_PROFILE_ID, type InferenceProfile } from '@gitspace/protocol/inference';
 import type { AvailableModel } from '@gitspace/protocol';
 import { Badge, Button, Card, CardDescription, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Select, SelectContent, SelectItem, SelectTrigger, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
-import { RuntimeSettingsEditor, type RuntimeSettingView } from './SettingsPage.js';
+import { parseRoleModel, RuntimeSettingsEditor, type RuntimeSettingView, type SettingsTab } from './SettingsPage.js';
 import type { ProvidersSectionProps } from './ProvidersSection.js';
 import { useInference, type InferenceController } from './InferenceContext.js';
 import { inferenceActivationWaitMessage, rpcErrorMessage } from './rpc-error-message.js';
@@ -52,12 +52,39 @@ export interface InferencePageProps {
   initialTab?: 'Models' | 'Agents' | 'Providers';
 }
 
+export type OnboardingInferenceGate = 'loading' | 'connect-provider' | 'models-error' | 'choose-default' | 'ready';
+const ONBOARDING_INFERENCE_STATUS: Readonly<Record<Exclude<OnboardingInferenceGate, 'ready'>, string>> = {
+  loading: 'Loading this profile’s providers and models…',
+  'connect-provider': 'Connect a provider to continue.',
+  'models-error': 'This profile’s models could not be loaded. Refresh to continue.',
+  'choose-default': 'Choose a Default model on the Models tab to continue.',
+};
+function defaultRoleModel(profile: InferenceProfile): string {
+  const roles = applyInferenceSettings({}, profile.settings).modelRoles;
+  return roles !== null && typeof roles === 'object' && 'default' in roles && typeof roles.default === 'string' ? roles.default : '';
+}
+/** Onboarding requires the profile's Default role to name a model its authenticated catalog can run; nothing is guessed. */
+export function onboardingInferenceGate({ profile, models, modelsReady, modelsError, providers }: Pick<InferencePageProps, 'models' | 'modelsReady' | 'modelsError' | 'providers'> & { profile: InferenceProfile | undefined }): OnboardingInferenceGate {
+  if (!profile || providers.loading) return 'loading';
+  if (!providers.providers.some((provider) => provider.hasAuth)) return 'connect-provider';
+  if (modelsError) return 'models-error';
+  if (!modelsReady) return 'loading';
+  const defaultModel = defaultRoleModel(profile);
+  return defaultModel && parseRoleModel(defaultModel, models).known ? 'ready' : 'choose-default';
+}
+
 export function InferencePage({ inference, selectedProfileId, onSelectProfile, projects, schema, schemaLoading, schemaError, onRefreshSchema, models, modelsReady, modelsLoading, modelsError, providers, onboarding = false, initialTab }: InferencePageProps) {
   const [dialog, setDialog] = useState<{ action: 'create' | 'rename' | 'duplicate' | 'delete'; profile: InferenceProfile | null } | null>(null);
   const [name, setName] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? 'Models');
   const state = inference.state;
   const profile = state?.profiles.find((entry) => entry.id === selectedProfileId);
+  const gate = onboarding ? onboardingInferenceGate({ profile, models, modelsReady, modelsError, providers }) : 'ready';
+  const connected = providers.providers.some((provider) => provider.hasAuth);
+  const defaultUnset = profile !== undefined && !defaultRoleModel(profile);
+  // A connected provider leaves Default as the remaining onboarding choice; never auto-pick a model.
+  useEffect(() => { if (onboarding && connected && defaultUnset) setTab('Models'); }, [connected, defaultUnset]);
   const editor = profile ? profileSettingViews(schema, profile) : null;
   const assignments = state?.assignments.filter((entry) => entry.profileId === selectedProfileId) ?? [];
   const assignedIds = new Set(assignments.map((entry) => entry.projectId));
@@ -111,7 +138,7 @@ export function InferencePage({ inference, selectedProfileId, onSelectProfile, p
         {schemaError ? <div role="alert" className="text-caption text-destructive">{schemaError}<Button variant="ghost" onClick={onRefreshSchema}>Retry editor metadata</Button></div> : null}
         {modelsError ? <p role="alert" className="text-caption text-destructive">Models: {modelsError}. Connect this profile’s providers or refresh. Existing selections are preserved.</p> : !modelsReady ? <p role="status" className="text-caption text-muted-foreground">{modelsLoading ? 'Loading this profile’s models…' : 'This profile’s model catalog is not ready yet.'}</p> : !models.length ? <p className="text-caption text-muted-foreground">No runnable models in this profile. Connect a provider on the Providers tab.</p> : null}
         {editor?.missingDefaults.length ? <p role="alert" className="text-caption text-destructive">Editor defaults are unavailable for {editor.missingDefaults.join(', ')}. Refresh cloud metadata. Account values are not substituted.</p> : null}
-        {schemaLoading && !schema.length ? <p role="status" className="text-caption text-muted-foreground">Loading editor metadata…</p> : <RuntimeSettingsEditor key={profile.id} sections={['Models', 'Agents', 'Providers']} initialTab={initialTab} runtimeSettings={editor?.items ?? []} runtimeGeneration={profile.revision} models={models} modelsReady={modelsReady} providers={providers} saving={inference.pending || !!schemaError} onSetRuntimeSetting={async (path, value) => { await inference.update(profile, profile.name, updatedProfileSettings(profile, path, value)); }} />}
+        {schemaLoading && !schema.length ? <p role="status" className="text-caption text-muted-foreground">Loading editor metadata…</p> : <RuntimeSettingsEditor key={profile.id} sections={['Models', 'Agents', 'Providers']} tab={tab} onTabChange={setTab} runtimeSettings={editor?.items ?? []} runtimeGeneration={profile.revision} models={models} modelsReady={modelsReady} providers={providers} saving={inference.pending || !!schemaError} onSetRuntimeSetting={async (path, value) => { await inference.update(profile, profile.name, updatedProfileSettings(profile, path, value)); }} />}
         <section aria-label="Project assignments" className="flex flex-col gap-3">
           <h3 className="text-subtitle font-semibold">Affected projects <span className="tabular-nums">({affected.length})</span></h3>
           {affected.length ? affected.map((project) => <div key={project.id} className="flex flex-wrap items-center justify-between gap-3"><span className="text-body">{project.name}</span><ProjectInferenceSelector projectId={project.id} projectName={project.name} /></div>) : <p className="text-caption text-muted-foreground">No projects use this profile yet.</p>}
@@ -119,6 +146,10 @@ export function InferencePage({ inference, selectedProfileId, onSelectProfile, p
         </section>
       </section>}
     </>}
+    {gate !== 'ready' ? <div role="status" aria-label="Inference setup status" className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
+      {gate === 'loading' ? <ThinkingIndicator /> : null}<span>{ONBOARDING_INFERENCE_STATUS[gate]}</span>
+      {gate === 'choose-default' && tab !== 'Models' ? <Button variant="secondary" size="compact" onClick={() => setTab('Models')}>Open Models tab</Button> : null}
+    </div> : null}
     <Dialog open={dialog !== null} onOpenChange={(next) => { if (!next && !inference.pending) setDialog(null); }}><DialogContent>
       <DialogHeader><DialogTitle>{dialog?.action === 'delete' ? `Delete ${dialog.profile?.name}?` : dialog?.action === 'rename' ? 'Rename inference profile' : dialog?.action === 'duplicate' ? 'Duplicate inference profile' : 'Create inference profile'}</DialogTitle><DialogDescription>{dialog?.action === 'delete' ? 'Credentials will no longer be available through this profile. Active work may fail, but provider requests already sent cannot be recalled.' : dialog?.action === 'rename' ? 'The stable profile identity and its project assignments stay unchanged.' : 'Copies non-secret inference configuration only. Credentials, OAuth accounts, and project assignments are never copied. Connect providers separately before use.'}</DialogDescription></DialogHeader>
       {dialog?.action !== 'delete' ? <InputGroup><InputField index={0} label="Profile name" placeholder="Profile name" value={name} maxLength={160} disabled={inference.pending} onChange={setName} /></InputGroup> : null}

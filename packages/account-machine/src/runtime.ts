@@ -724,17 +724,7 @@ export async function startMachineRuntime() {
     inference: authority,
     devices,
     gitIdentity,
-    deployment: {
-      status: () => authority.deploymentStatus(),
-      launch: (input) => launcher.launch(input),
-      launchProgress: () => launcher.status(),
-      revert: async () => {
-        const status = await authority.revertRelease();
-        void releases.nudge();
-        return status;
-      },
-      get thisMachine() { return { sha: machineReleaseSha, generation: process.env.GITSPACE_GENERATION_HASH ?? null }; },
-    },
+    deployment: { launch: (input) => launcher.launch(input) },
     onInternalError: ({ incidentId, phase, cause, procedurePath }) => {
       console.error('[gitspace-rpc]', { incidentId, phase, procedurePath, cause });
     },

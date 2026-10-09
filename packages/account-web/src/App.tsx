@@ -66,7 +66,6 @@ export const deploymentStatusFixture: DeploymentStatusView = {
     status: { worker: 'applied', frontend: 'applied', machines: { studio: 'applied' }, omps: { studio: 'applied' } },
     error: null,
   }],
-  thisMachine: { machineId: 'darktop', sha: null, generation: 'gen-0f3a9c' },
   launch: {
     launchId: 'launch-7',
     workspaceId: 'workspace-b',

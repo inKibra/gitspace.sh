@@ -63,12 +63,8 @@ export function converging(status: DeploymentStatusView): boolean {
   }
   const sha = status.desired.machine;
   const record = sha === null ? null : status.releases.find((release) => release.sha === sha);
-  const states = record?.status.machines;
-  const localState = states?.[status.thisMachine.machineId];
-  if (localState !== 'failed' && (status.thisMachine.sha !== sha || localState === 'pending')) return true;
   for (const [machineId, running] of Object.entries(status.current.machines)) {
-    if (machineId === status.thisMachine.machineId) continue;
-    const state = states?.[machineId];
+    const state = record?.status.machines[machineId];
     if (state !== 'failed' && (running.sha !== sha || state === 'pending')) return true;
   }
   return false;
@@ -144,21 +140,15 @@ export function launchPhaseLabel(entry: LaunchLogEntry): string {
   return LAUNCH_PHASE_LABEL[entry.phase] ?? `${entry.phase}…`;
 }
 
-/** Current fleet machines whose complete host generation matches the selection. */
+/** Current fleet machines whose complete host generation matches the selection; a fleet with no machines has converged. */
 export function machineConvergence(status: DeploymentStatusView): { applied: number; total: number } {
-  let applied = status.thisMachine.sha === status.desired.machine ? 1 : 0;
-  let total = 1;
-  for (const [machineId, machine] of Object.entries(status.current.machines)) {
-    if (machineId === status.thisMachine.machineId) continue;
-    total++;
-    if (machine.sha === status.desired.machine) applied++;
-  }
-  return { applied, total };
+  const machines = Object.values(status.current.machines);
+  return { applied: machines.filter((machine) => machine.sha === status.desired.machine).length, total: machines.length };
 }
 
-/** Label of the release this machine runs, or `stable` on the channel build. */
+/** Label of the release the account's Worker runs, or `stable` on the channel build. */
 export function runningLabel(status: DeploymentStatusView): string {
-  const sha = status.thisMachine.sha;
+  const sha = status.current.worker.sha;
   if (sha === null) return 'stable';
   return status.releases.find((release) => release.sha === sha)?.label ?? shortSha(sha);
 }

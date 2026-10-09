@@ -20,7 +20,7 @@ import {
   listProjectsContract, listDevicesContract, revokeDeviceContract,
   getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
   ensureGitSpaceProjectContract, placementsContract, locateSessionContract, type SpacePlacementView,
-  spaceViewContract, setWorkspaceRelationsContract, createProjectContract,
+  spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentRevertContract,
   projectEventsContract, projectDirectoryEventsContract, environmentEventsContract, spaceEventsContract, recordIncidentContract,
 } from '@gitspace/protocol/rpc-contract';
 import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract, inferenceEventsContract } from '@gitspace/protocol/rpc-contract';
@@ -31,7 +31,8 @@ import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js';
-import { controlFleetMachine, provisionManagedSandbox, reconcileFleetMachines, type CredentialVaultDO } from './application.js';
+import { controlFleetMachine, provisionManagedSandbox, readTenantDeployment, reconcileFleetMachines, revertTenantRelease, type CredentialVaultDO } from './application.js';
+import type { DeploymentStatus } from '@gitspace/protocol/deployment';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { UserSettingsDO, SettingsSnapshot } from './user-settings.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
@@ -327,6 +328,19 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     if (!(await projectIndex.list()).some((project) => project.id === projectId)) throw new Error('Project does not belong to this account');
     return (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${userId}:${projectId}`);
   };
+  // The wire view omits each release's worker upload metadata.
+  const deploymentView = (status: DeploymentStatus) => ({
+    desired: status.desired, current: status.current, machineExecution: status.machineExecution, launch: status.launch,
+    releases: status.releases.map(({ sha, label, workspaceId, builtBy, createdAt, artifacts, omp, status: outcome, error }) => ({ sha, label, workspaceId, builtBy, createdAt, artifacts, omp, status: outcome, error })),
+  });
+  const deploymentStatus = server.implement(deploymentStatusContract).handler(async ({ errors }) => {
+    try { return ok(deploymentView(await readTenantDeployment(env, userId))); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read deployment status', message: message(error) })); }
+  });
+  const deploymentRevert = server.implement(deploymentRevertContract).handler(async ({ errors }) => {
+    try { return ok(deploymentView(await revertTenantRelease(env, userId))); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'revert release', message: message(error) })); }
+  });
   const createProject = server.implement(createProjectContract).handler(async ({ input, errors }) => {
     try {
       const { project, operation } = await createCloudProject(env, userId, input);
@@ -515,7 +529,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, events: settingsEvents },
     machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, events: projectEvents, directoryEvents },
     space: { events: spaceEvents, view: spaceView }, workspace: { setRelations }, incidents: { record: recordIncident },
-    devices: { list: devices, revoke }, providers: providerCloudProcedures(env, userId, requireAdministration),
+    devices: { list: devices, revoke }, deployment: { status: deploymentStatus, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
     inspector: inspectorCloudProcedures(env, userId, requireSubscription, async () => {
       const device = await vault.currentDeviceGrant(deviceId);

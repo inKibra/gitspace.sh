@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   deploymentStatusSchema,
+  launchProgressSchema,
   releaseRecordSchema,
   releaseStatusSchema,
   releaseTargetSchema,
@@ -8,6 +9,7 @@ import {
   tenantDesiredSchema,
   MACHINE_EXECUTION_PROTOCOL_VERSION,
   machineProtocolInputSchema,
+  type LaunchProgress,
   type MachineExecutionAdmission,
   type DeploymentStatus,
   type ReleaseRecord,
@@ -112,7 +114,29 @@ export class TenantReleasesDO extends DurableObject<Env> {
         generation TEXT,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS latest_launch (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        machine_id TEXT NOT NULL,
+        record_json TEXT NOT NULL
+      );
     `);
+  }
+
+  /** Keeps the account's latest launch as its building machine reports it; an older report of the same launch never
+   * overwrites a newer one. */
+  recordLaunchProgress(machineId: string, value: LaunchProgress): void {
+    const progress = launchProgressSchema.parse(value);
+    const stored = this.latestLaunch();
+    if (stored?.launchId === progress.launchId && stored.updatedAt > progress.updatedAt) return;
+    this.ctx.storage.sql.exec(
+      'INSERT INTO latest_launch(id, machine_id, record_json) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET machine_id = excluded.machine_id, record_json = excluded.record_json',
+      machineId, JSON.stringify(progress),
+    );
+  }
+
+  private latestLaunch(): LaunchProgress | null {
+    const row = this.ctx.storage.sql.exec<{ record_json: string }>('SELECT record_json FROM latest_launch WHERE id = 1').toArray()[0];
+    return row ? launchProgressSchema.parse(JSON.parse(row.record_json)) : null;
   }
 
 
@@ -321,7 +345,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
     const version = WORKER_VERSION ?? null;
     const worker = { sha: version === 'channel' || version?.startsWith('channel:') ? null : version, version };
     return deploymentStatusSchema.parse({
-      desired, current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution,
+      desired, current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution, launch: this.latestLaunch(),
     });
   }
 

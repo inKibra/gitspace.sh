@@ -219,6 +219,21 @@ export const machineExecutionAdmissionSchema = z.object({
 });
 export type MachineExecutionAdmission = z.infer<typeof machineExecutionAdmissionSchema>;
 
+/** The latest launch, reported phase by phase by the machine that builds it and kept by the account. */
+export const launchProgressSchema = z.object({
+  launchId: z.string().uuid(),
+  workspaceId: z.string().min(1).max(160),
+  targets: z.array(releaseTargetSchema).min(1),
+  sha: z.string().min(1).max(160).nullable(),
+  phase: z.string().min(1).max(64),
+  message: z.string().max(4_096),
+  status: z.enum(['running', 'succeeded', 'failed']),
+  error: z.string().max(4_096).nullable(),
+  startedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type LaunchProgress = z.infer<typeof launchProgressSchema>;
+
 export const deploymentStatusSchema = z.object({
   desired: tenantDesiredSchema,
   current: z.object({
@@ -231,6 +246,7 @@ export const deploymentStatusSchema = z.object({
   }),
   releases: z.array(releaseRecordSchema),
   machineExecution: z.record(idSchema, machineExecutionAdmissionSchema).optional(),
+  launch: launchProgressSchema.nullable(),
 });
 export type DeploymentStatus = z.infer<typeof deploymentStatusSchema>;
 

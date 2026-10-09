@@ -75,7 +75,9 @@ import {
   platformDeployResponseSchema,
   stageReleaseInputSchema,
   machineProtocolInputSchema,
+  launchProgressSchema,
   WORKER_VERSION_HEADER,
+  type DeploymentStatus,
   type PlatformDeployRequest,
   type ReleaseStatus,
 } from '@gitspace/protocol/deployment';
@@ -2230,6 +2232,21 @@ async function tenantWorkerVersion(env: Env, userId: string): Promise<WorkerVers
   const version = state.deployment.active;
   return { sha: version === 'channel' || version?.startsWith('channel:') ? null : version, version };
 }
+/** What the account runs, read from cloud state; no machine is consulted. */
+export async function readTenantDeployment(env: Env, userId: string): Promise<DeploymentStatus> {
+  return tenantReleases(env, userId).status(userId, await tenantWorkerVersion(env, userId));
+}
+/** Returns every target to the channel build: the Worker through the platform, machines and the frontend by selection. */
+export async function revertTenantRelease(env: Env, userId: string): Promise<DeploymentStatus> {
+  const releases = tenantReleases(env, userId);
+  await releases.assertChannelCompatible();
+  if ((await tenantWorkerVersion(env, userId)).sha !== null) {
+    const outcome = await platformCall(await platformConfig(env, userId), 'revert', { to: 'channel' });
+    if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Platform revert failed');
+  }
+  await releases.revert();
+  return readTenantDeployment(env, userId);
+}
 async function platformConfig(env: Env, userId: string): Promise<PlatformConfig> {
   const account = await activeAccount(env, userId);
   if (account.status === 'error') throw new Error(account.error.message);
@@ -3563,17 +3580,13 @@ const worker = {
             case 'deploy.status':
               value = await releases.status(body.userId, await tenantWorkerVersion(env, body.userId), body.machineId);
               break;
-            case 'deploy.revert': {
-              await releases.assertChannelCompatible();
-              const currentWorker = await tenantWorkerVersion(env, body.userId);
-              if (currentWorker.sha !== null) {
-                const outcome = await platformCall(await platformConfig(env, body.userId), 'revert', { to: 'channel' });
-                if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Platform revert failed');
-              }
-              await releases.revert();
-              value = await releases.status(body.userId, await tenantWorkerVersion(env, body.userId));
+            case 'deploy.revert':
+              value = await revertTenantRelease(env, body.userId);
               break;
-            }
+            case 'deploy.launchProgress':
+              await releases.recordLaunchProgress(body.machineId, launchProgressSchema.parse(body.payload));
+              value = null;
+              break;
             case 'deploy.machineApplied': {
               const input = machineAppliedInputSchema.parse(body.payload);
               value = await releases.machineApplied(body.machineId, input);

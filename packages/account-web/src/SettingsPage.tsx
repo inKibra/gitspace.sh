@@ -58,7 +58,7 @@ import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBr
 // Onboarding embeds the same Default profile surface used by Inference.
 type Section = 'profile' | 'runtime' | 'runtime-providers' | 'git' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
 const SETTINGS_TABS = ['Models', 'Agents', 'Providers', 'Advanced'] as const;
-type SettingsTab = (typeof SETTINGS_TABS)[number];
+export type SettingsTab = (typeof SETTINGS_TABS)[number];
 export interface SettingsMachineView { id: string; label: string; state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error'; kind: 'physical' | 'sandbox'; provider: 'physical' | 'cloudflare-sandbox'; notes: string; desiredState: 'online' | 'offline' | 'removed'; lifecycleRevision: number; operationId: string | null; error: string | null }
 export interface RuntimeSettingView {
   path: string;
@@ -78,6 +78,8 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   runtimeSettings: readonly RuntimeSettingView[];
   runtimeGeneration: number;
   inferenceSetup: ReactNode;
+  /** Onboarding cannot leave the Inference step until the Default profile has a runnable Default model. */
+  inferenceReady: boolean;
   gitIdentity: { generation: number; publicKey: string; fingerprint: string; updatedAt: string; updatedBy: string } | null;
   onChange: (settings: UserSettings) => void;
   onSave: (settings: UserSettings) => Promise<void>;
@@ -204,12 +206,14 @@ function SettingRowsEditor({ items, saving, onSetRuntimeSetting }: { items: read
   return <SettingRows>{items.map((item) => <SettingRow key={item.path} title={item.label} description={item.description ?? item.path}><SettingControl item={item} disabled={saving} onSet={(value) => onSetRuntimeSetting(item.path, value)} /></SettingRow>)}</SettingRows>;
 }
 const THINKING_LEVELS = ['auto', 'off', 'low', 'medium', 'high', 'xhigh'] as const;
-/** A model role is `provider/model[:thinking]`; the picker splits it into a model select and a thinking select. */
-function RoleModelPicker({ role, label, value, models, modelsReady, disabled, onChange }: { role: string; label: string; value: string; models: readonly AvailableModel[]; modelsReady: boolean; disabled: boolean; onChange(value: string): void }) {
+/** A model role is `provider/model[:thinking]`; `known` means this profile's model catalog can run it. */
+export function parseRoleModel(value: string, models: readonly AvailableModel[]): { modelKey: string; thinking: string; known: boolean } {
   const separator = value.lastIndexOf(':');
   const modelKey = separator > value.indexOf('/') ? value.slice(0, separator) : value;
-  const thinking = separator > value.indexOf('/') ? value.slice(separator + 1) : 'auto';
-  const known = models.some((model) => `${model.provider}/${model.id}` === modelKey);
+  return { modelKey, thinking: separator > value.indexOf('/') ? value.slice(separator + 1) : 'auto', known: models.some((model) => `${model.provider}/${model.id}` === modelKey) };
+}
+function RoleModelPicker({ role, label, value, models, modelsReady, disabled, onChange }: { role: string; label: string; value: string; models: readonly AvailableModel[]; modelsReady: boolean; disabled: boolean; onChange(value: string): void }) {
+  const { modelKey, thinking, known } = parseRoleModel(value, models);
   const options = [
     ...(modelKey && !known ? [{ value: modelKey, label: modelsReady ? `${modelKey} (not available here)` : modelKey }] : []),
     ...modelOptions(models),
@@ -225,8 +229,7 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
     </Select>
   </span>;
 }
-export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], modelsReady = false, sections, initialTab }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly SettingsTab[]; initialTab?: SettingsTab }) {
-  const [tab, setTab] = useState<SettingsTab>(initialTab ?? sections[0] ?? 'Advanced');
+export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], modelsReady = false, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
   const rolesItem = runtimeSettings.find((item) => item.path === 'modelRoles');
   const cycleItem = runtimeSettings.find((item) => item.path === 'cycleOrder');
   const overridesItem = runtimeSettings.find((item) => item.path === 'task.agentModelOverrides');
@@ -296,7 +299,7 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
   }
   const tabIndex = sections.indexOf(tab);
   return <>
-    {subtleTabs(sections, tab, (value) => setTab(value as SettingsTab), 'omp-tabs')}
+    {subtleTabs(sections, tab, (value) => onTabChange?.(sections.find((section) => section === value) ?? tab), 'omp-tabs')}
     <TabsSubtlePanel index={tabIndex} selectedIndex={tabIndex} idPrefix="omp-tabs" className="flex flex-col gap-8">{content}</TabsSubtlePanel>
   </>;
 }
@@ -871,16 +874,14 @@ function ReleaseRow({ release, desired, index }: { release: ReleaseRecordView; d
   </Card>;
 }
 export function SourceSettings({ deployment, onRevertDeployment, saving }: Pick<SettingsPageProps, 'deployment' | 'onRevertDeployment' | 'saving'>) {
-  if (!deployment) return <Group title="Running"><EmptyState icon={icon(Rocket02, 20)} title="Loading source status…" description="Asking the home machine what GitSpace runs." /></Group>;
-  const others = Object.entries(deployment.current.machines).filter(([machineId]) => machineId !== deployment.thisMachine.machineId);
+  if (!deployment) return <Group title="Running"><EmptyState icon={icon(Rocket02, 20)} title="Loading source status…" description="Asking GitSpace Cloud what your account runs." /></Group>;
   const releases = [...deployment.releases].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   const channel = RELEASE_TARGETS.every((target) => deployment.desired[target] === null);
   return <>
     <Group title="Running"><SettingRows>
-      <SettingRow title={<>This machine<Badge color="green">Home</Badge></>} description={<span className="font-mono">{deployment.thisMachine.machineId}</span>}><RunningBadge sha={deployment.thisMachine.sha} generation={deployment.thisMachine.generation} /></SettingRow>
       <SettingRow title="Worker" description="The tenant worker answering this account, by its own version stamp."><Badge color={deployment.current.worker.sha === null ? 'gray' : 'blue'}><span className="font-mono">{deployment.current.worker.version ?? 'unknown'}</span></Badge></SettingRow>
       {deployment.current.platformWorker && deployment.current.platformWorker.version !== deployment.current.worker.version ? <SettingRow title="Platform record" description="The platform’s last recorded deployment differs from the Worker answering this request."><Badge color="gray"><span className="font-mono">{deployment.current.platformWorker.version ?? 'Not recorded'}</span></Badge></SettingRow> : null}
-      {others.map(([machineId, running]) => <SettingRow key={machineId} title={machineId} description={`Machine ${running.sha ? shortSha(running.sha) : 'stable'}`}><RunningBadge sha={running.sha} generation={running.generation} /></SettingRow>)}
+      {Object.entries(deployment.current.machines).map(([machineId, running]) => <SettingRow key={machineId} title={machineId} description={`Machine ${running.sha ? shortSha(running.sha) : 'stable'}`}><RunningBadge sha={running.sha} generation={running.generation} /></SettingRow>)}
     </SettingRows></Group>
     {Object.entries(deployment.machineExecution ?? {}).filter(([, execution]) => execution.state !== 'ready').map(([machineId, execution]) => <Group key={machineId} title={execution.state === 'blocked' ? 'Machine update blocked' : 'Updating machine'}><SettingRows>
       <SettingRow title={machineId} description={execution.error ?? `Updating to ${execution.releaseSha ? shortSha(execution.releaseSha) : 'the current channel release'} before agent execution. Workspaces, builds, and Launch remain available.`}><Badge color={execution.state === 'blocked' ? 'red' : 'blue'}>{execution.state === 'blocked' ? 'Needs attention' : 'Updating'}</Badge></SettingRow>
@@ -927,7 +928,7 @@ function SaveState({ saving, error }: Pick<SettingsPageProps, 'saving' | 'error'
   return saving ? <span className="text-caption text-muted-foreground">Saving…</span> : null;
 }
 function SettingsContent({ section, ...props }: { section: Section } & SettingsPageProps) {
-  if (section === 'runtime') return <RuntimeSettingsEditor {...props} sections={['Advanced']} />;
+  if (section === 'runtime') return <RuntimeSettingsEditor {...props} sections={['Advanced']} tab="Advanced" />;
   if (section === 'runtime-providers') return <>{props.inferenceSetup}</>;
   if (section === 'git') return <GitSettings {...props} />;
   if (section === 'machines') return <MachineSettings {...props} />;
@@ -958,6 +959,7 @@ function OnboardingShell(props: SettingsPageProps) {
   const current = steps[step]!;
   const last = step === steps.length - 1;
   const profileIncomplete = step === 0 && (!props.settings.profile.displayName.trim() || !props.settings.profile.handle);
+  const inferenceIncomplete = current.section === 'runtime-providers' && !props.inferenceReady;
   const advance = async () => { if (last) await props.onComplete({ ...props.settings, onboardingComplete: true }); else { await props.onSave(props.settings); setStep((value) => value + 1); } };
   return <PageCanvas>
     <div className="flex items-center justify-between gap-4 pb-4">
@@ -969,7 +971,7 @@ function OnboardingShell(props: SettingsPageProps) {
     {last ? <Group title="Your GitSpace source"><SettingRows><SettingRow title="GitSpace is included" description="Your account always includes the GitSpace source project. Open it on a machine when you are ready to make changes; setup does not need a running machine or GitHub authorization."><Badge color="green">Included</Badge></SettingRow></SettingRows></Group> : null}
     <footer className="mt-10 flex items-center justify-between gap-4 border-t border-border pt-6">
       <Button variant="secondary" disabled={step === 0 || props.saving} onClick={() => setStep((value) => value - 1)}>Back</Button>
-      <Button variant="primary" disabled={profileIncomplete || props.saving} onClick={() => settle(advance())}>{last ? props.saving ? 'Finishing setup…' : 'Open GitSpace' : 'Continue'}</Button>
+      <Button variant="primary" disabled={profileIncomplete || inferenceIncomplete || props.saving} onClick={() => settle(advance())}>{last ? props.saving ? 'Finishing setup…' : 'Open GitSpace' : 'Continue'}</Button>
     </footer>
   </PageCanvas>;
 }

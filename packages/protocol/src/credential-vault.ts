@@ -122,6 +122,7 @@ export const controlOperationSchema = z.enum([
   'deploy.launch',
   'deploy.status',
   'deploy.revert',
+  'deploy.launchProgress',
   'deploy.machineApplied',
   'deploy.machineChannelApplied',
   'deploy.machineProtocol',

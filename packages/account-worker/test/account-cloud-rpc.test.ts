@@ -855,6 +855,14 @@ describe('cloud projects and workspace relations with no machines', () => {
       project: { repositoryReference: 'git@github.com:example/private.git', baseBranch: 'release', lifecycle: 'active' },
     } });
   });
+
+  it('reports what the account runs without any machine', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: null } })));
+    expect(await inspectorClient(fixture).deployment.status({})).toMatchObject({ status: 'ok', value: {
+      desired: { worker: null, machine: null, frontend: null }, current: { machines: {} }, releases: [], launch: null,
+    } });
+  });
 });
 
 async function inspectorWorkspace(userId: string) {

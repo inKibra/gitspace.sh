@@ -2106,7 +2106,7 @@ export const ReleaseRecordWireCodec = wire.object({
   status: wire.object({ worker: ReleaseStatusWireCodec, frontend: ReleaseStatusWireCodec, machines: wire.record(ReleaseStatusWireCodec), omps: wire.optional(wire.record(ReleaseStatusWireCodec)) }),
   error: wire.nullable(wire.string),
 });
-/** A launch in flight (or the last one) on the answering machine; phases arrive as `deployment` fact events too. */
+/** The account's latest launch, as the building machine reported it; phases also arrive as `deployment` fact events. */
 export const LaunchProgressWireCodec = wire.object({
   launchId: wire.string,
   workspaceId: wire.string,
@@ -2133,8 +2133,6 @@ export const DeploymentStatusWireCodec = wire.object({
     state: wire.enum(['ready', 'updating', 'blocked']),
     releaseSha: wire.nullable(wire.string), error: wire.nullable(wire.string),
   }))),
-  /** This machine's own running generation, so the caller can tell home from the fleet. */
-  thisMachine: wire.object({ machineId: wire.string, sha: wire.nullable(wire.string), generation: wire.nullable(wire.string) }),
   launch: wire.nullable(LaunchProgressWireCodec),
 });
 export type DeploymentStatusView = InputOf<typeof DeploymentStatusWireCodec>;

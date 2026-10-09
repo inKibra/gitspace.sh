@@ -35,6 +35,7 @@ createRoot(root).render(<SettingsPage
   runtimeSettings={[]}
   runtimeGeneration={4}
   inferenceSetup={<a href="/test/inference-preview.html">Configure Default inference</a>}
+  inferenceReady
   devices={[]}
   onRevokeDevice={unavailable}
   onSignOut={unavailable}

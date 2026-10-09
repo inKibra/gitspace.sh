@@ -112,6 +112,20 @@ describe('tenant releases', () => {
     });
   });
 
+  it('keeps the latest launch its building machine reports and ignores an older report of the same launch', async () => {
+    const { control } = await tenant();
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toBeNull();
+    const queued = { launchId: crypto.randomUUID(), workspaceId: 'workspace-a', targets: ['frontend'], sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: '2026-10-09T10:00:00.000Z', updatedAt: '2026-10-09T10:00:00.000Z' };
+    const building = { ...queued, sha: 'b'.repeat(40), phase: 'build', message: 'building frontend', updatedAt: '2026-10-09T10:01:00.000Z' };
+    await control('deploy.launchProgress', queued);
+    await control('deploy.launchProgress', building);
+    await control('deploy.launchProgress', queued);
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toEqual(building);
+    const next = { ...queued, launchId: crypto.randomUUID(), startedAt: '2026-10-09T09:00:00.000Z', updatedAt: '2026-10-09T09:00:00.000Z' };
+    await control('deploy.launchProgress', next);
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toEqual(next);
+  });
+
   it('rejects retired OMP staging, activation, and acknowledgements without changing the release', async () => {
     const { control } = await tenant();
     const input = stageInput('retired-target');

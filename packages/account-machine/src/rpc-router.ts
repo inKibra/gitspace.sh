@@ -75,10 +75,6 @@ import {
   type SpacePlacementView,
   listDevicesContract,
   deploymentLaunchContract,
-  deploymentRevertContract,
-  deploymentStatusContract,
-  type DeploymentStatus,
-  type ReleaseRecord,
   type ReleaseTarget,
   revokeDeviceContract,
   promptSessionContract,
@@ -224,7 +220,8 @@ import { type AgentSession, type ArtifactCapability, type FactEventStore, type G
 import { assertWorkspacePhase, WorkspaceDomainError } from '@gitspace/protocol-workspace';
 import { contractDigest, err, ok } from 'result-rpc';
 import { createFetchHandler, serverRpc } from 'result-rpc/server';
-import { DeploymentLaunchError, type LaunchProgress } from './deployment-launcher.js';
+import { DeploymentLaunchError } from './deployment-launcher.js';
+import type { LaunchProgress } from '@gitspace/protocol/deployment';
 import { DeviceRegistry } from './device-registry.js';
 import { callerFor } from './signed-rpc.js';
 import { computeStackStatus } from './stack-status.js';
@@ -377,14 +374,10 @@ export interface ProjectEventsRpc {
 
 
 
-/** Self-development: the tenant's release state plus what this generation runs; mutations go through the launcher. */
+/** Self-development: this machine builds a workspace into a release; the account answers status and revert. */
 export interface DeploymentRpc {
-  status(): Promise<DeploymentStatus>;
-  /** Starts the build and returns immediately; progress via `launchProgress()` and `deployment` events. */
+  /** Starts the build and returns immediately; progress reaches the account and arrives as `deployment` events. */
   launch(input: { workspaceId: string; targets: ReleaseTarget[] }): LaunchProgress;
-  launchProgress(): LaunchProgress | null;
-  revert(): Promise<DeploymentStatus>;
-  thisMachine: { sha: string | null; generation: string | null };
 }
 
 export interface GitSpaceRpcRouterOptions {
@@ -1621,34 +1614,6 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'revoke device', message: error instanceof Error ? error.message : 'Unable to revoke device' }));
     }
   });
-  // The wire view omits worker upload metadata but includes the OMP reproducibility envelope.
-  const releaseView = (record: ReleaseRecord) => ({
-    sha: record.sha,
-    label: record.label,
-    workspaceId: record.workspaceId,
-    builtBy: record.builtBy,
-    createdAt: record.createdAt,
-    artifacts: record.artifacts,
-    omp: record.omp,
-    status: record.status,
-    error: record.error,
-  });
-  const deploymentView = (status: DeploymentStatus) => ({
-    desired: status.desired,
-    current: status.current,
-    releases: status.releases.map(releaseView),
-    machineExecution: status.machineExecution,
-    thisMachine: { machineId: options.machineId, ...options.deployment!.thisMachine },
-    launch: options.deployment!.launchProgress(),
-  });
-  const deploymentStatus = server.implement(deploymentStatusContract).handler(async ({ errors }) => {
-    if (!options.deployment) return err(errors.OperationFailed({ operation: 'read deployment status', message: 'Deployment control is unavailable' }));
-    try {
-      return ok(deploymentView(await options.deployment.status()));
-    } catch (error) {
-      return err(errors.OperationFailed({ operation: 'read deployment status', message: error instanceof Error ? error.message : 'Unable to read deployment status' }));
-    }
-  });
   const deploymentLaunch = server.implement(deploymentLaunchContract).handler(async ({ input, errors }) => {
     if (!options.deployment) return err(errors.OperationFailed({ operation: 'launch release', message: 'Deployment control is unavailable' }));
     try {
@@ -1656,14 +1621,6 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     } catch (error) {
       if (error instanceof DeploymentLaunchError && error.code === 'WORKSPACE_NOT_FOUND') return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
       return err(errors.OperationFailed({ operation: 'launch release', message: error instanceof Error ? error.message : 'Unable to launch release' }));
-    }
-  });
-  const deploymentRevert = server.implement(deploymentRevertContract).handler(async ({ errors }) => {
-    if (!options.deployment) return err(errors.OperationFailed({ operation: 'revert release', message: 'Deployment control is unavailable' }));
-    try {
-      return ok(deploymentView(await options.deployment.revert()));
-    } catch (error) {
-      return err(errors.OperationFailed({ operation: 'revert release', message: error instanceof Error ? error.message : 'Unable to revert release' }));
     }
   });
   // Local checkouts are not the account directory. Placement always comes from cloud authority.
@@ -2786,7 +2743,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     inference: { list: listInference, create: createInference, update: updateInference, delete: deleteInference, assign: assignInference },
     space: { view: spaceView, close: closeSpace, reopen: reopenSpace },
     devices: { list: listDevices, revoke: revokeDevice },
-    deployment: { status: deploymentStatus, launch: deploymentLaunch, revert: deploymentRevert },
+    deployment: { launch: deploymentLaunch },
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret, account: { list: listAccountSecrets, put: putAccountSecret, delete: deleteAccountSecret, grant: grantAccountSecret, revoke: revokeAccountSecret } },
     configuration: { values: { get: getConfigurationValues, put: putConfigurationValue, delete: deleteConfigurationValue } },
     environment: {

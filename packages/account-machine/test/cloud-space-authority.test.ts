@@ -65,7 +65,7 @@ describe('interrupted release acknowledgement', () => {
   it.each(['applied', 'wrong-worker', 'partial-selection', 'failed'] as const)('reconciles a lost response only for a confirmed release: %s', async (outcome) => {
     const sha = 'release-after-worker-swap';
     const status: DeploymentStatus = {
-      desired: { worker: sha, machine: outcome === 'partial-selection' ? null : sha, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, desired: { worker: sha, machine: outcome === 'partial-selection' ? null : sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: outcome === 'wrong-worker' ? 'previous' : sha, version: sha }, machines: {} },
       releases: [{
         sha, label: sha, workspaceId: 'space-a', builtBy: 'machine-a', createdAt: new Date().toISOString(),
