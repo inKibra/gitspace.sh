@@ -107,16 +107,16 @@ describe('ProjectAuthorityDO', () => {
   it('changes an active project base branch only at its current revision and never for the built-in source', async () => {
     const authority = projectEnv.PROJECT_AUTHORITY.getByName('base-branch');
     const project = await authority.bootstrap({ id: 'base-branch', name: 'Base branch', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(project.revision, 'release'))).rejects.toThrow('must be active');
+    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(project.revision, 'release', 'a'.repeat(40)))).rejects.toThrow('must be active');
     const active = await authority.setProjectLifecycle(project.revision, 'active');
-    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(project.revision, 'release'))).rejects.toThrow('revision conflict');
+    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(project.revision, 'release', 'a'.repeat(40)))).rejects.toThrow('revision conflict');
     expect(await authority.getProject()).toEqual(active);
-    expect(await authority.setBaseBranch(active.revision, 'release')).toMatchObject({ baseBranch: 'release', revision: active.revision + 1 });
+    expect(await authority.setBaseBranch(active.revision, 'release', 'a'.repeat(40))).toMatchObject({ baseBranch: 'release', revision: active.revision + 1 });
 
     const reserved = await projectEnv.USER_PROJECTS.getByName('base-branch-source').ensureGitSpaceProject({ release: null, branch: 'release/test', commit: null });
     const sourceAuthority = projectEnv.PROJECT_AUTHORITY.getByName('base-branch-source-project');
     const source = await sourceAuthority.setProjectLifecycle((await sourceAuthority.ensureGitSpaceProject(reserved)).revision, 'active');
-    await expect(runInDurableObject(sourceAuthority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(source.revision, 'main'))).rejects.toThrow('managed by GitSpace releases');
+    await expect(runInDurableObject(sourceAuthority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(source.revision, 'main', 'a'.repeat(40)))).rejects.toThrow('managed by GitSpace releases');
     expect(await sourceAuthority.getProject()).toEqual(source);
   });
 
@@ -505,15 +505,13 @@ describe('UserProjectIndexDO', () => {
     expect(await adopted.ensureGitSpaceProject(source)).toEqual(repaired);
   });
 
-  it('keeps canonical source workspaces intact when project deletion or archival is attempted', async () => {
+  it('creates the built-in project with its base workspace and keeps it intact when project deletion or archival is attempted', async () => {
     const index = projectEnv.USER_PROJECTS.getByName('source-protected');
     const project = await index.ensureGitSpaceProject({ release: null, branch: 'release/test', commit: null });
     const authority = projectEnv.PROJECT_AUTHORITY.getByName('source-protected-project');
     const source = await authority.ensureGitSpaceProject(project);
-    const base = await authority.putWorkspace({
-      id: source.id, projectId: source.id, kind: 'base', name: source.name, branch: source.baseBranch,
-      phase: null, sourceKind: 'base', sourceRef: source.baseBranch, sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0,
-    });
+    const [base] = await authority.listWorkspaces();
+    expect(base).toMatchObject({ id: source.id, projectId: source.id, kind: 'base', branch: source.baseBranch, lifecycle: 'active' });
     await runInDurableObject(authority, async (instance: ProjectAuthorityDO) => {
       await expect(instance.deleteProject(source.revision)).rejects.toThrow();
       await expect(instance.setProjectLifecycle(source.revision, 'archived')).rejects.toThrow();

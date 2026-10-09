@@ -17,6 +17,7 @@ import {
   type TenantDesired,
 } from '@gitspace/protocol/deployment';
 import worker from '../src/index.js';
+import { revertTenantRelease } from '../src/application.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 
@@ -260,7 +261,7 @@ describe('tenant releases', () => {
     activeWorker = 'scoped-channel-guard';
     const before = await releases.status(userId, { sha: 'scoped-channel-guard', version: 'scoped-channel-guard' });
 
-    await expect(control('deploy.revert', {})).rejects.toThrow();
+    await expect(revertTenantRelease(env, userId)).rejects.toThrow();
     await expect(Promise.resolve(releases.revert())).rejects.toThrow();
     await expect(control('deploy.machineChannelApplied', { target: 'omp', generation: 'legacy-channel' })).rejects.toThrow();
     expect(platformReverts).toBe(0);
@@ -346,7 +347,7 @@ describe('tenant releases', () => {
     status = deploymentStatusSchema.parse(await control('deploy.status', {}));
     expect(status.current.machines).toEqual({ 'machine-a': { sha: 'def456', generation: 'gen-7' } });
 
-    const reverted = deploymentStatusSchema.parse(await control('deploy.revert', {}));
+    const reverted = deploymentStatusSchema.parse(await revertTenantRelease(env, userId));
     expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
     expect(reverted.releases).toHaveLength(1);
     expect(reverted.current.machines).toEqual({ 'machine-a': { sha: 'def456', generation: 'gen-7' } });
@@ -402,7 +403,7 @@ describe('tenant releases', () => {
     const destroyed = deploymentStatusSchema.parse(await control('deploy.status', {}));
     expect(destroyed.current.machines).toEqual(survivor);
     expect(destroyed.releases).toEqual(before.releases);
-    const reverted = deploymentStatusSchema.parse(await control('deploy.revert', {}));
+    const reverted = deploymentStatusSchema.parse(await revertTenantRelease(env, userId));
     expect(reverted.current.machines).toEqual(survivor);
     expect(reverted.releases).toEqual(before.releases);
   });
@@ -452,7 +453,7 @@ describe('tenant releases', () => {
     expect(status.current.worker).toEqual({ sha: 'test-inference-worker', version: 'test-inference-worker' });
     expect(status.current.platformWorker).toEqual({ sha: 'good111', version: 'good111' });
 
-    const reverted = deploymentStatusSchema.parse(await control('deploy.revert', {}, platform));
+    const reverted = deploymentStatusSchema.parse(await revertTenantRelease({ ...env, ...platform }, userId));
     expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
     expect(reverted.current.platformWorker).toEqual({ sha: null, version: 'channel:1' });
     expect(reverts).toEqual([{ accountId: userId, to: 'channel' }]);
@@ -461,7 +462,7 @@ describe('tenant releases', () => {
     expect(unversionedChannel.current.platformWorker).toEqual({ sha: null, version: 'channel' });
   });
 
-  it('deploys and reverts only the bound tenant despite caller-supplied routing', async () => {
+  it('deploys only the bound tenant despite caller-supplied routing', async () => {
     const { userId, control } = await tenant();
     const foreignId = `foreign-${crypto.randomUUID()}`;
     const actions: Array<{ tenant: string; accountId: string; action: string }> = [];
@@ -478,24 +479,22 @@ describe('tenant releases', () => {
     await control('deploy.stage', stageInput('tenant-release'));
     await control('deploy.launch', { sha: 'tenant-release', targets: ['worker'], tenant: 'foreign', accountId: foreignId });
     expect(serving).toBe('tenant-release');
-    await control('deploy.revert', { tenant: 'foreign', accountId: foreignId });
+    await revertTenantRelease(env, userId);
     expect(serving).toBe('channel:1');
     expect(actions).toEqual([
       { tenant: env.TENANT_ID, accountId: userId, action: 'deploy' },
       { tenant: env.TENANT_ID, accountId: userId, action: 'revert' },
     ]);
-    for (const operation of ['deploy.launch', 'deploy.revert'] as const) {
-      const response = await SELF.fetch('https://tenant.test/v1/control', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(createSignedControlRequest({
-          userId: foreignId, machineId: 'machine-a', operation,
-          payload: { sha: 'tenant-release', targets: ['worker'] },
-          signingPrivateKey: machineSigningPrivateKey,
-        })),
-      });
-      expect(response.status).toBe(401);
-    }
+    const foreignLaunch = await SELF.fetch('https://tenant.test/v1/control', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(createSignedControlRequest({
+        userId: foreignId, machineId: 'machine-a', operation: 'deploy.launch',
+        payload: { sha: 'tenant-release', targets: ['worker'] },
+        signingPrivateKey: machineSigningPrivateKey,
+      })),
+    });
+    expect(foreignLaunch.status).toBe(401);
     expect(actions).toHaveLength(2);
     const status = deploymentStatusSchema.parse(await control('deploy.status', {}));
     expect(status.desired.worker).toBeNull();
@@ -655,7 +654,7 @@ describe('tenant releases', () => {
     expect(afterMachineLaunch.headers.get('x-gitspace-frontend-release')).toBe('fe333');
     expect(await afterMachineLaunch.text()).toBe('<!doctype html><title>release</title>');
 
-    await control('deploy.revert', {});
+    await revertTenantRelease(env, userId);
     expect(await (await fetchFrontend(`${origin}/`)).text()).toBe(channelHtml);
   });
 });

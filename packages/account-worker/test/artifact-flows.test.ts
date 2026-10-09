@@ -65,6 +65,91 @@ async function readBytes(stream: AsyncIterable<{ status: 'ok'; value: ResourcePr
 }
 
 describe('user artifact flows', () => {
+  it('previews published resource URLs without a machine or originating session', async () => {
+    const { client, workspaceId, projectId, publish } = await fixture();
+    await publish(workspaceId, 1, [
+      { path: 'notes.txt', content: 'first\nsecond\nthird\n' },
+      { path: 'empty.txt', content: '' },
+    ]);
+    await publish(projectId, 1, [{ path: 'notes.txt', content: 'project notes' }]);
+    const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null };
+    const url = 'local://notes.txt:raw:2-2';
+    const frames = [];
+    for await (const frame of client.inspector.resources.read({ ...request, url })) frames.push(frame);
+    expect(frames).toEqual([
+      { status: 'ok', value: { type: 'metadata', url, mediaType: 'text/plain', text: true, size: 6 } },
+      { status: 'ok', value: { type: 'chunk', base64: Buffer.from('second').toString('base64') } },
+    ]);
+    expect((await readBytes(client.inspector.resources.read({ ...request, sessionId: 'former-session', url: 'local://base/notes.txt' }))).toString()).toBe('project notes');
+    expect((await readBytes(client.inspector.resources.read({ ...request, spaceId: projectId, url: 'local://notes.txt' }))).toString()).toBe('project notes');
+    const empty = [];
+    for await (const frame of client.inspector.resources.read({ ...request, url: 'local://empty.txt' })) empty.push(frame);
+    expect(empty).toEqual([{ status: 'ok', value: { type: 'metadata', url: 'local://empty.txt', mediaType: 'text/plain', text: true, size: 0 } }]);
+  });
+
+  it('pages complete cloud resource bytes and rejects cursors from another version or identity', async () => {
+    const { client, workspaceId, publish } = await fixture();
+    const content = '\0audio'.repeat(25_000);
+    await publish(workspaceId, 1, [{ path: 'capture.wav', content, mediaType: 'audio/wav' }]);
+    const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null, url: 'local://capture.wav' };
+    const first = await client.inspector.resources.readPage({ ...request, cursor: null, limit: 1 });
+    if (first.status === 'error') throw first.error;
+    expect(first.value.items).toEqual([{ type: 'metadata', url: request.url, mediaType: 'audio/wav', text: false, size: Buffer.byteLength(content) }]);
+    expect(first.value.nextCursor).not.toBeNull();
+    const chunks: Buffer[] = [];
+    let cursor = first.value.nextCursor;
+    while (cursor !== null) {
+      const page = await client.inspector.resources.readPage({ ...request, cursor, limit: 1 });
+      if (page.status === 'error') throw page.error;
+      for (const frame of page.value.items) {
+        if (frame.type === 'chunk') chunks.push(Buffer.from(frame.base64, 'base64'));
+      }
+      cursor = page.value.nextCursor;
+    }
+    expect(Buffer.concat(chunks)).toEqual(Buffer.from(content));
+    expect(await readBytes(client.inspector.resources.read(request))).toEqual(Buffer.from(content));
+    expect(await client.inspector.resources.readPage({ ...request, sessionId: 'another-session', cursor: first.value.nextCursor, limit: 1 })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/operation-failed' } });
+    await publish(workspaceId, 2, [{ path: 'capture.wav', content: 'changed audio', mediaType: 'audio/wav' }]);
+    expect(await client.inspector.resources.readPage({ ...request, cursor: first.value.nextCursor, limit: 1 })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/operation-failed' } });
+  });
+
+  it('enforces resource scope and placement fences and reports unavailable references', async () => {
+    const { client, workspaceId, projectId, authority, publish } = await fixture();
+    const siblingId = crypto.randomUUID();
+    await authority.putWorkspace({ id: siblingId, projectId, kind: 'worktree', name: 'Sibling', branch: 'main', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await publish(workspaceId, 1, [{ path: 'private.txt', content: 'this workspace' }]);
+    await publish(siblingId, 1, [{ path: 'private.txt', content: 'sibling workspace' }]);
+    const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null };
+    const pageRequest = { ...request, cursor: null, limit: 16 };
+    for (const url of [
+      `local://workspaces/${siblingId}/private.txt`,
+      'local://workspace/%2e%2e/private.txt',
+      'local://missing.txt',
+      'artifact://123',
+      'browser-artifact://machine/capture',
+    ]) {
+      const frames = [];
+      for await (const frame of client.inspector.resources.read({ ...request, url })) frames.push(frame);
+      expect(frames).toMatchObject([{ status: 'error' }]);
+      expect(await client.inspector.resources.readPage({ ...pageRequest, url })).toMatchObject({ status: 'error' });
+    }
+    expect(await client.inspector.resources.readPage({ ...pageRequest, url: 'artifact://123' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
+    expect(await client.inspector.resources.readPage({ ...pageRequest, expectedGeneration: 1, url: 'local://private.txt' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/space-generation-conflict' } });
+    expect(await client.inspector.resources.readPage({ ...pageRequest, spaceId: crypto.randomUUID(), url: 'local://private.txt' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
+    expect((await readBytes(client.inspector.resources.read({ ...request, spaceId: projectId, url: `local://workspaces/${siblingId}/private.txt` }))).toString()).toBe('sibling workspace');
+  });
+
+  it('applies the text preview limit before streaming and allows bounded resource selections', async () => {
+    const { client, workspaceId, publish } = await fixture();
+    await publish(workspaceId, 1, [{ path: 'output.txt', content: `retained line\n${'large output\n'.repeat(20_000)}` }]);
+    const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null, url: 'local://output.txt' };
+    const frames = [];
+    for await (const frame of client.inspector.resources.read(request)) frames.push(frame);
+    expect(frames).toMatchObject([{ status: 'error', error: { _tag: 'gitspace/operation-failed' } }]);
+    expect(await client.inspector.resources.readPage({ ...request, cursor: null, limit: 16 })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/operation-failed' } });
+    expect((await readBytes(client.inspector.resources.read({ ...request, url: `${request.url}:1-1` }))).toString()).toBe('retained line');
+  });
+
   it('keeps oversized previews inside the RPC error contract and reads selected canonical text ranges', async () => {
     const { client, workspaceId, publish } = await fixture();
     await publish(workspaceId, 1, [{ path: 'output.txt', content: `selected line\n${'remaining output\n'.repeat(20_000)}` }]);

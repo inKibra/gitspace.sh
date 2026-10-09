@@ -35,11 +35,13 @@ export interface WorkspaceTerminalOutput {
   data: string;
 }
 
-/** A machine that may run this workspace's terminals: one attached to it as a ready cache. */
+/** A cache attached to this workspace that can run its terminals: live now, or paused while idle and woken when picked. */
 export interface WorkspaceTerminalMachine {
   id: string;
   label: string;
+  state: 'live' | 'paused';
 }
+const MACHINE_STATE_SUFFIX: Record<WorkspaceTerminalMachine['state'], string> = { live: '', paused: ' · Paused' };
 
 type ProtectedTerminalStream = AsyncIterable<{ status: 'ok'; value: ProtectedTerminalEvent } | { status: 'error'; error: Error }>;
 
@@ -532,18 +534,27 @@ function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect 
   </>;
 }
 
+function MachinePicker({ machines, machineId, onSelectMachine }: Pick<WorkspaceTerminalsProps, 'machines' | 'onSelectMachine'> & { machineId: string }) {
+  return <select aria-label="Terminal machine" className="max-w-40 shrink-0 bg-transparent text-caption text-muted-foreground" value={machineId} onChange={(event) => onSelectMachine(event.target.value)}>{machines.map((item) => <option key={item.id} value={item.id}>{item.label}{MACHINE_STATE_SUFFIX[item.state]}</option>)}</select>;
+}
+
 export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
   const machine = props.machines.find((item) => item.id === props.machineId);
-  if (machine) return <MachineTerminals key={machine.id} {...props} machine={machine} />;
+  // A paused cache refuses terminal traffic until it wakes, so its terminals open only once it is live again.
+  if (machine?.state === 'live') return <MachineTerminals key={machine.id} {...props} machine={machine} />;
   return <section className="flex h-full min-h-0 flex-col bg-surface-1" aria-label="Hub terminals">
     <header className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
       <strong className="flex-1 pl-1 text-caption font-semibold text-foreground">Hub terminals</strong>
+      {machine ? <MachinePicker machines={props.machines} machineId={machine.id} onSelectMachine={props.onSelectMachine} /> : null}
       {props.onClose ? <Button variant="ghost" size="icon-compact" aria-label="Close terminals" onClick={props.onClose}><XClose width={16} height={16} strokeWidth={1.5} /></Button> : null}
     </header>
-    <div className="flex min-h-0 flex-1 items-center justify-center p-6">{props.machines.length > 0
+    <div className="flex min-h-0 flex-1 items-center justify-center p-6">{machine
+      ? <EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title={`${machine.label} is paused`} description="This cache paused while idle. Picking it wakes it; terminals open here once it is live again."
+          action={<Button variant="secondary" size="compact" onClick={() => props.onSelectMachine(machine.id)}>Wake {machine.label}</Button>} />
+      : props.machines.length > 0
       ? <EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="Choose a machine" description="Terminals run on one machine attached to this workspace. Choose where to open them."
-          action={<div className="flex flex-wrap justify-center gap-2">{props.machines.map((item) => <Button key={item.id} variant="secondary" size="compact" onClick={() => props.onSelectMachine(item.id)}>{item.label}</Button>)}</div>} />
-      : <EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="Attach a machine to open a terminal" description="Terminals run on a machine attached to this workspace as a ready cache. Cloud files and conversations stay available without one."
+          action={<div className="flex flex-wrap justify-center gap-2">{props.machines.map((item) => <Button key={item.id} variant="secondary" size="compact" onClick={() => props.onSelectMachine(item.id)}>{item.label}{MACHINE_STATE_SUFFIX[item.state]}</Button>)}</div>} />
+      : <EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="Attach a machine to open a terminal" description="Terminals run on a machine attached to this workspace as a cache. Cloud files and conversations stay available without one."
           action={props.onAttachMachine ? <Button variant="secondary" size="compact" onClick={props.onAttachMachine}>Attach a machine</Button> : undefined} />}</div>
   </section>;
 }
@@ -660,7 +671,7 @@ function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceT
         <strong className="text-caption font-semibold text-foreground">Hub terminals</strong>
         <span className="text-caption tabular-nums text-muted-foreground">{running} running</span>
       </span>
-      <select aria-label="Terminal machine" className="max-w-40 shrink-0 bg-transparent text-caption text-muted-foreground" value={machine.id} onChange={(event) => props.onSelectMachine(event.target.value)}>{props.machines.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
+      <MachinePicker machines={props.machines} machineId={machine.id} onSelectMachine={props.onSelectMachine} />
       {terminals.length > 0
         ? <TabsSubtle size="compact" idPrefix="terminals" selectedIndex={selectedIndex} onSelect={(index) => setSelectedName(terminals[index]?.name ?? null)} className="min-w-0 flex-1">
             {terminals.map((terminal, index) => <TabsSubtleItem key={terminal.name} index={index} label={terminal.protected && terminal.kind === 'lifecycle' ? 'Environment' : terminal.name} icon={KIND[terminal.kind].icon} />)}

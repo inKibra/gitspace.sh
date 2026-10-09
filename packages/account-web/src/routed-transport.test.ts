@@ -32,7 +32,7 @@ it.each([
   let creationSettled = false;
   const creation = transport.request({ v: 1, path, input })
     .then((outcome) => { creationSettled = true; return outcome; });
-  const query = transport.request({ v: 1, path: 'placements', input: {} });
+  const query = transport.request({ v: 1, path: 'settings.get', input: {} });
 
   await vi.advanceTimersByTimeAsync(31_000);
   expect(await query).toMatchObject({ ok: false, reason: 'timeout' });
@@ -131,7 +131,7 @@ it('retains terminal server errors and cancels a caller-detached stream', async 
 
 const batchSchema = z.object({ batch: z.array(z.object({ path: z.string() })) });
 
-it('sends machine work for each space or session in its own tagged batch to the account endpoint', async () => {
+it('separates explicit terminal machine targets from cloud authority in signed batches', async () => {
   const requests: Array<{ url: string; paths: string[] }> = [];
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
@@ -142,16 +142,16 @@ it('sends machine work for each space or session in its own tagged batch to the 
   }) as typeof fetch;
   const transport = createRoutedTransport({ homeUrl: 'https://account.test/rpc', fetch: fetcher });
   await Promise.all([
-    transport.request({ v: 1, path: 'transcriptContent', input: { projectId: 'project', workspaceId: 'space-a' } }),
-    transport.request({ v: 1, path: 'transcriptPage', input: { projectId: 'project', workspaceId: 'space-b' } }),
-    transport.request({ v: 1, path: 'transcriptPage', input: { projectId: 'project', workspaceId: 'space-a' } }),
-    transport.request({ v: 1, path: 'session.control', input: { sessionId: 'session-a' } }),
+    transport.request({ v: 1, path: 'terminals.list', input: { spaceId: 'space-a', machineId: 'machine-a' } }),
+    transport.request({ v: 1, path: 'terminals.list', input: { spaceId: 'space-a', machineId: 'machine-b' } }),
+    transport.request({ v: 1, path: 'terminals.create', input: { spaceId: 'space-a', machineId: 'machine-a' } }),
+    transport.request({ v: 1, path: 'space.view', input: { projectId: 'project', workspaceId: 'space-a' } }),
   ]);
   expect(requests).toHaveLength(3);
   expect(requests).toEqual(expect.arrayContaining([
-    { url: 'https://account.test/rpc?p=transcriptContent,transcriptPage', paths: ['transcriptContent', 'transcriptPage'] },
-    { url: 'https://account.test/rpc?p=transcriptPage', paths: ['transcriptPage'] },
-    { url: 'https://account.test/rpc?p=session.control', paths: ['session.control'] },
+    { url: 'https://account.test/rpc?p=terminals.list,terminals.create', paths: ['terminals.list', 'terminals.create'] },
+    { url: 'https://account.test/rpc?p=terminals.list', paths: ['terminals.list'] },
+    { url: 'https://account.test/rpc?p=space.view', paths: ['space.view'] },
   ]));
 });
 
@@ -187,11 +187,11 @@ it.each([
     }),
   });
   const results: unknown[] = await Promise.all([
-    client.session.control({ sessionId: 'running' }),
+    client.settings.get({}),
     client.space.view({ projectId: 'project', workspaceId: null }),
   ]);
-  for await (const result of client.transcript({ projectId: 'project', workspaceId: null })) results.push(result);
-  expect(received[0]?.batch?.map((item) => item.path)).toEqual(['session.control', 'space.view']);
+  for await (const result of client.inspector.transcript({ projectId: 'project', workspaceId: null })) results.push(result);
+  expect(received[0]?.batch?.map((item) => item.path)).toEqual(['settings.get', 'space.view']);
   expect(results).toMatchObject(Array.from({ length: 3 }, () => ({ status: 'error', error: { _tag: 'client/http-failure', data: { status } } })));
 });
 
@@ -200,12 +200,12 @@ it('still rejects a successful RPC response that omits the contract header', asy
     contract: gitspaceContract,
     transport: batchFetchTransport({
       url: 'https://account.test/rpc',
-      fetch: (async () => new Response(encoded({ v: 1, status: 'ok', value: { machineId: '', spaces: [] } }), {
+      fetch: (async () => new Response(encoded({ v: 1, status: 'ok', value: [] }), {
         headers: { 'content-type': 'application/result-rpc+devalue; sv=1' },
       })) as typeof fetch,
     }),
   });
-  expect(await client.placements({})).toMatchObject({ status: 'error', error: { _tag: 'client/protocol-violation', data: { reason: 'version' } } });
+  expect(await client.machines({})).toMatchObject({ status: 'error', error: { _tag: 'client/protocol-violation', data: { reason: 'version' } } });
 });
 
 it('still rejects a successful transcript stream that omits the contract header', async () => {
@@ -219,6 +219,6 @@ it('still rejects a successful transcript stream that omits the contract header'
     }),
   });
   const results = [];
-  for await (const result of client.transcript({ projectId: 'project', workspaceId: null })) results.push(result);
+  for await (const result of client.inspector.transcript({ projectId: 'project', workspaceId: null })) results.push(result);
   expect(results).toMatchObject([{ status: 'error', error: { _tag: 'client/protocol-violation', data: { reason: 'version' } } }]);
 });

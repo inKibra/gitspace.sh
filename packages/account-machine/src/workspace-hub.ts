@@ -326,7 +326,7 @@ export class WorkspaceHubTerminalCoordinator {
     env: Record<string, string>,
     options: { interactive?: boolean; runId?: string; deadlineAt?: string; redactNames?: readonly string[]; onStarted?: () => Promise<void>; onOutput?: (output: string) => Promise<void>; directory?: string } = {},
   ): Promise<WorkspaceLifecyclePlanResult> {
-    if (options.interactive && options.directory) throw new Error('Interactive lifecycle execution cannot run in a detached recovery checkout');
+    if (options.interactive && options.directory && options.directory !== this.cache?.path(spaceId)) throw new Error('Interactive lifecycle execution cannot run in a detached recovery checkout');
     if (options.interactive && (!['linux', 'darwin'].includes(process.platform) || steps.some((step) => step.kind !== 'script'))) throw new Error('Protected interactive lifecycle execution requires a POSIX script phase');
     const scope = options.directory
       ? { space: { rootPath: options.directory }, client: await this.clientForProject(options.directory) }

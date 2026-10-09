@@ -39,7 +39,7 @@ describe('account GitSpace source provenance', () => {
       ? Response.json(metadata) : new Response('Not found', { status: 404 }), connect: (address, options) => env.ASSETS.connect(address, options) } satisfies Fetcher };
     const project = await ensureAccountGitSpaceProject(cloudEnv, userId, { sourceBranch: 'unrelated', sourceCommit: 'c'.repeat(40) });
     expect(project).toMatchObject({ lifecycle: 'cloud-only', baseBranch: metadata.branch, source: metadata });
-    expect(await env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`).listWorkspaces()).toEqual([]);
+    expect(await env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`).listWorkspaces()).toMatchObject([{ id: project.id, kind: 'base', branch: metadata.branch }]);
   });
 
   it('lets a machine write runtime state while it opens the cloud-only source project', async () => {

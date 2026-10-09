@@ -1,7 +1,8 @@
 import { readdir, readFile, rm } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { AppendFactEvent, GitSpaceDatabase } from '@gitspace/core';
+import type { AppendFactEvent } from '@gitspace/core';
+import type { ExecutorJournal, LocalAttachment } from '@gitspace/runtime-machine';
 import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { hashArtifactPath, workspaceSha } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
@@ -55,19 +56,35 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
   }
 }
 /**
- * "Launch into": build GitSpace from a workspace held on this machine, put the
+ * "Launch into": build GitSpace from a ready workspace cache on this machine, put the
  * bundles in the tenant's data bucket, stage the release, and point the
  * tenant's `desired` at it. Progress is logged and mirrored as `deployment`
  * fact events on the workspace's project.
  */
 
-export type DeploymentLaunchErrorCode = 'WORKSPACE_NOT_FOUND' | 'WORKSPACE_NOT_HELD' | 'NOT_GITSPACE' | 'BUSY';
+export type DeploymentLaunchErrorCode = 'WORKSPACE_NOT_FOUND' | 'CACHE_UNAVAILABLE' | 'NOT_GITSPACE' | 'BUSY';
 
 export class DeploymentLaunchError extends Error {
   constructor(readonly code: DeploymentLaunchErrorCode, message: string) {
     super(message);
     this.name = 'DeploymentLaunchError';
   }
+}
+
+type DeploymentSource = Pick<LocalAttachment, 'rootPath'> & Pick<LocalAttachment['attachment'], 'projectId' | 'workspaceId'> & { name: string };
+
+/** The executor's durable local assignment owns the checkout, not the retired workspace-holder table. */
+export function deploymentSource(attachments: readonly LocalAttachment[], machineId: string, workspaceId: string): DeploymentSource {
+  let attached = false;
+  for (const local of attachments) {
+    const { attachment } = local;
+    if (attachment.workspaceId !== workspaceId || attachment.machineId !== machineId || attachment.role !== 'cache') continue;
+    attached = true;
+    if (attachment.state !== 'ready' || attachment.cache?.state !== 'live' || !local.prerequisitesComplete) continue;
+    return { workspaceId: attachment.workspaceId, projectId: attachment.projectId, rootPath: local.rootPath, name: attachment.checkout.kind === 'shared' ? attachment.checkout.branch : attachment.workspaceId };
+  }
+  if (!attached) throw new DeploymentLaunchError('WORKSPACE_NOT_FOUND', `Attach workspace ${workspaceId} to machine ${machineId} before launching`);
+  throw new DeploymentLaunchError('CACHE_UNAVAILABLE', `Workspace ${workspaceId} needs a ready live cache on machine ${machineId}; resume or finish setup before launching`);
 }
 
 export interface ReleaseAuthority {
@@ -86,7 +103,7 @@ export interface ProjectFactEvents {
 }
 
 export interface DeploymentLauncherOptions {
-  database: Pick<GitSpaceDatabase, 'getWorkspace'>;
+  attachments: ExecutorJournal['attachments'];
   machineId: string;
   authority: ReleaseAuthority;
   blobs: ReleaseBlobWriter;
@@ -132,15 +149,11 @@ export class DeploymentLauncher {
    */
   launch(input: DeploymentLaunchInput): LaunchProgress {
     if (this.active) throw new DeploymentLaunchError('BUSY', 'A release is already being built on this machine');
-    const workspace = this.options.database.getWorkspace(input.workspaceId);
-    if (!workspace) throw new DeploymentLaunchError('WORKSPACE_NOT_FOUND', `Workspace ${input.workspaceId} does not exist`);
-    if (workspace.placementState === 'closed' || workspace.holderId !== this.options.machineId) {
-      throw new DeploymentLaunchError('WORKSPACE_NOT_HELD', `Workspace ${input.workspaceId} is not open on this machine`);
-    }
+    const workspace = deploymentSource(this.options.attachments(), this.options.machineId, input.workspaceId);
     const targets = [...new Set(z.array(releaseTargetSchema).parse(input.targets))];
     if (targets.length === 0) throw new DeploymentLaunchError('NOT_GITSPACE', 'A release needs at least one target');
     const now = new Date().toISOString();
-    this.progress = { launchId: crypto.randomUUID(), workspaceId: workspace.id, targets, sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: now, updatedAt: now };
+    this.progress = { launchId: crypto.randomUUID(), workspaceId: workspace.workspaceId, targets, sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: now, updatedAt: now };
     this.report(this.progress);
     this.active = this.run(workspace, targets).finally(() => { this.active = null; });
     this.active.catch(() => undefined);
@@ -153,7 +166,7 @@ export class DeploymentLauncher {
     return this.active!;
   }
 
-  private async run(workspace: NonNullable<ReturnType<GitSpaceDatabase['getWorkspace']>>, targets: ReleaseTarget[]): Promise<ReleaseRecord> {
+  private async run(workspace: DeploymentSource, targets: ReleaseTarget[]): Promise<ReleaseRecord> {
     const root = workspace.rootPath;
     const protocolPackage = await readFile(join(root, 'packages/protocol/package.json'), 'utf8').then(
       (source) => JSON.parse(source) as unknown,
@@ -177,12 +190,12 @@ export class DeploymentLauncher {
         entityId: sha,
         revision: Date.now(),
         operation: 'updated',
-        payload: { ...payload, launchId: current.launchId, phase, message, status, workspaceId: workspace.id, targets },
+        payload: { ...payload, launchId: current.launchId, phase, message, status, workspaceId: workspace.workspaceId, targets },
       });
     };
     if (!isGitSpace) {
-      progress('failed', `Workspace ${workspace.id} is not a GitSpace checkout`, {}, 'failed');
-      throw new DeploymentLaunchError('NOT_GITSPACE', `Workspace ${workspace.id} is not a GitSpace checkout`);
+      progress('failed', `Workspace ${workspace.workspaceId} is not a GitSpace checkout`, {}, 'failed');
+      throw new DeploymentLaunchError('NOT_GITSPACE', `Workspace ${workspace.workspaceId} is not a GitSpace checkout`);
     }
 
     const sha = await workspaceSha(root);
@@ -242,7 +255,7 @@ export class DeploymentLauncher {
         sha,
         inferenceVersion: 1,
         label: `${workspace.name} @ ${sha.slice(0, 12)}`,
-        workspaceId: workspace.id,
+        workspaceId: workspace.workspaceId,
         artifacts,
         worker,
       });

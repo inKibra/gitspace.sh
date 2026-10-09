@@ -1,9 +1,8 @@
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { GitSpaceDatabase } from '@gitspace/core';
-import type { Workspace } from '@gitspace/core';
+import { ExecutorJournal, type LocalAttachment } from '@gitspace/runtime-machine';
 import { CloudSpaceCheckpointAuthority, CloudDataCheckpointBlobStore } from './cloud-space-authority.js';
-import { DeploymentLauncher } from './deployment-launcher.js';
+import { DeploymentLauncher, deploymentSource } from './deployment-launcher.js';
 
 /** CLI recovery uses the same tenant deployment transaction, never host pointer edits or direct activation. */
 export async function recoverMachineFromSource(sourceRoot: string, workspaceId: string): Promise<void> {
@@ -18,21 +17,19 @@ export async function recoverMachineFromSource(sourceRoot: string, workspaceId: 
   if (signingPrivateKey.byteLength !== 32) throw new Error('Source recovery machine signing key is invalid');
   const control = { baseUrl: required('GITSPACE_CONTROL_URL'), userId: required('GITSPACE_USER_ID'), machineId, signingPrivateKey };
   const authority = new CloudSpaceCheckpointAuthority(control);
-  // The old process owns this database until health/commit. Do not run this source tree's migrations.
-  const database = new GitSpaceDatabase(join(environmentRoot, 'gitspace.db'), { readonly: true });
-  let workspace: Workspace;
+  // The old process owns this journal until health/commit. Recovery only reads its durable cache assignment.
+  const journal = new ExecutorJournal(join(environmentRoot, 'executor', 'attempts.sqlite'), { readonly: true });
+  let attachments: LocalAttachment[];
   try {
-    const selected = database.getWorkspace(workspaceId);
-    if (!selected || selected.holderId !== machineId || selected.placementState !== 'open') throw new Error('Recovery source must be an open workspace held by this machine');
-    if (await realpath(selected.rootPath) !== await realpath(sourceRoot)) throw new Error('Recovery source path does not match the account workspace');
-    workspace = selected;
+    attachments = journal.attachments();
+    const selected = deploymentSource(attachments, machineId, workspaceId);
+    if (await realpath(selected.rootPath) !== await realpath(sourceRoot)) throw new Error('Recovery source path does not match the account workspace cache');
   } finally {
-    database.close();
+    journal.close();
   }
-  const selectedWorkspace = workspace;
   let progress = Promise.resolve();
   const launcher = new DeploymentLauncher({
-    database: { getWorkspace: (id) => id === selectedWorkspace.id ? selectedWorkspace : null },
+    attachments: () => attachments,
     machineId, authority, blobs: new CloudDataCheckpointBlobStore(control),
     buildRoot: join(environmentRoot, 'recovery-builds'),
     events: {

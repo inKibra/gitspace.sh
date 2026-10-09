@@ -2,6 +2,7 @@
 import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { InferenceProfile, InferenceState } from '@gitspace/protocol/inference';
+import { inferenceSettingMetadata } from '@gitspace/protocol/inference';
 import { Button, IconProvider, ShapeProvider, SidebarInset, SidebarProvider, SizeProvider, TooltipProvider, untitledIcons } from '@gitspace/ui';
 import { MotionConfig } from 'framer-motion';
 import '@gitspace/ui/fluid-theme.css';
@@ -38,6 +39,7 @@ const schema: RuntimeSettingView[] = [
   { path: 'modelTags', label: 'Model tags', tab: 'models', description: null, kind: 'record', valueJson: '{}', defaultJson: '{}', options: [], credential: false },
   { path: 'task.agentModelOverrides', label: 'Agent roles', tab: 'task', description: null, kind: 'record', valueJson: '{}', defaultJson: '{}', options: [], credential: false },
   { path: 'agents.enabled', label: 'Enable agents', tab: 'task', description: 'Allow task agents in this profile.', kind: 'boolean', valueJson: 'true', defaultJson: 'true', options: [], credential: false },
+  ...inferenceSettingMetadata.filter(item => item.path.startsWith('approval.')).map(({ value, description, options, ...item }) => ({ ...item, valueJson: JSON.stringify(value), description: description ?? null, options: options ?? [] })),
 ];
 
 function Preview() {

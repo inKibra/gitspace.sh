@@ -131,26 +131,20 @@ it.each([
   expect(create).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'alpha', name: 'new-work', branch: 'feature/new-work', phase: expectedPhase }));
 });
 
-it('preserves released and archived workspace actions with their actual targets and project revisions', async () => {
-  const reopen = vi.fn();
-  const claim = vi.fn();
-  const remove = vi.fn();
-  const archiveWorkspace = vi.fn();
-  const archiveProject = vi.fn();
-  await render('projects', { onReopenSpace: reopen, onClaimWorkspace: claim, onDeleteWorkspace: remove, onArchiveWorkspace: archiveWorkspace, onArchiveProject: archiveProject });
-  await click('Reopen beta-release');
-  await click('Archive beta-release');
-  await click('Restore beta-archive');
-  await click('Delete beta-archive');
-  expect(reopen).toHaveBeenCalledWith('beta-release');
-  expect(archiveWorkspace).toHaveBeenCalledWith('beta-release');
-  expect(claim).toHaveBeenCalledWith('beta-archive', null);
-  expect(remove).toHaveBeenCalledWith('beta-archive');
+it('keeps the cloud workspace navigable after a cache-release failure and fences overlapping lifecycle actions', async () => {
+  const pending = Promise.withResolvers<void>();
+  await render('projects', { onReleaseMachines: () => pending.promise, onArchiveWorkspace: vi.fn(), onRestoreWorkspace: vi.fn() });
+  await click('Release machine caches for beta-release');
   expect(onOpenWorkspace).not.toHaveBeenCalled();
-  const beta = [...container.querySelectorAll('section')].find((section) => section.querySelector('button')?.textContent?.startsWith('Beta'))!;
-  await act(() => [...beta.querySelectorAll('button')].find((button) => button.textContent === 'Archive')!.click());
-  expect(archiveProject).toHaveBeenCalledWith('beta', 7);
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="Archive beta-release"]')?.disabled).toBe(true);
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="Restore beta-archive"]')?.disabled).toBe(true);
+  await act(async () => { pending.reject(new Error('Attachment generation changed')); });
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Attachment generation changed');
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="Archive beta-release"]')?.disabled).toBe(false);
+  await click('Open beta-release');
+  expect(onOpenWorkspace).toHaveBeenCalledExactlyOnceWith('beta', 'beta-release');
 });
+
 
 it('keeps archived projects out of the active list and restores the chosen archived project', async () => {
   const restore = vi.fn();

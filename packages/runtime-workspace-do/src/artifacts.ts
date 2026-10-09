@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
-import { ArtifactsSnapshotError, initializeArtifactsRepository, validateSnapshotPath, writeArtifactsSnapshot, type WriteSnapshotInput } from './artifacts-snapshot.js';
+import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, publishSnapshotPack, readCommitPack, readAdvertisedRefs, validateSnapshotPath, writeArtifactsSnapshot, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
 import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
@@ -36,6 +36,13 @@ export class ProjectImportRequiresMachineError extends TaggedError('ProjectImpor
 const ArtifactsImportRefusalSchema = z.object({ name: z.literal('ArtifactsError'), code: z.enum(['REMOTE_AUTH_REQUIRED', 'MEMORY_LIMIT']) });
 const IMPORT_REFUSAL_REASONS: Record<z.infer<typeof ArtifactsImportRefusalSchema>['code'], ProjectImportRequiresMachineReason> = { REMOTE_AUTH_REQUIRED: 'private', MEMORY_LIMIT: 'too-large' };
 const ArtifactsAlreadyExistsSchema = z.object({ name: z.literal('ArtifactsError'), code: z.literal('ALREADY_EXISTS') });
+const ArtifactsNotFoundSchema = z.object({ name: z.literal('ArtifactsError'), code: z.literal('NOT_FOUND') });
+
+/** The branch names Artifacts resolves: Git's ref rules over letters, digits, `.`, `_`, `-` and `/`. */
+export function isSupportedBranchName(branch: string): boolean {
+  return branch !== 'HEAD' && !branch.startsWith('refs/') && /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/u.test(branch) && !branch.includes('..') && !branch.includes('//')
+    && !branch.endsWith('/') && !branch.split('/').some(part => part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'));
+}
 
 /** The binding is supplied by the tenant Worker, never an account control-plane token. */
 export class ArtifactsCodeStore {
@@ -182,19 +189,112 @@ export class ArtifactsCodeStore {
     } finally { await disposeArtifactsRepository(repo); }
   }
 
-  async forkWorkspace(projectId: string, workspaceId: string) {
+  /** A workspace forked from another workspace starts from that workspace's repository, which holds commits the project never received. */
+  async forkWorkspace(projectId: string, workspaceId: string, source = artifactsProjectRepository(projectId)) {
     const name = artifactsWorkspaceRepository(workspaceId);
     const existing = await this.find(name);
     if (existing) return this.info(name);
-    const source = await this.binding.get(artifactsProjectRepository(projectId));
+    const sourceRepository = await this.binding.get(repositorySchema.parse(source));
     try {
-      const created = await source.fork(name, { defaultBranchOnly: false, readOnly: false });
+      const created = await sourceRepository.fork(name, { defaultBranchOnly: false, readOnly: false });
       const repo = await this.binding.get(name);
       try {
         await repo.revokeToken(created.token);
         return await repo.info();
       } finally { await disposeArtifactsRepository(repo); }
-    } finally { await disposeArtifactsRepository(source); }
+    } finally { await disposeArtifactsRepository(sourceRepository); }
+  }
+
+  /** Points a branch at a commit the repository already holds; a no-op once it does. An existing branch moves only from the tip read here. */
+  async setBranch(repository: string, branch: string, commit: string): Promise<void> {
+    const current = await this.resolveRef(repository, `refs/heads/${branch}`);
+    if (current === commitSchema.parse(commit)) return;
+    const repo = await this.binding.get(repositorySchema.parse(repository));
+    try {
+      if (!await repo.readCommit(commit)) throw new Error(`Commit ${commit} is not in repository ${repository}`);
+      const [info, token] = await Promise.all([repo.info(), repo.createToken('write', 60)]);
+      try { await publishRef({ remote: info.remote, token: token.plaintext, ref: `refs/heads/${branch}`, previous: current, commit }); }
+      finally { await repo.revokeToken(token.id); }
+    } finally { await disposeArtifactsRepository(repo); }
+  }
+
+  /** Copy a commit absent from a fork, then CAS its destination ref. Existing objects need no download. */
+  async copyCommit(source: string, destination: string, ref: string, commit: string, previous: string | null): Promise<void> {
+    commitSchema.parse(commit);
+    if (!/^refs\/(?:heads\/|gitspace\/)/u.test(ref)) throw new Error('Unsupported destination ref');
+    const target = await this.binding.get(repositorySchema.parse(destination));
+    try {
+      const info = await target.info();
+      const token = await target.createToken('write', 60);
+      try {
+        if (await target.readCommit(commit)) {
+          await publishRef({ remote: info.remote, token: token.plaintext, ref, previous, commit });
+        } else {
+          const origin = await this.binding.get(repositorySchema.parse(source));
+          try {
+            const sourceInfo = await origin.info();
+            const readToken = await origin.createToken('read', 60);
+            try {
+              const pack = await readCommitPack({ remote: sourceInfo.remote, token: readToken.plaintext, commit });
+              await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: previous ?? '0'.repeat(40), commit, pack });
+            } finally { await origin.revokeToken(readToken.id); }
+          } finally { await disposeArtifactsRepository(origin); }
+        }
+      } finally { await target.revokeToken(token.id); }
+    } finally { await disposeArtifactsRepository(target); }
+  }
+
+  /** Fetch a public origin ref omitted by the initial import. Keep its objects and exact ref in
+   * Artifacts so creation retries no longer depend on the origin. Origin redirects are refused. */
+  async importSourceRef(projectId: string, url: string, ref: string): Promise<string> {
+    const origin = new URL(url);
+    if (origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash) throw new Error('Source import requires a credential-free HTTPS repository root without redirects');
+    if (!/^refs\/(?:tags\/.+|pull\/[1-9][0-9]*\/head)$/u.test(ref)) throw new Error('Unsupported source ref');
+    const advertised = await readAdvertisedRefs({ remote: origin.href, token: null });
+    const object = advertised.get(ref);
+    if (!object) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
+    const pack = await readCommitPack({ remote: origin.href, token: null, commit: object });
+    const repository = artifactsProjectRepository(projectId);
+    const repo = await this.binding.get(repository);
+    try {
+      const info = await repo.info();
+      const token = await repo.createToken('write', 60);
+      try {
+        await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: '0'.repeat(40), commit: object, pack });
+      } finally { await repo.revokeToken(token.id); }
+    } finally { await disposeArtifactsRepository(repo); }
+    const commit = await this.resolveAdvertisedRef(repository, ref);
+    if (!commit) throw new Error(`Imported source ref ${ref} does not resolve to a commit`);
+    return commit;
+  }
+
+  /** Resolve imported tags and PR heads from advertised refs, peeling annotated tags through the binding. */
+  async resolveAdvertisedRef(repository: string, ref: string): Promise<string | null> {
+    if (!/^refs\/(?:tags\/.+|pull\/[1-9][0-9]*\/head)$/u.test(ref)) throw new Error('Unsupported advertised ref');
+    const repo = await this.binding.get(repositorySchema.parse(repository));
+    try {
+      const [info, token] = await Promise.all([repo.info(), repo.createToken('read', 60)]);
+      try {
+        const refs = await readAdvertisedRefs({ remote: info.remote, token: token.plaintext });
+        const peeled = refs.get(`${ref}^{}`);
+        if (peeled) return peeled;
+        const value = refs.get(ref);
+        if (!value) return null;
+        if (ref.startsWith('refs/tags/')) {
+          const resolved = (await repo.log({ ref, limit: 1 }))[0];
+          if (resolved) return resolved.hash;
+        }
+        return (await repo.readCommit(value))?.hash ?? null;
+      } finally { await repo.revokeToken(token.id); }
+    } finally { await disposeArtifactsRepository(repo); }
+  }
+
+  /** Permanent deletion; an absent repository is already deleted. */
+  async deleteRepository(repository: string): Promise<boolean> {
+    return this.binding.delete(repositorySchema.parse(repository)).catch((error: unknown) => {
+      if (ArtifactsNotFoundSchema.safeParse(error).success) return false;
+      throw error;
+    });
   }
 
   async credentials(repository: string, scope: 'read' | 'write', ttlSeconds = 900) {
@@ -232,7 +332,7 @@ export class ArtifactsCodeStore {
   async resolveRef(repository: string, ref: string): Promise<string | null> {
     if (/^[0-9a-f]{40}$/u.test(ref)) return (await this.readCommit(repository, ref))?.hash ?? null;
     const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
-    if (ref !== 'HEAD' && (branch.startsWith('refs/') || !/^[A-Za-z0-9_-][A-Za-z0-9._/-]*$/u.test(branch) || branch.includes('..') || branch.includes('//') || branch.endsWith('/') || branch.split('/').some(part => part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock')))) throw new Error('Unsupported committed source ref');
+    if (ref !== 'HEAD' && !isSupportedBranchName(branch)) throw new Error('Unsupported committed source ref');
     const repo = await this.binding.get(repositorySchema.parse(repository));
     try { return (await repo.log(ref === 'HEAD' ? { limit: 1 } : { ref: branch, limit: 1 }))[0]?.hash ?? null; }
     finally { await disposeArtifactsRepository(repo); }

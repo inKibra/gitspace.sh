@@ -1,6 +1,7 @@
 import { wire } from './json-wire.js'
 import { z } from 'zod';
 import { runtimeConfigDocumentSchema, runtimeSettingValueSchema, type RuntimeSettingValue, type RuntimeSettingSchemaItem } from './user-settings.js';
+import { SessionControlSchema, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 
 export const DEFAULT_INFERENCE_PROFILE_ID = 'default';
 export const INFERENCE_PROFILE_VERSION = 1 as const;
@@ -21,7 +22,7 @@ const namedEntryMaps: Record<string, true> = {
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
   modelRoles: 'Models', cycleOrder: 'Models', modelTags: 'Models', enabledModels: 'Models',
   modelProviderOrder: 'Models', modelRoleStorage: 'Models',
-  providers: 'Providers', agents: 'Agents',
+  providers: 'Providers', agents: 'Agents', approval: 'Agents',
 };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
@@ -116,6 +117,15 @@ export function applyInferenceSettings(config: Record<string, unknown>, settings
   return result;
 }
 
+const APPROVAL_DEFAULT_PATH = 'approval.defaultMode';
+const DEFAULT_APPROVAL_MODE: SessionControlView['approvalMode'] = 'yolo';
+const profileApprovalSchema = z.strictObject({ defaultMode: SessionControlSchema.shape.approvalMode.default(DEFAULT_APPROVAL_MODE) });
+/** New conversations adopt this mode; only an unset value means Auto-approve. Signed-in Chrome domain policy applies in every mode. */
+export function profileApprovalMode(settings: Record<string, RuntimeSettingValue>): SessionControlView['approvalMode'] {
+  const approval = applyInferenceSettings({}, settings).approval;
+  return profileApprovalSchema.parse(approval === undefined ? {} : approval).defaultMode;
+}
+
 /** Profile editor metadata is independent of any machine-installed runtime schema. */
 export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'modelRoles', tab: 'Models', label: 'Model roles', kind: 'record', value: {}, defaultJson: '{}', credential: false },
@@ -123,6 +133,7 @@ export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'modelTags', tab: 'Models', label: 'Model tags', kind: 'record', value: {}, defaultJson: '{}', credential: false },
   { path: 'enabledModels', tab: 'Models', label: 'Enabled models', kind: 'array', value: [], defaultJson: '[]', credential: false },
   { path: 'agents', tab: 'Agents', label: 'Agent definitions', kind: 'record', value: {}, defaultJson: '{}', credential: false },
+  { path: APPROVAL_DEFAULT_PATH, tab: 'Agents', label: 'Default approval mode', kind: 'enum', value: DEFAULT_APPROVAL_MODE, defaultJson: JSON.stringify(DEFAULT_APPROVAL_MODE), options: ['yolo', 'write', 'always-ask'], optionLabels: { yolo: 'Auto-approve', write: 'Ask for writes', 'always-ask': 'Always ask' }, credential: false, description: 'Where new conversations start; change one conversation from the composer menu. In every mode, your signed-in Chrome only opens the project’s allowed domains.' },
   { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },
 ];
 
@@ -135,6 +146,10 @@ export const inferenceSettingsSchema = z.record(z.string(), runtimeSettingValueS
       context.addIssue({ code: 'custom', path: [path], message: 'Connect credentials through the profile credential vault, not configuration' });
     }
   }
+  if (Object.keys(settings).some(path => !safePath(path) || !inferenceSettingSection(path))) return;
+  const approval = applyInferenceSettings({}, settings).approval;
+  const parsed = profileApprovalSchema.safeParse(approval === undefined ? {} : approval);
+  if (!parsed.success) context.addIssue({ code: 'custom', path: ['approval'], message: 'Approval settings must specify a valid default mode: yolo, write, or always-ask' });
 });
 export const inferenceProfileSchema = z.strictObject({
   version: z.literal(INFERENCE_PROFILE_VERSION),

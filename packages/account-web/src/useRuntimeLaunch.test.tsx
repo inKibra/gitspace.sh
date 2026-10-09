@@ -16,7 +16,7 @@ const refresh = vi.fn();
 const reload = vi.fn();
 function View({ status }: { status: DeploymentStatusView }) {
   state = useRuntimeLaunch(status, refresh, reload);
-  return <>{state.launch ? <LaunchSheet launch={state.launch} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.start(state.launch!.workspaceId, state.launch!.targets)} /> : null}{state.revertProgress ? <RevertSheet progress={state.revertProgress} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.revert().catch(() => {})} /> : null}{state.mark ? <LaunchedBanner mark={state.mark} onRevert={() => state.revert().catch(() => {})} onDismiss={state.dismiss} /> : null}</>;
+  return <>{state.launch ? <LaunchSheet launch={state.launch} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.start(state.launch!.workspaceId, 'builder', state.launch!.targets)} /> : null}{state.revertProgress ? <RevertSheet progress={state.revertProgress} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.revert().catch(() => {})} /> : null}{state.mark ? <LaunchedBanner mark={state.mark} onRevert={() => state.revert().catch(() => {})} onDismiss={state.dismiss} /> : null}</>;
 }
 function initial(): DeploymentStatusView {
   const value = structuredClone(deploymentStatusFixture);
@@ -70,7 +70,7 @@ it('shows failures and retries the original workspace and targets without invent
   const next = { ...status.launch!, launchId: 'attempt-2', status: 'running' as const, phase: 'queued', message: 'Queued', error: null };
   rpc.launch.mockResolvedValue({ status: 'ok', value: next });
   await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click(); });
-  expect(rpc.launch).toHaveBeenCalledWith({ workspaceId: status.launch!.workspaceId, targets: status.launch!.targets });
+  expect(rpc.launch).toHaveBeenCalledWith({ workspaceId: status.launch!.workspaceId, machineId: 'builder', targets: status.launch!.targets });
   expect(state.launch?.status).toBe('running');
   expect(state.launch?.log.map(entry => entry.phase)).toEqual(['queued']);
   expect(reload).not.toHaveBeenCalled();
@@ -86,7 +86,7 @@ it('propagates rejected launch and revert actions without reloading', async () =
   await act(() => root.render(<View status={initial()} />));
   rpc.launch.mockResolvedValue({ status: 'error', error: new Error('launch denied') });
   rpc.revert.mockResolvedValue({ status: 'error', error: new Error('revert denied') });
-  await act(async () => { await expect(state.start('workspace', ['frontend'])).rejects.toThrow('launch denied'); });
+  await act(async () => { await expect(state.start('workspace', 'builder', ['frontend'])).rejects.toThrow('launch denied'); });
   await act(async () => { await expect(state.revert()).rejects.toThrow('revert denied'); });
   expect(reload).not.toHaveBeenCalled();
 });
@@ -117,13 +117,13 @@ it.each(['Launch denied', 'Launch busy', 'Workspace not found'])('opens a retrya
   const status = { ...initial(), launch: null };
   await act(() => root.render(<View status={status} />));
   rpc.launch.mockRejectedValueOnce(new Error(message));
-  await act(async () => { await expect(state.start('requested-workspace', ['frontend'])).rejects.toThrow(message); });
+  await act(async () => { await expect(state.start('requested-workspace', 'builder', ['frontend'])).rejects.toThrow(message); });
   expect(container.querySelector('[aria-label="Launch progress"]')).not.toBeNull();
   expect(container.textContent).toContain(message);
   expect(state.launch).toMatchObject({ workspaceId: 'requested-workspace', targets: ['frontend'], status: 'failed' });
   rpc.launch.mockResolvedValueOnce({ status: 'ok', value: { ...initial().launch!, workspaceId: 'requested-workspace', targets: ['frontend'] } });
   await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click(); });
-  expect(rpc.launch).toHaveBeenLastCalledWith({ workspaceId: 'requested-workspace', targets: ['frontend'] });
+  expect(rpc.launch).toHaveBeenLastCalledWith({ workspaceId: 'requested-workspace', machineId: 'builder', targets: ['frontend'] });
   expect(state.launch?.status).toBe('running');
 });
 it('cancels stable activation polling when another launch supersedes revert', async () => {
@@ -132,7 +132,7 @@ it('cancels stable activation polling when another launch supersedes revert', as
   rpc.revert.mockResolvedValueOnce({ status: 'ok', value: status });
   await act(async () => { await state.revert(); });
   rpc.launch.mockRejectedValueOnce(new Error('busy'));
-  await act(async () => { await expect(state.start('workspace', ['frontend'])).rejects.toThrow('busy'); });
+  await act(async () => { await expect(state.start('workspace', 'builder', ['frontend'])).rejects.toThrow('busy'); });
   const stable = { ...status, desired: { ...status.desired, worker: null, frontend: null }, current: { ...status.current, worker: { sha: null, version: 'stable' } } };
   await act(() => root.render(<View status={stable} />));
   await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
@@ -260,7 +260,7 @@ it('ignores a superseded revert RPC reply and cancels its deadline for a new lau
   let pending: Promise<void>;
   await act(() => { pending = state.revert(); });
   rpc.launch.mockRejectedValueOnce(new Error('Launch denied'));
-  await act(async () => { await expect(state.start('workspace', ['frontend'])).rejects.toThrow('Launch denied'); });
+  await act(async () => { await expect(state.start('workspace', 'builder', ['frontend'])).rejects.toThrow('Launch denied'); });
   await act(async () => { reply.resolve({ status: 'ok', value: status }); await pending!; await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
   expect(state.revertProgress).toBeNull();
   expect(state.launch?.error).toContain('Launch denied');
@@ -280,4 +280,11 @@ it('still expires when status refresh rejects instead of leaving an unhandled po
   await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
   expect(refresh).toHaveBeenCalledTimes(polls);
   expect(reload).not.toHaveBeenCalled();
+});
+
+it('refuses an empty machine before dispatch and exposes the failure in the launch sheet', async () => {
+  await act(() => root.render(<View status={{ ...initial(), launch: null }} />));
+  await act(async () => { await expect(state.start('workspace', '', ['frontend'])).rejects.toThrow('choose a machine'); });
+  expect(rpc.launch).not.toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('choose a machine');
 });

@@ -638,15 +638,20 @@ before execution; there is no silent legacy alias.
   do not change busy timeouts, retries, transaction modes, or activation rules.
   A complete machine release now updates this host instrumentation too.
 - If an old launcher cannot build the required source release, use:
-  `gitspace machine recover --source <held-GitSpace-checkout> --workspace <id>`.
+  `gitspace machine recover --source <ready-GitSpace-cache> --workspace <id>`.
   From this source checkout the same CLI is
   `bun packages/cli/src/index.ts machine recover --source <checkout> --workspace <id>`.
   Run outside a managed agent/terminal that the old machine will drain; a native
   shell or linked provider console is suitable. Keep the old host running.
   The recovery command uses its installed Bun and machine authority, reads the
-  held workspace through genuine readonly SQLite (no create, migrations or
-  persistent initialization), closes that reader, and invokes the same
-  `DeploymentLauncher` transaction. It emits ordinary account project
+  executor's canonical cache attachment journal through genuine readonly SQLite
+  (no create, migrations or persistent initialization), closes that reader, and
+  invokes the same `DeploymentLauncher` transaction. The durable attachment must
+  name this machine and workspace, be a ready/live cache with completed setup,
+  and resolve to the supplied source path. Lost, detached, paused, reclaimed,
+  runner-only, and incomplete checkouts cannot build a release. Recovery does
+  not require a fresh heartbeat from the old host or a legacy workspace-holder row.
+  It emits ordinary account project
   deployment progress, stages/launches only the selected source's `machine`
   target, and waits for the complete machine's applied/failed health report.
   The command stages account selection; the candidate updater performs the
@@ -967,8 +972,13 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
   consumers dispose the entire result, not just the byte reader. The explicit
   `RpcTarget` lifetime removes the idle producer's listener and settles its
   pending pull. Byte-stream cancellation alone does not reliably do this
-  across RPC. Platform and tenant Workers enable `enable_request_signal` and
-  `request_signal_passthrough` so HTTP disconnects also reach stream consumers.
+  across RPC. Platform, tenant, and sandbox provider Workers enable
+  `enable_request_signal` and `request_signal_passthrough` so HTTP disconnects
+  also reach stream consumers. Cloud machine RPC streams (terminal output,
+  events) never cross Durable Object RPC, where an AbortSignal cannot be
+  serialized: the platform Worker resolves the placement and fetches the
+  sandbox Worker itself, and the sandbox Worker reaches its machine object
+  through `stub.fetch`, so a browser disconnect cancels the container stream.
 - The sidebar shares one `account-directory` channel for projects, machines,
   workspace definitions, and placements. `GET /v1/directory/events` uses a
   signed, origin-checked WebSocket accepted through `ctx.acceptWebSocket` in
@@ -1198,6 +1208,10 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     platform default or any compatible registry-qualified OCI image pinned
     `@sha256:<64 lowercase hex>`. The account default pins the resolved digest
     for future provisioning; it never follows platform changes automatically.
+    Initial default lookup does not block an explicit selection or overwrite
+    one that has finished verification. On first use, the provider waits up to
+    60 seconds for the image Worker's container namespace to become ready;
+    it does not repeat image upload or hide a failed compatibility check.
     Each existing machine has its own Change image action and durable progress,
     failure, retry, and safe-cancellation controls. Image and native/runtime
     release selection remain independent; inheriting our image is optional.

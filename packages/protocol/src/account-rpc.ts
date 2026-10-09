@@ -1,105 +1,218 @@
-/** Account authority operations have a separate batch queue from machine work.
- * A signed envelope cannot be split or rewritten after signing. Every `runtime.*`
- * procedure is the account's cloud runtime; machines implement none of them. */
-const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
-  'providers.login.start': true, 'providers.login.events': true,
-  'providers.login.respond': true, 'providers.login.cancel': true,
-  'providers.usage': true, 'providers.models': true,
-  'settings.get': true, 'settings.update': true, 'settings.reserveHandle': true, 'settings.git.get': true,
-  'settings.runtime.get': true, 'settings.runtime.set': true, 'settings.events': true,
-  'inference.list': true, 'inference.create': true, 'inference.update': true,
-  'inference.delete': true, 'inference.assign': true, 'inference.events': true,
-  placements: true, 'session.locate': true,
-  machines: true, 'machine.events': true, 'machine.createSandbox': true, 'machine.updateNotes': true,
-  'machine.sleep': true, 'machine.resume': true, 'machine.destroy': true,
-  'machine.image.list': true, 'machine.image.events': true, 'machine.image.set': true,
-  'machine.image.retry': true, 'machine.image.cancel': true, 'machine.image.recover': true,
-  'machine.image.defaults.get': true, 'machine.image.defaults.set': true,
-  'project.list': true, 'project.create': true, 'devices.list': true, 'devices.revoke': true,
-  'deployment.status': true, 'deployment.revert': true,
-  'project.events': true, 'project.directoryEvents': true, 'space.events': true, 'incidents.record': true,
-  'providers.list': true, 'providers.apiKey.set': true, 'providers.logout': true,
-  'mcp.composio.setup.get': true, 'mcp.composio.setup.put': true, 'mcp.composio.setup.delete': true,
-  'mcp.composio.catalog': true, 'mcp.composio.authorize': true, 'mcp.composio.refresh': true,
-  'mcp.composio.tools': true, 'mcp.composio.updateTools': true, 'mcp.composio.disconnect': true,
-  'mcp.connections.list': true, 'mcp.connections.create': true, 'mcp.connections.update': true,
-  'mcp.connections.delete': true, 'mcp.connections.status': true,
-  'mcp.grants.list': true, 'mcp.grants.put': true, 'mcp.grants.delete': true,
-  'mcp.discover': true,
-  'skills.list': true, 'skills.update': true,
-  'secrets.list': true, 'secrets.put': true, 'secrets.delete': true,
-  'secrets.account.list': true, 'secrets.account.put': true, 'secrets.account.delete': true,
-  'secrets.account.grant': true, 'secrets.account.revoke': true,
-  'configuration.values.get': true, 'configuration.values.put': true, 'configuration.values.delete': true,
-  'crons.list': true, 'crons.create': true, 'crons.update': true, 'crons.delete': true,
-  'crons.runNow': true, 'crons.cancelRun': true, 'crons.history': true,
-  'inspector.view': true,
-  'inspector.transcript': true,
-  'inspector.transcriptPage': true,
-  'inspector.transcriptContent': true,
-  'inspector.availability': true,
-  'project.ensureGitSpace': true,
-  'inspector.artifacts.read': true,
-  'inspector.artifacts.readPage': true,
-  'inspector.artifacts.list': true, 'inspector.artifacts.copyToProject': true,
-  'inspector.artifacts.shares.list': true, 'inspector.artifacts.shares.create': true, 'inspector.artifacts.shares.revoke': true,
-  'environment.approve': true, 'environment.revokeApproval': true,
-  'environment.recoverRun': true, 'environment.runLog': true,
-  'environment.events': true, 'environment.cancelRun': true,
-};
+import type { AnyProcedureContract } from 'result-rpc';
+import type { gitspaceContract } from './rpc-contract.js';
 
-/** The account, not a machine, serves this procedure. */
-export function isAccountCloudRpcPath(path: string): boolean {
-  return path.startsWith('runtime.') || Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path);
+type ProcedurePaths<T> = {
+  [K in keyof T & string]: T[K] extends AnyProcedureContract ? K : `${K}.${ProcedurePaths<T[K]>}`;
+}[keyof T & string];
+
+export type GitSpaceProcedurePath = ProcedurePaths<typeof gitspaceContract.record>;
+export type RpcAuthority = 'cloud' | 'machine';
+
+/** Every public procedure has one authority. Adding a contract requires an explicit
+ * routing decision here. Cloud procedures may dispatch effects to an explicitly
+ * named cache, but no public procedure follows a legacy holder or an online default. */
+export const ACCOUNT_RPC_AUTHORITY = {
+  'runtime.snapshot': 'cloud',
+  'runtime.draft': 'cloud',
+  'runtime.submit': 'cloud',
+  'runtime.cancel': 'cloud',
+  'runtime.answer': 'cloud',
+  'runtime.browserTrust': 'cloud',
+  'runtime.watch': 'cloud',
+  'runtime.session': 'cloud',
+  'runtime.services': 'cloud',
+  'runtime.executionMachine': 'cloud',
+  'runtime.qa': 'cloud',
+  'runtime.attachment.request': 'cloud',
+  'runtime.attachment.cache.request': 'cloud',
+  'runtime.attachment.action': 'cloud',
+  'runtime.attachment.detach': 'cloud',
+  'machines': 'cloud',
+  'machine.events': 'cloud',
+  'machine.updateNotes': 'cloud',
+  'machine.createSandbox': 'cloud',
+  'machine.sleep': 'cloud',
+  'machine.resume': 'cloud',
+  'machine.destroy': 'cloud',
+  'machine.image.list': 'cloud',
+  'machine.image.events': 'cloud',
+  'machine.image.set': 'cloud',
+  'machine.image.retry': 'cloud',
+  'machine.image.cancel': 'cloud',
+  'machine.image.recover': 'cloud',
+  'machine.image.defaults.get': 'cloud',
+  'machine.image.defaults.set': 'cloud',
+  'settings.get': 'cloud',
+  'settings.git.get': 'cloud',
+  'settings.update': 'cloud',
+  'settings.reserveHandle': 'cloud',
+  'settings.runtime.get': 'cloud',
+  'settings.runtime.set': 'cloud',
+  'settings.events': 'cloud',
+  'inference.list': 'cloud',
+  'inference.create': 'cloud',
+  'inference.update': 'cloud',
+  'inference.delete': 'cloud',
+  'inference.assign': 'cloud',
+  'inference.events': 'cloud',
+  'providers.list': 'cloud',
+  'providers.login.start': 'cloud',
+  'providers.login.events': 'cloud',
+  'providers.login.respond': 'cloud',
+  'providers.login.cancel': 'cloud',
+  'providers.logout': 'cloud',
+  'providers.apiKey.set': 'cloud',
+  'providers.usage': 'cloud',
+  'providers.models': 'cloud',
+  'devices.list': 'cloud',
+  'devices.revoke': 'cloud',
+  'deployment.status': 'cloud',
+  'deployment.launch': 'machine',
+  'deployment.revert': 'cloud',
+  'secrets.list': 'cloud',
+  'secrets.put': 'cloud',
+  'secrets.delete': 'cloud',
+  'secrets.account.list': 'cloud',
+  'secrets.account.put': 'cloud',
+  'secrets.account.delete': 'cloud',
+  'secrets.account.grant': 'cloud',
+  'secrets.account.revoke': 'cloud',
+  'configuration.values.get': 'cloud',
+  'configuration.values.put': 'cloud',
+  'configuration.values.delete': 'cloud',
+  'environment.events': 'cloud',
+  'environment.get': 'cloud',
+  'environment.putBundle': 'cloud',
+  'environment.setProfile': 'cloud',
+  'environment.putValue': 'cloud',
+  'environment.deleteValue': 'cloud',
+  'environment.approve': 'cloud',
+  'environment.revokeApproval': 'cloud',
+  'environment.runChecks': 'cloud',
+  'environment.runPhase': 'cloud',
+  'environment.cancelRun': 'cloud',
+  'environment.recoverRun': 'cloud',
+  'environment.runLog': 'cloud',
+  'mcp.connections.list': 'cloud',
+  'mcp.connections.create': 'cloud',
+  'mcp.connections.update': 'cloud',
+  'mcp.connections.delete': 'cloud',
+  'mcp.connections.status': 'cloud',
+  'mcp.composio.setup.get': 'cloud',
+  'mcp.composio.setup.put': 'cloud',
+  'mcp.composio.setup.delete': 'cloud',
+  'mcp.composio.catalog': 'cloud',
+  'mcp.composio.authorize': 'cloud',
+  'mcp.composio.refresh': 'cloud',
+  'mcp.composio.tools': 'cloud',
+  'mcp.composio.updateTools': 'cloud',
+  'mcp.composio.disconnect': 'cloud',
+  'mcp.grants.list': 'cloud',
+  'mcp.grants.put': 'cloud',
+  'mcp.grants.delete': 'cloud',
+  'mcp.discover': 'cloud',
+  'crons.list': 'cloud',
+  'crons.create': 'cloud',
+  'crons.update': 'cloud',
+  'crons.delete': 'cloud',
+  'crons.runNow': 'cloud',
+  'crons.cancelRun': 'cloud',
+  'crons.history': 'cloud',
+  'skills.list': 'cloud',
+  'skills.update': 'cloud',
+  'inspector.view': 'cloud',
+  'inspector.transcript': 'cloud',
+  'inspector.transcriptPage': 'cloud',
+  'inspector.transcriptContent': 'cloud',
+  'inspector.availability': 'cloud',
+  'inspector.overview': 'cloud',
+  'inspector.goal.put': 'cloud',
+  'inspector.goal.attachEvidence': 'cloud',
+  'inspector.workflow.put': 'cloud',
+  'inspector.workflow.waiveGate': 'cloud',
+  'inspector.rubric.put': 'cloud',
+  'inspector.rubric.appendJudgment': 'cloud',
+  'inspector.journal.list': 'cloud',
+  'inspector.journal.startPhase': 'cloud',
+  'inspector.journal.endPhase': 'cloud',
+  'inspector.journal.append': 'cloud',
+  'inspector.guide.put': 'cloud',
+  'inspector.guide.analyze': 'cloud',
+  'inspector.guide.submit': 'cloud',
+  'inspector.guide.markSectionRead': 'cloud',
+  'inspector.guide.setApproval': 'cloud',
+  'inspector.review.list': 'cloud',
+  'inspector.review.create': 'cloud',
+  'inspector.review.reply': 'cloud',
+  'inspector.review.resolve': 'cloud',
+  'inspector.repository.tree': 'cloud',
+  'inspector.repository.treePage': 'cloud',
+  'inspector.repository.status': 'cloud',
+  'inspector.repository.file': 'cloud',
+  'inspector.repository.diff': 'cloud',
+  'inspector.resources.read': 'cloud',
+  'inspector.resources.readPage': 'cloud',
+  'inspector.artifacts.read': 'cloud',
+  'inspector.artifacts.write': 'cloud',
+  'inspector.artifacts.uploadBegin': 'cloud',
+  'inspector.artifacts.uploadChunk': 'cloud',
+  'inspector.artifacts.uploadCommit': 'cloud',
+  'inspector.artifacts.uploadAbort': 'cloud',
+  'inspector.artifacts.readPage': 'cloud',
+  'inspector.artifacts.list': 'cloud',
+  'inspector.artifacts.copyToProject': 'cloud',
+  'inspector.artifacts.shares.list': 'cloud',
+  'inspector.artifacts.shares.create': 'cloud',
+  'inspector.artifacts.shares.revoke': 'cloud',
+  'inspector.services.list': 'cloud',
+  'inspector.services.start': 'cloud',
+  'inspector.services.stop': 'cloud',
+  'project.events': 'cloud',
+  'project.directoryEvents': 'cloud',
+  'project.list': 'cloud',
+  'project.create': 'cloud',
+  'project.ensureGitSpace': 'cloud',
+  'project.archive': 'cloud',
+  'project.restore': 'cloud',
+  'project.setBaseBranch': 'cloud',
+  'project.delete': 'cloud',
+  'space.view': 'cloud',
+  'space.events': 'cloud',
+  'workspace.create': 'cloud',
+  'workspace.retryCreate': 'cloud',
+  'workspace.archive': 'cloud',
+  'workspace.restore': 'cloud',
+  'workspace.delete': 'cloud',
+  'workspace.setRelations': 'cloud',
+  'workspace.stackStatus': 'cloud',
+  'terminals.events': 'machine',
+  'terminals.live': 'machine',
+  'terminals.list': 'machine',
+  'terminals.create': 'machine',
+  'terminals.read': 'machine',
+  'terminals.send': 'machine',
+  'terminals.stop': 'machine',
+  'incidents.record': 'cloud',
+} as const satisfies Readonly<Record<GitSpaceProcedurePath, RpcAuthority>>;
+
+const authorityByPath: Readonly<Record<string, RpcAuthority | undefined>> = ACCOUNT_RPC_AUTHORITY;
+
+/** Unknown paths are not machine work. Callers must reject an absent authority. */
+export function accountRpcAuthority(path: string): RpcAuthority | undefined {
+  return Object.hasOwn(authorityByPath, path) ? authorityByPath[path] : undefined;
 }
 
-/** Read and edited in cloud state unless the space they name is a legacy space held open by an online machine.
- * Per-space queues remain separate from account mutations and runtime work. */
-const SPACE_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = { 'environment.get': true, 'space.view': true, 'workspace.setRelations': true };
-export function isSpaceCloudRpcPath(path: string): boolean {
-  return Object.hasOwn(SPACE_CLOUD_RPC_PATHS, path) || (path.startsWith('inspector.') && !Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path));
-}
-
-export function spaceCloudRpcSpaceId(path: string, input: unknown): string | null {
-  if (!input || typeof input !== 'object') return null;
-  const outer = input as Record<string, unknown>;
-  const record = outer.input && typeof outer.input === 'object'
-    ? outer.input as Record<string, unknown>
-    : outer;
-  if (typeof record.spaceId === 'string') return record.spaceId;
-  const target = rpcCallTarget(path, record);
-  return target?.kind === 'space' ? target.spaceId : null;
-}
-
-/** The space or session a machine-bound call names. The account Worker forwards
- * each signed batch whole to that target's holder, so a batch names one target.
- * Terminal calls name their machine explicitly and never follow a holder. */
 export type RpcCallTarget =
-  | { kind: 'space'; spaceId: string }
-  | { kind: 'session'; sessionId: string }
-  | { kind: 'terminal'; spaceId: string; machineId: string };
-
-export function isTerminalRpcPath(path: string): boolean {
-  return path.startsWith('terminals.');
-}
-
-/** Project-level calls whose `projectId` names the project's base space. */
-const BASE_SPACE_RPC_PATHS: Readonly<Record<string, true>> = {
-  'space.view': true, transcript: true, transcriptPage: true, transcriptContent: true,
-  'workspace.create': true, 'session.createProject': true, events: true, 'project.setBaseBranch': true,
-};
+  | { kind: 'terminal'; spaceId: string; machineId: string }
+  | { kind: 'machine'; machineId: string };
 
 export function rpcCallTarget(path: string, input: unknown): RpcCallTarget | null {
-  if (!input || typeof input !== 'object') return null;
-  if (isTerminalRpcPath(path)) {
-    return 'spaceId' in input && typeof input.spaceId === 'string' && 'machineId' in input && typeof input.machineId === 'string'
+  if (accountRpcAuthority(path) !== 'machine' || !input || typeof input !== 'object') return null;
+  if (!('machineId' in input) || typeof input.machineId !== 'string' || !input.machineId) return null;
+  if (path.startsWith('terminals.')) {
+    return 'spaceId' in input && typeof input.spaceId === 'string' && input.spaceId
       ? { kind: 'terminal', spaceId: input.spaceId, machineId: input.machineId }
       : null;
   }
-  const named = 'spaceId' in input && typeof input.spaceId === 'string' ? input.spaceId
-    : 'workspaceId' in input && typeof input.workspaceId === 'string' ? input.workspaceId
-    : null;
-  const spaceId = named || (Object.hasOwn(BASE_SPACE_RPC_PATHS, path) && 'projectId' in input && typeof input.projectId === 'string' ? input.projectId : null);
-  if (spaceId) return { kind: 'space', spaceId };
-  return 'sessionId' in input && typeof input.sessionId === 'string' && input.sessionId ? { kind: 'session', sessionId: input.sessionId } : null;
+  return { kind: 'machine', machineId: input.machineId };
 }

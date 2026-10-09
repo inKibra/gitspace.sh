@@ -83,6 +83,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
   private readonly provisioningRuns = new Map<string, Promise<void>>();
   private alarmLine: Promise<void> = Promise.resolve();
   private imageDefaultRun: Promise<CloudImageChoice> | null = null;
+  private imageDefaultInitialization: Promise<CloudImageChoice> | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
@@ -280,14 +281,17 @@ export class FleetCatalogDO extends DurableObject<Env> {
     const row = this.ctx.storage.sql.exec<{ choice_json: string }>('SELECT choice_json FROM cloud_image_default WHERE singleton=1').toArray()[0];
     if (row) return cloudImageChoiceSchema.parse(JSON.parse(row.choice_json));
     if (this.imageDefaultRun) return this.imageDefaultRun;
+    if (this.imageDefaultInitialization) return this.imageDefaultInitialization;
     const run = (async () => {
       const choice = await resolveCloudImage(this.env, { kind: 'platform-default' });
       this.ctx.storage.sql.exec('INSERT OR IGNORE INTO cloud_image_default(singleton,choice_json) VALUES(1,?)', JSON.stringify(choice));
       const pinned = this.ctx.storage.sql.exec<{ choice_json: string }>('SELECT choice_json FROM cloud_image_default WHERE singleton=1').toArray()[0]!;
       return cloudImageChoiceSchema.parse(JSON.parse(pinned.choice_json));
     })();
-    this.imageDefaultRun = run;
-    try { return await run; } finally { this.imageDefaultRun = null; }
+    // Initialization must not lock out an explicit selection. INSERT OR IGNORE above
+    // preserves a verified selection that commits while the platform lookup is pending.
+    this.imageDefaultInitialization = run;
+    try { return await run; } finally { this.imageDefaultInitialization = null; }
   }
 
   async setCloudImageDefault(input: CloudImageSelection): Promise<CloudImageChoice> {

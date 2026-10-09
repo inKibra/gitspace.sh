@@ -4,13 +4,19 @@ import { forwardTunnelRequest } from './relay-request.js';
 import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } from './runtime-services.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
 import { z } from 'zod';
-import { parseRuntimeSettings } from '@gitspace/protocol';
+import { parseRuntimeSettings, type CloudProjectSummary } from '@gitspace/protocol';
 import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
+import { setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 
-/** Repository identities and origins come only from canonical project metadata.
- * Scratch projects have an initial commit; imported repositories retain their history. */
+/** The project repository every workspace forks: a scratch repository with an initial commit, or the imported origin with its history. */
+export async function ensureProjectCodeRepository(code: ArtifactsCodeStore, project: Pick<CloudProjectSummary, 'id' | 'repositoryReference' | 'baseBranch'>) {
+  if (project.repositoryReference === null) return code.ensureEmptyProject(project.id, project.baseBranch);
+  return code.importProject(project.id, { url: project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/'), branch: project.baseBranch });
+}
+
+/** Repository identities and origins come only from canonical project metadata. */
 export async function ensureRuntimeCodeRepository(env: Env, userId: string, identity: RuntimeIdentity) {
   if (userId !== env.ACCOUNT_ID) throw new Error('Repository lease belongs to a different account');
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${identity.projectId}`);
@@ -18,12 +24,7 @@ export async function ensureRuntimeCodeRepository(env: Env, userId: string, iden
   if (!project || project.id !== identity.projectId) throw new Error('Project is unavailable');
   if (identity.workspaceId !== project.id && !(await authority.listWorkspaces()).some(workspace => workspace.id === identity.workspaceId)) throw new Error('Workspace is not owned by this project');
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
-  if (project.repositoryReference === null) {
-    await code.ensureEmptyProject(project.id, project.baseBranch);
-  } else {
-    const url = project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/');
-    await code.importProject(project.id, { url, branch: project.baseBranch });
-  }
+  await ensureProjectCodeRepository(code, project);
   return code.forkWorkspace(project.id, identity.workspaceId);
 }
 
@@ -55,7 +56,10 @@ export async function createAccountWorkspaceRuntime(
   const workspaces = await project.listWorkspaces();
   const canonicalProject = await project.getProject();
   if (!canonicalProject || canonicalProject.id !== identity.projectId || (identity.workspaceId !== canonicalProject.id && !workspaces.some(workspace => workspace.id === identity.workspaceId && workspace.projectId === identity.projectId))) throw new Error('Workspace is not owned by this project');
-  if (identity.workspaceId === canonicalProject.id) await project.ensureBaseWorkspace({ userId: env.ACCOUNT_ID, projectId: identity.projectId });
+  const definition = identity.workspaceId === canonicalProject.id
+    ? await project.ensureBaseWorkspace({ userId: env.ACCOUNT_ID, projectId: identity.projectId })
+    : workspaces.find(workspace => workspace.id === identity.workspaceId);
+  if (!definition) throw new Error('Canonical workspace definition is unavailable');
   const inference = await createCloudRuntimeInference(ctx, env, identity);
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
   const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
@@ -82,6 +86,8 @@ export async function createAccountWorkspaceRuntime(
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
   runtime = await createWorkspaceRuntime({
     ...inference,
+    workspacePhase: definition.phase ?? 'plan',
+    async setWorkspacePhase(phase) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase); },
     code,
     lfs,
     async retainLfs(checkpoint, publicationId) {

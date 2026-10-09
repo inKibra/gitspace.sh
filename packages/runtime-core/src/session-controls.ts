@@ -16,8 +16,9 @@ import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { cronHasOutstanding } from './cron.js';
 
 const ThinkingSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const ControlsSchema = z.object({ revision: z.number(), settingsRevision: z.number(), instructionsRevision: z.number(), inferenceRevision: z.number(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), fastMode: z.boolean(), approvalMode: SessionControlSchema.shape.approvalMode, goal: SessionControlSchema.shape.goal, definitions: z.array(AgentDefinitionSchema) });
-export const SessionControlsDoc = defineDoc<z.infer<typeof ControlsSchema>>({ kind: 'gitspace.session-controls', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ revision: 0, settingsRevision: 0, instructionsRevision: 0, inferenceRevision: 0, selection: { kind: 'default' }, role: null, fastMode: false, approvalMode: 'write', goal: null, definitions: [] }) });
+// `approvalMode` is null until the conversation first needs it; it then adopts its inference profile's default once.
+const ControlsSchema = z.object({ revision: z.number(), settingsRevision: z.number(), instructionsRevision: z.number(), inferenceRevision: z.number(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), fastMode: z.boolean(), approvalMode: SessionControlSchema.shape.approvalMode.nullable(), goal: SessionControlSchema.shape.goal, definitions: z.array(AgentDefinitionSchema) });
+export const SessionControlsDoc = defineDoc<z.infer<typeof ControlsSchema>>({ kind: 'gitspace.session-controls', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ revision: 0, settingsRevision: 0, instructionsRevision: 0, inferenceRevision: 0, selection: { kind: 'default' }, role: null, fastMode: false, approvalMode: null, goal: null, definitions: [] }) });
 export const SessionSelectionDoc = defineDoc<{ conversationId: string | null }>({ kind: 'gitspace.session-selection', version: 1, scope: 'session', initial: () => ({ conversationId: null }) });
 const GoalClockDoc = defineDoc<{ startedAt: number | null; elapsedSeconds: number; tokensAtStart: number }>({ kind: 'gitspace.goal-clock', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ startedAt: null, elapsedSeconds: 0, tokensAtStart: 0 }) });
 const DefinitionMetadataSchema = z.object({ name: z.string().min(1).optional(), description: z.string().default(''), model: z.union([z.string(), z.array(z.string())]).optional(), thinking: ThinkingSchema.nullable().optional(), tools: z.union([z.string(), z.array(z.string())]).optional(), spawns: z.union([z.string(), z.array(z.string())]).optional() });
@@ -56,15 +57,26 @@ export async function committedSessionApproval(harness: Harness, conversationId:
   const questions = await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT);
   return questions?.items.find(item => item.id === `approval:${taskId}` && item.conversationId === conversationId);
 }
-export async function enforceSessionApproval(api: ToolExecutionApi, context: Context, tool: string, args: JsonValue, browser?: RuntimeBrowserApprovalCard): Promise<boolean> {
-  const controls = await api.snapshot(SessionControlsDoc, api.conversationId, context);
+export type ApprovalMode = SessionControlView['approvalMode'];
+/** The conversation's approval mode; a conversation without one adopts its inference profile's default and keeps it, so later profile edits apply to new conversations only. */
+export async function sessionApprovalMode(owner: Pick<Harness, 'commit'>, conversationId: ConversationId, context: Context, approvalDefault: () => Promise<ApprovalMode>): Promise<ApprovalMode> {
+  const stored = await owner.commit(async tx => (await tx.doc(SessionControlsDoc, conversationId)).approvalMode, context);
+  if (stored) return stored;
+  const adopted = await approvalDefault();
+  return owner.commit(async tx => {
+    const draft = await tx.doc(SessionControlsDoc, conversationId);
+    if (draft.approvalMode === null) { draft.approvalMode = adopted; draft.revision++; }
+    return draft.approvalMode;
+  }, context);
+}
+export async function enforceSessionApproval(api: ToolExecutionApi, context: Context, tool: string, args: JsonValue, approvalDefault: () => Promise<ApprovalMode>, browser?: RuntimeBrowserApprovalCard): Promise<boolean> {
   if (tool === 'browser' && !browser) throw new Error('Browser preflight required');
   if ((await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child) return isSubagentToolCallAllowed(tool, args);
   if (browser && !browser.requiresApproval) return true;
-  const autoApprove = controls?.approvalMode === 'yolo';
-  if (autoApprove) return true;
+  const approvalMode = await sessionApprovalMode(api, api.conversationId, context, approvalDefault);
+  if (approvalMode === 'yolo') return true;
   const readOnly = runtimeOperationIsReadOnly(tool, args);
-  if (readOnly && (tool === 'bash' || tool === 'proc' || (controls?.approvalMode ?? 'write') === 'write')) return true;
+  if (readOnly && (tool === 'bash' || tool === 'proc' || approvalMode === 'write')) return true;
   const id = `approval:${api.taskId}`;
   await api.commit(async tx => { const questions = await tx.doc(QuestionsDoc); if (!questions.items.some(item => item.id === id)) questions.items.push({ id, conversationId: String(api.conversationId), kind: 'approval', prompt: browser ? `Create browser group "${browser.groupName}" with access to ${browser.origins.join(', ')}?` : `Allow ${tool}?`, choices: ['Approve', 'Reject'], answer: null, ...(browser ? { browser } : { tool: { name: tool, args } }) }); }, context);
   const watch = await api.watchDoc(QuestionsDoc, context);
@@ -89,8 +101,10 @@ export interface SessionHistoryService {
   usage(target: ConversationId, harness: Harness): Promise<SessionUsageReport>;
 }
 export type SessionCatalog = { models: SessionControlView['models']; roles: SessionControlView['roles']; inference?: SessionControlView['inference'] };
-export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference'> & {
+export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference' | 'setWorkspacePhase'> & {
   harness: Harness;
+  /** The inference profile's default approval mode for conversations that have not adopted one. */
+  approvalDefault(): Promise<ApprovalMode>;
   root: Conversation;
   history: SessionHistoryService;
   lifecycle: ConversationLifecycle;
@@ -150,7 +164,7 @@ export function createSessionControls(services: SessionControlServices) {
     const context = tokens !== null && currentModel?.contextWindow ? { tokens, contextWindow: currentModel.contextWindow, percent: tokens / currentModel.contextWindow * 100 } : null;
     const clock = await harness.snapshot(GoalClockDoc, target.id, ctx);
     const goal = state.goal ? { ...state.goal, tokensUsed: Math.max(0, buckets.reduce((sum, value) => sum + value.totalTokens, 0) - (clock?.tokensAtStart ?? 0)), timeUsedSeconds: (clock?.elapsedSeconds ?? 0) + (clock?.startedAt === null || clock?.startedAt === undefined ? 0 : Math.max(0, (Date.now() - clock.startedAt) / 1000)) } : null;
-    return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role, roleLabel: child ? child.role : catalog.roles.find(role => role.id === state.role)?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? null, thinking: child ? child.thinking : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', approvalMode: state.approvalMode, context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null }] } : null };
+    return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role, roleLabel: child ? child.role : catalog.roles.find(role => role.id === state.role)?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? null, thinking: child ? child.thinking : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', approvalMode: await sessionApprovalMode(target, target.id, ctx, services.approvalDefault), context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null }] } : null };
   }
   async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false): Promise<RuntimeSessionResult> {
     let target = await conversation(id);
@@ -189,7 +203,10 @@ export function createSessionControls(services: SessionControlServices) {
         if (!canApprove) throw new Error('Human approval authority required');
         await mutate(draft => { draft.approvalMode = command.approvalMode; }); break;
       }
-      case 'setWorkspacePhase': await harness.commit(async tx => { const workspace = await tx.doc(WorkspaceDoc); workspace.phase = command.phase; }, ctx); break;
+      case 'setWorkspacePhase':
+        await services.setWorkspacePhase?.(command.phase);
+        await harness.commit(async tx => { const workspace = await tx.doc(WorkspaceDoc); workspace.phase = command.phase; }, ctx);
+        break;
       case 'setGoal': await target.commit(async tx => {
         const draft = await tx.doc(SessionControlsDoc, target.id);
         const clock = await tx.doc(GoalClockDoc, target.id);

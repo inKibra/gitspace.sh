@@ -78,35 +78,6 @@ describe('signed control transport', () => {
       status: 'ok',
       value: { projectId: 'project-a', spaceId: 'space-a', revision: 0, goal: null },
     });
-    const createCron = createSignedControlRequest({
-      userId,
-      machineId: 'machine-a',
-      operation: 'crons.create',
-      payload: {
-        projectId: 'project-a',
-        draft: {
-          name: 'authority-health',
-          schedule: 'every 5m',
-          description: 'Exercise the signed project cron authority route.',
-          prompt: 'Check the canonical project agent health.',
-          target: { scope: 'project', projectId: 'project-a' },
-          readScopes: ['repository/**'],
-          writeScopes: [],
-          enabled: true,
-        },
-      },
-      signingPrivateKey: machineSigningPrivateKey,
-    });
-    const cronResponse = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(createCron),
-    });
-    expect(cronResponse.status).toBe(200);
-    expect(await cronResponse.json()).toMatchObject({
-      status: 'ok',
-      value: { projectId: 'project-a', name: 'authority-health', revision: 1 },
-    });
     const replay = await SELF.fetch('https://auth.test/v1/control', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -231,47 +202,6 @@ describe('signed control transport', () => {
     const stored = await env.DATA.get(`users/${userId}/${key}`);
     expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(bytes);
   });
-  it('authorizes canonical settings writes and reports stale generations', async () => {
-    const userId = env.ACCOUNT_ID;
-    const vault = env.CREDENTIALS.getByName(userId);
-    await vault.bootstrap({
-      userId,
-      rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey)),
-      vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(7)),
-    });
-    await vault.registerDevice(signCredentialAuthorityGrant({
-      version: 1,
-      userId,
-      machineId: 'machine-a',
-      signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineSigningPrivateKey)),
-      exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(machineExchangePrivateKey)),
-      capabilities: ['storage.access'],
-      generation: 1,
-    }, rootPrivateKey));
-    const content = '{"toolExecution":"parallel"}';
-    const hash = await sha256(new TextEncoder().encode(content));
-    const update = (expectedGeneration: number) => createSignedControlRequest({
-      userId,
-      machineId: 'machine-a',
-      operation: 'settings.runtime.update',
-      payload: { expectedGeneration, content, checksum: hash },
-      signingPrivateKey: machineSigningPrivateKey,
-    });
-    const stored = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(update(0)),
-    });
-    expect(stored.status).toBe(200);
-    expect(await stored.json()).toMatchObject({ status: 'ok', value: { generation: 1, content, checksum: hash } });
-    const stale = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(update(0)),
-    });
-    expect(stale.status).toBe(409);
-    expect(await stale.json()).toMatchObject({ status: 'error', error: { code: 'SETTINGS_CONFLICT', resource: 'runtime-config', expected: 0, actual: 1 } });
-  });
   it('pushes settings generations to every authenticated machine subscriber', async () => {
     const userId = env.ACCOUNT_ID;
     const vault = env.CREDENTIALS.getByName(userId);
@@ -309,20 +239,14 @@ describe('signed control transport', () => {
       openSubscription('machine-a', machineSigningPrivateKey),
       openSubscription('machine-b', machineBSigningPrivateKey),
     ]);
-    const content = '{"toolExecution":"sequential"}';
-    const update = createSignedControlRequest({
-      userId,
-      machineId: 'machine-a',
-      operation: 'settings.runtime.update',
-      payload: { expectedGeneration: 0, content, checksum: await sha256(new TextEncoder().encode(content)) },
-      signingPrivateKey: machineSigningPrivateKey,
-    });
+    // Machines re-apply the account Git author whenever the account edits user settings.
+    const settings = env.USER_SETTINGS.getByName(userId);
+    const { revision, updatedAt: _updatedAt, updatedBy: _updatedBy, version: _version, ...current } = await settings.get('browser');
     const pushedA = nextMessage(socketA);
     const pushedB = nextMessage(socketB);
-    const stored = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(update) });
-    expect(stored.status).toBe(200);
-    expect(await pushedA).toMatchObject({ type: 'settings.changed', runtimeGeneration: 1 });
-    expect(await pushedB).toMatchObject({ type: 'settings.changed', runtimeGeneration: 1 });
+    expect(await settings.update('browser', { ...current, expectedRevision: revision, git: { authorName: 'Ada', authorEmail: 'ada@example.com' } })).toMatchObject({ status: 'ok' });
+    expect(await pushedA).toMatchObject({ type: 'settings.changed', userRevision: revision + 1 });
+    expect(await pushedB).toMatchObject({ type: 'settings.changed', userRevision: revision + 1 });
     socketA.close(1000, 'done');
     socketB.close(1000, 'done');
   });

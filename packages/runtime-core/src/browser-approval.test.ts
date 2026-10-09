@@ -19,7 +19,7 @@ for (const approvalMode of ['write', 'always-ask'] as const) test(`registered br
       return RuntimeBrowserApprovalCardSchema.parse({ id: 'preparation', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: ['example.com'], source: 'relay', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'open', requiresApproval: true });
     },
     async invoke() { invocations++; if (rejected) afterRejection.push('invoke'); throw new Error('Browser effect must never run after rejection'); },
-    question: unused, instructions: async () => '', authorizeCronTool: unused,
+    question: unused, instructions: async () => '', authorizeCronTool: unused, approvalDefault: unused, preflight: async () => {},
   };
   const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, deliverConversationEvent: unused, observeProcess: unused, stopProcess: unused };
   const tools = createRuntimeTools(services, operations, (id, context) => harness.abortTask(id, context), async () => {});
@@ -80,7 +80,7 @@ for (const { name, args, approvalMode } of automaticCases) test(`${name} does no
       dispatched.push(input);
       return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: 'Browser action completed.' }] };
     },
-    question: unused, instructions: async () => '', authorizeCronTool: unused,
+    question: unused, instructions: async () => '', authorizeCronTool: unused, approvalDefault: unused, preflight: async () => {},
   };
   const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, deliverConversationEvent: unused, observeProcess: unused, stopProcess: unused };
   const tools = createRuntimeTools(services, operations, (id, context) => harness.abortTask(id, context), async () => {});

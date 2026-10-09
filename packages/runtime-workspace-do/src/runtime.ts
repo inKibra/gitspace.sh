@@ -22,6 +22,9 @@ import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifac
 import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
 export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'listSnapshotEntries' | 'readBlob'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
+/** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. */
+const MANAGEMENT_TIMEOUT_MS: Readonly<Record<'mcp_discover' | 'lifecycle', number>> = { mcp_discover: 30_000, lifecycle: 240_000 };
+type ManagementTool = keyof typeof MANAGEMENT_TIMEOUT_MS;
 type RuntimeBrowserService = NonNullable<SessionControlServices['browser']>;
 export type WorkspaceRuntime = {
   harness: Harness;
@@ -41,7 +44,9 @@ export type WorkspaceRuntime = {
   waitForSnapshot(commit: string): Promise<void>;
   cacheReady(attachmentId: string, generation: number): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
-  discoverMcp(input: { requestId: string; args: JsonValue }): Promise<RuntimeToolResult>;
+  /** A human request run once per request id as a tool call of the main conversation: MCP discovery, or an
+   * environment run dispatched to the cache machine its arguments name. */
+  manage(input: { tool: ManagementTool; requestId: string; args: JsonValue }): Promise<RuntimeToolResult>;
   qa(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted & { shareDraft?: string }>;
   snapshotCommit(input: RuntimeSnapshotCommitInput): Promise<RuntimeSnapshotCommitResult>;
   lfsRoots(): RuntimeSnapshotCommitInput['checkpoint'][];
@@ -92,7 +97,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   };
   const history = createHistoryIndex(options.storage, storage, (reference, conversationId) => attachments.historyResult(reference, conversationId));
   await history.refresh();
-  const controls = createSessionControls({ ...runtime, ...options.session, loadAgentDefinitions, browser: options.browser, history: history.service, admitInference: options.admitInference });
+  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, approvalDefault: options.tools.approvalDefault, loadAgentDefinitions, browser: options.browser, history: history.service, admitInference: options.admitInference });
   const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
   const cron = createCronRuntime({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { await options.schedule(Date.now() + 1000); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
@@ -348,16 +353,16 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       if (!record) throw new Error('Browser conversation no longer exists');
       return { id: record.id, root: record.id === runtime.root.id && record.owner === undefined };
     },
-    async discoverMcp(input) {
-      const fingerprint = JSON.stringify(input.args);
+    async manage(input) {
+      const fingerprint = JSON.stringify([input.tool, input.args]);
       const prior = options.storage.sql.exec<{ input: string; result: string | null }>('SELECT input,result FROM runtime_management WHERE request_id=?', input.requestId).toArray()[0];
       if (prior) {
         if (prior.input !== fingerprint) throw new Error('Management request identity changed');
         if (prior.result !== null) return RuntimeToolResultSchema.parse(JSON.parse(prior.result));
-        return { requestId: input.requestId, attemptId: `management:${input.requestId}`, status: 'interrupted', content: [{ type: 'text', text: 'Discovery has an unresolved prior attempt; it was not relaunched.' }] };
+        return { requestId: input.requestId, attemptId: `management:${input.requestId}`, status: 'interrupted', content: [{ type: 'text', text: 'This request has an unresolved prior attempt; it was not relaunched.' }] };
       }
       options.storage.sql.exec('INSERT INTO runtime_management(request_id,input) VALUES(?,?)', input.requestId, fingerprint);
-      const result = await options.tools.invoke({ tool: 'mcp_discover', args: input.args, conversationId: String(runtime.root.id), taskId: `management:${input.requestId}`, requestId: input.requestId, attemptId: `management:${input.requestId}`, replay: 'unsafe', signal: AbortSignal.timeout(30_000) });
+      const result = await options.tools.invoke({ tool: input.tool, args: input.args, conversationId: String(runtime.root.id), taskId: `management:${input.requestId}`, requestId: input.requestId, attemptId: `management:${input.requestId}`, replay: 'unsafe', signal: AbortSignal.timeout(MANAGEMENT_TIMEOUT_MS[input.tool]) });
       options.storage.sql.exec('UPDATE runtime_management SET result=? WHERE request_id=?', JSON.stringify(result), input.requestId);
       materializeValue(result, String(runtime.root.id));
       await collectReceipts();
@@ -493,7 +498,11 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
           const plan = await tx.doc(PlanDoc, id);
           if (plan.questionId === input.questionId) {
             plan.status = input.answer === true ? 'approved' : 'rejected';
-            if (plan.status === 'approved') { const workspace = await tx.doc(WorkspaceDoc); workspace.phase = 'code'; }
+            if (plan.status === 'approved') {
+              await options.setWorkspacePhase?.('code');
+              const workspace = await tx.doc(WorkspaceDoc);
+              workspace.phase = 'code';
+            }
           }
         }
       }, BACKGROUND_CONTEXT);

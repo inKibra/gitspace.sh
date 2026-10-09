@@ -4,6 +4,7 @@ import { Result, TaggedError } from 'better-result';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { z } from 'zod';
 import { hasSnapshotConflictMarkers, isCleanSnapshotContent, isSnapshotTextEntry, readSnapshotText } from './artifacts-merge.js';
+import { collectBytes, streamBytes } from '@gitspace/protocol-workspace';
 
 export type RuntimeGitCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?: string; oid?: string; type?: 'blob' | 'commit' };
@@ -67,6 +68,53 @@ export async function publishSnapshotPack(input: { remote: string; token: string
   const status = packets(new Uint8Array(await response.arrayBuffer())).map(line => line.trimEnd());
   if (status.some(line => line.startsWith(`ng ${input.ref} `)) && !status.includes(`ok ${input.ref}`)) input.onPublicationState?.('not-published');
   if (!status.includes('unpack ok') || !status.includes(`ok ${input.ref}`)) throw new Error(`Git push rejected: ${status.join('; ')}`);
+}
+
+/** A ref update whose commit the repository already holds sends a pack with no objects. */
+export async function publishRef(input: { remote: string; token: string; ref: string; previous: string | null; commit: string }, request: ArtifactsFetch = fetch): Promise<void> {
+  const header = new Uint8Array([...encoder.encode('PACK'), 0, 0, 0, 2, 0, 0, 0, 0]);
+  const pack = new Uint8Array(header.length + 20);
+  pack.set(header); pack.set(new Uint8Array(await crypto.subtle.digest('SHA-1', header)), header.length);
+  await publishSnapshotPack({ remote: input.remote, token: input.token, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack }, request);
+}
+
+/** Every ref a repository advertises for reading; an annotated tag's commit is advertised as `<tag>^{}`. */
+export async function readAdvertisedRefs(input: { remote: string; token: string | null }, request: ArtifactsFetch = fetch): Promise<Map<string, string>> {
+  const remote = new URL(input.remote);
+  if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid Artifacts Git remote');
+  const signal = AbortSignal.timeout(15_000);
+  const advertised = await request(`${remote.href.replace(/\/$/u, '')}/info/refs?service=git-upload-pack`, { headers: input.token === null ? {} : { Authorization: `Bearer ${input.token}` }, signal, redirect: input.token === null ? 'error' : 'manual' });
+  if (!advertised.ok) throw new Error(`Git discovery failed (${advertised.status})`);
+  const refs = new Map<string, string>();
+  if (!advertised.body) throw new Error('Git discovery returned no advertisement');
+  for (const line of packets(await collectBytes(streamBytes(advertised.body, signal), 64 * 1024))) {
+    if (line.startsWith('#')) continue;
+    const [oid, ref] = (line.trimEnd().split('\0')[0] ?? '').split(' ');
+    if (oid && ref && /^[0-9a-f]{40}$/u.test(oid)) refs.set(ref, oid);
+  }
+  return refs;
+}
+
+/** Transfer a reachable commit and its complete object graph through Git's stateless upload-pack.
+ * No credentials follow redirects, and a failed download has no destination-side effect. */
+export async function readCommitPack(input: { remote: string; token: string | null; commit: string }, request: ArtifactsFetch = fetch): Promise<Uint8Array> {
+  const remote = new URL(input.remote);
+  if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid Artifacts Git remote');
+  if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new Error('Invalid Git commit');
+  const want = packet(`want ${input.commit}\n`);
+  const done = packet('done\n');
+  const body = new Uint8Array(want.length + 4 + done.length);
+  body.set(want); body.set(encoder.encode('0000'), want.length); body.set(done, want.length + 4);
+  const signal = AbortSignal.timeout(15_000);
+  const response = await request(`${remote.href.replace(/\/$/u, '')}/git-upload-pack`, {
+    method: 'POST', headers: { ...(input.token === null ? {} : { Authorization: `Bearer ${input.token}` }), 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
+    body, signal, redirect: input.token === null ? 'error' : 'manual',
+  });
+  if (!response.ok) throw new Error(`Git fetch failed (${response.status})`);
+  if (!response.body) throw new Error('Git fetch returned no pack');
+  const bytes = await collectBytes(streamBytes(response.body, signal), 40 * 1024 * 1024);
+  if (decoder.decode(bytes.subarray(0, 8)) !== '0008NAK\n' || decoder.decode(bytes.subarray(8, 12)) !== 'PACK') throw new Error('Git fetch did not return a complete pack');
+  return bytes.subarray(8);
 }
 
 /** Deterministic root objects make interrupted initialization safely replayable. */

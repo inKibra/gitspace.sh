@@ -120,7 +120,7 @@ async function bootstrapDevelopmentControlPlane(): Promise<void> {
     machineId: 'local-machine',
     signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineSigningPrivateKey)),
     exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(machineExchangePrivateKey)),
-    capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
+    capabilities: ['storage.access', 'space.control', 'credential.access'],
     generation: 1,
   }, rootSigningPrivateKey);
   const response = await fetch(new URL('/__dev/bootstrap', controlUrl), {

@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type ReactNode } from 'react';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
 import type { InspectorView } from '@gitspace/protocol';
-import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
@@ -20,9 +20,10 @@ import { useCacheFreshnessClock } from './environment/useCacheFreshnessClock.js'
 import { BrowserApprovalCard } from './RuntimeBrowser.js';
 import { ToolApprovalCard } from './ToolApprovalCard.js';
 import { RELEASE_TARGETS } from './release.js';
-import { LaunchSheet, LaunchedBanner, RevertSheet } from './LaunchSheet.js';
+import { LaunchMachineDialog, LaunchSheet, LaunchedBanner, RevertSheet } from './LaunchSheet.js';
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
+import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
 
 export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;
@@ -70,6 +71,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const deployment = useResultQuery(rpcClient.deployment.status, {}, { enabled: inspection.project.role === 'gitspace-source' });
   const deploymentValue = useRetainedQueryValue(deployment, inspection.project.id);
   const launch = useRuntimeLaunch(deploymentValue, deployment.refetch);
+  const [launchRequest, setLaunchRequest] = useState<{ workspaceId: string; targets: typeof RELEASE_TARGETS } | null>(null);
   const relationQuery = useResultQuery(rpcClient.space.view, { projectId: props.projectId, workspaceId: inspection.workspace.kind === 'base' ? null : props.workspaceId });
   const relationValue = useRetainedQueryValue(relationQuery, JSON.stringify([props.projectId, props.workspaceId]));
   const [actionError, setActionError] = useState<string | null>(null);
@@ -147,9 +149,21 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const spaceId = snapshot.workspaceId;
   const now = useCacheFreshnessClock();
   const environment = environmentCacheSummary(snapshot, now);
-  // Terminals open only on a ready cache the user picked for this workspace: never a default machine or a placement holder.
-  const terminalMachines = snapshot.attachments.filter(item => item.role === 'cache' && cachePresentation(item, now).ready)
-    .map(item => ({ id: item.machineId, label: inspection.machines.find(machine => machine.id === item.machineId)?.label ?? item.machineId }));
+  // Terminals open only on a cache the user picked for this workspace: never a default machine or a placement holder.
+  // A cache paused while idle stays listed; picking it wakes it, and its terminals open once it is live again.
+  const terminalMachines = snapshot.attachments.flatMap((item): WorkspaceTerminalMachine[] => {
+    if (item.role !== 'cache') return [];
+    const status = cachePresentation(item, now);
+    const state = status.ready ? 'live' : status.label === 'Paused' ? 'paused' : null;
+    return state ? [{ id: item.machineId, label: inspection.machines.find(machine => machine.id === item.machineId)?.label ?? item.machineId, state }] : [];
+  });
+  const selectTerminalMachine = (machineId: string) => {
+    setTerminalChoice({ spaceId, machineId });
+    if (terminalMachines.some(machine => machine.id === machineId && machine.state === 'paused')) void perform(async () => {
+      const result = await rpcClient.runtime.attachment.cache.request({ ...identity, machineId: RuntimeMachineIdSchema.parse(machineId), requestId: crypto.randomUUID() });
+      if (result.status === 'error') throw result.error;
+    });
+  };
   return <>
     {props.creation}
     {actionError ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
@@ -173,12 +187,12 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
       onSetWorkspacePhase={async (_id, phase) => { await perform(async () => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }); }}
       onSetWorkspaceRelations={relationsEditable ? setRelations : undefined}
-      deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', onLaunch: workspaceId => perform(() => launch.start(workspaceId, RELEASE_TARGETS)), onRevert: () => perform(launch.revert) } : null}
+      deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', onLaunch: workspaceId => setLaunchRequest({ workspaceId, targets: RELEASE_TARGETS }), onRevert: () => perform(launch.revert) } : null}
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onRevert={() => perform(launch.revert)} onDismiss={launch.dismiss} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       terminals={{
         spaceId, machines: terminalMachines, machineId: terminalChoice?.spaceId === spaceId ? terminalChoice.machineId : null,
-        onSelectMachine: machineId => setTerminalChoice({ spaceId, machineId }),
+        onSelectMachine: selectTerminalMachine,
         events: (machineId, name, after, signal) => rpcClient.terminals.events({ spaceId, machineId, name, after }, { signal }),
         live: (machineId, name, signal) => rpcClient.terminals.live({ spaceId, machineId, name }, { signal }),
         create: async machineId => { const result = await rpcClient.terminals.create({ spaceId, machineId }); if (result.status === 'error') throw result.error; return result.value; },
@@ -187,7 +201,8 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       }}
       renderInspector={(onClose, initialView, resourceRequest) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest })}
     />
-    {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open} onOpenChange={launch.setOpen} onRetry={() => perform(() => launch.start(launch.launch!.workspaceId, launch.launch!.targets))} /> : null}
+    {launchRequest ? <LaunchMachineDialog key={launchRequest.workspaceId} projectId={props.projectId} workspaceId={launchRequest.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.workspaceId, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
+    {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => setLaunchRequest({ workspaceId: launch.launch!.workspaceId, targets: launch.launch!.targets })} /> : null}
     {launch.revertProgress ? <RevertSheet progress={launch.revertProgress} open={launch.open} onOpenChange={launch.setOpen} onRetry={() => perform(launch.revert)} /> : null}
   </>;
 }

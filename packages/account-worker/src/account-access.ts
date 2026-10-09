@@ -24,7 +24,7 @@ export function accountAccessResponse(result: CredentialVaultResult<unknown>): R
     : null;
 }
 
-export async function authorizeControl(env: Env, request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access' | 'credential.manage', maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): Promise<CredentialVaultResult<{ authorized: true }>> {
+export async function authorizeControl(env: Env, request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access', maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): Promise<CredentialVaultResult<{ authorized: true }>> {
   const vaults = env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>;
   const authorized = await vaults.get(vaults.idFromName(request.userId)).authorizeControl(request, capability, maxAgeMs);
   if (authorized.status === 'error') return authorized;

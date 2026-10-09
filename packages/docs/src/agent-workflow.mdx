@@ -19,9 +19,13 @@ An agent's default plan file is `local://workspace/PLAN.md`, or `local://base/PL
 
 ## Build with context
 
-The workspace agent runs in a cloud-owned Pi Session. Conversation history, questions, and task records survive a machine disconnect. Provider requests and credential refresh run in the cloud; they do not require an online machine. File and shell tools use the conversation's assigned machine checkout, so repository work and process effects still need an available executor.
+The workspace agent runs in a cloud-owned Pi Session. Conversation history, questions, and task records survive a machine disconnect. Provider requests and credential refresh run in the cloud; they do not require an online machine. Repository file reads, edits, and ordinary searches use the cloud-owned working copy. Shell commands, structural search, and lifecycle execution require an attached machine cache.
 
 Structured agent questions appear as native interactions. Answer the decision directly without searching terminal output for a prompt.
+
+Under **Inference → your profile → Agents**, **Default approval mode** chooses how new conversations start: **Auto-approve** (the default), **Ask for writes**, or **Always ask**. Each conversation adopts its default once; later profile edits do not overwrite that conversation's mode. Change an existing conversation from its composer menu.
+
+Machine-backed tools check for an available executor before asking for approval. A completed attempt can still return its saved receipt after that machine disconnects; this does not rerun its command. Approval modes never grant new signed-in Chrome access: project browser approval and allowed-domain restrictions still apply.
 
 The live workspace view shows a bounded window of recent messages and completed tasks. Older history and task receipts remain in durable storage. Reconnecting can replace the live view with a fresh snapshot; it does not replay an uncertain machine effect.
 

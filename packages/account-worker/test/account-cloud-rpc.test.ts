@@ -4,7 +4,7 @@ import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, de
 import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
-import { executionHash, loadEnvironmentBundle } from '@gitspace/protocol-environment';
+import { executionHash, loadEnvironmentBundle, type LifecycleRun } from '@gitspace/protocol-environment';
 import { gitspaceContract, rpcErrors, UserSettingsViewCodec } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
@@ -17,7 +17,9 @@ import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
-import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeLifecycleDispatchArgumentsSchema, type RuntimeGitCheckpoint, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { Result } from 'better-result';
+import type { SpaceAuthorityDO } from '../src/space-authority.js';
 
 afterEach(() => vi.restoreAllMocks());
 function emptyCommittedSource() {
@@ -341,37 +343,6 @@ describe('account cloud RPC without machines', () => {
     ] });
   });
 
-  it('locates canonical holders and sessions without a portable catalog or a running machine', async () => {
-    const fixture = await account();
-    const space = await inspectorWorkspace(fixture.userId);
-    const { sessionId } = await publishInspectorSession(fixture, space, []);
-    const catalog = env.FLEET_CATALOG.getByName(fixture.userId);
-    const machineId = 'sandbox-stopped-directory';
-    await space.placement.bootstrap({ projectId: space.projectId, spaceId: space.spaceId, machineId });
-    await env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${space.projectId}`).bootstrap({ projectId: space.projectId, spaceId: space.projectId, machineId });
-    const machine = { id: machineId, label: 'Stopped', kind: 'sandbox' as const, provider: 'cloudflare-sandbox' as const,
-      state: 'offline' as const, desiredState: 'online' as const, rpcEndpoint: 'https://stopped.example/rpc', notes: '',
-      lifecycleRevision: 1, operationId: null, error: null };
-    await catalog.putMachine(machine);
-    const providerCalls: string[] = [];
-    network.use(http.all(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/*`, ({ request }) => {
-      providerCalls.push(request.url);
-      return new HttpResponse(null, { status: 503 });
-    }));
-    const cloudEnv = env;
-    const client = inspectorClient(fixture, (request) => worker.fetch(request, cloudEnv));
-    const directory = await client.placements({});
-    const located = await client.session.locate({ sessionId });
-    const expected = { spaceId: space.spaceId, holderId: machineId, state: 'open', generation: 1, endpoint: null, kind: 'worktree' };
-    const expectedBase = { ...expected, spaceId: space.projectId, kind: 'base' };
-    expect(directory).toMatchObject({ status: 'ok', value: { machineId: '', spaces: [expectedBase, expected] } });
-    expect(located).toMatchObject({ status: 'ok', value: expected });
-    await catalog.putMachine({ ...machine, state: 'online', lifecycleRevision: 2 });
-    expect(await client.placements({})).toMatchObject({ status: 'ok', value: { machineId: '', spaces: [
-      { ...expectedBase, endpoint: machine.rpcEndpoint }, { ...expected, endpoint: machine.rpcEndpoint },
-    ] } });
-    expect(providerCalls).toEqual([]);
-  });
 
   it('repairs the same canonical source project across concurrent onboarding requests without Git authorization', async () => {
     const fixture = await account();
@@ -384,7 +355,9 @@ describe('account cloud RPC without machines', () => {
     }));
     expect(new Set(projects.map((project) => project.id)).size).toBe(1);
     expect(await env.USER_PROJECTS.getByName(fixture.userId).list()).toHaveLength(1);
-    expect(await env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projects[0].id}`).listWorkspaces()).toEqual([]);
+    expect(await env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projects[0].id}`).listWorkspaces()).toMatchObject([
+      { id: projects[0].id, projectId: projects[0].id, kind: 'base', branch: projects[0].baseBranch },
+    ]);
     expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
     expect(await env.USER_SETTINGS.getByName(fixture.userId).getGitIdentity()).toBeNull();
   });
@@ -427,7 +400,7 @@ describe('account cloud RPC without machines', () => {
       fetch: ((input, init) => SELF.fetch(new Request(input, init))) as typeof fetch,
     });
     const [settings, runtime, machine] = await Promise.all([
-      client.settings.get({}), client.settings.runtime.get({}), client.browserRelay.status({}),
+      client.settings.get({}), client.settings.runtime.get({}), client.terminals.list({ spaceId: 'missing', machineId: 'offline' }),
     ]);
     expect(settings).toMatchObject({ status: 'ok', value: { profile: { handle: fixture.handle } } });
     expect(runtime).toMatchObject({ status: 'ok', value: { document: { content }, schema: expect.arrayContaining([expect.objectContaining({ path: 'toolExecution', valueJson: '"sequential"' })]), sync: { status: 'synced' } } });
@@ -654,13 +627,15 @@ describe('account routing of machine work', () => {
 
   /** Machine A is the first online machine. The project's worktree and its
    * session are open on machine B; the base space on machine C. */
-  async function fleet() {
+  async function fleet(cloudRuntime = false) {
     const fixture = await account(['rpc.read', 'rpc.write']);
     const held = await inspectorWorkspace(fixture.userId);
     const { sessionId } = await publishInspectorSession(fixture, held, []);
     const catalog = env.FLEET_CATALOG.getByName(fixture.userId);
     const machines = ['machine-a', 'machine-b', 'machine-c'];
     for (const id of machines) await catalog.putMachine(machine(id));
+    // A real cloud runtime predates any stale placement. Do not migrate a legacy fixture implicitly.
+    if (cloudRuntime) await held.placement.runtimeAttachments({ projectId: held.projectId, workspaceId: held.spaceId });
     await held.placement.bootstrap({ projectId: held.projectId, spaceId: held.spaceId, machineId: 'machine-b' });
     await env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${held.projectId}`).bootstrap({ projectId: held.projectId, spaceId: held.projectId, machineId: 'machine-c' });
     const reached: Array<{ machine: string; signedTarget: string | null }> = [];
@@ -671,18 +646,11 @@ describe('account routing of machine work', () => {
     return { fixture, catalog, held, sessionId, reached };
   }
 
-  it('forwards space and session work to the machine holding the space, not the first online machine', async () => {
-    const { fixture, held, sessionId, reached } = await fleet();
-    const view = await SELF.fetch(fixture.request(single('space.view', { projectId: held.projectId, workspaceId: held.spaceId })));
-    expect(await view.json()).toEqual({ machine: 'machine-b' });
-    const control = await SELF.fetch(fixture.request(single('session.control', { sessionId })));
-    expect(await control.json()).toEqual({ machine: 'machine-b' });
-    await inspectorClient(fixture).space.view({ projectId: held.projectId, workspaceId: held.spaceId });
-    expect(reached).toEqual([
-      { machine: 'machine-b', signedTarget: '/rpc' },
-      { machine: 'machine-b', signedTarget: '/rpc' },
-      { machine: 'machine-b', signedTarget: '/rpc?p=space.view' },
-    ]);
+  it('serves cloud space state without following an online legacy holder', async () => {
+    const { fixture, held, reached } = await fleet();
+    const view = await inspectorClient(fixture).space.view({ projectId: held.projectId, workspaceId: held.spaceId });
+    expect(view).toMatchObject({ status: 'ok', value: { project: { id: held.projectId } } });
+    expect(reached).toEqual([]);
   });
 
   it('keeps cloud runtime work on the account even while a machine holds the space', async () => {
@@ -742,17 +710,16 @@ describe('account routing of machine work', () => {
     expect(reached).toEqual([]);
   });
 
-  it('still forwards a legacy machine-held space repository read to its holder', async () => {
+  it('refuses legacy holder terminal access without a ready cache attachment', async () => {
     const { fixture, held, reached } = await fleet();
-    const response = await SELF.fetch(fixture.request(single('inspector.repository.status', { spaceId: held.spaceId, expectedGeneration: 1, mode: 'current', path: null })));
-    expect(await response.json()).toEqual({ machine: 'machine-b' });
-    expect(reached.map((entry) => entry.machine)).toEqual(['machine-b']);
+    const response = await SELF.fetch(fixture.request(single('terminals.list', { spaceId: held.spaceId, machineId: 'machine-b' })));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'TERMINAL_MACHINE_NOT_ATTACHED' } });
+    expect(reached).toEqual([]);
   });
 
   it('forwards terminal work only to the chosen machine while it is a ready cache of the cloud workspace', async () => {
-    const { fixture, held, reached } = await fleet();
-    // The cloud runtime owns this workspace, so machine-b's legacy placement must not attract its terminals.
-    await held.placement.runtimeAttachments({ projectId: held.projectId, workspaceId: held.spaceId });
+    const { fixture, held, reached } = await fleet(true);
     const ready = RuntimeAttachmentSchema.parse({
       projectId: held.projectId, workspaceId: held.spaceId, attachmentId: 'cache-c', machineId: 'machine-c', generation: 1, role: 'cache', state: 'ready',
       checkout: { kind: 'shared', branch: 'review' }, capabilities: [], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
@@ -776,27 +743,86 @@ describe('account routing of machine work', () => {
     expect(reached.map((entry) => entry.machine)).toEqual(['machine-c']);
   });
 
-  it('rejects one signed batch naming spaces held by different machines', async () => {
-    const { fixture, held, reached } = await fleet();
-    const logs = vi.spyOn(console, 'log');
-    try {
-      const response = await SELF.fetch(fixture.request({ v: 1, batch: [
-        { ...single('transcriptPage', { projectId: held.projectId, workspaceId: held.spaceId }), id: 'held' },
-        { ...single('transcriptPage', { projectId: held.projectId, workspaceId: null }), id: 'base' },
-      ] }));
-      expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ error: { code: 'RPC_MIXED_HOLDER_BATCH' } });
-      expect(reached).toEqual([]);
-      const batches = logs.mock.calls.flatMap(([line]): unknown[] => typeof line === 'string' && line.includes('"rpc_batch"') ? [JSON.parse(line)] : []);
-      expect(batches).toEqual([expect.objectContaining({ event: 'rpc_batch', procedures: ['transcriptPage'], status: 400, code: 'RPC_MIXED_HOLDER_BATCH' })]);
-    } finally { logs.mockRestore(); }
+  it('accepts environment runs in the cloud and dispatches them only to the named ready cache of the workspace', async () => {
+    const { fixture, held, reached } = await fleet(true);
+    const client = inspectorClient(fixture);
+    const notAttached = (machineId: string) => ({ status: 'error', error: { data: { code: 'RunnerUnavailable', context: { spaceId: held.spaceId, machineId } } } });
+    // Online machines exist, but none is attached: a typed refusal, never a forward to whichever machine is online.
+    expect(await client.environment.runChecks({ spaceId: held.spaceId, machineId: 'machine-a', runId: 'checks-unattached' })).toMatchObject(notAttached('machine-a'));
+    const ready = RuntimeAttachmentSchema.parse({
+      projectId: held.projectId, workspaceId: held.spaceId, attachmentId: 'cache-c', machineId: 'machine-c', generation: 1, role: 'cache', state: 'ready',
+      checkout: { kind: 'shared', branch: 'review' }, capabilities: [], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+    });
+    const stale = { ...ready, attachmentId: 'cache-a', machineId: 'machine-a', heartbeatAt: new Date(Date.now() - 10 * 60_000).toISOString() };
+    const dispatched: RuntimeToolDispatch[] = [];
+    await runInDurableObject(held.placement, async (instance, state) => {
+      for (const attachment of [ready, stale]) {
+        state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
+      }
+      const runtime = await instance['runtime'];
+      if (!runtime) throw new Error('Workspace runtime did not open');
+      vi.spyOn(runtime.cloudFiles, 'initializeSnapshot').mockResolvedValue(committedCheckout(held.spaceId).checkpoint);
+      // The cache accepts the run it was sent, as the machine's lifecycle tool does.
+      vi.spyOn(runtime.attachments, 'execute').mockImplementation(async (dispatch) => {
+        dispatched.push(dispatch);
+        const request = RuntimeLifecycleDispatchArgumentsSchema.parse(dispatch.args);
+        const run: LifecycleRun = {
+          id: request.runId, projectId: held.projectId, spaceId: held.spaceId, phase: request.phase, status: 'accepted', profile: 'base', machineId: dispatch.machineId, generation: dispatch.generation,
+          executionHashes: [], terminalName: null, results: [], output: '', exitCode: null, startedAt: new Date().toISOString(), finishedAt: null,
+          deadlineAt: new Date(Date.now() + 60_000).toISOString(), cancelRequestedAt: null, failure: null, incidents: [],
+        };
+        return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(run) }] };
+      });
+    });
+    expect(await client.environment.runChecks({ spaceId: held.spaceId, machineId: 'machine-c', runId: 'checks-c' })).toMatchObject({ status: 'ok', value: { id: 'checks-c', phase: 'checks', machineId: 'machine-c' } });
+    expect(await client.environment.runPhase({ spaceId: held.spaceId, machineId: 'machine-c', runId: 'destroy-c', phase: 'cloud/destroy', rerun: null })).toMatchObject({ status: 'ok', value: { id: 'destroy-c', phase: 'cloud/destroy', machineId: 'machine-c' } });
+    // Destroying cloud resources needs lifecycle authority, which an API client must be granted explicitly.
+    const apiClient = inspectorClient(await account(['rpc.read', 'rpc.write'], 'client'));
+    expect(await apiClient.environment.runPhase({ spaceId: held.spaceId, machineId: 'machine-c', runId: 'destroy-client', phase: 'cloud/destroy', rerun: null })).toMatchObject({ status: 'error', error: { data: { code: 'PermissionDenied' } } });
+    // A cache whose heartbeat went stale and the legacy placement holder are refused before dispatch.
+    for (const machineId of ['machine-a', 'machine-b']) {
+      expect(await client.environment.runPhase({ spaceId: held.spaceId, machineId, runId: `prepare-${machineId}`, phase: 'machine/prepare', rerun: null })).toMatchObject(notAttached(machineId));
+    }
+    expect(dispatched.map((dispatch) => ({ machineId: dispatch.machineId, attachmentId: dispatch.attachmentId, tool: dispatch.tool, args: dispatch.args }))).toEqual([
+      { machineId: 'machine-c', attachmentId: 'cache-c', tool: 'lifecycle', args: { runId: 'checks-c', phase: 'checks', on: 'machine-c' } },
+      { machineId: 'machine-c', attachmentId: 'cache-c', tool: 'lifecycle', args: { runId: 'destroy-c', phase: 'cloud/destroy', rerun: false, on: 'machine-c' } },
+    ]);
+    expect(reached).toEqual([]);
   });
 
-  it('sends work without a live holder to the first online machine', async () => {
+  it('launches a release only on the named online enrolled machine, never the holder or any online machine', async () => {
+    const { fixture, catalog, held, reached } = await fleet();
+    await catalog.putMachine({ ...machine('machine-d'), state: 'offline' });
+    const launch = (input: Record<string, unknown>) => SELF.fetch(fixture.request(single('deployment.launch', { workspaceId: held.spaceId, targets: ['worker'], ...input })));
+    expect(await (await launch({ machineId: 'machine-c' })).json()).toEqual({ machine: 'machine-c' });
+    const refusals: Array<[Record<string, unknown>, number, string]> = [[{}, 400, 'LAUNCH_MACHINE_REQUIRED'], [{ machineId: 'machine-d' }, 503, 'LAUNCH_MACHINE_OFFLINE'], [{ machineId: 'machine-z' }, 409, 'LAUNCH_MACHINE_NOT_ENROLLED']];
+    for (const [input, status, code] of refusals) {
+      const refused = await launch(input);
+      expect(refused.status).toBe(status);
+      expect(await refused.json()).toMatchObject({ error: { code } });
+    }
+    expect(reached.map((entry) => entry.machine)).toEqual(['machine-c']);
+  });
+
+  it('rejects mixed cloud and explicit machine work before either authority acts', async () => {
     const { fixture, held, reached } = await fleet();
-    await SELF.fetch(fixture.request(single('project.open', { projectId: held.projectId })));
-    await SELF.fetch(fixture.request(single('space.reopen', { spaceId: 'never-placed', expectedGeneration: 1 })));
-    expect(reached.map((entry) => entry.machine)).toEqual(['machine-a', 'machine-a']);
+    const response = await SELF.fetch(fixture.request({ v: 1, batch: [
+      { ...single('settings.get', {}), id: 'cloud' },
+      { ...single('deployment.launch', { workspaceId: held.spaceId, machineId: 'machine-c', targets: ['worker'] }), id: 'machine' },
+    ] }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'RPC_MIXED_AUTHORITY_BATCH' } });
+    expect(reached).toEqual([]);
+  });
+
+  it('rejects removed and unknown public procedures instead of selecting an online machine', async () => {
+    const { fixture, held, reached } = await fleet();
+    for (const path of ['project.open', 'space.close', 'space.reopen', 'session.control', 'placements', 'events', 'browserRelay.status', 'runtime.unknown', 'inspector.unknown', 'terminals.unknown']) {
+      const response = await SELF.fetch(fixture.request(single(path, { projectId: held.projectId, spaceId: held.spaceId, machineId: 'machine-b' })));
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ error: { code: 'RPC_PROCEDURE_UNKNOWN' } });
+    }
+    expect(reached).toEqual([]);
   });
 });
 
@@ -1308,4 +1334,142 @@ describe('machine-independent Inspector', () => {
     expect(providerCalls).toEqual([]);
   });
 
+});
+
+/** A cloud workspace's committed checkout, as its runtime stores it. */
+async function seedCheckpoint(authority: DurableObjectStub<SpaceAuthorityDO>, checkpoint: RuntimeGitCheckpoint) {
+  await runInDurableObject(authority, (_instance, state) => {
+    state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
+    state.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
+  });
+}
+
+function checkpointAt(workspaceId: string, branch: string, headCommit: string, worktreeTree = 'e'.repeat(40)): RuntimeGitCheckpoint {
+  return { checkpointRef: `refs/gitspace/spaces/${workspaceId}/checkpoints`, headCommit, branch, indexCommit: headCommit, trackedWorktreeCommit: headCommit, worktreeCommit: headCommit, indexTree: worktreeTree, worktreeTree };
+}
+
+/** Artifacts history: each repository serves only the commits it holds, along their first-parent chain. */
+function artifactsHistory() {
+  const commits = new Map<string, { parents: string[]; committedAt: number; repositories: Set<string> }>();
+  const identity = { name: 'Fixture', email: 'fixture@example.invalid' };
+  vi.spyOn(ArtifactsCodeStore.prototype, 'log').mockImplementation(async (repository, start, limit = 50) => {
+    const page: ArtifactsCommitMetadata[] = [];
+    for (let hash: string | undefined = start; hash !== undefined && page.length < limit;) {
+      const entry = commits.get(hash);
+      if (!entry?.repositories.has(repository)) break;
+      page.push({ hash, treeHash: hash, message: hash, author: identity, committer: identity, parents: entry.parents, authoredAt: entry.committedAt, committedAt: entry.committedAt });
+      hash = entry.parents[0];
+    }
+    return page;
+  });
+  return {
+    commit(parents: string[], ...repositories: string[]) {
+      const hash = (commits.size + 1).toString(16).padStart(40, '0');
+      commits.set(hash, { parents, committedAt: commits.size + 1, repositories: new Set(repositories) });
+      return hash;
+    },
+    copy(repository: string, ...hashes: string[]) {
+      for (const hash of hashes) commits.get(hash)?.repositories.add(repository);
+    },
+  };
+}
+
+describe('workspace environment edits and stack status with no machines', () => {
+  it('saves a validated bundle into the cloud working copy and edits the profile and values', async () => {
+    emptyCommittedSource();
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { spaceId, placement } = await inspectorWorkspace(fixture.userId);
+    const trees = new Map<string, Record<string, string>>([['e'.repeat(40), { 'README.md': 'f'.repeat(40) }]]);
+    const blobs = new Map<string, string>([['f'.repeat(40), '# Pantry\n']]);
+    const writes: string[][] = [];
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readFile').mockResolvedValue(null);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotPaths').mockImplementation(async (_repository, tree) => Object.keys(trees.get(tree) ?? {}));
+    vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotInventories').mockImplementation(async (_repository, requested) => requested.map(tree =>
+      new Map(Object.entries(trees.get(tree) ?? {}).map(([path, oid]) => [path, { oid, mode: '100644', type: 'blob' as const }]))));
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readBlob').mockImplementation(async (_repository, oid) => {
+      const text = blobs.get(oid);
+      return text === undefined ? null : new Blob([text]);
+    });
+    vi.spyOn(ArtifactsCodeStore.prototype, 'writeSnapshot').mockImplementation(async (input) => {
+      const files = { ...trees.get(input.previous.worktreeTree) };
+      for (const mutation of input.mutations) {
+        if (mutation.content === null) { delete files[mutation.path]; continue; }
+        const oid = (blobs.size + 1).toString(16).padStart(40, 'b');
+        blobs.set(oid, new TextDecoder().decode(mutation.content));
+        files[mutation.path] = oid;
+      }
+      const tree = (trees.size + 1).toString(16).padStart(40, 'a');
+      trees.set(tree, files);
+      writes.push(input.mutations.map(mutation => mutation.path));
+      return Result.ok({ ...input.previous, trackedWorktreeCommit: tree, worktreeCommit: tree, worktreeTree: tree });
+    });
+    await seedCheckpoint(placement, checkpointAt(spaceId, 'review', '1'.repeat(40)));
+    const client = inspectorClient(fixture);
+    const bundle = { version: 1, defaultProfile: 'base', profiles: { base: { values: ['REGION'] }, ios: { values: ['DEVICE'] } }, values: { REGION: { default: 'us-east-1' }, DEVICE: {} } };
+    const canonical = JSON.stringify(loadEnvironmentBundle(bundle));
+    expect(await client.environment.putBundle({ spaceId, bundleJson: JSON.stringify(bundle) })).toMatchObject({ status: 'ok', value: { bundleJson: canonical, selectedProfile: 'base', values: { effective: { REGION: 'us-east-1' } } } });
+    expect(writes).toEqual([['.gitspace/bundle.json']]);
+    const committed = [...trees.values()].at(-1)?.['.gitspace/bundle.json'];
+    expect(JSON.parse(blobs.get(committed ?? '') ?? 'null')).toEqual(loadEnvironmentBundle(bundle));
+    // The environment definition is the working copy's file: a fresh read derives the saved bundle from it.
+    expect(await client.environment.get({ spaceId })).toMatchObject({ status: 'ok', value: { bundleJson: canonical } });
+
+    const invalid = await client.environment.putBundle({ spaceId, bundleJson: JSON.stringify({ version: 1, profiles: { base: { values: ['REGION'] } } }) });
+    expect(invalid).toMatchObject({ status: 'error', error: { _tag: rpcErrors.environmentFailure.tag, data: { code: 'InvalidBundle', message: expect.stringContaining('profiles.base.values: Unknown value: REGION') } } });
+    expect(writes).toHaveLength(1);
+    expect(await client.environment.get({ spaceId })).toMatchObject({ status: 'ok', value: { bundleJson: canonical } });
+
+    expect(await client.environment.setProfile({ spaceId, profile: 'ios' })).toMatchObject({ status: 'ok', value: { selectedProfile: 'ios', effective: { values: ['REGION', 'DEVICE'] } } });
+    expect(await client.environment.setProfile({ spaceId, profile: 'android' })).toMatchObject({ status: 'error', error: { data: { code: 'InvalidConfiguration', message: 'Unknown environment profile: android' } } });
+    expect(await client.environment.putValue({ spaceId, scope: 'workspace', name: 'DEVICE', value: 'simulator' })).toMatchObject({ status: 'ok', value: { values: { workspace: { DEVICE: 'simulator' }, effective: { DEVICE: 'simulator' } } } });
+    expect(await client.environment.putValue({ spaceId, scope: 'global', name: 'REGION', value: 'ap-south-1' })).toMatchObject({ status: 'ok', value: { values: { global: { REGION: 'ap-south-1' }, effective: { REGION: 'ap-south-1' } } } });
+    expect(await client.environment.putValue({ spaceId, scope: 'project', name: 'REGION', value: 'eu-west-1' })).toMatchObject({ status: 'ok', value: { values: { project: { REGION: 'eu-west-1' }, global: { REGION: 'ap-south-1' }, effective: { REGION: 'eu-west-1' } } } });
+    expect(await client.environment.putValue({ spaceId, scope: 'workspace', name: 'device', value: 'x' })).toMatchObject({ status: 'error', error: { data: { code: 'InvalidConfiguration' } } });
+    const removed = await client.environment.deleteValue({ spaceId, scope: 'workspace', name: 'DEVICE' });
+    if (removed.status === 'error') throw removed.error;
+    expect(removed.value.values.workspace).toEqual({});
+    expect(removed.value.values.effective).not.toHaveProperty('DEVICE');
+    expect(removed.value.selectedProfile).toBe('ios');
+  });
+
+  it('computes a stacked workspace position from cloud checkpoints and Artifacts history', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { projectId, spaceId: parentId, authority } = await inspectorWorkspace(fixture.userId);
+    const childId = `space-${crypto.randomUUID()}`;
+    await authority.putWorkspace({ id: childId, projectId, kind: 'worktree', name: 'Child', branch: 'child', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(childId, projectId);
+    const client = inspectorClient(fixture);
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [], relatedTo: [], stackedOn: parentId })).toMatchObject({ status: 'ok' });
+    const stack = async (workspaceId: string) => {
+      const result = await client.workspace.stackStatus({ workspaceId });
+      if (result.status === 'error') throw result.error;
+      return result.value;
+    };
+    const [projectRepository, baseRepository, parentRepository, childRepository] = [`project-${projectId}`, `workspace-${projectId}`, `workspace-${parentId}`, `workspace-${childId}`];
+    const history = artifactsHistory();
+    const root = history.commit([], projectRepository, baseRepository, parentRepository, childRepository);
+    const main = history.commit([root], projectRepository, baseRepository, parentRepository, childRepository);
+    const fork = history.commit([main], parentRepository, childRepository);
+    const second = history.commit([fork], parentRepository);
+    const parentHead = history.commit([second], parentRepository);
+    const childHead = history.commit([fork], childRepository);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (repository, ref) => repository === projectRepository && ref === 'refs/heads/main' ? main : null);
+    const child = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${childId}`);
+    await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`), checkpointAt(parentId, 'review', parentHead));
+    await seedCheckpoint(child, checkpointAt(childId, 'child', childHead));
+    expect(await stack(childId)).toEqual({ parentId, parentBranch: 'review', baseBranch: 'main', mergeBase: fork, parentAhead: 2, parentMerged: 'not-merged', instruction: 'Rebase onto the parent: `git rebase review`' });
+
+    // Merging the parent into the child reaches its commits only through a second parent.
+    history.copy(childRepository, second, parentHead);
+    await seedCheckpoint(child, checkpointAt(childId, 'child', history.commit([childHead, parentHead], childRepository)));
+    expect(await stack(childId)).toMatchObject({ mergeBase: parentHead, parentAhead: 0, parentMerged: 'not-merged', instruction: null });
+
+    // The base workspace's checkpoint, not the imported branch, says whether the parent landed.
+    history.copy(baseRepository, fork, second, parentHead);
+    await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${projectId}`), checkpointAt(projectId, 'main', history.commit([main, parentHead], baseRepository)));
+    expect(await stack(childId)).toMatchObject({ parentAhead: 0, parentMerged: 'merged', instruction: 'The parent merged into main. Rebase only your own commits: `git rebase --onto main review`, then this workspace is no longer stacked.' });
+
+    expect(await stack(parentId)).toEqual({ parentId: null, parentBranch: null, baseBranch: 'main', mergeBase: null, parentAhead: 0, parentMerged: 'unknown', instruction: null });
+    expect(await client.workspace.stackStatus({ workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { _tag: rpcErrors.workspaceNotFound.tag, data: { workspaceId: 'missing' } } });
+  });
 });

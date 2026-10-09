@@ -52,7 +52,7 @@ async function registerMachine(id: string): Promise<void> {
     machineId: id,
     signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(signing)),
     exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(exchange)),
-    capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
+    capabilities: ['storage.access', 'space.control', 'credential.access'],
     generation: 1,
   }, rootPrivateKey);
   const response = await fetch(new URL('/__dev/bootstrap', controlUrl), {

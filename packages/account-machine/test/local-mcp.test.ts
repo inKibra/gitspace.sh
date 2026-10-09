@@ -1,15 +1,9 @@
 import { join } from 'node:path';
 import { describe, expect, it } from 'bun:test';
 import type {
-  ComposioMcpMaterialization,
-  ComposioPluginAuthorization,
-  ComposioPluginCatalog,
-  ComposioSetup,
-  ComposioPluginTool,
   EffectiveSecretMetadata,
   McpAuditEvent,
   McpConnection,
-  McpConnectionDraft,
   McpConnectionStatus,
   ProjectMcpGrant,
 } from '@gitspace/protocol';
@@ -51,28 +45,9 @@ class FakeMcpAuthority implements MachineMcpAuthority {
   grants: ProjectMcpGrant[] = [];
   readonly audit: Array<Omit<McpAuditEvent, 'principalId' | 'machineId'>> = [];
   readonly secretValues: Record<string, string> = {};
-  composioMaterialization: ComposioMcpMaterialization | null = null;
   secretMetadata: EffectiveSecretMetadata[] | null = null;
   unavailable = false;
 
-  async listMcpConnections(): Promise<McpConnection[]> { return structuredClone(this.connections); }
-  async createMcpConnection(draft: McpConnectionDraft): Promise<McpConnection> {
-    const created = connection({ ...draft, status: draft.enabled ? 'offline' : 'disabled' });
-    this.connections.push(created);
-    return structuredClone(created);
-  }
-  async updateMcpConnection(connectionId: string, expectedRevision: number, draft: McpConnectionDraft): Promise<McpConnection> {
-    const index = this.connections.findIndex((candidate) => candidate.id === connectionId && candidate.revision === expectedRevision);
-    if (index < 0) throw new Error('revision conflict');
-    const updated = connection({ ...draft, revision: expectedRevision + 1 });
-    this.connections[index] = updated;
-    return structuredClone(updated);
-  }
-  async deleteMcpConnection(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }> {
-    const before = this.connections.length;
-    this.connections = this.connections.filter((candidate) => candidate.id !== connectionId || candidate.revision !== expectedRevision);
-    return { connectionId, deleted: before !== this.connections.length };
-  }
   async getMcpConnectionStatus(connectionId: string): Promise<McpConnection | null> {
     return structuredClone(this.connections.find((candidate) => candidate.id === connectionId) ?? null);
   }
@@ -96,38 +71,8 @@ class FakeMcpAuthority implements MachineMcpAuthority {
     });
     return structuredClone(current);
   }
-  async getComposioSetup(): Promise<ComposioSetup> { throw new Error('Setup is not used by execution tests'); }
-  async putComposioSetup(): Promise<ComposioSetup> { throw new Error('Setup is not used by execution tests'); }
-  async deleteComposioSetup(): Promise<ComposioSetup> { throw new Error('Setup is not used by execution tests'); }
-  async listComposioPluginCatalog(): Promise<ComposioPluginCatalog> { return { configured: true, toolkits: [] }; }
-  async authorizeComposioPlugin(): Promise<ComposioPluginAuthorization> { throw new Error('not implemented by fake'); }
-  async refreshComposioPlugin(connectionId: string): Promise<McpConnection> {
-    const current = this.connections.find((candidate) => candidate.id === connectionId);
-    if (!current) throw new Error('not found');
-    return structuredClone(current);
-  }
-  async listComposioPluginTools(): Promise<ComposioPluginTool[]> { return []; }
-  async updateComposioPluginTools(): Promise<McpConnection> { throw new Error('not implemented by fake'); }
-  async disconnectComposioPlugin(connectionId: string): Promise<{ connectionId: string; deleted: boolean }> { return { connectionId, deleted: true }; }
-  async materializeComposioPlugin(): Promise<ComposioMcpMaterialization> {
-    if (!this.composioMaterialization) throw new Error('Composio materialization is unavailable');
-    return structuredClone(this.composioMaterialization);
-  }
   async listProjectMcpGrants(projectId: string): Promise<ProjectMcpGrant[]> {
     return structuredClone(this.grants.filter((candidate) => candidate.projectId === projectId));
-  }
-  async putProjectMcpGrant(projectId: string, connectionId: string, enabled: boolean, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<ProjectMcpGrant> {
-    const current = this.grants.find((candidate) => candidate.projectId === projectId && candidate.connectionId === connectionId);
-    if ((current?.revision ?? 0) !== expectedRevision) throw new Error('revision conflict');
-    const updated = { ...(current ?? grant(connectionId)), projectId, enabled, projectSpaceEnabled, workspacesEnabled, revision: expectedRevision + 1, updatedAt: new Date().toISOString() };
-    this.grants = this.grants.filter((candidate) => candidate.projectId !== projectId || candidate.connectionId !== connectionId);
-    this.grants.push(updated);
-    return structuredClone(updated);
-  }
-  async deleteProjectMcpGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<{ projectId: string; connectionId: string; deleted: boolean }> {
-    const before = this.grants.length;
-    this.grants = this.grants.filter((candidate) => candidate.projectId !== projectId || candidate.connectionId !== connectionId || candidate.revision !== expectedRevision);
-    return { projectId, connectionId, deleted: before !== this.grants.length };
   }
   async listEffectiveSecrets(projectId: string, _workspaceId: string | null): Promise<EffectiveSecretMetadata[]> {
     if (this.unavailable) throw new Error('Cloud configuration unavailable');

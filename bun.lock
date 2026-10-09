@@ -396,6 +396,7 @@
         "@earendil-works/pi-durable": "1.0.0",
         "@gitspace/blocks": "workspace:*",
         "@gitspace/protocol-agent": "workspace:*",
+        "@gitspace/protocol-environment": "workspace:*",
         "@gitspace/protocol-runtime": "workspace:*",
         "@gitspace/protocol-workspace": "workspace:*",
         "@gitspace/runtime-core": "workspace:*",

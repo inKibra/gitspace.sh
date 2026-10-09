@@ -1,7 +1,7 @@
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, expect, it } from 'vitest';
-import { TenantComputeProvider } from '../src/compute-provider.js';
+import { invokeCompute, TenantComputeProvider } from '../src/compute-provider.js';
 import { publishDefaultFixture } from './default-release-fixture.js';
 
 const originalFetch = globalThis.fetch;
@@ -22,7 +22,9 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
   const namespaces = new Map<string, { id: string; script: string; dispatch_namespace: string; class: string; use_containers: boolean }>();
   const applications = new Map<string, Application>();
   const holders = new Map<string, Holder>();
-  const faults = { applicationResponse: false, enrollmentResponse: false, retirementResponse: false };
+  const faults = { applicationResponse: false, enrollmentResponse: false, retirementResponse: false, preflight: false };
+  const namespaceReadiness: Array<'missing' | 'pending'> = [];
+  let preflights = 0;
   let applicationCreates = 0;
   const bindings = { ...env, COMPUTE_TEMPLATE_SCRIPT: 'trusted-template',
     COMPUTE_SANDBOX_HOSTNAME: 'sandbox.example', COMPUTE_MAX_MACHINES: 20, COMPUTE_MAX_IMAGE_DEPLOYMENTS: maxImages } as unknown as Env;
@@ -38,7 +40,10 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
     if (path === '/workers/durable_objects/namespaces') {
       const page = Number(url.searchParams.get('page'));
       // A foreign namespace occupies the first page. Never reconcile by class/name alone.
-      const rows = [{ id: 'foreign', script: 'unrelated', dispatch_namespace: 'another-tenant', class: 'GitSpaceSandbox', use_containers: true }, ...namespaces.values()];
+      const readiness = namespaces.size ? namespaceReadiness[0] : undefined;
+      const visible = readiness === 'missing' ? [] : [...namespaces.values()].map(namespace => ({ ...namespace, use_containers: readiness !== 'pending' }));
+      const rows = [{ id: 'foreign', script: 'unrelated', dispatch_namespace: 'another-tenant', class: 'GitSpaceSandbox', use_containers: true }, ...visible];
+      if (namespaces.size && page >= rows.length) namespaceReadiness.shift();
       return Response.json({ success: true, result: rows.slice(page - 1, page), result_info: { page, per_page: 1, total_count: rows.length } });
     }
     const script = /^\/workers\/dispatch\/namespaces\/[^/]+\/scripts\/(.+)$/u.exec(path)?.[1];
@@ -68,7 +73,12 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
     async fetch(request: Request): Promise<Response> {
       if (request.headers.get('x-gitspace-user-id') !== accountId || request.headers.has('x-gitspace-provider-token')) return new Response('Wrong account', { status: 403 });
       const path = new URL(request.url).pathname;
-      if (path === '/_image/preflight') return Response.json({ status: 'ok' });
+      if (path === '/_image/preflight') {
+        preflights += 1;
+        return faults.preflight
+          ? Response.json({ status: 'error', error: { code: 'IMAGE_BOOTSTRAP_MISSING', message: 'Image bootstrap is missing' } }, { status: 409 })
+          : Response.json({ status: 'ok' });
+      }
       const body = path === '/v1/sandboxes' ? await request.json() as NonNullable<Holder['enrollment']> : null;
       const machineId = body?.machineId ?? path.split('/')[3]!;
       const instance = request.headers.get('x-gitspace-image-incarnation') ?? 'legacy';
@@ -110,9 +120,11 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
   bindings.COMPUTE = fetcher(null) as Fetcher;
   let provider = new TenantComputeProvider(storage, bindings, 'tenant-a', accountId, () => null);
   return {
-    applications, holders, faults,
+    applications, holders, faults, namespaceReadiness,
+    preflights: () => preflights,
     creates: () => applicationCreates,
     restart: () => { provider = new TenantComputeProvider(storage, bindings, 'tenant-a', accountId, () => null); },
+    rpc: (machineId: string) => invokeCompute(bindings, accountId, provider.rpcTarget(machineId), `/v1/sandboxes/${machineId}/rpc`, { method: 'POST' }),
     post: (path: string, body?: unknown) => provider.fetch(new Request(`https://compute.test${path}`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-gitspace-user-id': 'foreign', 'x-gitspace-provider-token': 'must-not-leak', 'x-gitspace-image-incarnation': crypto.randomUUID() },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -128,6 +140,35 @@ it('pre-pin tenant creates a cloud machine using the authenticated current defau
     expect(response.status).toBe(200);
     expect([...f.applications.values()].map(application => application.configuration.image)).toEqual([published.image]);
     expect([...f.holders.values()].find(holder => holder.enrollment?.machineId === 'sandbox-default')?.runtimeStarted).toBe(true);
+  });
+});
+
+it('prepares a new image on the first request while its namespace becomes visible and container-ready', async () => {
+  await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
+    const f = fixture(state.storage);
+    f.namespaceReadiness.push('missing', 'pending');
+    const prepared = await f.post('/v1/images/prepare', { image: imageA });
+    expect(prepared.status, await prepared.clone().text()).toBe(200);
+    expect(await prepared.json()).toMatchObject({ status: 'ok', value: { image: imageA } });
+    expect([...f.applications.values()].map(application => application.configuration.image)).toEqual([imageA]);
+    expect(f.creates()).toBe(1);
+    expect(f.preflights()).toBe(1);
+  });
+});
+
+it('does not retry or pin an image whose startup check fails after namespace readiness', async () => {
+  await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
+    const f = fixture(state.storage);
+    f.namespaceReadiness.push('pending');
+    f.faults.preflight = true;
+    const rejected = await f.post('/v1/images/prepare', { image: imageA });
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ status: 'error', error: { code: 'COMPUTE_IMAGE_INCOMPATIBLE' } });
+    expect(f.preflights()).toBe(1);
+    f.faults.preflight = false;
+    expect((await f.post('/v1/images/prepare', { image: imageA })).status).toBe(200);
+    expect(f.preflights()).toBe(2);
+    expect(f.creates()).toBe(1);
   });
 });
 
@@ -162,13 +203,13 @@ it('requires a checkpoint and changes only the selected machine image and incarn
   await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
     const f = fixture(state.storage);
     for (const machineId of ['sandbox-a', 'sandbox-b']) expect((await f.post('/v1/sandboxes', { machineId, environment: {}, image: imageA })).status).toBe(200);
-    const beforeB = await (await f.post('/v1/sandboxes/sandbox-b/rpc')).json();
+    const beforeB = await (await f.rpc('sandbox-b')).json();
     const change = { image: imageB, operationId: crypto.randomUUID() };
     expect(await (await f.post('/v1/sandboxes/sandbox-a/image', change)).json()).toMatchObject({ error: { code: 'COMPUTE_NOT_PREPARED' } });
     await f.post('/v1/sandboxes/sandbox-a/prepare-replacement');
     expect((await f.post('/v1/sandboxes/sandbox-a/image', change)).status).toBe(200);
     expect(await (await f.post('/v1/sandboxes/sandbox-a/resume')).json()).toMatchObject({ image: imageB, instance: change.operationId, retired: false });
-    expect(await (await f.post('/v1/sandboxes/sandbox-b/rpc')).json()).toEqual(beforeB);
+    expect(await (await f.rpc('sandbox-b')).json()).toEqual(beforeB);
     expect([...f.applications.values()].map(value => value.configuration.image).sort()).toEqual([imageA, imageB]);
   });
 });

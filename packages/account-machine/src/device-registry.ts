@@ -9,7 +9,6 @@ import { eq } from 'drizzle-orm';
 
 export interface DeviceGrantAuthority {
   listDeviceGrants(): Promise<DeviceGrantRecord[]>;
-  revokeDeviceGrant(deviceId: string): Promise<{ deviceId: string; revokedAt: number }>;
 }
 
 export interface DeviceRegistryOptions {
@@ -21,8 +20,8 @@ export interface DeviceRegistryOptions {
   onError?: (error: unknown) => void;
 }
 
-/** A mirrored grant with its verification outcome, for the Devices registry view. */
-export interface MirroredDevice {
+/** A mirrored grant with its verification outcome. */
+interface MirroredDevice {
   record: DeviceGrantRecord;
   verified: VerifiedDevice | null;
 }
@@ -87,17 +86,6 @@ export class DeviceRegistry {
     }
     const found = this.cache.get(deviceId);
     return found ? this.current(found) : null;
-  }
-
-  list(): MirroredDevice[] {
-    return [...this.cache.values()].map((entry) => ({ record: entry.record, verified: this.current(entry) }));
-  }
-
-  async revoke(deviceId: string): Promise<{ deviceId: string; revokedAt: number }> {
-    const result = await this.options.authority.revokeDeviceGrant(deviceId);
-    const cached = this.cache.get(deviceId);
-    if (cached) this.store([{ ...cached.record, revokedAt: result.revokedAt, generation: cached.record.generation + 1 }]);
-    return result;
   }
 
   private current(entry: MirroredDevice): VerifiedDevice | null {

@@ -8,6 +8,7 @@ import {
   inspectorTranscriptContentContract,
   inspectorAvailabilityContract,
   inspectorReadArtifactContract,
+  inspectorReadResourceContract,
   inspectorWriteArtifactContract,
   inspectorBeginArtifactUploadContract,
   inspectorUploadArtifactChunkContract,
@@ -57,6 +58,22 @@ import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import { cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, readCloudCheckout } from './cloud-repository.js';
 import type { RepositoryMode } from '@gitspace/protocol/inspector-contract';
+import { canonicalLocalResourceUrl, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
+import type { InspectorCloudContext } from './account-inspector-data.js';
+
+async function readCloudResource(env: Env, userId: string, source: InspectorCloudContext, url: string) {
+  const resource = parseResourceUri(url);
+  if (!resource) throw new InspectorStateError('Unsupported or unsafe resource URI');
+  if (resource.kind === 'artifact') throw new InspectorStateError('This tool output was retained only in its originating machine session, not in cloud artifacts.');
+  if (resource.kind === 'browser-artifact') throw new InspectorStateError('Read browser artifacts through the authorized cloud browser control.');
+  // Published local artifacts are workspace-scoped, not session-scoped. An old
+  // session ID must neither prevent reading them nor grant access to another scope.
+  const canonicalUrl = canonicalLocalResourceUrl(resource, source.workspace.kind === 'base' ? 'base' : 'workspace');
+  const frames = await new InspectorCloudArtifacts(env, userId, source).read(`${canonicalUrl}${resource.suffix}`);
+  return (function* (): Generator<ResourcePreviewFrame> {
+    for (const frame of frames) yield frame.type === 'metadata' ? { ...frame, url } : frame;
+  })();
+}
 
 export function inspectorCloudProcedures(env: Env, userId: string, requireSubscription: () => Promise<void>, currentDevice: () => Promise<VerifiedDevice>) {
   const server = serverRpc.context<GitSpaceRpcContext>();
@@ -507,8 +524,42 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
       return err(errors.OperationFailed({ operation: 'read Inspector repository tree page', message: error instanceof Error ? error.message : String(error) }));
     }
   });
-  const readResourcePage = server.implement(inspectorReadResourcePageContract).handler(({ errors }) =>
-    err(errors.InspectorState({ resource: 'runtime', message: 'Session resources require the live workspace and originating session.' })));
+  const readResource = server.implement(inspectorReadResourceContract).stream(async function* ({ input, errors, signal }) {
+    try {
+      if (signal.aborted) return;
+      await requireSubscription();
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      const frames = await readCloudResource(env, userId, source, input.url);
+      for (const frame of frames) {
+        if (signal.aborted) return;
+        await requireSubscription();
+        if (signal.aborted) return;
+        yield ok(frame);
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      if (error instanceof InspectorWorkspaceMissing) { yield err(errors.WorkspaceNotFound({ workspaceId: error.spaceId })); return; }
+      if (error instanceof InspectorGenerationConflict) { yield err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual })); return; }
+      if (error instanceof InspectorStateError) { yield err(errors.InspectorState({ resource: 'resource', message: error.message })); return; }
+      yield err(errors.OperationFailed({ operation: 'read cloud resource', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const readResourcePage = server.implement(inspectorReadResourcePageContract).handler(async ({ input, errors }) => {
+    try {
+      await requireSubscription();
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      const frames = await readCloudResource(env, userId, source, input.url);
+      const { cursor, limit, ...identity } = input;
+      const page = await snapshotPage(frames, { identity, cursor, limit });
+      await requireSubscription();
+      return ok(page);
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'resource', message: error.message }));
+      return err(errors.OperationFailed({ operation: 'read cloud resource page', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   const repositoryStatus = server.implement(inspectorRepositoryStatusContract).handler(async ({ input, errors }) => {
     try {
       const checkout = await repositoryCheckout(input);
@@ -559,7 +610,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
       read: readArtifact, readPage: readArtifactPage, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },
       uploadBegin: beginUpload, uploadChunk, uploadCommit: commitUpload, uploadAbort: abortUpload,
     },
-    resources: { readPage: readResourcePage },
+    resources: { read: readResource, readPage: readResourcePage },
     repository: { tree: repositoryTree, treePage: repositoryTreePage, status: repositoryStatus, file: repositoryFile, diff: repositoryDiff },
     services: { list: listServices, start: startService, stop: stopService },
   };

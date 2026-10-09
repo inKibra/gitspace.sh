@@ -164,10 +164,10 @@ describe('WorkspaceEnvironmentManager', () => {
   it.each(['values', 'secrets'] as const)('rejects declared %s that try to spoof reserved source provenance before running scripts', async (kind) => {
     const context = fixture('printf "%s" "$GITSPACE_WORKSPACE_SOURCE_COMMIT" > spoofed.txt\n');
     const name = 'GITSPACE_WORKSPACE_SOURCE_COMMIT';
-    await context.manager.putBundle('workspace-a', {
+    writeFileSync(join(context.checkout, '.gitspace', 'bundle.json'), JSON.stringify({
       version: 1, profiles: { base: { [kind]: [name] } },
       ...(kind === 'values' ? { values: { [name]: { default: 'spoofed-declared-source' } } } : {}),
-    });
+    }));
     await approveActive(context.manager, context.ledger);
     await expect(context.manager.runPhase('workspace-a', 'cloud/provision')).rejects.toMatchObject({ code: 'InvalidConfiguration' });
     expect(existsSync(join(context.checkout, 'spoofed.txt'))).toBe(false);
@@ -177,19 +177,18 @@ describe('WorkspaceEnvironmentManager', () => {
 
   it('resolves inherited profiles and scoped values while excluding scripts for other profiles', async () => {
     const context = fixture('printf "%s:%s" "$PORT" "$DEVICE"\n');
-    await context.manager.putBundle('workspace-a', {
+    writeFileSync(join(context.checkout, '.gitspace', 'bundle.json'), JSON.stringify({
       version: 1, defaultProfile: 'base',
       profiles: { base: { values: ['PORT'] }, ios: { values: ['DEVICE'] }, linux: {} },
       values: { PORT: { default: '1000' }, DEVICE: {} },
-    });
+    }));
     const directory = join(context.checkout, '.gitspace', 'lifecycle', 'cloud', 'provision');
     writeFileSync(join(directory, '02-ios.ios.sh'), 'echo ios\n');
     writeFileSync(join(directory, '02-linux.linux.sh'), 'echo linux\n');
-    await context.manager.putValue('workspace-a', 'global', 'PORT', '1500');
-    await context.manager.putValue('workspace-a', 'project', 'PORT', '2000');
-    await context.manager.putValue('workspace-a', 'workspace', 'PORT', '3000');
-    await context.manager.putValue('workspace-a', 'workspace', 'DEVICE', 'simulator');
-    await context.manager.setProfile('workspace-a', 'ios');
+    context.ledger.state.values = {
+      global: { PORT: '1500' }, project: { PORT: '2000' }, workspace: { PORT: '3000', DEVICE: 'simulator' },
+    };
+    context.ledger.state.selectedProfile = 'ios';
     const view = await context.manager.view('workspace-a');
     expect(view.effective.values).toEqual(['PORT', 'DEVICE']);
     expect(view.executions.map((execution) => execution.fileName)).toEqual(['01-main.sh', '02-ios.ios.sh']);
@@ -203,7 +202,6 @@ describe('WorkspaceEnvironmentManager', () => {
     const context = fixture('echo approved > result.txt\n');
     await expect(context.manager.runPhase('workspace-a', 'cloud/provision')).rejects.toThrow('approval');
     expect(context.materializations()).toBe(0);
-    await expect(context.manager.approve('workspace-a', 'workspace', 'anything')).rejects.toThrow();
     await approveActive(context.manager, context.ledger);
     context.beforeRun(() => writeFileSync(context.scriptPath, 'echo unapproved > result.txt\n'));
     await context.manager.runPhase('workspace-a', 'cloud/provision');

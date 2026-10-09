@@ -112,10 +112,16 @@ export type EnvironmentCheckDefinition = z.infer<typeof EnvironmentCheckDefiniti
 export type EnvironmentProfile = z.infer<typeof EnvironmentProfileSchema>;
 export type EnvironmentValueDefinition = z.infer<typeof EnvironmentValueDefinitionSchema>;
 
+/** The message names each schema problem by its bundle path, so an editor can point at what to fix. */
 export function loadEnvironmentBundle(source: unknown): EnvironmentBundle {
   const parsed = EnvironmentBundleSchema.safeParse(source);
-  if (!parsed.success) throw new EnvironmentError('InvalidBundle', 'Environment bundle must use the canonical version-1 format', { detail: parsed.error.message });
-  return parsed.data;
+  if (parsed.success) return parsed.data;
+  const problems = parsed.error.issues.map((issue) => {
+    const path = issue.path.reduce<string>((text, segment) => typeof segment === 'number' ? `${text}[${segment}]` : text ? `${text}.${String(segment)}` : String(segment), '');
+    return `${path || 'bundle'}: ${issue.message}`;
+  });
+  const more = problems.length > 3 ? ` (and ${problems.length - 3} more)` : '';
+  throw new EnvironmentError('InvalidBundle', `Environment bundle is invalid: ${problems.slice(0, 3).join('; ')}${more}`, { detail: parsed.error.message });
 }
 
 export function parseEnvironmentBundleJson(json: string): EnvironmentBundle {

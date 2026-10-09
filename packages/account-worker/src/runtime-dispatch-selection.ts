@@ -7,6 +7,11 @@ import { attachmentMachineKind } from './runtime-machine-loss.js';
 const selectionState = z.object({ fingerprint: z.string(), deadline: z.string(), machineId: z.string().optional(), commit: z.string().optional(), attachmentId: z.string().optional(), result: z.unknown().optional() });
 export type DispatchSelectionState = z.infer<typeof selectionState>;
 
+/** A cache machine work can be dispatched to: online, and ready or paused/reclaimed so that dispatch wakes it first. */
+export function isDispatchableCache(item: RuntimeAttachment, now: number): boolean {
+  return item.role === 'cache' && isAttachmentOnline(item, now) && (item.state === 'ready' || item.cache?.state === 'paused' || item.cache?.state === 'reclaimed');
+}
+
 export function createDispatchSelector(options: { storage: DurableObjectStorage; env: Env; identity: { projectId: string; workspaceId: string }; runtime(): WorkspaceRuntime }) {
   const { storage, env, identity } = options;
   storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_host_selection (id TEXT PRIMARY KEY, state TEXT NOT NULL)');
@@ -30,7 +35,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
   async function cache(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
     const selection = RuntimeDispatchSelectionSchema.parse(args);
     const now = Date.now();
-    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => item.role === 'cache' && isAttachmentOnline(item, now) && (item.state === 'ready' || item.cache?.state === 'paused' || item.cache?.state === 'reclaimed'));
+    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => isDispatchableCache(item, now));
     const selector = selection.on;
     if (typeof selector === 'string') {
       let machineId = candidates.find(item => item.machineId === selector)?.machineId;

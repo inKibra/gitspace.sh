@@ -597,7 +597,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   remove(projectId: string): boolean {
     return this.commit(() => {
     const project = this.list().find((candidate) => candidate.id === projectId);
-    if (project?.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be removed. Close its workspaces instead.');
+    if (project?.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be removed. Release its machine caches instead.');
     this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleted_projects(project_id) VALUES(?)', projectId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_projects WHERE project_id=?', projectId);
     return this.ctx.storage.sql.exec(
@@ -1068,6 +1068,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.requireProject();
     });
     await (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID).ensureProjectInference(project.id);
+    // The built-in project is usable from the first sidebar render: its base workspace exists before anyone opens it.
+    this.ensureBaseWorkspace({ userId: this.env.ACCOUNT_ID, projectId: project.id });
     return this.requireProject();
   }
 
@@ -1083,15 +1085,18 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  setBaseBranch(expectedRevision: number, baseBranch: string): CloudProjectSummary {
+  setBaseBranch(expectedRevision: number, baseBranch: string, sourceCommit: string): CloudProjectSummary {
     return this.commit('project', null, () => {
-    const current = this.requireProject();
-    if (current.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
-    if (current.lifecycle !== 'active') throw new Error(`Project must be active to change its base branch; it is ${current.lifecycle}`);
-    if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
-    if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid base branch');
-    this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,revision=revision+1,updated_at=?', baseBranch, new Date().toISOString());
-    return this.requireProject();
+      const current = this.requireProject();
+      if (current.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
+      if (current.lifecycle !== 'active') throw new Error(`Project must be active to change its base branch; it is ${current.lifecycle}`);
+      if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
+      if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid base branch');
+      if (!/^[0-9a-f]{40}$/u.test(sourceCommit)) throw new Error('Invalid base branch commit');
+      const now = new Date().toISOString();
+      this.ctx.storage.sql.exec("UPDATE workspaces SET branch=?,source_ref=CASE WHEN source_kind='base' THEN ? ELSE source_ref END,source_commit=?,revision=revision+1,updated_at=? WHERE workspace_id=? AND kind='base'", baseBranch, baseBranch, sourceCommit, now, current.id);
+      this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,revision=revision+1,updated_at=?', baseBranch, now);
+      return this.requireProject();
     });
   }
 
@@ -1180,7 +1185,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     const current = this.requireProject();
     if (current.lifecycle === 'deleting') throw new Error('Deleted project identity cannot be restored');
     if (current.role === GITSPACE_SOURCE_PROJECT_ROLE && lifecycle !== 'active' && lifecycle !== 'cloud-only') {
-      throw new Error('The built-in GitSpace project cannot be archived or deleted. Close its workspaces instead.');
+      throw new Error('The built-in GitSpace project cannot be archived or deleted. Release its machine caches instead.');
     }
     if (current.revision !== expectedRevision) {
       throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
@@ -1337,7 +1342,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   async deleteProject(expectedRevision: number): Promise<CloudProjectSummary> {
     const deleted = this.commit('project', null, () => {
     const project = this.requireProject();
-    if (project.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be deleted. Close its workspaces instead.');
+    if (project.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be deleted. Release its machine caches instead.');
     // A retry must finish vault cleanup even when the original caller never received
     // the revision produced by the durable deletion tombstone.
     if (project.lifecycle === 'deleting') return project;

@@ -48,8 +48,8 @@ async function enroll(signedInvite: SignedDeviceInvite, privateKey = browserPriv
   return SELF.fetch('https://auth.test/v1/devices/enroll', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ invite: signedInvite, binding }) });
 }
 
-async function control(userId: string, operation: 'devices.list' | 'devices.revoke', payload: Record<string, unknown>): Promise<Response> {
-  const request = createSignedControlRequest({ userId, machineId: 'machine-a', operation, payload, signingPrivateKey: machinePrivateKey });
+async function listDevices(userId: string): Promise<Response> {
+  const request = createSignedControlRequest({ userId, machineId: 'machine-a', operation: 'devices.list', payload: {}, signingPrivateKey: machinePrivateKey });
   return SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
 }
 
@@ -66,16 +66,15 @@ describe('device grants', () => {
     expect(replay.status).toBe(400);
     expect(await replay.json()).toMatchObject({ error: { code: 'DEVICE_INVITE_USED' } });
 
-    const listed = await control(userId, 'devices.list', {});
+    const listed = await listDevices(userId);
     expect(listed.status).toBe(200);
     const records = (await listed.json() as { value: DeviceGrantRecord[] }).value;
     expect(records).toHaveLength(1);
     const verified = verifyDeviceGrantRecord(records[0]!, ed25519.getPublicKey(rootPrivateKey));
     expect(verified).toMatchObject({ deviceId: value.deviceId, kind: 'browser', label: 'Chrome', capabilities: ['rpc.read', 'rpc.write', 'session.prompt', 'devices.manage'] });
 
-    const revoked = await control(userId, 'devices.revoke', { deviceId: value.deviceId });
-    expect(revoked.status).toBe(200);
-    const after = (await (await control(userId, 'devices.list', {})).json() as { value: DeviceGrantRecord[] }).value;
+    expect(await env.CREDENTIALS.getByName(userId).revokeDeviceGrant(value.deviceId)).toMatchObject({ status: 'ok' });
+    const after = (await (await listDevices(userId)).json() as { value: DeviceGrantRecord[] }).value;
     expect(after[0]).toMatchObject({ generation: 2 });
     expect(after[0]?.revokedAt).not.toBeNull();
     expect(verifyDeviceGrantRecord(after[0]!, ed25519.getPublicKey(rootPrivateKey))).toBeNull();
@@ -112,13 +111,13 @@ describe('device grants', () => {
     expect(enrolled.status).toBe(200);
     const escalated = await enroll(delegated(['rpc.read', 'fleet.control']), clientPrivateKey);
     expect(await escalated.json()).toMatchObject({ error: { code: 'INVALID_DEVICE_INVITE' } });
-    const records = (await (await control(userId, 'devices.list', {})).json() as { value: DeviceGrantRecord[] }).value;
+    const records = (await (await listDevices(userId)).json() as { value: DeviceGrantRecord[] }).value;
     const resolve = (deviceId: string) => records.find((record) => record.binding.deviceId === deviceId) ?? null;
     const client = records.find((record) => record.invite.invite.kind === 'client')!;
     expect(verifyDeviceGrantRecord(client, ed25519.getPublicKey(rootPrivateKey), Date.now(), resolve)).toMatchObject({ kind: 'client', capabilities: ['rpc.read'] });
     // Revoking the browser silently invalidates the key it minted.
-    await control(userId, 'devices.revoke', { deviceId: browserDevice.deviceId });
-    const after = (await (await control(userId, 'devices.list', {})).json() as { value: DeviceGrantRecord[] }).value;
+    await env.CREDENTIALS.getByName(userId).revokeDeviceGrant(browserDevice.deviceId);
+    const after = (await (await listDevices(userId)).json() as { value: DeviceGrantRecord[] }).value;
     const resolveAfter = (deviceId: string) => after.find((record) => record.binding.deviceId === deviceId) ?? null;
     expect(verifyDeviceGrantRecord(after.find((record) => record.invite.invite.kind === 'client')!, ed25519.getPublicKey(rootPrivateKey), Date.now(), resolveAfter)).toBeNull();
   });

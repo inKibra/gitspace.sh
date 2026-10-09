@@ -2,9 +2,10 @@ import { z } from 'zod';
 import { canonicalJson, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeTranscriptSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
+import { profileApprovalMode } from '@gitspace/protocol/inference';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, CloudPublicationUncertain, ExecutorNotConnected, isAttachmentOnline, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
-import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
@@ -22,6 +23,7 @@ import { RuntimeProcArgumentsSchema, RuntimeGrepArgumentsSchema } from '@gitspac
 import { caughtUpSearchCache, type RuntimeAttachment, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
+import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
 export type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
@@ -45,7 +47,7 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const completed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
 const interrupted = (input: Pick<Invocation, 'requestId' | 'attemptId'>, text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text }] });
 const failed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, error: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: message(error) }], error: { code: 'HOST_OPERATION_FAILED', message: message(error) } });
-const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, create: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
+const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
 machineTools.browser = true;
 
 /** QA is written to the existing project event authority; nothing is sent externally. */
@@ -145,6 +147,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   const codemode = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: options.model });
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   const source = () => readInspectorContext(env, env.ACCOUNT_ID, identity.workspaceId, identity.projectId);
+  const approvalDefault = async () => profileApprovalMode((await env.CREDENTIALS.getByName(env.ACCOUNT_ID).resolveCloudInference(identity.projectId)).profile.settings);
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
     serviceFetch: request => fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, ...identity }, request),
@@ -156,6 +159,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     },
     selectExecution: (args, candidates) => selections.cache(args, candidates),
     approvedOrigins: async () => approvedBrowserOrigins(await authority.refreshBrowserOrigins(identity.workspaceId)),
+    approvalDefault,
     groupName: async () => {
       const project = await authority.getProject();
       if (!project) throw new Error('Browser workspace project is unavailable');
@@ -260,12 +264,12 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     return tool === 'runtime_cancel' ? options.runtime().attachments.cancel(original) : options.runtime().attachments.reconcile(original);
   }
   async function cancelLifecycle(dispatch: RuntimeToolDispatch) {
-    const request = RuntimeAgentLifecycleRunArgumentsSchema.parse(dispatch.args);
+    const request = RuntimeLifecycleDispatchArgumentsSchema.parse(dispatch.args);
     const result = await authority.mutateLifecycleState(identity.workspaceId, { op: 'cancel', runId: request.runId }, { machineId: dispatch.machineId, actorId: `task:${dispatch.attemptId}`, kind: 'client', lifecycleControl: false });
     if (result.status === 'error') throw new Error(result.failure.message);
   }
   async function awaitLifecycle(dispatch: RuntimeToolDispatch, signal?: AbortSignal): Promise<RuntimeToolResult> {
-    const request = RuntimeAgentLifecycleRunArgumentsSchema.parse(dispatch.args);
+    const request = RuntimeLifecycleDispatchArgumentsSchema.parse(dispatch.args);
     const controller = new AbortController();
     const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', abort, { once: true });
@@ -398,10 +402,16 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           case 'get': case 'current': return completed(input, identity.workspaceId === baseWorkspaceId ? await authority.getProject() : (await source()).workspace);
           case 'list': return completed(input, await authority.listWorkspaces());
           case 'operations': return completed(input, await authority.listOperations());
-          default: return executeMachine({ ...input, tool: 'create', replay: 'unsafe' });
+          default: return completed(input, await changeAgentWorkspace(env, identity, args));
         }
       }
-      if (input.tool === 'space_phase') return executeMachine({ ...input, tool: 'workspace_phase', replay: 'unsafe' });
+      if (input.tool === 'space_phase') {
+        const { phase } = RuntimeSpacePhaseArgumentsSchema.parse(input.args);
+        // The canonical definition enforces the dependency ceiling; the runtime's workspace document drives this agent.
+        const workspace = await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase);
+        await options.runtime().session(input.conversationId, { type: 'setWorkspacePhase', phase });
+        return completed(input, workspace);
+      }
       if (input.tool === 'space_artifacts') {
         const args = RuntimeSpaceArtifactsArgumentsSchema.parse(input.args);
         const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source());
@@ -467,6 +477,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           return interrupted(input, `Snapshot publication is awaiting durable recovery. Do not repeat the mutation as a new attempt. ${error.message}`);
         }
       }
+      // A human run the account authorized: the same dispatch an agent's `environment` run makes, to the cache it names.
+      if (input.tool === 'lifecycle') return executeMachine({ ...input, replay: 'unsafe' }, RuntimeLifecycleDispatchArgumentsSchema.parse(input.args).deadlineAt);
       if (machineTools[input.tool]) return executeMachine(input);
       throw new Error(`Unknown workspace tool: ${input.tool}`);
     } catch (error) { if (savedDispatch(input.attemptId)) throw error; return failed(input, error); }
@@ -479,10 +491,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const receipt = await crons.runNow({ projectId: identity.projectId, cronId: args.cronId, requestId: input.attemptId });
         return completed(input, receipt);
       }
-      const tool = { CreateWorkspace: 'create', Checkpoint: 'checkpoint_code', LifecycleRun: 'lifecycle', Job: 'bash', Service: 'service', Merge: 'merge' }[input.kind];
+      const tool = { Checkpoint: 'checkpoint_code', LifecycleRun: 'lifecycle', Job: 'bash', Service: 'service', Merge: 'merge' }[input.kind];
       if (input.kind === 'LifecycleRun') RuntimeAgentLifecycleRunArgumentsSchema.parse(input.args);
-      const args = input.kind === 'CreateWorkspace' ? { ...object.parse(input.args), method: 'create' } : input.args;
-      const result = await executeMachine({ ...input, args, tool }, input.deadlineAt);
+      const result = await executeMachine({ ...input, tool }, input.deadlineAt);
       if (input.kind !== 'LifecycleRun' || result.status !== 'completed') return result;
       const dispatch = savedDispatch(input.attemptId);
       if (!dispatch) throw new Error('Lifecycle dispatch record is missing');
@@ -517,7 +528,22 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   return {
     browser: browser.manage,
-    tools: { invoke, prepareBrowser: browser.prepare, authorizeCronTool, async instructions(conversationId) {
+    tools: { invoke, prepareBrowser: browser.prepare, authorizeCronTool, approvalDefault,
+      // A machine tool with no cache to run on fails here, before the user is asked to approve it.
+      async preflight(input) {
+        // Replay/reconciliation follows the admitted identity, not today's cache availability.
+        if (savedDispatch(input.attemptId) || selections.load(input.attemptId)?.result) return;
+        if (machineTools[input.tool] && input.tool !== 'browser') {
+          await selections.cache(input.args);
+        } else if (input.tool === 'environment') {
+          const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);
+          if (args.method === 'runChecks' || args.method === 'runPhase') await selections.cache(args);
+        } else if (input.tool === 'mcp_invoke' || input.tool === 'mcp_discover') {
+          const args = object.parse(input.args);
+          if (typeof args.connectionId === 'string' && await mcp.isStdio(args)) await selections.cache(args);
+        }
+      },
+      async instructions(conversationId) {
       const project = await authority.getProject();
       if (!project) throw new Error('Project is not configured');
       const workspace = (await authority.listWorkspaces()).find(item => item.id === identity.workspaceId);

@@ -91,7 +91,7 @@ async function flushFrames() {
 }
 
 function props(live: WorkspaceTerminalsProps['live']): WorkspaceTerminalsProps {
-  return { spaceId: 'space', machines: [{ id: 'machine', label: 'Machine' }], machineId: 'machine', onSelectMachine: vi.fn(), events: async function* () {}, live, create: async () => terminal, send: vi.fn(async () => undefined), stop: async () => undefined };
+  return { spaceId: 'space', machines: [{ id: 'machine', label: 'Machine', state: 'live' }], machineId: 'machine', onSelectMachine: vi.fn(), events: async function* () {}, live, create: async () => terminal, send: vi.fn(async () => undefined), stop: async () => undefined };
 }
 
 function button(text: string): HTMLButtonElement | undefined {
@@ -175,7 +175,8 @@ it('opens terminals only on the attached machine the user picks', async () => {
   synchronized.value = { terminals: [], output: null };
   const onSelectMachine = vi.fn();
   const create = vi.fn(async () => terminal);
-  const options = { ...props(channel().live), machines: [{ id: 'cache-a', label: 'Cache A' }, { id: 'cache-b', label: 'Cache B' }], machineId: null, onSelectMachine, create };
+  const machines: WorkspaceTerminalsProps['machines'] = [{ id: 'cache-a', label: 'Cache A', state: 'live' }, { id: 'cache-b', label: 'Cache B', state: 'live' }];
+  const options = { ...props(channel().live), machines, machineId: null, onSelectMachine, create };
   await render(options);
   // Two ready caches and no pick: nothing is chosen for the user.
   expect(container.textContent).toContain('Choose a machine');
@@ -186,4 +187,28 @@ it('opens terminals only on the attached machine the user picks', async () => {
   expect(container.querySelector<HTMLSelectElement>('select[aria-label="Terminal machine"]')?.value).toBe('cache-b');
   await act(() => button('New terminal')?.click());
   expect(create).toHaveBeenCalledWith('cache-b');
+});
+
+it('lists a paused cache with its state and waits for it to wake before opening terminals there', async () => {
+  synchronized.value = { terminals: [], output: null };
+  const onSelectMachine = vi.fn();
+  const create = vi.fn(async () => terminal);
+  const machines: WorkspaceTerminalsProps['machines'] = [{ id: 'cache-a', label: 'Cache A', state: 'live' }, { id: 'cache-p', label: 'Cache P', state: 'paused' }];
+  const options = { ...props(channel().live), machines, machineId: null, onSelectMachine, create };
+  await render(options);
+  expect(button('Cache P · Paused')).toBeDefined();
+  await act(() => button('Cache P · Paused')?.click());
+  expect(onSelectMachine).toHaveBeenCalledWith('cache-p');
+  await render({ ...options, machineId: 'cache-p' });
+  // Terminal placement stays on the pick: no terminal opens until the paused cache is live again.
+  expect(container.textContent).toContain('Cache P is paused');
+  expect(button('New terminal')).toBeUndefined();
+  const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Terminal machine"]');
+  expect(picker?.value).toBe('cache-p');
+  expect(Array.from(picker?.options ?? [], (option) => option.textContent)).toEqual(['Cache A', 'Cache P · Paused']);
+  await act(() => button('Wake Cache P')?.click());
+  expect(onSelectMachine).toHaveBeenLastCalledWith('cache-p');
+  await render({ ...options, machineId: 'cache-p', machines: [machines[0]!, { ...machines[1]!, state: 'live' }] });
+  await act(() => button('New terminal')?.click());
+  expect(create).toHaveBeenCalledWith('cache-p');
 });

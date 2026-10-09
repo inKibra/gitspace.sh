@@ -13,10 +13,12 @@ export async function ensureAccountGitSpaceProject(
   const index = namespace.get(namespace.idFromName(userId));
   const authorityNamespace = env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>;
   const existing = (await index.list()).find((project) => project.role === 'gitspace-source');
-  if (existing && existing.lifecycle !== 'cloud-only') {
-    const authority = authorityNamespace.get(authorityNamespace.idFromName(`${userId}:${existing.id}`));
-    return index.put(await authority.ensureGitSpaceProject(existing));
-  }
+  const ensure = async (reserved: CloudProjectSummary): Promise<CloudProjectSummary> => {
+    const project = await authorityNamespace.get(authorityNamespace.idFromName(`${userId}:${reserved.id}`)).ensureGitSpaceProject(reserved);
+    await index.putWorkspaceLocation(project.id, project.id);
+    return index.put(project);
+  };
+  if (existing && existing.lifecycle !== 'cloud-only') return ensure(existing);
   const releasesNamespace = env.TENANT_RELEASES as DurableObjectNamespace<TenantReleasesDO>;
   const accountsNamespace = env.ACCOUNT_STATE as DurableObjectNamespace<AccountStateDO>;
   const [frontend, account] = await Promise.all([
@@ -55,7 +57,5 @@ export async function ensureAccountGitSpaceProject(
       }
     }
   }
-  const reserved = await index.ensureGitSpaceProject(source);
-  const authority = authorityNamespace.get(authorityNamespace.idFromName(`${userId}:${reserved.id}`));
-  return index.put(await authority.ensureGitSpaceProject(reserved));
+  return ensure(await index.ensureGitSpaceProject(source));
 }

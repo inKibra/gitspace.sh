@@ -48,6 +48,22 @@ function sandbox() {
   return { runtime, records, methods, container, fetch, get };
 }
 
+/** The Durable Object stub boundary as workerd enforces it: `fetch` hands the object the caller's Request, abort signal
+ * included, while RPC arguments are structured-cloned and an abortable AbortSignal cannot be cloned. */
+function objectStub(runtime: GitSpaceSandbox) {
+  return new Proxy(runtime, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key);
+      if (typeof value !== 'function') return value;
+      if (key === 'fetch') return (request: Request) => value.call(target, request);
+      return async (...args: unknown[]) => {
+        if (args.some((arg) => arg instanceof Request)) throw new DOMException('AbortSignal serialization is not enabled.', 'DataCloneError');
+        return value.apply(target, args);
+      };
+    },
+  });
+}
+
 describe('managed runtime startup', () => {
   it('launches only one host for concurrent starts', async () => {
     const { runtime, methods } = sandbox();
@@ -214,7 +230,7 @@ describe('managed runtime startup', () => {
     const { runtime, records, container, fetch, methods } = sandbox();
     records.set('gitspace:machine-record', { id: 'sandbox-a', state: 'online', desiredState: 'online' });
     container.running = false;
-    const response = await runtime.rpc(new Request('http://localhost/rpc', { method: 'POST', body: 'signed read' }));
+    const response = await runtime.fetch(new Request('http://gitspace-machine.internal/rpc', { method: 'POST', body: 'signed read' }));
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ error: { code: 'MACHINE_OFFLINE' } });
     expect(fetch).not.toHaveBeenCalled();
@@ -225,11 +241,31 @@ describe('managed runtime startup', () => {
   it('preserves a live host rejection without the SDK replaying or restarting the RPC', async () => {
     const { runtime, records, fetch, methods } = sandbox();
     records.set('gitspace:machine-record', { id: 'sandbox-a', state: 'online', desiredState: 'online' });
-    const response = await runtime.rpc(new Request('http://localhost/rpc', { method: 'POST', body: 'signed mutation' }));
+    const response = await runtime.fetch(new Request('http://gitspace-machine.internal/rpc', { method: 'POST', body: 'signed mutation' }));
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ error: { code: 'RPC_DRAINING' } });
     expect(fetch).toHaveBeenCalledOnce();
     expect(methods.startAndWaitForPorts).not.toHaveBeenCalled();
+  });
+
+  it('cancels the container RPC stream when the caller disconnects', async () => {
+    const { runtime, records, fetch } = sandbox();
+    records.set('gitspace:machine-record', { id: 'sandbox-a', state: 'online', desiredState: 'online' });
+    const containerCall = Promise.withResolvers<Request>();
+    fetch.mockImplementationOnce(async (request: Request) => {
+      containerCall.resolve(request);
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('event\n')); } }));
+    });
+    vi.mocked(getSandbox).mockReturnValue(objectStub(runtime) as never);
+    const caller = new AbortController();
+    const response = await worker.fetch(new Request('https://provider.test/v1/sandboxes/sandbox-a/rpc', {
+      method: 'POST', headers: { 'x-gitspace-user-id': 'user-a' }, signal: caller.signal,
+    }), { Sandbox: {} } as never);
+    expect(response.status).toBe(200);
+    const upstream = await containerCall.promise;
+    expect(upstream.signal.aborted).toBe(false);
+    caller.abort();
+    expect(upstream.signal.aborted).toBe(true);
   });
 
   it('requires checkpoint authority after an uncertain custom image start', async () => {

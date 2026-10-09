@@ -8,7 +8,7 @@ import {
   resolveExecutionApproval, deriveLifecycleExecutions, isInteractiveLifecycleScript,
   effectiveEnvironmentValues, assertEnvironmentExecutionReady, shouldPrepareEnvironment, environmentPreparationPhases,
   EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
-  type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleMutation, type LifecycleIncident, type EnvironmentValueScope, type EnvironmentApprovalScope,
+  type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleMutation, type LifecycleIncident,
   type EnvironmentLifecycleAuthority, type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from '@gitspace/protocol-environment';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol';
@@ -154,45 +154,6 @@ export class WorkspaceEnvironmentManager {
     };
   }
 
-  async putBundle(spaceId: string, source: unknown): Promise<WorkspaceEnvironmentView> {
-    const space = this.database.getSpace(spaceId);
-    if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
-    const bundle = loadEnvironmentBundle(source);
-    const path = join(space.rootPath, '.gitspace', 'bundle.json');
-    await mkdir(dirname(path), { recursive: true });
-    const temporary = `${path}.${crypto.randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(bundle, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await rename(temporary, path);
-    await this.authority.mutateLifecycleState(space.projectId, spaceId, { op: 'configure', bundleJson: JSON.stringify(bundle) });
-    return this.view(spaceId);
-  }
-
-  async setProfile(spaceId: string, profile: string): Promise<WorkspaceEnvironmentView> {
-    const current = await this.view(spaceId);
-    resolveEnvironmentProfile(current.bundle, profile);
-    await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'profile', profile });
-    return this.view(spaceId);
-  }
-
-  async putValue(spaceId: string, scope: EnvironmentValueScope, name: string, value: string): Promise<WorkspaceEnvironmentView> {
-    const current = await this.view(spaceId);
-    await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'value', scope, name, value });
-    return this.view(spaceId);
-  }
-
-  async deleteValue(spaceId: string, scope: EnvironmentValueScope, name: string): Promise<WorkspaceEnvironmentView> {
-    const current = await this.view(spaceId);
-    await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'value', scope, name, value: null });
-    return this.view(spaceId);
-  }
-
-  async approve(_spaceId: string, _scope: EnvironmentApprovalScope, _hash: string): Promise<WorkspaceEnvironmentView> {
-    throw new EnvironmentError('PermissionDenied', 'Execution approval requires lifecycle control authorization through the account gateway');
-  }
-
-  async revokeApproval(_spaceId: string, _scope: EnvironmentApprovalScope, _hash: string): Promise<WorkspaceEnvironmentView> {
-    throw new EnvironmentError('PermissionDenied', 'Execution approval changes require lifecycle control authorization through the account gateway');
-  }
 
   /** The request ends after durable acceptance; no caller signal owns execution. */
   async acceptRun(spaceId: string, candidate: LifecycleRunRequest, attachment?: LocalAttachment): Promise<LifecycleRun> {

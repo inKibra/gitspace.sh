@@ -7,7 +7,7 @@ import { RuntimeBrowserArgumentsSchema, RuntimeBrowserApprovalCardSchema, Runtim
 import type { RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import type { WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
-import { committedSessionApproval, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
+import { committedSessionApproval, sessionApprovalMode, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 import type { AccountStateDO } from './account-state.js';
 import type { CredentialVaultDO } from './application.js';
@@ -49,7 +49,7 @@ export async function runtimeBrowserPublicKey(storage: DurableObjectStorage) {
   const pair = await runtimeBrowserKey(storage);
   return { algorithm: 'Ed25519' as const, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))) };
 }
-export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; groupName(): Promise<string>; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname };
+export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; approvalDefault: ToolServices['approvalDefault']; groupName(): Promise<string>; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname };
 export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOptions): RuntimeBrowserAuthority {
   const { storage, env, identity } = options;
   async function eligible(machineId: string) {
@@ -130,8 +130,8 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       await tx.put(groupKey, groupId);
       return { groupId, grant: undefined };
     });
-    const controls = await options.runtime().harness.snapshot(SessionControlsDoc, conversation.id, BACKGROUND_CONTEXT);
-    const card = RuntimeBrowserApprovalCardSchema.parse({ ...identity, machineId: placement.machineId, attachmentId: placement.attachmentId, generation: placement.generation, groupId, groupName: await options.groupName(), source: args.source, origins, expiresAt: grant?.expiresAt ?? new Date(Date.now() + 30 * 60_000).toISOString(), id: crypto.randomUUID(), action: args.action, requiresApproval: args.source === 'relay' && !grant && controls?.approvalMode !== 'yolo' });
+    const approvalMode = await sessionApprovalMode(options.runtime().harness, conversation.id, BACKGROUND_CONTEXT, options.approvalDefault);
+    const card = RuntimeBrowserApprovalCardSchema.parse({ ...identity, machineId: placement.machineId, attachmentId: placement.attachmentId, generation: placement.generation, groupId, groupName: await options.groupName(), source: args.source, origins, expiresAt: grant?.expiresAt ?? new Date(Date.now() + 30 * 60_000).toISOString(), id: crypto.randomUUID(), action: args.action, requiresApproval: args.source === 'relay' && !grant && approvalMode !== 'yolo' });
     const saved = await storage.transaction(async tx => {
       if (await tx.get(`runtime.browser.revoked:${card.groupId}`) || await tx.get(groupKey) !== card.groupId) throw new Error('Browser group grant expired or revoked');
       const current = await tx.get(key);

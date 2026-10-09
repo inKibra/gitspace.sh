@@ -78,9 +78,8 @@ export async function loadInspectorResource(transport: ResourceTransport, contex
     })(), uri, signal);
   }
   const request = { spaceId: context.spaceId, expectedGeneration: context.generation };
-  const durable = resource.kind === 'local' && (resource.mount !== null || !context.runtimeAvailable);
-  if (!durable && (!context.runtimeAvailable || context.sessionId === null)) throw new Error('Open this workspace on its machine to read this session resource. Tool outputs are not part of the saved artifact catalog.');
-  const stream = durable && resource.kind === 'local'
+  if (resource.kind !== 'local') throw new Error('Machine-session output spills are not retained cloud artifacts. Use a published local:// evidence link.');
+  const stream = resource.mount !== null || !context.runtimeAvailable
     ? transport.readArtifact({ ...request, url: `${canonicalLocalResourceUrl(resource, context.spaceId === context.projectId ? 'base' : 'workspace')}${resource.suffix}`, hash: null }, { signal })
     : transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal });
   return loadInspectorContent(stream, uri, signal);

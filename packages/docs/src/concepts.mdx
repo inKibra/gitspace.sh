@@ -37,7 +37,7 @@ A project groups work for one repository. It is the stable parent for that repos
 
 ## Workspace
 
-A workspace is an isolated, durable unit of change. Its cloud Durable Object owns Pi conversations, task state, questions, and workspace documents. Opening it on a machine materializes a checkout; closing that checkout does not transfer conversation authority to or from the machine.
+A workspace is an isolated, durable unit of change. Its cloud Durable Object owns Pi conversations, task state, questions, workspace documents, and the canonical working tree. Opening it in the app does not require a machine. Attaching a machine materializes an equal checkout cache; releasing that cache does not close the cloud conversation.
 
 A completed checkout checkpoint saves supported Git state: the branch, commits, staged and unstaged tracked changes, and non-ignored untracked files. Cloudflare Artifacts stores code repositories. GitSpace's encrypted evidence manifests and blobs are a separate store, not repository branches or ArtifactFS mounts.
 
@@ -53,6 +53,24 @@ Workspace phases are:
 | `ship` | Release the work and watch its operational state. |
 
 A workspace can attach to eligible machines, with explicit placement for its checkouts and tasks. Each machine keeps an equal cache of the canonical cloud working tree, with one fenced writer for each admitted mutation. Runners use a recorded source commit rather than sharing a mutable filesystem. Losing a connection does not prove that an old command stopped, so unresolved effects must reconcile before they can safely repeat. A GitSpace workspace can also modify and release the account's own GitSpace code, subject to approval.
+
+### Public API authority
+
+The browser, CLI, and MCP use the same exhaustive protocol authority map.
+Cloud operations never follow a legacy workspace holder or select an arbitrary
+online machine. Unknown or removed procedures are rejected rather than forwarded.
+Terminal calls and release builds require an explicit `machineId`; terminals
+additionally require that machine to be a ready cache of the named workspace.
+Environment runs and service actions are accepted by cloud authority and dispatch
+only to their explicit machine attachment.
+
+Use `runtime.session`, `runtime.watch`, and Inspector conversation readers for
+cloud sessions and history. The legacy `session.*`, `subagents.*`, top-level
+transcript and event APIs, `placements`, `browserRelay.*`, `workspace.setPhase`,
+`project.open`, and `space.close`/`space.reopen` are removed. Change a phase through
+`runtime.session`; attach or release caches through runtime attachment APIs.
+Archive and restore remain durable project/workspace lifecycle operations.
+
 
 ## Account releases
 
@@ -104,8 +122,6 @@ These products stay attached to the workspace instead of disappearing when an ag
 
 Opening Inspector does not open a checkout or start a machine. It can read cloud records such as goals, workflow, rubric, journal, review, Change Guide, and referenced artifacts while machines are offline. Cloud conversations and committed repository reads do not depend on a live checkout.
 
-Working-copy files, staged or uncommitted changes, terminals, processes, and services require the relevant checkout on an online machine. Committed cloud reads identify a recorded ref; they do not include unflushed local edits. Use **Open workspace** when you need machine work, and start a machine explicitly if none is online.
+Cloud working-tree reads, edits, repository comparisons, and ordinary Git operations do not require a machine. Hooks, rebase or conflict work, LFS restoration, initial private or large imports, terminals, processes, and services require an explicitly selected machine. Unpublished local cache edits are not silently substituted for cloud state.
 
-An open portable workspace has its own Git repository. Inspector can browse its local files and staged or working changes without the project's base checkout. ArtifactFS is a machine-side checkout option, not the authority for conversations or evidence. Its host and repository requirements are separate from cloud repository access.
-
-Base comparisons use the original branch commit from the base space's latest published checkpoint. Inspector fetches any missing Git objects into the inspected workspace and compares changes from the merge base. It does not reopen the base space or include the base space's saved uncommitted changes. If the checkpoint is unavailable, the base comparison reports that error; files and local changes remain available.
+Published encrypted `local://` evidence can be previewed or paged through Inspector resource readers without its originating session or machine. Machine-session `artifact://` output spills are not retained cloud artifacts; publish durable evidence before relying on a saved link. Resource reads preserve artifact scope authorization and reject stale paging cursors when the content changes.

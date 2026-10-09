@@ -33,7 +33,7 @@ export interface OverviewViewProps {
   workspaces: readonly WorkspaceView[];
   onSelectWorkspace(workspaceId: string): void;
   onSetRelations?: SetWorkspaceRelations;
-  /** Git position against the `stackedOn` parent; null while loading or when the holder cannot compute it. */
+  /** Git position against the `stackedOn` parent; null while loading or when it cannot be computed. */
   stackStatus?: StackStatus | null;
 }
 

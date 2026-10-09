@@ -38,7 +38,7 @@ function Harness({ read }: { read: (uri: string) => Promise<InspectorArtifactCon
   const [request, setRequest] = useState<ResourceRequest>();
   const unavailable = async (): Promise<never> => { throw new Error('Unexpected unrelated action'); };
   return <ResourceNavigation.Provider value={setRequest}>
-    <GitSpaceMarkdown>{'[Plan](local://workspace/PLAN.md) [Output](artifact://7) [Missing](local://workspace/missing.txt) [Unsafe](javascript:alert(1))'}</GitSpaceMarkdown>
+    <GitSpaceMarkdown>{'[Plan](local://workspace/PLAN.md) [Output](local://output.txt) [Missing](local://workspace/missing.txt) [Unsafe](javascript:alert(1))'}</GitSpaceMarkdown>
     <Inspector
       overview={{ projectId: 'project', spaceId: 'workspace', revision: 0, goal: null, workflow: null, rubric: null, journal: { entries: 0, openPhaseRunId: null, recent: [] }, changeGuide: null, review: { total: 0, unresolved: 0 } }}
       workspaces={[]} onSelectWorkspace={() => { throw new Error('Unexpected workspace change'); }}
@@ -60,7 +60,7 @@ async function clickLink(label: string) {
 }
 
 describe('Markdown resource navigation', () => {
-  it('opens authenticated local and session output bytes in the actual Inspector and displays missing-resource failures', async () => {
+  it('opens authenticated published artifacts and runtime files in the actual Inspector and displays missing-resource failures', async () => {
     const transport = {
       readArtifact: async function* ({ spaceId, url }: { spaceId: string; url: string }) {
         if (spaceId !== 'workspace') throw new Error('Wrong workspace');
@@ -71,7 +71,7 @@ describe('Markdown resource navigation', () => {
       },
       readResource: async function* ({ sessionId, url }: { sessionId: string | null; url: string }) {
         if (sessionId !== 'session-a') throw new Error('Wrong originating session');
-        const text = 'Actual spilled tool output';
+        const text = 'Published tool output';
         yield { status: 'ok' as const, value: { type: 'metadata' as const, url, text: true, mediaType: 'text/plain', size: text.length } };
         yield { status: 'ok' as const, value: { type: 'chunk' as const, base64: btoa(text) } };
       },
@@ -81,7 +81,7 @@ describe('Markdown resource navigation', () => {
     await clickLink('Plan');
     expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('The resource body');
     await clickLink('Output');
-    expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('Actual spilled tool output');
+    expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('Published tool output');
     await clickLink('Missing');
     expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('Artifact does not exist');
     expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('local://workspace/missing.txt');
@@ -90,7 +90,7 @@ describe('Markdown resource navigation', () => {
   it('does not let a stale resource response replace the latest selection', async () => {
     const pending = Promise.withResolvers<InspectorArtifactContent>();
     const dispose = vi.fn();
-    await act(async () => root.render(<Harness read={(uri) => uri.startsWith('local:') ? pending.promise : Promise.resolve({ url: uri, source: 'Latest output', mediaType: 'text/plain', previewUrl: '' })} />));
+    await act(async () => root.render(<Harness read={(uri) => uri.endsWith('PLAN.md') ? pending.promise : Promise.resolve({ url: uri, source: 'Latest output', mediaType: 'text/plain', previewUrl: '' })} />));
     await clickLink('Plan');
     await clickLink('Output');
     await act(async () => pending.resolve({ url: 'local://workspace/PLAN.md', source: 'Stale plan', mediaType: 'text/plain', previewUrl: '', dispose }));
@@ -103,7 +103,7 @@ describe('Markdown resource navigation', () => {
   it('disposes the displayed resource when replaced and when the Inspector unmounts', async () => {
     const planDispose = vi.fn();
     const outputDispose = vi.fn();
-    await act(async () => root.render(<Harness read={async (uri) => ({ url: uri, source: null, mediaType: 'audio/wav', previewUrl: uri.startsWith('local:') ? 'blob:plan' : 'blob:output', dispose: uri.startsWith('local:') ? planDispose : outputDispose })} />));
+    await act(async () => root.render(<Harness read={async (uri) => ({ url: uri, source: null, mediaType: 'audio/wav', previewUrl: uri.endsWith('PLAN.md') ? 'blob:plan' : 'blob:output', dispose: uri.endsWith('PLAN.md') ? planDispose : outputDispose })} />));
     await clickLink('Plan');
     expect(container.querySelector('audio')?.getAttribute('src')).toBe('blob:plan');
     await clickLink('Output');

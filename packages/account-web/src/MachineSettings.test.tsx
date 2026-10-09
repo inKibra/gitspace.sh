@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { UserSettings } from '@gitspace/protocol';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
+import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { MachineSettings } from './SettingsPage.js';
 
 const settings: UserSettings = { version: 1, revision: 2, onboardingComplete: true, profile: { displayName: 'Brad', handle: 'brad' }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, machines: { cacheReclaimSeconds: 86400 }, updatedAt: '2026-10-03T00:00:00.000Z', updatedBy: 'browser' };
@@ -115,4 +116,28 @@ it('keeps every other machine and its discard dialog usable while one machine op
   await button('Discard and stop');
   expect(control).toHaveBeenLastCalledWith('sleep', 'cloud-b', confirmation);
   await act(async () => { hung.resolve(); await hung.promise; });
+});
+it('shows account image verification progress and failure beside the pin action', async () => {
+  const verification = Promise.withResolvers<void>();
+  const pin = vi.fn((_selection: CloudImageSelection) => verification.promise);
+  const machine = (id: string) => ({ id, label: id, state: 'online' as const, kind: 'sandbox' as const, provider: 'cloudflare-sandbox' as const, notes: '', desiredState: 'online' as const, lifecycleRevision: 1, operationId: null, error: null });
+  // Machines push the image panel far below the section's top-level alert.
+  await render({ machines: [machine('cloud-a'), machine('cloud-b')], onSetCloudImageDefault: pin });
+  await button('Choose account image');
+  await act(() => document.body.querySelector<HTMLElement>('[aria-label="Cloud image source"]')!.click());
+  await act(() => [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent === 'Custom immutable OCI image')!.click());
+  const image = `ghcr.io/team/image@sha256:${'a'.repeat(64)}`;
+  const input = document.body.querySelector<HTMLInputElement>('input[placeholder^="registry.example.com"]')!;
+  await act(() => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, image);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await button('Verify and pin default');
+  expect(pin).toHaveBeenCalledWith({ kind: 'custom', image });
+  let panel = [...document.body.querySelectorAll('button')].find((candidate) => candidate.textContent === 'Verify and pin default')!.parentElement;
+  while (panel && !panel.textContent?.includes('Choose account cloud image')) panel = panel.parentElement;
+  expect(panel?.querySelector('[role="status"]')?.textContent).toContain('Verifying');
+  await act(async () => { verification.reject(rpcErrors.operationFailed({ operation: 'set cloud image default', message: 'images/prepare returned 409' })); await verification.promise.catch(() => undefined); });
+  expect(panel?.querySelector('[role="alert"]')?.textContent).toContain('images/prepare returned 409');
+  expect(panel?.querySelector('[role="status"]')).toBeNull();
 });

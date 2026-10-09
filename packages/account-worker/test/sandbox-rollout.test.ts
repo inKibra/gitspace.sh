@@ -242,49 +242,114 @@ it('requires explicit discard consent and a bound stop receipt before fencing an
 });
 
 it('pins the tenant default and preserves it when a new image cannot be pulled', async () => {
-  const catalog = env.FLEET_CATALOG.getByName(env.ACCOUNT_ID);
-  let platformDefault = originalImage;
-  let rejected = false;
-  let preflights = 0;
-  network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/v1/images/:action`, async ({ request, params }) => {
-    if (params.action === 'default') return HttpResponse.json({ status: 'ok', value: { image: platformDefault } });
-    preflights += 1;
-    const { image } = await request.json() as { image: string };
-    return rejected ? HttpResponse.json({ status: 'error', error: { code: 'IMAGE_PULL_REJECTED', message: 'No compatible image available' } }, { status: 409 })
-      : HttpResponse.json({ status: 'ok', value: { image, deploymentId: 'prepared-deployment' } });
-  }));
-  expect(await catalog.cloudImageDefault()).toEqual({ kind: 'platform-default', image: originalImage });
-  platformDefault = selectedImage;
-  expect(await catalog.cloudImageDefault()).toEqual({ kind: 'platform-default', image: originalImage });
-  expect(preflights).toBe(0);
-  rejected = true;
-  await expect(Promise.resolve(catalog.setCloudImageDefault({ kind: 'custom', image: selectedImage }))).rejects.toThrow();
-  expect(await catalog.cloudImageDefault()).toEqual({ kind: 'platform-default', image: originalImage });
-  rejected = false;
-  expect(await catalog.setCloudImageDefault({ kind: 'platform-default' })).toEqual({ kind: 'platform-default', image: selectedImage });
+  await runInDurableObject(env.FLEET_CATALOG.getByName(env.ACCOUNT_ID), async (catalog: FleetCatalogDO) => {
+    let platformDefault = originalImage;
+    let rejected = false;
+    let preflights = 0;
+    network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/v1/images/:action`, async ({ params }) => {
+      if (params.action === 'default') return HttpResponse.json({ status: 'ok', value: { image: platformDefault } });
+      preflights += 1;
+      return rejected ? HttpResponse.json({ status: 'error', error: { code: 'IMAGE_PULL_REJECTED', message: 'No compatible image available' } }, { status: 409 })
+        : HttpResponse.json({ status: 'ok', value: { image: selectedImage, deploymentId: 'prepared-deployment' } });
+    }));
+    expect(await catalog.cloudImageDefault()).toEqual({ kind: 'platform-default', image: originalImage });
+    platformDefault = selectedImage;
+    expect(await catalog.cloudImageDefault()).toEqual({ kind: 'platform-default', image: originalImage });
+    expect(preflights).toBe(0);
+    rejected = true;
+    await expect(catalog.setCloudImageDefault({ kind: 'custom', image: selectedImage })).rejects.toThrow('No compatible image available');
+    expect(await catalog.cloudImageDefault()).toEqual({ kind: 'platform-default', image: originalImage });
+    rejected = false;
+    expect(await catalog.setCloudImageDefault({ kind: 'platform-default' })).toEqual({ kind: 'platform-default', image: selectedImage });
+  });
 });
 
 it('atomically pins concurrent first-default reads without preparing a VM', async () => {
-  const catalog = env.FLEET_CATALOG.getByName(env.ACCOUNT_ID);
-  const gate = Promise.withResolvers<void>();
-  let resolutions = 0;
-  let preflights = 0;
-  network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/v1/images/:action`, async ({ params }) => {
-    if (params.action === 'prepare') {
-      preflights += 1;
-      return HttpResponse.json({ status: 'ok', value: { image: originalImage, deploymentId: 'prepared' } });
+  await runInDurableObject(env.FLEET_CATALOG.getByName(env.ACCOUNT_ID), async (catalog: FleetCatalogDO) => {
+    const gate = Promise.withResolvers<void>();
+    let resolutions = 0;
+    let preflights = 0;
+    network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/v1/images/:action`, async ({ params }) => {
+      if (params.action === 'prepare') {
+        preflights += 1;
+        return HttpResponse.json({ status: 'ok', value: { image: originalImage, deploymentId: 'prepared' } });
+      }
+      const selected = resolutions++ === 0 ? originalImage : selectedImage;
+      await gate.promise;
+      return HttpResponse.json({ status: 'ok', value: { image: selected } });
+    }));
+    const first = catalog.cloudImageDefault();
+    const second = catalog.cloudImageDefault();
+    try {
+      await expect.poll(() => resolutions).toBe(1);
+    } finally { gate.resolve(); }
+    expect(await Promise.all([first, second])).toEqual([{ kind: 'platform-default', image: originalImage }, { kind: 'platform-default', image: originalImage }]);
+    expect(await catalog.cloudImageDefault()).toEqual({ kind: 'platform-default', image: originalImage });
+    expect(preflights).toBe(0);
+  });
+});
+
+it('accepts the first explicit image selection while default initialization is pending', async () => {
+  await runInDurableObject(env.FLEET_CATALOG.getByName(env.ACCOUNT_ID), async (catalog: FleetCatalogDO) => {
+    const lookupStarted = Promise.withResolvers<void>();
+    const lookup = Promise.withResolvers<void>();
+    const preparationStarted = Promise.withResolvers<void>();
+    const preparation = Promise.withResolvers<void>();
+    network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/v1/images/:action`, async ({ params }) => {
+      if (params.action === 'default') {
+        lookupStarted.resolve();
+        await lookup.promise;
+        return HttpResponse.json({ status: 'ok', value: { image: originalImage } });
+      }
+      preparationStarted.resolve();
+      await preparation.promise;
+      return HttpResponse.json({ status: 'ok', value: { image: selectedImage, deploymentId: 'prepared' } });
+    }));
+    const initialRead = catalog.cloudImageDefault();
+    const selection = { kind: 'custom', image: selectedImage } as const;
+    try {
+      await Promise.race([lookupStarted.promise, initialRead]);
+      const selected = catalog.setCloudImageDefault(selection);
+      try {
+        await Promise.race([preparationStarted.promise, selected]);
+        // Two real writes still conflict; the delayed initial read must not own or clear this lock.
+        lookup.resolve();
+        expect(await initialRead).toEqual({ kind: 'platform-default', image: originalImage });
+        await expect(catalog.setCloudImageDefault({ kind: 'platform-default' })).rejects.toThrow('already in progress');
+        preparation.resolve();
+        expect(await selected).toEqual(selection);
+        expect(await catalog.cloudImageDefault()).toEqual(selection);
+      } finally {
+        preparation.resolve();
+        await selected;
+      }
+    } finally {
+      lookup.resolve();
+      await initialRead;
     }
-    const selected = resolutions++ === 0 ? originalImage : selectedImage;
-    await gate.promise;
-    return HttpResponse.json({ status: 'ok', value: { image: selected } });
-  }));
-  const first = catalog.cloudImageDefault();
-  const second = catalog.cloudImageDefault();
-  try {
-    await expect.poll(() => resolutions).toBe(1);
-    await expect(Promise.resolve(catalog.setCloudImageDefault({ kind: 'custom', image: selectedImage }))).rejects.toThrow();
-  } finally { gate.resolve(); }
-  expect(await Promise.all([first, second])).toEqual([{ kind: 'platform-default', image: originalImage }, { kind: 'platform-default', image: originalImage }]);
-  expect(await catalog.cloudImageDefault()).toEqual({ kind: 'platform-default', image: originalImage });
-  expect(preflights).toBe(0);
+  });
+});
+
+it('does not overwrite a verified first selection when the initial platform lookup finishes later', async () => {
+  await runInDurableObject(env.FLEET_CATALOG.getByName(env.ACCOUNT_ID), async (catalog: FleetCatalogDO) => {
+    const lookupStarted = Promise.withResolvers<void>();
+    const lookup = Promise.withResolvers<void>();
+    network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/v1/images/:action`, async ({ params }) => {
+      if (params.action === 'prepare') return HttpResponse.json({ status: 'ok', value: { image: selectedImage, deploymentId: 'prepared' } });
+      lookupStarted.resolve();
+      await lookup.promise;
+      return HttpResponse.json({ status: 'ok', value: { image: originalImage } });
+    }));
+    const initialRead = catalog.cloudImageDefault();
+    const selection = { kind: 'custom', image: selectedImage } as const;
+    try {
+      await Promise.race([lookupStarted.promise, initialRead]);
+      expect(await catalog.setCloudImageDefault(selection)).toEqual(selection);
+    } finally {
+      lookup.resolve();
+      await initialRead;
+    }
+    expect(await initialRead).toEqual(selection);
+    expect(await catalog.cloudImageDefault()).toEqual(selection);
+  });
 });

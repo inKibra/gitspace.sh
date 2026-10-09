@@ -1,4 +1,4 @@
-import { isAccountCloudRpcPath, isTerminalRpcPath, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
+import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
 import { consumeDurableStream } from './durable-stream.js';
 import { activeAccount } from './account-access.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
@@ -19,11 +19,12 @@ import {
   setCloudImageContract, retryCloudImageContract, cancelCloudImageContract, recoverCloudImageContract,
   listProjectsContract, listDevicesContract, revokeDeviceContract,
   getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
-  ensureGitSpaceProjectContract, placementsContract, locateSessionContract, type SpacePlacementView,
+  ensureGitSpaceProjectContract,
   spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentRevertContract,
   projectEventsContract, projectDirectoryEventsContract, environmentEventsContract, spaceEventsContract, recordIncidentContract,
 } from '@gitspace/protocol/rpc-contract';
 import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract, inferenceEventsContract } from '@gitspace/protocol/rpc-contract';
+import { stackStatusContract } from '@gitspace/protocol/rpc-contract';
 import type { InferenceState } from '@gitspace/protocol/inference';
 import { parse } from 'devalue';
 import { contractDigest, err, ok } from 'result-rpc';
@@ -44,6 +45,8 @@ import { configurationCloudProcedures } from './account-configuration-rpc.js';
 import { runtimeCloudProcedures } from './account-runtime-rpc.js';
 import { providerCloudProcedures } from './account-provider-rpc.js';
 import { createCloudProject, readCloudSpaceView } from './cloud-project.js';
+import { readCloudStackStatus } from './cloud-stack-status.js';
+import { workspaceLifecycleCloudProcedures } from './account-workspace-rpc.js';
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_BATCH_ITEMS = 32;
@@ -80,33 +83,6 @@ async function readBody(request: Pick<Request, 'body'>): Promise<Uint8Array | nu
   return body;
 }
 
-/** The canonical workspace of a session, from whichever account project owns it. */
-async function sessionSpaceId(env: Env, userId: string, sessionId: string): Promise<string | null> {
-  const projects = await env.USER_PROJECTS.getByName(userId).list();
-  const sessions = await Promise.all(projects.map((project) => env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`).getCanonicalSession(sessionId)));
-  return sessions.find((session) => session !== null)?.workspaceId ?? null;
-}
-
-/** Machines currently holding the spaces and sessions a batch names. A target
- * without a live holder can run on any machine, so it never selects one. */
-async function liveHolders(env: Env, userId: string, items: readonly { path: string; input: unknown }[]): Promise<FleetMachineDefinition[]> {
-  const spaceIds = new Set<string>();
-  const sessionIds = new Set<string>();
-  for (const item of items) {
-    const target = rpcCallTarget(item.path, item.input);
-    if (target?.kind === 'space') spaceIds.add(target.spaceId);
-    else if (target?.kind === 'session') sessionIds.add(target.sessionId);
-  }
-  for (const spaceId of await Promise.all([...sessionIds].map((sessionId) => sessionSpaceId(env, userId, sessionId)))) {
-    if (spaceId) spaceIds.add(spaceId);
-  }
-  const placements = await Promise.all([...spaceIds].map((spaceId) => env.SPACE_AUTHORITY.getByName(`${userId}:${spaceId}`).get()));
-  const machineIds = new Set(placements.flatMap((placement) => placement?.state === 'open' && placement.machineId ? [placement.machineId] : []));
-  if (machineIds.size === 0) return [];
-  const catalog = env.FLEET_CATALOG.getByName(userId);
-  const machines = await Promise.all([...machineIds].map((machineId) => catalog.getMachine(machineId)));
-  return machines.flatMap((machine) => machine?.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint ? [machine] : []);
-}
 
 function accountRouter(env: Env, userId: string, deviceId: string, origin: string) {
   const server = serverRpc.context<GitSpaceRpcContext>();
@@ -126,6 +102,11 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     if (!deviceCanAdminister(device, capability)) throw new Error(`Account scope, rpc.write and ${capability} authorization are required`);
     return device!;
   };
+  const currentDevice = async () => {
+    const device = await vault.currentDeviceGrant(deviceId);
+    if (!device) throw new Error('Device authority has expired or been revoked');
+    return device;
+  };
   // Every delivery consumes the same bounded tenant authority as request admission.
   const requireSubscription = async () => {
     const account = await activeAccount(env, userId);
@@ -137,38 +118,6 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     }
   };
   const fleet = async () => reconcileFleetMachines(env, userId, catalog);
-  const readDirectory = async () => {
-    const [projects, machines] = await Promise.all([
-      (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(userId).list(),
-      catalog.listMachines(),
-    ]);
-    const definitions = (await Promise.all(projects.map((project) =>
-      (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${userId}:${project.id}`).listWorkspaces(),
-    ))).flat();
-    const byMachine = new Map(machines.map((machine) => [machine.id, machine]));
-    const spaces = await Promise.all(definitions.map(async (definition): Promise<SpacePlacementView | null> => {
-      const state = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${definition.id}`).get();
-      if (!state) return null;
-      const machine = state.machineId ? byMachine.get(state.machineId) : undefined;
-      return {
-        spaceId: definition.id, projectId: definition.projectId, kind: definition.kind,
-        holderId: state.machineId ?? 'unassigned', state: state.state,
-        generation: state.generation,
-        endpoint: machine?.state === 'online' && machine.desiredState === 'online' ? machine.rpcEndpoint : null,
-      };
-    }));
-    return { projects, spaces: spaces.filter((space): space is SpacePlacementView => space !== null) };
-  };
-  const placements = server.implement(placementsContract).handler(async ({ errors }) => {
-    try { return ok({ machineId: '', spaces: (await readDirectory()).spaces }); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'list placements', message: message(error) })); }
-  });
-  const locateSession = server.implement(locateSessionContract).handler(async ({ input, errors }) => {
-    try {
-      const spaceId = await sessionSpaceId(env, userId, input.sessionId);
-      return ok(spaceId ? (await readDirectory()).spaces.find((space) => space.spaceId === spaceId) ?? null : null);
-    } catch (error) { return err(errors.OperationFailed({ operation: 'locate session', message: message(error) })); }
-  });
   const composioSetup = async () => {
     const metadata = await vault.providerSecretMetadata('composio');
     const platform = Boolean(env.COMPOSIO_API_KEY?.trim());
@@ -372,6 +321,13 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return workspace ? ok(workspace) : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'set workspace relations', message: message(error) })); }
   });
+  const stackStatus = server.implement(stackStatusContract).handler(async ({ input, errors }) => {
+    try {
+      const projectId = await projectIndex.locateWorkspace(input.workspaceId);
+      const status = projectId ? await readCloudStackStatus(env, userId, projectId, input.workspaceId) : null;
+      return status ? ok(status) : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read stack status', message: message(error) })); }
+  });
   const directoryEvents = server.implement(projectDirectoryEventsContract).stream(async function* ({ input, signal, errors }) {
     try {
       await requireSubscription();
@@ -521,31 +477,26 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to inference profiles', message: message(error) })); }
   });
   const configuration = configurationCloudProcedures(env, userId, deviceId, origin);
+  const lifecycle = workspaceLifecycleCloudProcedures(env, userId);
   return server.router({
     runtime: runtimeCloudProcedures(env, userId, deviceId),
-    placements, session: { locate: locateSession },
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign, events: inferenceEvents },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, events: settingsEvents },
-    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, events: projectEvents, directoryEvents },
-    space: { events: spaceEvents, view: spaceView }, workspace: { setRelations }, incidents: { record: recordIncident },
+    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, events: projectEvents, directoryEvents, ...lifecycle.project },
+    space: { events: spaceEvents, view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, deployment: { status: deploymentStatus, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
-    inspector: inspectorCloudProcedures(env, userId, requireSubscription, async () => {
-      const device = await vault.currentDeviceGrant(deviceId);
-      if (!device) throw new Error('Device authority has expired or been revoked');
-      return device;
-    }),
-    environment: { ...environmentCloudProcedures(env, userId, deviceId, () => requireAdministration('lifecycle.control')), events: environmentEvents },
+    inspector: inspectorCloudProcedures(env, userId, requireSubscription, currentDevice),
+    environment: { ...environmentCloudProcedures(env, userId, deviceId, currentDevice, () => requireAdministration('lifecycle.control')), events: environmentEvents },
   });
 }
 
-/** Where the account sends a `/rpc` request: answered here (`target: 'cloud'`
- * when the account router served it), or forwarded untouched to one machine,
- * any online machine when `holder` is null. A signed batch is never split. */
+/** A signed batch is answered by cloud authority or forwarded untouched to the
+ * one machine explicitly named by every call. There is no default machine. */
 export type AccountRpcRoute =
   | { kind: 'response'; response: Response; procedures?: readonly string[]; target?: 'cloud' }
-  | { kind: 'machine'; procedures: readonly string[]; holder: FleetMachineDefinition | null };
+  | { kind: 'machine'; procedures: readonly string[]; machine: FleetMachineDefinition };
 
 /** Called after the account's active-state and tenant-hostname checks. */
 export async function handleAccountCloudRpc(request: Request, env: Env, userId: string): Promise<AccountRpcRoute> {
@@ -562,7 +513,10 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   catch { return { kind: 'response', response: transportError(400, 'RPC_ENVELOPE_INVALID', 'RPC request envelope is invalid') }; }
   const procedures = [...new Set(items.map((item) => item.path))];
   const reject = (status: number, code: string, text: string): AccountRpcRoute => ({ kind: 'response', response: transportError(status, code, text), procedures });
-  const terminals = items.filter((item) => isTerminalRpcPath(item.path));
+  for (const item of items) {
+    if (!accountRpcAuthority(item.path)) return reject(404, 'RPC_PROCEDURE_UNKNOWN', `Unknown procedure ${item.path}`);
+  }
+  const terminals = items.filter((item) => accountRpcAuthority(item.path) === 'machine' && item.path.startsWith('terminals.'));
   if (terminals.length > 0) {
     // A terminal runs where the caller chose; it never follows a placement holder or an arbitrary online machine.
     if (terminals.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Terminal operations require a separate signed batch');
@@ -572,40 +526,27 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
     if (targets.some((other) => other?.kind !== 'terminal' || other.spaceId !== target.spaceId || other.machineId !== target.machineId)) {
       return reject(400, 'RPC_MIXED_TERMINAL_BATCH', 'Terminal operations for different workspaces or machines require separate signed batches');
     }
-    const authority = (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${target.spaceId}`);
+    const authority = env.SPACE_AUTHORITY.getByName(`${userId}:${target.spaceId}`);
     if (!await authority.runtimeTerminalMachine(target.machineId)) {
-      if (await authority.hasCloudRuntime()) return reject(409, 'TERMINAL_MACHINE_NOT_ATTACHED', `Machine ${target.machineId} is not a ready cache of this workspace; attach it to open terminals there`);
-      const placement = await authority.get();
-      if (placement?.state !== 'open' || placement.machineId !== target.machineId) return reject(409, 'TERMINAL_MACHINE_NOT_HOLDER', `Machine ${target.machineId} does not hold this workspace`);
+      return reject(409, 'TERMINAL_MACHINE_NOT_ATTACHED', `Machine ${target.machineId} is not a ready cache of this workspace; attach it to open terminals there`);
     }
-    const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).getMachine(target.machineId);
+    const machine = await env.FLEET_CATALOG.getByName(userId).getMachine(target.machineId);
     if (machine?.state !== 'online' || machine.desiredState !== 'online' || !machine.rpcEndpoint) return reject(503, 'TERMINAL_MACHINE_OFFLINE', `Machine ${target.machineId} is not online`);
-    return { kind: 'machine', procedures, holder: machine };
+    return { kind: 'machine', procedures, machine };
   }
-  const spaceReads = items.filter((item) => isSpaceCloudRpcPath(item.path));
-  if (spaceReads.length > 0) {
-    if (spaceReads.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads and other operations require separate signed batches');
-    const spaceId = spaceCloudRpcSpaceId(spaceReads[0]!.path, spaceReads[0]!.input);
-    if (spaceReads.some((item) => spaceCloudRpcSpaceId(item.path, item.input) !== spaceId)) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads require separate signed batches');
-    if (spaceId) {
-      // A cloud workspace's checkout lives in the cloud: a legacy placement never answers for it.
-      const authority = (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${spaceId}`);
-      const placement = await authority.get();
-      if (placement?.state === 'open' && placement.machineId && !await authority.hasCloudRuntime()) {
-        const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).getMachine(placement.machineId);
-        if (machine?.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint) {
-          return { kind: 'machine', procedures, holder: machine };
-        }
-      }
-    }
+  const named = items.filter((item) => accountRpcAuthority(item.path) === 'machine');
+  if (named.length > 0) {
+    // A release builds on the machine the caller chose; it never follows a placement holder or an arbitrary online machine.
+    if (named.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Launch operations require a separate signed batch');
+    const targets = items.map((item) => rpcCallTarget(item.path, item.input));
+    const target = targets[0];
+    if (target?.kind !== 'machine') return reject(400, 'LAUNCH_MACHINE_REQUIRED', 'A launch must name the machine that builds the release');
+    if (targets.some((other) => other?.kind !== 'machine' || other.machineId !== target.machineId)) return reject(400, 'RPC_MIXED_MACHINE_BATCH', 'Launches on different machines require separate signed batches');
+    const machine = await env.FLEET_CATALOG.getByName(userId).getMachine(target.machineId);
+    if (!machine || machine.desiredState === 'removed') return reject(409, 'LAUNCH_MACHINE_NOT_ENROLLED', `Machine ${target.machineId} is not enrolled in this account`);
+    if (machine.state !== 'online' || machine.desiredState !== 'online' || !machine.rpcEndpoint) return reject(503, 'LAUNCH_MACHINE_OFFLINE', `Machine ${target.machineId} is not online; start it or choose another machine to build the release`);
+    return { kind: 'machine', procedures, machine };
   }
-  const cloud = items.filter((item) => isAccountCloudRpcPath(item.path) || isSpaceCloudRpcPath(item.path));
-  if (cloud.length === 0) {
-    const holders = await liveHolders(env, userId, items);
-    if (holders.length > 1) return reject(400, 'RPC_MIXED_HOLDER_BATCH', `This batch names spaces held by different machines (${holders.map((machine) => machine.id).join(', ')}); send calls for each space or session in a separate signed batch`);
-    return { kind: 'machine', procedures, holder: holders[0] ?? null };
-  }
-  if (cloud.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Cloud and machine operations must use separate signed batches');
   // A CPU-limit kill leaves no later log line; joining this line by request ID names the batch.
   console.log(JSON.stringify({ event: 'rpc_start', procedures, items: items.length, requestBytes: body.byteLength }));
   const capabilities: DeviceCapability[] = [];

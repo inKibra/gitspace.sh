@@ -1,12 +1,15 @@
 import {
-  executionHash, browserOriginHash, projectEnvironmentState, EnvironmentError, environmentFailure,
-  type LifecycleMutation, type LifecycleState,
+  executionHash, browserOriginHash, projectEnvironmentState, EnvironmentError, environmentFailure, parseEnvironmentBundleJson, LifecycleMutationSchema,
+  assertLifecycleCommandAuthorized, parseLifecycleRunRequest, type LifecycleMutation, type LifecycleRunRequest, type LifecycleState,
 } from '@gitspace/protocol-environment';
-import type { GitSpaceRpcContext, VerifiedDevice } from '@gitspace/protocol';
+import { deviceCanAdminister, type GitSpaceRpcContext, type VerifiedDevice } from '@gitspace/protocol';
 import {
   getWorkspaceEnvironmentContract, approveWorkspaceEnvironmentExecutionContract,
   revokeWorkspaceEnvironmentApprovalContract, recoverWorkspaceEnvironmentRunContract,
   getWorkspaceEnvironmentRunLogContract, cancelWorkspaceEnvironmentRunContract, type WorkspaceEnvironmentView,
+  putWorkspaceEnvironmentBundleContract, setWorkspaceEnvironmentProfileContract,
+  putWorkspaceEnvironmentValueContract, deleteWorkspaceEnvironmentValueContract,
+  runWorkspaceEnvironmentChecksContract, runWorkspaceEnvironmentPhaseContract,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
@@ -17,8 +20,8 @@ import type { ProjectSecretsDO } from './project-secrets.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 
-/** Cloud reads do not possess, materialize, or start an agent in the workspace. */
-export function environmentCloudProcedures(env: Env, userId: string, deviceId: string, requireLifecycleControl: () => Promise<VerifiedDevice>) {
+/** Cloud reads do not possess, materialize, or start an agent in the workspace; edits land in cloud state alone. */
+export function environmentCloudProcedures(env: Env, userId: string, deviceId: string, currentDevice: () => Promise<VerifiedDevice>, requireLifecycleControl: () => Promise<VerifiedDevice>) {
   const server = serverRpc.context<GitSpaceRpcContext>();
   const projects = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(userId);
   const authorityFor = async (spaceId: string) => {
@@ -54,6 +57,56 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     } catch (error) {
       const failure = environmentFailure(error);
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'read cloud environment', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  /** Saved into the cloud working copy, the commit history every environment read derives the definition from. */
+  const putBundle = server.implement(putWorkspaceEnvironmentBundleContract).handler(async ({ input, errors }) => {
+    try {
+      const bundle = parseEnvironmentBundleJson(input.bundleJson);
+      const { projectId } = await authorityFor(input.spaceId);
+      await env.SPACE_AUTHORITY.getByName(`${userId}:${input.spaceId}`).runtimeWriteEnvironmentBundle({ projectId, workspaceId: input.spaceId }, `${JSON.stringify(bundle, null, 2)}\n`);
+      return ok(await view(input.spaceId, await currentState(input.spaceId)));
+    } catch (error) {
+      const failure = environmentFailure(error);
+      return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'save workspace environment bundle', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  /** Validated as the lifecycle transition validates; global values belong to the account, not the project. */
+  const edit = async (spaceId: string, candidate: Extract<LifecycleMutation, { op: 'profile' | 'value' }>) => {
+    const parsed = LifecycleMutationSchema.safeParse(candidate);
+    if (!parsed.success) throw new EnvironmentError('InvalidConfiguration', 'Invalid lifecycle mutation', { detail: parsed.error.message });
+    const { authority } = await authorityFor(spaceId);
+    // The checkpoint's bundle decides which profiles exist, as a machine's checkout did.
+    const state = await currentState(spaceId);
+    const mutation = parsed.data;
+    if (mutation.op === 'value' && mutation.scope === 'global') {
+      await projects.setEnvironmentValue(mutation.name, mutation.value);
+      return view(spaceId, state);
+    }
+    const device = await currentDevice();
+    const result = await authority.mutateLifecycleState(spaceId, mutation, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: false });
+    if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);
+    return view(spaceId, result.state);
+  };
+  const setProfile = server.implement(setWorkspaceEnvironmentProfileContract).handler(async ({ input, errors }) => {
+    try { return ok(await edit(input.spaceId, { op: 'profile', profile: input.profile })); }
+    catch (error) {
+      const failure = environmentFailure(error);
+      return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'set workspace environment profile', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const putValue = server.implement(putWorkspaceEnvironmentValueContract).handler(async ({ input, errors }) => {
+    try { return ok(await edit(input.spaceId, { op: 'value', scope: input.scope, name: input.name, value: input.value })); }
+    catch (error) {
+      const failure = environmentFailure(error);
+      return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'save workspace environment value', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const deleteValue = server.implement(deleteWorkspaceEnvironmentValueContract).handler(async ({ input, errors }) => {
+    try { return ok(await edit(input.spaceId, { op: 'value', scope: input.scope, name: input.name, value: null })); }
+    catch (error) {
+      const failure = environmentFailure(error);
+      return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'delete workspace environment value', message: error instanceof Error ? error.message : String(error) }));
     }
   });
   const approve = async (spaceId: string, input: Extract<LifecycleMutation, { op: 'approval' }>) => {
@@ -130,5 +183,29 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'cancel lifecycle run', message: error instanceof Error ? error.message : String(error) }));
     }
   });
-  return { get, approve: approveExecution, revokeApproval, recoverRun, cancelRun, runLog };
+  /** Accepted here, then dispatched by the workspace runtime to the cache machine the caller named; the run's
+   * state, log, cancellation and recovery stay in the cloud ledger. No other machine is ever chosen. */
+  const run = async (spaceId: string, machineId: string, candidate: LifecycleRunRequest) => {
+    const request = parseLifecycleRunRequest(candidate);
+    assertLifecycleCommandAuthorized(request.phase, { lifecycleControl: deviceCanAdminister(await currentDevice(), 'lifecycle.control') });
+    const { projectId } = await authorityFor(spaceId);
+    const result = await env.SPACE_AUTHORITY.getByName(`${userId}:${spaceId}`).runtimeEnvironmentRun({ projectId, workspaceId: spaceId, machineId, request });
+    if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);
+    return result.run;
+  };
+  const runChecks = server.implement(runWorkspaceEnvironmentChecksContract).handler(async ({ input, errors }) => {
+    try { return ok(await run(input.spaceId, input.machineId, { runId: input.runId, phase: 'checks', deadlineAt: input.deadlineAt })); }
+    catch (error) {
+      const failure = environmentFailure(error);
+      return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'run workspace environment checks', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const runPhase = server.implement(runWorkspaceEnvironmentPhaseContract).handler(async ({ input, errors }) => {
+    try { return ok(await run(input.spaceId, input.machineId, { runId: input.runId, phase: input.phase, rerun: input.rerun ?? false, interactive: input.interactive, deadlineAt: input.deadlineAt })); }
+    catch (error) {
+      const failure = environmentFailure(error);
+      return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: `run workspace environment ${input.phase}`, message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  return { get, putBundle, setProfile, putValue, deleteValue, approve: approveExecution, revokeApproval, recoverRun, cancelRun, runLog, runChecks, runPhase };
 }

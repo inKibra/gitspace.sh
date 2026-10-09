@@ -183,7 +183,7 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
 | `deployment.status` | `rpc.read` | T | - | - | F | Tool | Read saved state or metadata. Secrets/private keys must not enter outputs; status is not a live probe unless explicitly documented. |
-| `deployment.launch`<br>`deployment.revert` | `deployment.control` | F | T | F | F | Tool | Builds or reverts running GitSpace release targets; preserve launch IDs and the target set. Accepted is not activated. |
+| `deployment.launch`<br>`deployment.revert` | `deployment.control` | F | T | F | F | Tool | Builds or reverts running GitSpace release targets; launch requires `machineId` and runs on exactly that online enrolled machine, with no available-machine fallback. Resume a paused build cache first. Preserve launch IDs and the target set. Accepted is not activated. |
 
 ### secrets
 
@@ -211,7 +211,7 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | `environment.setProfile` | `rpc.write` | F | F | T | F | Tool | Reversible selection of the workspace environment profile; changes configuration without starting checks or provisioning resources. |
 | `environment.approve`<br>`environment.revokeApproval` | `rpc.write` + `lifecycle.control` for clients | F | F | T | F | Tool | Records or withdraws approval for exact execution content or browser-origin hashes without running or cancelling anything. API/MCP keys with `lifecycle.control` may approve browser origins. Project origin approval applies only where the workspace's committed bundle lists that origin. Content-hash preconditions remain required. |
 | `environment.recoverRun` | `rpc.write` + `lifecycle.control` for clients | F | T | T | F | Tool | Releases a stranded lifecycle claim after its runner machine was destroyed, abandoning the old run. Account recovery is excluded; workspace run recovery is not. |
-| `environment.runChecks`<br>`environment.runPhase` | `rpc.write` | F | T | T | T | Tool | Same spaceId/runId is deduplicated by durable acceptance; preserve identical inputs and reconcile results. `cloud/destroy` additionally requires lifecycle authority. |
+| `environment.runChecks`<br>`environment.runPhase` | `rpc.write` | F | T | T | T | Tool | Requires `machineId`, accepted in the cloud and dispatched only to the named attached ready or resumable cache. Missing attachment is a typed attach error, never an arbitrary-online fallback. Same spaceId/runId is deduplicated by durable acceptance; preserve machineId and all inputs and reconcile results. `cloud/destroy` additionally requires lifecycle authority. |
 | `environment.cancelRun` | `rpc.write` + `lifecycle.control` for clients | F | T | T | T | Tool | Records cancellation, not proof of process exit. Poll the durable run to terminal state. |
 
 ### mcp
@@ -286,7 +286,7 @@ Only one run per cron may be queued or running. Queue time does not count as exe
 | `project.create` | `rpc.write` | F | F | F | T | Tool | Creates a project from a remote or new managed repository plus its canonical agent. Returns lifecycle and operation records, not proof of readiness. |
 | `project.open` | `rpc.write` | F | F | T | T | Tool | Materializes a cloud-only project's repository on a machine; returns null when no operation is needed. |
 | `project.ensureGitSpace`<br>`project.restore` | `rpc.write` | F | F | T | F | Tool | Ensures the built-in project exists, or returns an archived project to active lifecycle without restoring workspace runtimes. |
-| `project.setBaseBranch` | `rpc.write` | F | T | T | T | Tool | Replaces an active user project's base branch and switches its clean base checkout, fetching from the Git remote when one exists. Existing workspaces keep their branches; requires the current project revision and the base space open on its holder. |
+| `project.setBaseBranch` | `rpc.write` | F | T | T | T | Tool | Replaces an active user project's base branch, in the cloud with no machine; the branch must exist in the project's cloud repository. Existing workspaces keep their branches; the base workspace definition and new base-sourced workspaces follow. Requires the current project revision. |
 | `project.archive`<br>`project.delete` | `rpc.write` | F | T | T | F | Tool | Can stop work, checkpoint, remove materialization, or delete records. Preserve revisions/generations and distinguish archive from permanent deletion. |
 
 ### space
@@ -301,9 +301,9 @@ Only one run per cron may be queued or running. Queue time does not count as exe
 
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
-| `workspace.create` | `rpc.write` | F | F | F | T | Tool | Creates a branch workspace and starts its canonical agent. Return accepted operation identity, not completed-work claims. |
-| `workspace.retryCreate` | `rpc.write` | F | F | T | T | Tool | Resumes a failed or interrupted creation at its first incomplete step, reusing the kept checkout, local projection and this machine's placement, then starts or resumes the canonical agent. |
-| `workspace.restore` | `rpc.write` | F | F | T | T | Tool | Reactivates an archived workspace and opens its saved checkout and canonical agent. |
+| `workspace.create` | `rpc.write` | F | F | F | T | Tool | Creates a branch workspace in the cloud with no machine: source resolved in the project's cloud repository, workspace repository forked and its branch set at the source commit. Its agent starts when the workspace is first opened. Return accepted operation identity, not completed-work claims. |
+| `workspace.retryCreate` | `rpc.write` | F | F | T | T | Tool | Resumes a failed or interrupted cloud creation, repeating each idempotent step with the recorded source commit, repository and branch. |
+| `workspace.restore` | `rpc.write` | F | F | T | T | Tool | Reactivates an archived workspace in the cloud; its runtime and agent resume when it is next opened. |
 | `workspace.archive`<br>`workspace.delete` | `rpc.write` | F | T | T | F | Tool | Can stop work, checkpoint, remove materialization, or delete records. Preserve revisions/generations and distinguish archive from permanent deletion. |
 | `workspace.setPhase`<br>`workspace.setRelations` | `rpc.write` | F | F | T | F | Tool | Reversible phase/dependency selections, subject to dependency phase constraints. The agent is informed of phase changes. |
 | `workspace.stackStatus` | `rpc.read` | T | - | - | F | Tool | Bounded inspection; preserve resource ownership and generation checks. Never implicitly open a space or start its runtime. |

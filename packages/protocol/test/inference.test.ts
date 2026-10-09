@@ -4,10 +4,31 @@ import {
   extractInferenceSettings,
   inferenceCredentialPaths,
   inferenceSettingsSchema,
+  profileApprovalMode,
   stripInferenceSettings,
 } from '../src/inference.js';
+import type { RuntimeSettingValue } from '../src/user-settings.js';
 
 describe('inference profile configuration boundaries', () => {
+  it('adopts only a valid approval default, with dotted edits overriding the stored subtree', () => {
+    expect(profileApprovalMode({})).toBe('yolo');
+    expect(profileApprovalMode({ approval: { defaultMode: 'write' }, 'approval.defaultMode': 'always-ask' })).toBe('always-ask');
+    expect(profileApprovalMode({ 'approval.defaultMode': 'write' })).toBe('write');
+  });
+
+  it('rejects malformed approval settings rather than silently granting Auto-approve', () => {
+    const invalidSettings: Record<string, RuntimeSettingValue>[] = [
+      { 'approval.defaultMode': 'ask' },
+      { approval: { defaultMode: null } },
+      { approval: 'write' },
+      { 'approval.defaultMdoe': 'write' },
+    ];
+    for (const settings of invalidSettings) {
+      expect(inferenceSettingsSchema.safeParse(settings).success).toBe(false);
+      expect(() => profileApprovalMode(settings)).toThrow();
+    }
+  });
+
   it('replaces all inherited inference fields while retaining shared Advanced settings', () => {
     const source = {
       modelRoles: { default: 'old/main', reviewer: 'old/reviewer' },

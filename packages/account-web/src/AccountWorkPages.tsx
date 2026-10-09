@@ -20,7 +20,9 @@ export interface AccountWorkPagesProps {
   onRefresh(): void;
   onOpenWorkspace(projectId: string, workspaceId: string): void;
   onOpenProject(projectId: string): void;
-  actions: Pick<GitSpaceShellProps, 'onCreateProject' | 'onCreateWorkspace' | 'onCloseSpace' | 'onReopenSpace' | 'onArchiveWorkspace' | 'onClaimWorkspace' | 'onArchiveProject' | 'onRestoreProject' | 'onDeleteProject' | 'onDeleteWorkspace' | 'onSetWorkspaceRelations'> & {
+  actions: Pick<GitSpaceShellProps, 'onCreateProject' | 'onCreateWorkspace' | 'onArchiveWorkspace' | 'onArchiveProject' | 'onRestoreProject' | 'onDeleteProject' | 'onDeleteWorkspace' | 'onSetWorkspaceRelations'> & {
+    onReleaseMachines?: (workspaceId: string) => void | Promise<void>;
+    onRestoreWorkspace?: (workspaceId: string) => void | Promise<void>;
     onSetProjectBaseBranch?: (projectId: string, expectedRevision: number, baseBranch: string) => void | Promise<void>;
   };
   /** Controls which project's Settings dialog is open; omit to let the Projects view own it. */
@@ -32,6 +34,7 @@ interface AccountWorkspace extends WorkspaceGraphItem {
   holder: SpaceHolderView;
   statusLabel: string;
   freshness: 'fresh' | 'stale' | 'unknown';
+  creation?: SidebarSpaceSummary['creation'];
 }
 
 function selectOptions(options: readonly { value: string; label: ReactNode }[]): ReactNode {
@@ -63,6 +66,7 @@ function accountWorkspaces(projects: readonly ProjectLifecycleView[], directory:
     status: workspace.summary?.status,
     statusLabel: summaryStatusLabel(workspace.summary),
     freshness: summaryFreshness(workspace.summary),
+    creation: workspace.summary?.creation,
     relations: workspace.runtime?.relations,
     stack: workspace.runtime?.stack,
   })));
@@ -120,7 +124,7 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     <DirectoryCoverage projects={projects} directory={directory} loading={loading} onRefresh={onRefresh} />
     {view === 'kanban' ? <KanbanView workspaces={activeWorkspaces} onOpen={open} onSetRelations={actions.onSetWorkspaceRelations} onNewWorkspace={actions.onCreateWorkspace ? setNewWorkspacePhase : undefined} />
-      : view === 'projects' ? <ProjectsView projects={projects} workspaces={workspaces} directory={directory} onOpen={open} onOpenProject={onOpenProject} {...actions} onRestoreWorkspace={actions.onClaimWorkspace ? (workspaceId) => actions.onClaimWorkspace!(workspaceId, null) : undefined} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />
+      : view === 'projects' ? <ProjectsView projects={projects} workspaces={workspaces} directory={directory} onOpen={open} onOpenProject={onOpenProject} {...actions} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />
         : <InboxView projects={activeProjects.filter((project) => project.lifecycle !== 'cloud-only')} directory={directory} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} />}
     <Dialog open={newWorkspacePhase !== null && newWorkspaceProject === null} onOpenChange={(next) => { if (!next) clearCreate(); }}>
       <DialogContent><DialogHeader><DialogTitle>Choose a project</DialogTitle><DialogDescription>Choose which project the new {newWorkspacePhase ? PHASE_LABEL[newWorkspacePhase].toLowerCase() : ''} workspace belongs to.</DialogDescription></DialogHeader>
@@ -212,14 +216,13 @@ function KanbanView({ workspaces, onOpen, onSetRelations, onNewWorkspace }: { wo
     {!workspaces.length ? <EmptyState title="No active workspaces in the available directory" description="Create a workspace in a project, or refresh if project coverage is incomplete." /> : null}
   </PageCanvas>;
 }
-function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onSetProjectBaseBranch, settingsProjectId: requestedSettingsProjectId, onSettingsProjectChange }: {
+function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, onReleaseMachines, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onSetProjectBaseBranch, settingsProjectId: requestedSettingsProjectId, onSettingsProjectChange }: {
   projects: readonly ProjectLifecycleView[];
   workspaces: readonly AccountWorkspace[];
   directory: Directory;
   onOpen: (workspace: AccountWorkspace) => void;
   onOpenProject?: (projectId: string) => void;
-  onCloseSpace?: GitSpaceShellProps['onCloseSpace'];
-  onReopenSpace?: GitSpaceShellProps['onReopenSpace'];
+  onReleaseMachines?: AccountWorkPagesProps['actions']['onReleaseMachines'];
   onArchiveWorkspace?: GitSpaceShellProps['onArchiveWorkspace'];
   onRestoreWorkspace?: (workspaceId: string) => void | Promise<void>;
   onCreateProject?: GitSpaceShellProps['onCreateProject'];
@@ -262,8 +265,7 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
     <div className="flex flex-col gap-6">
       {visible.map((project) => {
         const items = workspaces.filter((workspace) => workspace.projectId === project.id);
-        const open = items.filter((workspace) => !workspace.closedAt && workspace.holder.kind !== 'released');
-        const runtimeClosed = items.filter((workspace) => !workspace.closedAt && workspace.holder.kind === 'released');
+        const open = items.filter((workspace) => !workspace.closedAt);
         const archived = items.filter((workspace) => !!workspace.closedAt);
         return <section key={project.id} className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
@@ -289,19 +291,11 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
               </CardHeader>
               <CardContent><Badge variant="dot" size="compact" color="gray">{workspacePhaseLabel(workspace.phase)}</Badge></CardContent>
               <CardFooter>
-                {onCloseSpace ? <Tooltip content="Close space" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Close ${workspace.name}`} disabled={pending} onClick={() => void run(() => onCloseSpace(workspace.id))}><XClose width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                {onReleaseMachines && !workspace.creation ? <Tooltip content="Release machine caches; keep the cloud workspace and conversations" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Release machine caches for ${workspace.name}`} disabled={pending} onClick={() => void run(() => onReleaseMachines(workspace.id))}><XClose width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
                 {onArchiveWorkspace ? <Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onArchiveWorkspace(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
               </CardFooter>
             </Card>)}
-            {runtimeClosed.map((workspace, index) => <Card key={workspace.id} index={open.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
-              <CardHeader><CardTitle><span className="flex items-center gap-2 text-muted-foreground"><XClose width={14} height={14} strokeWidth={1.5} />{workspace.name}</span></CardTitle><CardDescription>Closed · released to cloud</CardDescription><WorkspaceStatus workspace={workspace} /></CardHeader>
-              <CardContent><Badge variant="dot" size="compact" color="gray">{workspacePhaseLabel(workspace.phase)}</Badge></CardContent>
-              <CardFooter>
-                {onReopenSpace ? <Tooltip content="Reopen space" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Reopen ${workspace.name}`} disabled={pending} onClick={() => void run(() => onReopenSpace(workspace.id))}><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-                {onArchiveWorkspace ? <Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onArchiveWorkspace(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-              </CardFooter>
-            </Card>)}
-            {archived.map((workspace, index) => <Card key={workspace.id} index={open.length + runtimeClosed.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
+            {archived.map((workspace, index) => <Card key={workspace.id} index={open.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
               <CardHeader>
                 <CardTitle><span className="flex items-center gap-2 text-muted-foreground"><Archive width={14} height={14} strokeWidth={1.5} />{workspace.name}</span></CardTitle>
                 <CardDescription>Archived</CardDescription>

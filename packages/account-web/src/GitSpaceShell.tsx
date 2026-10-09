@@ -162,19 +162,7 @@ export interface GitSpaceShellProps {
   sendError?: string;
   onSelectWorkspace?: (workspaceId: string) => void;
   onSelectProject?: (projectId: string) => void;
-  onCloseSpace?: (spaceId: string) => void | Promise<void>;
-  onReopenSpace?: (spaceId: string) => void | Promise<void>;
   onArchiveWorkspace?: (workspaceId: string) => void | Promise<void>;
-  /** Machines a released or archived space can be opened on (online, reachable). */
-  claimMachines?: Array<{ id: string; label: string }>;
-  /** The machine serving this page; `null` in `onClaimWorkspace` means it. */
-  homeMachineId?: string | null;
-  /** Preferred machine for opening released spaces (`settings.defaults.machineId`). */
-  defaultMachineId?: string | null;
-  /** Present when the transcript is a read-only projection of a closed space's cloud checkpoint. */
-  checkpoint?: { sessionId: string; generation: number; lastMachineId: string | null } | null;
-  /** Open a released or archived space on the chosen machine; `null` opens it on the home machine. */
-  onClaimWorkspace?: (workspaceId: string, machineId: string | null) => void | Promise<void>;
   onMoveWorkspace?: (spaceId: string, destinationMachineId: string) => void | Promise<void>;
   onCreateProject?: (input: CreateProjectInput) => void | Promise<void>;
   onCreateWorkspace?: (input: CreateWorkspaceInput) => void | Promise<void>;
@@ -313,7 +301,7 @@ export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, pending, error, onReopenSpace, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, skills, banner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, pending, error, providers, skills, banner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
@@ -329,12 +317,6 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
   draft?: WorkspaceDraftBinding;
   pending: boolean;
   error?: string;
-  onReopenSpace?: GitSpaceShellProps['onReopenSpace'];
-  onClaimWorkspace?: GitSpaceShellProps['onClaimWorkspace'];
-  claimMachines?: GitSpaceShellProps['claimMachines'];
-  homeMachineId?: GitSpaceShellProps['homeMachineId'];
-  defaultMachineId?: GitSpaceShellProps['defaultMachineId'];
-  checkpoint?: GitSpaceShellProps['checkpoint'];
   providers?: readonly ProviderAuthView[];
   skills?: readonly SkillView[];
   banner?: ReactNode;
@@ -357,43 +339,30 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
       })),
     })),
   } : null;
-  // Released: closed in the cloud with its files kept somewhere; the transcript above is the checkpoint, read-only.
-  const released = !workspace.closedAt && workspace.holder.kind === 'released';
   const inactive = mainAgent?.controlsAvailable === false;
-  const idle = !!workspace.closedAt || !mainAgent || mainAgent.state === 'closed' || released || inactive;
-  const [chosenMachineId, setChosenMachineId] = useState<string | null>(null);
+  const idle = !!workspace.closedAt || !mainAgent || mainAgent.state === 'closed' || inactive;
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const openingRef = useRef(false);
   const open = async (): Promise<void> => {
-    if (openingRef.current) return;
+    if (openingRef.current || !onRetryAgent) return;
     openingRef.current = true;
     setOpening(true);
     setOpenError(null);
     try {
-      if (workspace.closedAt) await onClaimWorkspace?.(workspace.id, null);
-      else if (released && claimMachineId) await onClaimWorkspace?.(workspace.id, claimMachineId);
-      else if (onRetryAgent) await onRetryAgent();
-      else await onReopenSpace?.(workspace.id);
+      await onRetryAgent();
     } catch (failure) { setOpenError(rpcErrorMessage(failure, 'Open workspace agent')); }
     finally { openingRef.current = false; setOpening(false); }
   };
-  const claimMachineId = [chosenMachineId, defaultMachineId, homeMachineId, claimMachines[0]?.id ?? null]
-    .find((candidate): candidate is string => !!candidate && claimMachines.some((machine) => machine.id === candidate)) ?? null;
-  const lastMachine = checkpoint?.lastMachineId ? claimMachines.find((machine) => machine.id === checkpoint.lastMachineId)?.label ?? checkpoint.lastMachineId : null;
   const idleTitle = workspace.closedAt
     ? (workspace.kind === 'project' ? 'Project archived' : 'Workspace archived')
-    : released
-      ? `Closed${lastMachine ? ` · last on ${lastMachine}` : ''}`
-      : mainAgent?.recovering ? 'Agent is recovering'
-        : mainAgent?.failed ? 'Agent failed' : inactive ? 'Agent is inactive'
-          : 'Agent unavailable';
+    : mainAgent?.recovering ? 'Agent is recovering'
+      : mainAgent?.failed ? 'Agent failed' : inactive ? 'Agent is inactive'
+        : 'Agent unavailable';
   const idleDetail = workspace.closedAt
-    ? 'Files, history, artifacts, and review state are preserved.'
-    : released
-      ? 'Read-only until it is reopened; local files are retained.'
-      : mainAgent?.recovering ? 'Restoring the saved session. Prompts become available when recovery finishes.'
-        : inactive ? 'Files and transcript are preserved. Retry when you are ready.' : 'This open space has no available agent. Retry or reopen it to continue.';
+    ? 'Files, history, artifacts, and review state are preserved. Restore this workspace from Projects to continue.'
+    : mainAgent?.recovering ? 'Restoring the saved session. Prompts become available when recovery finishes.'
+      : inactive ? 'Files and transcript are preserved. Retry when you are ready.' : 'This workspace has no available agent. Retry to continue.';
   const virtualTranscript = transcript !== undefined;
   // Chat semantics: open at the newest message and follow new content unless
   // the reader has scrolled up to look at something.
@@ -466,18 +435,12 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
           : null}
         {idle
           ? <div className={`${shape.container} pointer-events-auto flex items-center gap-3 bg-surface-3 p-3 shadow-surface-3`}>
-              <span className="text-muted-foreground">{workspace.closedAt || released ? <Archive width={16} height={16} strokeWidth={1.5} /> : <StatusDot color="orange" />}</span>
+              <span className="text-muted-foreground">{workspace.closedAt ? <Archive width={16} height={16} strokeWidth={1.5} /> : <StatusDot color="orange" />}</span>
               <span className="min-w-0 flex-1">
                 <span className="block text-body text-foreground">{idleTitle}</span>
                 <span className="block text-caption text-muted-foreground">{idleDetail}</span>
               </span>
-              {released && claimMachines.length
-                ? <span className="flex items-center gap-1 text-caption text-muted-foreground">
-                    <span className="max-md:hidden">Open on</span>
-                    <Select size="compact" value={claimMachineId ?? ''} disabled={opening} onValueChange={(value) => setChosenMachineId(value)}><SelectTrigger variant="borderless" aria-label="Open on machine" />{selectOptions(claimMachines.map((machine) => ({ value: machine.id, label: machine.label })))}</Select>
-                  </span>
-                : null}
-              <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || (inactive && !released && !workspace.closedAt && !onRetryAgent) || (released && claimMachines.length > 0 && !claimMachineId)} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? onRetryAgent ? 'Retrying agent…' : 'Opening…' : workspace.closedAt ? 'Restore' : released ? 'Reopen' : onRetryAgent ? 'Retry agent' : 'Start'}</Button>
+              {!workspace.closedAt ? <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || !onRetryAgent} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? 'Retrying agent…' : 'Retry agent'}</Button> : null}
               {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
             </div>
           : <Composer workspace={workspace} draft={draft} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
@@ -612,7 +575,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -631,34 +594,6 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   const [createPending, setCreatePending] = useState(false);
   const createPendingRef = useRef(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [closePendingSpaceId, setClosePendingSpaceId] = useState<string | null>(null);
-  const [closeError, setCloseError] = useState<string | null>(null);
-  const [openPendingSpaceId, setOpenPendingSpaceId] = useState<string | null>(null);
-  const openPendingRef = useRef(false);
-  const requestOpen = async (spaceId: string, restore = false): Promise<void> => {
-    if (openPendingRef.current) return;
-    openPendingRef.current = true;
-    setOpenPendingSpaceId(spaceId);
-    setCloseError(null);
-    try {
-      if (restore) await onClaimWorkspace?.(spaceId, null);
-      else await onReopenSpace?.(spaceId);
-    } catch (cause) { setCloseError(rpcErrorMessage(cause, restore ? 'Restore workspace' : 'Open workspace')); }
-    finally { openPendingRef.current = false; setOpenPendingSpaceId(null); }
-  };
-  const restoreHome = onClaimWorkspace ? (spaceId: string) => requestOpen(spaceId, true) : undefined;
-  const requestClose = async (spaceId: string): Promise<void> => {
-    if (!onCloseSpace || closePendingSpaceId) return;
-    setClosePendingSpaceId(spaceId);
-    setCloseError(null);
-    try {
-      await onCloseSpace(spaceId);
-    } catch (failure) {
-      setCloseError(rpcErrorMessage(failure, 'Close workspace'));
-    } finally {
-      setClosePendingSpaceId(null);
-    }
-  };
 
   const updateInspectorWidth = (width: number): void => {
     const next = Math.round(width);
@@ -693,7 +628,6 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     }
     return [...byProject.values()];
   }, [accountSidebar, projects, baseSpace, workspaces, workspace.id, selectedSummary]);
-  const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
   const statusColor = workspaceStatusColor(selectedSummary);
   const recovering = selectedSummary.detail === 'Agent is recovering';
   const inferenceState = useInference()?.state;
@@ -709,11 +643,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     machines,
     onSelectProject,
     onSelectWorkspace: (target) => { onSelectWorkspace?.(target.id); navigate('agent'); },
-    onClose: requestClose,
-    closePendingSpaceId,
-    onReopen: onReopenSpace ? requestOpen : undefined,
     onArchive: onArchiveWorkspace,
-    onRestore: restoreHome,
     onMove: onMoveWorkspace,
     onNewWorkspace: onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'plan' }) : undefined,
     onNewProject: onCreateProject ? () => setNewProject(true) : undefined,
@@ -734,23 +664,20 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
             {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); }, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
             <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><StatusDot color={statusColor} pulse={statusColor === 'green'} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)}{profileChange ? ` · ${profileChange}` : ''}</span></span>
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
-            {!workspace.closedAt && workspace.holder.kind === 'released' && onReopenSpace ? <Button variant="secondary" size="compact" loading={openPendingSpaceId === workspace.id} disabled={openPendingSpaceId !== null} onClick={() => void requestOpen(workspace.id)} leadingIcon={glyph(RefreshCcw01)}>{openPendingSpaceId === workspace.id ? 'Opening…' : 'Reopen'}</Button> : null}
-            {!workspace.closedAt && workspace.holder.kind !== 'released' && onCloseSpace ? <Button variant="ghost" size="compact" loading={closePendingSpaceId === workspace.id} disabled={closePendingSpaceId !== null} onClick={() => void requestClose(workspace.id)} leadingIcon={glyph(XClose)}>{closePendingSpaceId === workspace.id ? running ? 'Stopping agent…' : 'Closing…' : running ? 'Stop and close' : 'Close'}</Button> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
             {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
         </div>
       </SidebarInsetTopbar>
-      {closeError ? <p role="alert" className="shrink-0 px-4 py-1 text-right text-caption text-destructive">{closeError}</p> : null}
-      {openPendingSpaceId ? <p role="status" className="shrink-0 px-4 py-1 text-right text-caption text-muted-foreground">Opening workspace and checking canonical cloud state…</p> : null}
 
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content">
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} approvalCard={approvalCard} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} pending={sendPending || closePendingSpaceId === workspace.id} error={sendError} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills} banner={launchBanner} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} approvalCard={approvalCard} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
-              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined)}</aside> : null}
+              {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}
+              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined)}</aside> : null}
             </div>
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? () => { setInspectorSection('environment'); setInspectorOpen(true); } : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>

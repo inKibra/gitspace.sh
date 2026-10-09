@@ -4,6 +4,7 @@ import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validatio
 import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, ReadResourceRequestSchema, ErrorCode, McpError, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createGitSpaceClient, type GitSpaceClient } from '@gitspace/protocol/client';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
+import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
 import { requiredCapability, requiredAdministrativeCapability, requiresImageSelectionControl } from '@gitspace/protocol/device-grant';
 import { procedureJsonRepresentation } from '@gitspace/protocol/json-representation';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
@@ -20,26 +21,24 @@ export interface GitSpaceMcpOptions {
 type RpcCall = (input: unknown, options: { signal: AbortSignal; timeoutMs: number; retry: false }) => Promise<RpcResult> | Subscription;
 /** Streams with a finite page reader are exposed only through their `*Page`/`page` tool. */
 const pagedStreams: Record<string, true> = {
-  transcript: true, 'inspector.transcript': true, 'subagents.transcript': true,
+  'inspector.transcript': true,
   'inspector.repository.tree': true, 'inspector.artifacts.read': true, 'inspector.resources.read': true,
 };
 const resourceReaders: Record<string, { path: string; description: string }> = {
   files: { path: 'inspector.repository.file', description: 'Read one repository file in the selected repository view; use this for source inspection, not saved artifacts or agent output. Percent-encode the JSON input accepted by gitspace_inspector_repository_file, including the workspace placement generation.' },
   artifacts: { path: 'inspector.artifacts.readPage', description: 'Read a saved artifact as metadata and base64 content chunks. Percent-encode the input for gitspace_inspector_artifacts_read_page. Start with cursor null, then pass nextCursor until it is null; a changed snapshot requires a fresh read.' },
-  resources: { path: 'inspector.resources.readPage', description: 'Read retained tool output or a local artifact referenced by its resource URL. Percent-encode the input for gitspace_inspector_resources_read_page, retaining the originating session where required. Follow nextCursor to collect the content rather than treating the first page as the whole output.' },
+  resources: { path: 'inspector.resources.readPage', description: 'Read a published encrypted cloud artifact using its local:// resource URL, including line or byte selectors. Percent-encode the input for gitspace_inspector_resources_read_page. Follow nextCursor to collect all content. Machine-session artifact:// spills are not retained cloud resources.' },
   goals: { path: 'inspector.overview', description: 'Inspect a workspace goal, workflow, rubric, and other saved Inspector state without editing them. Percent-encode the JSON input for gitspace_inspector_overview. Use the returned revisions when proposing subsequent edits.' },
-  transcripts: { path: 'transcriptPage', description: 'Read a bounded page of conversation rows for a project or workspace. Percent-encode the input for gitspace_transcript_page and preserve the returned generation when paging. Use transcript-content for the full content of a shortened row; this is not the session history tree.' },
-  'transcript-content': { path: 'transcriptContent', description: 'Retrieve full content for a transcript row that was shortened in a conversation page. Percent-encode the input for gitspace_transcript_content using the same generation and rowId, starting at offset 0 and following nextOffset until null.' },
-  'session-history': { path: 'session.history', description: 'Inspect the branching history of an agent session without changing its current branch. Percent-encode the input for gitspace_session_history and follow its page boundaries. To read conversation messages instead, use transcripts.' },
-  'subagent-transcripts': { path: 'subagents.page', description: 'Inspect a bounded conversation page for one subagent using its parent sessionId and subagentId. Percent-encode the input for gitspace_subagents_page; retain the returned generation. Retrieve shortened row content with gitspace_subagents_content.' },
+  transcripts: { path: 'inspector.transcriptPage', description: 'Read a bounded page of cloud conversation rows using an Inspector context. Percent-encode the input for gitspace_inspector_transcript_page and preserve the returned generation when paging. Use transcript-content for a shortened row.' },
+  'transcript-content': { path: 'inspector.transcriptContent', description: 'Retrieve full cloud conversation row content using an Inspector context. Percent-encode the input for gitspace_inspector_transcript_content with the same generation and rowId, starting at offset 0 and following nextOffset until null.' },
 };
 // Human authorization and protected terminal bytes are browser-only.
-const excluded = (path: string) => path.startsWith('providers.login.') || path.startsWith('browserRelay.') || [
+const excluded = (path: string) => path.startsWith('providers.login.') || [
   'mcp.composio.authorize', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
-  'session.setApproval', 'session.answerAsk', 'inspector.guide.setApproval',
+  'inspector.guide.setApproval',
 ].includes(path);
 const agentSessionCommands = [
-  'control', 'agentSetup', 'historyAnchorId', 'messages', 'persist', 'handoff', 'resume', 'stop',
+  'control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'messages', 'persist', 'handoff', 'resume', 'stop',
   'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged', 'prompt',
   'setWorkspacePhase', 'cycleRole', 'setModel', 'setThinking', 'setFast', 'setGoal',
   'compact', 'removeQueuedMessage', 'promoteQueuedMessage', 'navigateTree', 'saveAgentDefinition',
@@ -170,7 +169,7 @@ function errorResult(error: unknown) {
 export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(request: Request): Promise<Response> } {
   const allowed = (path: string, input?: unknown) => {
     const procedure = gitspaceContract.procedures.get(path);
-    if (!procedure || excluded(path) || !options.capabilities.includes(requiredCapability(path, procedure._def.kind))) return false;
+    if (!procedure || !accountRpcAuthority(path) || excluded(path) || !options.capabilities.includes(requiredCapability(path, procedure._def.kind))) return false;
     if (input !== undefined && path === 'runtime.session' && !agentSessionCommands.includes(String(record(record(input).command).type))) return false;
     if (input !== undefined && path === 'runtime.qa' && !['dismiss', 'merge'].includes(String(record(record(input).action).kind))) return false;
     const readOnly = reviewedAnnotations[path]?.readOnlyHint === true;
@@ -187,6 +186,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
     return target as RpcCall;
   };
   for (const [path] of gitspaceContract.procedures) {
+    if (!accountRpcAuthority(path)) throw new Error(`Missing RPC authority: ${path}`);
     if (excluded(path) || pagedStreams[path]) continue;
     if (!toolDescriptions[path]) throw new Error(`Missing MCP tool description: ${path}`);
     if (!reviewedAnnotations[path]) throw new Error(`Missing MCP tool annotation: ${path}`);
@@ -194,6 +194,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
   const catalog = new Map<string, { path: string; stream: boolean; tool: Tool }>();
   for (const [path, procedure] of gitspaceContract.procedures) {
     if (pagedStreams[path] || !allowed(path)) continue;
+    const authority = accountRpcAuthority(path);
     const representation = procedureJsonRepresentation(path);
     const stream = procedure._def.kind === 'subscription';
     const inputSchema = stream ? { ...representation.inputSchema, properties: { ...record(representation.inputSchema.properties ?? {}), _mcp: objectSchema({ waitMs: { type: 'integer', minimum: 1, maximum: STREAM_LIMITS.maxWaitMs, default: STREAM_LIMITS.waitMs, description: 'Maximum milliseconds to wait for this event batch, not for the underlying operation to finish. Use nextInput to resume after a timeout.' } }, []) } } : representation.inputSchema;
@@ -201,7 +202,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
     const name = toolName(path);
     if (catalog.has(name)) throw new Error('MCP tool name collision');
     catalog.set(name, { path, stream, tool: {
-      name, title: title(path), description: `${toolDescriptions[path]}${stream ? ' This is a bounded event read: continue with nextInput and resynchronize when gap is true; complete=false is not end of history.' : ''}`,
+      name, title: title(path), description: `${toolDescriptions[path]} Authority: ${authority}.${authority === 'machine' ? ' Supply the explicit machineId; no holder or default machine is selected.' : ''}${stream ? ' This is a bounded event read: continue with nextInput and resynchronize when gap is true; complete=false is not end of history.' : ''}`,
       inputSchema: agentInputSchema(path, inputSchema) as Tool['inputSchema'], outputSchema: outputSchema as Tool['outputSchema'],
       annotations: reviewedAnnotations[path],
     } });
@@ -219,6 +220,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
     const representation = procedureJsonRepresentation(path);
     let input: unknown;
     try { input = representation.decodeInput(payload); } catch { throw new McpError(ErrorCode.InvalidParams, 'Input does not match the published tool schema'); }
+    if (accountRpcAuthority(path) === 'machine' && !rpcCallTarget(path, input)) throw new McpError(ErrorCode.InvalidParams, 'Machine operations require an explicit machineId and workspace where applicable');
     if (!allowed(path, input)) throw new McpError(ErrorCode.InvalidParams, 'The backing grant does not authorize this operation');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), entry.stream ? Number(waitMs) : 30_000);

@@ -25,14 +25,6 @@ describe('AppSidebar Source pill', () => {
   });
 
 
-  it('keeps released spaces inline and visually marks them as released', () => {
-    if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
-    const released = { ...verticalSliceFixture.workspace, holder: { kind: 'released' as const } };
-    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} projects={[{ ...base.projects[0]!, workspaces: [{ ...released, runtime: released }] }]} onClose={() => undefined} onReopen={() => undefined} deployment={null} /></SidebarProvider>);
-    expect(html).toContain('· released');
-    expect(html).not.toContain('>Closed<');
-    expect(html).not.toContain('>Archived<');
-  });
 
   it('reserves the collapsed disclosure for archived spaces', () => {
     if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
@@ -68,6 +60,8 @@ describe('AppSidebar Source pill', () => {
     expect(html).toContain('Other project');
     expect(html).toContain('Saved workspace');
     expect(html).not.toContain('Space actions for');
+    // Nothing has been read for these rows yet: no status is not a warning.
+    expect(html).not.toContain('#f97316');
   });
 
   it('uses status circles for unknown and stale scopes, pulsing only freshly confirmed running status', () => {

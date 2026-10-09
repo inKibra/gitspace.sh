@@ -14,7 +14,7 @@ export interface RuntimeLaunch {
   setOpen(open: boolean): void;
   mark: LaunchedMark | null;
   dismiss(): void;
-  start(workspaceId: string, targets: readonly ReleaseTarget[]): Promise<void>;
+  start(workspaceId: string, machineId: string, targets: readonly ReleaseTarget[]): Promise<void>;
   revert(): Promise<void>;
 }
 
@@ -101,7 +101,7 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
     setMark(null);
     reload();
   }, [status, reverting, reload]);
-  const start = async (workspaceId: string, targets: readonly ReleaseTarget[]) => {
+  const start = async (workspaceId: string, machineId: string, targets: readonly ReleaseTarget[]) => {
     const token = ++operation.current;
     setReverting(null);
     setRevertProgress(null);
@@ -109,7 +109,8 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
     followed.current = null;
     setOpen(true);
     try {
-      const result = await rpcClient.deployment.launch({ workspaceId, targets: [...targets] });
+      if (!machineId.trim()) throw new Error('Attach and choose a machine to launch GitSpace.');
+      const result = await rpcClient.deployment.launch({ workspaceId, machineId, targets: [...targets] });
       if (result.status === 'error') throw result.error;
       if (operation.current !== token) return;
       followed.current = result.value.launchId;

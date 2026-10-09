@@ -30,7 +30,7 @@ export async function runExecutionProof(): Promise<void> {
     artifacts: unexpected,
     operations: machineOperationalTools({
       get environments() { return unexpected(); }, get services() { return unexpected(); }, get authority() { return unexpected(); },
-      get controls() { return unexpected(); }, get artifacts() { return unexpected(); }, get mcp() { return unexpected(); },
+      get artifacts() { return unexpected(); }, get mcp() { return unexpected(); },
       journal: () => journal,
     }),
   });

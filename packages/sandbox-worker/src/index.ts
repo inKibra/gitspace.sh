@@ -9,6 +9,8 @@ interface ProviderEnv extends Env { PROVIDER_ACCOUNT_ID?: string; PROVIDER_IMAGE
 const ENROLLMENT_KEY = 'gitspace:managed-enrollment';
 const MACHINE_KEY = 'gitspace:machine-record';
 const IMAGE_STATE_KEY = 'gitspace:image-state';
+/** Object-internal route for machine RPC; the container answers its `/rpc` path on port 8081. */
+const MACHINE_RPC_URL = 'http://gitspace-machine.internal/rpc';
 interface ImageState {
   operationId: string | null;
   prepared: boolean;
@@ -251,7 +253,13 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
     });
   }
 
-  async rpc(request: Request): Promise<Response> {
+  /** Machine RPC arrives as an object fetch, never as an RPC call: an AbortSignal cannot cross Durable Object RPC, and the
+   * caller's disconnect must reach the container stream (forwarded with `request_signal_passthrough`). */
+  override async fetch(request: Request): Promise<Response> {
+    return request.url === MACHINE_RPC_URL ? this.rpc(request) : super.fetch(request);
+  }
+
+  private async rpc(request: Request): Promise<Response> {
     const machine = await this.ctx.storage.get<SandboxMachineRecord>(MACHINE_KEY);
     const container = this.ctx.container;
     if (machine?.desiredState !== 'online' || !container?.running) {
@@ -519,7 +527,7 @@ export default {
       if (action === 'rpc') {
         const headers = new Headers(request.headers);
         headers.delete('host');
-        return await stub.rpc(new Request('http://localhost/rpc', { method: 'POST', headers, body: request.body, signal: request.signal, redirect: 'manual' }));
+        return await stub.fetch(new Request(MACHINE_RPC_URL, { method: 'POST', headers, body: request.body, signal: request.signal, redirect: 'manual' }));
       }
       if (['status', 'sleep', 'resume', 'destroy'].includes(action)) {
         const value = action === 'status' ? await stub.statusMachine() : action === 'sleep' ? await stub.sleepMachine() : action === 'resume' ? await stub.resumeMachine() : await stub.destroyMachine(machineId);

@@ -5,6 +5,7 @@ import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, ty
 import { Type } from 'typebox';
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api, type ToolCall } from '@earendil-works/pi-ai';
 import { RuntimeBrowserApprovalCardSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema } from '@gitspace/protocol-runtime';
+import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
 import { createRuntimeTools, type ToolServices } from './tools.js';
@@ -17,7 +18,7 @@ const completed: ToolServices['invoke'] = async input => ({ status: 'completed',
 const services: ToolServices = {
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs', requiresApproval: false }); },
-  question: async () => 'answered', instructions: async () => '', authorizeCronTool: unused,
+  question: async () => 'answered', instructions: async () => '', authorizeCronTool: unused, approvalDefault: unused, preflight: async () => {},
 };
 const samples: Record<string, ToolCall['arguments']> = {
   read: { path: 'src/main.ts', offset: 1, limit: 10 }, write: { path: 'src/main.ts', content: 'new content' },
@@ -33,8 +34,8 @@ const samples: Record<string, ToolCall['arguments']> = {
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'] },
 };
-async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = []) {
-  const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
+async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = [], approvalDefault: ToolServices['approvalDefault'] = async () => 'yolo') {
+  const tools = [...createRuntimeTools({ ...services, invoke, approvalDefault }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools }));
   let generation = 0;
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
@@ -44,7 +45,7 @@ async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] =
   } };
   const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { toolExecution: 'parallel', compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });
-  await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'yolo'; }, BACKGROUND_CONTEXT);
+  await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; }, BACKGROUND_CONTEXT);
   return { harness, root, tools };
 }
 const call = (name: string, args: ToolCall['arguments'], id = name): ToolCall => ({ type: 'toolCall', name, arguments: args, id });
@@ -212,6 +213,72 @@ test('readonly process and background command controls bypass always-ask approva
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.map(result => result.toolCallId).sort()).toEqual(calls.map(item => item.id).sort());
     expect(results.some(result => result.isError)).toBe(false);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('a new conversation adopts its inference profile default approval mode once, unaffected by later profile edits', async () => {
+  let profileDefault: SessionControlView['approvalMode'] = 'yolo';
+  let mutations = 0;
+  const { harness, root } = await registered([[call('write', { path: 'a.ts', content: 'a' }, 'first')], [call('write', { path: 'b.ts', content: 'b' }, 'second')]], async input => {
+    mutations++;
+    profileDefault = 'always-ask';
+    return completed(input);
+  }, operations, [], async () => profileDefault);
+  try {
+    await root.submit({ type: 'input', content: 'Write both files.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(1500), BACKGROUND_CONTEXT));
+    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
+    expect(mutations).toBe(2);
+    expect((await harness.snapshot(SessionControlsDoc, root.id, BACKGROUND_CONTEXT))?.approvalMode).toBe('yolo');
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('a profile defaulting to Ask for writes asks before a new conversation mutates', async () => {
+  let mutations = 0;
+  const fixture = await registered([[call('write', { path: 'denied.ts', content: 'denied' })]], async input => { mutations++; return completed(input); }, operations, [], async () => 'write');
+  await fixture.harness.commit(async tx => { await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
+  const watch = await fixture.harness.watchDoc(QuestionsDoc, BACKGROUND_CONTEXT);
+  if (!watch) throw new Error('Questions fixture document missing');
+  const asked = Promise.withResolvers<string>();
+  watch.start(async value => {
+    const question = value?.items.find(item => item.kind === 'approval' && item.answer === null);
+    if (question) asked.resolve(question.id);
+  });
+  try {
+    await fixture.root.submit({ type: 'input', content: 'Write a file.' }, BACKGROUND_CONTEXT);
+    const id = await asked.promise;
+    await fixture.harness.commit(async tx => {
+      const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === id);
+      if (!question) throw new Error('Approval disappeared');
+      question.answer = false;
+    }, BACKGROUND_CONTEXT);
+    await fixture.root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(mutations).toBe(0);
+    expect((await fixture.harness.snapshot(SessionControlsDoc, fixture.root.id, BACKGROUND_CONTEXT))?.approvalMode).toBe('write');
+  } finally { await watch.stop(); await fixture.harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('a mutating machine command with no machine attached fails before asking for approval', async () => {
+  let dispatched = 0;
+  const tools = createRuntimeTools({ ...services, approvalDefault: async () => 'write', async invoke(input) { dispatched++; return completed(input); }, async preflight(input) { if (input.tool === 'bash') throw new Error('No machine attached: attach a ready workspace cache or choose an available execution machine.'); } }, operations, (id, context) => harness.abortTask(id, context), async () => {});
+  const registry = createRegistry(); registry.install(defineExtension({ name: 'preflight-proof', tools }));
+  let generation = 0;
+  const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
+    const calls = generation++ === 0 ? [call('bash', { command: 'touch effect' })] : undefined;
+    const reply: AssistantMessage = { role: 'assistant', content: calls ?? [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: model.id, stopReason: calls ? 'toolUse' : 'stop', timestamp: generation, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
+  } };
+  const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });
+    await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; }, BACKGROUND_CONTEXT);
+    await root.submit({ type: 'input', content: 'Run a command.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(1500), BACKGROUND_CONTEXT));
+    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
+    expect(dispatched).toBe(0);
+    const result = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult');
+    expect(result?.role === 'toolResult' && result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain('No machine attached');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 5000);
 

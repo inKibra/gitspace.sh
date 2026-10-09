@@ -4,12 +4,24 @@ import { ComputeProviderError, prepareComputeImage, type ComputeImageDeployment 
 import { defaultReleaseReader } from './default-release.js';
 import { resolveDefaultRelease } from '@gitspace/protocol/default-release';
 
-interface ComputeTarget { deploymentId: string | null; script: string | null; image: string | null; instance: string | null }
+export interface ComputeTarget { deploymentId: string | null; script: string | null; image: string | null; instance: string | null }
 interface ImageTransfer { operationId: string; target: ComputeTarget; staged: boolean }
 interface ComputePlacement extends ComputeTarget { machineId: string; operationId: string | null; transfer: ImageTransfer | null }
 const machineIdSchema = z.string().regex(/^sandbox-[a-z0-9-]{1,64}$/u);
 const operationSchema = z.string().uuid();
 const emptyTarget: ComputeTarget = { deploymentId: null, script: null, image: null, instance: null };
+
+/** Calls the sandbox provider that owns `target` as `accountId`; the provider token and caller-chosen incarnation never pass through. */
+export function invokeCompute(env: Env, accountId: string, target: ComputeTarget, path: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  headers.set('x-gitspace-user-id', accountId);
+  headers.delete('x-gitspace-provider-token');
+  headers.delete('x-gitspace-image-incarnation');
+  if (target.instance) headers.set('x-gitspace-image-incarnation', target.instance);
+  return (target.script ? env.DISPATCHER.get(target.script) : env.COMPUTE).fetch(new Request(`https://compute.internal${path}`, {
+    ...init, headers, redirect: 'manual',
+  }));
+}
 
 /** Only provider allocation/routing state lives here. Workspace checkpoints and release policy remain in account code. */
 export class TenantComputeProvider {
@@ -29,15 +41,9 @@ export class TenantComputeProvider {
   private save(placement: ComputePlacement): void {
     this.storage.sql.exec('INSERT INTO compute_machines(machine_id,value) VALUES (?,?) ON CONFLICT(machine_id) DO UPDATE SET value=excluded.value', placement.machineId, JSON.stringify(placement));
   }
-  private invoke(target: ComputeTarget, path: string, init?: RequestInit): Promise<Response> {
-    const headers = new Headers(init?.headers);
-    headers.set('x-gitspace-user-id', this.accountId);
-    headers.delete('x-gitspace-provider-token');
-    headers.delete('x-gitspace-image-incarnation');
-    if (target.instance) headers.set('x-gitspace-image-incarnation', target.instance);
-    return (target.script ? this.env.DISPATCHER.get(target.script) : this.env.COMPUTE).fetch(new Request(`https://compute.internal${path}`, {
-      ...init, headers, redirect: 'manual',
-    }));
+  /** Routing for machine RPC, which the caller streams itself (see `invokeCompute`); placement changes only through `fetch`. */
+  rpcTarget(machineId: string): ComputeTarget {
+    return this.placement(machineIdSchema.parse(machineId)) ?? emptyTarget;
   }
   private async required(response: Response): Promise<Response> {
     if (!response.ok) {
@@ -51,7 +57,7 @@ export class TenantComputeProvider {
     return prepareComputeImage({ env: this.env, storage: this.storage, tenant: this.tenant, accountId: this.accountId, image });
   }
   private async providerStatus(target: ComputeTarget, machineId: string) {
-    const response = await this.required(await this.invoke(target, `/v1/sandboxes/${machineId}/image/status`, { method: 'POST' }));
+    const response = await this.required(await invokeCompute(this.env, this.accountId, target, `/v1/sandboxes/${machineId}/image/status`, { method: 'POST' }));
     const body = await response.json() as { status?: string; value?: unknown };
     if (body.status !== 'ok') throw new ComputeProviderError('COMPUTE_STATUS_INVALID', 'Provider did not acknowledge image status');
     return cloudImageProviderStatusSchema.parse(body.value);
@@ -62,10 +68,10 @@ export class TenantComputeProvider {
     // Private enrollment-transfer methods are callable only by this provider implementation, never via tenant passthrough.
     if (path.includes('/_image/') || path.startsWith('/_image/')) return this.error(new ComputeProviderError('COMPUTE_ROUTE_PRIVATE', 'Provider transfer route is private', 403));
     if (request.method !== 'POST') return this.error(new ComputeProviderError('METHOD_NOT_ALLOWED', 'Compute operations require POST', 405));
-    const passive = /^\/v1\/sandboxes\/[^/]+\/(?:rpc|status|image\/status)$/u.test(path) || path === '/v1/images/default';
+    const passive = /^\/v1\/sandboxes\/[^/]+\/(?:status|image\/status)$/u.test(path) || path === '/v1/images/default';
     const work = () => this.handle(request).catch((error: unknown) => this.error(error));
     if (passive) return work();
-    // Serialize provider allocations and handoffs per tenant; RPC and passive health reads never wait on image pulls.
+    // Serialize provider allocations and handoffs per tenant; passive health reads never wait on image pulls.
     const result = this.control.then(work, work);
     this.control = result.then(() => undefined, () => undefined);
     return result;
@@ -105,7 +111,7 @@ export class TenantComputeProvider {
         // Persist allocation before enrolling: a lost response must not allocate another namespace or machine identity.
         this.save(placement);
       }
-      return this.invoke(placement, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: this.accountId, machineId, environment }) });
+      return invokeCompute(this.env, this.accountId, placement, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: this.accountId, machineId, environment }) });
     }
     const match = /^\/v1\/sandboxes\/(sandbox-[a-z0-9-]{1,64})\/(.+)$/u.exec(path);
     if (!match) throw new ComputeProviderError('COMPUTE_ROUTE_NOT_FOUND', 'Compute route does not exist', 404);
@@ -124,18 +130,18 @@ export class TenantComputeProvider {
       const body = z.object({ operationId: operationSchema.nullable(), recoveryOperationId: operationSchema }).strict().parse(await request.json());
       if (placement.transfer) throw new ComputeProviderError('COMPUTE_HANDOFF_PENDING', 'Reconcile the outstanding image handoff before discarding a candidate');
       if (placement.operationId !== body.operationId) throw new ComputeProviderError('COMPUTE_OPERATION_CHANGED', 'Candidate operation changed before recovery');
-      const response = await this.required(await this.invoke(placement, `/v1/sandboxes/${machineId}/_image/discard`, {
+      const response = await this.required(await invokeCompute(this.env, this.accountId, placement, `/v1/sandboxes/${machineId}/_image/discard`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
       }));
       return response;
     }
-    if (!['prepare-replacement', 'cancel-replacement', 'resume', 'status', 'sleep', 'destroy', 'rpc'].includes(action)) {
+    if (!['prepare-replacement', 'cancel-replacement', 'resume', 'status', 'sleep', 'destroy'].includes(action)) {
       throw new ComputeProviderError('COMPUTE_ROUTE_NOT_FOUND', 'Compute route does not exist', 404);
     }
-    if (placement.transfer && !['status', 'rpc', 'prepare-replacement'].includes(action)) {
+    if (placement.transfer && !['status', 'prepare-replacement'].includes(action)) {
       throw new ComputeProviderError('COMPUTE_HANDOFF_PENDING', 'Complete the image handoff before changing machine lifecycle');
     }
-    const response = await this.invoke(placement, path, { method: 'POST', headers: request.headers, body: request.body });
+    const response = await invokeCompute(this.env, this.accountId, placement, path, { method: 'POST', headers: request.headers, body: request.body });
     if (action === 'destroy' && response.ok) this.storage.sql.exec('DELETE FROM compute_machines WHERE machine_id = ?', machineId);
     return response;
   }
@@ -159,15 +165,15 @@ export class TenantComputeProvider {
     const transfer = placement.transfer;
     const transferHeaders = { 'x-gitspace-image-operation': operationId };
     if (!transfer.staged) {
-      const enrollment = await this.required(await this.invoke(placement, `/v1/sandboxes/${placement.machineId}/_image/enrollment`, { method: 'GET', headers: transferHeaders }));
+      const enrollment = await this.required(await invokeCompute(this.env, this.accountId, placement, `/v1/sandboxes/${placement.machineId}/_image/enrollment`, { method: 'GET', headers: transferHeaders }));
       // The platform streams opaque enrollment material to tenant-scoped durable storage. It never persists machine private keys in platform state.
-      await this.required(await this.invoke(transfer.target, `/v1/sandboxes/${placement.machineId}/_image/enrollment`, {
+      await this.required(await invokeCompute(this.env, this.accountId, transfer.target, `/v1/sandboxes/${placement.machineId}/_image/enrollment`, {
         method: 'PUT', headers: { ...transferHeaders, 'content-type': 'application/json' }, body: enrollment.body,
       }));
       transfer.staged = true;
       this.save(placement);
     }
-    await this.required(await this.invoke(placement, `/v1/sandboxes/${placement.machineId}/_image/retire`, { method: 'POST', headers: transferHeaders }));
+    await this.required(await invokeCompute(this.env, this.accountId, placement, `/v1/sandboxes/${placement.machineId}/_image/retire`, { method: 'POST', headers: transferHeaders }));
     Object.assign(placement, transfer.target, { operationId, transfer: null });
     this.save(placement);
     return this.ok({ image, operationId });

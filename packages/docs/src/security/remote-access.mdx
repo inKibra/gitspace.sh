@@ -60,6 +60,18 @@ A machine executes repository tools, jobs, services, and lifecycle scripts. Enro
 
 Lifecycle content approval, uncertain-effect recovery, and cloud destruction remain human-authorized actions. Protected interactive lifecycle terminals require a live browser session. Raw input and output stay out of durable logs and replay; reconnecting does not recover earlier terminal text.
 
+### Managed sandbox trust boundary
+
+The managed Cloudflare image currently starts the machine host as `root`. Its enrollment passes the machine signing key and host control token in the host's process environment. The host, supervisor, repository commands, terminals, and lifecycle scripts do not have a separate OS security boundary.
+
+<Warning>
+Do not treat the machine signing key or local host controls as confidential from code running in that sandbox. Removing variables from a command's environment does not prevent a same-user process from reading another process's `/proc` environment or host-owned files. Supervisor socket permissions likewise do not isolate processes running as the same user.
+</Warning>
+
+Treat code executed in a managed sandbox—including dependency install scripts and repository tests—as able to exercise that machine's permissions. The machine control channel rejects account-level controls such as device revocation, account-secret administration, inference configuration, and fleet power; signed-in devices perform those operations through the account RPC. Cloud authorization checks, not credential secrecy inside the container, enforce those limits.
+
+This is a boundary within one tenant's machine, not evidence of cross-tenant access. Cloudflare documents the sandbox as its [unit of trust](https://developers.cloudflare.com/sandbox/concepts/security/). The account's inference credentials remain in the cloud vault rather than being placed in the machine environment.
+
 ## Relay and Worker visibility
 
 The production browser transport signs RPC requests, but it does not currently encrypt every RPC body end to end between the browser and machine. The account Worker and relay terminate or route production requests and may observe data needed by that path.

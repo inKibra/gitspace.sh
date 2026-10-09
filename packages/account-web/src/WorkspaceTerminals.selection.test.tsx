@@ -120,7 +120,7 @@ async function settle() {
 }
 
 async function render(terminals: Pick<WorkspaceTerminalsProps, 'events' | 'create' | 'stop'>) {
-  const props: WorkspaceTerminalsProps = { spaceId: 'space', machines: [{ id: 'machine', label: 'Machine' }], machineId: 'machine', onSelectMachine: vi.fn(), events: terminals.events, live: async function* () {}, create: terminals.create, send: vi.fn(async () => undefined), stop: terminals.stop };
+  const props: WorkspaceTerminalsProps = { spaceId: 'space', machines: [{ id: 'machine', label: 'Machine', state: 'live' }], machineId: 'machine', onSelectMachine: vi.fn(), events: terminals.events, live: async function* () {}, create: terminals.create, send: vi.fn(async () => undefined), stop: terminals.stop };
   await act(() => root.render(<SynchronizationContext.Provider value={owner}><WorkspaceTerminals {...props} /></SynchronizationContext.Provider>));
   await settle();
 }

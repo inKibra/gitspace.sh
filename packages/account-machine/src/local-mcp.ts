@@ -1,13 +1,9 @@
 import { isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { executeMcpStdio } from '@gitspace/supervisor';
-import { mcpConnectionDraftSchema, type ComposioMcpMaterialization, type ComposioPluginAuthorization, type ComposioPluginCatalog, type ComposioPluginTool, type ComposioToolPolicy, type ComposioSetup, type EffectiveSecretMetadata, type McpAuditEvent, type McpConnection, type McpConnectionDraft, type McpConnectionStatus, type ProjectMcpGrant } from '@gitspace/protocol';
+import type { McpAuditEvent, McpConnection, McpConnectionStatus, ProjectMcpGrant } from '@gitspace/protocol';
 
 export interface MachineMcpAuthority {
-  listMcpConnections(): Promise<McpConnection[]>;
-  createMcpConnection(connection: McpConnectionDraft): Promise<McpConnection>;
-  updateMcpConnection(connectionId: string, expectedRevision: number, connection: McpConnectionDraft): Promise<McpConnection>;
-  deleteMcpConnection(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }>;
   getMcpConnectionStatus(connectionId: string): Promise<McpConnection | null>;
   recordMcpConnectionStatus(input: {
     connectionId: string;
@@ -17,21 +13,8 @@ export interface MachineMcpAuthority {
     serverFingerprint?: string | null;
     serverVersion?: string | null;
   }): Promise<McpConnection>;
-  getComposioSetup(): Promise<ComposioSetup>;
-  putComposioSetup(apiKey: string): Promise<ComposioSetup>;
-  deleteComposioSetup(): Promise<ComposioSetup>;
-  listComposioPluginCatalog(): Promise<ComposioPluginCatalog>;
-  authorizeComposioPlugin(toolkit: string, label: string): Promise<ComposioPluginAuthorization>;
-  refreshComposioPlugin(connectionId: string): Promise<McpConnection>;
-  listComposioPluginTools(connectionId: string): Promise<ComposioPluginTool[]>;
-  updateComposioPluginTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<McpConnection>;
-  disconnectComposioPlugin(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }>;
-  materializeComposioPlugin(projectId: string, workspaceId: string | null, connectionId: string): Promise<ComposioMcpMaterialization>;
   listProjectMcpGrants(projectId: string): Promise<ProjectMcpGrant[]>;
-  putProjectMcpGrant(projectId: string, connectionId: string, enabled: boolean, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<ProjectMcpGrant>;
-  deleteProjectMcpGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<{ projectId: string; connectionId: string; deleted: boolean }>;
   materializeProjectSecrets(projectId: string, names: string[], workspaceId: string | null): Promise<Record<string, string>>;
-  listEffectiveSecrets(projectId: string, workspaceId: string | null): Promise<EffectiveSecretMetadata[]>;
   appendMcpAudit(event: Omit<McpAuditEvent, 'id' | 'principalId' | 'machineId' | 'createdAt'>): Promise<McpAuditEvent>;
 }
 
@@ -88,88 +71,6 @@ export class MachineMcpCoordinator {
       throw new Error(message);
     }
   }
-
-  async listConnections(): Promise<McpConnection[]> {
-    return this.authority.listMcpConnections();
-  }
-
-  getComposioSetup(): Promise<ComposioSetup> {
-    return this.authority.getComposioSetup();
-  }
-
-  putComposioSetup(apiKey: string): Promise<ComposioSetup> {
-    return this.authority.putComposioSetup(apiKey);
-  }
-
-  deleteComposioSetup(): Promise<ComposioSetup> {
-    return this.authority.deleteComposioSetup();
-  }
-
-  listComposioCatalog(): Promise<ComposioPluginCatalog> {
-    return this.authority.listComposioPluginCatalog();
-  }
-
-  async authorizeComposio(toolkit: string, label: string): Promise<ComposioPluginAuthorization> {
-    const authorization = await this.authority.authorizeComposioPlugin(toolkit, label);
-    return authorization;
-  }
-
-  async refreshComposio(connectionId: string): Promise<McpConnection> {
-    const connection = await this.authority.refreshComposioPlugin(connectionId);
-    return connection;
-  }
-
-  listComposioTools(connectionId: string): Promise<ComposioPluginTool[]> {
-    return this.authority.listComposioPluginTools(connectionId);
-  }
-
-  async updateComposioTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<McpConnection> {
-    const connection = await this.authority.updateComposioPluginTools(connectionId, expectedRevision, toolPolicy);
-    return connection;
-  }
-
-  async disconnectComposio(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }> {
-    const result = await this.authority.disconnectComposioPlugin(connectionId, expectedRevision);
-    return result;
-  }
-
-  async createConnection(candidate: McpConnectionDraft): Promise<McpConnection> {
-    const connection = await this.authority.createMcpConnection(mcpConnectionDraftSchema.parse(candidate));
-    return connection;
-  }
-
-  async updateConnection(connectionId: string, expectedRevision: number, candidate: McpConnectionDraft): Promise<McpConnection> {
-    const connection = await this.authority.updateMcpConnection(connectionId, expectedRevision, mcpConnectionDraftSchema.parse(candidate));
-    await Promise.all([...this.statusQueue.values()]);
-    const latest = await this.authority.getMcpConnectionStatus(connectionId);
-    return latest ?? connection;
-  }
-
-  async deleteConnection(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }> {
-    const result = await this.authority.deleteMcpConnection(connectionId, expectedRevision);
-    return result;
-  }
-
-  async connectionStatus(connectionId: string): Promise<McpConnection | null> {
-    await Promise.all([...this.statusQueue.values()]);
-    return this.authority.getMcpConnectionStatus(connectionId);
-  }
-
-  async listGrants(projectId: string): Promise<ProjectMcpGrant[]> {
-    return this.authority.listProjectMcpGrants(projectId);
-  }
-
-  async putGrant(projectId: string, connectionId: string, enabled: boolean, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<ProjectMcpGrant> {
-    const grant = await this.authority.putProjectMcpGrant(projectId, connectionId, enabled, projectSpaceEnabled, workspacesEnabled, expectedRevision);
-    return grant;
-  }
-
-  async deleteGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<{ projectId: string; connectionId: string; deleted: boolean }> {
-    const result = await this.authority.deleteProjectMcpGrant(projectId, connectionId, expectedRevision);
-    return result;
-  }
-
-
 
   queueStatus(
     connection: McpConnection,

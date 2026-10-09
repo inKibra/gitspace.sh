@@ -1,6 +1,3 @@
-import { deserialize } from 'result-rpc';
-import { TranscriptEventCodec } from '@gitspace/protocol/transcript';
-
 export type RpcResult = { status: 'ok'; value: unknown } | { status: 'error'; error: unknown };
 export interface Subscription extends AsyncIterable<RpcResult> { close(): void }
 export type StreamPage = {
@@ -29,14 +26,10 @@ export async function readLivePage(options: {
   const items: unknown[] = [];
   let bytes = 0;
   let cursor = input.after ?? null;
-  let ordinal = input.afterOrdinal;
   let reason: StreamPage['reason'] = 'limit';
   const complete = false;
   let gap = false;
   const iterator = stream[Symbol.asyncIterator]();
-  let fragments: string[] = [];
-  let chunks: unknown[] = [];
-  let fragmentBytes = 0;
   const { promise: deadline, resolve } = Promise.withResolvers<typeof timedOut>();
   const abort = () => resolve(timedOut);
   if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
@@ -61,26 +54,6 @@ export async function readLivePage(options: {
         if (value.type === 'reset') { gap = true; reason = 'resync'; break; }
         continue;
       }
-      if (path === 'subagents.events') {
-        if (typeof value.data !== 'string' || typeof value.complete !== 'boolean') throw new StreamFailure('INVALID_TRANSCRIPT_FRAGMENT');
-        fragmentBytes += utf8.encode(value.data).byteLength;
-        if (fragmentBytes > STREAM_LIMITS.bytes) throw new StreamFailure('TRANSCRIPT_EVENT_TOO_LARGE_USE_SUBAGENTS_CONTENT');
-        fragments.push(value.data);
-        chunks.push(encode(value));
-        if (!value.complete) continue;
-        const decoded = deserialize(fragments.join(''));
-        if (!decoded.ok) throw new StreamFailure('INVALID_TRANSCRIPT_EVENT');
-        const event = TranscriptEventCodec.decode(decoded.value);
-        if (!event.ok || typeof ordinal !== 'number' || event.value.ordinal <= ordinal) throw new StreamFailure('TRANSCRIPT_CURSOR_GAP');
-        const size = utf8.encode(JSON.stringify(chunks)).byteLength;
-        if (size > STREAM_LIMITS.bytes) throw new StreamFailure('TRANSCRIPT_EVENT_TOO_LARGE_USE_SUBAGENTS_CONTENT');
-        if (bytes + size > STREAM_LIMITS.bytes || (items.length > 0 && items.length + chunks.length > STREAM_LIMITS.items)) break;
-        items.push(...chunks);
-        bytes += size;
-        ordinal = event.value.ordinal;
-        chunks = []; fragments = []; fragmentBytes = 0;
-        continue;
-      }
       if (typeof value.cursor !== 'number' || !['snapshot', 'change', 'resync'].includes(String(value.type))) throw new StreamFailure('INVALID_STREAM_CURSOR');
       if (value.type === 'change' && value.previous !== cursor) throw new StreamFailure('STREAM_CURSOR_GAP');
       const encoded = encode(value);
@@ -91,8 +64,7 @@ export async function readLivePage(options: {
       if (value.type === 'resync') { gap = true; reason = 'resync'; cursor = null; break; }
       cursor = value.cursor;
     }
-    if (reason === 'ended' && fragments.length) throw new StreamFailure('INCOMPLETE_TRANSCRIPT_EVENT');
-    return { items, nextInput: complete ? null : { ...input, ...(path === 'subagents.events' ? { afterOrdinal: ordinal } : { after: cursor }) }, complete, reason, gap };
+    return { items, nextInput: { ...input, after: cursor }, complete, reason, gap };
   } finally {
     signal.removeEventListener('abort', abort);
     stream.close();

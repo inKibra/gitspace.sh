@@ -99,6 +99,7 @@ export const runtimeSettingSchemaItemSchema = z.object({
   /** Schema default, not another profile's effective value. */
   defaultJson: z.string().optional(),
   options: z.array(z.string()).optional(),
+  optionLabels: z.record(z.string(), z.string()).optional(),
   credential: z.boolean(),
 });
 export type RuntimeSettingSchemaItem = z.infer<typeof runtimeSettingSchemaItemSchema>;

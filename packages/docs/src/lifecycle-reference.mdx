@@ -171,11 +171,11 @@ Approved scripts still receive their secrets and can intentionally write a `.env
 
 ### Retire after the original machine is gone
 
-Choose an authorized online runner in the browser and explicitly request `cloud/destroy`. If that runner does not hold the workspace checkout, it restores the latest durable checkpoint into an isolated directory and restores the canonical repository origin. The full checkout supplies repository helpers; the destroy entry script comes from the approved cloud execution record.
+Attach an authorized online machine to the workspace and select it in Environment before explicitly requesting `cloud/destroy`. The request requires its `machineId`; the cloud refuses a missing, stale, or unattached machine instead of choosing another runner. A paused cache resumes through normal setup and approval gates before execution.
 
-The runner performs approved `machine/prepare` and checks before destruction. It does not open or claim the workspace's original placement, run materialization, or provision replacement resources. Without a durable checkpoint, it reports the missing prerequisite and executes nothing. If the runner already holds the current checkout, it uses that checkout instead.
+The chosen cache provides the workspace checkout and repository helpers. Retirement remains a separate human confirmation, and API/MCP clients need lifecycle-control authority. Selecting or resuming a cache does not authorize destruction or a cloud provisioning rerun.
 
-Cloud bindings and logs remain available after retirement. GitSpace removes the isolated restore only after it knows the process stopped and the result finished. A failed or uncertain destruction does not erase the records needed to recover.
+Cloud bindings and logs remain available after retirement. Failed or uncertain destruction does not erase the records needed to recover.
 
 ## Script inputs and outputs
 
@@ -232,6 +232,8 @@ Use the typed `environment` tool directly:
 Available methods are `get`, `setProfile`, `putValue`, `deleteValue`, `runChecks`, `runPhase`, `cancelRun`, and `runLog`. Arguments go inside `args`; all operations target the current workspace. A run request supplies `runId`, optional `deadlineAt`, and a phase for `runPhase`. A log request supplies `runId` and optional `offset`. Agent calls cannot request protected interactive execution.
 
 An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface excludes `cloud/destroy`. Do not use raw shell to bypass this restriction or a missing content approval.
+
+The browser and MCP RPC contracts are separate from the agent tool: `environment.runChecks({ spaceId, machineId, runId })` and `environment.runPhase({ spaceId, machineId, runId, phase, rerun })` require an explicit attached machine ID. They accept the request in the cloud and dispatch only to the named ready or resumable cache. Keep the same machine ID and inputs when reconciling an existing run ID; attach a machine before requesting execution if none is available.
 
 The environment view includes `lifecycle`, the cloud-owned record of profile, values, approvals, automatic policy, execution definitions and content, bindings, last successful provision, destruction time, and phase runs. Saved script content lets the human inspect what a closed workspace would execute; do not embed secrets in it. Run status is `accepted`, `running`, `cancelling`, `succeeded`, `failed`, `cancelled`, `timed-out`, or `interrupted`. The run stores its machine, profile, hashes, interaction mode, timestamps, results, and safe output preview.
 

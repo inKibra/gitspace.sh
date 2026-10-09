@@ -40,25 +40,12 @@ describe('GitSpaceShell', () => {
     expect(pendingProfileChange(admitted, undefined)).toBeNull();
   });
 
-  it('keeps compaction visibly active and interruptible', () => {
-    const html = renderToStaticMarkup(<GitSpaceShell
-      {...verticalSliceFixture}
-      workspace={{ ...verticalSliceFixture.workspace, status: { ...verticalSliceFixture.workspace.status, primaryColor: 'green', compaction: { detail: 'Background soft' } } }}
-      mainAgent={{ ...verticalSliceFixture.mainAgent!, state: 'running', controlsAvailable: true }}
-      onCloseSpace={async () => undefined}
-    />);
-    expect(html).toContain('role="status"');
-    expect(html).toContain('Background soft');
-    expect(html).toContain('data-pulse="true"');
-    expect(html).toContain('Stop and close');
-  });
 
   it('gates prompt intake while a reopened session is recovering', () => {
     const html = renderToStaticMarkup(<GitSpaceShell
       {...verticalSliceFixture}
       mainAgent={{ ...verticalSliceFixture.mainAgent!, state: 'waiting', recovering: true }}
       onSend={async () => undefined}
-      onCloseSpace={async () => undefined}
     />);
     expect(html).toContain('Recovering agent…');
     expect(html).toContain('placeholder="Recovering agent…"');
@@ -69,31 +56,6 @@ describe('GitSpaceShell', () => {
 
 
 
-  it('renders a released workspace read-only with a machine picker defaulting to the preferred machine', () => {
-    if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
-    const released: WorkspaceView = {
-      ...verticalSliceFixture.workspace,
-      holder: { kind: 'released' },
-      status: { primaryColor: 'dim' as const, agents: { green: 0, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } },
-    };
-    const html = renderToStaticMarkup(<GitSpaceShell
-      {...verticalSliceFixture}
-      workspace={released}
-      workspaces={verticalSliceFixture.workspaces.map((workspace) => workspace.id === released.id ? released : workspace)}
-      mainAgent={null}
-      checkpoint={{ sessionId: 'session-a', generation: 4, lastMachineId: 'studio' }}
-      claimMachines={[{ id: 'darktop', label: 'Darktop' }, { id: 'studio', label: 'Studio' }]}
-      homeMachineId="darktop"
-      defaultMachineId="studio"
-      onClaimWorkspace={async () => undefined}
-    />);
-    expect(html).toContain('Closed · last on Studio');
-    expect(html).toContain('Build the GitSpace 1.0 working loop.');
-    expect(html).not.toContain('Ask the workspace agent');
-    expect(html).toContain('aria-label="Open on machine"');
-    expect(html).toContain('Reopen');
-    expect(html).toContain('· released');
-  });
 
   it('renders the base project as its own agent scope', () => {
     const html = renderToStaticMarkup(<GitSpaceShell
@@ -119,21 +81,6 @@ describe('GitSpaceShell', () => {
     expect(html).not.toContain('Open base project');
   });
 
-  it('renders explicit open controls without starting an absent base agent', () => {
-    const stopped = {
-      ...verticalSliceFixture.baseSpace,
-      status: {
-        primaryColor: 'dim' as const,
-        agents: { green: 0, blue: 0, orange: 0, red: 0 },
-        services: { green: 0, red: 0 },
-        terminals: { green: 0, red: 0 },
-      },
-    };
-    const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} workspace={stopped} baseSpace={stopped} mainAgent={null} />);
-    expect(html).toContain('Start');
-    expect(html).not.toContain('Ask the project agent');
-    expect(html).toContain('color:#f97316');
-  });
 
 
 

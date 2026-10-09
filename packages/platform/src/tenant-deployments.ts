@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
-import { TenantComputeProvider } from './compute-provider.js';
+import { TenantComputeProvider, type ComputeTarget } from './compute-provider.js';
 
 /** One upload the platform performed for this tenant, in RELEASES bucket terms. */
 export interface TenantDeployRecord {
@@ -123,7 +123,7 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
       `);
     });
   }
-  async compute(tenant: string, accountId: string, request: Request): Promise<Response> {
+  private computeProviderFor(tenant: string, accountId: string): TenantComputeProvider {
     if (this.computeProvider && (this.computeProvider.tenant !== tenant || this.computeProvider.accountId !== accountId)) {
       throw new Error('Compute namespace identity does not match this tenant');
     }
@@ -133,7 +133,14 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
       if (pin.source !== 'literal' || pin.value === undefined) throw new Error('Invalid tenant default release pin');
       return pin.value;
     });
-    return this.computeProvider.fetch(request);
+    return this.computeProvider;
+  }
+  async compute(tenant: string, accountId: string, request: Request): Promise<Response> {
+    return this.computeProviderFor(tenant, accountId).fetch(request);
+  }
+  /** Machine RPC streams bypass this object: an AbortSignal cannot cross Durable Object RPC, so a stream proxied here never learns its caller left. */
+  computeRpcTarget(tenant: string, accountId: string, machineId: string): ComputeTarget {
+    return this.computeProviderFor(tenant, accountId).rpcTarget(machineId);
   }
 
   configure(rootPublicKey: string, blobBucket: string): { created: boolean; rootPublicKey: string; blobBucket: string } {

@@ -1,6 +1,6 @@
 import { createExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 
@@ -154,5 +154,24 @@ describe('tenant resource authorization', () => {
     }), env, createExecutionContext());
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: 'COMPUTE_ACCOUNT_MISMATCH' } });
+  });
+
+  it('cancels the sandbox machine RPC stream when the tenant caller disconnects', async () => {
+    const tenant = `stream-${crypto.randomUUID().slice(0, 8)}`;
+    const publicKey = ed25519.keygen().publicKey;
+    await env.DEPLOYMENTS.getByName(tenant).configure(btoa(String.fromCharCode(...publicKey)), `gsp-relay-${tenant}`);
+    const token = await env.DEPLOYMENTS.getByName(tenant).providerToken();
+    const caller = new AbortController();
+    const response = await worker.fetch(new Request(`https://platform.test/__platform/tenants/${tenant}/provider/compute/v1/sandboxes/sandbox-${tenant}/rpc`, {
+      method: 'POST', headers: { 'x-gitspace-provider-token': token }, body: 'follow terminal', signal: caller.signal,
+    }), env, createExecutionContext());
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe('event\n');
+    // A browser disconnect aborts the incoming request and cancels its response body.
+    caller.abort();
+    await reader.cancel();
+    await vi.waitFor(async () => {
+      expect(await (await env.COMPUTE.fetch('https://compute.internal/__probe/aborted')).json()).toContain(`/v1/sandboxes/sandbox-${tenant}/rpc`);
+    }, { timeout: 2_000 });
   });
 });

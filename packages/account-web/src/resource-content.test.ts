@@ -13,17 +13,15 @@ async function* frames(body = bytes, text = false) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('Inspector bounded resource content', () => {
-  it('assembles large media exactly through both artifact and resource routes and revokes each object URL once', async () => {
+  it('assembles cloud media exactly without an originating session and revokes each object URL once', async () => {
     const blobs: Blob[] = [];
     vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => { if (!(blob instanceof Blob)) throw new Error('Expected a Blob preview'); blobs.push(blob); return `blob:preview-${blobs.length}`; });
     const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
     const transport = { readArtifact: vi.fn(() => frames()), readResource: vi.fn(() => frames()) };
-    const context = { spaceId: 'workspace', projectId: 'project', generation: 3, sessionId: 'session', runtimeAvailable: true };
+    const context = { spaceId: 'workspace', projectId: 'project', generation: 3, sessionId: null, runtimeAvailable: true };
     const published = await loadInspectorContent(frames(), url);
     const durable = await loadInspectorResource(transport, context, url);
     const live = await loadInspectorResource(transport, context, 'local://live-capture.wav');
-    expect(transport.readArtifact).toHaveBeenCalledOnce();
-    expect(transport.readResource).toHaveBeenCalledOnce();
     for (const [index, content] of [published, durable, live].entries()) {
       expect(content.source).toBeNull();
       expect(content.mediaType).toBe('audio/wav');

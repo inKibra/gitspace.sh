@@ -19,6 +19,7 @@ import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSe
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
 import { serveArtifactShare } from './account-inspector-data.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
+import { setCloudProjectBaseBranch } from './cloud-workspace-lifecycle.js';
 import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
 import { mcpAccessStatusRequestSchema, mcpAccessChangeRequestSchema, mcpAccessEnableRequestSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
 import { GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot } from '@gitspace/protocol-workspace';
@@ -26,14 +27,11 @@ import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
   credentialProtocolBase64,
-  runtimeConfigUpdateSchema,
   sealCredentialForMachine,
   signedControlRequestSchema,
   SIGNED_REQUEST_MAX_AGE_MS,
   SIGNED_UPLOAD_MAX_AGE_MS,
-  userSettingsUpdateSchema,
   verifyCredentialAccessRequest,
-  skillUpdateSchema,
   verifyCredentialAuthorityGrant,
   verifyManagedDeviceGrant,
   signCredentialAuthorityGrant,
@@ -85,23 +83,12 @@ import { refreshCredential, ProviderRefreshError, type StoredOAuthCredential } f
 import { ComposioPluginGateway } from './composio-plugins.js';
 import { ProjectSecretsDO } from './project-secrets.js';
 import {
-  ProjectCronAlreadyRunningError,
-  ProjectCronNotFoundError,
-  ProjectCronRevisionConflictError,
-  ProjectCronRunNotCompletableError,
-  ProjectCronValidationError,
-  ProjectCronsDO,
-} from './project-crons.js';
-import {
   InspectorConflictError,
   InspectorStateError,
   SpaceContextDO,
 } from './space-context.js';
-import { SkillRevisionConflict, UserSkillsDO } from './user-skills.js';
 import {
   ProjectAuthorityDO,
-  ProjectMcpGrantNotFoundError,
-  ProjectMcpGrantRevisionConflictError,
   UserProjectIndexDO,
 } from './project-authority.js';
 export * from './project-authority.js';
@@ -124,7 +111,7 @@ import type { TenantReleasesDO } from './tenant-releases.js';
 import { SpaceAuthorityDO } from './space-authority.js';
 import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
-import { HandleUnavailable, SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
+import { SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
 import { AccountStateDO } from './account-state.js';
 import type { SpaceAuthorityResult } from '@gitspace/protocol-workspace';
 import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
@@ -136,7 +123,6 @@ import {
   McpConnectionNotFoundError,
   McpConnectionRevisionConflictError,
   McpConnectionValidationError,
-  validateComposioToolPolicy,
   UserMcpConnectionsDO,
 } from './local-mcp.js';
 import {
@@ -233,11 +219,6 @@ type MachinePairingValue =
   | { state: 'pending' }
   | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; apiUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant; artifactKey: string };
 const PAIRING_CAPABILITIES: DeviceCapability[] = ['devices.manage', 'fleet.control', 'rpc.write', 'session.prompt', 'deployment.control'];
-/** Agent commands share a machine's OS user and can read its signing key (e.g. /proc/<pid>/environ),
- * so signed machine control never carries fleet power; only user devices with fleet.control do. */
-const MACHINE_DENIED_FLEET_OPERATIONS: Readonly<Record<string, true>> = {
-  'catalog.sandbox.create': true, 'catalog.machine.sleep': true, 'catalog.machine.resume': true, 'catalog.machine.destroy': true,
-};
 
 function credentialIdentity(credential: StoredVaultCredential): string | null {
   if (credential.type === 'api_key') return null;
@@ -771,7 +752,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     machineId: string;
     signingPublicKey: string;
     exchangePublicKey: string;
-    capabilities: Array<'storage.access' | 'space.control' | 'credential.access' | 'credential.manage'>;
+    capabilities: Array<'storage.access' | 'space.control' | 'credential.access'>;
   }): CredentialVaultResult<{ machineId: string; generation: number }> {
     const config = this.config();
     if (!config || input.userId !== config.user_id || !input.machineId || input.capabilities.length === 0) {
@@ -1140,7 +1121,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       const grant: CredentialAuthorityGrant | null = machine ? {
         version: 1, userId: config.user_id, machineId: machine.machineId,
         signingPublicKey: machine.signingPublicKey, exchangePublicKey: machine.exchangePublicKey,
-        capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
+        capabilities: ['storage.access', 'space.control', 'credential.access'],
         generation: 1, issuerDeviceId: row.creator_device_id, expiresAt,
       } : null;
       if (input.operation === 'inspect') return { status: 'ok', value: { pairingId, state: row.state, expiresAt: row.expires_at, machine, grant, issuerChain } };
@@ -1866,7 +1847,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
    * `maxAgeMs` is the signature window: `SIGNED_UPLOAD_MAX_AGE_MS` only for `data.put`,
    * whose body may be buffered by the edge long after signing.
    */
-  authorizeControl(request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access' | 'credential.manage', maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): CredentialVaultResult<{ authorized: true }> {
+  authorizeControl(request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access', maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): CredentialVaultResult<{ authorized: true }> {
     const config = this.config();
     if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
     const parsed = signedControlRequestSchema.safeParse(request);
@@ -1909,11 +1890,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return capabilities.success && capabilities.data.includes('space.control');
   }
 
-  authorizeBroker(machineId: string, generation: number, capability: 'credential.access' | 'credential.manage' = 'credential.access'): boolean {
+  authorizeBroker(machineId: string, generation: number): boolean {
     const device = this.device(machineId);
     const capabilities = device ? JSON.parse(device.capabilities_json) as string[] : [];
-    return Boolean(device && device.generation === generation
-      && capabilities.includes('credential.access') && capabilities.includes(capability));
+    return Boolean(device && device.generation === generation && capabilities.includes('credential.access'));
   }
   async getAccess(request: CredentialAccessRequest): Promise<CredentialVaultResult<{
     credentialId: string;
@@ -2154,19 +2134,9 @@ function accountState(env: Env) {
 
 
 
-function projectCrons(env: Env, userId: string, projectId: string) {
-  const namespace = env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>;
-  return namespace.get(namespace.idFromName(JSON.stringify([userId, projectId])));
-}
-
 function spaceContext(env: Env, userId: string, projectId: string, spaceId: string) {
   const namespace = env.SPACE_CONTEXT as DurableObjectNamespace<SpaceContextDO>;
   return namespace.get(namespace.idFromName(JSON.stringify([userId, projectId, spaceId])));
-}
-
-function userSkills(env: Env, userId: string) {
-  const namespace = env.USER_SKILLS as DurableObjectNamespace<UserSkillsDO>;
-  return namespace.get(namespace.idFromName(userId));
 }
 
 function userMcpConnections(env: Env, userId: string) {
@@ -2904,7 +2874,7 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
     userId, machineId,
     signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(signingPrivateKey)),
     exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(exchangePrivateKey)),
-    capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'] satisfies Array<'storage.access' | 'space.control' | 'credential.access' | 'credential.manage'>,
+    capabilities: ['storage.access', 'space.control', 'credential.access'] satisfies Array<'storage.access' | 'space.control' | 'credential.access'>,
   };
   const registered = await vault.registerManagedDevice(device);
   if (registered.status === 'error') throw new Error(registered.error.message);
@@ -2994,13 +2964,7 @@ async function routeAccountRpc(request: Request, env: Env): Promise<RoutedAccoun
   }
   const route = await handleAccountCloudRpc(request, env, userId);
   if (route.kind === 'response') return route;
-  // Existing workspace ownership and other machine operations keep their routing policy.
-  const machine = route.holder ?? (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines())
-    .find((candidate) => candidate.state === 'online' && candidate.desiredState === 'online' && candidate.rpcEndpoint) ?? null;
-  if (!machine) {
-    return { response: Response.json(publicError('FLEET_OFFLINE', 'No account machine is available'), { status: 503 }), procedures: route.procedures };
-  }
-  return { response: await proxyAccountMachineRpc(request, env, userId, machine), procedures: route.procedures, target: machine.id };
+  return { response: await proxyAccountMachineRpc(request, env, userId, route.machine), procedures: route.procedures, target: route.machine.id };
 }
 
 const SLOW_RPC_BATCH_MS = 5_000;
@@ -3472,19 +3436,14 @@ const worker = {
         const body = signedControlRequestSchema.parse(await readBoundedJson(request));
         signedControl = body;
         recordSyncRequestParsed(diagnostics, body);
-        if (MACHINE_DENIED_FLEET_OPERATIONS[body.operation] || (body.operation === 'catalog.machine.put' && body.payload.id !== body.machineId)) {
-          return Response.json({ status: 'error', error: { code: 'MACHINE_FLEET_CONTROL_DENIED', message: 'A machine credential may only report its own machine; creating, stopping, starting or destroying machines needs a signed-in device with Fleet control.' } }, { status: 403, headers: { 'cache-control': 'no-store' } });
+        if (body.operation === 'catalog.machine.put' && body.payload.id !== body.machineId) {
+          return Response.json({ status: 'error', error: { code: 'MACHINE_FLEET_CONTROL_DENIED', message: 'A machine credential may only report its own machine.' } }, { status: 403, headers: { 'cache-control': 'no-store' } });
         }
-        const capability = body.operation.startsWith('inference.') && body.operation !== 'inference.list' ? 'credential.manage'
-          : body.operation === 'secrets.materialize' || body.operation === 'mcp.composio.materialize' ? 'credential.access'
-          : body.operation === 'secrets.put' || body.operation === 'secrets.delete'
-            || body.operation === 'secrets.account.put' || body.operation === 'secrets.account.delete'
-            || body.operation === 'secrets.account.grant' || body.operation === 'secrets.account.revoke' ? 'credential.manage'
+        const capability = body.operation === 'secrets.materialize' || body.operation === 'mcp.composio.materialize' ? 'credential.access'
           : body.operation === 'runtime.repository.credentials' || body.operation.startsWith('settings.') ? 'storage.access'
           : body.operation.startsWith('space.')
             || body.operation.startsWith('runtime.')
             || body.operation.startsWith('catalog.')
-            || body.operation.startsWith('crons.')
             || body.operation.startsWith('inspector.')
             || body.operation.startsWith('mcp.')
             || body.operation.startsWith('devices.')
@@ -3544,21 +3503,6 @@ const worker = {
           await authority.lfsReleasePublication(publicationId);
           return Response.json({ status: 'ok', value: null }, { headers: { 'cache-control': 'private, no-store' } });
         }
-        if (body.operation.startsWith('inference.')) {
-          const vault = credentialVault(env, body.userId);
-          let value: unknown;
-          let mutation: InferenceWriteResult | null = null;
-          switch (body.operation) {
-            case 'inference.list': value = await vault.ensureInference(); break;
-            case 'inference.create': value = await vault.createInferenceProfile(inferenceCreateInputSchema.parse(body.payload)); break;
-            case 'inference.update': mutation = await vault.updateInferenceProfile(inferenceUpdateInputSchema.parse(body.payload)); break;
-            case 'inference.delete': mutation = await vault.deleteInferenceProfile(inferenceDeleteInputSchema.parse(body.payload)); break;
-            case 'inference.assign': mutation = await vault.assignInferenceProfile(inferenceAssignInputSchema.parse(body.payload)); break;
-            default: throw new Error('Unsupported inference operation');
-          }
-          if (mutation?.status === 'conflict') return Response.json({ status: 'error', error: { code: 'SETTINGS_CONFLICT', message: 'Inference revision changed', resource: mutation.resource, expected: mutation.expected, actual: mutation.actual } }, { status: 409, headers: { 'cache-control': 'private, no-store' } });
-          return Response.json({ status: 'ok', value: mutation?.value ?? value }, { headers: { 'cache-control': 'private, no-store' } });
-        }
         if (body.operation === 'artifacts.key.get') {
           if (Object.keys(body.payload).length !== 0) throw new Error('Artifact key request must have an empty payload');
           const key = await credentialVault(env, body.userId).artifactKey(body.userId);
@@ -3579,9 +3523,6 @@ const worker = {
               break;
             case 'deploy.status':
               value = await releases.status(body.userId, await tenantWorkerVersion(env, body.userId), body.machineId);
-              break;
-            case 'deploy.revert':
-              value = await revertTenantRelease(env, body.userId);
               break;
             case 'deploy.launchProgress':
               await releases.recordLaunchProgress(body.machineId, launchProgressSchema.parse(body.payload));
@@ -3605,50 +3546,10 @@ const worker = {
         if (body.operation === 'devices.list') {
           return Response.json({ status: 'ok', value: await credentialVault(env, body.userId).listDeviceGrants() }, { headers: { 'cache-control': 'private, no-store' } });
         }
-        if (body.operation === 'devices.revoke') {
-          const result = await credentialVault(env, body.userId).revokeDeviceGrant(String(body.payload.deviceId ?? ''));
-          return Response.json(result, { status: result.status === 'ok' ? 200 : 404, headers: { 'cache-control': 'private, no-store' } });
-        }
         if (body.operation.startsWith('mcp.')) {
-          const vault = credentialVault(env, body.userId);
           const connections = userMcpConnections(env, body.userId);
-          const accountApiKey = await vault.getProviderSecret('composio');
-          const composio = new ComposioPluginGateway(env, accountApiKey);
           let value: unknown;
           switch (body.operation) {
-            case 'mcp.connections.list':
-              value = await connections.list(body.userId);
-              break;
-            case 'mcp.connections.create':
-              value = await connections.create(
-                body.userId,
-                body.payload.connection as Parameters<UserMcpConnectionsDO['create']>[1],
-              );
-              break;
-            case 'mcp.connections.update':
-              value = await connections.update(
-                body.userId,
-                String(body.payload.connectionId ?? ''),
-                Number(body.payload.expectedRevision ?? -1),
-                body.payload.connection as Parameters<UserMcpConnectionsDO['update']>[3],
-              );
-              break;
-            case 'mcp.connections.delete': {
-              const connectionId = String(body.payload.connectionId ?? '');
-              const current = await connections.get(body.userId, connectionId);
-              if (current?.transport.type === 'composio') {
-                throw new McpConnectionValidationError('connectionId', 'Disconnect Composio plugins through the dedicated plugin operation');
-              }
-              value = {
-                connectionId,
-                deleted: await connections.delete(
-                  body.userId,
-                  connectionId,
-                  Number(body.payload.expectedRevision ?? -1),
-                ),
-              };
-              break;
-            }
             case 'mcp.connections.status': {
               if (body.payload.status === undefined) {
                 value = await connections.get(body.userId, String(body.payload.connectionId ?? ''));
@@ -3665,89 +3566,6 @@ const worker = {
               }
               break;
             }
-            case 'mcp.composio.setup.get': {
-              const metadata = await vault.providerSecretMetadata('composio');
-              value = metadata.configured
-                ? { configured: true, source: 'account', updatedAt: metadata.updatedAt }
-                : { configured: Boolean(env.COMPOSIO_API_KEY?.trim()), source: env.COMPOSIO_API_KEY?.trim() ? 'platform' : null, updatedAt: null };
-              break;
-            }
-            case 'mcp.composio.setup.set': {
-              const apiKey = String(body.payload.apiKey ?? '').trim();
-              await new ComposioPluginGateway(env, apiKey).catalog();
-              const metadata = await vault.putProviderSecret('composio', apiKey);
-              value = { configured: true, source: 'account', updatedAt: metadata.updatedAt };
-              break;
-            }
-            case 'mcp.composio.setup.delete': {
-              await vault.deleteProviderSecret('composio');
-              const platformConfigured = Boolean(env.COMPOSIO_API_KEY?.trim());
-              value = { configured: platformConfigured, source: platformConfigured ? 'platform' : null, updatedAt: null };
-              break;
-            }
-            case 'mcp.composio.catalog':
-              value = await composio.catalog();
-              break;
-            case 'mcp.composio.authorize': {
-              const toolkit = String(body.payload.toolkit ?? '').trim().toLowerCase();
-              const label = String(body.payload.label ?? '').trim();
-              if (!toolkit || !label) throw new McpConnectionValidationError('toolkit', 'Choose a Composio plugin and provide an account label');
-              const state = crypto.randomUUID();
-              const signature = await signComposioState(env, body.userId, state, accountApiKey);
-              const callback = new URL('/v1/mcp/composio/callback', env.ACCOUNT_URL);
-              callback.searchParams.set('principal', body.userId);
-              callback.searchParams.set('gitspace_state', state);
-              callback.searchParams.set('signature', signature);
-              const authorization = await composio.authorize(body.userId, toolkit, callback.toString());
-              const connectionId = `composio-${toolkit.slice(0, 80)}-${crypto.randomUUID().slice(0, 8)}`;
-              const connection = await connections.createComposio(body.userId, {
-                id: connectionId,
-                label,
-                toolkit,
-                connectedAccountId: authorization.connectedAccountId,
-                state,
-                expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
-              });
-              value = { connection, redirectUrl: authorization.redirectUrl };
-              break;
-            }
-            case 'mcp.composio.refresh': {
-              const connectionId = String(body.payload.connectionId ?? '');
-              const current = await connections.get(body.userId, connectionId);
-              if (!current) throw new McpConnectionNotFoundError(connectionId);
-              if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
-              const status = await composio.status(current.transport.connectedAccountId);
-              value = await connections.updateComposioStatus(body.userId, connectionId, status.status, status.message);
-              break;
-            }
-            case 'mcp.composio.tools': {
-              const connectionId = String(body.payload.connectionId ?? '');
-              const current = await connections.get(body.userId, connectionId);
-              if (!current) throw new McpConnectionNotFoundError(connectionId);
-              if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
-              value = await composio.tools(current.transport.toolkit);
-              break;
-            }
-            case 'mcp.composio.updateTools': {
-              const connectionId = String(body.payload.connectionId ?? '');
-              const current = await connections.get(body.userId, connectionId);
-              if (!current) throw new McpConnectionNotFoundError(connectionId);
-              if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
-              const toolPolicy = validateComposioToolPolicy(body.payload.toolPolicy, await composio.tools(current.transport.toolkit));
-              value = await connections.updateComposioTools(body.userId, connectionId, Number(body.payload.expectedRevision ?? -1), toolPolicy);
-              break;
-            }
-            case 'mcp.composio.disconnect': {
-              const connectionId = String(body.payload.connectionId ?? '');
-              const expectedRevision = Number(body.payload.expectedRevision ?? -1);
-              const current = await connections.get(body.userId, connectionId);
-              if (!current) throw new McpConnectionNotFoundError(connectionId);
-              if (current.revision !== expectedRevision) throw new McpConnectionRevisionConflictError(connectionId, expectedRevision, current.revision);
-              if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
-              await composio.disconnect(current.transport.connectedAccountId);
-              value = { connectionId, deleted: await connections.delete(body.userId, connectionId, expectedRevision) };
-              break;
-            }
             case 'mcp.composio.materialize': {
               const projectId = String(body.payload.projectId ?? '');
               const workspaceId = await requireSecretContext(env, body.userId, projectId, body.payload.workspaceId);
@@ -3761,7 +3579,7 @@ const worker = {
               if (!current.enabled || current.status !== 'ready' || current.transport.type !== 'composio') {
                 throw new McpConnectionValidationError('connectionId', 'Composio plugin is not ready');
               }
-              value = await composio.materialize(body.userId, current.transport);
+              value = await new ComposioPluginGateway(env, await credentialVault(env, body.userId).getProviderSecret('composio')).materialize(body.userId, current.transport);
               break;
             }
             case 'mcp.audit.append':
@@ -3776,13 +3594,6 @@ const worker = {
                 message: typeof body.payload.message === 'string' ? body.payload.message : null,
               });
               break;
-            case 'mcp.audit.list':
-              value = await connections.listAudit(
-                body.userId,
-                typeof body.payload.after === 'string' ? body.payload.after : null,
-                Number(body.payload.limit ?? 200),
-              );
-              break;
             default:
               throw new Error('Unsupported MCP control operation');
           }
@@ -3791,41 +3602,10 @@ const worker = {
         if (body.operation.startsWith('secrets.')) {
           const secrets = projectSecrets(env, body.userId);
           const projectId = String(body.payload.projectId ?? '');
-          if (!body.operation.startsWith('secrets.account.') || body.operation === 'secrets.account.grant' || body.operation === 'secrets.account.revoke') await requireConfigurationProject(env, body.userId, projectId);
           let value: unknown;
           switch (body.operation) {
-            case 'secrets.account.list':
-              value = await secrets.listAccount();
-              break;
-            case 'secrets.account.put':
-              value = await secrets.putAccount({ name: String(body.payload.name ?? ''), value: String(body.payload.value ?? ''), updatedBy: body.machineId });
-              break;
-            case 'secrets.account.delete':
-              value = { deleted: await secrets.deleteAccount(String(body.payload.name ?? '')) };
-              break;
-            case 'secrets.account.grant':
-              if (typeof body.payload.projectSpaceEnabled !== 'boolean' || typeof body.payload.workspacesEnabled !== 'boolean') throw new Error('Secret grant applicability is required');
-              value = await secrets.grantAccount({ name: String(body.payload.name ?? ''), projectId, projectSpaceEnabled: body.payload.projectSpaceEnabled, workspacesEnabled: body.payload.workspacesEnabled });
-              break;
-            case 'secrets.account.revoke':
-              value = await secrets.revokeAccount(String(body.payload.name ?? ''), projectId);
-              break;
             case 'secrets.effective.list':
               value = await secrets.listEffective(projectId, await requireSecretContext(env, body.userId, projectId, body.payload.workspaceId));
-              break;
-            case 'secrets.list':
-              value = await secrets.list(String(body.payload.projectId ?? ''));
-              break;
-            case 'secrets.put':
-              value = await secrets.put({
-                projectId: String(body.payload.projectId ?? ''),
-                name: String(body.payload.name ?? ''),
-                value: String(body.payload.value ?? ''),
-                updatedBy: body.machineId,
-              });
-              break;
-            case 'secrets.delete':
-              value = { deleted: await secrets.delete(String(body.payload.projectId ?? ''), String(body.payload.name ?? '')) };
               break;
             case 'secrets.materialize':
               value = await secrets.materialize(
@@ -3837,59 +3617,6 @@ const worker = {
             default: throw new Error('Unsupported secret operation');
           }
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'no-store' } });
-        }
-        if (body.operation.startsWith('configuration.values.')) {
-          const projects = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(body.userId);
-          const projectId = typeof body.payload.projectId === 'string' ? body.payload.projectId : undefined;
-          const authority = projectId === undefined ? null : await requireConfigurationProject(env, body.userId, projectId);
-          if (body.operation !== 'configuration.values.get') {
-            const name = String(body.payload.name ?? '');
-            const value = body.operation === 'configuration.values.delete' ? null : String(body.payload.value ?? '');
-            if (body.payload.scope === 'global') await projects.setEnvironmentValue(name, value);
-            else if (body.payload.scope === 'project' && authority) await authority.setEnvironmentValue(name, value);
-            else throw new Error('Project scope requires an explicit project');
-          }
-          return Response.json({ status: 'ok', value: { global: await projects.getEnvironmentValues(), project: authority ? await authority.getEnvironmentValues() : {} } }, { headers: { 'cache-control': 'private, no-store' } });
-        }
-        if (body.operation.startsWith('skills.')) {
-          const skills = userSkills(env, body.userId);
-          const update = body.operation === 'skills.update' ? skillUpdateSchema.parse(body.payload) : null;
-          if (update) for (const projectId of new Set([...update.exceptions, ...update.assignments.map(entry => entry.projectId)])) await requireConfigurationProject(env, body.userId, projectId);
-          const value = update ? await skills.update(update) : await skills.list();
-          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
-        }
-        if (body.operation.startsWith('crons.')) {
-          const projectId = String(body.payload.projectId ?? '');
-          if (!projectId) throw new Error('Project id is required');
-          await requireConfigurationProject(env, body.userId, projectId);
-          const crons = projectCrons(env, body.userId, projectId);
-          let value: unknown;
-          switch (body.operation) {
-            case 'crons.list':
-              value = await crons.list(projectId);
-              break;
-            case 'crons.create':
-              value = await crons.create({ ...body.payload, projectId } as Parameters<ProjectCronsDO['create']>[0]);
-              break;
-            case 'crons.update':
-              value = await crons.update({ ...body.payload, projectId } as Parameters<ProjectCronsDO['update']>[0]);
-              break;
-            case 'crons.delete':
-              value = await crons.delete({ ...body.payload, projectId } as Parameters<ProjectCronsDO['delete']>[0]);
-              break;
-            case 'crons.runNow':
-              value = await crons.runNow({ ...body.payload, projectId } as Parameters<ProjectCronsDO['runNow']>[0]);
-              break;
-            case 'crons.history':
-              value = await crons.history({ ...body.payload, projectId } as Parameters<ProjectCronsDO['history']>[0]);
-              break;
-            case 'crons.processDue':
-              value = await crons.processDue({ projectId });
-              break;
-            default:
-              throw new Error('Unsupported project cron operation');
-          }
-          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
         }
         if (body.operation.startsWith('inspector.')) {
           const projectId = String(body.payload.projectId ?? '');
@@ -3942,43 +3669,12 @@ const worker = {
             case 'settings.get':
               value = await settings.get(body.machineId);
               break;
-            case 'settings.update': {
-              const input = userSettingsUpdateSchema.parse(body.payload);
-              const current = await settings.get(body.machineId);
-              if (input.profile.handle !== current.profile.handle) throw new Error('Handle changes require settings.handle.reserve');
-              const result = await settings.update(body.machineId, input);
-              if (result.status === 'conflict') throw new SettingsRevisionConflict(result.resource, result.expected, result.actual);
-              value = result.value;
-              break;
-            }
             case 'settings.git.get':
               value = await settings.getGitIdentity();
               break;
             case 'settings.git.update': {
               const result = await settings.updateGitIdentity(body.machineId, gitIdentityUpdateSchema.parse(body.payload));
               if (result.status === 'conflict') throw new SettingsRevisionConflict(result.resource, result.expected, result.actual);
-              value = result.value;
-              break;
-            }
-            case 'settings.runtime.get':
-              value = await settings.getRuntime();
-              break;
-            case 'settings.runtime.update': {
-              const result = await settings.updateRuntime(body.machineId, runtimeConfigUpdateSchema.parse(body.payload));
-              if (result.status === 'conflict') throw new SettingsRevisionConflict(result.resource, result.expected, result.actual);
-              value = result.value;
-              break;
-            }
-            case 'settings.handle.reserve': {
-              const handle = String(body.payload.handle ?? '').trim().toLowerCase();
-              if (!/^[a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?$/u.test(handle)) throw new Error('Handle must be 1 to 30 lowercase letters, numbers, or hyphens');
-              const current = await settings.get(body.machineId);
-              if (current.profile.handle && current.profile.handle !== handle) throw new Error('GitSpace handles are permanent');
-              if (handle !== env.TENANT_ID) throw new HandleUnavailable(handle);
-              const result = await settings.setHandle(body.machineId, Number(body.payload.expectedRevision ?? -1), handle);
-              if (result.status === 'conflict') {
-                throw new SettingsRevisionConflict(result.resource, result.expected, result.actual);
-              }
               value = result.value;
               break;
             }
@@ -4142,9 +3838,7 @@ const worker = {
               break;
             }
             case 'project.setBaseBranch': {
-              const project = await authority.setBaseBranch(Number(body.payload.expectedRevision ?? -1), String(body.payload.baseBranch ?? ''));
-              const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-              value = await namespace.get(namespace.idFromName(body.userId)).put(project);
+              value = await setCloudProjectBaseBranch(env, body.userId, projectId, Number(body.payload.expectedRevision ?? -1), String(body.payload.baseBranch ?? ''));
               break;
             }
             case 'project.workspaces.list':
@@ -4170,30 +3864,6 @@ const worker = {
             }
             case 'project.mcp.grants.list':
               value = await authority.listMcpGrants();
-              break;
-            case 'project.mcp.grants.put': {
-              const connectionId = String(body.payload.connectionId ?? '');
-              const owned = await userMcpConnections(env, body.userId).get(body.userId, connectionId);
-              if (!owned) throw new McpConnectionNotFoundError(connectionId);
-              value = await authority.putMcpGrant({
-                connectionId,
-                enabled: body.payload.enabled === true,
-                projectSpaceEnabled: body.payload.projectSpaceEnabled !== false,
-                workspacesEnabled: body.payload.workspacesEnabled !== false,
-                expectedRevision: Number(body.payload.expectedRevision ?? -1),
-                createdBy: body.machineId,
-              });
-              break;
-            }
-            case 'project.mcp.grants.delete':
-              value = {
-                projectId,
-                connectionId: String(body.payload.connectionId ?? ''),
-                deleted: await authority.deleteMcpGrant(
-                  String(body.payload.connectionId ?? ''),
-                  Number(body.payload.expectedRevision ?? -1),
-                ),
-              };
               break;
             case 'project.operations.create':
               value = await authority.createOperation(
@@ -4384,47 +4054,20 @@ const worker = {
           console.error(JSON.stringify({ event: 'control_request_failed', operation: signedControl?.operation ?? null, machineId: signedControl?.machineId ?? null, code: lifecycleFailure.code, message: lifecycleFailure.message }));
           return Response.json({ status: 'error', error: lifecycleFailure }, { status: 409 });
         }
-        if (error instanceof ProjectCronRevisionConflictError) {
-          return Response.json({ status: 'error', error: { code: 'CRON_REVISION_CONFLICT', message: error.message, cronId: error.cronId, expected: error.expected, actual: error.actual } }, { status: 409 });
-        }
-        if (error instanceof ProjectCronAlreadyRunningError) {
-          return Response.json({ status: 'error', error: { code: 'CRON_ALREADY_RUNNING', message: error.message, cronId: error.cronId, runId: error.runId, state: error.state } }, { status: 409 });
-        }
-        if (error instanceof ProjectCronRunNotCompletableError) {
-          return Response.json({ status: 'error', error: { code: 'CRON_RUN_NOT_COMPLETABLE', message: error.message, runId: error.runId } }, { status: 409 });
-        }
-        if (error instanceof ProjectCronNotFoundError) {
-          return Response.json({ status: 'error', error: { code: 'CRON_NOT_FOUND', message: error.message, projectId: error.projectId, cronId: error.cronId } }, { status: 404 });
-        }
-        if (error instanceof ProjectCronValidationError) {
-          return Response.json({ status: 'error', error: { code: 'CRON_INVALID', message: error.message, field: error.field } }, { status: 400 });
-        }
         if (error instanceof InspectorConflictError) {
           return Response.json({ status: 'error', error: { code: 'INSPECTOR_CONFLICT', message: error.message, resource: error.resource, expected: error.expected, actual: error.actual } }, { status: 409 });
         }
         if (error instanceof InspectorStateError) {
           return Response.json({ status: 'error', error: { code: 'INSPECTOR_STATE', message: error.message, resource: 'inspector' } }, { status: 409 });
         }
-        if (error instanceof SkillRevisionConflict) {
-          return Response.json({ status: 'error', error: { code: 'SKILL_CONFLICT', message: error.message, skillId: error.skillId, expected: error.expected, actual: error.actual } }, { status: 409 });
-        }
         if (error instanceof SettingsRevisionConflict) {
           return Response.json({ status: 'error', error: { code: 'SETTINGS_CONFLICT', message: error.message, resource: error.resource, expected: error.expected, actual: error.actual } }, { status: 409 });
-        }
-        if (error instanceof HandleUnavailable) {
-          return Response.json({ status: 'error', error: { code: 'HANDLE_UNAVAILABLE', message: error.message } }, { status: 409 });
         }
         if (error instanceof McpConnectionRevisionConflictError) {
           return Response.json({ status: 'error', error: { code: 'MCP_CONNECTION_CONFLICT', message: error.message, resource: `connection:${error.connectionId}`, expected: error.expected, actual: error.actual } }, { status: 409 });
         }
-        if (error instanceof ProjectMcpGrantRevisionConflictError) {
-          return Response.json({ status: 'error', error: { code: 'MCP_GRANT_CONFLICT', message: error.message, resource: `grant:${error.connectionId}`, expected: error.expected, actual: error.actual } }, { status: 409 });
-        }
         if (error instanceof McpConnectionNotFoundError) {
           return Response.json({ status: 'error', error: { code: 'MCP_CONNECTION_NOT_FOUND', message: error.message, resource: 'connection', id: error.connectionId } }, { status: 404 });
-        }
-        if (error instanceof ProjectMcpGrantNotFoundError) {
-          return Response.json({ status: 'error', error: { code: 'MCP_GRANT_NOT_FOUND', message: error.message, resource: 'grant', id: error.connectionId } }, { status: 404 });
         }
         if (error instanceof ReleaseNotFoundError) {
           return Response.json({ status: 'error', error: { code: 'RELEASE_NOT_FOUND', message: error.message, sha: error.sha } }, { status: 404 });

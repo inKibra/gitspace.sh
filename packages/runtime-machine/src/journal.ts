@@ -14,8 +14,9 @@ export function dispatchFingerprint(dispatch: RuntimeToolDispatch): string { ret
 /** FULL synchronous SQLite commits precede effects. A running row survives a process crash as uncertainty, never permission to retry. */
 export class ExecutorJournal {
   private readonly database: Database;
-  constructor(path: string) {
-    this.database = new Database(path, { create: true });
+  constructor(path: string, options: { readonly?: boolean } = {}) {
+    this.database = new Database(path, options.readonly ? { readonly: true } : { create: true });
+    if (options.readonly) return;
     this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS executor_attachments (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS executor_attempts (id TEXT PRIMARY KEY, attachment_id TEXT NOT NULL, payload TEXT NOT NULL);');
     this.database.exec('CREATE TABLE IF NOT EXISTS executor_proposals(id TEXT PRIMARY KEY, payload TEXT NOT NULL)');
   }

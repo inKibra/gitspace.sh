@@ -11,7 +11,8 @@ import { RuntimeWorkspaceShell } from './RuntimeWorkspace.js';
 
 const mocks = vi.hoisted((): { setRelations: ReturnType<typeof vi.fn>; refresh: ReturnType<typeof vi.fn>; shell: GitSpaceShellProps | null; saved: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), shell: null, saved: null, failed: false, pending: false }));
 const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal } } }));
+const requestCache = vi.hoisted(() => vi.fn(async (_input: { projectId: string; workspaceId: string; machineId: string; requestId: string }) => ({ status: 'ok' as const, value: {} })));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, runtime: { attachment: { cache: { request: requestCache } } } } }));
 vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: procedure === 'relations' && mocks.failed ? 'failure' : procedure === 'relations' && mocks.pending ? 'pending' : 'success', error: new Error('relations unavailable'), value: procedure === 'relations' ? mocks.saved : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: null, run: vi.fn(), error: null }) }));
@@ -172,21 +173,29 @@ it('changes the Environment chip to offline without another snapshot render', as
   } finally { vi.useRealTimers(); }
 });
 
-it('offers only live ready caches as terminal machines and opens terminals on the explicit pick', async () => {
+it('offers live and paused caches as terminal machines, waking a paused cache only when the user picks it', async () => {
   const now = new Date().toISOString();
   const cache = RuntimeSnapshotSchema.shape.attachments.element.parse({
     projectId: project.id, workspaceId: workspace.id, attachmentId: 'cache-a', machineId: 'cache-a', generation: 1,
     role: 'cache', checkout: { kind: 'shared', branch: 'work' }, state: 'ready', capabilities: [], updatedAt: now, heartbeatAt: now,
     cache: { state: 'live', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: null, reclaimAt: null, lastSyncAt: now, localWorkOptIn: false, setup: [] },
   });
-  snapshot.attachments = [cache, RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-b', machineId: 'cache-b', heartbeatAt: new Date(Date.now() - 60_000).toISOString() }), RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-lost', machineId: 'cache-lost', state: 'lost', lossReason: 'machine-revoked' })];
+  // An idle cache pauses: the cloud parks its attachment as attaching while the machine keeps heartbeating.
+  const paused = RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-p', machineId: 'cache-p', state: 'attaching', cache: { ...cache.cache, state: 'paused', pausedAt: now } });
+  snapshot.attachments = [cache, RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-b', machineId: 'cache-b', heartbeatAt: new Date(Date.now() - 60_000).toISOString() }), RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-lost', machineId: 'cache-lost', state: 'lost', lossReason: 'machine-revoked' }), paused];
   // The execution default never chooses where a terminal opens.
   snapshot.documents = { 'gitspace.execution': { defaultMachineId: 'cache-a' } };
+  requestCache.mockClear();
   await act(async () => { render(); });
-  expect(mocks.shell?.terminals?.machines).toEqual([{ id: 'cache-a', label: 'cache-a' }]);
+  expect(mocks.shell?.terminals?.machines).toEqual([{ id: 'cache-a', label: 'cache-a', state: 'live' }, { id: 'cache-p', label: 'cache-p', state: 'paused' }]);
   expect(mocks.shell?.terminals?.machineId).toBeNull();
   await act(async () => { mocks.shell?.terminals?.onSelectMachine('cache-a'); });
   expect(mocks.shell?.terminals?.machineId).toBe('cache-a');
+  expect(requestCache).not.toHaveBeenCalled();
   await mocks.shell?.terminals?.create('cache-a');
   expect(createTerminal).toHaveBeenCalledWith({ spaceId: workspace.id, machineId: 'cache-a' });
+  await act(async () => { mocks.shell?.terminals?.onSelectMachine('cache-p'); });
+  expect(mocks.shell?.terminals?.machineId).toBe('cache-p');
+  expect(requestCache).toHaveBeenCalledTimes(1);
+  expect(requestCache).toHaveBeenCalledWith({ projectId: project.id, workspaceId: workspace.id, machineId: 'cache-p', requestId: expect.any(String) });
 });

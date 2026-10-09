@@ -1,13 +1,5 @@
 import { machineExecutionAdmissionSchema, type LaunchProgress, type machineProtocolInputSchema, type MachineExecutionAdmission } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
-import {
-  inferenceStateSchema,
-  type InferenceState,
-  type InferenceCreateInput,
-  type InferenceUpdateInput,
-  type InferenceDeleteInput,
-  type InferenceAssignInput,
-} from '@gitspace/protocol';
 import { MachineDiscardRequired, machineDiscardRequiredSchema } from '@gitspace/protocol/machine-discard';
 import { collectBytes, streamBytes, SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import {
@@ -22,11 +14,6 @@ import {
   type CanonicalSession,
   type HostedServiceRoute,
   type ComposioMcpMaterialization,
-  type ComposioPluginAuthorization,
-  type ComposioPluginCatalog,
-  type ComposioPluginTool,
-  type ComposioToolPolicy,
-  type ComposioSetup,
   type CloudProjectOperation,
   type CloudProjectSummary,
   type CloudWorkspaceDefinition,
@@ -45,17 +32,11 @@ import {
   type InspectorOverview,
   type JournalEntryView,
   type MarkGuideSectionReadInput,
-  type RuntimeConfigDocument,
   type McpAuditEvent,
   type McpConnection,
-  type McpConnectionDraft,
   type McpConnectionStatus,
-  type RuntimeConfigUpdate,
-  type ProjectCronDraft,
-  type ProjectCronRunView,
   type DeviceGrantRecord,
   type ProjectEvent,
-  type ProjectCronView,
   type PutChangeGuideInput,
   type PutGoalInput,
   type PutRubricInput,
@@ -66,17 +47,14 @@ import {
   type RubricView,
   type ProjectMcpGrant,
   type SetGuideApprovalInput,
-  type SkillUpdate,
-  type SkillView,
   type SignedControlRequest,
   type StartJournalPhaseInput,
   type UserSettings,
-  type UserSettingsUpdate,
   type WaiveWorkflowGateInput,
   type WorkflowView,
 } from '@gitspace/protocol';
 import type { CheckpointBlobStore, SpaceCheckpointAuthority } from './portable-space-lifecycle.js';
-import type { AccountSecretMetadata, EffectiveSecretMetadata, ConfigurationValuesView } from '@gitspace/protocol/rpc-contract';
+import type { EffectiveSecretMetadata } from '@gitspace/protocol/rpc-contract';
 import { cloudResponseRay, withCloudRequestDiagnostics } from './cloud-request-diagnostics.js';
 import { EnvironmentError, EnvironmentFailureSchema, LifecycleStateSchema, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 import { applyStreamEvent, initialStreamState } from '@gitspace/protocol-sync';
@@ -87,14 +65,6 @@ export class CloudSpaceAuthorityError extends Error {
     super(message);
     this.name = 'CloudSpaceAuthorityError';
   }
-}
-
-export interface ProjectSecretMetadata {
-  projectId: string;
-  name: string;
-  revision: number;
-  updatedAt: string;
-  updatedBy: string;
 }
 
 interface SignedCloudRequestOptions {
@@ -132,30 +102,6 @@ function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
   return owned.buffer;
-}
-function optionalDate(value: unknown): Date | null {
-  return value === null || value === undefined ? null : new Date(String(value));
-}
-
-function projectCronRunView(value: ProjectCronRunView): ProjectCronRunView {
-  return {
-    ...value,
-    scheduledFor: new Date(String(value.scheduledFor)),
-    claimedAt: optionalDate(value.claimedAt),
-    startedAt: optionalDate(value.startedAt),
-    completedAt: optionalDate(value.completedAt),
-    createdAt: new Date(String(value.createdAt)),
-  };
-}
-
-function projectCronView(value: ProjectCronView): ProjectCronView {
-  return {
-    ...value,
-    nextRunAt: optionalDate(value.nextRunAt),
-    lastRunAt: optionalDate(value.lastRunAt),
-    createdAt: new Date(String(value.createdAt)),
-    updatedAt: new Date(String(value.updatedAt)),
-  };
 }
 
 const uploadMaxAttempts = 10;
@@ -607,10 +553,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('devices.list', {});
   }
 
-  revokeDeviceGrant(deviceId: string): Promise<{ deviceId: string; revokedAt: number }> {
-    return this.call('devices.revoke', { deviceId });
-  }
-
   getCanonicalSession(projectId: string, sessionId: string): Promise<CanonicalSession | null> {
     return this.call('project.sessions.get', { projectId, sessionId });
   }
@@ -810,41 +752,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     connect();
     return () => { stopped = true; if (retryTimer) clearTimeout(retryTimer); socket?.close(1000, 'Fleet subscription stopped'); };
   }
-  updateUserSettings(input: UserSettingsUpdate): Promise<UserSettings> {
-    return this.call('settings.update', { ...input });
-  }
-
-  reserveUserHandle(expectedRevision: number, handle: string): Promise<UserSettings> {
-    return this.call('settings.handle.reserve', { expectedRevision, handle });
-  }
-
-  getRuntimeConfig(): Promise<RuntimeConfigDocument> {
-    return this.call('settings.runtime.get', {});
-  }
-
-  updateRuntimeConfig(input: RuntimeConfigUpdate): Promise<RuntimeConfigDocument> {
-    return this.call('settings.runtime.update', { ...input });
-  }
-
-  async listInferenceProfiles(): Promise<InferenceState> {
-    return inferenceStateSchema.parse(await this.call('inference.list', {}));
-  }
-
-  async createInferenceProfile(input: InferenceCreateInput): Promise<InferenceState> {
-    return inferenceStateSchema.parse(await this.call('inference.create', { ...input }));
-  }
-
-  async updateInferenceProfile(input: InferenceUpdateInput): Promise<InferenceState> {
-    return inferenceStateSchema.parse(await this.call('inference.update', { ...input }));
-  }
-
-  async deleteInferenceProfile(input: InferenceDeleteInput): Promise<InferenceState> {
-    return inferenceStateSchema.parse(await this.call('inference.delete', { ...input }));
-  }
-
-  async assignInferenceProfile(input: InferenceAssignInput): Promise<InferenceState> {
-    return inferenceStateSchema.parse(await this.call('inference.assign', { ...input }));
-  }
 
   getGitIdentity(): Promise<GitIdentityDocument | null> {
     return this.call('settings.git.get', {});
@@ -854,48 +761,12 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('settings.git.update', { ...input });
   }
 
-  listProjectSecrets(projectId: string): Promise<ProjectSecretMetadata[]> {
-    return this.call('secrets.list', { projectId });
-  }
-
-  putProjectSecret(projectId: string, name: string, value: string): Promise<ProjectSecretMetadata> {
-    return this.call('secrets.put', { projectId, name, value });
-  }
-
-  deleteProjectSecret(projectId: string, name: string): Promise<{ deleted: boolean }> {
-    return this.call('secrets.delete', { projectId, name });
-  }
-
   materializeProjectSecrets(projectId: string, names: string[], workspaceId: string | null): Promise<Record<string, string>> {
     return this.call('secrets.materialize', { projectId, names, workspaceId });
   }
 
   listEffectiveSecrets(projectId: string, workspaceId: string | null): Promise<EffectiveSecretMetadata[]> {
     return this.call('secrets.effective.list', { projectId, workspaceId });
-  }
-  listAccountSecrets(): Promise<AccountSecretMetadata[]> { return this.call('secrets.account.list', {}); }
-  putAccountSecret(input: { name: string; value: string }): Promise<AccountSecretMetadata> { return this.call('secrets.account.put', input); }
-  deleteAccountSecret(name: string): Promise<{ deleted: boolean }> { return this.call('secrets.account.delete', { name }); }
-  grantAccountSecret(input: { name: string; projectId: string; projectSpaceEnabled: boolean; workspacesEnabled: boolean }): Promise<AccountSecretMetadata> { return this.call('secrets.account.grant', input); }
-  revokeAccountSecret(name: string, projectId: string): Promise<AccountSecretMetadata> { return this.call('secrets.account.revoke', { name, projectId }); }
-  getConfigurationValues(input: { projectId?: string }): Promise<ConfigurationValuesView> { return this.call('configuration.values.get', input); }
-  putConfigurationValue(input: { scope: 'global' | 'project'; projectId?: string; name: string; value: string }): Promise<ConfigurationValuesView> { return this.call('configuration.values.put', input); }
-  deleteConfigurationValue(input: { scope: 'global' | 'project'; projectId?: string; name: string }): Promise<ConfigurationValuesView> { return this.call('configuration.values.delete', input); }
-
-  listMcpConnections(): Promise<McpConnection[]> {
-    return this.call('mcp.connections.list', {});
-  }
-
-  createMcpConnection(connection: McpConnectionDraft): Promise<McpConnection> {
-    return this.call('mcp.connections.create', { connection });
-  }
-
-  updateMcpConnection(connectionId: string, expectedRevision: number, connection: McpConnectionDraft): Promise<McpConnection> {
-    return this.call('mcp.connections.update', { connectionId, expectedRevision, connection });
-  }
-
-  deleteMcpConnection(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }> {
-    return this.call('mcp.connections.delete', { connectionId, expectedRevision });
   }
 
   getMcpConnectionStatus(connectionId: string): Promise<McpConnection | null> {
@@ -913,42 +784,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('mcp.connections.status', input);
   }
 
-  getComposioSetup(): Promise<ComposioSetup> {
-    return this.call('mcp.composio.setup.get', {});
-  }
-
-  putComposioSetup(apiKey: string): Promise<ComposioSetup> {
-    return this.call('mcp.composio.setup.set', { apiKey });
-  }
-
-  deleteComposioSetup(): Promise<ComposioSetup> {
-    return this.call('mcp.composio.setup.delete', {});
-  }
-
-  listComposioPluginCatalog(): Promise<ComposioPluginCatalog> {
-    return this.call('mcp.composio.catalog', {});
-  }
-
-  authorizeComposioPlugin(toolkit: string, label: string): Promise<ComposioPluginAuthorization> {
-    return this.call('mcp.composio.authorize', { toolkit, label });
-  }
-
-  refreshComposioPlugin(connectionId: string): Promise<McpConnection> {
-    return this.call('mcp.composio.refresh', { connectionId });
-  }
-
-  listComposioPluginTools(connectionId: string): Promise<ComposioPluginTool[]> {
-    return this.call('mcp.composio.tools', { connectionId });
-  }
-
-  updateComposioPluginTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<McpConnection> {
-    return this.call('mcp.composio.updateTools', { connectionId, expectedRevision, toolPolicy });
-  }
-
-  disconnectComposioPlugin(connectionId: string, expectedRevision: number): Promise<{ connectionId: string; deleted: boolean }> {
-    return this.call('mcp.composio.disconnect', { connectionId, expectedRevision });
-  }
-
   materializeComposioPlugin(projectId: string, workspaceId: string | null, connectionId: string): Promise<ComposioMcpMaterialization> {
     return this.call('mcp.composio.materialize', { projectId, workspaceId, connectionId });
   }
@@ -957,29 +792,10 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('project.mcp.grants.list', { projectId });
   }
 
-  putProjectMcpGrant(projectId: string, connectionId: string, enabled: boolean, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<ProjectMcpGrant> {
-    return this.call('project.mcp.grants.put', { projectId, connectionId, enabled, projectSpaceEnabled, workspacesEnabled, expectedRevision });
-  }
-
-  deleteProjectMcpGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<{ projectId: string; connectionId: string; deleted: boolean }> {
-    return this.call('project.mcp.grants.delete', { projectId, connectionId, expectedRevision });
-  }
-
   appendMcpAudit(event: Omit<McpAuditEvent, 'id' | 'principalId' | 'machineId' | 'createdAt'>): Promise<McpAuditEvent> {
     return this.call('mcp.audit.append', event);
   }
 
-  listMcpAudit(after: string | null, limit = 200): Promise<McpAuditEvent[]> {
-    return this.call('mcp.audit.list', { after, limit });
-  }
-
-  listSkills(): Promise<SkillView[]> {
-    return this.call('skills.list', {});
-  }
-
-  updateSkill(input: SkillUpdate): Promise<SkillView> {
-    return this.call('skills.update', { ...input });
-  }
   subscribeSettings(
     onChange: (event: { userRevision: number; runtimeGeneration: number }) => void,
     onState: (state: 'connecting' | 'open' | 'offline') => void,
@@ -1023,38 +839,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
       socket?.close(1000, 'Settings subscription stopped');
     };
   }
-
-  async listProjectCrons(projectId: string): Promise<ProjectCronView[]> {
-    const values = await this.call<ProjectCronView[]>('crons.list', { projectId });
-    return values.map(projectCronView);
-  }
-
-  async createProjectCron(projectId: string, draft: ProjectCronDraft): Promise<ProjectCronView> {
-    return projectCronView(await this.call<ProjectCronView>('crons.create', { projectId, draft }));
-  }
-
-  async updateProjectCron(projectId: string, cronId: string, expectedRevision: number, draft: ProjectCronDraft): Promise<ProjectCronView> {
-    return projectCronView(await this.call<ProjectCronView>('crons.update', { projectId, cronId, expectedRevision, draft }));
-  }
-
-  deleteProjectCron(projectId: string, cronId: string, expectedRevision: number): Promise<{ projectId: string; cronId: string; deleted: boolean }> {
-    return this.call('crons.delete', { projectId, cronId, expectedRevision });
-  }
-
-  async runProjectCronNow(projectId: string, cronId: string): Promise<ProjectCronRunView> {
-    return projectCronRunView(await this.call<ProjectCronRunView>('crons.runNow', { projectId, cronId }));
-  }
-
-  async projectCronHistory(projectId: string, cronId: string, limit?: number): Promise<ProjectCronRunView[]> {
-    const values = await this.call<ProjectCronRunView[]>('crons.history', { projectId, cronId, ...(limit === undefined ? {} : { limit }) });
-    return values.map(projectCronRunView);
-  }
-
-  async processDueProjectCrons(projectId: string): Promise<ProjectCronRunView[]> {
-    const values = await this.call<ProjectCronRunView[]>('crons.processDue', { projectId });
-    return values.map(projectCronRunView);
-  }
-
 
   bootstrapInspector(identity: InspectorIdentity): Promise<InspectorIdentity> {
     return this.call('inspector.bootstrap', { ...identity });

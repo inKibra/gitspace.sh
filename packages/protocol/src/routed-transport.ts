@@ -1,15 +1,14 @@
 import { deserialize } from 'result-rpc';
 import { batchFetchTransport, fetchTransport, type ClientTransport } from 'result-rpc/client';
-import { isAccountCloudRpcPath, rpcCallTarget, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
+import { accountRpcAuthority, rpcCallTarget } from './account-rpc.js';
 
 /**
- * One client, every machine. Every call goes to the account endpoint, which
- * forwards machine work to the machine holding the space or session it names.
- * A signed batch cannot be split or rewritten, so separate batch queues keep
- * cloud authority work, runtime metadata, and each machine target apart.
+ * Every call goes to the account endpoint, which serves cloud work or forwards
+ * machine work only to the named machine. Signed batches cannot be split or
+ * rewritten, so cloud authority work and each explicit machine target stay apart.
  */
 export interface RoutedTransportOptions {
-  /** Account RPC URL; it serves account work and forwards machine work to the current holder. */
+  /** Account RPC URL; serves cloud work and forwards explicitly named machine work. */
   homeUrl: string;
   /** Signed fetch shared by every queue. */
   fetch: typeof globalThis.fetch;
@@ -43,7 +42,7 @@ function procedureTag(paths: readonly string[]): string {
 }
 
 /**
- * Names a request's procedures in its URL (`?p=space.view,session.control`) so
+ * Names a request's procedures in its URL (`?p=space.view,runtime.snapshot`) so
  * request logs identify the work. Wrap the fetch before signing: the signature
  * covers the tagged target, and servers otherwise ignore the query.
  */
@@ -63,13 +62,11 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   const batch = () => batchFetchTransport({ url: options.homeUrl, fetch, maxItems: options.maxItems ?? 32 });
   const home = batch();
   const account = batch();
-  // Repository provisioning and image startup can outlast ordinary queries.
-  // Keep those calls out of their batch and timeout budget.
+  // Repository provisioning, image startup and waking a paused cache for an environment run can outlast
+  // ordinary queries. Keep those calls out of their batch and timeout budget.
   const provisioning = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 });
   const inspectorContext = batch();
-  // The account Worker forwards a batch whole to one holder, and lets the
-  // account authority choose cloud versus the live machine for workspace reads
-  // before any provider proxy can wake a stopped machine. Never mix targets.
+  // A signed machine batch goes whole to one explicit machine and workspace.
   const targets = new Map<string, ClientTransport>();
   const queue = (key: string): ClientTransport => {
     let transport = targets.get(key);
@@ -78,15 +75,14 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   };
 
   const resolve = (path: string, input: unknown): ClientTransport => {
-    if (path === 'project.create' || path === 'machine.createSandbox' ||
-        path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' ||
+    if (path === 'project.create' || path === 'workspace.create' || path === 'workspace.retryCreate' || path === 'machine.createSandbox' ||
+        path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' || path === 'environment.runChecks' || path === 'environment.runPhase' ||
         (path.startsWith('machine.image.') && path !== 'machine.image.list' && path !== 'machine.image.events')) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
-    if (isAccountCloudRpcPath(path)) return account;
-    if (isSpaceCloudRpcPath(path)) return queue(`inspector:${spaceCloudRpcSpaceId(path, input) ?? ''}`);
+    if (accountRpcAuthority(path) === 'cloud') return account;
     const target = rpcCallTarget(path, input);
     if (!target) return home;
-    return queue(target.kind === 'space' ? `space:${target.spaceId}` : target.kind === 'terminal' ? `terminal:${target.spaceId}:${target.machineId}` : `session:${target.sessionId}`);
+    return queue(target.kind === 'terminal' ? `terminal:${target.spaceId}:${target.machineId}` : `machine:${target.machineId}`);
   };
 
   return {

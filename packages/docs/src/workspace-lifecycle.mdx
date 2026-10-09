@@ -11,9 +11,19 @@ Use the normal workspace agent to configure repository setup. The built-in `work
 
 Selecting a project or workspace does not run setup. Creating a workspace does not provision cloud resources.
 
+## Cloud workspaces and base branches
+
+Workspace creation, ordinary Git source resolution, archive, and restore run in the cloud without an attached machine. A new workspace uses its saved phase, including after its runtime reopens. Human phase changes and approved plans update that saved phase; a workspace still cannot advance beyond its dependencies.
+
+Sources can name the project base branch, an imported branch or commit, another workspace's committed HEAD, a tag, or a pull-request head. Missing public tag and pull-request refs are fetched from the canonical HTTPS origin into the project's Artifacts repository before the workspace forks it. Annotated tags are resolved to their commits. This fetch sends no account credentials to the origin and does not follow redirects: use the final repository-root URL. Ref advertisements are limited to 64 KiB, Git packs to 40 MiB, and each fetch to 15 seconds. Private or oversized initial imports still require the existing machine-seeding flow.
+
+Changing a project's base branch switches its existing base workspace checkout as well as its saved branch and source commit. Other workspaces retain their branches. The base checkout must be clean, its agent stopped, and its machine caches detached. Staged, unstaged, conflicted, or held-back LFS changes are rejected before branch mutation; they are not discarded. If a ref publication is interrupted, the base runtime remains fenced: repeat the same base-branch change to complete recovery before using it.
+
+Legacy machine-held workspaces cannot silently become cloud runtimes. They must be migrated from their original machine checkout before cloud lifecycle operations are available.
+
 ## Configure a repository
 
-1. Open a workspace with an online machine checkout for repository inspection and edits. Configure its inference profile in the cloud; the agent's conversation and provider access do not depend on that machine staying online.
+1. Open the cloud workspace for repository inspection and edits, and configure its inference profile. Attach a machine in Environment when you are ready to execute checks or lifecycle scripts; conversation and ordinary cloud Git work do not require that machine.
 2. Ask: **Use the workspace-lifecycle skill to inspect this repository and propose its lifecycle configuration. Do not edit or execute yet.**
 3. Review the proposal. It should name the files to change, required tools, profiles, secret names, existing resource IDs, costs, and any cloud effects.
 4. Approve the repository edits. The agent can now write the agreed configuration and check its syntax. This does not authorize installs, repository checks, provisioning, or teardown.
@@ -47,19 +57,25 @@ The workspace header has one **Environment** chip. It opens **Inspector > Enviro
 
 Normal attachments are equal caches of the cloud working tree. Each machine uses its standard workspace path and runs machine preparation, checks, and materialization under the same approval rules. A successful setup on one machine does not prove that another machine is ready. **Setup again** records a new run; **Make default** changes routing without moving the workspace.
 
+Before **Run checks** or a lifecycle phase, choose **Run on machine**. The panel may preselect the workspace's explicit default cache or its only ready cache; with multiple ready caches and no default, you must choose. Every request names that machine. A missing or stale attachment is an error, never a fallback to another online machine. Paused caches resume through the normal cache setup lifecycle before the run. With no attached machine, records and configuration remain available but execution is disabled.
+
 Terminals open on a machine you choose. The terminal pane lists the machines attached to the workspace as ready caches; pick one, and its shells start in that machine's copy with the bundle's [terminal environment](/lifecycle-reference#terminal-environment). There is no default terminal machine: the default machine only routes commands. With no ready cache, the pane offers **Attach a machine**, which opens Environment. Every terminal request names its machine, and the account refuses one that is not a ready cache of the workspace.
 
 Commands catch up before execution and publish changes when they finish. Services and running processes publish periodically. Continuous sync ends after active work stops and a 15-minute grace period expires. Attaching a terminal or enabling **Work locally** also starts a human file watcher. Viewing the workspace in a browser does not start that watcher.
 
 An idle copy pauses before it is reclaimed. The default reclaim delay is 24 hours; the workspace cache policy can change it. Low disk space may trigger earlier reclaim of an idle copy. A final acknowledged snapshot, no held-back LFS edits, and no unresolved effects are required before deletion. **Reclaim now** uses the same barriers. The next command rebuilds the copy and runs approved local setup again. Machines without a heartbeat for 30 seconds cannot receive new work; reconnecting requires catch-up before they become ready.
 
-## Close, move, and retire
+## Release caches, archive, and retire
 
-**Close** saves a checkpoint and releases the managed checkout. **Move** saves and removes the source checkout, then restores the same durable workspace on another machine. Neither action authorizes remote destruction. **Retirement** is a separate, explicit decision about cloud resources. Archiving is not retirement.
+Opening a project or workspace opens its cloud view; it does not claim a machine or restore a holder. Use **Environment > Add machine** when you need a machine cache for commands or terminals.
 
-If the original machine is gone, choose another authorized online runner in the browser for explicit retirement. It needs a durable workspace checkpoint to restore the repository helpers and run approved preparation, checks, and destruction. This does not reopen or reprovision the workspace. An unavailable checkpoint blocks execution, and failed destruction preserves the cloud records for recovery.
+**Release machine caches** asks each attached normal cache to drain and detach. It does not archive the workspace, stop its cloud conversations, or detach private runner and delegate checkouts. The cloud workspace stays available, and Environment can attach a cache again. No attached cache is reported explicitly rather than treated as a closed workspace.
 
-Before local removal, GitSpace drains services and runs dematerialization. It must save the checkpoint successfully before deleting the managed checkout. A failed dematerialization or checkpoint blocks deletion, not your access to the workspace. Fix the failure while the local files remain available.
+**Archive** stops the workspace's agents, asks its machine attachments to drain, and marks its saved definition archived. **Restore** reactivates that definition in the cloud without requiring an online machine. Retirement is a separate, explicit decision about cloud resources; releasing caches and archiving never authorize remote destruction.
+
+If the original machine is gone, attach another authorized online machine to this workspace, then select it in Environment for explicit retirement. Cache setup restores the canonical working copy and honors preparation approvals before the requested destruction runs. Choosing a machine does not authorize scripts or retirement. Failed destruction preserves the cloud records for recovery.
+
+Before a cache is deleted, its machine drains activity and completes the publication and execution-reconciliation barriers. Held-back LFS changes require a commit or explicit confirmation before release. A failed drain or publication keeps local files available for recovery; requesting release is not proof that the machine has finished detaching.
 
 Private runner and delegate checkouts have a separate drain step. GitSpace verifies the attachment generation, stops owned processes, confirms that any mount is gone, and refuses deletion while execution claims remain unresolved. A lost attachment fences work but does not authorize deleting files. Normal cache reclamation has its own final-snapshot and held-back-change barriers.
 
@@ -67,7 +83,7 @@ Pi conversation state lives in the cloud, not in the checkout. The checkpoint re
 
 A fresh arrival recreates local state. Do not rely on files left behind on the previous machine, even when you return to it.
 
-| State | What to expect after close or move |
+| State | What to expect after cache reclamation |
 | --- | --- |
 | Git commits and branch; staged and unstaged tracked changes | Saved by a completed checkpoint |
 | Non-ignored untracked files | Saved by a completed checkpoint |
@@ -79,7 +95,7 @@ A fresh arrival recreates local state. Do not rely on files left behind on the p
 | Remote resources | Remain until you explicitly authorize their destruction |
 
 <Warning>
-A checkpoint is not a disk backup. If you keep a database only in an ignored local file, closing or moving the workspace can lose it. Use durable remote storage or an explicit export that the checkpoint captures. Never export secrets into tracked or non-ignored files.
+A checkpoint is not a disk backup. If you keep a database only in an ignored local file, releasing or reclaiming its machine cache can lose it. Use durable remote storage or an explicit export that the checkpoint captures. Never export secrets into tracked or non-ignored files.
 </Warning>
 
 After an unexpected interruption, the last completed checkpoint remains the recovery limit for local work. An interrupted cloud command may have taken effect without reporting success. Inspect the provider and recorded bindings before authorizing recovery. GitSpace must not retry an uncertain cloud effect in the background.

@@ -155,12 +155,11 @@ it('preserves desktop Enter submission without consuming Shift+Enter or IME conf
   expect(textarea.value).toBe('');
 });
 
-it('keeps failure details and transcript through an explicit retry failure while close remains usable', async () => {
+it('keeps failure details and transcript through an explicit retry failure', async () => {
   const retry = Promise.withResolvers<void>();
   const onRetryAgent = vi.fn(() => retry.promise);
-  const onCloseSpace = vi.fn(async () => undefined);
   const failedAgent = { ...verticalSliceFixture.mainAgent!, state: 'waiting' as const, controlsAvailable: false, failed: true, errorMessage: 'Restore agent: saved runtime could not start' };
-  await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} mainAgent={failedAgent} onRetryAgent={onRetryAgent} onCloseSpace={onCloseSpace} />));
+  await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} mainAgent={failedAgent} onRetryAgent={onRetryAgent} />));
   const transcript = container.querySelector('.conversation-stage [data-slot=scroll-area-viewport]');
   const transcriptText = transcript?.textContent;
   expect(container.querySelector('textarea')).toBeNull();
@@ -168,16 +167,12 @@ it('keeps failure details and transcript through an explicit retry failure while
   await act(() => retryButton.click());
   expect(retryButton.disabled).toBe(true);
   expect(container.textContent).toContain(failedAgent.errorMessage);
-  const closeButton = [...container.querySelectorAll('button')].find((button) => button.textContent === 'Close')!;
-  expect(closeButton.disabled).toBe(false);
   await act(async () => { retry.reject(new Error('Retry failed: provider credentials are unavailable')); });
   expect(container.textContent).toContain('Retry failed: provider credentials are unavailable');
   expect(container.textContent).toContain(failedAgent.errorMessage);
   expect(container.querySelector('.conversation-stage [data-slot=scroll-area-viewport]')).toBe(transcript);
   expect(transcript?.textContent).toBe(transcriptText);
   expect(onRetryAgent).toHaveBeenCalledTimes(1);
-  await act(() => closeButton.click());
-  expect(onCloseSpace).toHaveBeenCalledExactlyOnceWith(verticalSliceFixture.workspace.id);
 });
 
 it('presents legacy missing failure details honestly and removes the retry affordance after recovery', async () => {

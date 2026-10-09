@@ -8,7 +8,7 @@ import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserArgumentsSche
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc } from './documents.js';
 import { cronToolScopes } from './cron.js';
-import { enforceSessionApproval } from './session-controls.js';
+import { enforceSessionApproval, type ApprovalMode } from './session-controls.js';
 import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
@@ -24,6 +24,10 @@ export type ToolServices = {
   question(id: string, api: ToolExecutionApi, context: Context): Promise<JsonValue>;
   instructions(conversationId: string, context: Context): Promise<string>;
   authorizeCronTool(input: { tool: string; args: JsonValue; readScopes: readonly string[]; writeScopes: readonly string[] }): Promise<void>;
+  /** The inference profile's default approval mode for conversations that have not adopted one. */
+  approvalDefault(): Promise<ApprovalMode>;
+  /** Throws before any approval question when an effect cannot run (e.g. a machine tool with no machine attached). */
+  preflight(input: Parameters<ToolServices['invoke']>[0]): Promise<void>;
 };
 const workspaceId = z.string().min(1).optional();
 const get = z.object({ method: z.literal('get'), workspaceId });
@@ -117,7 +121,8 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         const attemptId = await api.memo('gitspace.attempt', `tool:${api.taskId}`, context);
         const invocation = { tool: name, args, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: api.callId, attemptId, replay: safe ? 'safe' as const : 'unsafe' as const, signal: context.abortSignal };
         const browser = name === 'browser' ? await services.prepareBrowser(invocation) : undefined;
-        if (!await enforceSessionApproval(api, context, name, args, browser)) return { isError: true, content: [{ type: 'text' as const, text: 'The requested operation was not approved.' }] };
+        await services.preflight(invocation);
+        if (!await enforceSessionApproval(api, context, name, args, services.approvalDefault, browser)) return { isError: true, content: [{ type: 'text' as const, text: 'The requested operation was not approved.' }] };
         if (name === 'bash' && args && typeof args === 'object' && !Array.isArray(args) && (args.background === true || typeof args.op === 'string')) {
           const value = await jobs(args, api, context);
           const result = RuntimeToolResultSchema.safeParse(value);

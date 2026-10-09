@@ -19,14 +19,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   "runtime.attachment.request": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   "runtime.attachment.cache.request": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   "runtime.attachment.detach": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  "transcriptPage": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "transcriptContent": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
   "machines": {
     "readOnlyHint": true,
     "openWorldHint": false
@@ -133,18 +125,10 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": false,
     "openWorldHint": false
   },
-  "placements": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
   "incidents.record": {
     "readOnlyHint": false,
     "destructiveHint": false,
     "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "events": {
-    "readOnlyHint": true,
     "openWorldHint": false
   },
   "settings.get": {
@@ -531,12 +515,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
-  "project.open": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": true
-  },
   "project.archive": {
     "readOnlyHint": false,
     "destructiveHint": true,
@@ -565,18 +543,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": true,
     "openWorldHint": false
   },
-  "space.close": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "space.reopen": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": true
-  },
   "workspace.create": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -604,12 +570,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   "workspace.delete": {
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "workspace.setPhase": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
     "idempotentHint": true,
     "openWorldHint": false
   },
@@ -871,140 +831,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": false,
     "destructiveHint": false,
     "idempotentHint": false,
-    "openWorldHint": false
-  },
-  "subagents.events": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "subagents.page": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "subagents.content": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "session.history": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "session.locate": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "session.create": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.createProject": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.prompt": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": false,
-    "openWorldHint": true
-  },
-  "session.control": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "session.usage": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "session.agents": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "session.saveAgent": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.cycleRole": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": false,
-    "openWorldHint": false
-  },
-  "session.setThinking": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.setApproval": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.setFast": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.setModel": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.setGoal": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": true
-  },
-  "session.compact": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": false,
-    "openWorldHint": true
-  },
-  "session.navigateTree": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.clearQueue": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.removeQueuedMessage": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "session.promoteQueuedMessage": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": true
-  },
-  "session.answerAsk": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": false,
-    "openWorldHint": true
-  },
-  "session.stop": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
     "openWorldHint": false
   },
   "space.view": {

@@ -99,7 +99,7 @@ const NewWorkspaceGlyph = glyph(Plus);
 /** Icon slots take component types, so keep this type stable while context updates the accepted status. */
 function SpaceStatusGlyph({ className, size, strokeWidth }: IconComponentProps) {
   const summary = useContext(SpaceSummaryContext);
-  const color = summary ? workspaceStatusColor(summary) : 'orange';
+  const color = summary ? workspaceStatusColor(summary) : 'dim';
   const freshness = summary?.freshness ?? (summary?.status ? 'fresh' : 'unknown');
   return <span className={`inline-flex items-center justify-center ${className ?? ''}`} style={{ width: size, height: size }} data-freshness={freshness}>
     {summary?.closedAt ? <ArchiveGlyph size={size} strokeWidth={strokeWidth} /> : <StatusDot color={color} pulse={color === 'green' && freshness === 'fresh'} />}
@@ -140,9 +140,8 @@ export interface AppSidebarProps {
   machines: Array<{ id: string; label: string }>;
   onSelectProject?(projectId: string): void;
   onSelectWorkspace(workspace: SidebarWorkspace): void;
-  onClose?(spaceId: string): void | Promise<void>;
-  closePendingSpaceId?: string | null;
-  onReopen?(spaceId: string): void | Promise<void>;
+  onReleaseMachines?(spaceId: string): void | Promise<void>;
+  releasePendingSpaceId?: string | null;
   onArchive?(spaceId: string): void | Promise<void>;
   onRestore?(spaceId: string): void | Promise<void>;
   onMove?(spaceId: string, destinationMachineId: string): void | Promise<void>;
@@ -164,7 +163,7 @@ function launchedFrom(deployment: SidebarDeploymentProps | null | undefined, wor
   return release !== null && RELEASE_TARGETS.some((target) => deployment.status.desired[target] === release.sha);
 }
 
-function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployment, onClose, closePendingSpaceId, onReopen, onArchive, onRestore, onMove, onInspect, onNewWorkspace, onOpenProjectSettings, triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; runtime?: AgentScopeView; summary?: SidebarSpaceSummary; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; triggerClassName?: string } & Pick<AppSidebarProps, 'machines' | 'deployment' | 'onClose' | 'closePendingSpaceId' | 'onReopen' | 'onArchive' | 'onRestore' | 'onMove'>) {
+function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployment, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onMove, onInspect, onNewWorkspace, onOpenProjectSettings, triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; runtime?: AgentScopeView; summary?: SidebarSpaceSummary; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; triggerClassName?: string } & Pick<AppSidebarProps, 'machines' | 'deployment' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onMove'>) {
   const lfsTransition = useLfsTransition();
   const [movePending, setMovePending] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
@@ -187,17 +186,13 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
     finally { setMovePending(false); }
   };
   const archived = !!summary?.closedAt;
-  // Close, reopen and move manage a legacy machine-held space; a cloud workspace lives in the cloud and offers none of them.
-  const released = !archived && summary?.holder.kind === 'released';
   const held = !!runtime && !archived && summary?.holder.kind === 'held';
   const launchable = (held || (!archived && summary?.holder.kind === 'cloud')) && kind === 'workspace' && deployment?.isGitSpaceProject === true;
-  const canReopen = released && !!onReopen;
-  const canClose = !archived && summary?.holder.kind === 'held' && !!onClose;
-  const outstanding = !!summary?.status && summary.status.agents.green + summary.status.agents.orange + summary.status.agents.red > 0;
+  const canRelease = !archived && !summary?.creation && !!onReleaseMachines;
   const canRestore = kind === 'workspace' && archived && !!onRestore;
   const canArchive = kind === 'workspace' && !archived && !summary?.creation && !!onArchive;
   const canMove = held && !!onMove && machines.length > 0;
-  if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !canReopen && !canClose && !canRestore && !canArchive && !canMove && !launchable) return null;
+  if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !canRelease && !canRestore && !canArchive && !canMove && !launchable) return null;
   const launching = deployment?.launch?.status === 'running';
   let index = 0;
   return <>{lfsTransition.dialog}{moveError ? <p role="alert" className="text-caption text-destructive">{moveError}</p> : null}<DropdownMenu>
@@ -206,8 +201,7 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
       {onInspect ? <MenuItem index={index++} icon={ProjectGlyph} label="Open project" onSelect={onInspect} /> : null}
       {onNewWorkspace ? <MenuItem index={index++} icon={NewWorkspaceGlyph} label="New workspace" onSelect={onNewWorkspace} /> : null}
       {onOpenProjectSettings ? <MenuItem index={index++} icon={SettingsGlyph} label="Project settings" onSelect={onOpenProjectSettings} /> : null}
-      {canReopen ? <MenuItem index={index++} icon={ReopenGlyph} label="Reopen space" onSelect={() => void onReopen?.(space.id)} /> : null}
-      {canClose ? <MenuItem index={index++} icon={CloseGlyph} label={closePendingSpaceId === space.id ? outstanding ? 'Stopping agent…' : 'Closing space…' : outstanding ? 'Stop and close' : 'Close space'} disabled={closePendingSpaceId !== null && closePendingSpaceId !== undefined} onSelect={() => void onClose?.(space.id)} /> : null}
+      {canRelease ? <MenuItem index={index++} icon={CloseGlyph} label={releasePendingSpaceId === space.id ? 'Releasing machine caches…' : 'Release machine caches'} disabled={releasePendingSpaceId !== null && releasePendingSpaceId !== undefined} onSelect={() => void onReleaseMachines?.(space.id)} /> : null}
       {canRestore ? <MenuItem index={index++} icon={ReopenGlyph} label="Restore workspace" onSelect={() => void onRestore?.(space.id)} /> : null}
       {canArchive ? <MenuItem index={index++} icon={ArchiveGlyph} label="Archive workspace" onSelect={() => void onArchive?.(space.id)} /> : null}
       {canMove ? machines.map((machine) => <MenuItem key={machine.id} index={index++} icon={MachineGlyph} label={`Move to ${machine.label}`} disabled={movePending} onSelect={() => void move(machine)} />) : null}
@@ -261,7 +255,7 @@ function SourcePill({ deployment, onOpenSettings }: { deployment: SidebarDeploym
  */
 const FOLDED_ACTION_REVEAL = 'opacity-0 group-hover/menu-item:opacity-100 group-focus-within/menu-item:opacity-100 data-[popup-open]:opacity-100';
 
-function ProjectRows({ project, collapsed, onCollapse, selected, machines, deployment, onSelectProject, onSelectWorkspace, onClose, closePendingSpaceId, onReopen, onArchive, onRestore, onMove, onNewWorkspace, onOpenProjectSettings }: { project: SidebarProject; collapsed: boolean; onCollapse(projectId: string, collapsed: boolean): void } & Pick<AppSidebarProps, 'selected' | 'machines' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onClose' | 'closePendingSpaceId' | 'onReopen' | 'onArchive' | 'onRestore' | 'onMove' | 'onNewWorkspace' | 'onOpenProjectSettings'>) {
+function ProjectRows({ project, collapsed, onCollapse, selected, machines, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onMove, onNewWorkspace, onOpenProjectSettings }: { project: SidebarProject; collapsed: boolean; onCollapse(projectId: string, collapsed: boolean): void } & Pick<AppSidebarProps, 'selected' | 'machines' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onMove' | 'onNewWorkspace' | 'onOpenProjectSettings'>) {
   const { base, workspaces } = project;
   const [showArchived, setShowArchived] = useState(false);
   const visible = workspaces.filter((workspace) => !workspace.closedAt);
@@ -281,7 +275,7 @@ function ProjectRows({ project, collapsed, onCollapse, selected, machines, deplo
     const suffix = released && !summary?.closedAt;
     return <SpaceSummaryContext.Provider key={workspace.id} value={summary}><SidebarMenuSubItem>
       <SidebarMenuSubButton className={released ? 'text-muted-foreground' : undefined} render={<button type="button" onClick={() => onSelectWorkspace(workspace)} />} isActive={selected?.projectId === workspace.projectId && selected.workspaceId === workspace.id} icon={SpaceStatusGlyph} title={`${workspace.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${suffix ? ' · released' : ''}`} aria-description={summary?.detail ?? undefined}>{workspace.name}{launchedFrom(deployment, workspace.id) ? <LaunchedGlyph /> : null}{suffix ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuSubButton>
-      <SidebarMenuActions showOnHover><SpaceMenu space={workspace} kind="workspace" runtime={runtime} summary={summary} machines={machines} deployment={deployment} onClose={onClose} closePendingSpaceId={closePendingSpaceId} onReopen={onReopen} onArchive={onArchive} onRestore={onRestore} onMove={onMove} /></SidebarMenuActions>
+      <SidebarMenuActions showOnHover><SpaceMenu space={workspace} kind="workspace" runtime={runtime} summary={summary} machines={machines} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onMove={onMove} /></SidebarMenuActions>
     </SidebarMenuSubItem></SpaceSummaryContext.Provider>;
   };
   return <SidebarMenuItem>
@@ -292,7 +286,7 @@ function ProjectRows({ project, collapsed, onCollapse, selected, machines, deplo
     <SidebarMenuActions showOnHover={open}>
       <SidebarMenuAction aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} aria-expanded={open} onClick={() => onCollapse(project.id, open)}><ChevronRight width={16} height={16} strokeWidth={1.5} className={open ? 'rotate-90 transition-[rotate] duration-80' : 'transition-[rotate] duration-80'} /></SidebarMenuAction>
       {createWorkspace ? <Tooltip content="New workspace" side="top"><SidebarMenuAction className={open ? undefined : FOLDED_ACTION_REVEAL} aria-label={`New workspace in ${project.name}`} onClick={createWorkspace}><Plus width={16} height={16} strokeWidth={1.5} /></SidebarMenuAction></Tooltip> : null}
-      <SpaceMenu space={base ?? project} kind="project" runtime={base} summary={baseSummary} machines={machines} deployment={deployment} onClose={onClose} closePendingSpaceId={closePendingSpaceId} onReopen={onReopen} onArchive={onArchive} onRestore={onRestore} onMove={onMove} onInspect={onSelectProject ? () => onSelectProject(project.id) : undefined} onNewWorkspace={createWorkspace} onOpenProjectSettings={onOpenProjectSettings ? () => onOpenProjectSettings(project.id) : undefined} triggerClassName={open ? undefined : FOLDED_ACTION_REVEAL} />
+      <SpaceMenu space={base ?? project} kind="project" runtime={base} summary={baseSummary} machines={machines} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onMove={onMove} onInspect={onSelectProject ? () => onSelectProject(project.id) : undefined} onNewWorkspace={createWorkspace} onOpenProjectSettings={onOpenProjectSettings ? () => onOpenProjectSettings(project.id) : undefined} triggerClassName={open ? undefined : FOLDED_ACTION_REVEAL} />
     </SidebarMenuActions>
     <SidebarMenuSub open={open}>
       {visible.map(row)}
@@ -315,7 +309,7 @@ function readCollapsedProjects(): ReadonlySet<string> {
   return new Set(Array.isArray(parsed) ? parsed.filter((id: unknown): id is string => typeof id === 'string') : []);
 }
 
-export function AppSidebar({ view, onView, selected, selectedSummary, projects, machines, onSelectProject, onSelectWorkspace, onClose, closePendingSpaceId = null, onReopen, onArchive, onRestore, onMove, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, user, deployment }: AppSidebarProps) {
+export function AppSidebar({ view, onView, selected, selectedSummary, projects, machines, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onMove, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, user, deployment }: AppSidebarProps) {
   const userName = user?.name || 'Your account';
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const collapseProject = (projectId: string, collapse: boolean): void => {
@@ -352,7 +346,7 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
             ? selected.workspaceId === null
               ? { ...project, baseSummary: selectedSummary }
               : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: selectedSummary } : workspace) }
-            : project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} machines={machines} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onClose={onClose} closePendingSpaceId={closePendingSpaceId} onReopen={onReopen} onArchive={onArchive} onRestore={onRestore} onMove={onMove} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} />)}
+            : project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} machines={machines} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onMove={onMove} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} />)}
         </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>

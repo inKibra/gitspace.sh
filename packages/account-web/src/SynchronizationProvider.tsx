@@ -34,9 +34,6 @@ export function useSpaceSynchronization(spaceId: string) {
 export function useProjectSynchronization(projectId: string) {
   return useSynchronizedResource(`project:${projectId}`, (after, signal) => rpcClient.project.events({ projectId, after }, { signal }));
 }
-export function useRuntimeSynchronization(projectId: string) {
-  return useSynchronizedResource(`runtime:${projectId}`, (after, signal) => rpcClient.events({ projectId, after }, { signal }));
-}
 export function useAccountDirectorySnapshot(source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource) {
   return useSynchronizedResource('account-directory', source);
 }

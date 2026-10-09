@@ -2,7 +2,7 @@ import type { RuntimeBrowserApprovalCard, RuntimeQuestionTool } from '@gitspace/
 import { defineDoc } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
-export const WorkspaceDoc = defineDoc<{ phase: 'plan' | 'code' | 'review' | 'ship'; instructions: string; goal: string; creation: string }>({ kind: 'gitspace.workspace', version: 1, scope: 'session', initial: () => ({ phase: 'code', instructions: '', goal: '', creation: 'pending' }) });
+export const WorkspaceDoc = defineDoc<{ phase: 'plan' | 'code' | 'review' | 'ship'; instructions: string; goal: string }>({ kind: 'gitspace.workspace', version: 1, scope: 'session', initial: () => ({ phase: 'code', instructions: '', goal: '' }) });
 export const MachinesDoc = defineDoc<{ attachments: RuntimeAttachment[] }>({ kind: 'gitspace.machines', version: 1, scope: 'session', initial: () => ({ attachments: [] }) });
 export const TodosDoc = defineDoc<{ items: { id: string; text: string; status: 'pending' | 'active' | 'completed' }[] }>({ kind: 'gitspace.todos', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ items: [] }) });
 export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 'approved' | 'rejected'; questionId: string | null }>({ kind: 'gitspace.plan', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ text: '', status: 'draft', questionId: null }) });

@@ -83,6 +83,9 @@ export const RuntimeSpaceArtifactsArgumentsSchema = z.discriminatedUnion('method
   z.object({ method: z.literal('readCode'), path, commit: z.string().regex(/^[a-f0-9]{40,64}$/u) }),
 ]);
 export const RuntimeAgentLifecycleRunArgumentsSchema = LifecycleRunRequestSchema.omit({ interactive: true }).extend({ ...RuntimeDispatchSelectionSchema.shape, phase: LifecycleRunRequestSchema.shape.phase.exclude(['cloud/destroy']) });
+/** A lifecycle run as its cache machine receives it. Agents enter through the narrower schema above; a human run,
+ * authorized by the account before dispatch, may also run interactively or destroy cloud resources. */
+export const RuntimeLifecycleDispatchArgumentsSchema = LifecycleRunRequestSchema.extend(RuntimeDispatchSelectionSchema.shape);
 export const RuntimeEnvironmentArgumentsSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('get') }),
   z.object({ method: z.enum(['runLog', 'log']), runId: path, offset: z.number().int().nonnegative().optional() }),

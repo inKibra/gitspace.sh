@@ -594,3 +594,106 @@ for (const publication of ['cloud', 'cache', 'initial', 'recovery'] as const) te
     expect(result.value.conflicts).toEqual(['real-text']);
   } finally { await f.close(); }
 }, 10000);
+
+test('workspace branches move only to held commits, and tags and pull heads resolve from the read advertisement', async () => {
+  const f = await fixture();
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = String(input);
+    if (!url.includes('git-upload-pack')) return f.request(url, init);
+    const child = Bun.spawn(['git', '-c', 'core.bare=true', 'upload-pack', '--stateless-rpc', '--advertise-refs', f.dir], { stdout: 'pipe', stderr: 'pipe' });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    if (await child.exited !== 0) throw new Error(await new Response(child.stderr).text());
+    return new Response(bytes);
+  }, { preconnect: fetch.preconnect }));
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  const repo: ArtifactsRepo = { ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readFile: unsupported, fork: unsupported };
+  const removed: string[] = [];
+  const code = new ArtifactsCodeStore({ get: async () => repo, create: unsupported, import: unsupported, list: unsupported, delete: async name => {
+    if (name === 'workspace-missing') throw Object.assign(new Error('Repository not found'), { name: 'ArtifactsError', code: 'NOT_FOUND' });
+    removed.push(name);
+    return true;
+  } });
+  try {
+    const head = f.previous.worktreeCommit;
+    await code.setBranch('fixture', 'feature/cloud', head);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: 'refs/heads/feature/cloud' })).toBe(head);
+    const minted = f.credentials().minted;
+    await code.setBranch('fixture', 'feature/cloud', head);
+    expect(f.credentials().minted).toBe(minted);
+    const next = await git.writeCommit({ fs, dir: f.dir, commit: { tree: f.tree, parent: [head], author, committer: author, message: 'next\n' } });
+    await code.setBranch('fixture', 'feature/cloud', next);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: 'refs/heads/feature/cloud' })).toBe(next);
+    await expect(code.setBranch('fixture', 'absent', 'f'.repeat(40))).rejects.toThrow();
+    expect(await git.listBranches({ fs, dir: f.dir })).not.toContain('absent');
+    await git.annotatedTag({ fs, dir: f.dir, ref: 'v1', object: head, tagger: author, message: 'v1\n' });
+    await git.writeRef({ fs, dir: f.dir, ref: 'refs/pull/7/head', value: next });
+    await git.writeRef({ fs, dir: f.dir, ref: 'refs/tags/lightweight', value: next });
+    expect(await code.resolveAdvertisedRef('fixture', 'refs/tags/v1')).toBe(head);
+    expect(await code.resolveAdvertisedRef('fixture', 'refs/pull/7/head')).toBe(next);
+    expect(await code.resolveAdvertisedRef('fixture', 'refs/tags/lightweight')).toBe(next);
+    expect(await code.resolveAdvertisedRef('fixture', 'refs/tags/missing')).toBeNull();
+    await expect(code.resolveAdvertisedRef('fixture', 'refs/heads/main')).rejects.toThrow('Unsupported advertised ref');
+    expect(await code.deleteRepository('workspace-gone')).toBe(true);
+    expect(await code.deleteRepository('workspace-missing')).toBe(false);
+    expect(removed).toEqual(['workspace-gone']);
+  } finally { request.mockRestore(); await f.close(); }
+});
+
+test('cloud transfer imports public tag and PR object graphs and updates an existing fork without machines', async () => {
+  const source = await fixture();
+  const target = await fixture();
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected provider operation'); };
+  const repository = (f: typeof source, host: string): ArtifactsRepo => ({
+    ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readFile: unsupported, fork: unsupported,
+    info: async () => ({ ...await f.repo.info(), remote: `https://${host}/repo.git` }),
+    readCommit: async oid => {
+      try { return await f.repo.readCommit(oid); }
+      catch (error) { if (error instanceof git.Errors.NotFoundError) return null; throw error; }
+    },
+    log: async options => {
+      const result = Bun.spawnSync(['git', '-C', f.dir, 'rev-parse', '--verify', `${options?.ref ?? 'HEAD'}^{commit}`]);
+      if (result.exitCode !== 0) return [];
+      return [await f.repo.readCommit(new TextDecoder().decode(result.stdout).trim())];
+    },
+  });
+  const sourceRepo = repository(source, 'source.invalid');
+  const targetRepo = repository(target, 'target.invalid');
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    const dir = url.hostname === 'source.invalid' ? source.dir : url.hostname === 'target.invalid' ? target.dir : null;
+    if (!dir) throw new Error('Unexpected network destination');
+    const authorization = new Headers(init?.headers).get('authorization');
+    if (url.hostname === 'source.invalid' && init?.redirect === 'error') expect(authorization).toBeNull();
+    else expect(authorization).toBe('Bearer secret');
+    const advertise = url.pathname.endsWith('/info/refs');
+    const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
+    const child = Bun.spawn(['git', '-c', 'core.bare=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), dir], {
+      stdin: advertise ? 'ignore' : new Response(init?.body).body, stdout: 'pipe', stderr: 'pipe',
+    });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    const error = await new Response(child.stderr).text();
+    if (await child.exited !== 0) throw new Error(error);
+    return new Response(bytes);
+  }, { preconnect: fetch.preconnect }));
+  const code = new ArtifactsCodeStore({ get: async name => name === 'source' ? sourceRepo : targetRepo, create: unsupported, import: unsupported, list: unsupported, delete: unsupported });
+  try {
+    const blob = await git.writeBlob({ fs, dir: source.dir, blob: text.encode('new public ref content') });
+    const tree = await git.writeTree({ fs, dir: source.dir, tree: [{ mode: '100755', path: 'new-script', oid: blob, type: 'blob' }] });
+    const head = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [source.previous.worktreeCommit], author, committer: author, message: 'new branch\n' } });
+    await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/develop', value: head });
+    await git.writeRef({ fs, dir: source.dir, ref: 'refs/pull/9/head', value: head });
+    await git.annotatedTag({ fs, dir: source.dir, ref: 'release-v2', object: head, tagger: author, message: 'release\n' });
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/tags/release-v2')).toBe(head);
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/pull/9/head')).toBe(head);
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/pull/9/head' })).toBe(head);
+    expect(new TextDecoder().decode((await git.readBlob({ fs, dir: target.dir, oid: head, filepath: 'new-script' })).blob)).toBe('new public ref content');
+    expect((await git.readCommit({ fs, dir: target.dir, oid: head })).commit.parent).toEqual([source.previous.worktreeCommit]);
+    const next = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'later branch\n' } });
+    await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/develop', value: next, force: true });
+    await code.copyCommit('source', 'target', 'refs/heads/develop', next, null);
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(next);
+    expect((await git.readCommit({ fs, dir: target.dir, oid: next })).commit.parent).toEqual([head]);
+    await expect(code.copyCommit('source', 'target', 'refs/heads/develop', head, null)).rejects.toThrow('ref has advanced');
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(next);
+  } finally { request.mockRestore(); await source.close(); await target.close(); }
+}, 15_000);

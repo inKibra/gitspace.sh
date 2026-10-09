@@ -44,7 +44,7 @@ async function showActions(workspace: SidebarWorkspace) {
     projects={[{ id: 'project', name: 'Project', workspaces: [workspace] }]}
     machines={[{ id: 'desk', label: 'Desk' }]}
     onSelectWorkspace={() => undefined}
-    onClose={() => undefined} onReopen={() => undefined} onArchive={() => undefined}
+    onReleaseMachines={() => undefined} onArchive={() => undefined}
     onRestore={() => undefined} onMove={() => undefined}
   /></SidebarProvider>));
   const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Space actions for Saved workspace"]');
@@ -53,9 +53,6 @@ async function showActions(workspace: SidebarWorkspace) {
   return Array.from(document.querySelectorAll('[role="menuitem"]'), (item) => item.getAttribute('aria-label'));
 }
 
-it('offers reopen and archive without requiring a runtime for a released workspace', async () => {
-  expect(await showActions(saved)).toEqual(['Reopen space', 'Archive workspace']);
-});
 
 it('uses archived account state rather than a stale held runtime for its actions', async () => {
   if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
@@ -66,18 +63,6 @@ it('uses archived account state rather than a stale held runtime for its actions
   })).toEqual(['Restore workspace']);
 });
 
-it('does not offer reopen or machine controls when placement is unknown', async () => {
-  expect(await showActions({ ...saved, summary: { closedAt: null, holder: { kind: 'unknown' }, freshness: 'unknown' } })).toEqual(['Archive workspace']);
-});
-
-it('offers no close, reopen or move for a cloud workspace, but keeps them for a machine-held space', async () => {
-  if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
-  const runtime = { ...verticalSliceFixture.workspace, id: saved.id, projectId: saved.projectId, name: saved.name };
-  expect(await showActions({ ...saved, runtime, summary: { closedAt: null, holder: { kind: 'cloud' }, freshness: 'unknown' } })).toEqual(['Archive workspace']);
-  await act(() => root.unmount());
-  root = createRoot(container);
-  expect(await showActions({ ...saved, runtime, summary: { closedAt: null, holder: { kind: 'held', machineId: 'origin', label: 'Origin' }, freshness: 'fresh' } })).toEqual(['Close space', 'Archive workspace', 'Move to Desk']);
-});
 
 it('blocks a workspace move until its own saved LFS list is explicitly accepted', async () => {
   if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');

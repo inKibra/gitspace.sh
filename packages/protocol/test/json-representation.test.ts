@@ -83,15 +83,11 @@ describe('RPC JSON representations', () => {
     expect(() => representation.decodeInput({ ...valid, unexpected: true })).toThrow();
   });
 
-  it('composes stream custom validators with Date and opaque payload representations', () => {
-    const representation = procedureJsonRepresentation('events');
+  it('composes stream validation with project invalidation JSON representations', () => {
+    const representation = procedureJsonRepresentation('project.events');
     const value = {
       type: 'snapshot', resource: 'project/example', cursor: 1, revision: 1, previous: null,
-      value: {
-        offset: 1, eventId: 'event', projectId: 'project', scope: 'project', entity: 'example', entityId: 'one', revision: 1,
-        operation: 'updated', createdAt: new Date('2026-09-28T00:00:00.000Z'),
-        payload: { bytes: new Uint8Array([1, 2]), count: 9n, optional: undefined },
-      },
+      value: { entity: 'workspace', entityId: 'one', eventOffset: 1 },
     };
     const encoded = representation.encodeOutput(value);
     expect(ajv.compile(representation.outputSchema)(encoded)).toBe(true);
@@ -100,7 +96,7 @@ describe('RPC JSON representations', () => {
   });
 
   it('preserves declared failure data without exporting Error causes', () => {
-    const representation = procedureJsonRepresentation('events');
+    const representation = procedureJsonRepresentation('inspector.transcript');
     const error = rpcErrors.projectNotFound({ projectId: 'missing' });
     const encoded = representation.encodeError(error);
     expect(encoded).toEqual({ _tag: error._tag, data: { projectId: 'missing' } });

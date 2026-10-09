@@ -15,10 +15,15 @@ import { z } from 'zod';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { ConversationLifecycleDoc, createConversationLifecycle, type ConversationLifecycle } from './conversation-lifecycle.js';
 import { bindCronGeneration } from './cron.js';
+import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls';
 const ModelNoticesDoc = defineDoc<{ delivered: string[] }>({ kind: 'gitspace.model-notices', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ delivered: [] }) });
 export type RuntimeHarnessOptions = {
   identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
   storage: Storage;
+  /** Canonical phase, reapplied when opening a cloud runtime, including an existing persisted document. */
+  workspacePhase?: WorkspacePhase;
+  /** Persist phase policy before a session transition or an approved plan becomes effective. */
+  setWorkspacePhase?(phase: WorkspacePhase): Promise<void>;
   models: HarnessOptions['models'];
   model: ModelRef;
   settings?: HarnessOptions['settings'];
@@ -130,6 +135,10 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   };
   const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, async wake() { await options.operations.wakeAt(Date.now() + 1000); harness.resume(); } });
   lifecycleReady.resolve(lifecycle);
-  await harness.commit(async tx => { await tx.doc(WorkspaceDoc); await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
+  await harness.commit(async tx => {
+    const workspace = await tx.doc(WorkspaceDoc);
+    if (options.workspacePhase !== undefined) workspace.phase = options.workspacePhase;
+    await tx.doc(QuestionsDoc);
+  }, BACKGROUND_CONTEXT);
   return { harness, root, registry, configureModel, lifecycle, backgroundAgentTask };
 }

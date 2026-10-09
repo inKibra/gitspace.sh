@@ -5,7 +5,6 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { scheduler } from 'node:timers/promises';
 import {
-  FactEventStore,
   factEvents,
   agentSessions,
   type AgentSession,
@@ -13,10 +12,8 @@ import {
   LocalArtifactResolver,
   MemoryArtifactObjectStore,
 } from '@gitspace/core';
-import { cloudWorkspaceDefinitionSchema } from '@gitspace/protocol';
 import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import { eq } from 'drizzle-orm';
-import { createSpaceWorkspaceControls } from '../src/space-workspace-controls.js';
 import {
   MachineSessionCoordinator,
 } from '../src/index.js';
@@ -632,35 +629,11 @@ describe('MachineSessionCoordinator', () => {
     const sessions = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
     const created = await sessions.openSpace('workspace-a');
     if (created.status === 'error') throw created.error;
-    let definition = cloudWorkspaceDefinitionSchema.parse({
-      id: 'workspace-a', projectId: 'project-a', kind: 'worktree', name: 'A', branch: 'a', phase: 'plan',
-      sourceKind: 'base', sourceRef: 'main', lifecycle: 'active', goalId: null, revision: 1, archivedAt: null,
-      createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
-    });
-    type ControlsOptions = Parameters<typeof createSpaceWorkspaceControls>[0];
-    const authority = {
-      listProjectWorkspaces: async () => [definition],
-      appendProjectEvent: async () => undefined,
-    } as unknown as ControlsOptions['authority'];
-    const controls = createSpaceWorkspaceControls({
-      database, events: new FactEventStore(database), sessions, machineId: 'machine-a', authority,
-      projects: {
-        setWorkspacePhase: async (_projectId: string, _spaceId: string, phase: 'plan' | 'code' | 'review' | 'ship', expectedRevision: number) => {
-          if (expectedRevision !== definition.revision) throw new Error('Workspace revision conflict');
-          definition = { ...definition, phase, revision: definition.revision + 1 };
-          return definition;
-        },
-      } as ControlsOptions['projects'],
-      spaces: {} as ControlsOptions['spaces'],
-      environments: {} as ControlsOptions['environments'],
-    });
     try {
       expect((await sessions.prompt(created.value.id, 'blocked in plan')).status).toBe('error');
-      await controls.manage('setPhase', definition, { expectedRevision: 1, phase: 'code' });
+      database.setWorkspacePhase('workspace-a', 'code');
+      await sessions.workspacePhaseChanged('project-a', 'workspace-a');
       expect((await sessions.prompt(created.value.id, 'code-write')).status).toBe('ok');
-      await expect(controls.manage('setPhase', definition, { expectedRevision: 1, phase: 'plan' })).rejects.toThrow('revision conflict');
-      expect(database.getWorkspace('workspace-a')?.phase).toBe('code');
-      expect((await sessions.prompt(created.value.id, 'after-rejected-change')).status).toBe('ok');
       await sessions.close(created.value.id);
       database.setWorkspacePhase('workspace-a', 'plan');
       await sessions.workspacePhaseChanged('project-a', 'workspace-a');

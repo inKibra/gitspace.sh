@@ -9,6 +9,7 @@ import { ArtifactsCodeStore, artifactsWorkspaceRepository } from './artifacts.js
 import { validateSnapshotPath } from './artifacts-snapshot.js';
 import { CloudSearchIndex, type CloudSearchSource } from './cloud-search-index.js';
 import { RuntimeGrepArgumentsSchema } from '@gitspace/protocol-runtime';
+import { parseEnvironmentBundleJson } from '@gitspace/protocol-environment';
 
 const InvocationSchema = z.object({ tool: z.enum(['read', 'edit', 'write', 'find', 'grep', 'apply_patch']), args: z.unknown(), requestId: z.string(), attemptId: z.string() });
 const PathSchema = z.object({ path: z.string().min(1) });
@@ -22,6 +23,11 @@ const LFS_POINTER_LIMIT = 1024;
 
 function assertCloudReadSize(size: number, path: string): void {
   if (size > CLOUD_FILE_READ_LIMIT) throw new Error(`File ${path} (${size} bytes) exceeds the 8 MiB cloud read limit; use a machine to read its content.`);
+}
+
+/** The committed environment definition must stay loadable: an edit that breaks its schema never reaches the working copy. */
+function assertValidMutations(mutations: z.infer<typeof PendingSchema>['mutations']): void {
+  for (const mutation of mutations) if (mutation.path === '.gitspace/bundle.json' && mutation.content !== null) parseEnvironmentBundleJson(mutation.content);
 }
 
 const checkpointIdentity = (checkpoint: Checkpoint) => canonicalJson({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(({ oid, size }) => ({ oid, size })) } } : {}) });
@@ -74,6 +80,38 @@ export class CloudFileStore {
       const checkpoint = await this.initializeSnapshot();
       if (!checkpoint) throw new Error('Workspace has no committed source snapshot');
       return operation(checkpoint);
+    });
+  }
+  /** A base-branch change holds the same queue as cloud edits and cache publications. Its durable
+   * writer fence survives failures until the lifecycle operation retries its idempotent effects. */
+  changeBranch<T>(input: {
+    checkpoint: Checkpoint;
+    validate(current: Checkpoint): Promise<void>;
+    prepare(current: Checkpoint): Promise<void>;
+    publish(current: Checkpoint): Promise<void>;
+    commit(): Promise<T>;
+  }): Promise<T> {
+    return this.serialize(async () => {
+      const current = await this.initializeSnapshot();
+      if (!current) throw new Error('Base workspace has no committed checkout');
+      const attempt = 'project.setBaseBranch';
+      const writer = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt;
+      if (writer && writer !== attempt) throw new Error('Canonical publication is busy or awaiting recovery');
+      await input.validate(current);
+      await input.prepare(current);
+      this.storage.sql.exec('UPDATE runtime_cloud_writer SET fence=fence+1,attempt=? WHERE singleton=1', attempt);
+      await this.storage.sync();
+      await input.publish(current);
+      if (checkpointIdentity(current) !== checkpointIdentity(input.checkpoint)) this.storage.transactionSync(() => {
+        this.recordCommit(input.checkpoint, current.worktreeCommit);
+        this.enqueueRetention(input.checkpoint, current);
+        this.storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', JSON.stringify(input.checkpoint));
+      });
+      await this.flushRetention();
+      const result = await input.commit();
+      this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1 AND attempt=?', attempt);
+      this.publish();
+      return result;
     });
   }
   /** Explicit source initialization for file execution and attachment admission; snapshot stays read-only. */
@@ -202,6 +240,7 @@ export class CloudFileStore {
     await this.flushRetention();
     const lease = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
     if (!lease?.attempt) return;
+    if (lease.attempt === 'project.setBaseBranch') throw new Error('Base branch change is awaiting recovery; retry project.setBaseBranch with the same branch');
     if (lease.attempt.startsWith('machine:')) {
       const id = lease.attempt.slice('machine:'.length);
       const machine = this.storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
@@ -299,6 +338,7 @@ export class CloudFileStore {
           if (change.destination) mutations.push({ path: change.path, content: null });
           mutations.push({ path: change.destination ?? change.path, content: change.after });
         }
+        assertValidMutations(mutations);
         pending = { input, previous, mutations, fence };
         this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
         await this.storage.sync();
@@ -358,7 +398,9 @@ export class CloudFileStore {
         for (const edit of replacements) { if (edit.index < end) throw new Error('Edit ranges overlap'); content += original.slice(end, edit.index) + edit.newText; end = edit.index + edit.oldText.length; }
         content += original.slice(end);
       }
-      pending = { input, previous, mutations: [{ path, content }], fence };
+      const mutations = [{ path, content }];
+      assertValidMutations(mutations);
+      pending = { input, previous, mutations, fence };
       this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
       await this.storage.sync();
     } catch (error) {

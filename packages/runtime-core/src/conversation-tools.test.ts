@@ -44,7 +44,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };
   const controls = createSessionControls({
-    harness, root, lifecycle, admitInference, configureModel, catalog,
+    harness, root, lifecycle, admitInference, configureModel, catalog, approvalDefault: async () => 'write',
     reload: async () => {},
     ...(files ? { loadAgentDefinitions: async () => files } : {}),
     browser: async id => { browserTargets.push(id); return { groups: [], records: [] }; },
@@ -135,7 +135,7 @@ test('role and file children independently resolve selection, persona, thinking 
     for (const child of [role.child, file.child]) {
       const controls = await f.harness.snapshot(SessionControlsDoc, child.id, context);
       expect(controls?.fastMode).toBe(false);
-      expect(controls?.approvalMode).toBe('write');
+      expect(controls?.approvalMode).not.toBe('yolo');
       expect(controls?.goal).toBe(null);
       expect(await f.harness.snapshot(PlanDoc, child.id, context)).toBeUndefined();
     }

@@ -4,10 +4,12 @@ import { createModels, createAssistantMessageEventStream, type ToolCall, type As
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { Result } from 'better-result';
 import { RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
-import { createWorkspaceRuntime, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { credentialProtocolBase64 } from '@gitspace/protocol';
+import { ArtifactsCodeStore, createWorkspaceRuntime, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { z } from 'zod';
 import { createRuntimeServices } from '../src/runtime-services.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
-import { WorkspaceDoc } from '@gitspace/runtime-core';
+import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
 import { SessionControlsDoc } from '@gitspace/runtime-core/session-controls';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
@@ -302,5 +304,84 @@ test('grep selects a healthy caught-up cache before a failing cloud index', asyn
       expect(index).not.toHaveBeenCalled();
       expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ tool: 'grep', snapshot: checkpoint });
     } finally { index.mockRestore(); machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('agent workspace creation and phase changes run in the cloud with no machine attached', async () => {
+  const projectId = 'owner-project';
+  const source = '1'.repeat(40);
+  const repository: ArtifactsRepoInfo = { id: 'repo', name: 'repo', description: null, defaultBranch: 'main', createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false, remote: 'https://artifacts.invalid/repo.git' };
+  vi.spyOn(ArtifactsCodeStore.prototype, 'ensureEmptyProject').mockResolvedValue(repository);
+  vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(repository);
+  vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockResolvedValue(source);
+  const setBranch = vi.spyOn(ArtifactsCodeStore.prototype, 'setBranch').mockResolvedValue();
+  await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(19)) });
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  const project = await authority.bootstrap({ id: projectId, name: 'Agent owner', repositoryReference: null, baseBranch: 'main', createdBy: 'test' });
+  await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).put(await authority.setProjectLifecycle(project.revision, 'active'));
+  await authority.putWorkspace({ id: 'owner-workspace', projectId, kind: 'worktree', name: 'Owner', branch: 'owner', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`owner-proof:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx);
+    try {
+      const goal = { id: 'goal', title: 'Child task', summary: 'Implement the child task', phase: 'plan', requirements: [], updatedBy: 'agent' };
+      const created = await invoke('space_workspace', { method: 'create', name: 'Agent child', branch: 'agent-child', sourceKind: 'base', sourceRef: '', phase: 'plan', goal });
+      expect(created.status, text(created)).toBe('completed');
+      const value = z.object({ workspace: z.object({ id: z.string() }).passthrough() }).passthrough().parse(JSON.parse(text(created)));
+      expect(value).toMatchObject({ ready: true, initialized: ['goal'], workspace: { projectId, name: 'Agent child', branch: 'agent-child', phase: 'plan', lifecycle: 'active' }, operation: { kind: 'workspace.create', state: 'succeeded', targetMachines: [] } });
+      expect(setBranch).toHaveBeenCalledWith(`workspace-${value.workspace.id}`, 'agent-child', source);
+      expect(await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).locateWorkspace(value.workspace.id)).toBe(projectId);
+      expect(await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, projectId, value.workspace.id])).getGoal({ projectId, spaceId: value.workspace.id })).toMatchObject({ title: 'Child task', revision: 1 });
+
+      const phased = await invoke('space_phase', { phase: 'review' });
+      expect(phased.status, text(phased)).toBe('completed');
+      expect((await runtime.harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT))?.phase).toBe('review');
+    } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+  expect((await authority.listWorkspaces()).find(workspace => workspace.id === 'owner-workspace')).toMatchObject({ phase: 'review' });
+});
+
+test('machine availability precedes approval for shell, structural reads, and lifecycle runs', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`preflight:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, root, calls } = await ownerFixture(ctx);
+    await runtime.harness.commit(async tx => {
+      (await tx.doc(WorkspaceDoc)).phase = 'code';
+      (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'always-ask';
+    }, BACKGROUND_CONTEXT);
+    const requests: ToolCall[] = [
+      { type: 'toolCall', id: 'shell', name: 'bash', arguments: { command: 'pwd' } },
+      { type: 'toolCall', id: 'structural-read', name: 'ast_grep', arguments: { pattern: '$A', path: '.' } },
+      { type: 'toolCall', id: 'checks', name: 'environment', arguments: { method: 'runChecks', runId: 'no-machine-checks' } },
+    ];
+    try {
+      for (const call of requests) {
+        calls.push(call);
+        await root.submit({ type: 'input', requestId: call.id, content: 'Run the requested tool.' }, BACKGROUND_CONTEXT);
+        await root.waitForIdle(withAbortSignal(AbortSignal.timeout(2000), BACKGROUND_CONTEXT));
+        const result = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === call.id);
+        expect(result).toMatchObject({ role: 'toolResult', isError: true });
+        if (!result || result.role !== 'toolResult') throw new Error('Missing tool result');
+        expect(result.content.filter(part => part.type === 'text').map(part => part.text).join('\n')).toContain('No machine attached');
+        expect((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
+      }
+    } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('a completed machine attempt replays its receipt after its cache disappears', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`preflight-replay:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, services, root, identity } = await ownerFixture(ctx);
+    const now = new Date().toISOString();
+    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'receipt-cache', machineId: 'receipt-machine', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: now, heartbeatAt: now });
+    ctx.storage.sql.exec('INSERT INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
+    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'receipt survives disconnect' }] }));
+    const input: Parameters<typeof services.tools.invoke>[0] = { tool: 'bash', args: { command: 'pwd' }, conversationId: String(root.id), taskId: 'replay', requestId: 'replay', attemptId: 'replay', replay: 'unsafe' };
+    try {
+      const first = await services.tools.invoke(input);
+      expect(first.status).toBe('completed');
+      ctx.storage.sql.exec('DELETE FROM runtime_attachments WHERE id=?', cache.attachmentId);
+      await services.tools.preflight(input);
+      expect(await services.tools.invoke(input)).toEqual(first);
+      expect(machine).toHaveBeenCalledTimes(1);
+    } finally { machine.mockRestore(); await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });

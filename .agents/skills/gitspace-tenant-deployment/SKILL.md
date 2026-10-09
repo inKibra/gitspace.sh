@@ -16,11 +16,11 @@ GitSpace can build itself from a workspace and launch the result into the accoun
 
 ## Choose the targets
 
-The release targets are `worker`, `frontend`, `machine`, and `omp`. Inspect the complete selected checkout, including pending changes, rather than assuming a build contains only the latest fix.
+The release targets are `worker`, `frontend`, and `machine`. Pi inference is part of `worker`; historical OMP release records are not active launch targets. Inspect the complete selected checkout, including pending changes, rather than assuming a build contains only the latest fix.
 
 - Frontend-only changes can target `frontend`; machine implementation changes can target `machine` when their contracts remain compatible.
 - A `machine` release replaces the complete machine application, including host activation code. Its temporary updater drains the old application, checkpoints state, starts and checks the replacement, then exits. Failed activation restores the predecessor. Expect a short disconnect.
-- OMP runtime, dependency, or patch changes target `omp`. Include other targets when their compatibility contracts change too.
+- Cloud Pi runtime and dependency changes target `worker`. Include other targets when their compatibility contracts change too.
 - Shared RPC/schema changes require the compatible set of producers and consumers. Strict custom codec changes need a new codec identity because validation functions do not participate in the contract digest. For a contract shared by frontend, worker, and machine, include all three.
 - Compatibility determines the target set within the normal tenant launch. It is not a reason to invent a separate rollout procedure or stop at a warning about a coordinated deployment.
 
@@ -29,7 +29,7 @@ The release targets are `worker`, `frontend`, `machine`, and `omp`. Inspect the 
 ### Browser
 
 1. Open the source workspace in the account's GitSpace source project.
-2. Use the workspace menu's **Launch GitSpace from here** action. This action launches all four targets; do not describe it as a selected-target launch.
+2. Use the workspace menu's **Launch GitSpace from here** action. Choose the named build machine, resuming its workspace cache first if paused, then confirm **Launch**. The chooser may preselect the workspace's explicit default cache or its only ready cache; it never picks the first online machine. This action launches all three active targets; do not describe it as a selected-target launch.
 3. Follow launch progress. The sidebar's **Source** entry opens **Settings > Source**, which shows selections, releases, and running machines.
 
 ### Authenticated API
@@ -37,7 +37,7 @@ The release targets are `worker`, `frontend`, `machine`, and `omp`. Inspect the 
 Use the existing product client or an available, authorized integration. These are RPC procedure names, not shell commands or assumed harness tools:
 
 - `deployment.status({})`: current selections, release records, running machine state, and the latest launch on the answering machine.
-- `deployment.launch({ workspaceId, targets })`: start the source build and launch. It returns progress immediately, not proof of activation.
+- `deployment.launch({ workspaceId, machineId, targets })`: start the source build and launch on exactly the named, online, enrolled build machine. No available-machine fallback exists. Ensure that machine has the source workspace checkout and resume a paused cache before calling. It returns progress immediately, not proof of activation.
 - Progress arrives through `deployment` fact events and `deployment.status({}).launch`.
 - `deployment.revert({})`: return account selections to the stable/channel build. The browser labels this **Back to stable**; it is not a rollback to an arbitrary previous source release.
 
@@ -45,9 +45,9 @@ Use the authenticated browser if no suitable API integration is available. Do no
 
 ## Verify completion
 
-1. Record the `launchId`, source `workspaceId`, targets, and resulting release `sha`. Follow that launch, not another concurrent launch on a different machine.
+1. Record the `launchId`, source `workspaceId`, build `machineId`, targets, and resulting release `sha`. Follow that launch, not another concurrent launch on a different machine.
 2. Inspect build/launch failures and per-target release status. An accepted request or uploaded bundle does not prove activation.
-3. Compare `desired` selections with `current` worker and fleet machine state, plus `thisMachine` state. Account for each target independently, including `ompSha` and `ompDraining`. Report machines still converging rather than declaring fleet-wide success.
+3. Compare `desired` selections with `current` worker and fleet machine state, plus `thisMachine` state. Account for each active target independently. Historical `ompSha` and `ompDraining` fields are not activation gates. Report machines still converging rather than declaring fleet-wide success.
    Machine status must follow the committed complete host, not just the first machine child started during an old-host upgrade. The updater must finish before the release counts as applied.
 4. For frontend changes, verify the served build and reload the browser after activation. Reloading unchanged assets does not fix a wire mismatch. Exercise the changed behavior on the deployed surface.
 5. Report the tenant, source workspace, release SHA, selected targets, observed activation result, and remaining convergence or failure. Distinguish locally verified code from deployed code.
@@ -56,7 +56,7 @@ Hot deployment does not promise zero interruption. Let the product manage drain,
 
 ## Recovery is exceptional
 
-`gitspace machine recover --source <checkout> --workspace <id>` stages a machine release when the running launcher cannot build the required source upgrade. It is not the ordinary deployment entry point. The release follows the same complete-machine activation and rollback path. Read the recovery prerequisites in [FLEET.md](../../../docs/FLEET.md) before using it; run outside a session the machine will drain. A machine-only recovery cannot apply a multi-target protocol change safely by itself.
+`gitspace machine recover --source <checkout> --workspace <id>` stages a machine release when the running launcher cannot build the required source upgrade. It requires the named machine's durable ready/live canonical cache assignment, completed setup, and an exact source-path match; no legacy workspace-holder row or fresh old-host heartbeat is required. It is not the ordinary deployment entry point. The release follows the same complete-machine activation and rollback path. Read the recovery prerequisites in [FLEET.md](../../../docs/FLEET.md) before using it; run outside a session the machine will drain. A machine-only recovery cannot apply a multi-target protocol change safely by itself.
 
 Do not substitute `bun run dev`, a standalone Vite server, a service restart, or a host/image replacement for a tenant launch. Those actions do not establish the account's selected release.
 
@@ -65,8 +65,8 @@ Channel builds that predate complete-host packaging cannot serve as complete mac
 ## Source references
 
 - [RPC contracts](../../../packages/protocol/src/rpc-contract.ts): `deploymentStatusContract`, `deploymentLaunchContract`, `deploymentRevertContract`.
-- [Browser launch wiring](../../../packages/account-web/src/LiveApp.tsx): `launchInto`, deployment progress, and status queries.
+- [Browser launch wiring](../../../packages/account-web/src/RuntimeWorkspace.tsx), [machine chooser](../../../packages/account-web/src/LaunchSheet.tsx), and [progress hook](../../../packages/account-web/src/useRuntimeLaunch.ts).
 - [Workspace launch menu](../../../packages/account-web/src/AppSidebar.tsx): `SpaceMenu` and `SourcePill`.
 - [Source settings](../../../packages/account-web/src/SettingsPage.tsx): `SourceSettings`.
-- [Convergence rules](../../../packages/account-web/src/release.ts): independent machine and OMP selections.
+- [Convergence rules](../../../packages/account-web/src/release.ts): worker, frontend, and machine selections.
 - [Architecture and recovery constraints](../../../docs/FLEET.md).

@@ -162,7 +162,7 @@ Use the product's deployment entrypoints, not a new upload or activation script.
 
 | Change | Supported path |
 |---|---|
-| A user's GitSpace account, such as `bradleat.gitspace.sh` | In the GitSpace source workspace's menu, choose **Launch GitSpace from here**. This calls `deployment.launch({ workspaceId, targets })`. `DeploymentLauncher` owns install, build, upload, staging, launch, and project progress events. The release follower and runtime hosts own activation. |
+| A user's GitSpace account | In the GitSpace source workspace's menu, choose **Launch GitSpace from here**, select the build machine, and confirm **Launch**. This calls `deployment.launch({ workspaceId, machineId, targets })` on exactly that online, enrolled machine. Resume a paused cache before launching. `DeploymentLauncher` owns install, build, upload, staging, launch, and project progress events. The release follower and runtime hosts own activation. |
 | Platform/operator-managed releases | Use the existing platform/operator deployment workflow for that component. Tenant Worker deploys and reverts use the authenticated `/__platform/operator/tenants/:tenant/deploy` and `/revert` routes. Native distributions and cloud images use their existing GitHub publication and rollout workflows. |
 
 The active account targets are `worker` (the tenant Worker and Pi runtime), `machine` (tool execution), and `frontend`. Historical OMP release fields remain readable but are not launch targets. Shared-contract changes require a compatible set of these targets. The shared operator/control Worker is not the account's `worker` target.

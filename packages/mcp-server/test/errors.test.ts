@@ -3,6 +3,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { deviceProtocolBase64, encodeApiKey } from '@gitspace/protocol/device-grant';
 import { createGitSpaceMcpHandler } from '../src/index.js';
+import { deserialize } from 'result-rpc';
+import { z } from 'zod';
 
 const key = encodeApiKey({
   version: 2,
@@ -60,6 +62,37 @@ describe('MCP tool failure detail', () => {
         expect(response instanceof Error || response.isError === true).toBe(true);
       }
       expect(backendCalls).toBe(0);
+    } finally { await client.close(); }
+  });
+
+  test('rejects unnamed machine tools and removed APIs without forwarding, but preserves an explicit target', async () => {
+    const requests: unknown[] = [];
+    const handler = createGitSpaceMcpHandler({
+      key, capabilities: ['rpc.read', 'rpc.write', 'deployment.control'], scope: { kind: 'user' },
+      fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const decoded = deserialize(await new Request(input, init).text());
+        if (!decoded.ok) throw new Error('Invalid signed request');
+        requests.push(decoded.value);
+        return Response.json({ error: { code: 'LAUNCH_MACHINE_OFFLINE', message: 'Named machine is offline' } }, { status: 503 });
+      }, { preconnect: fetch.preconnect }),
+    });
+    const client = new Client({ name: 'gitspace-mcp-targets', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL('https://account.test/mcp'), {
+      fetch: (input, init) => handler.fetch(new Request(input, init)),
+    }));
+    try {
+      for (const name of ['gitspace_session_prompt', 'gitspace_placements', 'gitspace_space_reopen', 'gitspace_project_open', 'gitspace_events']) {
+        const result = await client.callTool({ name, arguments: {} }).catch(error => error);
+        expect(result instanceof Error || result.isError === true).toBe(true);
+      }
+      for (const machineId of [undefined, '']) {
+        const result = await client.callTool({ name: 'gitspace_deployment_launch', arguments: { workspaceId: 'space', targets: ['worker'], ...(machineId === undefined ? {} : { machineId }) } }).catch(error => error);
+        expect(result instanceof Error || result.isError === true).toBe(true);
+      }
+      expect(requests).toEqual([]);
+      await client.callTool({ name: 'gitspace_deployment_launch', arguments: { workspaceId: 'space', machineId: 'named-cache', targets: ['worker'] } });
+      const envelope = z.object({ batch: z.array(z.object({ path: z.string(), input: z.object({ machineId: z.string() }) })) }).parse(requests[0]);
+      expect(envelope.batch).toEqual([{ path: 'deployment.launch', input: { machineId: 'named-cache' } }]);
     } finally { await client.close(); }
   });
 

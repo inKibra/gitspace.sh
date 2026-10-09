@@ -69,6 +69,7 @@ export interface RuntimeSettingView {
   valueJson: string;
   defaultJson?: string;
   options: readonly string[];
+  optionLabels?: Readonly<Record<string, string>>;
   credential: boolean;
 }
 export interface SettingsPageProps extends BrowserConnectionActions, McpAccessActions {
@@ -183,7 +184,8 @@ function SettingControl({ item, onSet, disabled }: { item: RuntimeSettingView; o
   useEffect(() => { if (!draftSetter.current) setText(draftText(item, value)); }, [item.valueJson, item.credential]);
   const discard = <Button variant="ghost" size="compact" onClick={() => { draftSetter.current = null; setText(draftText(item, value)); setError(null); }}>Discard draft</Button>;
   if (item.kind === 'boolean') return <Select value={value === null ? 'default' : String(value)} disabled={disabled} onValueChange={(next) => settle(onSet(next === 'default' ? null : next === 'true'))}><SelectTrigger aria-label={item.label} />{selectOptions([{ value: 'default', label: 'Use runtime default' }, { value: 'true', label: 'Enabled' }, { value: 'false', label: 'Disabled' }])}</Select>;
-  if (item.kind === 'enum') return <Select value={typeof value === 'string' ? value : 'default'} disabled={disabled} onValueChange={(next) => settle(onSet(next === 'default' ? null : next))}><SelectTrigger aria-label={item.label} />{selectOptions([{ value: 'default', label: 'Use runtime default' }, ...item.options.map((option) => ({ value: option, label: option }))])}</Select>;
+  // A setting with a schema default shows that default as its value; there is no separate "runtime default" to fall back to.
+  if (item.kind === 'enum') return <Select value={typeof value === 'string' ? value : 'default'} disabled={disabled} onValueChange={(next) => settle(onSet(next === 'default' ? null : next))}><SelectTrigger aria-label={item.label} />{selectOptions([...(item.defaultJson === undefined ? [{ value: 'default', label: 'Use runtime default' }] : []), ...item.options.map((option) => ({ value: option, label: item.optionLabels?.[option] ?? option }))])}</Select>;
   if (item.kind === 'number') return <TextField label={item.label} type="number" placeholder="Runtime default" value={typeof value === 'number' ? String(value) : ''} disabled={disabled} onChange={(next) => settle(onSet(next.trim() === '' ? null : Number(next)))} />;
   if (item.kind === 'array' || item.kind === 'record') {
     // FLUID-GAP: multi-line JSON editor (no textarea/code editor in the registry)
@@ -712,7 +714,8 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
   const [useAccountImage, setUseAccountImage] = useState(true);
   // Operations are tracked per key (a machine id, 'image' or 'create'): one hung machine operation never blocks another.
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
-  const [actionError, setActionError] = useState<string | null>(null);
+  // The failing operation's key decides where its error renders: an open image panel shows its own failure beside its action.
+  const [actionError, setActionError] = useState<{ key: string; message: string } | null>(null);
   const [discardRequired, setDiscardRequired] = useState<Pick<MachineDiscardRequired, 'message' | 'confirmation' | 'workspaces'> | null>(null);
   const [discardPhrase, setDiscardPhrase] = useState('');
   const operationPending = useRef(new Set<string>());
@@ -729,15 +732,17 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
       if (rpcErrors.machineDiscardRequired.is(error) && error.data.confirmation.machineId === key) {
         setDiscardRequired(error.data);
         setDiscardPhrase('');
-      } else setActionError(rpcErrorMessage(error, 'Machine settings operation'));
+      } else setActionError({ key, message: rpcErrorMessage(error, 'Machine settings operation') });
     }
     finally { operationPending.current.delete(key); setPending(new Set(operationPending.current)); }
   };
+  const imagePanelError = imageTarget && actionError?.key === 'image' ? actionError.message : null;
+  const sectionError = imagePanelError ? cloudImageError : actionError?.message ?? cloudImageError;
   const reclaimSeconds = settings.machines.cacheReclaimSeconds;
   // A value set outside these choices (for example through MCP) stays visible rather than silently displaying another option.
   const reclaimChoices = CACHE_RECLAIM_SECONDS.includes(reclaimSeconds) ? CACHE_RECLAIM_SECONDS : [...CACHE_RECLAIM_SECONDS, reclaimSeconds].sort((left, right) => left - right);
   return <>
-    {cloudImageError || actionError ? <p role="alert" className="text-caption text-destructive">{actionError ?? cloudImageError}</p> : null}
+    {sectionError ? <p role="alert" className="text-caption text-destructive">{sectionError}</p> : null}
     <Group title="Cloud image default">
       <p className="text-caption text-muted-foreground">New cloud machines use this account-owned, pinned image. Changing this default never replaces an existing machine or silently follows a platform update.</p>
       <p className="break-all font-mono text-caption">{cloudImageDefault?.image ?? 'Loading pinned account image…'}</p>
@@ -832,6 +837,8 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
       setImageRecovery(null);
     })}>{imageTarget === 'default' ? 'Verify and pin default' : imageRecovery?.machineId === imageTarget ? 'Recover using selected image' : 'Checkpoint and change image'}</Button></>}>
       <CloudImagePicker value={selection} onChange={setSelection} />
+      {pending.has('image') ? <p role="status" className="text-caption text-muted-foreground">{imageTarget === 'default' ? 'Verifying that the provider can prepare this image. This can take several minutes.' : 'Preparing the image and checkpointing this machine. This can take several minutes.'}</p> : null}
+      {imagePanelError ? <p role="alert" className="text-caption text-destructive">{imagePanelError}</p> : null}
       {imageRecovery?.machineId === imageTarget ? <div className="space-y-3">
         <p role="status" className="text-caption">The admission barrier stays in place. GitSpace prepares this image and checkpoints the actual candidate before replacing it. Only a candidate whose container provably never started can reuse its inherited checkpoint without checkpointing candidate work.</p>
         <Switch label="Allow discarding uncheckpointed candidate work if saving fails" checked={discardCandidate} disabled={pending.has('image')} onToggle={() => setDiscardCandidate(value => !value)} />

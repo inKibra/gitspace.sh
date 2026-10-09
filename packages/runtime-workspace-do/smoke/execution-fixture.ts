@@ -117,7 +117,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
       storage: ctx.storage, identity, models, model: reference,
       code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: unsupported, listSnapshotEntries: unsupported, readBlob: unsupported },
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: unsupported,
-      tools: { prepareBrowser: unsupported, invoke: async input => {
+      tools: { prepareBrowser: unsupported, approvalDefault: async () => 'yolo', preflight: async () => {}, invoke: async input => {
         if (input.tool === 'agents') return (await this.runtime).invokeConversationTool(input);
         if (input.tool !== 'read') return unsupported();
         const grant = RuntimeAttachResultSchema.parse(await ctx.storage.get('proof-grant'));

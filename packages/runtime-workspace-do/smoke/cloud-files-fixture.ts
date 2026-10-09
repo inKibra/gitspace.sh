@@ -130,6 +130,11 @@ export class CloudFilesProof extends DurableObject {
     assert.equal((await invoke('edit', { path: 'repeat.txt', edits: [{ oldText: 'same', newText: 'other' }] })).status, 'failed');
     assert.equal((await invoke('edit', { path: 'file.txt', edits: [{ oldText: 'one\ntwo', newText: 'other' }, { oldText: 'two', newText: 'overlap' }] })).status, 'failed');
     assert.equal((await invoke('write', { path: '../escape', content: 'bad' })).status, 'failed');
+    // The environment definition is validated against its schema before it can land in the working copy.
+    const invalidBundle = await invoke('write', { path: '.gitspace/bundle.json', content: JSON.stringify({ version: 1, profiles: 'not-a-record' }) });
+    assert.equal(invalidBundle.status, 'failed');
+    assert.match(JSON.stringify(invalidBundle.content), /profiles/u);
+    assert.equal(files.has('.gitspace/bundle.json'), false);
     const written = await invoke('write', { path: 'new.txt', content: 'written', message: 'Add the new greeting file' }, 'write-once');
     assert.equal(written.status, 'completed');
     assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written', message: 'Add the new greeting file' }, 'write-once'), written);

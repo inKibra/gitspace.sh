@@ -153,7 +153,7 @@ let terminalCursor = 0;
 function changedTerminals() { terminalChanges.dispatchEvent(new Event('change')); }
 const workbenchTerminalApi: WorkspaceTerminalsProps = {
   spaceId: 'workspace-a',
-  machines: [{ id: 'local-machine', label: 'Local machine' }],
+  machines: [{ id: 'local-machine', label: 'Local machine', state: 'live' }],
   machineId: 'local-machine',
   onSelectMachine: () => {},
   async *events(machineId, name, _after, signal) {

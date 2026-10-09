@@ -9,16 +9,16 @@ import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime';
 
 type ReadState<T> = { report: T | null; status: 'idle' | 'loading' | 'ready' | 'error'; error?: string };
 export type RuntimeInspectorState = Pick<InspectorProps, 'agentSetup' | 'subagents'> & { usage: InspectorProps['usage'] & { providerUsage: InspectorProviderUsageState } };
-export function useRuntimeInspectorState(context: RuntimeInspectorContext | undefined): RuntimeInspectorState | null {
+export function useRuntimeInspectorState(context: RuntimeInspectorContext): RuntimeInspectorState {
   const [usage, setUsage] = useState<ReadState<NonNullable<InspectorProps['usage']['report']>>>({ report: null, status: 'idle' });
   const [setup, setSetup] = useState<ReadState<NonNullable<InspectorProps['agentSetup']['report']>>>({ report: null, status: 'idle' });
   const [providerUsage, setProviderUsage] = useState<InspectorProviderUsageState>({ report: null, status: 'idle' });
-  const main = context?.snapshot.conversations.find(conversation => conversation.parentId === null);
-  const identity = context ? JSON.stringify([context.snapshot.projectId, context.snapshot.workspaceId, main?.id]) : '';
+  const main = context.snapshot.conversations.find(conversation => conversation.parentId === null);
+  const identity = JSON.stringify([context.snapshot.projectId, context.snapshot.workspaceId, main?.id]);
   const current = useRef(identity);
   current.current = identity;
   const session = useCallback(async (command: RuntimeSessionCommand) => {
-    if (!context || !main) throw new Error('The main runtime session is unavailable.');
+    if (!main) throw new Error('The main runtime session is unavailable.');
     const result = await rpcClient.runtime.session({ projectId: context.snapshot.projectId, workspaceId: context.snapshot.workspaceId, conversationId: main.id, command });
     if (result.status === 'error') throw result.error;
     if (current.current !== identity) throw new Error('The runtime workspace changed.');
@@ -60,8 +60,7 @@ export function useRuntimeInspectorState(context: RuntimeInspectorContext | unde
     catch (error) { if (current.current === identity) setSetup(value => ({ ...value, status: 'error', error: rpcErrorMessage(error, 'Load runtime agent definitions') })); }
     finally { if (setupBusy.current === identity) setupBusy.current = null; }
   };
-  useEffect(() => { if (usage.status === 'ready') void loadUsage(); }, [context?.snapshot.cursor]);
-  if (!context) return null;
+  useEffect(() => { if (usage.status === 'ready') void loadUsage(); }, [context.snapshot.cursor]);
   return {
     subagents: runtimeSubagents(context.snapshot),
     usage: { ...usage, providerUsage, sessionId: main?.id ?? null, load: () => { void loadUsage(); }, refresh: () => { void loadUsage(true); } },

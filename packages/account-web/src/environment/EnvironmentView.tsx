@@ -206,7 +206,6 @@ export function EnvironmentView({ model, machinePanel, busy = false, runtimeAvai
   const lifecycleNeedsApproval = visibleLifecycle.some((script) => script.trust.status !== 'approved');
   const lifecycleFailed = visibleLifecycle.some((script) => script.lastRun.status === 'failed');
   const summary = model.ledger ? lifecycleSummary(model.ledger) : { label: lifecycleFailed ? 'Environment needs attention' : lifecycleNeedsApproval ? 'Environment needs approval' : 'Environment', attention: lifecycleFailed || lifecycleNeedsApproval };
-  const readOnly = busy || !runtimeAvailable;
   const requestPhase = (phase: LifecyclePhase, rerun: boolean, interactive = false): void => {
     if (phase === 'cloud/destroy' || rerun || interactive) setConfirmation({ phase, rerun, interactive });
     else onRunLifecycle(phase);
@@ -224,7 +223,7 @@ export function EnvironmentView({ model, machinePanel, busy = false, runtimeAvai
         </div>
         <div className="flex flex-col gap-1.5">
           <span className="text-caption font-medium text-muted-foreground">Runtime profile</span>
-          <Select value={model.workspace.profile} onValueChange={onProfileChange} disabled={readOnly}>
+          <Select value={model.workspace.profile} onValueChange={onProfileChange} disabled={busy}>
             <SelectTrigger aria-label="Runtime profile" />
             <SelectContent>{Object.keys(model.bundle.profiles).map((name, index) => <SelectItem key={name} value={name} index={index}>{name}{name === model.bundle.default ? ' · default' : ''}</SelectItem>)}</SelectContent>
           </Select>
@@ -241,7 +240,7 @@ export function EnvironmentView({ model, machinePanel, busy = false, runtimeAvai
         <p className="max-w-prose text-pretty">No repository lifecycle configured. Keep working, or ask the agent to plan one with you.</p>
         {onConfigure ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={onConfigure}>Configure with agent</Button> : <span>Open this workspace to configure with the agent.</span>}
       </section> : null}
-      {!runtimeAvailable ? <p className="text-caption text-muted-foreground text-pretty">{model.ledger?.destroyedAt ? 'Cloud resources were explicitly retired. Their history, recorded bindings, and logs remain available.' : 'History, bindings, and logs are available while closed. Choose an online runner for explicit cloud retirement, or open the workspace for setup and local preparation.'}</p> : null}
+      {!runtimeAvailable ? <p className="text-caption text-muted-foreground text-pretty">{model.ledger?.destroyedAt ? 'Cloud resources were explicitly retired. Their history, recorded bindings, and logs remain available.' : 'History, bindings, and logs remain available without a runner. Attach and choose a workspace machine for checks, preparation, or explicit cloud retirement.'}</p> : null}
       {model.ledger ? <section className="flex flex-col gap-2" aria-label="Durable environment state">
         <div className="flex flex-wrap gap-2"><Badge size="compact" color={model.ledger.provisioned && !model.ledger.destroyedAt ? 'green' : 'gray'}>{model.ledger.destroyedAt ? 'Resources retired' : model.ledger.provisioned ? 'Provisioned' : 'Not provisioned'}</Badge><Badge size="compact" color="gray">{model.ledger.policy.automatic ? 'Automatic local preparation enabled' : model.ledger.destroyedAt || model.ledger.provisioned ? 'Automatic local preparation disabled' : 'Initial setup not requested'}</Badge></div>
         {model.ledger.provisioned ? <p className="text-caption text-muted-foreground tabular-nums">Last successful provision · {model.ledger.provisioned.profile} · {new Date(model.ledger.provisioned.completedAt).toLocaleString()} · {model.ledger.provisioned.machineId}. Preserved across moves and failed reruns.</p> : null}
@@ -255,9 +254,10 @@ export function EnvironmentView({ model, machinePanel, busy = false, runtimeAvai
         <p className="min-w-0 text-body text-muted-foreground">{selectedProfile.notes}</p>
       </Elevated> : null}
 
-      <fieldset disabled={readOnly} className="contents">
+      {/* The definition is cloud state, editable with no machine; only running checks needs a runner. */}
+      <fieldset disabled={busy} className="contents">
       <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Checks · <span className="tabular-nums">{checks.length}</span></h3><span className="flex items-center gap-1"><Button variant="ghost" size="compact" leadingIcon={PlayIcon} onClick={onRunChecks}>Run checks</Button><Button variant="secondary" size="compact" leadingIcon={PlusIcon} onClick={() => setAddCheckOpen(true)}>Add check</Button></span></div>
+        <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Checks · <span className="tabular-nums">{checks.length}</span></h3><span className="flex items-center gap-1"><Button variant="ghost" size="compact" leadingIcon={PlayIcon} disabled={!runtimeAvailable} onClick={onRunChecks}>Run checks</Button><Button variant="secondary" size="compact" leadingIcon={PlusIcon} onClick={() => setAddCheckOpen(true)}>Add check</Button></span></div>
         <CardGroup border="outlined" separated proximityHover={false}>{checks.map((check, index) => <CheckCard key={check.id} index={index} check={check} result={machine?.capabilities[check.id] ?? { status: 'unprobed' }} onApprove={() => onApprove(check.id)} onRevoke={() => onRevoke(check.id)} onFix={onFixCheck ? () => onFixCheck(check.id) : undefined} onEdit={() => setEditingCheck(check)} onDelete={() => setRemovingCheck(check)} />)}</CardGroup>
       </section>
       </fieldset>
@@ -275,7 +275,7 @@ export function EnvironmentView({ model, machinePanel, busy = false, runtimeAvai
         })}</CardGroup>
       </section>
 
-      <fieldset disabled={readOnly} className="contents">
+      <fieldset disabled={busy} className="contents">
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Secrets</h3><Button variant="ghost" size="compact" onClick={onOpenSecrets}>Manage secrets & values</Button></div>
         <CardGroup border="outlined" separated proximityHover={false}>{selectedProfile.secrets.map((name, index) => {
@@ -291,7 +291,7 @@ export function EnvironmentView({ model, machinePanel, busy = false, runtimeAvai
         <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Values</h3><Button variant="secondary" size="compact" leadingIcon={PlusIcon} onClick={() => setAddValueOpen(true)}>Add value</Button></div>
         {selectedProfile.inputs.length ? <><div className="flex flex-col gap-2">{selectedProfile.inputs.map((name) => {
           const input = model.inputValues.find((candidate) => candidate.name === name);
-          return <EnvironmentValueField key={`${model.workspace.profile}:${name}`} name={name} value={input?.value ?? model.bundle.inputs[name]?.default ?? ''} disabled={readOnly} onSave={(value) => onInputChange(name, value)} />;
+          return <EnvironmentValueField key={`${model.workspace.profile}:${name}`} name={name} value={input?.value ?? model.bundle.inputs[name]?.default ?? ''} disabled={busy} onSave={(value) => onInputChange(name, value)} />;
         })}</div>
         <div className="flex flex-wrap gap-1">{selectedProfile.inputs.map((name) => { const input = model.inputValues.find((candidate) => candidate.name === name); return <Badge key={name} size="compact" color={input?.source === 'workspace' ? 'blue' : 'gray'}>{name} · {input?.source === 'workspace' ? 'set for this workspace' : input?.source === 'account' ? 'account default' : input?.source === 'project' ? 'inherited from project' : 'bundle default'}</Badge>; })}</div></> : <p className="text-caption text-muted-foreground">No values declared for this profile.</p>}
       </section>

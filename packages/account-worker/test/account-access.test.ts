@@ -332,24 +332,10 @@ describe('account lifecycle authorization', () => {
     expect(await download.text()).toBe('verified native chunk');
   });
 
-  it('requires configuration authority for signed profile management and returns typed CAS conflicts', async () => {
+  it('resolves an assigned profile credential only for that profile, after the machine is gone', async () => {
     const a = await account();
-    const request = (operation: ControlOperation, payload: Record<string, unknown>) => SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation, payload)),
-    });
-    const denied = await request('inference.create', { name: 'Denied', sourceProfileId: null });
-    expect(denied.status).toBe(401);
-    expect(await denied.json()).toMatchObject({ error: { code: 'ACCESS_DENIED' } });
-    await a.vault.registerDevice(signCredentialAuthorityGrant({ ...a.grant.grant, generation: 2, capabilities: [...a.grant.grant.capabilities, 'credential.manage'] }, a.root));
-    const created = await (await request('inference.create', { name: 'Managed', sourceProfileId: null })).json() as { value: { profiles: Array<{ id: string }> } };
-    const profileId = created.value.profiles.find(profile => profile.id !== 'default')!.id;
-    expect((await request('inference.update', { profileId, expectedRevision: 0, name: 'Updated', settings: {} })).status).toBe(200);
-    const conflict = await request('inference.update', { profileId, expectedRevision: 0, name: 'Stale', settings: {} });
-    expect(conflict.status).toBe(409);
-    expect(await conflict.json()).toMatchObject({ status: 'error', error: { code: 'SETTINGS_CONFLICT', resource: 'inference-profile', expected: 0, actual: 1 } });
-    const foreign = await request('inference.assign', { projectId: 'foreign', profileId, expectedRevision: 0 });
-    expect(foreign.ok).toBe(false);
-    const listing = await (await request('inference.list', {})).text();
+    const created = await a.vault.createInferenceProfile({ name: 'Managed', sourceProfileId: null });
+    const profileId = created.profiles.find(profile => profile.id !== 'default')!.id;
     const projectId = 'bound-project';
     const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:${projectId}`);
     await env.USER_PROJECTS.getByName(a.userId).put(await authority.bootstrap({ id: projectId, name: 'Bound', baseBranch: 'main', repositoryReference: null, createdBy: 'machine' }));
@@ -371,8 +357,6 @@ describe('account lifecycle authorization', () => {
     const providers = await a.vault.cloudProviders(profileId);
     expect(providers.find(provider => provider.id === 'openai')).toMatchObject({ hasAuth: true });
     expect(JSON.stringify(providers)).not.toContain('managed-update');
-    expect(listing).not.toContain('bound-project-key');
-    expect(listing).not.toContain('secret-');
   });
 
 
@@ -482,26 +466,21 @@ describe('account lifecycle authorization', () => {
     expect(await runInDurableObject(a.vault, (_vault, state) => new CredentialVaultDO(state, env).artifactKey(a.userId))).toBe(key);
   });
 
-  it('does not turn storage access into secret administration or plaintext access', async () => {
+  it('does not turn storage access into plaintext secret access', async () => {
     const a = await account();
     await a.vault.registerDevice(signCredentialAuthorityGrant({
       ...a.grant.grant, machineId: 'storage-only', capabilities: ['storage.access'],
     }, a.root));
-    for (const operation of ['secrets.account.put', 'secrets.account.grant', 'secrets.account.revoke', 'secrets.materialize'] as const) {
-      const proof = createSignedControlRequest({
-        userId: a.userId, machineId: 'storage-only', operation,
-        payload: { projectId: 'project', name: 'TOKEN', value: 'secret', workspaceId: null, names: ['TOKEN'], projectSpaceEnabled: true, workspacesEnabled: true },
-        signingPrivateKey: a.signing,
-      });
-      const response = await SELF.fetch('https://auth.test/v1/control', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(proof),
-      });
-      expect(response.status).toBe(401);
-      expect(await response.json()).toMatchObject({ status: 'error' });
-    }
-    const proof = a.signed('secrets.account.grant', { projectId: 'project', name: 'TOKEN', projectSpaceEnabled: true, workspacesEnabled: true });
-    const response = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(proof) });
+    const proof = createSignedControlRequest({
+      userId: a.userId, machineId: 'storage-only', operation: 'secrets.materialize',
+      payload: { projectId: 'project', workspaceId: null, names: ['TOKEN'] },
+      signingPrivateKey: a.signing,
+    });
+    const response = await SELF.fetch('https://auth.test/v1/control', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(proof),
+    });
     expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ status: 'error' });
   });
 
   it('requires space.control and a valid unreplayed machine signature for artifact keys', async () => {

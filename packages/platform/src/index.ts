@@ -7,6 +7,7 @@ import { deployChannelTenant, deployTenantWorker, revertTenantWorker, type Deplo
 import { TenantControlDO } from './tenant-control.js';
 import { defaultFrontendResponse } from './default-release.js';
 import { defaultMachineResponse } from './default-native.js';
+import { invokeCompute } from './compute-provider.js';
 
 export { CreditLedgerDO } from './credit-ledger.js';
 export { TenantDeploymentsDO } from './tenant-deployments.js';
@@ -367,8 +368,19 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
     headers.set('x-gitspace-user-id', userId);
     headers.delete('host');
     const url = new URL(request.url);
-    const target = 'https://compute.internal' + path.slice('/provider/compute'.length) + url.search;
-    return deployments.compute(tenant, userId, new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' }));
+    const computePath = path.slice('/provider/compute'.length);
+    const rpcMachine = request.method === 'POST' ? /^\/v1\/sandboxes\/(sandbox-[a-z0-9-]{1,64})\/rpc$/u.exec(computePath)?.[1] : undefined;
+    if (rpcMachine) {
+      // Machine RPC streams (terminal output, events) are forwarded here, not through the tenant object: an AbortSignal
+      // cannot cross Durable Object RPC, so a stream proxied there keeps the sandbox call alive after the caller leaves.
+      const target = await deployments.computeRpcTarget(tenant, userId, rpcMachine);
+      try {
+        return await invokeCompute(env, userId, target, computePath + url.search, { method: 'POST', headers, body: request.body, signal: request.signal });
+      } catch (error) {
+        return platformError(409, 'COMPUTE_OPERATION_FAILED', error instanceof Error ? error.message : 'Provider operation failed');
+      }
+    }
+    return deployments.compute(tenant, userId, new Request('https://compute.internal' + computePath + url.search, { method: request.method, headers, body: request.body, redirect: 'manual' }));
   }
   return platformError(404, 'RESOURCE_NOT_FOUND', 'Tenant resource route does not exist');
 }

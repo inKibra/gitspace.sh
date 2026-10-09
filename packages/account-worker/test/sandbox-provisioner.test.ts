@@ -5,7 +5,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from '../src/sandbox-provisioner.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
-import { createRelayAuthorization, createSignedControlRequest, credentialProtocolBase64, RELAY_HEARTBEAT_MODE, signedCredentialAuthorityGrantSchema } from '@gitspace/protocol';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { createDeviceBinding, createRelayAuthorization, createSignedControlRequest, credentialProtocolBase64, RELAY_HEARTBEAT_MODE, signDeviceInvite, signedCredentialAuthorityGrantSchema } from '@gitspace/protocol';
+import { tenantRootPrivateKey } from './setup.js';
 import { controlFleetMachine, provisionManagedSandbox, reconcileFleetMachines } from '../src/application.js';
 import { CLOUD_MACHINE_LIMIT, FleetCatalogDO, SANDBOX_PROVISIONING_ATTEMPT_MS, SANDBOX_PROVISIONING_ATTEMPTS } from '../src/fleet-catalog.js';
 
@@ -280,37 +282,62 @@ it('provisions the tenant relay URL and a managed grant the relay accepts for th
   expect((await tunnel).status).toBe(502);
 });
 
-it('refuses machine provisioning and fleet power control to machine credentials, including a cloud machine’s own key', async () => {
+it('refuses account administration, machine provisioning and fleet power to machine credentials, including a cloud machine’s own key', async () => {
   const f = await provisionFixture();
   const machine = await provisionManagedSandbox(env, f.userId, env.ACCOUNT_URL, { kind: 'custom', image });
   await expect.poll(() => f.catalog.getMachine(machine.id)).toMatchObject({ state: 'online', error: null });
   const other = { id: 'machine-b', label: 'Laptop', state: 'online' as const, rpcEndpoint: null, kind: 'physical' as const, provider: 'physical' as const, notes: '', desiredState: 'online' as const, lifecycleRevision: 1, operationId: null, error: null };
   await f.catalog.putMachine(other);
-  // Agent commands on the sandbox run as the same user as the runtime holding this key.
-  const signingPrivateKey = credentialProtocolBase64.decode(f.enrollments[0]!.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY!);
-  const control = (operation: Parameters<typeof createSignedControlRequest>[0]['operation'], payload: Record<string, unknown>) => SELF.fetch('https://auth.test/v1/control', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(createSignedControlRequest({ userId: f.userId, machineId: machine.id, operation, payload, signingPrivateKey })),
+  const browserKey = new Uint8Array(32).fill(83);
+  const invite = signDeviceInvite({ version: 1, userId: f.userId, inviteId: crypto.randomUUID(), kind: 'browser', label: null, scope: { kind: 'user' }, capabilities: ['rpc.read', 'rpc.write', 'devices.manage'], canDelegate: true, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: env.ACCOUNT_URL }, tenantRootPrivateKey);
+  const browser = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(browserKey)), label: 'Browser', boundAt: Date.now(), signingPrivateKey: browserKey });
+  expect(await f.vault.enrollDevice({ invite, binding: browser })).toMatchObject({ status: 'ok' });
+  const settings = env.USER_SETTINGS.getByName(f.userId);
+  const secrets = env.PROJECT_SECRETS.getByName(f.userId);
+  await secrets.bootstrap({ userId: f.userId, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(7)) });
+  const connections = env.USER_MCP_CONNECTIONS.getByName(f.userId);
+  const accountState = async () => ({
+    settings: await settings.get('test'),
+    devices: await f.vault.listDeviceGrants(),
+    secrets: await secrets.listAccount(),
+    inference: await f.vault.ensureInference(),
+    connections: await connections.list(f.userId),
+    machines: await f.catalog.listMachines(),
   });
+  const before = await accountState();
+  // Agent commands on the sandbox run as the same user as the runtime holding this key, so they can sign any operation name.
+  const signingPrivateKey = credentialProtocolBase64.decode(f.enrollments[0]!.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY!);
+  const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => [key, canonical(child)]))
+    : value;
+  const control = (operation: string, payload: Record<string, unknown>) => {
+    const unsigned = { version: 1, userId: f.userId, machineId: machine.id, operation, timestamp: Date.now(), nonce: crypto.randomUUID(), payload };
+    const signature = credentialProtocolBase64.encode(ed25519.sign(new TextEncoder().encode(JSON.stringify(canonical(unsigned))), signingPrivateKey));
+    return SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...unsigned, signature }) });
+  };
+  const { revision, updatedAt: _updatedAt, updatedBy: _updatedBy, version: _version, ...current } = before.settings;
+  const statuses: Record<string, number> = {};
   for (const [operation, payload] of [
+    ['settings.update', { ...current, expectedRevision: revision, profile: { ...current.profile, displayName: 'Agent' } }],
+    ['devices.revoke', { deviceId: browser.deviceId }],
+    ['secrets.account.put', { name: 'STOLEN', value: 'exfiltrated' }],
+    ['inference.create', { name: 'Agent', sourceProfileId: null }],
+    ['mcp.connections.create', { connection: { id: 'agent-mcp', label: 'Agent', enabled: true, target: { kind: 'machine', machineId: machine.id }, transport: { type: 'stdio', command: '/bin/sh', args: [], cwd: null, environment: [] }, timeoutMs: 30_000 } }],
     ['catalog.sandbox.create', {}],
     ['catalog.sandbox.create', { image: { kind: 'custom', image } }],
     ['catalog.machine.sleep', { machineId: other.id }],
     ['catalog.machine.resume', { machineId: other.id }],
     ['catalog.machine.destroy', { machineId: machine.id }],
-  ] as const) {
-    const response = await control(operation, payload);
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ status: 'error', error: { code: 'MACHINE_FLEET_CONTROL_DENIED' } });
-  }
+  ] as const) statuses[`${operation} ${JSON.stringify(payload).slice(0, 40)}`] = (await control(operation, payload)).status;
+  expect(Object.entries(statuses).filter(([, status]) => status < 400 || status >= 500)).toEqual([]);
+  expect(await accountState()).toEqual(before);
+  expect(f.calls.filter(path => path === '/v1/sandboxes')).toHaveLength(1);
   // A machine reports its own observed state; it never edits another machine or its own lifecycle intent.
   expect((await control('catalog.machine.put', { ...other, desiredState: 'removed' })).status).toBe(403);
   const reported = await control('catalog.machine.put', { ...(await f.catalog.getMachine(machine.id)), desiredState: 'removed', kind: 'physical', provider: 'physical', notes: 'Self-reported notes' });
   expect(reported.status).toBe(200);
   expect(await f.catalog.getMachine(machine.id)).toMatchObject({ desiredState: 'online', kind: 'sandbox', provider: 'cloudflare-sandbox', notes: 'Self-reported notes' });
   expect(await f.catalog.getMachine(other.id)).toEqual(other);
-  expect((await f.catalog.listMachines()).map(item => item.id).sort()).toEqual([other.id, machine.id].sort());
-  expect(f.calls.filter(path => path === '/v1/sandboxes')).toHaveLength(1);
 });
 
 it('caps concurrently existing cloud machines per account atomically with a clear error', async () => {

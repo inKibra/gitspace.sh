@@ -6,19 +6,17 @@ import type { WorkspaceServiceManager } from './workspace-services.js';
 import { cacheServiceOperation } from './cache-services.js';
 import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/services';
 import { createHash } from 'node:crypto';
-import { type SpaceWorkspaceControls } from './space-workspace-controls.js';
-import { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { LocalArtifactResolver } from '@gitspace/core';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MachineMcpCoordinator } from './local-mcp.js';
-import { RuntimeBashCommandArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeDelegateExportArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeAgentLifecycleRunArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeBashCommandArgumentsSchema, RuntimeDelegateExportArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { workspaceProcessVisible } from './workspace-process.js';
 
 
-export function machineOperationalTools(options: { environments: WorkspaceEnvironmentManager; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; controls: SpaceWorkspaceControls; artifacts: LocalArtifactResolver; mcp: MachineMcpCoordinator; journal: () => ExecutorJournal }): Record<string, ExecutorOperationHandler> {
+export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; artifacts: LocalArtifactResolver; mcp: MachineMcpCoordinator; journal: () => ExecutorJournal }): Record<string, ExecutorOperationHandler> {
   return {
     mcp_discover: async (dispatch, local, signal) => {
       const workspace = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId);
@@ -32,53 +30,9 @@ export function machineOperationalTools(options: { environments: WorkspaceEnviro
       const result = await options.mcp.execute({ projectId: dispatch.projectId, workspaceId: workspace.kind === 'base' ? null : workspace.id, workspacePath: local.rootPath, operation: 'invoke', args: dispatch.args, signal });
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
-    create: async (dispatch, local) => {
-      if (local.attachment.role !== 'cache') throw new Error('Workspace changes require a cache attachment');
-      const request = RuntimeWorkspaceMutationArgumentsSchema.parse(dispatch.args);
-      if (request.workspaceId !== undefined && request.workspaceId !== dispatch.workspaceId) throw new Error('Workspace target is outside this dispatch');
-      let result: unknown;
-      if (request.method === 'create') {
-        const { method: _method, workspaceId: _workspaceId, on: _on, at: _at, goal, workflow, rubric, ...workspace } = request;
-        const created = await options.controls.create({ ...workspace, projectId: dispatch.projectId });
-        const identity = { projectId: dispatch.projectId, spaceId: created.workspace.id };
-        const initialized: string[] = [];
-        let initializing = 'goal';
-        const publish = async (entity: string, value: { id: string; revision: number }) => {
-          await options.authority.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: dispatch.projectId,
-            scope: 'workspace', entity, entityId: value.id, revision: value.revision, operation: 'updated', payload: { spaceId: identity.spaceId } });
-          await options.controls.instructionsChanged(identity.projectId, identity.spaceId);
-          initialized.push(entity);
-        };
-        try {
-          if (goal) await publish('goal', await options.authority.putInspectorGoal({ ...identity, expectedRevision: 0, goal }));
-          initializing = 'workflow';
-          if (workflow) await publish('workflow', await options.authority.putInspectorWorkflow({ ...identity, expectedRevision: 0, workflow }));
-          initializing = 'rubric';
-          if (rubric) await publish('rubric', await options.authority.putInspectorRubric({ ...identity, expectedRevision: 0, rubric }));
-          result = { ...created, identity, ready: true, initialized };
-        } catch (error) {
-          result = { ...created, identity, ready: false, initialized, error: { operation: `${initializing}.put`,
-            message: error instanceof Error ? error.message : String(error),
-            recovery: 'The workspace exists. Read its latest records and reconcile the incomplete instruction writes; do not recreate it.' } };
-        }
-      } else {
-        const definition = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId && workspace.projectId === dispatch.projectId);
-        if (!definition) throw new Error('Workspace does not exist in the current project');
-        result = await options.controls.manage(request.method, definition, request);
-      }
-      return [{ type: 'text', text: JSON.stringify(result) }];
-    },
-    workspace_phase: async (dispatch, local) => {
-      if (local.attachment.role !== 'cache') throw new Error('Phase changes require a canonical cache');
-      const { phase } = RuntimeSpacePhaseArgumentsSchema.parse(dispatch.args);
-      const definition = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId && workspace.projectId === dispatch.projectId);
-      if (!definition || definition.kind === 'base') throw new Error('Phase changes require a workspace in the current project');
-      await options.controls.manage('setPhase', definition, { expectedRevision: definition.revision, phase });
-      return [{ type: 'text', text: `Workspace phase set to ${phase}` }];
-    },
     lifecycle: async (dispatch, local) => {
       if (local.attachment.role !== 'cache') throw new Error('Lifecycle requires a canonical cache');
-      const { on: _on, at: _at, ...args } = RuntimeAgentLifecycleRunArgumentsSchema.parse(dispatch.args);
+      const { on: _on, at: _at, ...args } = RuntimeLifecycleDispatchArgumentsSchema.parse(dispatch.args);
       const accepted = await options.environments.acceptRun(dispatch.workspaceId, args, local);
       return [{ type: 'text', text: JSON.stringify(accepted) }];
     },

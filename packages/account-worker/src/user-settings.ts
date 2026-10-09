@@ -29,7 +29,6 @@ export class SettingsRevisionConflict extends Error {
     super(`${resource} generation changed from ${expected} to ${actual}`); this.name = 'SettingsRevisionConflict';
   }
 }
-export class HandleUnavailable extends Error { constructor(readonly handle: string) { super(`Handle ${handle} is already reserved`); this.name = 'HandleUnavailable'; } }
 export interface SettingsSnapshot { user: UserSettings; runtime: RuntimeConfigDocument; git: Omit<GitIdentityDocument, 'privateKey'> | null; inferenceRevision: number }
 export type SettingsWriteResult<T> = { status: 'ok'; value: T } | { status: 'conflict'; resource: 'user-settings' | 'runtime-config'; expected: number; actual: number };
 /** Rows written before account machine settings existed read as their defaults. */

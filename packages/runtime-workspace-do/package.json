@@ -17,6 +17,7 @@
     "@gitspace/runtime-core": "workspace:*",
     "@gitspace/protocol-runtime": "workspace:*",
     "@gitspace/protocol-agent": "workspace:*",
+    "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
     "@noble/hashes": "^2.2.0",
     "@earendil-works/pi-durable": "1.0.0",

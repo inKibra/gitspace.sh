@@ -152,7 +152,14 @@ export async function prepareComputeImage(input: {
     await cloudflare(env, `/workers/dispatch/namespaces/${encodeURIComponent(env.DISPATCH_NAMESPACE)}/scripts/${deployment.script}`, { method: 'PUT', body: upload });
     namespace = await findProviderNamespace(env, deployment.script);
   }
-  if (!namespace?.use_containers) throw new ComputeProviderError('COMPUTE_NAMESPACE_PENDING', 'Container-backed provider namespace is not available yet; retry preparation');
+  // Upload acknowledgement precedes namespace propagation and container binding.
+  // Wait for that resource, not another upload or another user mutation.
+  const namespaceDeadline = Date.now() + 60_000;
+  while (!namespace?.use_containers) {
+    if (Date.now() >= namespaceDeadline) throw new ComputeProviderError('COMPUTE_NAMESPACE_PENDING', 'Container-backed provider namespace did not become ready within 60 seconds', 503);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+    namespace = await findProviderNamespace(env, deployment.script);
+  }
   if (deployment.namespaceId && deployment.namespaceId !== namespace.id) throw new ComputeProviderError('COMPUTE_NAMESPACE_CHANGED', 'Provider namespace identity changed');
   deployment.namespaceId = namespace.id;
   saveImage(storage, deployment);

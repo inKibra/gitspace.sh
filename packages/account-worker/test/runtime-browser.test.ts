@@ -55,7 +55,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
     if (!selected) throw new Error('No selected browser cache is ready');
     return selected;
-  }, approvedOrigins: async () => state.origins, groupName: async () => 'Workspace' });
+  }, approvedOrigins: async () => state.origins, approvalDefault: async () => 'write', groupName: async () => 'Workspace' });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
   const mode = async (approvalMode: 'write' | 'always-ask' | 'yolo') => harness.commit(async tx => { (await tx.doc(SessionControlsDoc, root.id)).approvalMode = approvalMode; }, BACKGROUND_CONTEXT);
   return { authority, input, mode, state, dispatches, attachments, machines, credentials, attachment, pairing, forgottenPairings, offlinePairings };
