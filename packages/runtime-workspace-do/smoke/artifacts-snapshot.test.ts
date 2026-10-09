@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import git from 'isomorphic-git';
 import fs from 'node:fs';
-import { writeArtifactsSnapshot, type ArtifactsFetch, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
+import { readAdvertisedRefs, writeArtifactsSnapshot, type ArtifactsFetch, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
 import { ArtifactsCodeStore } from '../src/artifacts.js';
 import { planSnapshotMerge } from '../src/artifacts-merge.js';
 import { RuntimeAttachmentSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
@@ -639,7 +639,7 @@ test('workspace branches move only to held commits, and tags and pull heads reso
   } finally { request.mockRestore(); await f.close(); }
 });
 
-test('cloud transfer imports public branch, tag and PR object graphs and updates an existing fork without machines', async () => {
+for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports public branch, tag and PR object graphs over Git v${protocolVersion} and updates an existing fork without machines`, async () => {
   const source = await fixture();
   const target = await fixture();
   const unsupported = async (): Promise<never> => { throw new Error('Unexpected provider operation'); };
@@ -656,14 +656,14 @@ test('cloud transfer imports public branch, tag and PR object graphs and updates
       return [await f.repo.readCommit(new TextDecoder().decode(result.stdout).trim())];
     },
   });
-  const sourceRepo = repository(source, 'source.invalid');
+  const sourceRepo = repository(source, 'source-artifacts.invalid');
   const targetRepo = repository(target, 'target.invalid');
   let originRequests = 0;
   let originAvailable = true;
   let concurrentBranch: string | null = null;
   const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = new URL(String(input));
-    const dir = url.hostname === 'source.invalid' ? source.dir : url.hostname === 'target.invalid' ? target.dir : null;
+    const dir = url.hostname === 'source.invalid' || url.hostname === 'source-artifacts.invalid' ? source.dir : url.hostname === 'target.invalid' ? target.dir : null;
     if (!dir) throw new Error('Unexpected network destination');
     if (url.hostname === 'source.invalid') {
       originRequests += 1;
@@ -673,32 +673,52 @@ test('cloud transfer imports public branch, tag and PR object graphs and updates
         concurrentBranch = null;
       }
     }
-    const authorization = new Headers(init?.headers).get('authorization');
-    if (url.hostname === 'source.invalid' && init?.redirect === 'error') expect(authorization).toBeNull();
-    else expect(authorization).toBe('Bearer secret');
+    const headers = new Headers(init?.headers);
+    if (url.hostname === 'source.invalid') expect(headers.get('authorization')).toBeNull();
+    else expect(headers.get('authorization')).toBe('Bearer secret');
     const advertise = url.pathname.endsWith('/info/refs');
     const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
     const child = Bun.spawn(['git', '-c', 'core.bare=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), dir], {
       stdin: advertise ? 'ignore' : new Response(init?.body).body, stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, GIT_PROTOCOL: protocolVersion === 2 ? headers.get('git-protocol') ?? 'version=0' : 'version=0' },
     });
     const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
     const error = await new Response(child.stderr).text();
     if (await child.exited !== 0) throw new Error(error);
-    return new Response(bytes);
+    return new Response(advertise && service === 'upload-pack' ? new Blob(['001e# service=git-upload-pack\n0000', bytes]) : bytes);
   }, { preconnect: fetch.preconnect }));
   const code = new ArtifactsCodeStore({ get: async name => name === 'source' ? sourceRepo : targetRepo, create: unsupported, import: unsupported, list: unsupported, delete: unsupported });
   try {
     const blob = await git.writeBlob({ fs, dir: source.dir, blob: text.encode('new public ref content') });
     const tree = await git.writeTree({ fs, dir: source.dir, tree: [{ mode: '100755', path: 'new-script', oid: blob, type: 'blob' }] });
     const head = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [source.previous.worktreeCommit], author, committer: author, message: 'new branch\n' } });
+    const tagHead = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'tagged commit\n' } });
+    const pullHead = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'pull request commit\n' } });
+    const addUnrelatedRefs = async () => {
+      const commands = Array.from({ length: 1200 }, (_, index) => `create refs/pull/${1000 + index}/head ${head}\n`).join('');
+      const child = Bun.spawn(['git', '-C', source.dir, 'update-ref', '--stdin'], { stdin: new Response(commands).body, stdout: 'pipe', stderr: 'pipe' });
+      const error = await new Response(child.stderr).text();
+      if (await child.exited !== 0) throw new Error(error);
+    };
+    // A v0 advertisement cannot fit these refs in 64 KiB. V2 must filter on the server,
+    // not download every unrelated PR before selecting the omitted source ref.
+    if (protocolVersion === 2) await addUnrelatedRefs();
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/develop', value: head });
-    await git.writeRef({ fs, dir: source.dir, ref: 'refs/pull/9/head', value: head });
-    await git.annotatedTag({ fs, dir: source.dir, ref: 'release-v2', object: head, tagger: author, message: 'release\n' });
+    await git.writeRef({ fs, dir: source.dir, ref: 'refs/pull/9/head', value: pullHead });
+    await git.annotatedTag({ fs, dir: source.dir, ref: 'release-v2', object: tagHead, tagger: author, message: 'release\n' });
+    const tagObject = await git.resolveRef({ fs, dir: source.dir, ref: 'refs/tags/release-v2' });
+    const advertisedTag = await readAdvertisedRefs({ remote: 'https://source.invalid/repo.git', token: null, refPrefix: 'refs/tags/release-v2' });
+    expect(advertisedTag.get('refs/tags/release-v2')).toBe(tagObject);
+    expect(advertisedTag.get('refs/tags/release-v2^{}')).toBe(tagHead);
     expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/develop')).toBe(head);
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(head);
-    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/tags/release-v2')).toBe(head);
-    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/pull/9/head')).toBe(head);
-    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/pull/9/head' })).toBe(head);
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/tags/release-v2')).toBe(tagHead);
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/tags/release-v2' })).toBe(tagObject);
+    expect((await git.readTag({ fs, dir: target.dir, oid: tagObject })).tag.object).toBe(tagHead);
+    expect((await git.readCommit({ fs, dir: target.dir, oid: tagHead })).commit.parent).toEqual([head]);
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/pull/9/head')).toBe(pullHead);
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/pull/9/head' })).toBe(pullHead);
+    expect((await git.readCommit({ fs, dir: target.dir, oid: pullHead })).commit.parent).toEqual([head]);
     expect(new TextDecoder().decode((await git.readBlob({ fs, dir: target.dir, oid: head, filepath: 'new-script' })).blob)).toBe('new public ref content');
     expect((await git.readCommit({ fs, dir: target.dir, oid: head })).commit.parent).toEqual([source.previous.worktreeCommit]);
     const next = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'later branch\n' } });
@@ -708,6 +728,7 @@ test('cloud transfer imports public branch, tag and PR object graphs and updates
     expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/develop')).toBe(head);
     expect(originRequests).toBe(fetched);
     originAvailable = true;
+    await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/missing-longer', value: head });
     await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/missing')).rejects.toThrow('not advertised by the public origin');
     expect(await git.listBranches({ fs, dir: target.dir })).not.toContain('missing');
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/racing', value: next });
@@ -719,5 +740,12 @@ test('cloud transfer imports public branch, tag and PR object graphs and updates
     expect((await git.readCommit({ fs, dir: target.dir, oid: next })).commit.parent).toEqual([head]);
     await expect(code.copyCommit('source', 'target', 'refs/heads/develop', head, null)).rejects.toThrow('ref has advanced');
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(next);
+    if (protocolVersion === 0) {
+      await addUnrelatedRefs();
+      const before = originRequests;
+      await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/missing')).rejects.toThrow('Byte stream exceeds size limit');
+      expect(originRequests).toBe(before + 1);
+      expect(await git.listBranches({ fs, dir: target.dir })).not.toContain('missing');
+    }
   } finally { request.mockRestore(); await source.close(); await target.close(); }
 }, 15_000);

@@ -254,7 +254,7 @@ export class ArtifactsCodeStore {
     const repository = artifactsProjectRepository(projectId);
     const existing = branch ? await this.resolveRef(repository, ref) : await this.resolveAdvertisedRef(repository, ref);
     if (existing !== null) return existing;
-    const advertised = await readAdvertisedRefs({ remote: origin.href, token: null });
+    const advertised = await readAdvertisedRefs({ remote: origin.href, token: null, refPrefix: ref });
     const object = advertised.get(ref);
     if (!object) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
     const pack = await readCommitPack({ remote: origin.href, token: null, commit: object });

@@ -30,7 +30,7 @@ function packets(bytes: Uint8Array): string[] {
     if (!/^[0-9a-f]{4}$/u.test(prefix)) throw new Error('Invalid Git packet header');
     const size = Number.parseInt(prefix, 16);
     offset += 4;
-    if (size === 0) continue;
+    if (size <= 2) continue;
     if (size < 4 || offset + size - 4 > bytes.length) throw new Error('Truncated Git packet');
     result.push(decoder.decode(bytes.subarray(offset, offset + size - 4)));
     offset += size - 4;
@@ -78,19 +78,47 @@ export async function publishRef(input: { remote: string; token: string; ref: st
   await publishSnapshotPack({ remote: input.remote, token: input.token, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack }, request);
 }
 
-/** Every ref a repository advertises for reading; an annotated tag's commit is advertised as `<tag>^{}`. */
-export async function readAdvertisedRefs(input: { remote: string; token: string | null }, request: ArtifactsFetch = fetch): Promise<Map<string, string>> {
+/** Advertised refs, optionally narrowed by protocol v2 ls-refs; peeled tags use `<tag>^{}`. */
+export async function readAdvertisedRefs(input: { remote: string; token: string | null; refPrefix?: string }, request: ArtifactsFetch = fetch): Promise<Map<string, string>> {
   const remote = new URL(input.remote);
   if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid Artifacts Git remote');
+  if (input.refPrefix !== undefined && (!input.refPrefix || /[\0\r\n]/u.test(input.refPrefix))) throw new Error('Invalid Git ref prefix');
+  const base = remote.href.replace(/\/$/u, '');
+  const headers: Record<string, string> = input.token === null ? {} : { Authorization: `Bearer ${input.token}` };
+  if (input.refPrefix !== undefined) headers['Git-Protocol'] = 'version=2';
   const signal = AbortSignal.timeout(15_000);
-  const advertised = await request(`${remote.href.replace(/\/$/u, '')}/info/refs?service=git-upload-pack`, { headers: input.token === null ? {} : { Authorization: `Bearer ${input.token}` }, signal, redirect: input.token === null ? 'error' : 'manual' });
+  const advertised = await request(`${base}/info/refs?service=git-upload-pack`, { headers, signal, redirect: 'manual' });
   if (!advertised.ok) throw new Error(`Git discovery failed (${advertised.status})`);
-  const refs = new Map<string, string>();
   if (!advertised.body) throw new Error('Git discovery returned no advertisement');
-  for (const line of packets(await collectBytes(streamBytes(advertised.body, signal), 64 * 1024))) {
-    if (line.startsWith('#')) continue;
-    const [oid, ref] = (line.trimEnd().split('\0')[0] ?? '').split(' ');
-    if (oid && ref && /^[0-9a-f]{40}$/u.test(oid)) refs.set(ref, oid);
+  let lines = packets(await collectBytes(streamBytes(advertised.body, signal), 64 * 1024)).filter(line => !line.startsWith('#'));
+  const version2 = lines[0]?.trimEnd() === 'version 2';
+  if (version2) {
+    if (!lines.some(line => line.trimEnd().split('=')[0] === 'ls-refs')) throw new Error('Git server does not support ls-refs');
+    const parts = [packet('command=ls-refs\n'), encoder.encode('0001'), packet('peel\n')];
+    if (input.refPrefix !== undefined) parts.push(packet(`ref-prefix ${input.refPrefix}\n`));
+    parts.push(encoder.encode('0000'));
+    const body = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+    let offset = 0;
+    for (const part of parts) { body.set(part, offset); offset += part.length; }
+    const response = await request(`${base}/git-upload-pack`, {
+      method: 'POST', headers: { ...headers, 'Git-Protocol': 'version=2', 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
+      body, signal, redirect: 'manual',
+    });
+    if (!response.ok) throw new Error(`Git discovery failed (${response.status})`);
+    if (!response.body) throw new Error('Git discovery returned no advertisement');
+    lines = packets(await collectBytes(streamBytes(response.body, signal), 64 * 1024));
+  }
+  // A v0-only origin returns its advertisement directly. It must fit the same bound;
+  // neither a refused v2 negotiation nor an oversized response triggers an unbounded retry.
+  const refs = new Map<string, string>();
+  for (const line of lines) {
+    const [oid, ref, ...attributes] = (line.trimEnd().split('\0')[0] ?? '').split(' ');
+    if (!oid || !ref || !/^[0-9a-f]{40}$/u.test(oid) || (input.refPrefix !== undefined && !ref.startsWith(input.refPrefix))) continue;
+    refs.set(ref, oid);
+    if (version2) {
+      const peeled = attributes.find(attribute => attribute.startsWith('peeled:'))?.slice('peeled:'.length);
+      if (peeled && /^[0-9a-f]{40}$/u.test(peeled)) refs.set(`${ref}^{}`, peeled);
+    }
   }
   return refs;
 }
@@ -108,7 +136,7 @@ export async function readCommitPack(input: { remote: string; token: string | nu
   const signal = AbortSignal.timeout(15_000);
   const response = await request(`${remote.href.replace(/\/$/u, '')}/git-upload-pack`, {
     method: 'POST', headers: { ...(input.token === null ? {} : { Authorization: `Bearer ${input.token}` }), 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
-    body, signal, redirect: input.token === null ? 'error' : 'manual',
+    body, signal, redirect: 'manual',
   });
   if (!response.ok) throw new Error(`Git fetch failed (${response.status})`);
   if (!response.body) throw new Error('Git fetch returned no pack');
