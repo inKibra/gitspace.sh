@@ -97,7 +97,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         await this.scheduleAlarm('leases', Date.now() + LEASE_AUDIT_MS);
       });
       if (runtime) {
-        try { await this.sweepLeases(runtime); }
+        try { await this.sweepLeases(runtime, 'alarm'); }
         catch (error) {
           console.error('Runtime lease sweep failed; retrying', error);
           await this.scheduleAlarm('leases', Date.now() + LEASE_RETRY_MS);
@@ -123,17 +123,33 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   }
 
   /** Lose the attachments of machines that left the fleet and every attachment whose lease expired, then release what
-   * their holders claimed. Machine kinds are refreshed first: they decide the lease windows. */
-  private async sweepLeases(runtime: WorkspaceRuntime): Promise<void> {
+   * their holders claimed. Machine kinds are refreshed first: they decide the lease windows. Logs one line per sweep. */
+  private async sweepLeases(runtime: WorkspaceRuntime, trigger: 'alarm' | 'backfill'): Promise<void> {
     const fleet = this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID);
-    for (const machineId of new Set(runtime.attachments.list().filter(item => item.state !== 'lost' && item.state !== 'detached').map(item => item.machineId))) {
-      const machine = await fleet.getMachine(machineId);
-      if (machine) runtime.attachments.recordMachineKind(machineId, attachmentMachineKind(machine));
-      else await this.loseMachineAttachments(runtime, machineId, await fleet.wasMachineDestroyed(machineId) ? 'machine-destroyed' : 'machine-revoked');
+    const before = runtime.attachments.list().filter(item => item.state !== 'lost' && item.state !== 'detached');
+    const missingMachines: string[] = [];
+    const failures: string[] = [];
+    for (const machineId of new Set(before.map(item => item.machineId))) {
+      try {
+        const machine = await fleet.getMachine(machineId);
+        if (machine) runtime.attachments.recordMachineKind(machineId, attachmentMachineKind(machine));
+        else {
+          missingMachines.push(machineId);
+          await this.loseMachineAttachments(runtime, machineId, await fleet.wasMachineDestroyed(machineId) ? 'machine-destroyed' : 'machine-revoked');
+        }
+      } catch (error) { failures.push(`${machineId}: ${error instanceof Error ? error.message : String(error)}`); }
     }
     await runtime.expireAttachments(Date.now());
     await this.releaseLostClaims(runtime);
     await this.scheduleLeases(runtime);
+    const after = new Map(runtime.attachments.list().map(item => [item.attachmentId, item]));
+    console.info('Runtime lease sweep', {
+      workspaceId: this.cloudRuntime?.workspaceId ?? null, trigger, examined: before.length, missingMachines,
+      lost: before.filter(item => after.get(item.attachmentId)?.state === 'lost').length,
+      deadlinesStarted: before.filter(item => item.deadlineAt === null && after.get(item.attachmentId)?.state !== 'lost' && (after.get(item.attachmentId)?.deadlineAt ?? null) !== null).length,
+      nextDeadline: runtime.attachments.nextDeadline(), failures,
+    });
+    if (failures.length) throw new Error(`Runtime lease sweep failed for ${failures.join('; ')}`);
   }
 
   private async loseMachineAttachments(runtime: WorkspaceRuntime, machineId: string, reason: RuntimeAttachmentLossReason): Promise<void> {
@@ -174,8 +190,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   /** Backfill: sweep now, resolving attachments of machines removed before leases existed and starting the others' leases. */
   async runtimeSweepLeases(): Promise<void> {
-    if (!(await this.storedAttachments()).some(item => item.state !== 'lost' && item.state !== 'detached')) return;
-    await this.sweepLeases(await this.getRuntime(await this.ctx.storage.get('runtime.identity')));
+    if (!(await this.storedAttachments()).some(item => item.state !== 'lost' && item.state !== 'detached')) {
+      console.info('Runtime lease sweep', { workspaceId: this.get()?.spaceId ?? null, trigger: 'backfill', examined: 0, lost: 0, deadlinesStarted: 0, skipped: 'no live attachments' });
+      return;
+    }
+    await this.sweepLeases(await this.getRuntime(await this.ctx.storage.get('runtime.identity')), 'backfill');
   }
 
   private async getRuntime(raw: unknown): Promise<WorkspaceRuntime> {
@@ -190,8 +209,14 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     } else await this.ctx.storage.put('runtime.identity', identity);
     this.publishCloudRuntime(identity);
     if (!this.runtime) {
-      this.runtime = createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp));
-      this.runtime.catch(() => { this.runtime = undefined; });
+      const runtime = createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp));
+      this.runtime = runtime;
+      runtime.catch(() => { this.runtime = undefined; });
+      // Rows written before leases, or of machines whose kind was never recorded, are settled by this workspace's own
+      // sweep as soon as its runtime opens; no account-wide trigger is needed.
+      this.ctx.waitUntil(runtime.then(async opened => {
+        if (opened.attachments.leaseBackfillNeeded()) await this.scheduleAlarm('leases', Date.now());
+      }, () => {}));
     }
     return this.runtime;
   }
@@ -362,10 +387,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeHeartbeat(raw: unknown) {
     const input = RuntimeHeartbeatInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
-    if (input.browserCapabilities) {
-      const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
-      if (machine?.kind !== 'physical' || machine.desiredState === 'removed') input.browserCapabilities = [];
-    }
+    // Leases of a machine whose kind was never recorded (attached before leases existed) start under its real windows.
+    const machine = input.browserCapabilities || runtime.attachments.machineKind(input.machineId) === null ? await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId) : undefined;
+    if (machine) runtime.attachments.recordMachineKind(input.machineId, attachmentMachineKind(machine));
+    if (input.browserCapabilities && (machine?.kind !== 'physical' || machine.desiredState === 'removed')) input.browserCapabilities = [];
     if (input.cache?.state === 'reclaimed' && runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents cache reclamation');
     const attachment = runtime.attachments.heartbeat(input);
     runtime.publish();

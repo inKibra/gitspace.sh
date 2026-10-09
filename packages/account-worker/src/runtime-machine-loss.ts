@@ -35,17 +35,20 @@ export async function listMachineAttachments(env: Env, userId: string, machineId
 /**
  * Attachments of machines destroyed or revoked before attachment leases existed hold their fences forever. One sweep
  * of every workspace resolves them (a machine missing from the fleet is lost) and starts the leases of the rest.
+ * Each workspace also sweeps itself when its runtime first opens with unsettled leases; this covers the others.
  */
 export async function backfillRuntimeLeases(env: Env, userId: string): Promise<void> {
   const catalog = env.FLEET_CATALOG.getByName(userId);
   if (!await catalog.runtimeLeaseBackfillPending()) return;
-  let complete = true;
-  for (const space of await catalog.listSpaces()) {
+  const spaces = await catalog.listSpaces();
+  const failed: string[] = [];
+  for (const space of spaces) {
     try { await env.SPACE_AUTHORITY.getByName(`${userId}:${space.spaceId}`).runtimeSweepLeases(); }
     catch (error) {
-      complete = false;
+      failed.push(space.spaceId);
       console.error('Runtime lease backfill will retry this workspace', { spaceId: space.spaceId, error });
     }
   }
-  if (complete) await catalog.completeRuntimeLeaseBackfill();
+  if (!failed.length) await catalog.completeRuntimeLeaseBackfill();
+  console.info('Runtime lease backfill', { spaces: spaces.length, failed, complete: failed.length === 0 });
 }

@@ -62,22 +62,41 @@ export class AttachmentStore {
     if (!columns.some(column => column.name === 'source')) storage.sql.exec('ALTER TABLE runtime_attachments ADD COLUMN source TEXT');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_kinds(machine_id TEXT PRIMARY KEY, kind TEXT NOT NULL)');
   }
-  /** Unknown machines are treated as computers: patient leases never strand a user's own checkout. */
-  machineKind(machineId: string): AttachmentMachineKind {
-    return this.storage.sql.exec<{ kind: string }>('SELECT kind FROM runtime_machine_kinds WHERE machine_id=?', machineId).toArray()[0]?.kind === 'cloud' ? 'cloud' : 'computer';
+  /** `null` until the cloud records it; meanwhile leases use the patient computer windows so no user checkout is stranded. */
+  machineKind(machineId: string): AttachmentMachineKind | null {
+    const kind = this.storage.sql.exec<{ kind: string }>('SELECT kind FROM runtime_machine_kinds WHERE machine_id=?', machineId).toArray()[0]?.kind;
+    return kind === 'cloud' || kind === 'computer' ? kind : null;
   }
-  /** A machine's kind decides its lease windows; a changed kind restarts its live leases under the new windows. */
+  /** Live attachments whose lease the sweep must still settle: rows written before leases (no deadline where one is due)
+   * or of a machine whose kind was never recorded. */
+  leaseBackfillNeeded(): boolean {
+    return this.list().some(attachment => attachment.state !== 'lost' && attachment.state !== 'detached' && (this.machineKind(attachment.machineId) === null || (attachment.deadlineAt === null && this.window(attachment) !== null)));
+  }
+  /** A machine's kind decides its lease windows. A change keeps when each live lease started (its last renewal, or for a
+   * row written before leases its last record) and applies the new window from there, so an overdue lease expires. */
   recordMachineKind(machineId: string, kind: AttachmentMachineKind): void {
     this.storage.transactionSync(() => {
-      if (this.storage.sql.exec<{ kind: string }>('SELECT kind FROM runtime_machine_kinds WHERE machine_id=?', machineId).toArray()[0]?.kind === kind) return;
+      const recorded = this.machineKind(machineId);
+      if (recorded === kind) return;
+      const starts = this.list().filter(attachment => attachment.machineId === machineId && attachment.state !== 'lost' && attachment.state !== 'detached').map(attachment => {
+        const window = this.window(attachment);
+        return { attachment, start: attachment.deadlineAt !== null && window !== null ? Date.parse(attachment.deadlineAt) - window : this.leaseStart(attachment) };
+      });
       this.storage.sql.exec('INSERT INTO runtime_machine_kinds(machine_id,kind) VALUES(?,?) ON CONFLICT(machine_id) DO UPDATE SET kind=excluded.kind', machineId, kind);
-      const now = Date.now();
-      for (const attachment of this.list()) if (attachment.machineId === machineId && attachment.state !== 'lost' && attachment.state !== 'detached') this.save({ ...attachment, deadlineAt: this.deadline(attachment, null, now) });
+      for (const { attachment, start } of starts) this.save({ ...attachment, deadlineAt: this.deadline(attachment, null, start) });
     });
+  }
+  private window(attachment: RuntimeAttachment): number | null {
+    const kind = leaseClass(attachment);
+    return kind === null ? null : ATTACHMENT_LEASE_MS[this.machineKind(attachment.machineId) ?? 'computer'][kind];
+  }
+  /** When a lease with no recorded deadline began: the last heartbeat for heartbeat leases, else the last record. */
+  private leaseStart(attachment: RuntimeAttachment): number {
+    return Date.parse(leaseClass(attachment) === 'heartbeat' ? attachment.heartbeatAt ?? attachment.updatedAt : attachment.updatedAt);
   }
   private deadline(next: RuntimeAttachment, prior: Lease | null, now: number, renewal: { heartbeat?: boolean; progressAt?: number } = {}): string | null {
     const kind = leaseClass(next);
-    const window = kind === null ? null : ATTACHMENT_LEASE_MS[this.machineKind(next.machineId)][kind];
+    const window = this.window(next);
     if (kind === null || window === null) return null;
     if (!prior || prior.kind !== kind || prior.deadlineAt === null) return new Date(now + window).toISOString();
     if (kind === 'heartbeat' && renewal.heartbeat) return new Date(now + window).toISOString();
@@ -92,8 +111,7 @@ export class AttachmentStore {
     return this.storage.transactionSync(() => this.list().filter(attachment => {
       if (attachment.state === 'lost' || attachment.state === 'detached') return false;
       if (attachment.deadlineAt === null) {
-        const basis = leaseClass(attachment) === 'heartbeat' ? attachment.heartbeatAt ?? attachment.updatedAt : attachment.updatedAt;
-        const deadlineAt = this.deadline(attachment, null, Date.parse(basis));
+        const deadlineAt = this.deadline(attachment, null, this.leaseStart(attachment));
         if (deadlineAt === null) return false;
         this.save({ ...attachment, deadlineAt });
         return Date.parse(deadlineAt) <= now;

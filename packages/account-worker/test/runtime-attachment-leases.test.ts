@@ -194,6 +194,52 @@ describe('runtime attachment leases', () => {
     expect(await w.current(attachment.attachmentId)).toMatchObject({ state: 'lost', lossReason: 'machine-destroyed' });
     expect(await w.fleet.runtimeLeaseBackfillPending()).toBe(false);
   });
+
+  it('resolves rows written before leases through the fleet entry point: missing machines and overdue silent sandboxes become lost', async () => {
+    const w = await workspace();
+    await w.authority.runtimeAttachments(w.identity);
+    const stamp = (offset: number) => new Date(Date.now() + offset).toISOString();
+    const cache = { state: 'draining', platform: 'linux', activity: [], lastActivityAt: stamp(-30 * minute), pausedAt: null, reclaimAt: null, lastSyncAt: null, localWorkOptIn: false, setup: [] };
+    const legacy = (attachmentId: string, machineId: string, generation: number, state: string, updatedAt: string) => ({ ...w.identity, attachmentId, machineId, generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state, capabilities: [], updatedAt, heartbeatAt: updatedAt, cache });
+    // Exactly what the pre-lease schema stored: no lease fields, no recorded machine kinds, no lease alarm.
+    const rows = [legacy('gone', 'gone-machine', 1, 'draining', stamp(-2 * minute)), legacy('gone-setup', 'gone-machine-b', 2, 'attaching', stamp(-minute)), legacy('silent', w.machineId, 3, 'draining', stamp(-30 * minute)), legacy('fresh', 'fresh-machine', 4, 'draining', stamp(-minute))];
+    await w.fleet.putMachine({ id: 'fresh-machine', label: 'Fresh', kind: 'sandbox', provider: 'cloudflare-sandbox', state: 'online', desiredState: 'online', rpcEndpoint: null, notes: '', lifecycleRevision: 1, operationId: null, error: null });
+    await runInDurableObject(w.authority, (_instance, state) => {
+      state.storage.sql.exec('DELETE FROM runtime_attachments');
+      state.storage.sql.exec('DELETE FROM runtime_machine_kinds');
+      state.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner='leases'");
+      for (const row of rows) state.storage.sql.exec('INSERT INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', row.attachmentId, JSON.stringify(row), 'fixture');
+    });
+    network.use(http.all(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/*`, async ({ request }) => {
+      const machineId = new URL(request.url).pathname.split('/').at(-2) ?? '';
+      return Response.json({ status: 'ok', value: await w.fleet.getMachine(machineId) });
+    }));
+    const logs = vi.spyOn(console, 'info');
+    await reconcileFleetMachines(env, w.userId, w.fleet);
+    const byId = Object.fromEntries((await runInDurableObject(w.authority, (_instance, state) => state.storage.sql.exec<{ id: string; record: string }>('SELECT id,record FROM runtime_attachments').toArray())).map(row => [row.id, RuntimeAttachmentSchema.parse(JSON.parse(row.record))]));
+    expect(byId.gone).toMatchObject({ state: 'lost', lossReason: 'machine-revoked' });
+    expect(byId['gone-setup']).toMatchObject({ state: 'lost', lossReason: 'machine-revoked' });
+    expect(byId.silent).toMatchObject({ state: 'lost', lossReason: 'deadline' });
+    expect(byId.fresh).toMatchObject({ state: 'draining', deadlineAt: new Date(Date.parse(rows[3]!.updatedAt) + 10 * minute).toISOString() });
+    expect(logs).toHaveBeenCalledWith('Runtime lease sweep', expect.objectContaining({ workspaceId: w.identity.workspaceId, examined: 4, lost: 3, deadlinesStarted: 1 }));
+    expect(await w.fleet.runtimeLeaseBackfillPending()).toBe(false);
+  });
+
+  it('sweeps rows written before leases on its own as soon as the workspace runtime opens', async () => {
+    const w = await workspace();
+    const now = new Date().toISOString();
+    const legacy = { ...w.identity, attachmentId: 'orphan', machineId: 'gone-machine', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'draining', capabilities: [], updatedAt: now, heartbeatAt: now };
+    // A workspace whose runtime state predates leases and has not opened since the deploy.
+    await runInDurableObject(w.authority, async (_instance, state) => {
+      await state.storage.put('runtime.identity', w.identity);
+      state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attachments(id TEXT PRIMARY KEY, record TEXT NOT NULL, secret TEXT NOT NULL, request_id TEXT, source TEXT)');
+      state.storage.sql.exec('INSERT INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', legacy.attachmentId, JSON.stringify(legacy), 'fixture');
+    });
+    expect(await w.fleet.runtimeLeaseBackfillPending()).toBe(true);
+    await w.authority.runtimeAttachments(w.identity);
+    await expect.poll(async () => (await w.authority.runtimeMachineAttachments('gone-machine'))[0]?.state, { timeout: 5_000 }).toBe('lost');
+    expect(await w.fleet.runtimeLeaseBackfillPending()).toBe(true);
+  });
 });
 
 describe('final publication fencing', () => {
