@@ -103,7 +103,7 @@ const MAX_TERMINAL_DRAIN_MS = 8;
 const MIN_TERMINAL_WRITE_BYTES = 512;
 const terminalEncoder = new TextEncoder();
 // Clear both screens and scrollback. Ghostty.reset() alone can retain old cells.
-const ERASE_PROTECTED_TERMINAL = '\x1b[?1049h\x1b[3J\x1b[2J\x1b[H\x1b[?1049l\x1b[3J\x1b[2J\x1b[H';
+const ERASE_TERMINAL = '\x1b[?1049h\x1b[3J\x1b[2J\x1b[H\x1b[?1049l\x1b[3J\x1b[2J\x1b[H';
 
 function findUtf8SafeEnd(chunk: Uint8Array, offset: number, maxEnd: number): number {
   let end = maxEnd;
@@ -158,7 +158,7 @@ function createTerminalWritePump(terminal: GhosttyTerminalType, onFatal: (error:
     if (disposed) return;
     if (resetPending) {
       terminal.reset();
-      if (bounded) terminal.write(ERASE_PROTECTED_TERMINAL);
+      terminal.write(ERASE_TERMINAL);
       resetPending = false;
     }
     const startedAt = performance.now();
@@ -298,7 +298,7 @@ function HubGhosttyTerminal({ data, disabled, onData, onError, protected: protec
         const focus = terminal.focus;
         terminal.focus = () => {};
         try { terminal.open(container); } finally { terminal.focus = focus; }
-        terminal.write(ERASE_PROTECTED_TERMINAL);
+        terminal.write(ERASE_TERMINAL);
         container.setAttribute('autocorrect', 'off');
         container.setAttribute('autocapitalize', 'none');
         container.spellcheck = false;
@@ -437,7 +437,7 @@ function HubGhosttyTerminal({ data, disabled, onData, onError, protected: protec
       const current = terminal;
       terminalRef.current = null;
       if (current && protectedOutput) {
-        current.write(ERASE_PROTECTED_TERMINAL);
+        current.write(ERASE_TERMINAL);
         current.dispose();
       } else if (current) requestAnimationFrame(() => current.dispose());
     };
@@ -550,15 +550,28 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
 
 function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceTerminalMachine }) {
   const { spaceId, machine, events, create: createTerminal, send, stop: stopTerminal } = props;
-  const [terminals, setTerminals] = useState<readonly WorkspaceTerminalView[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(props.requestedName ?? null);
-  const synchronized = useSynchronizedResource(terminalStreamResource(spaceId, machine.id, selectedName), (after, signal) => events(machine.id, selectedName, after, signal));
+  const [created, setCreated] = useState<WorkspaceTerminalView | null>(null);
+  const [stopped, setStopped] = useState<readonly string[]>([]);
+  // The machine's list comes from the unnamed stream, which never depends on the selection. The
+  // selected terminal's stream adds its output and keeps a completed lifecycle run listed; its list
+  // never replaces the machine's, so switching streams cannot feed back into the selection.
+  const listed = useSynchronizedResource(terminalStreamResource(spaceId, machine.id, null), (after, signal) => events(machine.id, null, after, signal));
+  const streamed = useSynchronizedResource(terminalStreamResource(spaceId, machine.id, selectedName), (after, signal) => events(machine.id, selectedName, after, signal));
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const pendingInput = useRef<Array<{ name: string; chunks: string[]; send: WorkspaceTerminalsProps['send'] }>>([]);
   const sendingInput = useRef(false);
-  const selected = useMemo(() => terminals.find((terminal) => terminal.name === selectedName) ?? (selectedName ? null : terminals[0] ?? null), [terminals, selectedName]);
-  const output = synchronized.value?.output && synchronized.value.output.name === selected?.name ? synchronized.value.output : null;
+  const terminals = useMemo(() => {
+    const machineTerminals = listed.value?.terminals ?? [];
+    const retained = machineTerminals.some((terminal) => terminal.name === selectedName) ? undefined : streamed.value?.terminals.find((terminal) => terminal.name === selectedName);
+    const visible = retained ? [...machineTerminals, retained]
+      : created && created.name === selectedName && !machineTerminals.some((terminal) => terminal.name === created.name) ? [created, ...machineTerminals]
+      : machineTerminals;
+    return visible.filter((terminal) => !stopped.includes(terminal.id));
+  }, [listed.value, streamed.value, selectedName, created, stopped]);
+  const selected = useMemo(() => terminals.find((terminal) => terminal.name === selectedName) ?? (selectedName !== null && selectedName === props.requestedName ? null : terminals[0] ?? null), [terminals, selectedName, props.requestedName]);
+  const output = streamed.value?.output && streamed.value.output.name === selected?.name ? streamed.value.output : null;
   const selectionRef = useRef(selected);
   selectionRef.current = selected;
   const mountedRef = useRef(true);
@@ -571,18 +584,19 @@ function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceT
     if (props.requestedName) setSelectedName(props.requestedName);
   }, [props.requestedName]);
 
+  // Commit the shown terminal as the selection so its stream supplies the output. The shown
+  // terminal is always on the machine's list, so committing it settles in one step.
   useEffect(() => {
-    const next = synchronized.value?.terminals;
-    if (!next) return;
-    setTerminals(next);
-    setSelectedName((current) => current && (current === props.requestedName || next.some((terminal) => terminal.name === current)) ? current : next[0]?.name ?? null);
-  }, [synchronized.cursor]);
+    if (!listed.value) return;
+    const shown = selected?.name ?? (selectedName === props.requestedName ? selectedName : null);
+    if (shown !== selectedName) setSelectedName(shown);
+  }, [listed.value, selected, selectedName, props.requestedName]);
 
   const create = async (): Promise<void> => {
     setCreating(true);
     try {
       const terminal = await createTerminal(machine.id);
-      setTerminals((current) => [terminal, ...current.filter((item) => item.name !== terminal.name)]);
+      setCreated(terminal);
       setSelectedName(terminal.name);
       setError(null);
     } catch (cause) {
@@ -626,8 +640,10 @@ function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceT
     if (!selected || !isRunning(selected.state)) return;
     try {
       await stopTerminal(machine.id, selected.name);
-      if (selected.kind !== 'lifecycle') setTerminals((current) => current.filter((terminal) => terminal.name !== selected.name));
-      if (selected.kind !== 'lifecycle') setSelectedName(null);
+      if (selected.kind !== 'lifecycle') {
+        setStopped((current) => [...current, selected.id]);
+        setSelectedName(null);
+      }
       setError(null);
     } catch (cause) {
       setError(rpcErrorMessage(cause, 'Stop terminal'));
@@ -664,6 +680,6 @@ function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceT
       <TerminalErrorBoundary resetKey={selected.id} onError={() => setError('Terminal display unavailable. Close and reopen to reconnect.')}><div className="flex min-h-0 flex-1 flex-col" key={selected.id}>{selected.protected ? <ProtectedTerminal name={selected.name} running={isRunning(selected.state)} live={(name, signal) => props.live(machine.id, name, signal)} onData={sendInput} onDisconnect={() => { pendingInput.current.length = 0; }} onError={() => setError('Protected terminal display unavailable. Close and reopen to reconnect.')} /> : <HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} />}</div></TerminalErrorBoundary>
     </> : <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="No terminals" description={`Open a terminal on ${machine.label} in this workspace's checkout.`} action={newTerminal} /></div>}
     {error ? <div className="shrink-0 bg-destructive-light px-3 py-1.5 text-caption text-destructive" role="alert">{error}</div> : null}
-    {synchronized.transportError ? <div className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground" role="status">{selected?.protected ? 'Terminal status disconnected; reconnecting.' : 'Terminal delivery disconnected. Last received output is retained; reconnecting.'}</div> : null}
+    {listed.transportError ?? streamed.transportError ? <div className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground" role="status">{selected?.protected ? 'Terminal status disconnected; reconnecting.' : 'Terminal delivery disconnected. Last received output is retained; reconnecting.'}</div> : null}
   </section>;
 }

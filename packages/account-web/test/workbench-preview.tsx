@@ -148,8 +148,9 @@ const mockHubOutput = new Map<string,string>([
   ['shell-main', 'agent-blame feature/agent-blame\r\n$ '],
 ]);
 const terminalChanges = new EventTarget();
-let terminalRevision = 0;
-function changedTerminals() { terminalRevision++; terminalChanges.dispatchEvent(new Event('change')); }
+// The hub allocates every stream resource's snapshot cursor from one sequence.
+let terminalCursor = 0;
+function changedTerminals() { terminalChanges.dispatchEvent(new Event('change')); }
 const workbenchTerminalApi: WorkspaceTerminalsProps = {
   spaceId: 'workspace-a',
   machines: [{ id: 'local-machine', label: 'Local machine' }],
@@ -162,7 +163,8 @@ const workbenchTerminalApi: WorkspaceTerminalsProps = {
     signal.addEventListener('abort', changed);
     try {
       while (!signal.aborted) {
-        yield { status: 'ok', value: { type: 'snapshot', resource: terminalStreamResource('workspace-a', machineId, name), cursor: terminalRevision, revision: terminalRevision, previous: null,
+        const cursor = ++terminalCursor;
+        yield { status: 'ok', value: { type: 'snapshot', resource: terminalStreamResource('workspace-a', machineId, name), cursor, revision: cursor, previous: null,
           value: { terminals: mockHubTerminals, output: name === null ? null : { spaceId: 'workspace-a', name, state: mockHubTerminals.find(terminal => terminal.name === name)?.state ?? 'exited', cursor: (mockHubOutput.get(name) ?? '').length, data: mockHubOutput.get(name) ?? '' } } } };
         await next.promise;
         next = Promise.withResolvers<void>();
@@ -183,7 +185,8 @@ const workbenchTerminalApi: WorkspaceTerminalsProps = {
     return terminal;
   },
   send: async (_machineId, name, data) => { mockHubOutput.set(name, `${mockHubOutput.get(name) ?? ''}${data}`); changedTerminals(); },
-  stop: async (_machineId, name) => { mockHubTerminals = mockHubTerminals.map((terminal) => terminal.name === name ? { ...terminal, state: 'exited', exitCode: 0 } : terminal); changedTerminals(); },
+  // The hub lists only active runs: a stopped terminal leaves the machine's list.
+  stop: async (_machineId, name) => { mockHubTerminals = mockHubTerminals.filter((terminal) => terminal.name !== name); changedTerminals(); },
 };
 function TerminalsSurface({ requestedId }: { requestedId: string | null }) {
   const [owner] = useState(() => new SynchronizationOwner());
