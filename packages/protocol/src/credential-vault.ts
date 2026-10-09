@@ -323,6 +323,21 @@ export function verifyCredentialAuthorityGrant(
   }
 }
 
+/**
+ * Managed (account-provisioned) machines hold no root-issued grant: their grant is
+ * self-signed with the device key. The signature proves only possession, never
+ * authority; the credential vault's managed-device row is the sole authority.
+ */
+export function verifyManagedDeviceGrant(input: SignedCredentialAuthorityGrant, now = Date.now()): CredentialAuthorityGrant | null {
+  const parsed = signedCredentialAuthorityGrantSchema.safeParse(input);
+  if (!parsed.success || parsed.data.issuerChain || parsed.data.grant.issuerDeviceId) return null;
+  try {
+    return verifyCredentialAuthorityGrant(parsed.data, fromBase64(parsed.data.grant.signingPublicKey), now);
+  } catch {
+    return null;
+  }
+}
+
 function accessRequestPayload(input: Omit<CredentialAccessRequest, 'signature'>): Uint8Array {
   return payload(input);
 }

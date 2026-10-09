@@ -1,4 +1,5 @@
 import { sha256 } from '@noble/hashes/sha2.js';
+import { TaggedError } from 'better-result';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { canonicalJson, dispatchIdentity, receiptDigest, verifyReceipt, RuntimeExecutorReceiptSchema, RuntimeReceiptTransportSchema, RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeExecutorReceipt, type RuntimeReceiptTransport, type RuntimeAttachInput, type RuntimeAttachment, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { RuntimeAttachmentSourceSchema, RuntimeExecutionObservationSchema } from '@gitspace/protocol-runtime';
@@ -10,6 +11,12 @@ export type AttachmentServices = {
   admitExecution?(machineId: RuntimeAttachment['machineId']): Promise<void>;
   dispatch(input: { machineId: RuntimeAttachment['machineId']; path: '/runtime/execute' | '/runtime/receipt'; body: string; signature: string; signal: AbortSignal }): Promise<RuntimeReceiptTransport>;
 };
+/** The transport proved the request was never delivered: the machine has no relay connection. */
+export class ExecutorNotConnected extends TaggedError('ExecutorNotConnected')<{ machineId: string; message: string }> {
+  constructor(machineId: string) {
+    super({ machineId, message: `Machine ${machineId} is not connected to the relay` });
+  }
+}
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 export class AttachmentStore {
   constructor(private readonly storage: DurableObjectStorage, private readonly services: AttachmentServices) {
@@ -433,7 +440,15 @@ export class AttachmentStore {
         this.storage.sql.exec("INSERT INTO runtime_attempts(id,dispatch,status) VALUES(?,?,'dispatched')", dispatch.attemptId, JSON.stringify(dispatch));
         await this.storage.sync();
         try { receipt = await this.accept(dispatch, await this.exchange(dispatch, 'execute', signal)); }
-        catch { receipt = await this.reconcile(dispatch, signal); }
+        catch (error) {
+          if (!(error instanceof ExecutorNotConnected)) receipt = await this.reconcile(dispatch, signal);
+          else {
+            // Never delivered, so no effect exists: do not leave an unresolved attempt to poll until its deadline.
+            this.storage.sql.exec("DELETE FROM runtime_attempts WHERE id=? AND status='dispatched'", dispatch.attemptId);
+            await this.storage.sync();
+            throw error;
+          }
+        }
       }
     }
     for (;;) {

@@ -68,12 +68,12 @@ function authorizedRequest(url: string, init: RequestInit = {}): Request {
   headers.set('authorization', createRelayAuthorization(privateKey, target));
   return new Request(url, { ...init, headers });
 }
-function machineAuthorizedRequest(url: string, init: RequestInit = {}): Request {
+function machineAuthorizedRequest(url: string, init: RequestInit = {}, key: Uint8Array = machinePrivateKey, grant = machineGrant): Request {
   const parsed = new URL(url);
   const target = `${parsed.pathname}${parsed.search}`;
   const headers = new Headers(init.headers);
-  headers.set('authorization', createRelayAuthorization(machinePrivateKey, target));
-  headers.set('x-gitspace-machine-grant', btoa(JSON.stringify(machineGrant)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, ''));
+  headers.set('authorization', createRelayAuthorization(key, target));
+  headers.set('x-gitspace-machine-grant', btoa(JSON.stringify(grant)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, ''));
   return new Request(url, { ...init, headers });
 }
 
@@ -182,6 +182,54 @@ describe('portable RelayDO', () => {
     expect(connect.status).toBe(503);
     const artifact = await exports.default.fetch(machineAuthorizedRequest(`https://relay.test/artifacts/${'b'.repeat(64)}`));
     expect(artifact.status).toBe(503);
+  });
+
+  describe('managed (self-signed) machine grants', () => {
+    const managedKey = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);
+    const publicKey = (key: Uint8Array) => credentialProtocolBase64.encode(ed25519.getPublicKey(key));
+    async function registerManaged() {
+      const registered = await env.CREDENTIALS.getByName(env.ACCOUNT_ID).registerManagedDevice({
+        userId: env.ACCOUNT_ID, machineId: 'managed-a', signingPublicKey: publicKey(managedKey), exchangePublicKey: publicKey(managedKey), capabilities: ['storage.access', 'space.control'],
+      });
+      if (registered.status !== 'ok') throw new Error(registered.error.message);
+      return signCredentialAuthorityGrant({ version: 1, userId: env.ACCOUNT_ID, machineId: 'managed-a', signingPublicKey: publicKey(managedKey), exchangePublicKey: publicKey(managedKey), capabilities: ['storage.access', 'space.control'], generation: registered.value.generation }, managedKey);
+    }
+    const attempt = (machineId: string, key: Uint8Array, grant: SignedCredentialAuthorityGrant) => Promise.all([
+      exports.default.fetch(machineAuthorizedRequest(`https://relay.test/ws?role=machine&id=${machineId}`, { headers: { upgrade: 'websocket' } }, key, grant)),
+      exports.default.fetch(machineAuthorizedRequest(`https://relay.test/artifacts/${'c'.repeat(64)}`, { method: 'HEAD' }, key, grant)),
+    ]);
+
+    it('accepts the current managed device on both machine sockets and machine requests', async () => {
+      const [socket, artifact] = await attempt('managed-a', managedKey, await registerManaged());
+      expect(socket.status).toBe(101);
+      socket.webSocket?.accept();
+      expect(artifact.status).toBe(404);
+      socket.webSocket?.close(1000, 'done');
+    });
+
+    it('rejects a forged self-signed grant for an existing managed machine with a different key', async () => {
+      const genuine = await registerManaged();
+      const forgedKey = Uint8Array.from({ length: 32 }, (_, index) => 7 + index);
+      const forged = signCredentialAuthorityGrant({ ...genuine.grant, signingPublicKey: publicKey(forgedKey) }, forgedKey);
+      const [socket, artifact] = await attempt('managed-a', forgedKey, forged);
+      expect(socket.status).toBe(401);
+      expect(artifact.status).toBe(401);
+    });
+
+    it('rejects a self-signed grant for a root-paired device even with its own key', async () => {
+      const selfSigned = signCredentialAuthorityGrant(machineGrant.grant, machinePrivateKey);
+      const [socket, artifact] = await attempt('darktop', machinePrivateKey, selfSigned);
+      expect(socket.status).toBe(401);
+      expect(artifact.status).toBe(401);
+    });
+
+    it('rejects a revoked managed device', async () => {
+      const grant = await registerManaged();
+      await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('managed-a');
+      const [socket, artifact] = await attempt('managed-a', managedKey, grant);
+      expect(socket.status).toBe(401);
+      expect(artifact.status).toBe(401);
+    });
   });
 
   it('rechecks authority before sending a new tunnel to an already connected revoked machine', async () => {

@@ -21,6 +21,7 @@ import {
   credentialProtocolBase64,
   signedCredentialAuthorityGrantSchema,
   verifyCredentialAuthorityGrant,
+  verifyManagedDeviceGrant,
   type SignedCredentialAuthorityGrant,
 } from '@gitspace/protocol/credential-vault';
 import { WORKER_VERSION_HEADER } from '@gitspace/protocol/deployment';
@@ -101,7 +102,8 @@ async function currentMachineAuthority(
   capability: 'space.control' | 'storage.access',
 ): Promise<Response | null> {
   try {
-    if (!verifyCredentialAuthorityGrant(grant, credentialProtocolBase64.decode(env.AUTH_PUBLIC_KEY))) {
+    // A self-signed (managed device) grant is never sufficient on its own: the vault below decides.
+    if (!(verifyCredentialAuthorityGrant(grant, credentialProtocolBase64.decode(env.AUTH_PUBLIC_KEY)) ?? verifyManagedDeviceGrant(grant))) {
       return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine issuer proof is invalid or expired');
     }
     if (grant.grant.userId !== env.ACCOUNT_ID) return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine grant belongs to another tenant');
@@ -190,7 +192,9 @@ function decodeMachineGrant(value: string | null) {
 async function authorizedMachineRequest(request: Request, env: Env, machineId: string | null): Promise<Response | { nonce: string; timestamp: number; target: string }> {
   const signedGrant = decodeMachineGrant(request.headers.get(MACHINE_GRANT_HEADER));
   if (!signedGrant) return jsonError(401, 'MACHINE_GRANT_REQUIRED', 'Machine credential grant is missing or invalid');
-  const grant = verifyCredentialAuthorityGrant(signedGrant, credentialProtocolBase64.decode(env.AUTH_PUBLIC_KEY));
+  // Root-signed (paired) or self-signed (managed) claim; vault authority is checked
+  // below or, for machine sockets, inside the relay before the socket is accepted.
+  const grant = verifyCredentialAuthorityGrant(signedGrant, credentialProtocolBase64.decode(env.AUTH_PUBLIC_KEY)) ?? verifyManagedDeviceGrant(signedGrant);
   if (!grant || (machineId !== null && grant.machineId !== machineId)) {
     return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine credential grant is not valid for this relay endpoint');
   }

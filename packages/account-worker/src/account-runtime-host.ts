@@ -1,5 +1,5 @@
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
-import { RuntimeReceiptTransportSchema } from '@gitspace/protocol-runtime';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { RuntimeReceiptTransportSchema, type RuntimeReceiptTransport } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
 import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } from './runtime-services.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
@@ -116,28 +116,36 @@ export async function createAccountWorkspaceRuntime(
         const admission = await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).machineExecutionAdmission(machineId);
         if (admission.state !== 'ready') throw new Error(admission.error ?? `Updating machine: executor protocol ${admission.required} is required before agent execution.`);
       },
-      async dispatch(input) {
-        const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(input.machineId);
-        if (!machine || machine.state !== 'online' || machine.desiredState !== 'online') throw new Error('Assigned executor is unavailable');
-        const request = new Request(new URL(`/tunnel/${encodeURIComponent(input.machineId)}${input.path}`, env.RELAY_URL), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-gitspace-execution-signature': input.signature },
-          // AttachmentStore signs this exact serialized string; never re-encode the body.
-          body: input.body,
-          signal: input.signal,
-        });
-        input.signal.throwIfAborted();
-        const aborted = Promise.withResolvers<never>();
-        const onAbort = () => aborted.reject(input.signal.reason);
-        input.signal.addEventListener('abort', onAbort, { once: true });
-        try {
-          const response = await Promise.race([forwardTunnelRequest(request, env, { machineId: input.machineId, path: input.path }), aborted.promise]);
-          if (!response.ok) throw new Error(`Executor transport returned ${response.status}`);
-          return RuntimeReceiptTransportSchema.parse(await Promise.race([response.json(), aborted.promise]));
-        } finally { input.signal.removeEventListener('abort', onAbort); }
-      },
+      dispatch: input => dispatchRuntimeAttachment(env, input),
     },
   });
   ctx.waitUntil(runtime.wake());
   return runtime;
+}
+
+/** Every machine executes through the tenant relay tunnel; a missing tunnel fails at once. */
+export async function dispatchRuntimeAttachment(env: Env, input: Parameters<AttachmentServices['dispatch']>[0]): Promise<RuntimeReceiptTransport> {
+  const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(input.machineId);
+  if (!machine || machine.state !== 'online' || machine.desiredState !== 'online') throw new Error('Assigned executor is unavailable');
+  const request = new Request(new URL(`/tunnel/${encodeURIComponent(input.machineId)}${input.path}`, env.RELAY_URL), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-gitspace-execution-signature': input.signature },
+    // AttachmentStore signs this exact serialized string; never re-encode the body.
+    body: input.body,
+    signal: input.signal,
+  });
+  input.signal.throwIfAborted();
+  const aborted = Promise.withResolvers<never>();
+  const onAbort = () => aborted.reject(input.signal.reason);
+  input.signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    const response = await Promise.race([forwardTunnelRequest(request, env, { machineId: input.machineId, path: input.path }), aborted.promise]);
+    if (response.status === 503) {
+      // The relay answers MACHINE_OFFLINE only before dispatch: the request provably never left.
+      const body = z.object({ error: z.object({ code: z.string() }) }).safeParse(await Promise.race([response.json().catch(() => null), aborted.promise]));
+      if (body.success && body.data.error.code === 'MACHINE_OFFLINE') throw new ExecutorNotConnected(input.machineId);
+    }
+    if (!response.ok) throw new Error(`Executor transport returned ${response.status}`);
+    return RuntimeReceiptTransportSchema.parse(await Promise.race([response.json(), aborted.promise]));
+  } finally { input.signal.removeEventListener('abort', onAbort); }
 }

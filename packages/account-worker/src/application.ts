@@ -35,6 +35,8 @@ import {
   verifyCredentialAccessRequest,
   skillUpdateSchema,
   verifyCredentialAuthorityGrant,
+  verifyManagedDeviceGrant,
+  signCredentialAuthorityGrant,
   verifySignedControlRequest,
   verifyRelayAuthorization,
   signedCredentialAuthorityGrantSchema,
@@ -697,8 +699,21 @@ export class CredentialVaultDO extends DurableObject<Env> {
   authorizeRelayGrant(input: SignedCredentialAuthorityGrant, capability: 'space.control' | 'storage.access'): CredentialVaultResult<{ authorized: true }> {
     const config = this.config();
     if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
-    const grant = verifyCredentialAuthorityGrant(input, credentialProtocolBase64.decode(config.root_public_key), Date.now(), (deviceId) => this.deviceGrant(deviceId));
+    const now = Date.now();
+    const rooted = verifyCredentialAuthorityGrant(input, credentialProtocolBase64.decode(config.root_public_key), now, (deviceId) => this.deviceGrant(deviceId));
+    // A self-signed grant is only a claim; it is admitted solely for a managed
+    // device row (no root grant) whose identity, keys, generation and capabilities match exactly.
+    const managed = rooted ? null : verifyManagedDeviceGrant(input, now);
+    const grant = rooted ?? managed;
     if (!grant || grant.userId !== config.user_id) return publicError('DEVICE_UNAUTHORIZED', 'Device grant is invalid');
+    if (managed) {
+      const row = this.ctx.storage.sql.exec<{ grant_json: string | null; capabilities_json: string }>(
+        'SELECT grant_json, capabilities_json FROM credential_devices WHERE machine_id = ?', managed.machineId,
+      ).toArray()[0];
+      if (!row || row.grant_json !== null || row.capabilities_json !== JSON.stringify(managed.capabilities)) {
+        return publicError('DEVICE_UNAUTHORIZED', 'Device grant is not a current managed device credential');
+      }
+    }
     const device = this.device(grant.machineId);
     if (!device || device.generation !== grant.generation
       || device.signing_public_key !== grant.signingPublicKey
@@ -2801,13 +2816,17 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
   const artifactKey = await vault.artifactKey(userId);
   const signingPrivateKey = crypto.getRandomValues(new Uint8Array(32));
   const exchangePrivateKey = crypto.getRandomValues(new Uint8Array(32));
-  const registered = await vault.registerManagedDevice({
+  const device = {
     userId, machineId,
     signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(signingPrivateKey)),
     exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(exchangePrivateKey)),
-    capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
-  });
+    capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'] satisfies Array<'storage.access' | 'space.control' | 'credential.access' | 'credential.manage'>,
+  };
+  const registered = await vault.registerManagedDevice(device);
   if (registered.status === 'error') throw new Error(registered.error.message);
+  // The worker holds no root key: the managed grant is self-signed and the vault's
+  // managed-device row (this generation) is what the relay authorizes against.
+  const machineGrant = signCredentialAuthorityGrant({ version: 1, ...device, generation: registered.value.generation }, signingPrivateKey);
   // The tenant commits this complete enrollment and immutable image before
   // acknowledging. Slow preparation/boot belongs to its durable background run.
   return catalog.beginSandboxProvisioning({
@@ -2821,6 +2840,9 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
       // Worker provisioning pins the same root that installed the machine key.
       GITSPACE_ROOT_PUBLIC_KEY: rootPublicKey,
       GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: credentialProtocolBase64.encode(signingPrivateKey),
+      // Every machine executes through the tenant relay, exactly like paired computers.
+      GITSPACE_RELAY_URL: env.RELAY_URL,
+      GITSPACE_MACHINE_GRANT: JSON.stringify(machineGrant),
       GITSPACE_ARTIFACT_KEY: artifactKey,
       GITSPACE_CONTROL_TOKEN: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))),
       GITSPACE_SERVICE_DOMAIN: 'gssh.dev',

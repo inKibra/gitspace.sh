@@ -3,7 +3,7 @@ import { canonicalJson, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapsho
 import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, CloudPublicationUncertain, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, CloudPublicationUncertain, ExecutorNotConnected, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
@@ -236,6 +236,11 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (saved) await controlAttempt(saved.attemptId, 'runtime_cancel').catch(() => null);
         if (saved) throw error;
         return settle(interrupted(input, 'Execution cancelled before dispatch.'));
+      }
+      if (error instanceof ExecutorNotConnected) {
+        // The relay proved non-delivery and the store released the attempt: no effect remains to reconcile.
+        ctx.storage.sql.exec('DELETE FROM runtime_host_dispatch WHERE id=?', input.attemptId);
+        return settle(failed(input, error));
       }
       if (savedDispatch(input.attemptId)) throw error;
       return settle(failed(input, error));

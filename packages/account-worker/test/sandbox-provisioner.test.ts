@@ -1,9 +1,11 @@
 import { env, runInDurableObject } from 'cloudflare:test';
+import { exports } from 'cloudflare:workers';
+import { forwardTunnelRequest } from '../src/relay-request.js';
 import { describe, expect, it } from 'vitest';
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from '../src/sandbox-provisioner.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
-import { createSignedControlRequest, credentialProtocolBase64 } from '@gitspace/protocol';
+import { createRelayAuthorization, createSignedControlRequest, credentialProtocolBase64, RELAY_HEARTBEAT_MODE, signedCredentialAuthorityGrantSchema } from '@gitspace/protocol';
 import { controlFleetMachine, provisionManagedSandbox, reconcileFleetMachines } from '../src/application.js';
 import { FleetCatalogDO } from '../src/fleet-catalog.js';
 
@@ -251,4 +253,29 @@ it('retains enrollment when preflight fails before the provider has ever enrolle
   await expect.poll(() => f.catalog.getMachine(machine.id)).toMatchObject({ state: 'online', error: null });
   const actualFingerprint = credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(f.enrollments[0])))));
   expect(actualFingerprint).toBe(retainedFingerprint);
+});
+
+it('provisions the tenant relay URL and a managed grant the relay accepts for the machine socket and its tunnels', async () => {
+  const f = await provisionFixture();
+  const machine = await provisionManagedSandbox(env, f.userId, env.ACCOUNT_URL, { kind: 'custom', image });
+  await expect.poll(() => f.catalog.getMachine(machine.id)).toMatchObject({ state: 'online', error: null });
+  const enrolled = f.enrollments[0]!.environment;
+  expect(enrolled.GITSPACE_RELAY_URL).toBe(env.RELAY_URL);
+  const grant = signedCredentialAuthorityGrantSchema.parse(JSON.parse(enrolled.GITSPACE_MACHINE_GRANT!));
+  const url = new URL(`/ws?role=machine&id=${machine.id}&heartbeat=${RELAY_HEARTBEAT_MODE}`, enrolled.GITSPACE_RELAY_URL);
+  const response = await exports.default.fetch(new Request(url, { headers: {
+    upgrade: 'websocket',
+    authorization: createRelayAuthorization(credentialProtocolBase64.decode(enrolled.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY!), `${url.pathname}${url.search}`),
+    'x-gitspace-machine-grant': btoa(JSON.stringify(grant)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, ''),
+  } }));
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!;
+  socket.accept();
+  const started = Promise.withResolvers<string>();
+  socket.addEventListener('message', event => started.resolve(String(event.data)), { once: true });
+  // Runtime dispatch uses this same tunnel; the managed machine now receives it.
+  const tunnel = forwardTunnelRequest(new Request(new URL(`/tunnel/${machine.id}/runtime/execute`, env.RELAY_URL), { method: 'POST', body: '{}' }), env, { machineId: machine.id, path: '/runtime/execute' });
+  expect(JSON.parse(await started.promise)).toMatchObject({ type: 'tunnel.request.start', path: '/runtime/execute' });
+  socket.close(1000, 'done');
+  expect((await tunnel).status).toBe(502);
 });

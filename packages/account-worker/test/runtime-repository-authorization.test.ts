@@ -1,12 +1,13 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant, type ControlOperation } from '@gitspace/protocol';
-import { RuntimeAttachInputSchema, RuntimeHeartbeatInputSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachInputSchema, RuntimeAttachmentSchema, RuntimeHeartbeatInputSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore, type AttachmentServices } from '@gitspace/runtime-workspace-do';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { RuntimeAttachmentController } from '../src/runtime-attachments.js';
+import { dispatchRuntimeAttachment } from '../src/account-runtime-host.js';
 import { emptyLifecycleState } from '@gitspace/protocol-environment';
 
 const projectId = 'repository-project';
@@ -64,6 +65,19 @@ describe('signed repository credential authority', () => {
       await expect(store.execute(dispatch, AbortSignal.timeout(1000))).rejects.toThrow('Updating machine');
       expect(store.getAttempt(dispatch.attemptId)).toBe(null);
       expect(dispatched).toBe(false);
+    });
+  });
+  it('fails a dispatch to an online machine without a relay connection at once and releases the attempt', async () => {
+    const f = await fixture(['space.control']);
+    await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).putMachine({ id: 'assigned', label: 'Assigned', kind: 'sandbox', provider: 'cloudflare-sandbox', state: 'online', desiredState: 'online', rpcEndpoint: null, notes: '', lifecycleRevision: 1, operationId: null, error: null });
+    await runInDurableObject(f.authority, async (_instance, state) => {
+      const store = new AttachmentStore(state.storage, { seal: async secret => secret, open: async secret => secret, admitExecution: async () => {}, dispatch: input => dispatchRuntimeAttachment(env, input) });
+      const now = new Date().toISOString();
+      const attachment = RuntimeAttachmentSchema.parse({ projectId, workspaceId, attachmentId: 'attachment', machineId: 'assigned', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: now, heartbeatAt: now });
+      state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), credentialProtocolBase64.encode(new Uint8Array(32).fill(3)));
+      const dispatch = RuntimeToolDispatchSchema.parse({ version: 1, conversationKind: 'main', conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId, workspaceId, machineId: 'assigned', generation: 1, requestId: 'request', attemptId: 'not-connected', tool: 'bash', args: { command: 'pwd' }, deadlineAt: new Date(Date.now() + 3_000).toISOString(), replay: 'unsafe' });
+      await expect(store.execute(dispatch, AbortSignal.timeout(60_000))).rejects.toThrow('Machine assigned is not connected to the relay');
+      expect(store.getAttempt(dispatch.attemptId)).toBe(null);
     });
   });
   it('pins checkpoint attachments to the durable commit rather than resolving custom refs through the binding', async () => {
