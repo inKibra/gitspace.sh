@@ -331,7 +331,20 @@ export class AttachmentStore {
     return { attachment };
   }
 
-  requestCacheAction(input: RuntimeCacheActionInput) {
+  async requestCacheAction(input: RuntimeCacheActionInput) {
+    const attachment = this.list().find(item => item.attachmentId === input.attachmentId);
+    if (input.action.kind === 'setup' && attachment?.role === 'cache' && attachment.cache && attachment.projectId === input.projectId && attachment.workspaceId === input.workspaceId && attachment.machineId === input.machineId && attachment.generation === input.generation && attachment.state !== 'detached' && attachment.state !== 'lost') {
+      const signal = AbortSignal.timeout(30_000);
+      const rows = this.storage.sql.exec<{ dispatch: string }>("SELECT dispatch FROM runtime_attempts WHERE status='dispatched'").toArray();
+      for (const row of rows) {
+        const dispatch = RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch));
+        if (dispatch.attachmentId === attachment.attachmentId && dispatch.generation === attachment.generation) await this.reconcile(dispatch, signal);
+      }
+    }
+    // Receipt I/O can race a lease or action change. Re-read authority before mutation.
+    return this.applyCacheAction(input);
+  }
+  private applyCacheAction(input: RuntimeCacheActionInput) {
     const attachment = this.list().find(item => item.attachmentId === input.attachmentId);
     if (!attachment || attachment.role !== 'cache' || !attachment.cache || attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId || attachment.machineId !== input.machineId || attachment.generation !== input.generation || attachment.state === 'detached' || attachment.state === 'lost') throw new Error('Cache action has stale authority');
     const prior = leaseOf(attachment);
@@ -550,7 +563,17 @@ export class AttachmentStore {
     if (collected) return collected;
     this.storage.sql.exec("INSERT INTO runtime_attempts(id,dispatch,status) VALUES(?,?,'dispatched') ON CONFLICT(id) DO NOTHING", dispatch.attemptId, JSON.stringify(dispatch));
     await this.storage.sync();
-    return this.accept(dispatch, await this.exchange(dispatch, 'cancel', signal));
+    let receipt = await this.accept(dispatch, await this.exchange(dispatch, 'cancel', signal));
+    while (receipt.state === 'starting' || receipt.state === 'running') {
+      signal.throwIfAborted();
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(signal.reason); };
+        const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, 1000);
+        signal.addEventListener('abort', abort, { once: true });
+      });
+      receipt = await this.reconcile(dispatch, signal);
+    }
+    return receipt;
   }
   async execute(dispatch: RuntimeToolDispatch, signal: AbortSignal): Promise<RuntimeToolResult> {
     dispatch = RuntimeToolDispatchSchema.parse(dispatch);

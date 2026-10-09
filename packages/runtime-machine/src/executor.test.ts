@@ -108,6 +108,66 @@ describe('executor effect ownership', () => {
       expect(f.launches()).toBe(1);
     } finally { await f.close(); }
   });
+  test('paused retained cache recovers authenticated terminal receipts without admitting new execution', async () => {
+    const f = await fixture();
+    const send = async (path: string, body: unknown, key = Buffer.alloc(32, 7)) => {
+      const raw = JSON.stringify(body);
+      const signature = createHmac('sha256', key).update(raw).digest('base64url');
+      return f.executor.fetch(new Request(`http://executor/runtime/${path}`, { method: 'POST', body: raw, headers: { 'x-gitspace-execution-signature': signature } }));
+    };
+    try {
+      await f.executor.execute(f.dispatch);
+      const envelope = await f.executor.observe(f.dispatch);
+      const local = f.journal.attachment(f.dispatch.attachmentId)!;
+      const pausedAt = new Date().toISOString();
+      f.journal.installAttachment({ ...local, prerequisitesComplete: false, attachment: {
+        ...local.attachment, state: 'attaching',
+        cache: { state: 'paused', platform: 'linux', activity: [], lastActivityAt: pausedAt, pausedAt, reclaimAt: null, lastSyncAt: null, localWorkOptIn: false, reclaimBlocked: null, setup: [] },
+      } });
+      for (const op of ['observe', 'cancel']) {
+        const response = await send('receipt', { op, dispatch: f.dispatch });
+        expect(response.status).toBe(200);
+        const recovered = await response.json();
+        expect(recovered).toEqual(envelope);
+        expect((await verifyReceipt(f.dispatch, recovered, local.executionSecret)).state).toBe('terminal');
+      }
+      const acknowledgement = { version: 1, receiptId: envelope.receipt.receiptId, dispatch: envelope.receipt.dispatch, receiptDigest: await receiptDigest(envelope.receipt), acknowledgedAt: pausedAt };
+      expect((await send('receipt', { op: 'ack', dispatch: f.dispatch, acknowledgement })).status).toBe(200);
+      expect(f.journal.attempt(f.dispatch.attemptId)?.acknowledged).toBe(true);
+
+      const fresh = { ...f.dispatch, requestId: 'fresh-request', attemptId: 'fresh-attempt' };
+      expect((await send('execute', fresh)).status).toBe(409);
+      expect(f.journal.attempt(fresh.attemptId)).toBeNull();
+      expect((await send('receipt', { op: 'observe', dispatch: f.dispatch }, Buffer.alloc(32, 8))).status).toBe(403);
+      for (const changed of [
+        { machineId: 'other-machine' }, { projectId: 'other-project' }, { workspaceId: 'other-workspace' }, { generation: 6 },
+        { taskId: 'other-task' }, { args: { command: 'different' } },
+      ]) {
+        expect((await send('receipt', { op: 'cancel', dispatch: { ...f.dispatch, ...changed } })).status).toBe(409);
+      }
+      expect((await send('receipt', { op: 'observe', dispatch: { ...f.dispatch, attachmentId: 'other-attachment' } })).status).toBe(403);
+      f.journal.installAttachment({ ...f.journal.attachment(f.dispatch.attachmentId)!, attachment: { ...local.attachment, state: 'attaching', generation: 8 } });
+      expect((await send('receipt', { op: 'observe', dispatch: f.dispatch })).status).toBe(409);
+      expect(f.launches()).toBe(1);
+    } finally { await f.close(); }
+  });
+  test('paused receipt cancellation preserves uncertainty for an effect without terminal evidence', async () => {
+    const f = await fixture();
+    try {
+      const dispatch = { ...f.dispatch, tool: 'write', args: { path: 'unknown.txt', content: 'unknown effect' } };
+      f.journal.begin(dispatch);
+      f.journal.launch(dispatch);
+      const local = f.journal.attachment(dispatch.attachmentId)!;
+      f.journal.installAttachment({ ...local, prerequisitesComplete: false, attachment: { ...local.attachment, state: 'attaching' } });
+      const raw = JSON.stringify({ op: 'cancel', dispatch });
+      const signature = createHmac('sha256', Buffer.alloc(32, 7)).update(raw).digest('base64url');
+      const response = await f.executor.fetch(new Request('http://executor/runtime/receipt', { method: 'POST', body: raw, headers: { 'x-gitspace-execution-signature': signature } }));
+      expect(response.status).toBe(200);
+      expect((await response.json()).receipt).toMatchObject({ state: 'unknown', reason: 'recovered-without-evidence' });
+      expect(f.journal.attempt(dispatch.attemptId)).toMatchObject({ state: 'running', result: null, cancelRequested: true });
+      expect(f.launches()).toBe(0);
+    } finally { await f.close(); }
+  });
   test('running cancellation retains interrupted status while waiting for snapshot acceptance', async () => {
     const launched = Promise.withResolvers<void>();
     const stopped = Promise.withResolvers<void>();

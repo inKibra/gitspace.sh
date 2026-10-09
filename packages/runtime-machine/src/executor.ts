@@ -75,7 +75,8 @@ export class MachineExecutor {
     if (dispatch.conversationKind === 'subagent' && !isSubagentToolCallAllowed(dispatch.tool, dispatch.args)) throw new Error('Subagent execution is read-only');
     const local = this.options.journal.attachment(dispatch.attachmentId);
     if (!local || dispatch.machineId !== this.options.machineId || local.attachment.machineId !== dispatch.machineId || local.attachment.workspaceId !== dispatch.workspaceId || local.attachment.projectId !== dispatch.projectId || local.attachment.generation !== dispatch.generation) throw new Error('Execution attachment is stale or unauthorized');
-    if (local.attachment.state !== 'ready' && !(recovery && ['draining', 'lost', 'detached'].includes(local.attachment.state))) throw new Error('Attachment is not accepting execution');
+    // Paused caches retain their admission in attaching state; only receipt recovery may use it.
+    if (local.attachment.state !== 'ready' && !(recovery && ['attaching', 'draining', 'lost', 'detached'].includes(local.attachment.state))) throw new Error('Attachment is not accepting execution');
     const previous = this.options.journal.attempt(dispatch.attemptId);
     if (previous && previous.fingerprint !== dispatchFingerprint(dispatch)) throw new Error('Attempt identity conflicts with prior dispatch');
     return local;

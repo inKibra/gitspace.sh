@@ -26,7 +26,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-async function fixture(capabilities: Array<'storage.access' | 'space.control'>, repositoryReference: string | null = null) {
+async function fixture(capabilities: Array<'storage.access' | 'space.control'>, repositoryReference: string | null = null, ownership: 'legacy' | 'cloud' = 'legacy') {
   const userId = env.ACCOUNT_ID;
   const vault = env.CREDENTIALS.getByName(userId);
   await vault.bootstrap({ userId, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(tenantRootPrivateKey)), vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(19)) });
@@ -43,7 +43,7 @@ async function fixture(capabilities: Array<'storage.access' | 'space.control'>, 
   const workspace = { id: workspaceId, projectId, kind: 'worktree' as const, name: 'Repository', branch: 'main', phase: null, sourceKind: 'branch' as const, sourceRef: 'main', sourceCommit: null, lifecycle: 'active' as const, goalId: null, expectedRevision: 0 };
   await project.putWorkspace(workspace);
   const authority = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
-  await authority.bootstrap({ projectId, spaceId: workspaceId, machineId: 'assigned' });
+  if (ownership === 'legacy') await authority.bootstrap({ projectId, spaceId: workspaceId, machineId: 'assigned' });
   const request = (payload: Record<string, unknown> = {}, machineId = 'assigned', operation: ControlOperation = 'runtime.repository.credentials') => worker.fetch(new Request('https://auth.test/v1/control', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify(createSignedControlRequest({ userId, machineId, operation, payload: { projectId, workspaceId, generation: 1, scope: 'read', ...payload }, signingPrivateKey: signingKey })),
@@ -193,7 +193,7 @@ describe('signed repository credential authority', () => {
   });
 
   it('fences attachment generation and state and prevents runner publication', async () => {
-    const f = await fixture(['storage.access']);
+    const f = await fixture(['storage.access'], null, 'cloud');
     const services: AttachmentServices = {
       seal: async () => 'test-sealed-execution-secret',
       open: async () => { throw new Error('This fixture does not recover execution secrets'); },
@@ -216,8 +216,8 @@ describe('signed repository credential authority', () => {
     expect((await f.request(assigned)).status).toBe(400);
   });
 
-  it('leases the workspace repository to an attached cache machine that does not hold the legacy placement', async () => {
-    const f = await fixture(['storage.access']);
+  it('leases the cloud workspace repository only to its attached canonical cache', async () => {
+    const f = await fixture(['storage.access'], null, 'cloud');
     const services: AttachmentServices = {
       seal: async () => 'test-sealed-execution-secret',
       open: async () => { throw new Error('This fixture does not recover execution secrets'); },
@@ -305,7 +305,7 @@ describe('signed repository credential authority', () => {
       });
       const admission = RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId: 'cache', generation: 0, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: [] });
       const { attachment } = await store.requestCache({ ...admission, requestId: 'cache-admit' });
-      const requested = store.requestCacheAction({ ...attachment, requestId: 'reclaim-cache', action: { kind: 'reclaim' } });
+      const requested = await store.requestCacheAction({ ...attachment, requestId: 'reclaim-cache', action: { kind: 'reclaim' } });
       expect(requested.attachment.cacheAction?.status).toBe('requested');
       const now = new Date().toISOString();
       const observation = { state: 'reclaimed', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: now, reclaimAt: now, lastSyncAt: now, localWorkOptIn: false, setup: [] };
@@ -314,7 +314,7 @@ describe('signed repository credential authority', () => {
       store.recordCacheFlush(attachment.attachmentId, attachment.generation);
       expect(store.heartbeat(heartbeat).cache?.state).toBe('reclaimed');
       expect((await store.assignments(attachment.machineId))[0]?.grant.attachment.attachmentId).toBe(attachment.attachmentId);
-      const setup = store.requestCacheAction({ ...attachment, requestId: 'restore-cache', action: { kind: 'setup' } });
+      const setup = await store.requestCacheAction({ ...attachment, requestId: 'restore-cache', action: { kind: 'setup' } });
       expect(setup.attachment.cacheAction?.status).toBe('requested');
       expect(setup.attachment.state).not.toBe('ready');
     });

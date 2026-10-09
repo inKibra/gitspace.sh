@@ -80,7 +80,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
     const selection = RuntimeDispatchSelectionSchema.parse(input.args);
     let canonical = await cache(state.machineId ? { ...selection, on: state.machineId } : input.args);
     if (canonical.state !== 'ready') {
-      const action = options.runtime().attachments.requestCacheAction({ ...canonical, requestId: `wake:${input.attemptId}`, action: { kind: 'setup' } });
+      const action = await options.runtime().attachments.requestCacheAction({ ...canonical, requestId: `wake:${input.attemptId}`, action: { kind: 'setup' } });
       options.runtime().publish();
       while (canonical.state !== 'ready') {
         if (canonical.cacheAction?.status === 'failed') throw new Error(canonical.cacheAction.error ?? 'Cache setup failed');

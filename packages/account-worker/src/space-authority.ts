@@ -520,7 +520,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeCacheAction(raw: unknown) {
     const input = RuntimeCacheActionInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
-    const result = runtime.attachments.requestCacheAction(input);
+    const result = await runtime.attachments.requestCacheAction(input);
     runtime.publish();
     await this.scheduleLeases(runtime);
     return result;
