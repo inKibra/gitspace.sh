@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { spaceGitCheckpointRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { z } from 'zod';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
-import { captureGitLfs, checkoutGitLfs, gitLfsRestoreReceipt, gitLfsWorktreeTree, hydrateGitLfs, restoredGitLfsPaths, type MachineGitLfs } from './git-lfs.js';
+import { captureGitLfs, checkoutGitLfs, gitLfsRestoreReceipt, gitLfsWorktreeTree, hydrateGitLfs, restoredGitLfsPaths, type MachineGitLfs, type MachineGitLfsPublication } from './git-lfs.js';
 import { gitWorktreeClock, gitWorktreeDelay, type GitWorktreeClock } from './git-worktree-watch.js';
 
 export type GitIntermediateCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
@@ -104,7 +104,7 @@ export async function createGitIntermediateCheckpoint(input: {
   revision: number;
   captureId?: string;
   portableUntrackedPaths?: string[];
-  lfs?: MachineGitLfs;
+  lfs?: MachineGitLfsPublication;
 }): Promise<GitIntermediateCheckpoint> {
   const { branch, headCommit } = await readGitCheckpointHead(input.repositoryPath);
   const checkpointRef = spaceGitCheckpointRef(input.captureId ?? input.spaceId, input.revision);
@@ -274,7 +274,7 @@ export class IncrementalGitSnapshots {
     repositoryPath: string;
     spaceId: string;
     captureId?: string;
-    lfs?: (publicationId: string) => Promise<MachineGitLfs>;
+    lfs?: (publicationId: string) => Promise<MachineGitLfsPublication>;
     // Human writers have no completion protocol. Require this much unchanged
     // size/mtime/ctime for the complete dirty set, then recheck on both sides of
     // capture. This conservatively coalesces bursts, not arbitrarily long pauses.

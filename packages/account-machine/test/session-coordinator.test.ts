@@ -1,5 +1,5 @@
 import type { AgentRuntime, RuntimeEvent, RuntimeSession, SessionControlView } from '@gitspace/protocol-runtime/session-controls';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, setSystemTime } from 'bun:test';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -20,6 +20,7 @@ import { createSpaceWorkspaceControls } from '../src/space-workspace-controls.js
 import {
   MachineSessionCoordinator,
 } from '../src/index.js';
+import { QUIESCE_LEASE_MS } from '../src/session-coordinator.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -126,6 +127,19 @@ class FakeOmpRuntime implements AgentRuntime {
         return [...this.history];
       },
     };
+  }
+}
+
+/** An idle agent with nothing pending: a portable handoff may checkpoint it. */
+class PortableControlsRuntime extends FakeOmpRuntime {
+  override async create(input: Parameters<FakeOmpRuntime['create']>[0]) {
+    const session = await super.create(input);
+    const controls: SessionControlView = {
+      sessionId: session.id, role: null, roleLabel: null, roles: [], provider: null, models: [],
+      model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'always-ask', context: null,
+      cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null,
+    };
+    return { ...session, control: async () => controls };
   }
 }
 
@@ -1232,6 +1246,45 @@ describe('MachineSessionCoordinator', () => {
     expect((await coordinator.prompt(opened.value.id, 'must wait')).status).toBe('error');
     coordinator.resumeSpace('workspace-a');
     expect((await coordinator.prompt(opened.value.id, 'continued after cancel')).status).toBe('ok');
+    await coordinator.stopForRestart();
+    database.close();
+  });
+
+  it('prepares an already quiesced space for provider handoff instead of refusing it as quiescing', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new PortableControlsRuntime(), 'machine-a', join(root, 'runtime'));
+    const opened = await coordinator.openSpace('workspace-a');
+    if (opened.status === 'error') throw opened.error;
+    // Provider replacement first quiesces every space with an agent, then prepares each held space for its close.
+    await coordinator.quiesceSpace('workspace-a', true);
+    await coordinator.prepareSpaceHandoff('workspace-a');
+    expect((await coordinator.prompt(opened.value.id, 'must wait')).status).toBe('error');
+    coordinator.resumeSpace('workspace-a');
+    expect((await coordinator.prompt(opened.value.id, 'continued after cancel')).status).toBe('ok');
+    await coordinator.stopForRestart();
+    database.close();
+  });
+
+  it('lets a quiesce that is never completed or resumed lapse after its lease', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new PortableControlsRuntime(), 'machine-a', join(root, 'runtime'));
+    const opened = await coordinator.openSpace('workspace-a');
+    if (opened.status === 'error') throw opened.error;
+    const quiescedAt = Date.now();
+    try {
+      setSystemTime(quiescedAt);
+      await coordinator.quiesceSpace('workspace-a', true);
+      setSystemTime(quiescedAt + QUIESCE_LEASE_MS - 1);
+      expect((await coordinator.prompt(opened.value.id, 'during handoff')).status).toBe('error');
+      expect(coordinator.controlsAvailable(opened.value.id)).toBe(false);
+      setSystemTime(quiescedAt + QUIESCE_LEASE_MS);
+      expect(coordinator.controlsAvailable(opened.value.id)).toBe(true);
+      expect((await coordinator.prompt(opened.value.id, 'after the abandoned handoff')).status).toBe('ok');
+    } finally {
+      setSystemTime();
+    }
     await coordinator.stopForRestart();
     database.close();
   });

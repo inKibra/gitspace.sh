@@ -8,8 +8,7 @@ import {
   type InferenceDeleteInput,
   type InferenceAssignInput,
 } from '@gitspace/protocol';
-import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
-import { MachineDiscardRequired, machineDiscardRequiredSchema, type MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
+import { MachineDiscardRequired, machineDiscardRequiredSchema } from '@gitspace/protocol/machine-discard';
 import { collectBytes, streamBytes, SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import {
   createSignedControlRequest,
@@ -777,20 +776,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('catalog.machine.list', {});
   }
 
-  createSandboxMachine(image?: CloudImageSelection): Promise<FleetMachineDefinition> {
-    return this.call('catalog.sandbox.create', image === undefined ? {} : { image });
-  }
-  sleepMachine(machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineDefinition> {
-    return this.call('catalog.machine.sleep', { machineId, discardConfirmation });
-  }
-
-  resumeMachine(machineId: string): Promise<FleetMachineDefinition> {
-    return this.call('catalog.machine.resume', { machineId });
-  }
-
-  destroyMachine(machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<{ machineId: string; removed: boolean }> {
-    return this.call('catalog.machine.destroy', { machineId, discardConfirmation });
-  }
   getUserSettings(): Promise<UserSettings> {
     return this.call('settings.get', {});
   }

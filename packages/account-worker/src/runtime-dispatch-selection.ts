@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { RuntimeDispatchSelectionSchema, RuntimeMachineIdSchema, type RuntimeAttachment } from '@gitspace/protocol-runtime';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, isAttachmentOnline, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { RuntimeAttachmentController } from './runtime-attachments.js';
+import { attachmentMachineKind } from './runtime-machine-loss.js';
 
 const selectionState = z.object({ fingerprint: z.string(), deadline: z.string(), machineId: z.string().optional(), commit: z.string().optional(), attachmentId: z.string().optional(), result: z.unknown().optional() });
 export type DispatchSelectionState = z.infer<typeof selectionState>;
@@ -23,11 +24,13 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
     authorizeMachine: async machineId => {
       const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(machineId);
       if (!machine || machine.desiredState === 'removed' || !await env.CREDENTIALS.getByName(env.ACCOUNT_ID).hasRuntimeMachine(machineId)) throw new Error('Attachment target is not an enrolled account machine');
+      options.runtime().attachments.recordMachineKind(machineId, attachmentMachineKind(machine));
     },
   });
   async function cache(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
     const selection = RuntimeDispatchSelectionSchema.parse(args);
-    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => item.role === 'cache' && item.heartbeatAt !== null && Date.now() - Date.parse(item.heartbeatAt) <= 30_000 && (item.state === 'ready' || item.cache?.state === 'paused' || item.cache?.state === 'reclaimed'));
+    const now = Date.now();
+    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => item.role === 'cache' && isAttachmentOnline(item, now) && (item.state === 'ready' || item.cache?.state === 'paused' || item.cache?.state === 'reclaimed'));
     const selector = selection.on;
     if (typeof selector === 'string') {
       let machineId = candidates.find(item => item.machineId === selector)?.machineId;
@@ -78,7 +81,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
         if (canonical.cacheAction?.status === 'failed') throw new Error(canonical.cacheAction.error ?? 'Cache setup failed');
         await pause(signal);
         const current = options.runtime().attachments.list().find(item => item.attachmentId === action.attachment.attachmentId);
-        if (!current || !current.heartbeatAt || Date.now() - Date.parse(current.heartbeatAt) > 30_000) throw new Error('No machine attached: selected cache is offline');
+        if (!current || !isAttachmentOnline(current, Date.now())) throw new Error(current?.state === 'lost' ? `No machine attached: selected cache was lost (${current.lossReason ?? 'unknown'})` : 'No machine attached: selected cache is offline');
         canonical = current;
       }
     }
@@ -100,8 +103,8 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
     while (true) {
       signal.throwIfAborted();
       const attachments = options.runtime().attachments.list();
-      const host = attachments.find(item => item.machineId === state.machineId && item.role === 'cache');
-      if (!host?.heartbeatAt || Date.now() - Date.parse(host.heartbeatAt) > 30_000) throw new Error('No machine attached: selected machine is offline');
+      const host = attachments.find(item => item.machineId === state.machineId && item.role === 'cache' && item.state !== 'lost' && item.state !== 'detached');
+      if (!host || !isAttachmentOnline(host, Date.now())) throw new Error('No machine attached: selected machine is offline');
       let attachment = state.attachmentId ? attachments.find(item => item.attachmentId === state.attachmentId) : attachments.find(item => item.machineId === state.machineId && item.role === 'runner' && item.state === 'ready' && item.checkout.kind === 'snapshot' && item.checkout.commit === state.commit);
       if (!attachment) {
         if (state.attachmentId) throw new Error('Selected runner is no longer attached');

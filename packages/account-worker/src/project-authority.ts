@@ -1163,6 +1163,12 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     }
   }
 
+  /** Called only by the cloud once it forced the holder to `lost` (lease expiry, destroy or revoke): no human
+   * abandon is needed to free a workspace whose runner can never report again. */
+  releaseLostLifecycleClaims(spaceId: string, holder: NonNullable<LifecycleActor['lostHolder']>): string[] {
+    return this.environment.releaseLostHolder(this.requireLifecycleWorkspace(spaceId).id, spaceId, holder);
+  }
+
   getLifecycleRunLog(spaceId: string, runId: string, offset = 0): LifecycleRunLog {
     this.requireLifecycleWorkspace(spaceId);
     return this.environment.runLog(spaceId, runId, offset);

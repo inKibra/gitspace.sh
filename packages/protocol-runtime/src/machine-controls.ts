@@ -1,9 +1,10 @@
 import { z } from 'zod';
-import { RuntimeIdentitySchema, RuntimeProjectIdSchema, RuntimeWorkspaceIdSchema, RuntimeMachineIdSchema, RuntimeCacheObservationSchema, RuntimeCacheActionSchema } from './base.js';
+import { RuntimeIdentitySchema, RuntimeProjectIdSchema, RuntimeWorkspaceIdSchema, RuntimeMachineIdSchema, RuntimeCacheObservationSchema, RuntimeCacheActionSchema, RuntimeAttachmentFailureSchema, RuntimeAttachmentProgressSchema } from './base.js';
 import { RuntimeExecutionObservationSchema } from './scheduling.js';
 
 export const RuntimeAttachmentLeaseSchema = RuntimeIdentitySchema.extend({ attachmentId: z.string().min(1), generation: z.number().int().nonnegative(), machineId: RuntimeMachineIdSchema });
-export const RuntimeHeartbeatInputSchema = RuntimeAttachmentLeaseSchema.extend({ executionObservation: RuntimeExecutionObservationSchema, cache: RuntimeCacheObservationSchema.optional(), cacheAction: RuntimeCacheActionSchema.pick({ requestId: true, error: true }).extend({ status: z.enum(['running', 'completed', 'failed']) }).optional(), browserCapabilities: z.array(z.enum(['browser', 'browser_control', 'browser.headless', 'browser.relay'])).max(4).optional() });
+/** `failure: null` clears the recorded failure; omitting it keeps it. `progress` renews the attachment's deadline. */
+export const RuntimeHeartbeatInputSchema = RuntimeAttachmentLeaseSchema.extend({ executionObservation: RuntimeExecutionObservationSchema, cache: RuntimeCacheObservationSchema.optional(), cacheAction: RuntimeCacheActionSchema.pick({ requestId: true, error: true }).extend({ status: z.enum(['running', 'completed', 'failed']) }).optional(), browserCapabilities: z.array(z.enum(['browser', 'browser_control', 'browser.headless', 'browser.relay'])).max(4).optional(), failure: RuntimeAttachmentFailureSchema.nullable().optional(), progress: RuntimeAttachmentProgressSchema.optional() });
 export type RuntimeHeartbeatInput = z.infer<typeof RuntimeHeartbeatInputSchema>;
 export const RuntimeDetachInputSchema = RuntimeAttachmentLeaseSchema.extend({ state: z.enum(['draining', 'detached', 'lost']), discardHeldBack: z.boolean().optional() });
 /** `repository` is a workspace repository or `project-<projectId>`, which only the open base space

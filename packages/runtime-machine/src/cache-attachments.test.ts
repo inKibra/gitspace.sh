@@ -58,3 +58,34 @@ test('equal cache acquisition uses canonical path, runs setup, and retains unrel
     expect(await readFile(join(canonicalPath, 'work'), 'utf8')).toBe('new cloud contents');
   } finally { journal.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test('a lost cache releases its canonical checkout and never blocks a successor from releasing it again', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'cache-attachment-lost-'));
+  const journal = new ExecutorJournal(join(directory, 'journal.sqlite'));
+  try {
+    const source = join(directory, 'source');
+    await mkdir(source);
+    await git(source, 'init', '-b', 'main');
+    await git(source, 'config', 'user.name', 'Cache proof');
+    await git(source, 'config', 'user.email', 'proof@example.invalid');
+    await writeFile(join(source, 'work'), 'canonical');
+    await git(source, 'add', '.');
+    await git(source, 'commit', '-m', 'base');
+    const canonicalPath = join(directory, 'project', 'workspace');
+    const acquire = (attachmentId: string, generation: number) => prepareMachineAttachment(journal, {
+      enrolled: { attachment: RuntimeAttachmentSchema.parse({ attachmentId, projectId: 'project', workspaceId: 'workspace', machineId: 'machine-b', generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: [], updatedAt: new Date().toISOString() }), executionSecret: 'secret' },
+      source: { kind: 'local', repository: source }, checkoutRoot: directory, canonicalPath,
+      deadlineAt: new Date(Date.now() + 30000).toISOString(), signal: new AbortController().signal, prerequisites: async () => {},
+    });
+    const release = { checkoutRoot: directory, canonicalPath, signal: new AbortController().signal, stopAndVerify: async () => {}, verifyUnmounted: async () => {} };
+    const first = await acquire('first', 1);
+    const lost = await cleanupMachineAttachment(journal, { ...release, attachment: { ...first.attachment, state: 'lost', lossReason: 'machine-revoked' } });
+    expect([lost.attachment.state, lost.lostCheckout]).toEqual(['lost', 'removed']);
+    expect(await Bun.file(join(canonicalPath, 'work')).exists()).toBe(false);
+    const second = await acquire('second', 2);
+    expect(await readFile(join(canonicalPath, 'work'), 'utf8')).toBe('canonical');
+    const detached = await cleanupMachineAttachment(journal, { ...release, attachment: { ...second.attachment, state: 'draining', detachRequest: {} } });
+    expect(detached.attachment.state).toBe('detached');
+    expect(await Bun.file(join(canonicalPath, 'work')).exists()).toBe(false);
+  } finally { journal.close(); await rm(directory, { recursive: true, force: true }); }
+});

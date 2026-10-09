@@ -20,6 +20,8 @@ export interface LifecycleActor {
   kind: 'browser' | 'client' | 'machine';
   lifecycleControl: boolean;
   destroyedMachineId?: string;
+  /** The cloud proved the run's holder is gone for good: the whole machine, or one attachment of it. */
+  lostHolder?: { machineId: string; attachment?: { attachmentId: string; generation: number }; reason: string };
   attachment?: { attachmentId: string; generation: number };
 }
 export interface LifecycleRunRecord { run: LifecycleRun; token: string | null; scope: string; lock: string }
@@ -399,10 +401,14 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
     case 'abandon': {
       record = owned(input.runId);
-      if (!actor.lifecycleControl || actor.destroyedMachineId !== record.run.machineId) throw new EnvironmentError('PermissionDenied', 'Recovery requires lifecycle control and confirmed destruction of the owning machine');
-      if (!isLifecycleRunActive(record.run)) throw new EnvironmentError('PreconditionFailed', 'Only an unresolved lifecycle claim can be recovered');
-      record.run = { ...record.run, status: 'interrupted', finishedAt: now, exitCode: 1, failure: { code: 'Interrupted', message: 'Owning machine was destroyed before run completion; inspect effects before retrying', context: { runId: input.runId } } };
-      record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:interrupted`, kind: 'domain', occurredAt: now, message: record.run.failure!.message, failure: record.run.failure }];
+      const run = record.run;
+      const lost = actor.lostHolder;
+      const holderLost = lost !== undefined && lost.machineId === run.machineId && (lost.attachment === undefined || (run.attachment?.attachmentId === lost.attachment.attachmentId && run.attachment.generation === lost.attachment.generation));
+      if (!actor.lifecycleControl || (actor.destroyedMachineId !== run.machineId && !holderLost)) throw new EnvironmentError('PermissionDenied', 'Recovery requires lifecycle control and confirmed destruction of the owning machine');
+      if (!isLifecycleRunActive(run)) throw new EnvironmentError('PreconditionFailed', 'Only an unresolved lifecycle claim can be recovered');
+      const message = holderLost ? `Owning ${lost.attachment ? 'attachment' : 'machine'} was lost (${lost.reason}) before run completion; inspect effects before retrying` : 'Owning machine was destroyed before run completion; inspect effects before retrying';
+      record.run = { ...run, status: 'interrupted', finishedAt: now, exitCode: 1, failure: { code: 'Interrupted', message, context: { runId: input.runId } } };
+      record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:interrupted`, kind: 'domain', occurredAt: now, message, failure: record.run.failure }];
       record.token = null;
       break;
     }

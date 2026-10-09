@@ -1,6 +1,6 @@
 import {
   EnvironmentError, LifecycleMutationSchema, assertEnvironmentRetired, emptyLifecycleState,
-  transitionLifecycle, LIFECYCLE_PREVIEW_LIMIT, LifecycleStateSchema, LifecycleRunSchema,
+  transitionLifecycle, isLifecycleRunActive, LIFECYCLE_PREVIEW_LIMIT, LifecycleStateSchema, LifecycleRunSchema,
   type LifecycleActor, type LifecycleMutation, type LifecycleRunLog,
   type LifecycleRunRecord, type LifecycleState,
 } from '@gitspace/protocol-environment';
@@ -110,6 +110,21 @@ export class ProjectEnvironmentStore {
 
   assertRetired(projectId: string, spaceId: string): void {
     assertEnvironmentRetired(this.get(projectId, spaceId));
+  }
+
+  /** Interrupt every claim the lost holder still owns in this workspace: a lost attachment's runs, or all the machine's
+   * runs when the machine itself is gone. The abandon transition re-proves ownership; returns the released run ids. */
+  releaseLostHolder(projectId: string, spaceId: string, holder: NonNullable<LifecycleActor['lostHolder']>): string[] {
+    const actor: LifecycleActor = { actorId: 'cloud:attachment-lease', machineId: 'cloud:attachment-lease', kind: 'client', lifecycleControl: true, lostHolder: holder };
+    const claimed = this.storage.sql.exec<JsonRow>('SELECT data FROM lifecycle_runs WHERE space_id=? AND token IS NOT NULL', spaceId).toArray().map((row) => LifecycleRunSchema.parse(JSON.parse(row.data)));
+    const released: string[] = [];
+    for (const run of claimed) {
+      if (run.machineId !== holder.machineId || !isLifecycleRunActive(run)) continue;
+      if (holder.attachment && (run.attachment?.attachmentId !== holder.attachment.attachmentId || run.attachment.generation !== holder.attachment.generation)) continue;
+      this.mutate(projectId, spaceId, { op: 'abandon', runId: run.id }, actor);
+      released.push(run.id);
+    }
+    return released;
   }
 
   runLog(spaceId: string, runId: string, offset = 0): LifecycleRunLog {

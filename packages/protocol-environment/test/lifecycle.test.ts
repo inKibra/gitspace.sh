@@ -85,6 +85,21 @@ describe('isomorphic environment decisions', () => {
     expect(() => context.apply({ op: 'abandon', runId: 'recover' }, client)).toThrow();
     expect(context.apply({ op: 'abandon', runId: 'recover' }, { ...client, destroyedMachineId: machine.machineId }).runs[0]?.status).toBe('interrupted');
   });
+  it('lets the cloud release a claim only when it proves that exact holder lost', () => {
+    const context = scenario();
+    const attachment = { attachmentId: 'cache-a', generation: 3 };
+    context.apply(claim('held', { generation: null, phase: 'workspace/materialize', attachment }), { ...machine, attachment });
+    const cloud: LifecycleActor = { actorId: 'cloud:attachment-lease', machineId: 'cloud:attachment-lease', kind: 'client', lifecycleControl: true };
+    expect(() => context.apply({ op: 'abandon', runId: 'held' }, { ...cloud, lostHolder: { machineId: machine.machineId, attachment: { ...attachment, generation: 4 }, reason: 'deadline' } })).toThrow();
+    expect(() => context.apply({ op: 'abandon', runId: 'held' }, { ...cloud, lostHolder: { machineId: 'machine-b', reason: 'machine-destroyed' } })).toThrow();
+    expect(() => context.apply({ op: 'abandon', runId: 'held' }, { ...cloud, lifecycleControl: false, lostHolder: { machineId: machine.machineId, attachment, reason: 'deadline' } })).toThrow();
+    const released = context.apply({ op: 'abandon', runId: 'held' }, { ...cloud, lostHolder: { machineId: machine.machineId, attachment, reason: 'deadline' } });
+    expect(released.runs[0]).toMatchObject({ status: 'interrupted', failure: { code: 'Interrupted', message: 'Owning attachment was lost (deadline) before run completion; inspect effects before retrying' } });
+    expect(context.apply(claim('next', { generation: null, phase: 'workspace/materialize' })).claim?.status).toBe('claimed');
+    const machineWide = scenario();
+    machineWide.apply(claim('prepare'));
+    expect(machineWide.apply({ op: 'abandon', runId: 'prepare' }, { ...cloud, lostHolder: { machineId: machine.machineId, reason: 'machine-revoked' } }).runs[0]?.failure?.message).toContain('Owning machine was lost (machine-revoked)');
+  });
   it('rejects unsupported formats with typed identity instead of converting or silently emptying them', () => {
     let failure: unknown;
     try { loadEnvironmentBundle({ version: '1.0', name: 'Old bundle', onboarding: [] }); } catch (error) { failure = error; }

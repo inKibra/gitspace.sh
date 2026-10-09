@@ -7,6 +7,8 @@ import { GitSpaceDatabase, LocalArtifactResolver, MemoryArtifactObjectStore } fr
 import type { ControlOperation } from '@gitspace/protocol';
 import { RuntimeAttachmentSchema, RuntimeAssignmentsInputSchema, RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema, type RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
 import { daemonClientForProject } from '@gitspace/supervisor';
+import { collectBytes, GitLfsObjectSchema, type GitLfsObject } from '@gitspace/protocol-workspace';
+import type { MachineGitLfsAccess } from '../src/git-lfs.js';
 import { CloudRuntimeClient } from '../src/cloud-runtime-client.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { createMachineExecutor, type MachineExecutorRuntime } from '../src/runtime-executor.js';
@@ -18,7 +20,7 @@ async function git(cwd: string, ...args: string[]) {
   return stdout.trim();
 }
 
-for (const scenario of ['automatic normal', 'automatic held', 'manual held rejected', 'manual held accepted', 'detach held rejected', 'detach held accepted', 'detach normal']) test(`cache cleanup: ${scenario}`, async () => {
+for (const scenario of ['automatic normal', 'automatic held', 'manual held rejected', 'manual held accepted', 'detach held rejected', 'detach held accepted', 'detach normal', 'detach protected', 'detach protected history']) test(`cache cleanup: ${scenario}`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-reclaim-'));
   const checkout = join(root, 'checkout'), remote = join(root, 'remote.git');
   const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
@@ -33,6 +35,32 @@ for (const scenario of ['automatic normal', 'automatic held', 'manual held rejec
     await git(checkout, 'config', 'filter.lfs.smudge', 'cat');
     await git(checkout, 'config', 'filter.lfs.required', 'false');
     await writeFile(join(checkout, '.gitattributes'), '*.bin filter=lfs\n');
+    // Publication-bound LFS access mirrors the cloud store: only a publication can protect or upload.
+    const lfsObjects = new Map<string, Uint8Array>();
+    const protections: Array<{ publicationId: string; oids: string[] }> = [];
+    const released: string[] = [];
+    const reader = {
+      has: async (object: GitLfsObject) => lfsObjects.has(object.oid),
+      get: async (object: GitLfsObject) => { const bytes = lfsObjects.get(object.oid); return bytes ? (async function* () { yield bytes; })() : null; },
+    };
+    const lfs: MachineGitLfsAccess | undefined = scenario.includes('protected') ? {
+      read: async () => ({ store: reader, canonicalOrigin: null, originEnvironment: async () => ({}) }),
+      publish: async (_projectId, publicationId) => ({
+        canonicalOrigin: null, originEnvironment: async () => ({}),
+        store: {
+          ...reader,
+          put: async (object, source) => { lfsObjects.set(object.oid, await collectBytes(source, object.size)); },
+          protect: async objects => { protections.push({ publicationId, oids: objects.map(object => object.oid) }); return objects.filter(object => lfsObjects.has(object.oid)); },
+        },
+        releasePublication: async () => { released.push(publicationId); },
+      }),
+    } : undefined;
+    const payload = new TextEncoder().encode('committed LFS payload');
+    const committedObject = GitLfsObjectSchema.parse({ oid: new Bun.CryptoHasher('sha256').update(payload).digest('hex'), size: payload.byteLength });
+    if (scenario.endsWith('history')) {
+      lfsObjects.set(committedObject.oid, payload);
+      await writeFile(join(checkout, 'asset.bin'), `version https://git-lfs.github.com/spec/v1\noid sha256:${committedObject.oid}\nsize ${committedObject.size}\n`);
+    }
     await writeFile(join(checkout, 'tracked.txt'), 'base\n');
     await git(checkout, 'add', '.'); await git(checkout, 'commit', '-m', 'base');
     await git(root, 'init', '--bare', remote);
@@ -44,6 +72,7 @@ for (const scenario of ['automatic normal', 'automatic held', 'manual held rejec
     let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'cache', generation: 0, ownershipGeneration: space.generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write'], updatedAt: new Date().toISOString() });
     const authority: { checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null } = { checkpoint: null };
     let finalCount = 0;
+    let finalRef: string | undefined;
     const published: string[] = [];
     class LocalCloud extends CloudRuntimeClient {
       override async call<S extends z.ZodType>(operation: ControlOperation, payload: Record<string, unknown>, schema: S, signal?: AbortSignal): Promise<z.output<S>> {
@@ -76,8 +105,9 @@ for (const scenario of ['automatic normal', 'automatic held', 'manual held rejec
     runtime = await createMachineExecutor({ environmentRoot: join(root, 'runtime'), machineId: 'machine', database,
       artifacts: new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32)),
       cloud: new LocalCloud({ baseUrl: 'https://proof.invalid', userId: 'account', machineId: 'machine', signingPrivateKey: new Uint8Array(32) }), gitRemote: new LocalRemote({ credentials: forbidden }),
-      prepareAttachment: async () => {}, originGitEnvironment: forbidden,
+      prepareAttachment: async () => {}, originGitEnvironment: forbidden, lfs,
       commitSnapshot: async (_local, uploaded, previous, final) => {
+        if (final) finalRef = uploaded.checkpointRef;
         expect(previous).toBe(authority.checkpoint?.worktreeCommit ?? null);
         expect(await git(remote, 'rev-parse', uploaded.checkpointRef)).toBe(uploaded.worktreeCommit);
         if (final && published.includes(uploaded.worktreeCommit)) throw new Error('Final publication replayed an already accepted checkpoint instead of its original publication predecessor');
@@ -113,6 +143,13 @@ for (const scenario of ['automatic normal', 'automatic held', 'manual held rejec
       expect(runtime.journal.attachment('cache')?.attachment.state).toBe(scenario.startsWith('detach') ? 'detached' : 'attaching');
       expect(attachment.state).toBe(scenario.startsWith('detach') ? 'detached' : 'attaching');
       if (!held && authority.checkpoint) expect(await git(remote, 'show', `${authority.checkpoint.worktreeCommit}:tracked.txt`)).toBe('final ordinary edit');
+      if (scenario.includes('protected')) {
+        if (!finalRef) throw new Error('Final checkpoint was not committed');
+        // The final checkpoint protects committed objects under its own publication and releases it once committed.
+        expect(protections.filter(protection => protection.publicationId === finalRef)).toEqual(scenario.endsWith('history') ? [{ publicationId: finalRef, oids: [committedObject.oid] }] : []);
+        expect(released).toContain(finalRef);
+        if (scenario.endsWith('history')) expect(authority.checkpoint?.lfs?.objects).toEqual([{ ...committedObject, source: 'r2' }]);
+      }
     }
   } finally { await runtime?.close(); database.close(); await rm(root, { recursive: true, force: true }); }
 }, 30_000);

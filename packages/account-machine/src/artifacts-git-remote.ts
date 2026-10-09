@@ -216,11 +216,41 @@ export class ArtifactsGitRemote {
     await publishBounded(input.repositoryPath, input.commit, objects, ref, await this.auth(input.binding, 'write'));
   }
 
+  /** With `commit`, `checkpointRef` is this checkout's anchor for a cloud ref that every cache of the
+   * workspace advances, so a cache can be handed a tip older than one it already holds (a long-poll or
+   * dispatch snapshot its own publication overtook). The transfer lands on an owned ref, and the anchor
+   * moves only to a commit it does not already reach: it never rewinds, so the newest checkpoint this
+   * checkout received stays reachable, and a replaced canonical history is followed rather than refused. */
   async fetchCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string; commit?: string }): Promise<void> {
     this.checkRef(input.checkpointRef);
-    if (input.commit !== undefined && !/^[0-9a-f]{40}$/u.test(input.commit)) throw new ArtifactsGitError('checkpoint', 'Invalid immutable checkpoint commit');
+    const { commit, checkpointRef, repositoryPath } = input;
+    if (commit !== undefined && !/^[0-9a-f]{40}$/u.test(commit)) throw new ArtifactsGitError('checkpoint', 'Invalid immutable checkpoint commit');
     const auth = await this.auth(input.binding, 'read');
-    await git(input.repositoryPath, ['fetch', '--no-write-fetch-head', auth.remote, `${input.commit ?? input.checkpointRef}:${input.checkpointRef}`], { ...auth.environment, GIT_LFS_SKIP_SMUDGE: '1' });
+    const environment = { ...auth.environment, GIT_LFS_SKIP_SMUDGE: '1' };
+    if (commit === undefined) {
+      await git(repositoryPath, ['fetch', '--no-write-fetch-head', auth.remote, `${checkpointRef}:${checkpointRef}`], environment);
+      return;
+    }
+    const owned = `refs/gitspace/fetch/${crypto.randomUUID()}`;
+    await git(repositoryPath, ['fetch', '--no-write-fetch-head', auth.remote, `${commit}:${owned}`], environment);
+    // Exact match: for-each-ref patterns also match refs below `checkpointRef/`.
+    const anchor = async () => (await git(repositoryPath, ['for-each-ref', '--format=%(objectname) %(refname)', checkpointRef])).split('\n').map(line => line.split(' ')).find(([, name]) => name === checkpointRef)?.[0] ?? null;
+    try {
+      for (;;) {
+        const current = await anchor();
+        // Nothing reachable from `commit` is missing from the anchor: equal, or an older tip.
+        if (current !== null && await git(repositoryPath, ['rev-list', '-n', '1', commit, '--not', current]) === '') return;
+        try {
+          await git(repositoryPath, ['update-ref', checkpointRef, commit, current ?? '0'.repeat(40)]);
+          return;
+        } catch (error) {
+          // Only a concurrent fetch in this checkout moving the anchor is decided again.
+          if (await anchor() === current) throw error;
+        }
+      }
+    } finally {
+      await git(repositoryPath, ['update-ref', '-d', owned, commit]);
+    }
   }
 
   private checkRef(ref: string): void {

@@ -6,6 +6,7 @@ import type { FleetMachineDefinition } from '../src/fleet-catalog.js';
 import { http } from 'msw';
 import { network } from './network.js';
 import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
+import { MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 
 function mockProvider(fetch: (request: Pick<Request, 'url'>) => Promise<Response>) {
   network.use(http.all(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/*`, ({ request }) => fetch(request)));
@@ -185,6 +186,38 @@ it.each(['sleep', 'destroy'] as const)('fences discarded ownership only after ve
   expect(actions).toEqual(action === 'sleep' ? ['status', 'prepare-replacement', 'sleep'] : ['status', 'prepare-replacement', 'sleep', 'destroy']);
   expect(await authority.get()).toMatchObject({ state: 'closed', machineId: null, generation: 2, publishedRevision: 0 });
   expect(await env.PROJECT_AUTHORITY.getByName(`${userId}:project-a`).getProject()).toMatchObject({ lifecycle: 'active' });
+});
+
+it('destroys a cloud machine whose runtime can never checkpoint once the user approves loss back to the last checkpoint', async () => {
+  const { userId, catalog, authority } = await openSpaceMachine();
+  const actions: string[] = [];
+  mockProvider(async request => {
+    const action = new URL(request.url).pathname.split('/').at(-1)!;
+    actions.push(action);
+    if (action === 'status') return Response.json({ status: 'ok', value: sandbox });
+    // The live failure: the runtime refuses every checkpoint attempt.
+    if (action === 'prepare-replacement') return Response.json({ error: 'Session is quiescing' }, { status: 409 });
+    if (action === 'cancel-replacement') return Response.json({ prepared: false });
+    if (action === 'destroy') {
+      expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 1 });
+      return Response.json({ status: 'ok', value: { machineId: sandbox.id } });
+    }
+    throw new Error(`Unexpected provider operation ${action}`);
+  });
+  const refusal = await controlFleetMachine(env, userId, sandbox.id, 'destroy').then(() => null, (error: unknown) => error);
+  if (!(refusal instanceof MachineDiscardRequired)) throw new Error(`Expected an explicit discard choice, got ${String(refusal)}`);
+  expect(refusal.message).toContain('Session is quiescing');
+  expect(refusal.workspaces).toEqual([{ projectId: 'project-a', workspaceId: 'project-a', generation: 1, reason: 'unpublished-local-work' }]);
+  expect(actions).not.toContain('destroy');
+  expect(await authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 1 });
+  await expect(controlFleetMachine(env, userId, sandbox.id, 'destroy', { ...refusal.confirmation, token: 'cloud:forged' })).rejects.toMatchObject({ _tag: 'MachineDiscardRequired', confirmation: refusal.confirmation });
+  expect(actions).not.toContain('destroy');
+  expect(await controlFleetMachine(env, userId, sandbox.id, 'destroy', refusal.confirmation)).toEqual({ machineId: sandbox.id, removed: true });
+  expect(actions.filter(action => action === 'destroy')).toHaveLength(1);
+  expect(actions).not.toContain('sleep');
+  expect(await authority.get()).toMatchObject({ state: 'closed', machineId: null, generation: 2 });
+  expect(await catalog.getMachine(sandbox.id)).toBeNull();
+  expect(await catalog.wasMachineDestroyed(sandbox.id)).toBe(true);
 });
 
 it('does not fence or destroy when an explicitly approved provider stop has an uncertain outcome', async () => {

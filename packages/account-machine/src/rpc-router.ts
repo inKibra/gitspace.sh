@@ -1,7 +1,5 @@
 import { inspectorReadArtifactPageContract, inspectorReadResourcePageContract, inspectorRepositoryTreePageContract } from '@gitspace/protocol/rpc-contract';
 import { snapshotPage } from '@gitspace/protocol/snapshot-page';
-import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
-import { MachineDiscardRequired, type MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
 import {
   inferenceListContract,
   inferenceCreateContract,
@@ -420,10 +418,7 @@ export interface GitSpaceRpcRouterOptions {
   checkpointTranscript?(projectId: string, spaceId: string): Promise<ClosedSpaceTranscript | null>;
   checkpointTranscriptPage?(projectId: string, spaceId: string, request: TranscriptPageRequest): Promise<TranscriptPage | null>;
   checkpointTranscriptContent?(projectId: string, spaceId: string, request: TranscriptContentRequest): Promise<TranscriptContentPage | null>;
-  createSandbox?(image?: CloudImageSelection): Promise<FleetMachineRpcView>;
   updateMachine?(machineId: string, notes: string): Promise<FleetMachineRpcView>;
-  controlMachine?(action: 'sleep' | 'resume', machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineRpcView>;
-  destroyMachine?(machineId: string, discardConfirmation?: MachineDiscardConfirmation): Promise<{ machineId: string; removed: boolean }>;
   settings?: CanonicalSettingsCoordinator;
   inference?: Pick<CloudSpaceCheckpointAuthority, 'listInferenceProfiles' | 'createInferenceProfile' | 'updateInferenceProfile' | 'deleteInferenceProfile' | 'assignInferenceProfile'>;
   devices?: DeviceRegistry;
@@ -1286,37 +1281,12 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     }
   });
 
-  const createSandbox = server.implement(createSandboxMachineContract).handler(async ({ input, errors }) => {
-    if (!options.createSandbox) return err(errors.OperationFailed({ operation: 'create sandbox', message: 'Sandbox provisioning is unavailable' }));
-    try {
-      return ok(await options.createSandbox(input.image));
-    } catch (error) {
-      return err(errors.OperationFailed({ operation: 'create sandbox', message: error instanceof Error ? error.message : 'Unable to create sandbox' }));
-    }
-  });
-
-
-  const sleepMachine = server.implement(sleepMachineContract).handler(async ({ input, errors }) => {
-    if (!options.controlMachine) return err(errors.OperationFailed({ operation: 'sleep machine', message: 'Machine lifecycle is unavailable' }));
-    try { return ok(await options.controlMachine('sleep', input.machineId, input.discardConfirmation)); }
-    catch (error) {
-      if (error instanceof MachineDiscardRequired) return err(errors.MachineDiscardRequired({ message: error.message, confirmation: error.confirmation, workspaces: error.workspaces }));
-      return err(errors.OperationFailed({ operation: 'sleep machine', message: error instanceof Error ? error.message : 'Unable to sleep machine' }));
-    }
-  });
-  const resumeMachine = server.implement(resumeMachineContract).handler(async ({ input, errors }) => {
-    if (!options.controlMachine) return err(errors.OperationFailed({ operation: 'resume machine', message: 'Machine lifecycle is unavailable' }));
-    try { return ok(await options.controlMachine('resume', input.machineId)); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'resume machine', message: error instanceof Error ? error.message : 'Unable to resume machine' })); }
-  });
-  const destroyMachine = server.implement(destroyMachineContract).handler(async ({ input, errors }) => {
-    if (!options.destroyMachine) return err(errors.OperationFailed({ operation: 'destroy machine', message: 'Machine lifecycle is unavailable' }));
-    try { return ok(await options.destroyMachine(input.machineId, input.discardConfirmation)); }
-    catch (error) {
-      if (error instanceof MachineDiscardRequired) return err(errors.MachineDiscardRequired({ message: error.message, confirmation: error.confirmation, workspaces: error.workspaces }));
-      return err(errors.OperationFailed({ operation: 'destroy machine', message: error instanceof Error ? error.message : 'Unable to destroy machine' }));
-    }
-  });
+  // Machine credentials never carry fleet power (agent commands can read them); the account serves these to devices.
+  const accountOnly = 'Machine lifecycle is controlled by the account with a signed-in device that has Fleet control; a machine cannot create, stop, start or destroy machines.';
+  const createSandbox = server.implement(createSandboxMachineContract).handler(async ({ errors }) => err(errors.OperationFailed({ operation: 'create sandbox', message: accountOnly })));
+  const sleepMachine = server.implement(sleepMachineContract).handler(async ({ errors }) => err(errors.OperationFailed({ operation: 'sleep machine', message: accountOnly })));
+  const resumeMachine = server.implement(resumeMachineContract).handler(async ({ errors }) => err(errors.OperationFailed({ operation: 'resume machine', message: accountOnly })));
+  const destroyMachine = server.implement(destroyMachineContract).handler(async ({ errors }) => err(errors.OperationFailed({ operation: 'destroy machine', message: accountOnly })));
 
   const promptSession = server.implement(promptSessionContract).handler(async ({ input, errors }) => {
     if (!options.sessions.get(input.sessionId)) {

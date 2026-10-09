@@ -136,9 +136,12 @@ export async function mergeDelegateCommit(input: { cache: LocalAttachment; deleg
   return { commit: await run(['rev-parse', 'HEAD']), sourceCommit: input.commit };
 }
 
-/** Draining is explicit cloud authorization, persisted locally before stopping effects. */
+/** Draining is explicit cloud authorization, persisted locally before stopping effects. `lost` is terminal: the cloud already
+ * released every fence, so local effects stop and the checkout is removed — or retained as an orphan for its owner when this
+ * attachment did not acquire it or the machine keeps checkouts on loss (`retainCheckout`). */
 export async function cleanupMachineAttachment(journal: ExecutorJournal, input: {
   attachment: RuntimeAttachment; checkoutRoot: string; canonicalPath?: string; signal: AbortSignal;
+  retainCheckout?: boolean;
   stopAndVerify(local: LocalAttachment): Promise<void | false>;
   verifyUnmounted(rootPath: string): Promise<void>;
 }): Promise<LocalAttachment> {
@@ -146,24 +149,26 @@ export async function cleanupMachineAttachment(journal: ExecutorJournal, input: 
   const local = journal.attachment(assigned.attachmentId);
   if (!local) throw new Error('Cleanup requires a recorded owned checkout');
   const previous = local.attachment;
-  if (assigned.state !== 'draining') throw new Error('Cleanup requires explicit draining attachment');
+  if (assigned.state !== 'draining' && assigned.state !== 'lost') throw new Error('Cleanup requires an explicit draining or lost attachment');
   if (previous.role !== assigned.role || previous.generation !== assigned.generation || previous.ownershipGeneration !== assigned.ownershipGeneration || previous.projectId !== assigned.projectId || previous.workspaceId !== assigned.workspaceId || previous.machineId !== assigned.machineId || JSON.stringify(previous.checkout) !== JSON.stringify(assigned.checkout)) throw new Error('Cleanup admission changed');
-  if (assigned.role === 'cache' && !local.ownedCheckout) {
-    if (assigned.checkout.kind !== 'shared') throw new Error('Canonical cleanup requires shared checkout');
+  const lost = assigned.state === 'lost';
+  if (assigned.role === 'cache' && !local.ownedCheckout || lost && input.retainCheckout) {
+    if (assigned.role === 'cache' && assigned.checkout.kind !== 'shared') throw new Error('Canonical cleanup requires shared checkout');
     if (previous.state !== 'detached') journal.installAttachment({ ...local, attachment: assigned });
     input.signal.throwIfAborted();
     if (await input.stopAndVerify(local) === false) return journal.attachment(assigned.attachmentId) ?? local;
     if (journal.unresolved(previous).length) throw new Error('Cleanup blocked by unresolved executor effects');
-    const detached: LocalAttachment = { ...local, attachment: { ...assigned, state: 'detached', updatedAt: new Date().toISOString() } };
-    journal.installAttachment(detached);
-    return detached;
+    const released: LocalAttachment = { ...local, ...(lost ? { lostCheckout: 'orphaned' as const } : {}), attachment: { ...assigned, state: lost ? 'lost' : 'detached', updatedAt: new Date().toISOString() } };
+    journal.installAttachment(released);
+    return released;
   }
   const parent = resolve(input.checkoutRoot);
   if (await realpath(parent) !== parent) throw new Error('Cleanup parent must not contain symlinks');
   const expected = assigned.role === 'cache' && input.canonicalPath ? resolve(input.canonicalPath) : resolve(parent, Buffer.from(assigned.attachmentId).toString('base64url'));
   if (resolve(local.rootPath) !== expected) throw new Error('Cleanup target is not the exact owned checkout');
   if (journal.attachments().some(other => {
-    if (other.attachment.attachmentId === assigned.attachmentId) return false;
+    // Terminal attachments hold no checkout; a successor may own the same canonical path.
+    if (other.attachment.attachmentId === assigned.attachmentId || other.attachment.state === 'detached' || other.attachment.state === 'lost') return false;
     const otherRoot = resolve(other.rootPath);
     return otherRoot === expected || otherRoot.startsWith(`${expected}/`) || expected.startsWith(`${otherRoot}/`);
   })) throw new Error('Cleanup target overlaps another attachment');
@@ -182,7 +187,7 @@ export async function cleanupMachineAttachment(journal: ExecutorJournal, input: 
   }
   try { await lstat(expected); throw new Error('Cleanup directory remains present'); }
   catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
-  const detached: LocalAttachment = { ...local, attachment: { ...assigned, state: assigned.role === 'cache' && !assigned.detachRequest ? 'attaching' : 'detached', ...(assigned.cache ? { cache: { ...assigned.cache, state: 'reclaimed', activity: [], reclaimBlocked: null } } : {}), updatedAt: new Date().toISOString() } };
-  journal.installAttachment(detached);
-  return detached;
+  const released: LocalAttachment = { ...local, ...(lost ? { lostCheckout: 'removed' as const } : {}), attachment: { ...assigned, state: lost ? 'lost' : assigned.role === 'cache' && !assigned.detachRequest ? 'attaching' : 'detached', ...(assigned.cache ? { cache: { ...assigned.cache, state: 'reclaimed', activity: [], reclaimBlocked: null } } : {}), updatedAt: new Date().toISOString() } };
+  journal.installAttachment(released);
+  return released;
 }

@@ -3,13 +3,49 @@ import { subscriptionIdentity, subscriptionActive } from './account-access.js';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
-import { machineDiscardConfirmationSchema, machineDiscardScopeSchema } from '@gitspace/protocol/machine-discard';
-import { cloudImageProviderCall, prepareCloudImage, resolveCloudImage, runCloudImageOperation } from './sandbox-rollout.js';
+import { machineDiscardConfirmationSchema, machineDiscardScopeSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
+import { cloudImageProviderCall, prepareCloudImage, resolveCloudImage, runCloudImageOperation, type CloudImageOperationStore } from './sandbox-rollout.js';
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from './sandbox-provisioner.js';
+import { controlFleetMachine, ownedWorkspaceScopes, type CredentialVaultDO } from './application.js';
+import { listMachineAttachments } from './runtime-machine-loss.js';
+import type { RuntimeAttachment, RuntimeCacheObservation } from '@gitspace/protocol-runtime';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 export type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
+
+/** Cloud machines one account may hold at once; provisioning and stopped ones still count. */
+export const CLOUD_MACHINE_LIMIT = 10;
+/** Each provisioning attempt is a lease: one not finished by its deadline is fenced and retried. */
+export const SANDBOX_PROVISIONING_ATTEMPT_MS = 15 * 60_000;
+/** After this many attempts the sandbox is destroyed so a machine that never became ready cannot keep billing. */
+export const SANDBOX_PROVISIONING_ATTEMPTS = 3;
+export const SANDBOX_PROVISIONING_RETRY_DELAY_MS = 60_000;
+/** An image operation recording no progress this long is rolled back, or ended with its barrier released. */
+export const CLOUD_IMAGE_OPERATION_DEADLINE_MS = 30 * 60_000;
+const FORCED_DISCARD_TTL_MS = 15 * 60_000;
+/** A running cloud sandbox with no usable attachment intent this long is stopped (slept, never destroyed). */
+export const CLOUD_MACHINE_IDLE_STOP_MS = 30 * 60_000;
+export const CLOUD_MACHINE_IDLE_CHECK_MS = 5 * 60_000;
+/** Activity a user or agent is relying on; a watcher or the machine's own idle grace is not. */
+const ACTIVITY_KEEPS_MACHINE: Record<RuntimeCacheObservation['activity'][number]['reason'], boolean> = {
+  command: true, service: true, proc: true, terminal: true, 'local-work': true, setup: true, sync: true, watcher: false, grace: false,
+};
+
+/** Usable intent the cloud must never stop: opted-in local work, live activity or executions, setup or reclaim in
+ * flight, a scheduled retry, or a reclaim waiting on the user (held-back LFS). Lost and detached hold nothing. */
+export function attachmentKeepsMachineRunning(attachment: RuntimeAttachment): boolean {
+  if (attachment.state === 'lost' || attachment.state === 'detached') return false;
+  if (attachment.state !== 'ready') return true;
+  const cache = attachment.cache;
+  return (attachment.failure?.nextRetryAt ?? null) !== null
+    || attachment.cacheAction?.status === 'requested' || attachment.cacheAction?.status === 'running'
+    || (attachment.executionObservation?.activeExecutions ?? 0) > 0
+    || (cache !== undefined && (cache.localWorkOptIn || cache.reclaimBlocked !== null
+      || cache.setup.some(step => step.state === 'running')
+      || cache.activity.some(item => ACTIVITY_KEEPS_MACHINE[item.reason])));
+}
+const SANDBOX_ABANDONED = `Sandbox provisioning failed after ${SANDBOX_PROVISIONING_ATTEMPTS} attempts and its cloud machine was destroyed so it cannot keep billing. Destroy this entry and create a new machine.`;
 
 export interface PortableSpaceDefinition {
   projectId: string;
@@ -39,13 +75,15 @@ const pendingMachineDiscardSchema = z.object({
 export class FleetCatalogDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
   private readonly directoryOutbox: DirectoryOutbox;
-  private readonly imageRuns = new Map<string, Promise<void>>();
+  private readonly imageRuns = new Map<string, { run: Promise<void>; current: boolean }>();
   private readonly provisioningRuns = new Map<string, Promise<void>>();
+  private alarmLine: Promise<void> = Promise.resolve();
   private imageDefaultRun: Promise<CloudImageChoice> | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
-    this.directoryOutbox = new DirectoryOutbox(ctx, env);
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS fleet_alarms(owner TEXT PRIMARY KEY, timestamp INTEGER NOT NULL)');
+    this.directoryOutbox = new DirectoryOutbox(ctx, env, { set: timestamp => this.scheduleAlarm('directory', timestamp), clear: () => this.scheduleAlarm('directory', null) });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS space_definitions (
@@ -64,15 +102,24 @@ export class FleetCatalogDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS cloud_image_default(singleton INTEGER PRIMARY KEY CHECK(singleton=1),choice_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS cloud_image_operation_ids(operation_id TEXT PRIMARY KEY,machine_id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sandbox_enrollments(machine_id TEXT PRIMARY KEY,enrollment_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sandbox_provisioning(machine_id TEXT PRIMARY KEY,attempts INTEGER NOT NULL,deadline_at INTEGER NOT NULL,phase TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS forced_discards(machine_id TEXT PRIMARY KEY,token TEXT NOT NULL,workspaces_json TEXT NOT NULL,issued_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS machine_idle(machine_id TEXT PRIMARY KEY,idle_since INTEGER NOT NULL);
       `);
+      // No attempt survives an isolate restart; the provisioning lease retries interrupted work shortly.
+      const retryAt = Date.now() + SANDBOX_PROVISIONING_RETRY_DELAY_MS;
       for (const row of this.ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM sandbox_enrollments').toArray()) {
+        this.ctx.storage.sql.exec("INSERT INTO sandbox_provisioning(machine_id,attempts,deadline_at,phase) VALUES(?,1,?,'provisioning') ON CONFLICT(machine_id) DO UPDATE SET deadline_at=MIN(deadline_at,excluded.deadline_at)", row.machine_id, retryAt);
         const machine = this.getMachine(row.machine_id);
         if (machine?.state === 'provisioning') this.saveMachine({
           ...machine, state: 'error', operationId: null, lifecycleRevision: machine.lifecycleRevision + 1,
-          error: 'Sandbox provisioning was interrupted. Start the machine to resume.',
+          error: 'Sandbox provisioning was interrupted; retrying automatically.',
         });
       }
       this.directoryOutbox.kick();
+      await this.armProvisioning();
+      await this.armImageDeadlines();
+      if (this.listMachines().some(machine => machine.provider === 'cloudflare-sandbox' && machine.state === 'online')) await this.scheduleAlarm('idle', Date.now() + CLOUD_MACHINE_IDLE_CHECK_MS);
     });
   }
 
@@ -96,7 +143,67 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return { source: 'fleet', cursor: this.directoryOutbox.head(), machines: this.listMachines() };
   }
 
-  async alarm(): Promise<void> { await this.directoryOutbox.flush(); }
+  private scheduleAlarm(owner: 'directory' | 'provisioning' | 'images' | 'idle', timestamp: number | null): Promise<void> {
+    if (timestamp === null) this.ctx.storage.sql.exec('DELETE FROM fleet_alarms WHERE owner=?', owner);
+    else this.ctx.storage.sql.exec('INSERT INTO fleet_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp', owner, timestamp);
+    const operation = this.alarmLine.then(async () => {
+      const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>('SELECT MIN(timestamp) AS timestamp FROM fleet_alarms').toArray()[0]?.timestamp;
+      if (next === null || next === undefined) await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(next);
+    });
+    this.alarmLine = operation.catch(() => {});
+    return operation;
+  }
+
+  /** Every resource-holding fleet state is a lease the cloud forces to a terminal state when it lapses. */
+  async alarm(): Promise<void> {
+    await this.directoryOutbox.flush();
+    const now = Date.now();
+    const due = new Set(this.ctx.storage.sql.exec<{ owner: string }>("SELECT owner FROM fleet_alarms WHERE owner<>'directory' AND timestamp<=?", now).toArray().map(row => row.owner));
+    if (due.has('provisioning')) await this.expireProvisioningLeases(now);
+    if (due.has('images')) await this.expireCloudImageOperations(now);
+    if (due.has('idle')) await this.stopIdleSandboxes(now);
+  }
+
+  /** Stops (sleeps, never destroys) running cloud sandboxes nobody intends to use. Sleep checkpoints first and keeps
+   * the machine for Start; a refused checkpoint is recorded on the machine and the next idle window retries. An
+   * open legacy workspace is intent the cloud cannot observe, so its machine is kept. */
+  private async stopIdleSandboxes(now: number): Promise<void> {
+    let watching = false;
+    for (const machine of this.listMachines()) {
+      if (machine.provider !== 'cloudflare-sandbox' || machine.state !== 'online' || machine.desiredState !== 'online' || machine.operationId !== null) {
+        this.ctx.storage.sql.exec('DELETE FROM machine_idle WHERE machine_id=?', machine.id);
+        continue;
+      }
+      watching = true;
+      // Intent that cannot be read counts as intent; one unreachable workspace never stalls the sweep.
+      const busy = this.hasPendingSandbox(machine.id) || cloudImageOperationActive(this.cloudImage(machine.id)) || await this.pendingMachineDiscard(machine.id) !== null
+        || await listMachineAttachments(this.env, this.env.ACCOUNT_ID, machine.id).then(attachments => attachments.some(attachmentKeepsMachineRunning), () => true)
+        || await ownedWorkspaceScopes(this.env, this.env.ACCOUNT_ID, this, machine.id).then(scopes => scopes.length > 0, () => true);
+      const idleSince = this.ctx.storage.sql.exec<{ idle_since: number }>('SELECT idle_since FROM machine_idle WHERE machine_id=?', machine.id).toArray()[0]?.idle_since;
+      if (busy) this.ctx.storage.sql.exec('DELETE FROM machine_idle WHERE machine_id=?', machine.id);
+      else if (idleSince === undefined) this.ctx.storage.sql.exec('INSERT INTO machine_idle(machine_id,idle_since) VALUES(?,?)', machine.id, now);
+      else if (now - idleSince >= CLOUD_MACHINE_IDLE_STOP_MS) {
+        this.ctx.storage.sql.exec('DELETE FROM machine_idle WHERE machine_id=?', machine.id);
+        try {
+          await controlFleetMachine(this.env, this.env.ACCOUNT_ID, machine.id, 'sleep');
+        } catch (error) {
+          console.error(JSON.stringify({ event: 'cloud_machine_auto_stop_failed', machineId: machine.id, errorName: error instanceof Error ? error.name : 'UnknownError' }));
+        }
+      }
+    }
+    await this.scheduleAlarm('idle', watching ? now + CLOUD_MACHINE_IDLE_CHECK_MS : null);
+  }
+
+  private armProvisioning(): Promise<void> {
+    const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>("SELECT MIN(deadline_at) AS timestamp FROM sandbox_provisioning WHERE phase IN ('provisioning','releasing')").toArray()[0]?.timestamp;
+    return this.scheduleAlarm('provisioning', next ?? null);
+  }
+
+  private armImageDeadlines(): Promise<void> {
+    const deadlines = this.listCloudImages().flatMap(image => cloudImageOperationActive(image) ? [image.operation!.updatedAt + CLOUD_IMAGE_OPERATION_DEADLINE_MS] : []);
+    return this.scheduleAlarm('images', deadlines.length ? Math.min(...deadlines) : null);
+  }
 
   cloudImage(machineId: string): CloudImageState | null {
     const row = this.ctx.storage.sql.exec<{ state_json: string }>('SELECT state_json FROM cloud_images WHERE machine_id=?', machineId).toArray()[0];
@@ -124,6 +231,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
       this.changes.append('cloud-images', this.listCloudImages());
     });
     this.changes.wake();
+    this.ctx.waitUntil(this.armImageDeadlines());
     return state;
   }
 
@@ -220,14 +328,59 @@ export class FleetCatalogDO extends DurableObject<Env> {
 
   private launchCloudImage(state: CloudImageState): void {
     if (this.imageRuns.has(state.machineId)) return;
-    const run = runCloudImageOperation(this.env, this, state).finally(() => this.imageRuns.delete(state.machineId));
-    this.imageRuns.set(state.machineId, run);
-    this.ctx.waitUntil(run);
+    const entry = { run: Promise.resolve(), current: true };
+    // A run superseded at its deadline may still be awaiting the provider, but it can no longer commit.
+    const store: CloudImageOperationStore = {
+      saveCloudImage: (next) => { if (!entry.current) throw new Error('Image operation was superseded after missing its deadline'); return this.saveCloudImage(next); },
+      putMachine: (machine) => { if (!entry.current) throw new Error('Image operation was superseded after missing its deadline'); return this.putMachine(machine); },
+      listSpaces: () => this.listSpaces(),
+      getMachine: (machineId) => this.getMachine(machineId),
+    };
+    entry.run = runCloudImageOperation(this.env, store, state).finally(() => { if (this.imageRuns.get(state.machineId) === entry) this.imageRuns.delete(state.machineId); });
+    this.imageRuns.set(state.machineId, entry);
+    this.ctx.waitUntil(entry.run);
+  }
+
+  /** No progress for the deadline means the operation is hung. A cancellable one rolls back; an overdue
+   * rollback, or one past the point of no cancellation, ends with its admission barrier released. */
+  private async expireCloudImageOperations(now: number): Promise<void> {
+    for (const state of this.listCloudImages()) {
+      const operation = state.operation;
+      if (!operation || !cloudImageOperationActive(state) || operation.updatedAt + CLOUD_IMAGE_OPERATION_DEADLINE_MS > now) continue;
+      const hung = this.imageRuns.get(state.machineId);
+      if (hung) {
+        hung.current = false;
+        this.imageRuns.delete(state.machineId);
+      }
+      if (operation.phase === 'checkpointing' && cloudImageOperationCancellable(state)) {
+        this.launchCloudImage(this.writeCloudImage({ ...state, operation: { ...operation, phase: 'cancelling', updatedAt: now, error: 'Image operation stalled past its deadline; rolling back to the current image.' } }));
+        continue;
+      }
+      const cancelled = operation.phase === 'staging' && !operation.recoveryOf;
+      const error = cancelled ? 'Image operation stalled past its deadline and was cancelled.'
+        : 'Image operation stalled past its deadline; its admission barrier was released. Workspaces resume from their last checkpoint; check this machine before relying on its image.';
+      this.writeCloudImage({ ...state, desiredImage: state.currentImage, operation: { ...operation, phase: 'cancelled', barrier: false, updatedAt: now, error } });
+      const machine = this.getMachine(state.machineId);
+      if (machine && !cancelled) this.saveMachine({ ...machine, state: 'error', lifecycleRevision: machine.lifecycleRevision + 1, operationId: null, error });
+    }
+    await this.armImageDeadlines();
   }
 
   hasPendingSandbox(machineId: string): boolean {
     validateId(machineId);
     return this.ctx.storage.sql.exec('SELECT machine_id FROM sandbox_enrollments WHERE machine_id=?', machineId).toArray().length > 0;
+  }
+
+  /** True once the provisioning lease is exhausted: the record stays visible in error and can only be destroyed. */
+  abandonedSandbox(machineId: string): boolean {
+    return this.ctx.storage.sql.exec("SELECT machine_id FROM sandbox_provisioning WHERE machine_id=? AND phase<>'provisioning'", machineId).toArray().length > 0;
+  }
+
+  /** Atomic with the insert that follows it: both run in one synchronous Durable Object turn. */
+  assertCloudMachineCapacity(): void {
+    if (this.listMachines().filter(machine => machine.provider === 'cloudflare-sandbox').length >= CLOUD_MACHINE_LIMIT) {
+      throw new Error(`This account already has ${CLOUD_MACHINE_LIMIT} cloud machines, the maximum. Destroy one before creating another.`);
+    }
   }
 
   beginSandboxProvisioning(input: SandboxEnrollment): FleetMachineDefinition {
@@ -242,32 +395,100 @@ export class FleetCatalogDO extends DurableObject<Env> {
       lifecycleRevision: 1, operationId: crypto.randomUUID(), error: null,
     };
     this.ctx.storage.transactionSync(() => {
+      this.assertCloudMachineCapacity();
       // The only durable copy of private enrollment belongs to this tenant, never
       // a fleet snapshot, event, image record, or platform resource definition.
       this.ctx.storage.sql.exec('INSERT INTO sandbox_enrollments(machine_id,enrollment_json) VALUES(?,?)', machine.id, JSON.stringify({ ...input, choice }));
+      this.ctx.storage.sql.exec("INSERT INTO sandbox_provisioning(machine_id,attempts,deadline_at,phase) VALUES(?,1,?,'provisioning')", machine.id, Date.now() + SANDBOX_PROVISIONING_ATTEMPT_MS);
       this.writeCloudImage({ machineId: machine.id, selection: choice.kind === 'custom' ? choice : { kind: 'platform-default' }, currentImage: null, desiredImage: choice.image, operation: null });
       this.saveMachine(machine);
     });
+    this.ctx.waitUntil(this.armProvisioning());
     this.launchSandboxProvisioning(machine.id);
     return machine;
   }
 
   resumeSandboxProvisioning(userId: string, machineId: string): FleetMachineDefinition | null {
     if (userId !== this.env.ACCOUNT_ID) throw new Error('Machine belongs to another account');
+    if (this.abandonedSandbox(machineId)) throw new Error(SANDBOX_ABANDONED);
     if (!this.hasPendingSandbox(machineId)) return null;
     const current = this.getMachine(machineId);
     if (!current || current.desiredState !== 'online') throw new Error('Sandbox provisioning is no longer active');
     if (this.provisioningRuns.has(machineId)) return current;
-    const machine = this.saveMachine({ ...current, state: 'provisioning', lifecycleRevision: current.lifecycleRevision + 1, operationId: crypto.randomUUID(), error: null });
+    // An explicit Start is a new decision with a fresh attempt budget.
+    const machine = this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("INSERT INTO sandbox_provisioning(machine_id,attempts,deadline_at,phase) VALUES(?,1,?,'provisioning') ON CONFLICT(machine_id) DO UPDATE SET attempts=1,deadline_at=excluded.deadline_at", machineId, Date.now() + SANDBOX_PROVISIONING_ATTEMPT_MS);
+      return this.saveMachine({ ...current, state: 'provisioning', lifecycleRevision: current.lifecycleRevision + 1, operationId: crypto.randomUUID(), error: null });
+    });
+    this.ctx.waitUntil(this.armProvisioning());
     this.launchSandboxProvisioning(machineId);
     return machine;
   }
 
   private launchSandboxProvisioning(machineId: string): void {
     if (this.provisioningRuns.has(machineId)) return;
-    const run = this.runSandboxProvisioning(machineId).finally(() => this.provisioningRuns.delete(machineId));
+    const run: Promise<void> = this.runSandboxProvisioning(machineId).finally(() => { if (this.provisioningRuns.get(machineId) === run) this.provisioningRuns.delete(machineId); });
     this.provisioningRuns.set(machineId, run);
     this.ctx.waitUntil(run);
+  }
+
+  /** An attempt that missed its deadline is fenced by a new operation id (a hung run can no longer
+   * commit) and retried; an exhausted lease destroys the sandbox. */
+  private async expireProvisioningLeases(now: number): Promise<void> {
+    for (const lease of this.ctx.storage.sql.exec<{ machine_id: string; attempts: number; phase: string }>("SELECT machine_id,attempts,phase FROM sandbox_provisioning WHERE phase IN ('provisioning','releasing') AND deadline_at<=?", now).toArray()) {
+      const current = this.getMachine(lease.machine_id);
+      if (lease.phase === 'releasing') {
+        await this.releaseSandbox(lease.machine_id);
+      } else if (!current || current.desiredState !== 'online' || !this.hasPendingSandbox(lease.machine_id)) {
+        this.ctx.storage.sql.exec('DELETE FROM sandbox_provisioning WHERE machine_id=?', lease.machine_id);
+      } else if (lease.attempts >= SANDBOX_PROVISIONING_ATTEMPTS) {
+        await this.releaseSandbox(lease.machine_id);
+      } else {
+        this.provisioningRuns.delete(lease.machine_id);
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec('UPDATE sandbox_provisioning SET attempts=attempts+1,deadline_at=? WHERE machine_id=?', now + SANDBOX_PROVISIONING_ATTEMPT_MS, lease.machine_id);
+          this.saveMachine({ ...current, state: 'provisioning', lifecycleRevision: current.lifecycleRevision + 1, operationId: crypto.randomUUID(), error: null });
+        });
+        this.launchSandboxProvisioning(lease.machine_id);
+      }
+    }
+    await this.armProvisioning();
+  }
+
+  private async failSandboxAttempt(machineId: string): Promise<void> {
+    const attempts = this.ctx.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM sandbox_provisioning WHERE machine_id=? AND phase='provisioning'", machineId).toArray()[0]?.attempts ?? SANDBOX_PROVISIONING_ATTEMPTS;
+    if (attempts >= SANDBOX_PROVISIONING_ATTEMPTS) return this.releaseSandbox(machineId);
+    const current = this.getMachine(machineId)!;
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('UPDATE sandbox_provisioning SET deadline_at=? WHERE machine_id=?', Date.now() + SANDBOX_PROVISIONING_RETRY_DELAY_MS, machineId);
+      this.saveMachine({ ...current, state: 'error', lifecycleRevision: current.lifecycleRevision + 1, operationId: null, error: `Sandbox provisioning attempt ${attempts} of ${SANDBOX_PROVISIONING_ATTEMPTS} failed; retrying automatically. Start retries now with its retained enrollment.` });
+    });
+    await this.armProvisioning();
+  }
+
+  /** Fences the enrollment first, then revokes the machine credential and destroys the provider sandbox.
+   * A failed destroy stays 'releasing' and the lease alarm retries it. */
+  private async releaseSandbox(machineId: string): Promise<void> {
+    this.provisioningRuns.delete(machineId);
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('DELETE FROM sandbox_enrollments WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec("UPDATE sandbox_provisioning SET phase='releasing',deadline_at=? WHERE machine_id=?", Date.now() + SANDBOX_PROVISIONING_RETRY_DELAY_MS, machineId);
+      const current = this.getMachine(machineId);
+      if (current) this.saveMachine({ ...current, state: 'error', desiredState: 'offline', lifecycleRevision: current.lifecycleRevision + 1, operationId: null, error: `Sandbox provisioning failed after ${SANDBOX_PROVISIONING_ATTEMPTS} attempts; destroying its cloud machine so it cannot keep billing.` });
+    });
+    try {
+      await (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID).removeManagedDevice(machineId);
+      await controlCloudflareSandboxMachine({ env: this.env, userId: this.env.ACCOUNT_ID, machineId, action: 'destroy' });
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("UPDATE sandbox_provisioning SET phase='released' WHERE machine_id=?", machineId);
+        const released = this.getMachine(machineId);
+        if (released) this.saveMachine({ ...released, lifecycleRevision: released.lifecycleRevision + 1, error: SANDBOX_ABANDONED });
+      });
+    } catch (error) {
+      // Provider failures may echo enrollment; record only the error class.
+      console.error(JSON.stringify({ event: 'sandbox_release_failed', machineId, errorName: error instanceof Error ? error.name : 'UnknownError' }));
+    }
+    await this.armProvisioning();
   }
 
   private async runSandboxProvisioning(machineId: string): Promise<void> {
@@ -302,14 +523,15 @@ export class FleetCatalogDO extends DurableObject<Env> {
       const lifecycleRevision = Math.max(current.lifecycleRevision, machine.lifecycleRevision) + 1;
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec('DELETE FROM sandbox_enrollments WHERE machine_id=?', machineId);
+        this.ctx.storage.sql.exec('DELETE FROM sandbox_provisioning WHERE machine_id=?', machineId);
         this.writeCloudImage({ ...this.cloudImage(machineId)!, currentImage: enrollment.choice.image });
         // Provider error/notes/labels are untrusted and may echo enrollment.
         this.saveMachine({ ...current, state: 'online', rpcEndpoint, notes: 'Managed Cloudflare Sandbox. Machine runtime ready.', lifecycleRevision, operationId: null, error: null });
       });
+      await this.armProvisioning();
     } catch {
       if (!active()) return;
-      const current = this.getMachine(machineId)!;
-      this.saveMachine({ ...current, state: 'error', lifecycleRevision: current.lifecycleRevision + 1, operationId: null, error: 'Sandbox provisioning failed. Start the machine to retry with its retained enrollment.' });
+      await this.failSandboxAttempt(machineId);
     }
   }
 
@@ -366,6 +588,33 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return this.saveMachine(input);
   }
 
+  /** A machine's own report describes what it observes; lifecycle intent, kind and provider stay account-owned. */
+  reportMachine(input: FleetMachineDefinition): FleetMachineDefinition {
+    const current = this.getMachine(input.id);
+    return this.putMachine(current
+      ? { ...current, label: input.label, state: input.state, rpcEndpoint: input.rpcEndpoint, notes: input.notes }
+      : { ...input, kind: 'physical', provider: 'physical', desiredState: 'online', lifecycleRevision: 0, operationId: null, error: null });
+  }
+
+  /** A cloud-issued destroy confirmation for a cloud machine whose runtime could not checkpoint. It is bound to the
+   * machine and the exact owned-workspace scope, and expires; reissuing for an unchanged scope keeps the token. */
+  issueForcedDiscard(machineId: string, workspaces: MachineDiscardScope[]): MachineDiscardConfirmation {
+    const scope = JSON.stringify(z.array(machineDiscardScopeSchema).parse(workspaces));
+    const now = Date.now();
+    const issued = this.ctx.storage.sql.exec<{ token: string; workspaces_json: string; issued_at: number }>('SELECT token,workspaces_json,issued_at FROM forced_discards WHERE machine_id=?', machineId).toArray()[0];
+    if (issued && issued.workspaces_json === scope && issued.issued_at + FORCED_DISCARD_TTL_MS > now) return { machineId, action: 'destroy', token: issued.token };
+    const token = `cloud:${crypto.randomUUID()}`;
+    this.ctx.storage.sql.exec('INSERT INTO forced_discards(machine_id,token,workspaces_json,issued_at) VALUES(?,?,?,?) ON CONFLICT(machine_id) DO UPDATE SET token=excluded.token,workspaces_json=excluded.workspaces_json,issued_at=excluded.issued_at', machineId, token, scope, now);
+    return { machineId, action: 'destroy', token };
+  }
+
+  /** The workspace scope a still-valid cloud-issued confirmation covers, or null when it is not one. */
+  forcedDiscardScope(confirmation: MachineDiscardConfirmation): MachineDiscardScope[] | null {
+    const issued = this.ctx.storage.sql.exec<{ token: string; workspaces_json: string; issued_at: number }>('SELECT token,workspaces_json,issued_at FROM forced_discards WHERE machine_id=?', confirmation.machineId).toArray()[0];
+    if (!issued || confirmation.action !== 'destroy' || issued.token !== confirmation.token || issued.issued_at + FORCED_DISCARD_TTL_MS <= Date.now()) return null;
+    return z.array(machineDiscardScopeSchema).parse(JSON.parse(issued.workspaces_json));
+  }
+
   private saveMachine(input: FleetMachineDefinition): FleetMachineDefinition {
     validateId(input.id);
     if (!input.label || !['provisioning', 'online', 'sleeping', 'offline', 'resuming', 'deleting', 'error'].includes(input.state) || !['online', 'offline', 'removed'].includes(input.desiredState) || !Number.isInteger(input.lifecycleRevision) || input.lifecycleRevision < 0 || !['physical', 'sandbox'].includes(input.kind) || !['physical', 'cloudflare-sandbox'].includes(input.provider) || input.notes.length > 4_000) throw new Error('Machine definition is invalid');
@@ -391,6 +640,10 @@ export class FleetCatalogDO extends DurableObject<Env> {
     this.directoryOutbox.kick();
     this.changes.wake();
     this.ctx.waitUntil(this.broadcast({ type: 'upsert', machineId: input.id, machine: input }));
+    if (input.provider === 'cloudflare-sandbox' && input.state === 'online' && input.desiredState === 'online'
+      && this.ctx.storage.sql.exec("SELECT owner FROM fleet_alarms WHERE owner='idle'").toArray().length === 0) {
+      this.ctx.waitUntil(this.scheduleAlarm('idle', Date.now() + CLOUD_MACHINE_IDLE_CHECK_MS));
+    }
     return input;
   }
 
@@ -409,6 +662,9 @@ export class FleetCatalogDO extends DurableObject<Env> {
     const removed = this.ctx.storage.transactionSync(() => {
       if (destroyed) this.ctx.storage.sql.exec('INSERT OR REPLACE INTO destroyed_machines(machine_id,destroyed_at) VALUES(?,?)', machineId, new Date().toISOString());
       this.ctx.storage.sql.exec('DELETE FROM sandbox_enrollments WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec('DELETE FROM sandbox_provisioning WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec('DELETE FROM forced_discards WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec('DELETE FROM machine_idle WHERE machine_id=?', machineId);
       const removed = this.ctx.storage.sql.exec('DELETE FROM fleet_machines WHERE machine_id = ?', machineId).rowsWritten > 0;
       if (removed) {
         const machines = this.listMachines();
@@ -430,6 +686,17 @@ export class FleetCatalogDO extends DurableObject<Env> {
   wasMachineDestroyed(machineId: string): boolean {
     validateId(machineId);
     return this.ctx.storage.sql.exec('SELECT machine_id FROM destroyed_machines WHERE machine_id=?', machineId).toArray().length > 0;
+  }
+
+  /** Whether workspaces may still hold attachments of machines removed before attachment leases existed. */
+  runtimeLeaseBackfillPending(): boolean {
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lease_backfill(singleton INTEGER PRIMARY KEY CHECK(singleton=1), completed_at TEXT NOT NULL)');
+    return this.ctx.storage.sql.exec('SELECT singleton FROM runtime_lease_backfill').toArray().length === 0;
+  }
+
+  completeRuntimeLeaseBackfill(): void {
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lease_backfill(singleton INTEGER PRIMARY KEY CHECK(singleton=1), completed_at TEXT NOT NULL)');
+    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO runtime_lease_backfill(singleton,completed_at) VALUES(1,?)', new Date().toISOString());
   }
 
   listMachines(): FleetMachineDefinition[] {

@@ -81,7 +81,8 @@ export class MachineExecutor {
     return local;
   }
   async drain(local: LocalAttachment): Promise<void> {
-    if (this.options.journal.attachment(local.attachment.attachmentId)?.attachment.state !== 'draining') throw new Error('Executor drain requires a durable attachment fence');
+    const state = this.options.journal.attachment(local.attachment.attachmentId)?.attachment.state;
+    if (state !== 'draining' && state !== 'lost') throw new Error('Executor drain requires a durable attachment fence');
     const attempts = this.options.journal.unresolved(local.attachment);
     for (const attempt of attempts) {
       this.options.journal.fence(attempt.dispatch);

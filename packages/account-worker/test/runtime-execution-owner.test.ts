@@ -161,6 +161,27 @@ test('cloud file ownership survives attached caches; machine calls select the wo
   });
 });
 
+test('the agent machines list and dispatch see only live attachments heard from recently', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`machines-list:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text, identity } = await ownerFixture(ctx);
+    const now = new Date().toISOString();
+    const cache = { state: 'paused', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: now, reclaimAt: null, lastSyncAt: now, localWorkOptIn: false, setup: [] };
+    const live = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'live', machineId: 'live', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: now, heartbeatAt: now });
+    // Destroyed while ready: its last heartbeat is fresh and its cache observation still reads paused.
+    const destroyed = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'destroyed', machineId: 'destroyed', state: 'lost', lossReason: 'machine-destroyed', cache });
+    const silent = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'silent', machineId: 'silent', heartbeatAt: new Date(Date.now() - 60_000).toISOString() });
+    for (const attachment of [destroyed, silent, live]) ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
+    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: dispatch.machineId }] }));
+    try {
+      expect(RuntimeAttachmentSchema.array().parse(JSON.parse(text(await invoke('machines', { op: 'list' })))).map(item => item.attachmentId)).toEqual(['live']);
+      expect(text(await invoke('bash', { command: 'pwd', on: 'destroyed' }))).toContain('No machine attached');
+      ctx.storage.sql.exec('DELETE FROM runtime_attachments WHERE id=?', live.attachmentId);
+      expect(text(await invoke('bash', { command: 'pwd' }))).toContain('No machine attached');
+      expect(machine).not.toHaveBeenCalled();
+    } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
 test('equal canonical caches fall back from stale defaults and require readiness after reconnect', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`cache-offline:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text, identity } = await ownerFixture(ctx);

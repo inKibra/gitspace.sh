@@ -1,9 +1,9 @@
-import { env } from 'cloudflare:test';
-import { expect, it } from 'vitest';
+import { env, runInDurableObject } from 'cloudflare:test';
+import { expect, it, vi } from 'vitest';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { controlFleetMachine, reconcileFleetMachines } from '../src/application.js';
-import type { FleetMachineDefinition } from '../src/fleet-catalog.js';
+import { CLOUD_IMAGE_OPERATION_DEADLINE_MS, type FleetCatalogDO, type FleetMachineDefinition } from '../src/fleet-catalog.js';
 import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 
 const originalImage = `docker.io/example/original@sha256:${'a'.repeat(64)}`;
@@ -131,6 +131,42 @@ it('recovers canonical restart checkpoints when interrupted intent omitted their
   await expect.poll(() => f.catalog.cloudImage(sandbox.id)).toMatchObject({ operation: { phase: 'complete', barrier: false, error: null } });
   expect(await f.authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 3 });
   expect(f.calls.filter(path => path === '/v1/sandboxes/sandbox-a/image')).toEqual(['/v1/sandboxes/sandbox-a/image']);
+});
+
+it('rolls back an image operation stalled past its deadline and releases its admission barrier', async () => {
+  const f = await fixture();
+  f.faults.checkpoint = true;
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    await f.catalog.startCloudImage(f.input);
+    await expect.poll(() => f.catalog.cloudImage(sandbox.id)).toMatchObject({ operation: { phase: 'checkpointing', barrier: true, error: expect.any(String) } });
+    now += CLOUD_IMAGE_OPERATION_DEADLINE_MS - 1;
+    await runInDurableObject(f.catalog, (instance: FleetCatalogDO) => instance.alarm());
+    expect(await f.catalog.cloudImage(sandbox.id)).toMatchObject({ operation: { phase: 'checkpointing', barrier: true } });
+    now += 1;
+    await runInDurableObject(f.catalog, (instance: FleetCatalogDO) => instance.alarm());
+    await expect.poll(() => f.catalog.cloudImage(sandbox.id)).toMatchObject({ currentImage: originalImage, desiredImage: originalImage, operation: { phase: 'cancelled', barrier: false } });
+    expect(f.calls).not.toContain('/v1/sandboxes/sandbox-a/image');
+    expect(await f.authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id });
+  } finally { clock.mockRestore(); }
+});
+
+it('ends an image operation stalled past the point of no cancellation with its barrier released and the failure on the machine', async () => {
+  const f = await fixture();
+  f.faults.restore = true;
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    await f.catalog.startCloudImage(f.input);
+    await expect.poll(() => f.catalog.cloudImage(sandbox.id)).toMatchObject({ operation: { phase: 'confirming', barrier: true, error: expect.any(String) } });
+    now += CLOUD_IMAGE_OPERATION_DEADLINE_MS;
+    await runInDurableObject(f.catalog, (instance: FleetCatalogDO) => instance.alarm());
+    expect(await f.catalog.cloudImage(sandbox.id)).toMatchObject({ currentImage: originalImage, operation: { phase: 'cancelled', barrier: false, error: expect.stringContaining('barrier was released') } });
+    expect(await f.catalog.getMachine(sandbox.id)).toMatchObject({ state: 'error', operationId: null, error: expect.stringContaining('last checkpoint') });
+    // The machine lifecycle is no longer reserved by the image operation.
+    await expect(Promise.resolve(f.catalog.putMachine({ ...sandbox, desiredState: 'offline' }))).resolves.toMatchObject({ desiredState: 'offline' });
+  } finally { clock.mockRestore(); }
 });
 
 it('retains an uncertain switch barrier and recovers the same operation without replacing again', async () => {

@@ -3,7 +3,7 @@ import { abortSpaceClose, beginSpaceClose, beginSpaceOpen, bootstrapSpaceAuthori
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
-import { RuntimeAttachmentSchema, RuntimeCachePolicySchema, RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeCachePolicySchema, RuntimeIdentitySchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeAttachmentLossReason, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
@@ -20,7 +20,11 @@ import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type GitLfsConfirmedObject } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { readEncryptedCheckpoint } from './git-lfs-store.js';
+import { attachmentMachineKind } from './runtime-machine-loss.js';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
+/** Lease sweeps also audit fleet membership this often, so no attachment outlives its machine's removal. */
+const LEASE_AUDIT_MS = 60 * 60_000;
+const LEASE_RETRY_MS = 5 * 60_000;
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
@@ -34,6 +38,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_alarms(owner TEXT PRIMARY KEY, timestamp INTEGER NOT NULL)');
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lost_claims_released(attachment_id TEXT PRIMARY KEY)');
     this.directoryOutbox = new DirectoryOutbox(ctx, env, { set: timestamp => this.scheduleAlarm('directory', timestamp), clear: () => this.scheduleAlarm('directory', null) });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS space_authority (
@@ -82,6 +87,23 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    const leases = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='leases'").toArray()[0];
+    if (leases && leases.timestamp <= Date.now()) {
+      await this.scheduleAlarm('leases', null);
+      const identity = await this.ctx.storage.get('runtime.identity');
+      // An unavailable runtime (a deleted workspace) is retried only at the audit cadence; a failed sweep sooner.
+      const runtime = identity === undefined ? undefined : await this.getRuntime(identity).catch(async (error: unknown) => {
+        console.error('Runtime lease sweep deferred: workspace runtime is unavailable', error);
+        await this.scheduleAlarm('leases', Date.now() + LEASE_AUDIT_MS);
+      });
+      if (runtime) {
+        try { await this.sweepLeases(runtime); }
+        catch (error) {
+          console.error('Runtime lease sweep failed; retrying', error);
+          await this.scheduleAlarm('leases', Date.now() + LEASE_RETRY_MS);
+        }
+      }
+    }
     await this.directoryOutbox.flush();
     await this.flushPortableLfs();
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
@@ -90,6 +112,70 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       const identity = await this.ctx.storage.get<Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>>('runtime.identity');
       if (identity) await (await this.getRuntime(identity)).wake();
     }
+  }
+
+  /** Every live attachment is a lease: the alarm wakes at the earliest deadline, or at the next membership audit. */
+  private async scheduleLeases(runtime: WorkspaceRuntime): Promise<void> {
+    if (!runtime.attachments.list().some(item => item.state !== 'lost' && item.state !== 'detached')) return;
+    const target = Math.min(runtime.attachments.nextDeadline() ?? Infinity, Date.now() + LEASE_AUDIT_MS);
+    const scheduled = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='leases'").toArray()[0]?.timestamp;
+    if (scheduled === undefined || scheduled > target) await this.scheduleAlarm('leases', target);
+  }
+
+  /** Lose the attachments of machines that left the fleet and every attachment whose lease expired, then release what
+   * their holders claimed. Machine kinds are refreshed first: they decide the lease windows. */
+  private async sweepLeases(runtime: WorkspaceRuntime): Promise<void> {
+    const fleet = this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID);
+    for (const machineId of new Set(runtime.attachments.list().filter(item => item.state !== 'lost' && item.state !== 'detached').map(item => item.machineId))) {
+      const machine = await fleet.getMachine(machineId);
+      if (machine) runtime.attachments.recordMachineKind(machineId, attachmentMachineKind(machine));
+      else await this.loseMachineAttachments(runtime, machineId, await fleet.wasMachineDestroyed(machineId) ? 'machine-destroyed' : 'machine-revoked');
+    }
+    await runtime.expireAttachments(Date.now());
+    await this.releaseLostClaims(runtime);
+    await this.scheduleLeases(runtime);
+  }
+
+  private async loseMachineAttachments(runtime: WorkspaceRuntime, machineId: string, reason: RuntimeAttachmentLossReason): Promise<void> {
+    for (const attachment of runtime.attachments.list()) {
+      if (attachment.machineId === machineId && attachment.state !== 'lost' && attachment.state !== 'detached') await runtime.loseAttachment(attachment.attachmentId, attachment.generation, reason);
+    }
+  }
+
+  /** Lifecycle runs a lost attachment held end interrupted. Derived from durable lost state, so a crash only retries. */
+  private async releaseLostClaims(runtime: WorkspaceRuntime): Promise<void> {
+    const released = new Set(this.ctx.storage.sql.exec<{ attachment_id: string }>('SELECT attachment_id FROM runtime_lost_claims_released').toArray().map(row => row.attachment_id));
+    for (const attachment of runtime.attachments.list()) {
+      if (attachment.state !== 'lost' || released.has(attachment.attachmentId)) continue;
+      await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${attachment.projectId}`).releaseLostLifecycleClaims(attachment.workspaceId, { machineId: attachment.machineId, attachment: { attachmentId: attachment.attachmentId, generation: attachment.generation }, reason: attachment.lossReason ?? 'operator' });
+      this.ctx.storage.sql.exec('INSERT OR IGNORE INTO runtime_lost_claims_released(attachment_id) VALUES(?)', attachment.attachmentId);
+    }
+  }
+
+  /** Attachment records read without starting the runtime, so legacy spaces never gain runtime state. */
+  private async storedAttachments(): Promise<RuntimeAttachment[]> {
+    if (await this.ctx.storage.get('runtime.identity') === undefined) return [];
+    if (!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_attachments'").toArray().length) return [];
+    return this.ctx.storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments').toArray().map(row => RuntimeAttachmentSchema.parse(JSON.parse(row.record)));
+  }
+
+  async runtimeMachineAttachments(machineId: string): Promise<RuntimeAttachment[]> {
+    return (await this.storedAttachments()).filter(item => item.machineId === machineId);
+  }
+
+  /** Destroy and revoke fan-out: the machine's live attachments here become lost before its credentials go. */
+  async runtimeLoseMachine(machineId: string, reason: 'machine-destroyed' | 'machine-revoked'): Promise<RuntimeAttachment[]> {
+    if (!(await this.storedAttachments()).some(item => item.machineId === machineId && item.state !== 'lost' && item.state !== 'detached')) return [];
+    const runtime = await this.getRuntime(await this.ctx.storage.get('runtime.identity'));
+    await this.loseMachineAttachments(runtime, machineId, reason);
+    await this.releaseLostClaims(runtime);
+    return runtime.attachments.list().filter(item => item.machineId === machineId);
+  }
+
+  /** Backfill: sweep now, resolving attachments of machines removed before leases existed and starting the others' leases. */
+  async runtimeSweepLeases(): Promise<void> {
+    if (!(await this.storedAttachments()).some(item => item.state !== 'lost' && item.state !== 'detached')) return;
+    await this.sweepLeases(await this.getRuntime(await this.ctx.storage.get('runtime.identity')));
   }
 
   private async getRuntime(raw: unknown): Promise<WorkspaceRuntime> {
@@ -203,13 +289,16 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       authorizeMachine: async machineId => {
         const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId);
         if (!machine || machine.desiredState === 'removed' || !await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).hasRuntimeMachine(machineId)) throw new Error('Attachment target is not an enrolled account machine');
+        runtime.attachments.recordMachineKind(machineId, attachmentMachineKind(machine));
       },
     });
   }
 
   async runtimeAttachmentRequest(raw: unknown) {
     const input = RuntimeAttachmentRequestInputSchema.parse(raw);
-    return (await this.attachmentController(input)).request(input);
+    const result = await (await this.attachmentController(input)).request(input);
+    await this.scheduleLeases(await this.getRuntime(input));
+    return result;
   }
 
   async runtimeCacheAttachmentRequest(raw: unknown) {
@@ -218,10 +307,12 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
     if (!machine || machine.desiredState === 'removed' || !await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).hasRuntimeMachine(input.machineId)) throw new Error('Attachment target is not an enrolled account machine');
     const runtime = await this.getRuntime(input);
+    runtime.attachments.recordMachineKind(input.machineId, attachmentMachineKind(machine));
     await runtime.cloudFiles.recover();
     await runtime.cloudFiles.initializeSnapshot();
     const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace?.branch ?? project.baseBranch }, capabilities: executorCapabilities });
     runtime.publish();
+    await this.scheduleLeases(runtime);
     return result;
   }
 
@@ -230,6 +321,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const runtime = await this.getRuntime(input);
     const result = runtime.attachments.requestCacheAction(input);
     runtime.publish();
+    await this.scheduleLeases(runtime);
     return result;
   }
 
@@ -261,7 +353,9 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeAttachmentReady(raw: unknown) {
     const input = RuntimeAttachmentReadyInputSchema.parse(raw);
     const result = await (await this.attachmentController(input)).ready(input);
-    await (await this.getRuntime(input)).cacheReady(input.attachmentId, input.generation);
+    const runtime = await this.getRuntime(input);
+    await runtime.cacheReady(input.attachmentId, input.generation);
+    await this.scheduleLeases(runtime);
     return result;
   }
 
@@ -275,6 +369,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (input.cache?.state === 'reclaimed' && runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents cache reclamation');
     const attachment = runtime.attachments.heartbeat(input);
     runtime.publish();
+    await this.scheduleLeases(runtime);
     return { attachment };
   }
 
@@ -283,8 +378,12 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const runtime = await this.getRuntime(input);
     if (input.state === 'detached' && runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents cache detach');
     if (input.state === 'detached') await runtime.attachments.reconcileDetach(input);
-    const attachment = runtime.attachments.detach(input);
+    const held = runtime.attachments.list().find(item => item.attachmentId === input.attachmentId && item.generation === input.generation && item.machineId === input.machineId && item.projectId === input.projectId && item.workspaceId === input.workspaceId);
+    if (input.state === 'lost' && !held) throw new Error('Attachment detach has stale authority');
+    const attachment = input.state === 'lost' ? await runtime.loseAttachment(input.attachmentId, input.generation, 'operator') : runtime.attachments.detach(input);
     runtime.publish();
+    if (attachment.state === 'lost') await this.releaseLostClaims(runtime);
+    await this.scheduleLeases(runtime);
     this.ctx.waitUntil(this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${input.projectId}`).lfsCollect());
     return { attachment };
   }

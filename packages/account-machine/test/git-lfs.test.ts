@@ -100,7 +100,7 @@ it('hydrates R2 on handoff and rejects missing objects before changing the targe
   const f = fixture(); writeFileSync(join(f.root, 'asset.bin'), 'held edit'); const checkpoint = await f.capture(1);
   const target = mkdtempSync(join(tmpdir(), 'gitspace-lfs-target-')); roots.push(target); git(target, 'init', '-b', 'untouched');
   git(target, 'fetch', f.root, `${checkpoint.checkpointRef}:${checkpoint.checkpointRef}`);
-  await expect(restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint, branch: 'main', lfs: { ...f.lfs, store: { has: async () => false, put: async () => {}, get: async () => null } } })).rejects.toThrow('Missing Git LFS object');
+  await expect(restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint, branch: 'main', lfs: { ...f.lfs, store: { has: async () => false, get: async () => null } } })).rejects.toThrow('Missing Git LFS object');
   expect(git(target, 'symbolic-ref', 'HEAD')).toBe('refs/heads/untouched'); expect(existsSync(join(target, 'asset.bin'))).toBe(false);
   await restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint, branch: 'main', lfs: f.lfs });
   expect(readFileSync(join(target, '.git/lfs/objects', f.base.object.oid.slice(0, 2), f.base.object.oid.slice(2, 4), f.base.object.oid))).toEqual(Buffer.from(f.base.bytes));
@@ -178,7 +178,7 @@ it('uses saved lfsconfig for offline origin fallback rather than target working 
   writeFileSync(join(target, '.lfsconfig'), 'wrong working route\n');
   const bin = join(target, 'tools'); mkdirSync(bin); const executable = join(bin, 'git-lfs');
   writeFileSync(executable, '#!/bin/sh\n[ \"$1\" = smudge ] || exit 10\n[ \"$(cat \"$GIT_WORK_TREE/.lfsconfig\")\" = \"[lfs]\nurl = https://lfs.origin.invalid/objects\" ] || exit 11\ncat >/dev/null\nprintf \"committed bytes\"\n'); chmodSync(executable, 0o755);
-  const lfs = { store: { has: async () => false, get: async () => null, put: async () => { throw new Error('restore must not upload'); } }, originEnvironment: async () => ({ PATH: `${bin}:${process.env.PATH ?? ''}` }) };
+  const lfs = { store: { has: async () => false, get: async () => null }, originEnvironment: async () => ({ PATH: `${bin}:${process.env.PATH ?? ''}` }) };
   await restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint, branch: 'main', lfs });
   expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('committed bytes');
   expect(readFileSync(join(target, '.lfsconfig'), 'utf8')).toBe('[lfs]\nurl = https://lfs.origin.invalid/objects\n');
@@ -343,7 +343,7 @@ it('hydrates a transitioned portable object from its confirmed endpoint after ro
   writeFileSync(executable, '#!/bin/sh\n[ "$1" = smudge ] || exit 10\n[ "$(git config lfs.url)" = "https://confirmed.invalid/lfs" ] || exit 11\ncat >/dev/null\nprintf "committed bytes"\n');
   chmodSync(executable, 0o755);
   await restoreGitIntermediateCheckpoint({ repositoryPath: target, checkpoint, branch: 'main', lfs: {
-    store: { has: async () => false, get: async () => null, put: async () => { throw new Error('restore must not upload'); } },
+    store: { has: async () => false, get: async () => null },
     originEnvironment: async () => ({ PATH: `${bin}:${process.env.PATH ?? ''}` }),
     resolveSources: async objects => objects.map(object => ({ ...object, source: 'origin', location: { origin: 'https://origin.invalid/repo.git', endpoint: 'https://confirmed.invalid/lfs' } })),
   } });

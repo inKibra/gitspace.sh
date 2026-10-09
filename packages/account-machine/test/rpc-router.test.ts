@@ -959,9 +959,6 @@ describe('GitSpace Result RPC', () => {
         machine.notes = notes;
         return machine;
       },
-      createSandbox: async () => ({ id: 'sandbox-a', label: 'Sandbox A', state: 'offline', rpcEndpoint: null, kind: 'sandbox', provider: 'cloudflare-sandbox', notes: 'Provisioning', desiredState: 'offline', lifecycleRevision: 1, operationId: null, error: null }),
-      controlMachine: async (action, machineId) => ({ id: machineId, label: machineId === 'machine-a' ? 'Machine A' : 'Sandbox A', state: action === 'sleep' ? 'offline' : 'online', rpcEndpoint: action === 'sleep' ? null : 'https://machine.example/rpc', kind: machineId === 'machine-a' ? 'physical' : 'sandbox', provider: machineId === 'machine-a' ? 'physical' : 'cloudflare-sandbox', notes: action, desiredState: action === 'sleep' ? 'offline' : 'online', lifecycleRevision: 1, operationId: null, error: null }),
-      destroyMachine: async (machineId) => ({ machineId, removed: true }),
       machineId: 'machine-a',
       devices,
       deployment: {
@@ -1395,30 +1392,6 @@ describe('GitSpace Result RPC', () => {
     expect(noted.status).toBe('ok');
     if (noted.status === 'error') throw noted.error;
     expect(noted.value.notes).toBe('Docker and Android SDK');
-    const sandbox = await client.machine.createSandbox({});
-    expect(sandbox.status).toBe('ok');
-    if (sandbox.status === 'error') throw sandbox.error;
-    expect(sandbox.value).toMatchObject({ kind: 'sandbox', state: 'offline' });
-    const physicalSlept = await client.machine.sleep({ machineId: 'machine-a' });
-    expect(physicalSlept.status).toBe('ok');
-    if (physicalSlept.status === 'error') throw physicalSlept.error;
-    expect(physicalSlept.value).toMatchObject({ kind: 'physical', state: 'offline' });
-    const physicalResumed = await client.machine.resume({ machineId: 'machine-a' });
-    expect(physicalResumed.status).toBe('ok');
-    if (physicalResumed.status === 'error') throw physicalResumed.error;
-    expect(physicalResumed.value).toMatchObject({ kind: 'physical', state: 'online' });
-    const slept = await client.machine.sleep({ machineId: 'sandbox-a' });
-    expect(slept.status).toBe('ok');
-    if (slept.status === 'error') throw slept.error;
-    expect(slept.value.state).toBe('offline');
-    const resumed = await client.machine.resume({ machineId: 'sandbox-a' });
-    expect(resumed.status).toBe('ok');
-    if (resumed.status === 'error') throw resumed.error;
-    expect(resumed.value).toMatchObject({ state: 'online', rpcEndpoint: 'https://machine.example/rpc' });
-    const destroyed = await client.machine.destroy({ machineId: 'sandbox-a' });
-    expect(destroyed.status).toBe('ok');
-    if (destroyed.status === 'error') throw destroyed.error;
-    expect(destroyed.value).toEqual({ machineId: 'sandbox-a', removed: true });
 
     const rpcKey = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);
     const consumed = new Set<string>();

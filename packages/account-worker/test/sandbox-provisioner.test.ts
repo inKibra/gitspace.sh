@@ -1,13 +1,13 @@
-import { env, runInDurableObject } from 'cloudflare:test';
+import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
 import { forwardTunnelRequest } from '../src/relay-request.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from '../src/sandbox-provisioner.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { createRelayAuthorization, createSignedControlRequest, credentialProtocolBase64, RELAY_HEARTBEAT_MODE, signedCredentialAuthorityGrantSchema } from '@gitspace/protocol';
 import { controlFleetMachine, provisionManagedSandbox, reconcileFleetMachines } from '../src/application.js';
-import { FleetCatalogDO } from '../src/fleet-catalog.js';
+import { CLOUD_MACHINE_LIMIT, FleetCatalogDO, SANDBOX_PROVISIONING_ATTEMPT_MS, SANDBOX_PROVISIONING_ATTEMPTS } from '../src/fleet-catalog.js';
 
 const image = `docker.io/example/runtime@sha256:${'a'.repeat(64)}`;
 
@@ -278,4 +278,96 @@ it('provisions the tenant relay URL and a managed grant the relay accepts for th
   expect(JSON.parse(await started.promise)).toMatchObject({ type: 'tunnel.request.start', path: '/runtime/execute' });
   socket.close(1000, 'done');
   expect((await tunnel).status).toBe(502);
+});
+
+it('refuses machine provisioning and fleet power control to machine credentials, including a cloud machine’s own key', async () => {
+  const f = await provisionFixture();
+  const machine = await provisionManagedSandbox(env, f.userId, env.ACCOUNT_URL, { kind: 'custom', image });
+  await expect.poll(() => f.catalog.getMachine(machine.id)).toMatchObject({ state: 'online', error: null });
+  const other = { id: 'machine-b', label: 'Laptop', state: 'online' as const, rpcEndpoint: null, kind: 'physical' as const, provider: 'physical' as const, notes: '', desiredState: 'online' as const, lifecycleRevision: 1, operationId: null, error: null };
+  await f.catalog.putMachine(other);
+  // Agent commands on the sandbox run as the same user as the runtime holding this key.
+  const signingPrivateKey = credentialProtocolBase64.decode(f.enrollments[0]!.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY!);
+  const control = (operation: Parameters<typeof createSignedControlRequest>[0]['operation'], payload: Record<string, unknown>) => SELF.fetch('https://auth.test/v1/control', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(createSignedControlRequest({ userId: f.userId, machineId: machine.id, operation, payload, signingPrivateKey })),
+  });
+  for (const [operation, payload] of [
+    ['catalog.sandbox.create', {}],
+    ['catalog.sandbox.create', { image: { kind: 'custom', image } }],
+    ['catalog.machine.sleep', { machineId: other.id }],
+    ['catalog.machine.resume', { machineId: other.id }],
+    ['catalog.machine.destroy', { machineId: machine.id }],
+  ] as const) {
+    const response = await control(operation, payload);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ status: 'error', error: { code: 'MACHINE_FLEET_CONTROL_DENIED' } });
+  }
+  // A machine reports its own observed state; it never edits another machine or its own lifecycle intent.
+  expect((await control('catalog.machine.put', { ...other, desiredState: 'removed' })).status).toBe(403);
+  const reported = await control('catalog.machine.put', { ...(await f.catalog.getMachine(machine.id)), desiredState: 'removed', kind: 'physical', provider: 'physical', notes: 'Self-reported notes' });
+  expect(reported.status).toBe(200);
+  expect(await f.catalog.getMachine(machine.id)).toMatchObject({ desiredState: 'online', kind: 'sandbox', provider: 'cloudflare-sandbox', notes: 'Self-reported notes' });
+  expect(await f.catalog.getMachine(other.id)).toEqual(other);
+  expect((await f.catalog.listMachines()).map(item => item.id).sort()).toEqual([other.id, machine.id].sort());
+  expect(f.calls.filter(path => path === '/v1/sandboxes')).toHaveLength(1);
+});
+
+it('caps concurrently existing cloud machines per account atomically with a clear error', async () => {
+  const f = await provisionFixture();
+  const stopped = { label: 'Stopped sandbox', state: 'offline' as const, rpcEndpoint: null, kind: 'sandbox' as const, provider: 'cloudflare-sandbox' as const, notes: '', desiredState: 'offline' as const, lifecycleRevision: 1, operationId: null, error: null };
+  for (let index = 0; index < CLOUD_MACHINE_LIMIT - 1; index += 1) await f.catalog.putMachine({ ...stopped, id: `sandbox-held-${index}` });
+  // Paired computers are never counted against the cloud cap.
+  await f.catalog.putMachine({ ...stopped, id: 'laptop', kind: 'physical', provider: 'physical', state: 'online', desiredState: 'online' });
+  const results = await Promise.allSettled([
+    provisionManagedSandbox(env, f.userId, env.ACCOUNT_URL, { kind: 'custom', image }),
+    provisionManagedSandbox(env, f.userId, env.ACCOUNT_URL, { kind: 'custom', image }),
+  ]);
+  expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+  const refused = results.find(result => result.status === 'rejected');
+  expect(refused?.status === 'rejected' && String(refused.reason)).toContain(`${CLOUD_MACHINE_LIMIT} cloud machines`);
+  expect((await f.catalog.listMachines()).filter(item => item.provider === 'cloudflare-sandbox')).toHaveLength(CLOUD_MACHINE_LIMIT);
+  await expect(provisionManagedSandbox(env, f.userId, env.ACCOUNT_URL, { kind: 'custom', image })).rejects.toThrow(`${CLOUD_MACHINE_LIMIT} cloud machines`);
+  const enrollments = await runInDurableObject(f.catalog, (_instance, state) => state.storage.sql.exec('SELECT machine_id FROM sandbox_enrollments').toArray().length);
+  expect(enrollments).toBeLessThanOrEqual(1);
+});
+
+it('retries interrupted provisioning on its lease, then destroys the sandbox and ends in error so it cannot keep billing', async () => {
+  const f = await provisionFixture();
+  const interrupted = Promise.withResolvers<void>();
+  // Every attempt is accepted by the provider and then never answers.
+  f.hold.enroll = interrupted.promise;
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    const machine = await provisionManagedSandbox(env, f.userId, env.ACCOUNT_URL, { kind: 'custom', image });
+    for (let attempt = 1; attempt <= SANDBOX_PROVISIONING_ATTEMPTS; attempt += 1) {
+      await expect.poll(() => f.enrollments.length).toBe(attempt);
+      expect(await f.catalog.getMachine(machine.id)).toMatchObject({ state: 'provisioning' });
+      now += SANDBOX_PROVISIONING_ATTEMPT_MS - 1;
+      await runInDurableObject(f.catalog, (instance: FleetCatalogDO) => instance.alarm());
+      expect(f.enrollments.length).toBe(attempt);
+      now += 1;
+      await runInDurableObject(f.catalog, (instance: FleetCatalogDO) => instance.alarm());
+    }
+    const proof = createSignedControlRequest({ userId: f.userId, machineId: machine.id, operation: 'catalog.machine.list', payload: {}, signingPrivateKey: credentialProtocolBase64.decode(f.enrollments[0]!.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY!) });
+    expect(f.calls).toContain(`/v1/sandboxes/${machine.id}/destroy`);
+    expect(await f.catalog.getMachine(machine.id)).toMatchObject({ state: 'error', desiredState: 'offline', operationId: null, error: expect.stringContaining('cannot keep billing') });
+    expect(await f.catalog.hasPendingSandbox(machine.id)).toBe(false);
+    expect(await f.vault.authorizeControl(proof, 'space.control')).toMatchObject({ status: 'error' });
+    await expect(controlFleetMachine(env, f.userId, machine.id, 'resume')).rejects.toThrow('cannot keep billing');
+    // The fenced attempts finishing late cannot resurrect it.
+    interrupted.resolve();
+    await runInDurableObject(f.catalog, async (instance: FleetCatalogDO) => {
+      const draining = instance as unknown as { provisioningRuns: Map<string, Promise<void>> };
+      await Promise.all(draining.provisioningRuns.values());
+    });
+    expect(await f.catalog.getMachine(machine.id)).toMatchObject({ state: 'error', operationId: null });
+    expect(f.enrollments).toHaveLength(SANDBOX_PROVISIONING_ATTEMPTS);
+    expect(await controlFleetMachine(env, f.userId, machine.id, 'destroy')).toEqual({ machineId: machine.id, removed: true });
+    expect(await f.catalog.listMachines()).toEqual([]);
+  } finally {
+    clock.mockRestore();
+    interrupted.resolve();
+  }
 });

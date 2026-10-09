@@ -68,6 +68,8 @@ interface PendingLifecycleRun {
 export class WorkspaceEnvironmentManager {
   private readonly accepting = new Map<string, { phase: LifecycleRunPhase; interactive?: boolean; promise: Promise<LifecycleRun> }>();
   private readonly active = new Map<string, { projectId: string; spaceId: string; terminalName: string; directory?: string }>();
+  /** Journals written for a claim whose authority response is still pending. */
+  private readonly claiming = new Set<string>();
   constructor(
     private readonly database: GitSpaceDatabase,
     private readonly secrets: EnvironmentSecretMaterializer | undefined,
@@ -318,38 +320,47 @@ export class WorkspaceEnvironmentManager {
     const files = await readdir(this.options.stateRoot).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error));
     for (const file of files.filter((name) => name.endsWith('.json'))) {
       try {
-        const pending = JSON.parse(await readFile(join(this.options.stateRoot, file), 'utf8')) as PendingLifecycleRun;
+        const journal = join(this.options.stateRoot, file);
+        const pending = JSON.parse(await readFile(journal, 'utf8')) as PendingLifecycleRun;
         if (this.active.has(pending.runId) || this.accepting.has(`${pending.spaceId}:${pending.runId}`)) continue;
-        const space = this.database.getSpace(pending.spaceId);
-        if ((space && space.projectId !== pending.projectId) || (!space && !pending.workingDirectory)) throw new EnvironmentError('NotFound', 'Lifecycle recovery space is unavailable');
-        const state = await this.authority.getLifecycleState(pending.projectId, pending.spaceId);
-        const run = state.runs.find((entry) => entry.id === pending.runId);
-        if (!run || !isLifecycleRunActive(run)) {
-          if (run && pending.incidents?.length) await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, { op: 'incidents', runId: run.id, incidents: pending.incidents });
-          await rm(join(this.options.stateRoot, file));
-          await rm(pending.directory, { recursive: true, force: true });
-          continue;
-        }
-        if (pending.started && !pending.completion) {
-          if (!this.runner?.cancelLifecycleRun) continue;
-          await this.runner.cancelLifecycleRun(pending.spaceId, pending.terminalName, pending.workingDirectory);
-        }
-        const secrets = pending.secretNames.length ? await this.secrets?.materializeProjectSecrets(pending.projectId, pending.secretNames, pending.projectId === pending.spaceId ? null : pending.spaceId) : {};
-        if (!secrets) continue;
-        const bindings = await this.readBindings(pending.directory, Object.values(secrets));
-        await this.syncPendingLog(pending);
-        await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, pending.completion ?? {
-          op: 'finish', runId: pending.runId, token: pending.token, status: 'interrupted', exitCode: 1,
-          results: [], output: 'Interrupted lifecycle runner was confirmed stopped. Explicit retry is required.', bindings,
-          failure: { code: 'Interrupted', message: 'Runner restarted before lifecycle completion', context: { runId: pending.runId } },
-          incidents: pending.incidents,
-        });
-        await rm(join(this.options.stateRoot, file));
-        await rm(pending.directory, { recursive: true, force: true });
+        await this.reconcileJournal(journal, pending);
       } catch (error) {
         console.error('[gitspace-lifecycle] interrupted run requires explicit recovery', file, error instanceof Error ? error.message : String(error));
       }
     }
+  }
+
+  /** Settles a run journal no live execution here owns. A run the authority never recorded (a refused or lost claim) or
+   * already ended leaves nothing to recover; an active one is stopped if it started, then finished as interrupted.
+   * Returns false while the outcome cannot be confirmed yet; the journal is then retained. */
+  private async reconcileJournal(journal: string, pending: PendingLifecycleRun): Promise<boolean> {
+    const space = this.database.getSpace(pending.spaceId);
+    if ((space && space.projectId !== pending.projectId) || (!space && !pending.workingDirectory)) throw new EnvironmentError('NotFound', 'Lifecycle recovery space is unavailable');
+    const state = await this.authority.getLifecycleState(pending.projectId, pending.spaceId);
+    const run = state.runs.find((entry) => entry.id === pending.runId);
+    if (!run || !isLifecycleRunActive(run)) {
+      if (run && pending.incidents?.length) await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, { op: 'incidents', runId: run.id, incidents: pending.incidents });
+      await rm(journal);
+      await rm(pending.directory, { recursive: true, force: true });
+      return true;
+    }
+    if (pending.started && !pending.completion) {
+      if (!this.runner?.cancelLifecycleRun) return false;
+      await this.runner.cancelLifecycleRun(pending.spaceId, pending.terminalName, pending.workingDirectory);
+    }
+    const secrets = pending.secretNames.length ? await this.secrets?.materializeProjectSecrets(pending.projectId, pending.secretNames, pending.projectId === pending.spaceId ? null : pending.spaceId) : {};
+    if (!secrets) return false;
+    const bindings = await this.readBindings(pending.directory, Object.values(secrets));
+    await this.syncPendingLog(pending);
+    await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, pending.completion ?? {
+      op: 'finish', runId: pending.runId, token: pending.token, status: 'interrupted', exitCode: 1,
+      results: [], output: 'Interrupted lifecycle runner was confirmed stopped. Explicit retry is required.', bindings,
+      failure: { code: 'Interrupted', message: 'Runner restarted before lifecycle completion', context: { runId: pending.runId } },
+      incidents: pending.incidents,
+    });
+    await rm(journal);
+    await rm(pending.directory, { recursive: true, force: true });
+    return true;
   }
 
   async runLog(spaceId: string, runId: string, offset = 0) {
@@ -390,16 +401,31 @@ export class WorkspaceEnvironmentManager {
     const journalId = (await executionHash({ kind: 'check', command: JSON.stringify([spaceId, runId]) })).slice('sha256:'.length);
     const journal = join(this.options.stateRoot, `${journalId}.json`);
     await mkdir(this.options.stateRoot, { recursive: true, mode: 0o700 });
+    if (this.claiming.has(journal) || this.active.has(runId)) throw new EnvironmentError('RunConflict', 'Operation is already executing; observe its durable state', { runId });
+    // An earlier attempt of this run that never started left its journal; settle it so the claim can be retried.
+    const stale = await readFile(journal, 'utf8').then((text) => JSON.parse(text) as PendingLifecycleRun, (error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (stale && (stale.started || !await this.reconcileJournal(journal, stale))) throw new EnvironmentError('RecoveryRequired', 'A previous attempt of this lifecycle run awaits reconciliation', { runId });
     const directory = await mkdtemp(join(tmpdir(), 'gitspace-lifecycle-'));
     const pending: PendingLifecycleRun = { projectId: current.projectId, spaceId, runId, token, terminalName, directory, secretNames, ...(workingDirectory ? { workingDirectory } : {}) };
-    // Write ownership capability before cloud acceptance; a lost claim response is recoverable.
-    await writeFile(journal, JSON.stringify(pending), { mode: 0o600, flag: 'wx' });
-    const state = await this.authority.mutateLifecycleState(current.projectId, spaceId, {
-      op: 'claim', runId, ownershipToken: token, phase, profile: current.selectedProfile, executionHashes: planned.map((execution) => execution.hash),
-      interactive: request?.interactive ?? false,
-      generation: phase.startsWith('cloud/') || workingDirectory ? null : space.generation, rerun, terminalName, ...(request?.deadlineAt ? { deadlineAt: request.deadlineAt } : {}),
-      ...(attachment ? { attachment: { attachmentId: attachment.attachment.attachmentId, generation: attachment.attachment.generation } } : {}),
-    });
+    let state: LifecycleState;
+    this.claiming.add(journal);
+    try {
+      // Write ownership capability before cloud acceptance; a lost claim response is recoverable.
+      await writeFile(journal, JSON.stringify(pending), { mode: 0o600, flag: 'wx' });
+      state = await this.authority.mutateLifecycleState(current.projectId, spaceId, {
+        op: 'claim', runId, ownershipToken: token, phase, profile: current.selectedProfile, executionHashes: planned.map((execution) => execution.hash),
+        interactive: request?.interactive ?? false,
+        generation: phase.startsWith('cloud/') || workingDirectory ? null : space.generation, rerun, terminalName, ...(request?.deadlineAt ? { deadlineAt: request.deadlineAt } : {}),
+        ...(attachment ? { attachment: { attachmentId: attachment.attachment.attachmentId, generation: attachment.attachment.generation } } : {}),
+      });
+    } catch (error) {
+      // A refusal is the authority's answer: it recorded no run, so this claim leaves nothing to recover.
+      if (error instanceof EnvironmentError) {
+        await rm(journal, { force: true });
+        await rm(directory, { recursive: true, force: true });
+      }
+      throw error;
+    } finally { this.claiming.delete(journal); }
     const acceptedRun = state.runs.find((run) => run.id === runId);
     if (!acceptedRun) throw new EnvironmentError('RunConflict', 'Authority did not persist the accepted lifecycle run', { runId });
     if (state.claim?.status === 'skipped' || state.claim?.status === 'existing') {

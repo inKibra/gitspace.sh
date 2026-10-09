@@ -7,18 +7,19 @@ export type CloudGitLfsStoreOptions = {
   projectId: string;
   blobs: CheckpointBlobStore;
   encryptionKey: Uint8Array;
-  publicationId?: string;
   controlOptions: { baseUrl: string; userId: string; machineId: string; signingPrivateKey: Uint8Array; fetcher?: typeof fetch };
 };
-
-export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): Promise<GitLfsStore & {
-  releasePublication(): Promise<void>;
+/** Restores read verified objects; they hold no publication and so can neither pin nor upload. */
+export type CloudGitLfsReader = Pick<GitLfsStore, 'has' | 'get'> & {
   confirmOrigin(confirmation: GitLfsOriginConfirmation): Promise<void>;
   resolveSources(objects: GitLfsSnapshot['objects']): Promise<GitLfsSnapshot['objects']>;
-}> {
+};
+/** Every pin and upload belongs to the publication identity fixed at construction until it is released. */
+export type CloudGitLfsPublisher = CloudGitLfsReader & Required<GitLfsStore> & { releasePublication(): Promise<void> };
+
+async function cloudGitLfs(options: CloudGitLfsStoreOptions) {
   const root = `lfs/${projectStorageRoot(options.projectId)}/objects`;
   const encrypted = new EncryptedCheckpointBlobStore(options.blobs, await deriveArtifactScopeKey(options.encryptionKey, `lfs:${options.projectId}`));
-  const pinned = new Set<string>();
   const objectKey = (object: GitLfsObject) => `${root}/${GitLfsObjectSchema.parse(object).oid}`;
   const control = async <S extends z.ZodType>(operation: Extract<Parameters<typeof createSignedControlRequest>[0]['operation'], `lfs.${string}`>, payload: Record<string, unknown>, schema: S): Promise<z.output<S>> => {
     const request = createSignedControlRequest({ ...options.controlOptions, operation, payload: { projectId: options.projectId, ...payload } });
@@ -30,12 +31,6 @@ export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): 
     const bytes = response.body ? await collectBytes(streamBytes(response.body), 64 * 1024 * 1024) : new Uint8Array();
     const envelope = z.object({ status: z.literal('ok'), value: z.unknown() }).parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
     return schema.parse(envelope.value);
-  };
-  const pin = async (object: GitLfsObject) => {
-    GitLfsObjectSchema.parse(object);
-    if (!options.publicationId || pinned.has(object.oid)) return;
-    await control('lfs.pin', { publicationId: options.publicationId, objects: [object] }, GitLfsProtectionSchema);
-    pinned.add(object.oid);
   };
   const verify = async function* (object: GitLfsObject, source: AsyncIterable<Uint8Array>) {
     const hash = new Bun.CryptoHasher('sha256');
@@ -59,23 +54,50 @@ export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): 
     for await (const _chunk of source) { /* Exhaustion verifies the complete object. */ }
     return true;
   };
-  return {
+  const reader: CloudGitLfsReader = {
     get,
+    has,
+    async confirmOrigin(confirmation) {
+      await control('lfs.originConfirmed', GitLfsOriginConfirmationSchema.parse(confirmation), z.null());
+    },
+    async resolveSources(objects) {
+      const requested = GitLfsSnapshotSchema.shape.objects.parse(objects);
+      const resolved = await control('lfs.sources', { objects: requested }, GitLfsSnapshotSchema.shape.objects);
+      if (resolved.length !== requested.length || resolved.some((object, index) => object.oid !== requested[index]?.oid || object.size !== requested[index]?.size)) throw new Error('LFS source resolution changed the requested inventory');
+      return resolved;
+    },
+  };
+  return { reader, control, verify, encrypted, objectKey };
+}
+
+export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): Promise<CloudGitLfsReader> {
+  return (await cloudGitLfs(options)).reader;
+}
+
+export async function createCloudGitLfsPublisher(options: CloudGitLfsStoreOptions & { publicationId: string }): Promise<CloudGitLfsPublisher> {
+  const { reader, control, verify, encrypted, objectKey } = await cloudGitLfs(options);
+  const { publicationId } = options;
+  const pinned = new Set<string>();
+  const pin = async (object: GitLfsObject) => {
+    GitLfsObjectSchema.parse(object);
+    if (pinned.has(object.oid)) return;
+    await control('lfs.pin', { publicationId, objects: [object] }, GitLfsProtectionSchema);
+    pinned.add(object.oid);
+  };
+  return {
+    ...reader,
     async protect(objects) {
-      if (!options.publicationId) throw new Error('LFS protection requires a durable publication identity');
       const requested = GitLfsObjectSchema.array().parse(objects);
-      const result = await control('lfs.pin', { publicationId: options.publicationId, objects: requested }, GitLfsProtectionSchema);
+      const result = await control('lfs.pin', { publicationId, objects: requested }, GitLfsProtectionSchema);
       const sizes = new Map(requested.map(object => [object.oid, object.size]));
       if (result.objects.some(object => sizes.get(object.oid) !== object.size)) throw new Error('LFS protection returned an unrequested object');
       for (const object of requested) pinned.add(object.oid);
       return result.objects;
     },
-    async has(object) { await pin(object); return has(object); },
+    async has(object) { await pin(object); return reader.has(object); },
     async put(object, source) {
-      GitLfsObjectSchema.parse(object);
-      if (!options.publicationId) throw new Error('LFS upload requires a durable publication identity');
       await pin(object);
-      if (await has(object)) {
+      if (await reader.has(object)) {
         for await (const _chunk of verify(object, source)) { /* Verify even a deduplicated source. */ }
         return;
       }
@@ -87,21 +109,12 @@ export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): 
       try { await encrypted.putStream(objectKey(object), verified, object.size); }
       catch (error) {
         // Only a fully verified upload may accept independently encrypted winning bytes.
-        if (!sourceVerified || !await has(object)) throw error;
+        if (!sourceVerified || !await reader.has(object)) throw error;
       }
     },
     async releasePublication() {
-      if (options.publicationId) await control('lfs.release', { publicationId: options.publicationId }, z.null());
+      await control('lfs.release', { publicationId }, z.null());
       pinned.clear();
-    },
-    async confirmOrigin(confirmation) {
-      await control('lfs.originConfirmed', GitLfsOriginConfirmationSchema.parse(confirmation), z.null());
-    },
-    async resolveSources(objects) {
-      const requested = GitLfsSnapshotSchema.shape.objects.parse(objects);
-      const resolved = await control('lfs.sources', { objects: requested }, GitLfsSnapshotSchema.shape.objects);
-      if (resolved.length !== requested.length || resolved.some((object, index) => object.oid !== requested[index]?.oid || object.size !== requested[index]?.size)) throw new Error('LFS source resolution changed the requested inventory');
-      return resolved;
     },
   };
 }

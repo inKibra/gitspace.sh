@@ -218,13 +218,10 @@ export class CloudFilesProof extends DurableObject {
     const replayPushes = pushes;
     assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written', message: 'Add the new greeting file' }, 'write-once'), written);
     assert.equal(pushes, replayPushes);
-    attachments.transition(attached.attachmentId, attached.generation, 'lost'); caches = attachments.list();
+    attachments.lose(attached.attachmentId, attached.generation, 'operator'); caches = attachments.list();
     assert.equal((await invoke('write', { path: 'lost.txt', content: 'with lost cache' })).status, 'completed');
-    attachments.transition(attached.attachmentId, attached.generation, 'draining');
-    assert.throws(() => attachments.transition(attached.attachmentId, attached.generation, 'detached'), /final snapshot/);
-    assert.throws(() => attachments.recordCacheFlush(attached.attachmentId, attached.generation + 1));
-    attachments.recordCacheFlush(attached.attachmentId, attached.generation);
-    attachments.transition(attached.attachmentId, attached.generation, 'detached'); caches = attachments.list();
+    assert.throws(() => attachments.transition(attached.attachmentId, attached.generation, 'draining'), /Invalid attachment transition/);
+    assert.throws(() => attachments.recordCacheFlush(attached.attachmentId, attached.generation), /draining cache/);
     const afterDetach = await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach');
     assert.equal(afterDetach.status, 'completed');
     assert.deepEqual((await invoke('read', { path: 'after-detach.txt' })).content, [{ type: 'text', text: 'resumed' }]);

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, collectBytes, GitLfsObjectSchema, type GitLfsObject, type GitLfsStore } from '@gitspace/protocol-workspace';
-import { createCloudGitLfsStore } from '../src/cloud-lfs-store.js';
+import { createCloudGitLfsPublisher, createCloudGitLfsStore } from '../src/cloud-lfs-store.js';
 import { FileCheckpointBlobStore } from '../src/portable-space-lifecycle.js';
 import { deriveArtifactScopeKey, encryptArtifactBytes } from '@gitspace/protocol';
 import { CloudDataCheckpointBlobStore } from '../src/cloud-space-authority.js';
@@ -12,7 +12,7 @@ const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
 async function* source(bytes: Uint8Array) { yield bytes; }
-async function downloaded(store: GitLfsStore, object: GitLfsObject) {
+async function downloaded(store: Pick<GitLfsStore, 'get'>, object: GitLfsObject) {
   const stream = await store.get(object);
   return stream === null ? null : collectBytes(stream, object.size);
 }
@@ -28,7 +28,7 @@ it('pins before upload, roundtrips encrypted payloads, deduplicates, and rejects
     return rejectPin && request.operation === 'lfs.pin' ? Response.json({ status: 'error' }, { status: 403 }) : Response.json({ status: 'ok', value: request.operation === 'lfs.pin' ? { objects: [] } : null });
   }, { preconnect: fetch.preconnect });
   const options = { projectId: 'project-a', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), publicationId: 'capture-a', controlOptions: { userId: 'account-a', machineId: 'machine-a', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher } };
-  const store = await createCloudGitLfsStore(options);
+  const store = await createCloudGitLfsPublisher(options);
   await expect(store.put(object, source(bytes))).rejects.toThrow('403');
   expect(await store.get(object)).toBeNull();
   rejectPin = false;
@@ -44,16 +44,6 @@ it('pins before upload, roundtrips encrypted payloads, deduplicates, and rejects
   await store.releasePublication();
 });
 
-it('does not allow a read-only restore adapter to upload unpinned objects', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'gitspace-lfs-restore-'));
-  roots.push(root);
-  const bytes = new Uint8Array([1, 2, 3]);
-  const object = GitLfsObjectSchema.parse({ oid: new Bun.CryptoHasher('sha256').update(bytes).digest('hex'), size: bytes.length });
-  const store = await createCloudGitLfsStore({ projectId: 'project-a', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), controlOptions: { userId: 'account-a', machineId: 'machine-a', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21) } });
-  await expect(store.put(object, source(bytes))).rejects.toThrow('publication identity');
-  expect(await store.get(object)).toBeNull();
-});
-
 it('streams a multi-chunk object across arbitrary upload boundaries and verifies completion', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-lfs-stream-'));
   roots.push(root);
@@ -61,7 +51,7 @@ it('streams a multi-chunk object across arbitrary upload boundaries and verifies
   const last = new Uint8Array([9, 8, 7]);
   const object = GitLfsObjectSchema.parse({ oid: new Bun.CryptoHasher('sha256').update(first).update(last).digest('hex'), size: first.length + last.length });
   const fetcher = Object.assign(async () => Response.json({ status: 'ok', value: { objects: [] } }), { preconnect: fetch.preconnect });
-  const store = await createCloudGitLfsStore({ projectId: 'stream', publicationId: 'upload', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), controlOptions: { userId: 'a', machineId: 'b', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher } });
+  const store = await createCloudGitLfsPublisher({ projectId: 'stream', publicationId: 'upload', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), controlOptions: { userId: 'a', machineId: 'b', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher } });
   await store.put(object, (async function* () {
     yield first.subarray(0, 13);
     yield first.subarray(13);
@@ -113,7 +103,7 @@ it('does not publish a mismatched streaming source and closes it on overflow', a
   const bytes = new Uint8Array([1, 2, 3]);
   const object = GitLfsObjectSchema.parse({ oid: new Bun.CryptoHasher('sha256').update(bytes).digest('hex'), size: bytes.length });
   const fetcher = Object.assign(async () => Response.json({ status: 'ok', value: { objects: [] } }), { preconnect: fetch.preconnect });
-  const store = await createCloudGitLfsStore({ projectId: 'stream', publicationId: 'upload', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), controlOptions: { userId: 'a', machineId: 'b', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher } });
+  const store = await createCloudGitLfsPublisher({ projectId: 'stream', publicationId: 'upload', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), controlOptions: { userId: 'a', machineId: 'b', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher } });
   let closed = false;
   await expect(store.put(object, (async function* () {
     try { yield new Uint8Array(4); throw new Error('Read past overflow'); }

@@ -129,6 +129,7 @@ import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
 import { accountAccessResponse, activeAccount, authorizeControl } from './account-access.js';
 import { machineProviderFor } from './machine-providers.js';
+import { backfillRuntimeLeases, releaseMachineAttachments } from './runtime-machine-loss.js';
 import {
   McpConnectionNotFoundError,
   McpConnectionRevisionConflictError,
@@ -230,6 +231,11 @@ type MachinePairingValue =
   | { state: 'pending' }
   | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; apiUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant; artifactKey: string };
 const PAIRING_CAPABILITIES: DeviceCapability[] = ['devices.manage', 'fleet.control', 'rpc.write', 'session.prompt', 'deployment.control'];
+/** Agent commands share a machine's OS user and can read its signing key (e.g. /proc/<pid>/environ),
+ * so signed machine control never carries fleet power; only user devices with fleet.control do. */
+const MACHINE_DENIED_FLEET_OPERATIONS: Readonly<Record<string, true>> = {
+  'catalog.sandbox.create': true, 'catalog.machine.sleep': true, 'catalog.machine.resume': true, 'catalog.machine.destroy': true,
+};
 
 function credentialIdentity(credential: StoredVaultCredential): string | null {
   if (credential.type === 'api_key') return null;
@@ -2715,20 +2721,24 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
   putMachine(machine: FleetMachineDefinition): Promise<FleetMachineDefinition>;
   removeMachine(machineId: string, destroyed?: boolean): Promise<boolean>;
 }): Promise<FleetMachineDefinition[]> {
+  // Fleet reconciliation retries this until every workspace has been swept once.
+  await backfillRuntimeLeases(env, userId).catch(error => console.error('Runtime lease backfill will retry', error));
   for (const current of await catalog.listMachines()) {
     if (current.provider === 'physical') continue;
-    if (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).hasPendingSandbox(current.id)) continue;
-    if (cloudImageOperationActive(await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).cloudImage(current.id))) continue;
+    const durableCatalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
+    if (await durableCatalog.hasPendingSandbox(current.id) || await durableCatalog.abandonedSandbox(current.id)) continue;
+    if (cloudImageOperationActive(await durableCatalog.cloudImage(current.id))) continue;
     const provider = machineProviderFor(env, userId, current);
     let stopping = false;
     try {
-      if (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).pendingMachineDiscard(current.id)) {
+      if (await durableCatalog.pendingMachineDiscard(current.id)) {
         stopping = true;
         await checkpointAndStopFleetMachine(env, userId, catalog, current);
         continue;
       }
       if (current.desiredState === 'removed') {
         await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
+        await releaseMachineAttachments(env, userId, current.id, 'machine-destroyed');
         await credentialVault(env, userId).removeManagedDevice(current.id);
         await provider.destroy(current);
         await catalog.removeMachine(current.id, true);
@@ -2771,12 +2781,27 @@ export async function controlFleetMachine(env: Env, userId: string, machineId: s
     if (provisioning) return provisioning;
   } else if (action === 'sleep' && await catalog.hasPendingSandbox(machineId)) {
     throw new Error('Finish sandbox provisioning before sleeping the machine');
+  } else if (action === 'sleep' && await catalog.abandonedSandbox(machineId)) {
+    throw new Error(existing.error ?? 'Sandbox provisioning failed permanently; destroy this entry and create a new machine.');
   }
   if (action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline' && !await catalog.pendingMachineDiscard(machineId)) return existing;
   if (discardConfirmation && (discardConfirmation.machineId !== machineId || discardConfirmation.action !== action)) throw new Error('Discard confirmation does not match this machine operation');
   if (action === 'sleep') return checkpointAndStopFleetMachine(env, userId, catalog, existing, undefined, action, discardConfirmation);
-  if (action === 'destroy' && existing.provider !== 'physical' && !await catalog.hasPendingSandbox(machineId)) {
-    existing = await checkpointAndStopFleetMachine(env, userId, catalog, existing, undefined, action, discardConfirmation);
+  if (action === 'destroy' && existing.provider !== 'physical' && !await catalog.hasPendingSandbox(machineId) && !await catalog.abandonedSandbox(machineId)) {
+    const approved = discardConfirmation ? await catalog.forcedDiscardScope(discardConfirmation) : null;
+    if (approved) return forceDestroyCloudMachine(env, userId, catalog, existing, approved);
+    try {
+      existing = await checkpointAndStopFleetMachine(env, userId, catalog, existing, undefined, action, discardConfirmation);
+    } catch (error) {
+      if (error instanceof MachineDiscardRequired) throw error;
+      // The cloud can always end a cloud machine: when saving fails for any reason, offer explicit loss
+      // back to each workspace's last completed checkpoint rather than leaving it undestroyable.
+      const workspaces = await ownedWorkspaceScopes(env, userId, catalog, machineId);
+      throw new MachineDiscardRequired({
+        message: `Saving this machine failed (${(error instanceof Error ? error.message : String(error)).slice(0, 500)}). Destroying it now discards everything on it since each workspace's last completed checkpoint.`,
+        confirmation: await catalog.issueForcedDiscard(machineId, workspaces), workspaces,
+      });
+    }
   }
   const desiredState = action === 'resume' ? 'online' : 'removed';
   if (action === 'destroy') await assertMachineHasNoOpenSpaces(env, userId, catalog, machineId);
@@ -2787,6 +2812,7 @@ export async function controlFleetMachine(env: Env, userId: string, machineId: s
   const provider = machineProviderFor(env, userId, transition);
   try {
     if (action === 'destroy') {
+      await releaseMachineAttachments(env, userId, machineId, 'machine-destroyed');
       await credentialVault(env, userId).removeManagedDevice(machineId);
       await provider.destroy(transition);
       await catalog.removeMachine(machineId, true);
@@ -2800,11 +2826,52 @@ export async function controlFleetMachine(env: Env, userId: string, machineId: s
     throw error;
   }
 }
+
+/** Legacy machine-held workspaces this machine still owns, as the scope a discard of its local work would cover. */
+export async function ownedWorkspaceScopes(env: Env, userId: string, catalog: { listSpaces(): Promise<PortableSpaceDefinition[]> }, machineId: string): Promise<MachineDiscardScope[]> {
+  const scopes: MachineDiscardScope[] = [];
+  for (const definition of await catalog.listSpaces()) {
+    const placement = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${definition.spaceId}`).get();
+    if (placement?.machineId === machineId && placement.state !== 'closed') scopes.push({ projectId: placement.projectId, workspaceId: placement.spaceId, generation: placement.generation, reason: 'unpublished-local-work' });
+  }
+  return scopes;
+}
+
+/** Ends a cloud machine whose runtime could not checkpoint, once the user approved the exact loss scope.
+ * The provider destroy precedes fencing, so the machine cannot write after its workspaces return to their
+ * last completed checkpoints. Every step is idempotent: a retry after a partial failure converges. */
+async function forceDestroyCloudMachine(env: Env, userId: string, catalog: DurableObjectStub<FleetCatalogDO>, existing: FleetMachineDefinition, approved: MachineDiscardScope[]): Promise<{ machineId: string; removed: true }> {
+  const owned = await ownedWorkspaceScopes(env, userId, catalog, existing.id);
+  if (owned.some(scope => !approved.some(item => item.workspaceId === scope.workspaceId && item.projectId === scope.projectId && item.generation === scope.generation))) {
+    throw new MachineDiscardRequired({
+      message: 'Workspace ownership on this machine changed after you approved discarding its unsaved work. Review the current loss scope before destroying it.',
+      confirmation: await catalog.issueForcedDiscard(existing.id, owned), workspaces: owned,
+    });
+  }
+  const transition = await catalog.putMachine({ ...existing, state: 'deleting', desiredState: 'removed', lifecycleRevision: existing.lifecycleRevision + 1, operationId: crypto.randomUUID(), error: null });
+  try {
+    await releaseMachineAttachments(env, userId, existing.id, 'machine-destroyed');
+    await credentialVault(env, userId).removeManagedDevice(existing.id);
+    await machineProviderFor(env, userId, transition).destroy(transition);
+    for (const scope of owned) {
+      const fenced = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${scope.workspaceId}`)
+        .discardStoppedLocalWork({ userId, machineId: existing.id, projectId: scope.projectId, spaceId: scope.workspaceId, expectedGeneration: scope.generation });
+      if (fenced.status === 'error') throw new Error(fenced.failure.message);
+    }
+    await catalog.finishMachineDiscard(existing.id);
+    await catalog.removeMachine(existing.id, true);
+    return { machineId: existing.id, removed: true };
+  } catch (error) {
+    await catalog.putMachine({ ...transition, state: 'error', lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
 export async function provisionManagedSandbox(env: Env, userId: string, controlUrl: string, imageSelection?: CloudImageSelection): Promise<FleetMachineDefinition> {
   if (userId !== env.ACCOUNT_ID) throw new Error('Machine belongs to another account');
   const storageNamespace = env.USER_STORAGE as DurableObjectNamespace<UserStorageDO>;
   await storageNamespace.getByName(userId).requireReady(userId);
   const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
+  await catalog.assertCloudMachineCapacity();
   const choice = imageSelection ? await resolveCloudImage(env, cloudImageSelectionSchema.parse(imageSelection)) : await catalog.cloudImageDefault();
   const vault = credentialVault(env, userId);
   const rootPublicKey = await vault.rootPublicKey();
@@ -2852,6 +2919,10 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
       GITSPACE_RPC_PORT: '8081',
       GITSPACE_RPC_HOST: '0.0.0.0',
     },
+  }).catch(async (error: unknown) => {
+    // The cap can race between the early check and enrollment; a refused machine keeps no usable credential.
+    await vault.removeManagedDevice(machineId);
+    throw error;
   });
 }
 
@@ -3242,6 +3313,7 @@ const worker = {
         if (authorized.status === 'error') return Response.json(authorized, { status: 401 });
         const denied = accountAccessResponse(await activeAccount(env, body.userId));
         if (denied) return denied;
+        await releaseMachineAttachments(env, body.userId, body.machineId, 'machine-revoked');
         await vault.removeManagedDevice(body.machineId);
         const removed = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).removeMachine(body.machineId);
         return Response.json({ status: 'ok', value: { machineId: body.machineId, removed } }, { headers: { 'cache-control': 'private, no-store' } });
@@ -3399,6 +3471,9 @@ const worker = {
         const body = signedControlRequestSchema.parse(await readBoundedJson(request));
         signedControl = body;
         recordSyncRequestParsed(diagnostics, body);
+        if (MACHINE_DENIED_FLEET_OPERATIONS[body.operation] || (body.operation === 'catalog.machine.put' && body.payload.id !== body.machineId)) {
+          return Response.json({ status: 'error', error: { code: 'MACHINE_FLEET_CONTROL_DENIED', message: 'A machine credential may only report its own machine; creating, stopping, starting or destroying machines needs a signed-in device with Fleet control.' } }, { status: 403, headers: { 'cache-control': 'no-store' } });
+        }
         const capability = body.operation.startsWith('inference.') && body.operation !== 'inference.list' ? 'credential.manage'
           : body.operation === 'secrets.materialize' || body.operation === 'mcp.composio.materialize' ? 'credential.access'
           : body.operation === 'secrets.put' || body.operation === 'secrets.delete'
@@ -4225,17 +4300,9 @@ const worker = {
             case 'catalog.space.put': value = await catalog.putSpace(catalogSpacePayload(body.payload)); break;
             case 'catalog.space.get': value = await catalog.getSpace(String(body.payload.spaceId ?? '')); break;
             case 'catalog.space.list': value = await catalog.listSpaces(); break;
-            case 'catalog.machine.put': value = await catalog.putMachine(catalogMachinePayload(body.payload)); break;
+            case 'catalog.machine.put': value = await catalog.reportMachine(catalogMachinePayload(body.payload)); break;
             // Native startup reads this snapshot before readiness; provider reconciliation would wait on startup itself.
             case 'catalog.machine.list': value = await catalog.listMachines(); break;
-            case 'catalog.sandbox.create': value = await provisionManagedSandbox(env, body.userId, env.ACCOUNT_URL, body.payload.image === undefined ? undefined : cloudImageSelectionSchema.parse(body.payload.image)); break;
-            case 'catalog.machine.sleep':
-            case 'catalog.machine.resume':
-            case 'catalog.machine.destroy':
-              value = await controlFleetMachine(env, body.userId, String(body.payload.machineId ?? ''),
-                body.operation === 'catalog.machine.sleep' ? 'sleep' : body.operation === 'catalog.machine.resume' ? 'resume' : 'destroy',
-                body.payload.discardConfirmation === undefined ? undefined : machineDiscardConfirmationSchema.parse(body.payload.discardConfirmation));
-              break;
             default: throw new Error('Unsupported catalog operation');
           }
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'no-store' } });

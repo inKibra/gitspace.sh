@@ -4,7 +4,7 @@ import { defineDoc } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
 import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, PlanDoc, QuestionsDoc, WorkspaceDoc, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
-import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeWatchInput } from '@gitspace/protocol-runtime';
+import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeWatchInput, type RuntimeAttachment, type RuntimeAttachmentLossReason } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, type AttachmentServices } from './attachments.js';
 import { createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
@@ -45,6 +45,10 @@ export type WorkspaceRuntime = {
   qa(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted & { shareDraft?: string }>;
   snapshotCommit(input: RuntimeSnapshotCommitInput): Promise<RuntimeSnapshotCommitResult>;
   lfsRoots(): RuntimeSnapshotCommitInput['checkpoint'][];
+  /** Force a live attachment to terminal `lost` after settling the snapshot publications its machine admitted. */
+  loseAttachment(attachmentId: string, generation: number, reason: RuntimeAttachmentLossReason): Promise<RuntimeAttachment>;
+  /** Lose every live attachment whose lease expired at `now`; returns the attachments it released. */
+  expireAttachments(now: number): Promise<RuntimeAttachment[]>;
   reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void>;
   cronSubmit(input: RuntimeCronInput): Promise<{ conversationId: string }>;
   requestStatus(requestId: string): Promise<RuntimeRequestStatus>;
@@ -313,9 +317,31 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     if (!value) throw new Error('Runtime conversation no longer exists');
     return value;
   }
+  async function loseAttachment(attachmentId: string, generation: number, reason: RuntimeAttachmentLossReason, expiredAt?: number): Promise<RuntimeAttachment> {
+    const attachment = attachments.list().find(item => item.attachmentId === attachmentId && item.generation === generation);
+    if (!attachment) throw new Error('Stale attachment generation');
+    if (attachment.state === 'lost' || attachment.state === 'detached') return attachment;
+    // Only caches publish snapshots. Admission re-authorizes inside its transaction, so none starts after the loss.
+    const unsettled = attachment.role === 'cache' ? await cloudFiles.settleMachine(attachment.machineId) : null;
+    const lost = attachments.lose(attachmentId, generation, reason, { expiredAt, failure: unsettled === null ? null : { operation: 'publish', message: unsettled.slice(0, 2000), attempts: 1, nextRetryAt: null, at: new Date(Date.now()).toISOString() } });
+    await options.storage.sync();
+    publish(); await line;
+    return lost;
+  }
   return {
     harness, attachments, cloudFiles,
     invokeConversationTool,
+    loseAttachment,
+    async expireAttachments(now) {
+      const released: RuntimeAttachment[] = [];
+      for (const overdue of attachments.overdue(now)) {
+        try {
+          const settled = await loseAttachment(overdue.attachmentId, overdue.generation, 'deadline', now);
+          if (settled.state === 'lost') released.push(settled);
+        } catch (error) { options.onReport(error); }
+      }
+      return released;
+    },
     async browserConversation(conversationId) {
       const target = await conversation(conversationId);
       const record = await storage.conversation(target.id, BACKGROUND_CONTEXT);

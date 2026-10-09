@@ -15,7 +15,7 @@ import {
 import { decryptArtifactBytes, encryptArtifactBytes } from '@gitspace/protocol';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import type { ArtifactsRepositoryBinding } from './artifacts-git-remote.js';
-import type { MachineGitLfs } from './git-lfs.js';
+import type { MachineGitLfsAccess } from './git-lfs.js';
 
 export interface CheckpointBlobStore {
   put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`>;
@@ -192,7 +192,7 @@ export class PortableSpaceLifecycle {
     private readonly authority: SpaceCheckpointAuthority,
     private readonly blobs: CheckpointBlobStore,
     private readonly gitRemote: SpaceGitCheckpointRemote,
-    private readonly lfs?: (projectId: string, publicationId?: string) => Promise<MachineGitLfs>,
+    private readonly lfs?: MachineGitLfsAccess,
   ) {}
 
   /** Checkpoint, hand the space back to the cloud, and delete the local copy. */
@@ -211,7 +211,7 @@ export class PortableSpaceLifecycle {
     const identity = { projectId: space.projectId, spaceId: space.spaceId, machineId: space.machineId, expectedGeneration: space.expectedGeneration };
     const operation = await this.authority.beginClose(identity);
     let quiesced = false;
-    const lfs = await this.lfs?.(space.projectId, `portable:${space.spaceId}:${operation.revision}`);
+    const lfs = await this.lfs?.publish(space.projectId, `portable:${space.spaceId}:${operation.revision}`);
     try {
       quiesced = true;
       await runtime.quiesce();
@@ -290,7 +290,7 @@ export class PortableSpaceLifecycle {
         repositoryPath: space.repositoryPath,
         branch: manifest.repository.branch,
         checkpoint: manifest.repository,
-        lfs: await this.lfs?.(space.projectId),
+        lfs: await this.lfs?.read(space.projectId),
       });
       const artifactManifest = await requiredBlob(this.blobs, spaceArtifactManifestKey(space.projectId, space.spaceId, manifest.revision, manifest.artifacts.generation), manifest.artifacts.manifestHash);
       const agent: PortableAgentSnapshot = manifest.agent.kind === 'cloud' ? manifest.agent : {

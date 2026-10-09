@@ -165,13 +165,29 @@ export interface ArtifactManifestAuthority {
   listArtifactScopes?(projectId: string): Promise<CanonicalArtifactScope[]>;
 }
 
+/** A handoff that neither completes nor resumes must not fence its session forever: quiescence is a lease. */
+export const QUIESCE_LEASE_MS = 15 * 60_000;
+
+/** Sessions whose admission is closed for a handoff. Quiescing again renews the lease; a lapsed entry is gone. */
+class QuiesceLeases {
+  private readonly expiresAt = new Map<string, number>();
+  add(sessionId: string): void { this.expiresAt.set(sessionId, Date.now() + QUIESCE_LEASE_MS); }
+  has(sessionId: string): boolean {
+    const expiresAt = this.expiresAt.get(sessionId);
+    if (expiresAt === undefined) return false;
+    if (expiresAt > Date.now()) return true;
+    this.expiresAt.delete(sessionId);
+    return false;
+  }
+  delete(sessionId: string): boolean { return this.expiresAt.delete(sessionId); }
+}
 
 export class MachineSessionCoordinator {
   private readonly liveTranscripts = new Map<string, TranscriptIndex>();
   private readonly transcriptIndexes = new Map<string, TranscriptIndex>();
   private readonly transcriptUpdateTimers = new Map<string, Timer>();
   private readonly live = new Map<string, LiveSession>();
-  private readonly quiesced = new Set<string>();
+  private readonly quiesced = new QuiesceLeases();
   private readonly activePrompts = new Map<string, Set<Promise<void>>>();
   private readonly recoveringSessions = new Set<string>();
   private readonly artifactPublicationBases = new Map<string, ArtifactScope>();
@@ -902,6 +918,16 @@ export class MachineSessionCoordinator {
     }
   }
 
+
+  /** Closes admission for a held space before its portable close, creating the agent record that close captures.
+   * A space already quiesced by an earlier pass is not reopened: opening a quiescing session is refused. */
+  async prepareSpaceHandoff(spaceId: string): Promise<void> {
+    if (this.list(spaceId).length === 0) {
+      const opened = await this.openSpace(spaceId);
+      if (opened.status === 'error') throw opened.error;
+    }
+    await this.quiesceSpace(spaceId, true);
+  }
 
   async quiesceSpace(spaceId: string, requirePortableControls = false): Promise<void> {
     const queued = this.list(spaceId)[0];

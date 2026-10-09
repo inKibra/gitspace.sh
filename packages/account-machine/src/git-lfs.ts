@@ -8,13 +8,23 @@ import { downloadQueryObject, hydrationEndpoint, originConfirmation } from './gi
 import { committedLfsInventory } from './git-lfs-inventory.js';
 import { cachedLfsObject, installLfsObject, verifiedLfsSource } from './git-lfs-cache.js';
 
+/** Read-only access: restores and hydration can neither pin nor upload. */
 export type MachineGitLfs = {
-  store: GitLfsStore;
+  store: Pick<GitLfsStore, 'has' | 'get'>;
   originEnvironment(repositoryPath: string): Promise<Record<string, string>>;
   canonicalOrigin?: string | null;
   confirmOrigin?(receipt: GitLfsOriginConfirmation): Promise<void>;
   resolveSources?(objects: GitLfsSnapshot['objects']): Promise<GitLfsSnapshot['objects']>;
+};
+/** Capture access bound to one durable publication identity; its pins hold uploaded and protected objects until released. */
+export type MachineGitLfsPublication = Omit<MachineGitLfs, 'store'> & {
+  store: GitLfsStore;
   releasePublication?(): Promise<void>;
+};
+/** Reads need only the project; protecting or uploading requires an explicit publication identity. */
+export type MachineGitLfsAccess = {
+  read(projectId: string): Promise<MachineGitLfs>;
+  publish(projectId: string, publicationId: string): Promise<MachineGitLfsPublication>;
 };
 async function git(root: string, args: string[], env: Record<string, string> = {}, input?: string | Uint8Array): Promise<Uint8Array> {
   const child = Bun.spawn(['git', ...args], { cwd: root, env: { ...Bun.env, ...env }, stdin: input === undefined ? 'ignore' : typeof input === 'string' ? new Blob([input]) : input, stdout: 'pipe', stderr: 'pipe' });
@@ -74,14 +84,14 @@ async function pointers(root: string, revisions: string[]): Promise<Map<string, 
   return result;
 }
 
-export async function captureGitLfs(root: string, head: string | null, authorityIndex: string, access?: MachineGitLfs) {
+export async function captureGitLfs(root: string, head: string | null, authorityIndex: string, access?: MachineGitLfsPublication) {
   const snapshot: GitLfsSnapshot = { objects: [], heldBack: [] };
   const headEntries = head ? await tree(root, head) : new Map<string, Entry>();
   const history = await committedLfsInventory(root, head, git, pointers);
   const confirm = await originConfirmation(root, head, git, access?.canonicalOrigin === null ? {} : await access?.originEnvironment(root) ?? {}, access);
   const origin = new Map((await confirm([...history.values()])).map(object => [object.oid, object]));
   const unconfirmed = [...history.values()].filter(object => !origin.has(object.oid));
-  const protectedObjects = access?.store.protect ? new Map((await access.store.protect(unconfirmed)).map(object => [object.oid, object.size])) : undefined;
+  const protectedObjects = unconfirmed.length && access?.store.protect ? new Map((await access.store.protect(unconfirmed)).map(object => [object.oid, object.size])) : undefined;
   for (const object of history.values()) {
     const confirmed = origin.get(object.oid);
     if (confirmed) snapshot.objects.push({ ...confirmed, source: 'origin' });

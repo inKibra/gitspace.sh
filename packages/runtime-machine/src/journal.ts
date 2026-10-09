@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { canonicalJson, RuntimeBashCommandArgumentsSchema, RuntimeReceiptTransportSchema, RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeReceiptTransport } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 
-const LocalAttachmentSchema = z.object({ attachment: RuntimeAttachmentSchema, rootPath: z.string().min(1), executionSecret: z.string().min(1), prerequisitesComplete: z.boolean(), checkoutPrepared: z.boolean().optional(), ownedCheckout: z.boolean().optional() });
+/** `lostCheckout` records how a terminal `lost` attachment released its checkout: removed, or retained as an orphan for its owner. */
+const LocalAttachmentSchema = z.object({ attachment: RuntimeAttachmentSchema, rootPath: z.string().min(1), executionSecret: z.string().min(1), prerequisitesComplete: z.boolean(), checkoutPrepared: z.boolean().optional(), ownedCheckout: z.boolean().optional(), lostCheckout: z.enum(['removed', 'orphaned']).optional() });
 export type LocalAttachment = z.infer<typeof LocalAttachmentSchema>;
 const RowSchema = z.object({ payload: z.string() });
 const AttemptSchema = z.object({ dispatch: RuntimeToolDispatchSchema, fingerprint: z.string(), state: z.enum(['starting', 'running', 'fenced', 'settled']), result: RuntimeToolResultSchema.nullable(), receipt: RuntimeReceiptTransportSchema.optional(), acknowledged: z.boolean().optional(), cancelRequested: z.boolean().optional() });

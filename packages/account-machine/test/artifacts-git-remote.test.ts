@@ -27,7 +27,7 @@ function fixture() {
   const checkpointRef = 'refs/gitspace/checkpoints/test';
   const publish = () => publication.publishCheckpoint({ repositoryPath: root, binding: { projectId: 'test', repository: 'test' }, checkpointRef });
   const publishBranch = (commit: string) => publication.publishBranch({ repositoryPath: root, binding: { projectId: 'test', repository: 'project-test' }, branch: 'main', commit });
-  return { root, remote, checkpointRef, publish, publishBranch, scopes };
+  return { root, remote, checkpointRef, publication, publish, publishBranch, scopes };
 }
 function rejectPushes(remote: string) {
   const hook = join(remote, 'hooks/pre-receive');
@@ -132,3 +132,35 @@ it('cleans only its own upload after rejection and retries a shared-object merge
   expect(git(f.remote, 'ls-tree', '-r', f.checkpointRef)).toBe(git(f.root, 'ls-tree', '-r', commit));
   expect(git(f.remote, 'for-each-ref', '--format=%(refname)', 'refs/gitspace/upload/')).toBe('refs/gitspace/upload/foreign');
 }, 120_000);
+
+it('anchors a shared canonical checkpoint ref at the newest tip received, never rewinding to an older one', async () => {
+  const f = fixture();
+  // The cloud advances one canonical ref per workspace for every cache: x1 <- x2 <- x3.
+  const canonical = 'refs/gitspace/spaces/space/checkpoints';
+  const commit = (content: string) => {
+    writeFileSync(join(f.root, 'file'), content); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', content);
+    return git(f.root, 'rev-parse', 'HEAD');
+  };
+  const x1 = commit('x1'), x2 = commit('x2'), x3 = commit('x3');
+  git(f.root, 'push', f.remote, `${x3}:${canonical}`);
+  const cache = join(f.root, 'cache');
+  git(f.root, 'init', '-b', 'main', cache);
+  git(cache, 'config', `url.${f.remote}.insteadOf`, 'https://artifacts.invalid/repository');
+  const fetch = (tip: string) => f.publication.fetchCheckpoint({ repositoryPath: cache, binding: { projectId: 'test', repository: 'test' }, checkpointRef: canonical, commit: tip });
+  const anchor = () => git(cache, 'for-each-ref', '--format=%(objectname)', canonical);
+  await fetch(x2);
+  expect(anchor()).toBe(x2);
+  await fetch(x3);
+  expect(anchor()).toBe(x3);
+  // A long-poll or dispatch snapshot overtaken by this cache's own publication is a no-op.
+  await fetch(x1);
+  await fetch(x2);
+  expect(anchor()).toBe(x3);
+  // A replaced canonical history (recreated repository) is followed, not refused forever.
+  git(f.root, 'checkout', '--orphan', 'replaced');
+  const y1 = commit('y1');
+  git(f.root, 'push', '--force', f.remote, `${y1}:${canonical}`);
+  await fetch(y1);
+  expect(anchor()).toBe(y1);
+  expect(git(cache, 'for-each-ref', '--format=%(refname)', 'refs/gitspace/')).toBe(canonical);
+});

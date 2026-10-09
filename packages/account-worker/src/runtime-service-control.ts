@@ -5,7 +5,7 @@ import type { WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 type ServiceRuntime = Pick<WorkspaceRuntime, 'snapshot'> & { cloudFiles: Pick<WorkspaceRuntime['cloudFiles'], 'initializeSnapshot'>; attachments: Pick<WorkspaceRuntime['attachments'], 'list' | 'execute'> };
 /** Exact attachment identities fence every service action; listing never selects a default machine. */
 export async function runtimeServiceControl(runtime: ServiceRuntime, input: RuntimeServiceInput): Promise<RuntimeServiceResult> {
-  const caches = runtime.attachments.list().filter(item => item.role === 'cache' && item.state !== 'detached');
+  const caches = runtime.attachments.list().filter(item => item.role === 'cache' && item.state !== 'detached' && item.state !== 'lost');
   const available = (item: RuntimeAttachment) => item.state === 'ready' && item.heartbeatAt !== null && Date.now() - Date.parse(item.heartbeatAt) < 30_000 && item.capabilities.includes('service');
   const target = (item: RuntimeAttachment) => ({ machineId: item.machineId, attachmentId: item.attachmentId, generation: item.generation });
   async function execute(attachment: RuntimeAttachment, command: RuntimeServiceInput['command']) {

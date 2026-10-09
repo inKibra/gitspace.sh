@@ -84,6 +84,9 @@ async function watcherProof(run: (proof: {
       }
     }
     const unavailable = async (): Promise<never> => { throw new Error('External service forbidden'); };
+    const lfs = async () => ({ store: { has: unavailable, put: unavailable, get: unavailable }, originEnvironment: async () => {
+      const action = captureAction; captureAction = undefined; await action?.(); return {};
+    } });
     runtime = await createMachineExecutor({
       checkpointClock: clock,
       checkpointEvents: (_root, changed) => { watchers++; event = changed; return () => { watchers--; }; },
@@ -91,9 +94,7 @@ async function watcherProof(run: (proof: {
       artifacts: new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32)),
       cloud: new LocalCloud({ baseUrl: 'https://proof.invalid', userId: 'account', machineId: 'machine', signingPrivateKey: new Uint8Array(32) }),
       gitRemote: new LocalGitRemote({ credentials: unavailable }), prepareAttachment: async () => {}, originGitEnvironment: unavailable,
-      lfs: async () => ({ store: { has: unavailable, put: unavailable, get: unavailable }, originEnvironment: async () => {
-        const action = captureAction; captureAction = undefined; await action?.(); return {};
-      } }),
+      lfs: { read: lfs, publish: lfs },
       commitSnapshot: async (_local, candidate, previous) => {
         const worktreeCommit = await git(checkout, 'commit-tree', candidate.worktreeTree,
           '-p', candidate.worktreeCommit, ...(previous ? ['-p', previous] : []), '-m', 'Accepted canonical snapshot');

@@ -325,4 +325,34 @@ printf '%s' "$GITSPACE_LIFECYCLE_OUTPUT" > run-output-path.txt
     expect(context.ledger.state.bundleJson).toBeNull();
     expect(context.ledger.state.runs.find((run) => run.phase === 'machine/prepare')).toMatchObject({ status: 'succeeded', attachment: { attachmentId: 'cache', generation: 1 } });
   });
+
+  it('retries cache setup with the same run identity after its claim was refused for approval', async () => {
+    const script = "printf ready > prepared.txt\n";
+    const context = fixture(script, 'machine/prepare');
+    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache', machineId: 'machine-a', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'feature' }, state: 'attaching', capabilities: [], updatedAt: new Date().toISOString() });
+    const local = { attachment, rootPath: context.checkout, executionSecret: 'secret', prerequisitesComplete: false };
+    await expect(context.manager.prepareAttachment(local, new AbortController().signal)).rejects.toThrow('approval');
+    expect(context.ledger.state.runs).toEqual([]);
+    context.ledger.state.approvals = [{ scope: 'workspace', executionHash: await executionHash({ kind: 'script', command: script }), approvedBy: 'human-browser', approvedAt: new Date().toISOString() }];
+    await context.manager.prepareAttachment(local, new AbortController().signal);
+    expect(readFileSync(join(context.checkout, 'prepared.txt'), 'utf8')).toBe('ready');
+  });
+
+  it('retries cache setup after a claim request that never reached the authority', async () => {
+    const script = "printf ready > prepared.txt\n";
+    const context = fixture(script, 'machine/prepare');
+    context.ledger.state.approvals = [{ scope: 'workspace', executionHash: await executionHash({ kind: 'script', command: script }), approvedBy: 'human-browser', approvedAt: new Date().toISOString() }];
+    const mutate = context.ledger.mutateLifecycleState.bind(context.ledger);
+    let delivered = false;
+    context.ledger.mutateLifecycleState = async (projectId, spaceId, input) => {
+      if (input.op === 'claim' && !delivered) { delivered = true; throw new Error('Connection reset before the claim was delivered'); }
+      return mutate(projectId, spaceId, input);
+    };
+    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache', machineId: 'machine-a', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'feature' }, state: 'attaching', capabilities: [], updatedAt: new Date().toISOString() });
+    const local = { attachment, rootPath: context.checkout, executionSecret: 'secret', prerequisitesComplete: false };
+    await expect(context.manager.prepareAttachment(local, new AbortController().signal)).rejects.toThrow('Connection reset');
+    await context.manager.prepareAttachment(local, new AbortController().signal);
+    expect(readFileSync(join(context.checkout, 'prepared.txt'), 'utf8')).toBe('ready');
+    expect(context.ledger.state.runs.find((run) => run.phase === 'machine/prepare')?.status).toBe('succeeded');
+  });
 });

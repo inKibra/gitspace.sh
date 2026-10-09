@@ -3,7 +3,7 @@ import { canonicalJson, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapsho
 import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, CloudPublicationUncertain, ExecutorNotConnected, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, CloudPublicationUncertain, ExecutorNotConnected, isAttachmentOnline, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
@@ -254,6 +254,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   async function controlAttempt(attemptId: string, tool: 'runtime_cancel' | 'runtime_reconcile') {
     const original = savedDispatch(attemptId);
     if (!original) return null;
+    // Its attachment was lost: the attempt already ended interrupted and its machine can no longer be asked.
+    const lost = options.runtime().attachments.lossResult(attemptId);
+    if (lost) return lost;
     return tool === 'runtime_cancel' ? options.runtime().attachments.cancel(original) : options.runtime().attachments.reconcile(original);
   }
   async function cancelLifecycle(dispatch: RuntimeToolDispatch) {
@@ -380,7 +383,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           await options.runtime().setExecutionMachine(args.machineId);
           return completed(input, { defaultMachineId: options.runtime().defaultExecutionMachine() });
         }
-        return completed(input, options.runtime().attachments.list());
+        // Lost and silent attachments are not machines an agent can use.
+        const now = Date.now();
+        return completed(input, options.runtime().attachments.list().filter(item => isAttachmentOnline(item, now)));
       }
       if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind') return options.runtime().invokeConversationTool(input);
       if (input.tool === 'environment') return environment(input);

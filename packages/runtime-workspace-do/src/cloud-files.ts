@@ -26,6 +26,8 @@ function assertCloudReadSize(size: number, path: string): void {
 
 const checkpointIdentity = (checkpoint: Checkpoint) => canonicalJson({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(({ oid, size }) => ({ oid, size })) } } : {}) });
 export class CloudPublicationUncertain extends TaggedError('CloudPublicationUncertain')<{ attemptId: string; message: string }> {}
+/** The provider proved the machine publication never reached the checkpoint ref. */
+export class MachinePublicationRejected extends TaggedError('MachinePublicationRejected')<{ attemptId: string; message: string }> {}
 
 /** Read canonical checkpoint without constructing a runtime or waking inference. */
 export async function readCurrentCheckpoint(storage: DurableObjectStorage): Promise<Checkpoint | null> {
@@ -59,6 +61,7 @@ export class CloudFileStore {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_commits(commit_id TEXT PRIMARY KEY, predecessor TEXT, checkpoint TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lfs_retention_outbox(commit_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL, previous TEXT)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_publications(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, checkpoint TEXT)');
+    if (!storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_machine_publications)').toArray().some(column => column.name === 'abandoned')) storage.sql.exec('ALTER TABLE runtime_machine_publications ADD COLUMN abandoned TEXT');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_paths(commit_id TEXT PRIMARY KEY, paths TEXT NOT NULL)');
   }
   hasAttempt(attemptId: string): boolean {
@@ -111,8 +114,9 @@ export class CloudFileStore {
     return publication;
   }
   private async publishMachine(id: string, identity: string, checkpoint: Checkpoint, previous: string | null, machineId: string, authorize?: () => void): Promise<Checkpoint> {
-    const saved = this.storage.sql.exec<{ input: string; pending: string | null; checkpoint: string | null }>('SELECT input,pending,checkpoint FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
+    const saved = this.storage.sql.exec<{ input: string; pending: string | null; checkpoint: string | null; abandoned: string | null }>('SELECT input,pending,checkpoint,abandoned FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
     if (saved && saved.input !== identity) throw new Error('Machine snapshot publication identity changed');
+    if (saved?.abandoned) throw new Error(`Machine snapshot publication was abandoned when its attachment was lost: ${saved.abandoned}`);
     if (saved?.checkpoint) { await this.flushRetention(); return RuntimeGitCheckpointSchema.parse(JSON.parse(saved.checkpoint)); }
     let pending: z.infer<typeof MachinePendingSchema>;
     if (saved?.pending) pending = MachinePendingSchema.parse(JSON.parse(saved.pending));
@@ -139,10 +143,43 @@ export class CloudFileStore {
   hasPendingMachine(machineId: string): boolean {
     return this.storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_machine_publications WHERE pending IS NOT NULL').toArray().some(row => MachinePendingSchema.parse(JSON.parse(row.pending)).machineId === machineId);
   }
+  /** Before a machine's attachment is released, settle every publication it admitted: one in flight finishes, one left
+   * durably pending resumes, and one the provider proved unpublished is abandoned, so no late finish can advance the
+   * canonical snapshot after the release. One of unknown outcome keeps the writer fenced and keeps recovering.
+   * Returns why a publication did not settle, for the released attachment's record. */
+  async settleMachine(machineId: string): Promise<string | null> {
+    await Promise.allSettled([...this.machineRunning].filter(([id]) => id.startsWith(`${machineId}:refs/`)).map(([, publication]) => publication));
+    let failure: string | null = null;
+    for (const row of this.storage.sql.exec<{ id: string; pending: string }>('SELECT id,pending FROM runtime_machine_publications WHERE pending IS NOT NULL').toArray()) {
+      const pending = MachinePendingSchema.parse(JSON.parse(row.pending));
+      if (pending.machineId !== machineId) continue;
+      try { await this.resumeMachine(row.id, pending); }
+      catch (error) {
+        if (!(error instanceof MachinePublicationRejected)) {
+          failure = `Snapshot publication ${row.id} remains pending recovery: ${error instanceof Error ? error.message : String(error)}`;
+          continue;
+        }
+        failure = `Snapshot publication ${row.id} was abandoned: ${error.message}`;
+        this.storage.transactionSync(() => {
+          this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,abandoned=? WHERE id=? AND pending IS NOT NULL', error.message, row.id);
+          this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1 AND attempt=?', `machine:${row.id}`);
+        });
+        await this.storage.sync();
+      }
+    }
+    return failure;
+  }
+  private resumeMachine(id: string, pending: z.infer<typeof MachinePendingSchema>): Promise<Checkpoint> {
+    const active = this.machineRunning.get(id);
+    if (active) return active;
+    const resumed = this.finishMachine(id, pending).finally(() => this.machineRunning.delete(id));
+    this.machineRunning.set(id, resumed);
+    return resumed;
+  }
   private async finishMachine(id: string, pending: z.infer<typeof MachinePendingSchema>): Promise<Checkpoint> {
     const { checkpoint, previous, current, base, machineId } = pending;
     const merged = await this.code.mergeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous: current ?? checkpoint, base: base ?? checkpoint, machine: checkpoint, forcePublication: current === null });
-    if (merged.isErr()) throw new CloudPublicationUncertain({ attemptId: `machine:${id}`, message: merged.error.message });
+    if (merged.isErr()) throw merged.error.certainty === 'not-published' ? new MachinePublicationRejected({ attemptId: `machine:${id}`, message: merged.error.message }) : new CloudPublicationUncertain({ attemptId: `machine:${id}`, message: merged.error.message });
     const accepted = merged.value;
     const paths = await this.code.listSnapshotPaths(artifactsWorkspaceRepository(this.workspaceId), accepted.worktreeTree);
     this.storage.transactionSync(() => {
@@ -169,9 +206,7 @@ export class CloudFileStore {
       const id = lease.attempt.slice('machine:'.length);
       const machine = this.storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
       if (!machine) throw new Error('Missing pending machine publication');
-      const active = this.machineRunning.get(id);
-      if (active) await active;
-      else await this.finishMachine(id, MachinePendingSchema.parse(JSON.parse(machine.pending)));
+      await this.resumeMachine(id, MachinePendingSchema.parse(JSON.parse(machine.pending)));
       return;
     }
     const row = this.storage.sql.exec<{ input: string }>('SELECT input FROM runtime_cloud_files WHERE id=?', lease.attempt).toArray()[0];

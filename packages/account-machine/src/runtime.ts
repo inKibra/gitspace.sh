@@ -46,8 +46,8 @@ import { CloudArtifactObjectStore } from './cloud-artifact-object-store.js';
 import { ArtifactUploads } from './artifact-uploads.js';
 import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
 import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
-import { createCloudGitLfsStore } from './cloud-lfs-store.js';
-import { recheckGitLfsOrigin, type MachineGitLfs } from './git-lfs.js';
+import { createCloudGitLfsPublisher, createCloudGitLfsStore } from './cloud-lfs-store.js';
+import { recheckGitLfsOrigin, type MachineGitLfsAccess } from './git-lfs.js';
 import { createPublishedSpaceHeadResolver } from './inspector-base.js';
 import type { SpaceWorkspaceControls } from './space-workspace-controls.js';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
@@ -373,23 +373,35 @@ export async function startMachineRuntime() {
   const gitRemote = new ArtifactsGitRemote({
     credentials: (binding, scope) => cloudRuntime.call('runtime.repository.credentials', { ...binding, scope }, repositoryCredentialsSchema),
   });
-  const lfs = async (projectId: string, publicationId?: string): Promise<MachineGitLfs> => {
+  const lfsOrigin = async (projectId: string) => {
     const project = await authority.getProject(projectId);
     if (!project) throw new Error('LFS project is unavailable');
-    const store = await createCloudGitLfsStore({ projectId, publicationId, blobs: checkpointBlobs, encryptionKey, controlOptions });
     return {
-      store,
       canonicalOrigin: project.repositoryReference,
-      confirmOrigin: confirmation => store.confirmOrigin(confirmation),
-      resolveSources: objects => store.resolveSources(objects),
-      releasePublication: () => store.releasePublication(),
-      originEnvironment: async repositoryPath => {
+      originEnvironment: async (repositoryPath: string) => {
         const origin = Bun.spawn(['git', 'remote', 'get-url', 'origin'], { cwd: repositoryPath, stdout: 'pipe', stderr: 'pipe' });
         const [code, url, error] = await Promise.all([origin.exited, new Response(origin.stdout).text(), new Response(origin.stderr).text()]);
         if (code !== 0) throw new Error(`LFS origin is unavailable: ${error}`);
         return gitIdentity.gitEnvironment(url.trim());
       },
     };
+  };
+  const lfs: MachineGitLfsAccess = {
+    read: async projectId => {
+      const origin = await lfsOrigin(projectId);
+      const store = await createCloudGitLfsStore({ projectId, blobs: checkpointBlobs, encryptionKey, controlOptions });
+      return { ...origin, store, confirmOrigin: confirmation => store.confirmOrigin(confirmation), resolveSources: objects => store.resolveSources(objects) };
+    },
+    publish: async (projectId, publicationId) => {
+      const origin = await lfsOrigin(projectId);
+      const store = await createCloudGitLfsPublisher({ projectId, publicationId, blobs: checkpointBlobs, encryptionKey, controlOptions });
+      return {
+        ...origin, store,
+        confirmOrigin: confirmation => store.confirmOrigin(confirmation),
+        resolveSources: objects => store.resolveSources(objects),
+        releasePublication: () => store.releasePublication(),
+      };
+    },
   };
   const encryptedCheckpointBlobs = new EncryptedCheckpointBlobStore(checkpointBlobs, encryptionKey);
   const lifecycle = new PortableSpaceLifecycle(authority, encryptedCheckpointBlobs, gitRemote, lfs);
@@ -435,7 +447,7 @@ export async function startMachineRuntime() {
           if (originExit !== 0) throw new Error(`Unable to restore canonical origin: ${originError}`);
         }
         await gitRemote.fetchCheckpoint({ binding: gitBinding(definition.projectId, spaceId), repositoryPath: directory, checkpointRef: manifest.repository.checkpointRef });
-        await restoreGitIntermediateCheckpoint({ repositoryPath: directory, branch: manifest.repository.branch, checkpoint: manifest.repository, lfs: await lfs(definition.projectId) });
+        await restoreGitIntermediateCheckpoint({ repositoryPath: directory, branch: manifest.repository.branch, checkpoint: manifest.repository, lfs: await lfs.read(definition.projectId) });
         return directory;
       } catch (error) {
         await rm(directory, { recursive: true, force: true });
@@ -708,9 +720,6 @@ export async function startMachineRuntime() {
       if (!current) throw new Error(`Machine ${targetMachineId} does not exist`);
       return authority.putMachineDefinition({ ...current, notes });
     },
-    createSandbox: (image) => authority.createSandboxMachine(image),
-    controlMachine: (action, targetMachineId, confirmation) => action === 'sleep' ? authority.sleepMachine(targetMachineId, confirmation) : authority.resumeMachine(targetMachineId),
-    destroyMachine: (targetMachineId, confirmation) => authority.destroyMachine(targetMachineId, confirmation),
     settings,
     inference: authority,
     devices,
@@ -796,9 +805,8 @@ export async function startMachineRuntime() {
       held.push(space);
     }
     for (const space of held) {
-      const opened = await sessions.openSpace(space.id);
-      if (opened.status === 'error') throw opened.error;
-      await sessions.quiesceSpace(space.id, true);
+      // The pass above already quiesced every space with an agent; reopening one is refused.
+      await sessions.prepareSpaceHandoff(space.id);
       await terminals.stopOwned(space.id);
     }
     await serviceManager.dispose();
@@ -821,6 +829,8 @@ export async function startMachineRuntime() {
     }
   };
   const cancelReplacement = async () => {
+    // Every space the attempt quiesced reopens admission, even if restoring a released workspace below fails.
+    for (const project of database.listProjects()) for (const space of database.listSpaces(project.id)) sessions.resumeSpace(space.id);
     // Restart checkpoints outlive this process, including a partially failed startup.
     for (const { workspace, placement: cloud } of await listActiveCloudSpaces(authority)) {
       if (cloud?.state === 'closed' && cloud.resumeMachineId === machineId) {
@@ -914,6 +924,7 @@ export async function startMachineRuntime() {
   });
   executorRuntime = await createMachineExecutor({
     environmentRoot, managedSpaceRoot, machineId, database, artifacts, cloud: cloudRuntime, gitRemote, lfs,
+    provider: existingMachine?.provider ?? 'physical',
     browser: { enabled: true, services: {
       serviceHostname: hostname => hostname.endsWith(`--${process.env.GITSPACE_SERVICE_NAMESPACE}-srv.${process.env.GITSPACE_SERVICE_DOMAIN}`),
       workspaceServiceHostname: async (hostname, scope) => (await authority.listHostedRoutes(scope.projectId)).some(route => route.workspaceId === scope.workspaceId && route.hostname === hostname),
@@ -960,7 +971,7 @@ export async function startMachineRuntime() {
     lfsRecheck = (async () => {
       const placement = await authority.getSpace(space.projectId, space.id);
       if (placement?.state !== 'open' || placement.machineId !== machineId || placement.generation !== space.generation) return;
-      await recheckGitLfsOrigin(space.rootPath, await lfs(space.projectId));
+      await recheckGitLfsOrigin(space.rootPath, await lfs.read(space.projectId));
     })().catch(() => {
       console.warn('[gitspace-lfs] Origin recheck failed; retry remains scheduled', space.id);
     }).finally(() => { lfsRecheck = undefined; });
