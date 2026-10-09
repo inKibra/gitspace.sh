@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
 import { cloudWorkspaceDefinitionSchema, type CloudWorkspaceDefinition } from '@gitspace/protocol';
-import { transitionLifecycle, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunRecord } from '@gitspace/protocol-environment';
+import { executionHash, transitionLifecycle, type EnvironmentLifecycleAuthority, type LifecycleActor, type LifecycleMutation, type LifecycleState, type LifecycleRunRecord } from '@gitspace/protocol-environment';
 import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
 import { WorkspaceEnvironmentManager, type EnvironmentLifecycleRunner } from '../src/workspace-environment.js';
 
@@ -35,7 +35,9 @@ class Ledger implements EnvironmentLifecycleAuthority {
       if (input.value === null) delete this.state.values.global[input.name]; else this.state.values.global[input.name] = input.value;
       return structuredClone(this.state);
     }
-    const transition = transitionLifecycle({ state: this.state, runs: [...this.records.values()], actor: { actorId: 'machine-a', machineId: 'machine-a', kind: 'machine', lifecycleControl: false }, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
+    // The account gateway authenticates attachment admission before forwarding a cache claim.
+    const actor: LifecycleActor = { actorId: 'machine-a', machineId: 'machine-a', kind: 'machine', lifecycleControl: false, ...(input.op === 'claim' && input.attachment ? { attachment: input.attachment } : {}) };
+    const transition = transitionLifecycle({ state: this.state, runs: [...this.records.values()], actor, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
     if (transition.record) this.records.set(transition.record.run.id, transition.record);
     Object.assign(this.state, transition.state);
     if (this.state.bindings.resourceId) this.bindingWritten.resolve();
@@ -310,5 +312,17 @@ printf '%s' "$GITSPACE_LIFECYCLE_OUTPUT" > run-output-path.txt
     const failure = await context.manager.prepareAttachment({ attachment, rootPath: context.checkout, executionSecret: 'secret', prerequisitesComplete: false }, new AbortController().signal, async (step) => { steps.push({ phase: step.phase, state: step.state, error: step.error }); }).then(() => null, (error: unknown) => error);
     if (!(failure instanceof Error)) throw new Error('Cache setup unexpectedly succeeded');
     expect(steps.at(-1)).toEqual({ phase: 'machine/prepare', state: 'failed', error: failure.message });
+  });
+
+  it('runs cache setup the cloud approved by content hash, without the cache ever configuring the workspace', async () => {
+    const script = "printf ready > prepared.txt\n";
+    const context = fixture(script, 'machine/prepare');
+    // The cloud view lists `.gitspace/lifecycle/...` from its checkpoint; only the content hash binds the approval.
+    context.ledger.state.approvals = [{ scope: 'workspace', executionHash: await executionHash({ kind: 'script', command: script }), approvedBy: 'human-browser', approvedAt: new Date().toISOString() }];
+    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache', machineId: 'machine-a', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'feature' }, state: 'attaching', capabilities: [], updatedAt: new Date().toISOString() });
+    await context.manager.prepareAttachment({ attachment, rootPath: context.checkout, executionSecret: 'secret', prerequisitesComplete: false }, new AbortController().signal);
+    expect(readFileSync(join(context.checkout, 'prepared.txt'), 'utf8')).toBe('ready');
+    expect(context.ledger.state.bundleJson).toBeNull();
+    expect(context.ledger.state.runs.find((run) => run.phase === 'machine/prepare')).toMatchObject({ status: 'succeeded', attachment: { attachmentId: 'cache', generation: 1 } });
   });
 });

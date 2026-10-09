@@ -247,6 +247,7 @@ export const LifecycleExecutionSchema = z.object({
   command: z.string().max(65_536), hash: executionHashSchema, phase: LifecyclePhaseSchema.nullable(),
   fileName: z.string().max(512).nullable(), content: z.string().max(131_072),
 }).strict();
+export type LifecycleExecution = z.infer<typeof LifecycleExecutionSchema>;
 
 /** Bindings are resource identifiers or secret references, never credential material. */
 export const LifecycleBindingsSchema = z.record(

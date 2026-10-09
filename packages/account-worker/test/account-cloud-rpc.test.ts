@@ -4,7 +4,7 @@ import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, de
 import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
-import { executionHash } from '@gitspace/protocol-environment';
+import { executionHash, loadEnvironmentBundle } from '@gitspace/protocol-environment';
 import { gitspaceContract, rpcErrors, UserSettingsViewCodec } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
@@ -174,6 +174,44 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     if (changed.status === 'error') throw new Error(changed.failure.message);
     const forged = await SELF.fetch(fixture.request(single('environment.approve', { spaceId, executionHash: hash, scope: 'project' })));
     expect(parse(await forged.text())).toMatchObject({ status: 'error' });
+  });
+
+  it('derives a cloud workspace environment from its uncommitted checkpoint worktree and lets a cache claim the approved script', async () => {
+    emptyCommittedSource();
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { spaceId, authority, placement } = await inspectorWorkspace(fixture.userId);
+    const id = (digit: string) => digit.repeat(40);
+    // HEAD has neither file: the agent wrote both into the cloud worktree without committing.
+    const checkpoint = { checkpointRef: `refs/gitspace/spaces/${spaceId}/checkpoints`, headCommit: id('1'), branch: 'review', indexCommit: id('2'), trackedWorktreeCommit: id('3'), worktreeCommit: id('4'), indexTree: id('5'), worktreeTree: id('6') };
+    const bundle = { version: 1, defaultProfile: 'base', profiles: { base: {} } };
+    const script = '#!/usr/bin/env bash\nsudo apt-get install -y python3\n';
+    const worktree: Record<string, string> = { 'README.md': id('a'), '.gitspace/bundle.json': id('b'), '.gitspace/lifecycle/machine/prepare/10-python.sh': id('c') };
+    const blobs: Record<string, string> = { [id('a')]: '# Pantry\n', [id('b')]: JSON.stringify(bundle), [id('c')]: script };
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readFile').mockResolvedValue(null);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotInventories').mockImplementation(async (_repository, requested) => requested.map(tree =>
+      new Map(Object.entries(tree === checkpoint.worktreeTree ? worktree : {}).map(([path, oid]) => [path, { oid, mode: '100644', type: 'blob' as const }]))));
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readBlob').mockImplementation(async (_repository, oid) => blobs[oid] === undefined ? null : new Blob([blobs[oid]]));
+    await runInDurableObject(placement, (_instance, state) => {
+      state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
+      state.storage.sql.exec('INSERT INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
+    });
+    const hash = await executionHash({ kind: 'script', command: script });
+    const rpc = async (path: string, input: unknown) => parse(await (await SELF.fetch(fixture.request(single(path, input)))).text());
+    expect(await rpc('environment.get', { spaceId })).toMatchObject({ status: 'ok', value: {
+      bundleJson: JSON.stringify(loadEnvironmentBundle(bundle)),
+      executions: [{ id: 'machine/prepare:10-python.sh', kind: 'script', phase: 'machine/prepare', fileName: '10-python.sh', content: script, hash, approval: null }],
+    } });
+    const attachment = { attachmentId: 'cache-a', generation: 1 };
+    const cache = { machineId: 'machine-a', actorId: 'machine-a', kind: 'machine' as const, lifecycleControl: false, attachment };
+    const claim = (runId: string) => authority.mutateLifecycleState(spaceId, { op: 'claim', runId, ownershipToken: runId, phase: 'machine/prepare', profile: 'base', executionHashes: [hash], generation: null, rerun: true, attachment }, cache);
+    expect(await claim('before-approval')).toMatchObject({ status: 'error', failure: { code: 'ApprovalRequired' } });
+    expect(await rpc('environment.approve', { spaceId, executionHash: hash, scope: 'workspace' })).toMatchObject({ status: 'ok', value: { executions: [{ hash, approval: 'workspace' }] } });
+    expect(await claim('after-approval')).toMatchObject({ status: 'ok', state: { claim: { runId: 'after-approval', status: 'claimed' } } });
+    // A later checkpoint edit is new content: it surfaces for review rather than inheriting the approval.
+    blobs[id('c')] = `${script}python3 --version\n`;
+    expect(await rpc('environment.get', { spaceId })).toMatchObject({ status: 'ok', value: {
+      executions: [{ content: blobs[id('c')], hash: await executionHash({ kind: 'script', command: blobs[id('c')]! }), approval: null }],
+    } });
   });
 
   it('rejects API clients granting approval even when they hold account write access', async () => {

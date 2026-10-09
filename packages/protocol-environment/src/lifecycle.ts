@@ -1,7 +1,7 @@
 import { EnvironmentError, type EnvironmentFailure } from './errors.js';
 import {
-  LifecycleMutationSchema, LifecyclePhaseSchema, loadEnvironmentBundle, parseEnvironmentBundleJson, resolveEnvironmentProfile,
-  type EnvironmentBundle, type EffectiveEnvironmentProfile, type LifecycleMutation,
+  LifecycleMutationSchema, LifecyclePhaseSchema, executionHash, loadEnvironmentBundle, parseEnvironmentBundleJson, resolveEnvironmentProfile, selectLifecycleScripts,
+  type EnvironmentBundle, type EffectiveEnvironmentProfile, type LifecycleExecution, type LifecycleMutation,
   type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from './schema.js';
 
@@ -172,6 +172,32 @@ export function effectiveEnvironmentValues(bundle: EnvironmentBundle, profile: E
   return result;
 }
 
+/** Every checkout reader derives executions here: a hash approved from one checkout's view is the hash
+ * any runner recomputes from identical `.gitspace/lifecycle/<phase>/<file>` content. */
+export async function deriveLifecycleExecutions(input: {
+  bundle: EnvironmentBundle;
+  selectedProfile: string;
+  /** Entry names directly inside `.gitspace/lifecycle/<phase>`; absent directories list nothing. */
+  list(phase: LifecyclePhase): Promise<readonly string[]>;
+  read(phase: LifecyclePhase, fileName: string): Promise<{ command: string; content: string }>;
+}): Promise<LifecycleExecution[]> {
+  const { bundle, selectedProfile } = input;
+  const checks = await Promise.all(resolveEnvironmentProfile(bundle, selectedProfile).checks.map(async (id): Promise<LifecycleExecution> => {
+    const definition = bundle.checks[id]!;
+    const command = definition.kind === 'built-in' ? BUILT_IN_CHECKS[definition.check] : definition.command;
+    if (!command) throw new EnvironmentError('InvalidConfiguration', `Unknown built-in environment check: ${id}`, { checkId: id });
+    const label = definition.kind === 'built-in' ? definition.label ?? definition.check : definition.label;
+    return { id, kind: 'check', label, command, hash: await executionHash({ kind: 'check', command }), phase: null, fileName: null, content: command };
+  }));
+  const profiles = new Set(Object.keys(bundle.profiles));
+  const scripts = await Promise.all(LIFECYCLE_PHASES.map(async (phase) => Promise.all(
+    selectLifecycleScripts(await input.list(phase), selectedProfile, profiles).map(async ({ fileName }): Promise<LifecycleExecution> => {
+      const { command, content } = await input.read(phase, fileName);
+      return { id: `${phase}:${fileName}`, kind: 'script', label: fileName, command, hash: await executionHash({ kind: 'script', command: content }), phase, fileName, content };
+    }),
+  )));
+  return [...checks, ...scripts.flat()];
+}
 export function projectEnvironmentState(lifecycle: LifecycleState) {
   const bundle = lifecycle.bundleJson === null ? loadEnvironmentBundle({ version: 1, profiles: { base: {} } }) : parseEnvironmentBundleJson(lifecycle.bundleJson);
   const selectedProfile = lifecycle.selectedProfile ?? bundle.defaultProfile;

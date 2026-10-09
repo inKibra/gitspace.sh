@@ -21,6 +21,7 @@ import type { RuntimeModelHelper } from './runtime-inference.js';
 import { RuntimeProcArgumentsSchema, RuntimeGrepArgumentsSchema } from '@gitspace/protocol-runtime';
 import { caughtUpSearchCache, type RuntimeAttachment, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
+import { refreshCloudEnvironment } from './cloud-environment.js';
 
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
 export type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
@@ -292,7 +293,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);
     const method = args.method;
     if (method === 'get') {
-      const lifecycle = await authority.refreshBrowserOrigins(identity.workspaceId);
+      const checkpoint = await options.runtime().cloudFiles.initializeSnapshot();
+      if (!checkpoint) throw new Error('Cloud working copy is unavailable');
+      const lifecycle = await refreshCloudEnvironment({ code: new ArtifactsCodeStore(env.ARTIFACTS), authority, identity, checkpoint });
       lifecycle.values.global = await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).getEnvironmentValues();
       return completed(input, projectEnvironmentState(lifecycle));
     }

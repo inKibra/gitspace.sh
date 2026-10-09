@@ -5,7 +5,7 @@ import { watch, type FSWatcher } from 'node:fs';
 import type { GitSpaceDatabase } from '@gitspace/core';
 import {
   executionHash, loadEnvironmentBundle, parseEnvironmentBundleJson, parseLifecycleBindingsJson, resolveEnvironmentProfile,
-  resolveExecutionApproval, selectLifecycleScripts, isInteractiveLifecycleScript, BUILT_IN_CHECKS, LIFECYCLE_PHASES,
+  resolveExecutionApproval, deriveLifecycleExecutions, isInteractiveLifecycleScript,
   effectiveEnvironmentValues, assertEnvironmentExecutionReady, shouldPrepareEnvironment, environmentPreparationPhases,
   EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
   type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleMutation, type LifecycleIncident, type EnvironmentValueScope, type EnvironmentApprovalScope,
@@ -128,32 +128,20 @@ export class WorkspaceEnvironmentManager {
     const projectApprovals = new Set(lifecycle.approvals.filter((item) => item.scope === 'project').map((item) => item.executionHash));
     const workspaceApprovals = new Set(lifecycle.approvals.filter((item) => item.scope === 'workspace').map((item) => item.executionHash));
     const approval = (hash: string) => resolveExecutionApproval({ executionHash: hash, projectApprovals, workspaceApprovals });
-    const checks = await Promise.all(effective.checks.map(async (id): Promise<EnvironmentExecutionView> => {
-      const definition = bundle.checks[id]!;
-      const command = definition.kind === 'built-in' ? BUILT_IN_CHECKS[definition.check] : definition.command;
-      if (!command) throw new EnvironmentError('InvalidConfiguration', `Unknown built-in environment check: ${id}`, { checkId: id });
-      const hash = await executionHash({ kind: 'check', command });
-      return { id, kind: 'check', label: definition.kind === 'built-in' ? definition.label ?? definition.check : definition.label, command, content: command, hash, approval: approval(hash) };
-    }));
-    const scripts = (await Promise.all(LIFECYCLE_PHASES.map(async (phase) => {
-      if (!available) return [];
-      const directory = join(space.rootPath, '.gitspace', 'lifecycle', phase);
-      const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error));
-      return Promise.all(selectLifecycleScripts(names, selectedProfile, new Set(Object.keys(bundle.profiles))).map(async (script): Promise<EnvironmentExecutionView> => {
-        const command = join(directory, script.fileName);
-        const content = await readFile(command, 'utf8');
-        const hash = await executionHash({ kind: 'script', command: content });
-        return { id: `${phase}:${script.fileName}`, kind: 'script', label: script.fileName, command, content, hash, approval: approval(hash), phase, fileName: script.fileName, interactive: isInteractiveLifecycleScript(content) };
-      }));
-    }))).flat();
-    const executions: EnvironmentExecutionView[] = available ? [...checks, ...scripts] : lifecycle.executions.map((execution) => ({
+    // The same derivation the cloud applies to a cloud workspace's checkpoint: equal content, equal approval hash.
+    const derived = available ? await deriveLifecycleExecutions({
+      bundle, selectedProfile,
+      list: (phase) => readdir(join(space.rootPath, '.gitspace', 'lifecycle', phase)).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error)),
+      read: async (phase, fileName) => {
+        const command = join(space.rootPath, '.gitspace', 'lifecycle', phase, fileName);
+        return { command, content: await readFile(command, 'utf8') };
+      },
+    }) : null;
+    const executions: EnvironmentExecutionView[] = (derived ?? lifecycle.executions).map((execution) => ({
       ...execution, phase: execution.phase ?? undefined, fileName: execution.fileName ?? undefined, approval: approval(execution.hash), ...(execution.kind === 'script' ? { interactive: isInteractiveLifecycleScript(execution.content) } : {}),
     }));
-    if (!attachment && available && (source !== null || executions.length > 0)) {
-      const snapshot = executions.map(({ approval: _approval, interactive: _interactive, ...execution }) => ({ ...execution, phase: execution.phase ?? null, fileName: execution.fileName ?? null }));
-      if (JSON.stringify(snapshot) !== JSON.stringify(lifecycle.executions)) {
-        lifecycle = await this.authority.mutateLifecycleState(space.projectId, spaceId, { op: 'configure', bundleJson: JSON.stringify(bundle), executions: snapshot });
-      }
+    if (!attachment && derived && (source !== null || derived.length > 0) && JSON.stringify(derived) !== JSON.stringify(lifecycle.executions)) {
+      lifecycle = await this.authority.mutateLifecycleState(space.projectId, spaceId, { op: 'configure', bundleJson: JSON.stringify(bundle), executions: derived });
     }
     const secretMetadata = await this.secrets?.listEffectiveSecrets(space.projectId, space.kind === 'base' ? null : space.id) ?? [];
     return {

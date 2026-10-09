@@ -9,10 +9,13 @@ import {
   getWorkspaceEnvironmentRunLogContract, cancelWorkspaceEnvironmentRunContract, type WorkspaceEnvironmentView,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
+import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { serverRpc } from 'result-rpc/server';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
+import { refreshCloudEnvironment } from './cloud-environment.js';
 
 /** Cloud reads do not possess, materialize, or start an agent in the workspace. */
 export function environmentCloudProcedures(env: Env, userId: string, deviceId: string, requireLifecycleControl: () => Promise<VerifiedDevice>) {
@@ -23,6 +26,14 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     if (!projectId) throw new EnvironmentError('NotFound', 'Workspace does not belong to this account', { spaceId });
     const authority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${userId}:${projectId}`);
     return { projectId, authority };
+  };
+  /** Cloud workspaces derive configuration from their checkpoint; legacy holders configure it from their checkout. */
+  const currentState = async (spaceId: string) => {
+    const { projectId, authority } = await authorityFor(spaceId);
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${spaceId}`);
+    if (!await space.hasCloudRuntime()) return authority.refreshBrowserOrigins(spaceId);
+    const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: spaceId });
+    return refreshCloudEnvironment({ code: new ArtifactsCodeStore(env.ARTIFACTS), authority, identity, checkpoint: await space.runtimeRepositoryCheckpoint(identity) });
   };
   const view = async (spaceId: string, lifecycle: LifecycleState): Promise<WorkspaceEnvironmentView> => {
     lifecycle.values.global = await projects.getEnvironmentValues();
@@ -39,8 +50,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   };
   const get = server.implement(getWorkspaceEnvironmentContract).handler(async ({ input, errors }) => {
     try {
-      const { authority } = await authorityFor(input.spaceId);
-      return ok(await view(input.spaceId, await authority.refreshBrowserOrigins(input.spaceId)));
+      return ok(await view(input.spaceId, await currentState(input.spaceId)));
     } catch (error) {
       const failure = environmentFailure(error);
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'read cloud environment', message: error instanceof Error ? error.message : String(error) }));
@@ -50,7 +60,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     const device = await requireLifecycleControl();
     const { authority } = await authorityFor(spaceId);
     if (input.approved) {
-      const state = await authority.refreshBrowserOrigins(spaceId);
+      const state = await currentState(spaceId);
       const origin = state.browserOrigins.find((entry) => entry.hash === input.executionHash);
       if (origin) {
         if (await browserOriginHash(origin.pattern) !== origin.hash) throw new EnvironmentError('ContentChanged', 'Browser origin does not match its content hash');
