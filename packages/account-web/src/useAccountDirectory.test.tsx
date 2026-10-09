@@ -177,6 +177,32 @@ it('shows a cloud workspace without its stale legacy placement or any machine', 
   expect(container.textContent).not.toContain('Desk machine');
 });
 
+it('lists a cloud-only project before its first runtime and preserves its saved workspaces without machines', async () => {
+  const scene = fixture();
+  scene.projects[0]!.lifecycle = 'cloud-only';
+  scene.machines.length = 0;
+  const worktree = scene.saved.a[1]!;
+  scene.saved.a = [scene.saved.a[0]!];
+  await act(async () => { root.render(<Probe scene={scene} view="projects" />); });
+  expect(directory.a).toEqual({
+    baseSummary: { closedAt: null, holder: { kind: 'cloud' }, freshness: 'unknown', refreshing: false },
+    workspaces: [], error: null,
+  });
+
+  scene.saved.a.push(worktree);
+  await act(async () => { scene.publish(); });
+  expect(directory.a?.workspaces[0]).toMatchObject({
+    id: 'a-work', branch: 'feature', definition: { phase: 'code' },
+    summary: { holder: { kind: 'cloud' }, freshness: 'unknown', refreshing: false },
+  });
+  expect(directory.a?.error).toBeNull();
+  expect(scene.spaceView).not.toHaveBeenCalled();
+
+  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: null }} view="agent" />); });
+  expect(directory.a?.baseSummary?.holder).toEqual({ kind: 'cloud' });
+  expect(directory.a?.workspaces.map((space) => space.id)).toEqual(['a-work']);
+});
+
 it('retains accepted activity across navigation and older reads, then converges on a newer read', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="agent" />); });

@@ -88,8 +88,8 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
     const reconcile = () => {
       const snapshot = channel.snapshot();
       const value = snapshot.value;
-      const projectIds = new Set(value?.projects.filter((project) => project.lifecycle !== 'cloud-only' && project.lifecycle !== 'deleting').map((project) => project.id));
-      const entries = scope.current.filter((project) => project.lifecycle !== 'cloud-only' && project.lifecycle !== 'deleting' && (!value || projectIds.has(project.id)));
+      const projectIds = new Set(value?.projects.filter((project) => project.lifecycle !== 'deleting').map((project) => project.id));
+      const entries = scope.current.filter((project) => project.lifecycle !== 'deleting' && (!value || projectIds.has(project.id)));
       const ids = new Set(entries.map((project) => project.id));
       for (const [id, state] of work) if (!ids.has(id)) { state.revision++; state.pending = null; work.delete(id); }
       for (const key of observations.current.keys()) {
@@ -150,8 +150,8 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         const holders = new Map<string, SpacePlacementView>();
         const errors = directoryError ? [`Directory unavailable: ${directoryError}`] : [];
         const summarize = (id: string, closedAt: Date | null, previous: SidebarSpaceSummary | undefined): SidebarSpaceSummary => {
-          // A cloud workspace reports status from its runtime (the open pane); the directory has no placement or machine for it.
-          if (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud') return { closedAt, holder: { kind: 'cloud' }, freshness: 'unknown', refreshing: false };
+          // Cloud-only projects have canonical workspaces before their first runtime opens; neither needs a machine.
+          if (project.lifecycle === 'cloud-only' || (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud')) return { closedAt, holder: { kind: 'cloud' }, freshness: 'unknown', refreshing: false };
           const placement = placements.get(id);
           if (closedAt) return { closedAt, holder: { kind: 'released' }, generation: placement?.generation, freshness: 'fresh' };
           if (!placement) return { closedAt, holder: { kind: 'unknown' }, freshness: 'unknown', refreshing: false, detail: 'Placement unavailable' };

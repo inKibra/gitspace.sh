@@ -104,7 +104,7 @@ GitSpace uses this SSH identity for GitHub imports, including pasted HTTPS brows
 
 GitSpace reapplies your saved author name, email, and SSH configuration when it restores a workspace, before setup scripts or agents can run. These settings stay local to GitSpace repositories; they do not change your global Git configuration.
 
-Every account includes the GitSpace source project. Setup creates its cloud definition without an online machine or GitHub authorization. There is no source-project opt-out. The project stays **Cloud only** until you open it on a machine; GitSpace then checks out its recorded source branch and commit. A failed checkout leaves the cloud definition available to retry.
+Every account includes the GitSpace source project. Setup creates its cloud definition and base workspace without an online machine or GitHub authorization. There is no source-project opt-out. A **Cloud only** project remains available in the sidebar and **Projects**, including its saved workspaces, before its first runtime opens and while all machines are stopped. A machine checkout is not required to view these cloud records.
 
 Finishing setup takes you to **Projects**, without selecting a project or starting a machine. Select a project to inspect its cloud records and conversations. Open a workspace on a machine when you need a checkout or machine effects.
 

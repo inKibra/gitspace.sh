@@ -81,7 +81,7 @@ function WorkspaceStatus({ workspace }: { workspace: AccountWorkspace }) {
 }
 
 function DirectoryCoverage({ projects, directory, loading, onRefresh }: Pick<AccountWorkPagesProps, 'projects' | 'directory' | 'loading' | 'onRefresh'>) {
-  const missing = projects.filter((project) => project.lifecycle !== 'cloud-only' && project.lifecycle !== 'deleting' && !directory[project.id]);
+  const missing = projects.filter((project) => project.lifecycle !== 'deleting' && !directory[project.id]);
   const errors = projects.filter((project) => directory[project.id]?.error);
   return <div className="flex flex-col gap-1 px-8 pt-4 text-caption text-muted-foreground" aria-live="polite">
     <div className="flex items-center justify-between gap-3"><span>{loading ? 'Refreshing account directory…' : 'Account-wide saved workspaces and recorded status. Viewing does not open a workspace.'}</span><Button variant="ghost" size="compact" onClick={onRefresh} leadingIcon={glyph(RefreshCcw01)}>Refresh</Button></div>
@@ -125,11 +125,11 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
     <DirectoryCoverage projects={projects} directory={directory} loading={loading} onRefresh={onRefresh} />
     {view === 'kanban' ? <KanbanView workspaces={activeWorkspaces} onOpen={open} onSetRelations={actions.onSetWorkspaceRelations} onNewWorkspace={actions.onCreateWorkspace ? setNewWorkspacePhase : undefined} />
       : view === 'projects' ? <ProjectsView projects={projects} workspaces={workspaces} directory={directory} onOpen={open} onOpenProject={onOpenProject} {...actions} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />
-        : <InboxView projects={activeProjects.filter((project) => project.lifecycle !== 'cloud-only')} directory={directory} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} />}
+        : <InboxView projects={activeProjects} directory={directory} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} />}
     <Dialog open={newWorkspacePhase !== null && newWorkspaceProject === null} onOpenChange={(next) => { if (!next) clearCreate(); }}>
       <DialogContent><DialogHeader><DialogTitle>Choose a project</DialogTitle><DialogDescription>Choose which project the new {newWorkspacePhase ? PHASE_LABEL[newWorkspacePhase].toLowerCase() : ''} workspace belongs to.</DialogDescription></DialogHeader>
-        <CardGroup orientation="inline" border="outlined" separated>{activeProjects.filter((project) => project.lifecycle === 'active').map((project, index) => <Card key={project.id} index={index} onClick={() => setNewWorkspaceProject(project.id)} label={`Create workspace in ${project.name}`}><CardHeader><CardTitle>{project.name}</CardTitle><CardDescription>{project.baseBranch}</CardDescription></CardHeader></Card>)}</CardGroup>
-        {!activeProjects.some((project) => project.lifecycle === 'active') ? <p className="text-body text-muted-foreground">Open a project from Projects before adding a workspace.</p> : null}
+        <CardGroup orientation="inline" border="outlined" separated>{activeProjects.filter((project) => project.lifecycle === 'active' || project.lifecycle === 'cloud-only').map((project, index) => <Card key={project.id} index={index} onClick={() => setNewWorkspaceProject(project.id)} label={`Create workspace in ${project.name}`}><CardHeader><CardTitle>{project.name}</CardTitle><CardDescription>{project.baseBranch}</CardDescription></CardHeader></Card>)}</CardGroup>
+        {!activeProjects.some((project) => project.lifecycle === 'active' || project.lifecycle === 'cloud-only') ? <p className="text-body text-muted-foreground">Create a project from Projects before adding a workspace.</p> : null}
         <DialogFooter><Button variant="secondary" onClick={clearCreate}>Cancel</Button></DialogFooter>
       </DialogContent>
     </Dialog>
