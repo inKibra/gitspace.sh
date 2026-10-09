@@ -1210,8 +1210,20 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     for future provisioning; it never follows platform changes automatically.
     Initial default lookup does not block an explicit selection or overwrite
     one that has finished verification. On first use, the provider waits up to
-    60 seconds for the image Worker's container namespace to become ready;
-    it does not repeat image upload or hide a failed compatibility check.
+    60 seconds for the image Worker's container namespace, then up to 60 seconds
+    for its immutable Container Application to report prepared image capacity
+    (`health.instances.healthy > 0`) before making one startup compatibility check.
+    Cloudflare's [generated application health contract](https://github.com/cloudflare/workers-sdk/blob/main/packages/containers-shared/src/client/models/ApplicationHealthInstances.ts)
+    defines `healthy` as prepared instances for a Durable Object-bound application;
+    neither active containers nor the declared `instances: 0` is a readiness gate.
+    Other instances may still be scheduling or starting. Every readiness read
+    rechecks the application identity, namespace, image, and resources.
+    A readiness timeout returns `COMPUTE_APPLICATION_PENDING` (503), leaves the
+    deployment unready, and retains its identities for reconciliation without
+    another upload or application allocation. API errors and failed compatibility
+    checks are not retried or hidden. [First-time image provisioning can take
+    several minutes](https://developers.cloudflare.com/containers/guides/deploy/#deploy-from-your-machine),
+    so the bounded wait is not a guarantee that every image provisions in one request.
     Each existing machine has its own Change image action and durable progress,
     failure, retry, and safe-cancellation controls. Image and native/runtime
     release selection remain independent; inheriting our image is optional.

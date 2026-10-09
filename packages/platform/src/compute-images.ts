@@ -1,4 +1,5 @@
 import { cloudImageReferenceSchema } from '@gitspace/protocol/cloud-image';
+import { z } from 'zod';
 
 export interface ComputeImageDeployment {
   id: string;
@@ -24,7 +25,7 @@ function saveImage(storage: DurableObjectStorage, image: ComputeImageDeployment)
 
 async function cloudflare(env: Env, path: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}${path}`, {
-    ...init, headers: { ...init?.headers, authorization: `Bearer ${env.CF_API_TOKEN}` }, redirect: 'manual', signal: AbortSignal.timeout(60_000),
+    ...init, headers: { ...init?.headers, authorization: `Bearer ${env.CF_API_TOKEN}` }, redirect: 'manual', signal: init?.signal ?? AbortSignal.timeout(60_000),
   });
   if (!response.ok && !(init?.method === 'DELETE' && response.status === 404)) {
     const body = await response.json().catch(() => null) as { errors?: Array<{ message?: string }> } | null;
@@ -32,13 +33,26 @@ async function cloudflare(env: Env, path: string, init?: RequestInit): Promise<R
   }
   return response;
 }
-async function cloudflareJson<T>(env: Env, path: string, init?: RequestInit): Promise<T> {
-  const body = await (await cloudflare(env, path, init)).json() as T & { success?: boolean; result?: T };
-  if (body.success === false) throw new ComputeProviderError('COMPUTE_PROVIDER_REJECTED', `Cloudflare rejected ${path}`);
-  return body.result ?? body;
+const cloudflareEnvelopeSchema = z.object({ success: z.boolean(), result: z.unknown().optional() });
+async function cloudflareJson<S extends z.ZodType>(env: Env, path: string, schema: S, init?: RequestInit): Promise<z.output<S>> {
+  const body: unknown = await (await cloudflare(env, path, init)).json();
+  const envelope = cloudflareEnvelopeSchema.safeParse(body);
+  if (envelope.success && !envelope.data.success) throw new ComputeProviderError('COMPUTE_PROVIDER_REJECTED', `Cloudflare rejected ${path}`);
+  const parsed = schema.safeParse(envelope.success ? envelope.data.result : body);
+  if (!parsed.success) throw new ComputeProviderError('COMPUTE_PROVIDER_INVALID', `Cloudflare returned an invalid application response for ${path}`);
+  return parsed.data;
 }
 
-interface ContainerApplication { id: string; durable_objects?: { namespace_id?: string }; configuration: { image?: string; vcpu?: number; memory_mib?: number; disk?: { size_mb?: number } }; max_instances?: number }
+const containerApplicationIdentitySchema = z.object({
+  id: z.string(), durable_objects: z.object({ namespace_id: z.string().optional() }).optional(),
+});
+const containerApplicationSchema = containerApplicationIdentitySchema.extend({
+  configuration: z.object({
+    image: z.string(), vcpu: z.number(), memory_mib: z.number(), disk: z.object({ size_mb: z.number() }),
+  }),
+  max_instances: z.number().optional(),
+  health: z.object({ instances: z.object({ healthy: z.number().int().nonnegative() }) }).optional(),
+});
 interface ProviderNamespace { id: string; script: string; dispatch_namespace?: string; class: string; use_containers?: boolean }
 
 async function findProviderNamespace(env: Env, script: string): Promise<ProviderNamespace | undefined> {
@@ -163,22 +177,46 @@ export async function prepareComputeImage(input: {
   if (deployment.namespaceId && deployment.namespaceId !== namespace.id) throw new ComputeProviderError('COMPUTE_NAMESPACE_CHANGED', 'Provider namespace identity changed');
   deployment.namespaceId = namespace.id;
   saveImage(storage, deployment);
-  const applications = await cloudflareJson<ContainerApplication[]>(env, '/containers/applications');
+  const applications = await cloudflareJson(env, '/containers/applications', z.array(containerApplicationIdentitySchema));
   const matches = applications.filter((application) => application.durable_objects?.namespace_id === namespace.id);
   if (matches.length > 1) throw new ComputeProviderError('COMPUTE_APPLICATION_AMBIGUOUS', 'More than one application is bound to this image namespace');
-  let application = matches[0];
-  if (!application) {
-    application = await cloudflareJson<ContainerApplication>(env, '/containers/applications', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+  const existing = matches[0];
+  let application = existing
+    ? await cloudflareJson(env, `/containers/applications/${encodeURIComponent(existing.id)}`, containerApplicationSchema)
+    : await cloudflareJson(env, '/containers/applications', containerApplicationSchema, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
       name: deployment.script, scheduling_policy: 'default', instances: 0, max_instances: maxInstances,
       configuration: { image, instance_type: 'standard-1' }, durable_objects: { namespace_id: namespace.id },
     }) });
+  if ((existing && existing.id !== application.id) || (deployment.applicationId && deployment.applicationId !== application.id)) {
+    throw new ComputeProviderError('COMPUTE_APPLICATION_CHANGED', 'Image application identity changed');
   }
-  if (deployment.applicationId && deployment.applicationId !== application.id) throw new ComputeProviderError('COMPUTE_APPLICATION_CHANGED', 'Image application identity changed');
   deployment.applicationId = application.id;
   saveImage(storage, deployment);
-  if (application.configuration.image !== image || application.configuration.vcpu !== 0.5 ||
-      application.configuration.memory_mib !== 4096 || application.configuration.disk?.size_mb !== 8000 || application.max_instances !== maxInstances) {
-    throw new ComputeProviderError('COMPUTE_APPLICATION_CHANGED', 'Immutable image application configuration does not match its declaration');
+  // For a DO-bound default-policy application, healthy counts prepared capacity,
+  // not running containers. Namespace readiness alone does not imply an image is prepared.
+  // https://github.com/cloudflare/workers-sdk/blob/main/packages/containers-shared/src/client/models/ApplicationHealthInstances.ts
+  const applicationDeadline = Date.now() + 60_000;
+  const pendingApplication = () => new ComputeProviderError('COMPUTE_APPLICATION_PENDING', 'Container image capacity did not become ready within 60 seconds', 503);
+  while (true) {
+    if (application.id !== deployment.applicationId || application.durable_objects?.namespace_id !== namespace.id ||
+        application.configuration.image !== image || application.configuration.vcpu !== 0.5 ||
+        application.configuration.memory_mib !== 4096 || application.configuration.disk.size_mb !== 8000 || application.max_instances !== maxInstances) {
+      throw new ComputeProviderError('COMPUTE_APPLICATION_CHANGED', 'Immutable image application configuration does not match its declaration');
+    }
+    if (application.health && application.health.instances.healthy > 0) break;
+    const remaining = applicationDeadline - Date.now();
+    if (remaining <= 0) throw pendingApplication();
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(1_000, remaining)));
+    const requestBudget = applicationDeadline - Date.now();
+    if (requestBudget <= 0) throw pendingApplication();
+    const signal = AbortSignal.timeout(requestBudget);
+    try {
+      application = await cloudflareJson(env, `/containers/applications/${encodeURIComponent(deployment.applicationId)}`, containerApplicationSchema, { signal });
+    } catch (error) {
+      if (signal.aborted) throw pendingApplication();
+      throw error;
+    }
+    if (Date.now() >= applicationDeadline) throw pendingApplication();
   }
   const response = await env.DISPATCHER.get(deployment.script).fetch(new Request('https://compute.internal/_image/preflight', {
     method: 'POST', headers: { 'x-gitspace-user-id': accountId },

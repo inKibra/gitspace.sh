@@ -1,11 +1,11 @@
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { invokeCompute, TenantComputeProvider } from '../src/compute-provider.js';
 import { publishDefaultFixture } from './default-release-fixture.js';
 
 const originalFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = originalFetch; });
+afterEach(() => { globalThis.fetch = originalFetch; vi.restoreAllMocks(); });
 const accountId = `u-${'a'.repeat(32)}`;
 const imageA = `registry.example/tenant/a@sha256:${'a'.repeat(64)}`;
 const imageB = `registry.example/tenant/b@sha256:${'b'.repeat(64)}`;
@@ -16,14 +16,19 @@ interface Holder {
 }
 interface Application {
   id: string; durable_objects: { namespace_id: string }; configuration: { image: string; vcpu: number; memory_mib: number; disk: { size_mb: number } }; max_instances: number;
+  instances: number;
+  health?: { instances: { healthy: number; active: number; assigned: number; failed: number; starting: number; scheduling: number } };
 }
 
 function fixture(storage: DurableObjectStorage, maxImages = 16) {
   const namespaces = new Map<string, { id: string; script: string; dispatch_namespace: string; class: string; use_containers: boolean }>();
   const applications = new Map<string, Application>();
   const holders = new Map<string, Holder>();
-  const faults = { applicationResponse: false, enrollmentResponse: false, retirementResponse: false, preflight: false };
+  const faults = { applicationResponse: false, enrollmentResponse: false, retirementResponse: false, preflight: false, preflightInternal: false };
   const namespaceReadiness: Array<'missing' | 'pending'> = [];
+  const preparedHealth = { instances: { healthy: 7, active: 0, assigned: 0, failed: 0, starting: 0, scheduling: 0 } };
+  const applicationReadiness: Array<Application['health']> = [];
+  const applicationRead: { observe?: (application: Application) => void; response?: Response } = {};
   let preflights = 0;
   let applicationCreates = 0;
   const bindings = { ...env, COMPUTE_TEMPLATE_SCRIPT: 'trusted-template',
@@ -53,15 +58,28 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
       namespaces.set(script, { id: `namespace-${script}`, script, dispatch_namespace: env.DISPATCH_NAMESPACE, class: 'GitSpaceSandbox', use_containers: true });
       return Response.json({ success: true });
     }
-    if (path === '/containers/applications' && request.method === 'GET') return Response.json([...applications.values()]);
+    if (path === '/containers/applications' && request.method === 'GET') {
+      // A foreign durable_object-policy application need not have an application-wide image or prepared pool.
+      return Response.json({ success: true, result: [{ id: 'foreign-application', scheduling_policy: 'durable_object' }, ...applications.values()] });
+    }
     if (path === '/containers/applications' && request.method === 'POST') {
       const body = await request.json() as Omit<Application, 'id' | 'configuration'> & { configuration: { image: string } };
       // The Containers API expands instance_type into concrete resources; it does not echo the preset.
       const application: Application = { ...body, id: `application-${++applicationCreates}`,
-        configuration: { image: body.configuration.image, vcpu: 0.5, memory_mib: 4096, disk: { size_mb: 8000 } } };
+        configuration: { image: body.configuration.image, vcpu: 0.5, memory_mib: 4096, disk: { size_mb: 8000 } },
+        health: applicationReadiness.length ? applicationReadiness.shift() : preparedHealth };
       applications.set(application.id, application);
       if (faults.applicationResponse) { faults.applicationResponse = false; throw new Error('Application create response lost'); }
-      return Response.json(application);
+      return Response.json({ success: true, result: application });
+    }
+    if (path.startsWith('/containers/applications/') && request.method === 'GET') {
+      if (applicationRead.response) return applicationRead.response.clone();
+      const application = applications.get(path.slice('/containers/applications/'.length));
+      if (!application) return Response.json({ success: false }, { status: 404 });
+      if (applicationReadiness.length) application.health = applicationReadiness.shift();
+      application.instances = 7;
+      applicationRead.observe?.(application);
+      return Response.json({ success: true, result: application });
     }
     if (path.startsWith('/containers/applications/') && request.method === 'DELETE') {
       applications.delete(path.slice('/containers/applications/'.length));
@@ -75,6 +93,9 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
       const path = new URL(request.url).pathname;
       if (path === '/_image/preflight') {
         preflights += 1;
+        const application = [...applications.values()].find(value => value.durable_objects.namespace_id === namespaces.get(script ?? '')?.id);
+        if (!application?.health || application.health.instances.healthy === 0) throw new Error('Container capacity is not prepared');
+        if (faults.preflightInternal) throw new Error('internal error; reference = s3e6155h85p879ek0jafetmm');
         return faults.preflight
           ? Response.json({ status: 'error', error: { code: 'IMAGE_BOOTSTRAP_MISSING', message: 'Image bootstrap is missing' } }, { status: 409 })
           : Response.json({ status: 'ok' });
@@ -120,7 +141,7 @@ function fixture(storage: DurableObjectStorage, maxImages = 16) {
   bindings.COMPUTE = fetcher(null) as Fetcher;
   let provider = new TenantComputeProvider(storage, bindings, 'tenant-a', accountId, () => null);
   return {
-    applications, holders, faults, namespaceReadiness,
+    applications, holders, faults, namespaceReadiness, applicationReadiness, applicationRead, preparedHealth,
     preflights: () => preflights,
     creates: () => applicationCreates,
     restart: () => { provider = new TenantComputeProvider(storage, bindings, 'tenant-a', accountId, () => null); },
@@ -152,6 +173,80 @@ it('prepares a new image on the first request while its namespace becomes visibl
     expect(await prepared.json()).toMatchObject({ status: 'ok', value: { image: imageA } });
     expect([...f.applications.values()].map(application => application.configuration.image)).toEqual([imageA]);
     expect(f.creates()).toBe(1);
+    expect(f.preflights()).toBe(1);
+  });
+});
+
+it('waits for prepared image capacity, not active containers or the declared instance count', async () => {
+  await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
+    const f = fixture(state.storage);
+    f.applicationReadiness.push(
+      undefined,
+      { instances: { healthy: 0, active: 1, assigned: 1, failed: 0, starting: 1, scheduling: 1 } },
+      { instances: { healthy: 1, active: 0, assigned: 0, failed: 0, starting: 6, scheduling: 0 } },
+    );
+    const prepared = await f.post('/v1/images/prepare', { image: imageA });
+    expect(prepared.status, await prepared.clone().text()).toBe(200);
+    expect(await prepared.json()).toMatchObject({ status: 'ok', value: { image: imageA } });
+    expect(f.preflights()).toBe(1);
+    expect((await f.post('/v1/images/prepare', { image: imageA })).status).toBe(200);
+    expect(f.preflights()).toBe(1);
+    expect(f.creates()).toBe(1);
+  });
+});
+
+it('bounds application readiness and reconciles the same unready allocation after a timeout', async () => {
+  await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
+    const f = fixture(state.storage);
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    f.applicationReadiness.push({ instances: { healthy: 0, active: 0, assigned: 0, failed: 0, starting: 7, scheduling: 0 } });
+    f.applicationRead.observe = () => { now += 60_000; };
+    const pending = await f.post('/v1/images/prepare', { image: imageA });
+    expect(pending.status).toBe(503);
+    expect(await pending.json()).toMatchObject({ status: 'error', error: { code: 'COMPUTE_APPLICATION_PENDING' } });
+    expect(f.preflights()).toBe(0);
+    f.applicationRead.observe = undefined;
+    f.applicationReadiness.push(f.preparedHealth);
+    f.restart();
+    expect((await f.post('/v1/images/prepare', { image: imageA })).status).toBe(200);
+    expect(f.preflights()).toBe(1);
+    expect(f.creates()).toBe(1);
+  });
+});
+
+it('rejects immutable application drift discovered while waiting for prepared capacity', async () => {
+  await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
+    const f = fixture(state.storage);
+    f.applicationReadiness.push(undefined, f.preparedHealth);
+    f.applicationRead.observe = application => { application.configuration.image = imageB; };
+    const rejected = await f.post('/v1/images/prepare', { image: imageA });
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ status: 'error', error: { code: 'COMPUTE_APPLICATION_CHANGED' } });
+    expect(f.preflights()).toBe(0);
+    expect(f.creates()).toBe(1);
+  });
+});
+
+it('does not treat an application API rejection as provisioning progress', async () => {
+  await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
+    const f = fixture(state.storage);
+    f.applicationReadiness.push(undefined);
+    f.applicationRead.response = Response.json({ errors: [{ message: 'provider internal error' }] }, { status: 500 });
+    const rejected = await f.post('/v1/images/prepare', { image: imageA });
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ status: 'error', error: { code: 'COMPUTE_PROVIDER_REJECTED' } });
+    expect(f.preflights()).toBe(0);
+  });
+});
+
+it('does not retry a generic preflight internal error after prepared capacity is available', async () => {
+  await runInDurableObject(env.DEPLOYMENTS.getByName(crypto.randomUUID()), async (_instance, state) => {
+    const f = fixture(state.storage);
+    f.faults.preflightInternal = true;
+    const rejected = await f.post('/v1/images/prepare', { image: imageA });
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ status: 'error', error: { code: 'COMPUTE_OPERATION_FAILED' } });
     expect(f.preflights()).toBe(1);
   });
 });
