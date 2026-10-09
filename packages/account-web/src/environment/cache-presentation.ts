@@ -13,8 +13,13 @@ export function cachePresentation(attachment: Attachment, now = Date.now()) {
   return { label: 'Live', color: 'green', priority: 1, ready: true } as const;
 }
 
+/** Live attachments can still run work. `lost` is terminal: it is kept only as released history, never counted or offered. */
+export function partitionAttachments(attachments: readonly Attachment[]) {
+  return { live: attachments.filter(attachment => attachment.state !== 'lost' && attachment.state !== 'detached'), lost: attachments.filter(attachment => attachment.state === 'lost') };
+}
+
 export function environmentCacheSummary(snapshot: RuntimeSnapshot, now = Date.now()) {
-  const machines = snapshot.attachments.filter(attachment => attachment.state !== 'detached');
+  const machines = partitionAttachments(snapshot.attachments).live;
   const states = machines.map(attachment => cachePresentation(attachment, now));
   const worst = states.reduce<(typeof states)[number] | undefined>((current, next) => !current || next.priority > current.priority ? next : current, undefined);
   return { count: machines.length, ready: states.filter(state => state.ready).length, label: worst?.label ?? 'No machine', color: worst?.color ?? 'dim' } as const;

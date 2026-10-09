@@ -30,6 +30,7 @@ import { InferenceProvider, useInference } from './InferenceContext.js';
 import { InferencePage } from './InferencePage.js';
 import { EnvironmentView } from './environment/EnvironmentView.js';
 import { LifecycleLogDialog } from './environment/LifecycleLogDialog.js';
+import { partitionAttachments } from './environment/cache-presentation.js';
 import type { EnvironmentViewModel, LifecyclePhase, LifecycleRun, TrustState } from './environment/types.js';
 import { Inspector } from './inspector/index.js';
 import { ACCOUNT_DIRECTORY_CHANGED, PRODUCT_ROUTE_LABELS, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
@@ -223,7 +224,7 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
       machinePanel={runtimeContext ? <RuntimeMachines snapshot={runtimeContext.snapshot} onCommitFirst={onAskAgent ? () => onAskAgent('Help me review and commit uncommitted Git LFS changes before reclaiming or detaching this machine cache.') : undefined} profile={remote.selectedProfile}
         onOpenLog={runId => { const run = remote.lifecycle.runs.find(item => item.id === runId); const step = run?.results[0]; if (run) openRunLog(run.id, { id: step?.id ?? run.id, label: step?.id ?? run.phase }); else setActionError('The machine reported this setup run, but its durable log has not arrived. Refresh the environment and try again.'); }}
         renderBlockers={selectedMachineId => {
-          const attachment = runtimeContext.snapshot.attachments.find(item => item.machineId === selectedMachineId);
+          const attachment = partitionAttachments(runtimeContext.snapshot.attachments).live.find(item => item.machineId === selectedMachineId);
           const waiting = attachment?.cache?.setup.some(step => step.state === 'waiting-for-approval');
           const executions = remote.executions.filter(item => !remote.lifecycle.approvals.some(approval => approval.executionHash === item.hash && approval.scope === item.approval));
           const origins = remote.lifecycle.browserOrigins.filter(origin => !remote.lifecycle.approvals.some(approval => approval.executionHash === origin.hash));

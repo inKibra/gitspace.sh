@@ -23,6 +23,10 @@ export const SANDBOX_PROVISIONING_ATTEMPTS = 3;
 export const SANDBOX_PROVISIONING_RETRY_DELAY_MS = 60_000;
 /** An image operation recording no progress this long is rolled back, or ended with its barrier released. */
 export const CLOUD_IMAGE_OPERATION_DEADLINE_MS = 30 * 60_000;
+/** A machine power transition (stop, start, destroy) is a lease: a row still carrying its operation id this long after
+ * it started is settled by the fleet alarm, even when the request that began it died. Longer than the slowest chain of
+ * bounded provider calls in one transition (`SANDBOX_PROVIDER_DEADLINE_MS`). */
+export const MACHINE_OPERATION_LEASE_MS = 20 * 60_000;
 const FORCED_DISCARD_TTL_MS = 15 * 60_000;
 /** A running cloud sandbox with no usable attachment intent this long is stopped (slept, never destroyed). */
 export const CLOUD_MACHINE_IDLE_STOP_MS = 30 * 60_000;
@@ -106,6 +110,12 @@ export class FleetCatalogDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS forced_discards(machine_id TEXT PRIMARY KEY,token TEXT NOT NULL,workspaces_json TEXT NOT NULL,issued_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS machine_idle(machine_id TEXT PRIMARY KEY,idle_since INTEGER NOT NULL);
       `);
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS machine_operations(machine_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL,deadline_at INTEGER NOT NULL)');
+      // Transitions written before operation leases existed lease from their last write.
+      for (const row of this.ctx.storage.sql.exec<{ machine_id: string; definition_json: string; updated_at: string }>('SELECT machine_id,definition_json,updated_at FROM fleet_machines').toArray()) {
+        const operationId = (JSON.parse(row.definition_json) as Partial<FleetMachineDefinition>).operationId;
+        if (typeof operationId === 'string' && !this.hasPendingSandbox(row.machine_id)) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_operations(machine_id,operation_id,deadline_at) VALUES(?,?,?)', row.machine_id, operationId, Date.parse(row.updated_at) + MACHINE_OPERATION_LEASE_MS);
+      }
       // No attempt survives an isolate restart; the provisioning lease retries interrupted work shortly.
       const retryAt = Date.now() + SANDBOX_PROVISIONING_RETRY_DELAY_MS;
       for (const row of this.ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM sandbox_enrollments').toArray()) {
@@ -119,6 +129,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
       this.directoryOutbox.kick();
       await this.armProvisioning();
       await this.armImageDeadlines();
+      await this.armOperations();
       if (this.listMachines().some(machine => machine.provider === 'cloudflare-sandbox' && machine.state === 'online')) await this.scheduleAlarm('idle', Date.now() + CLOUD_MACHINE_IDLE_CHECK_MS);
     });
   }
@@ -143,7 +154,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return { source: 'fleet', cursor: this.directoryOutbox.head(), machines: this.listMachines() };
   }
 
-  private scheduleAlarm(owner: 'directory' | 'provisioning' | 'images' | 'idle', timestamp: number | null): Promise<void> {
+  private scheduleAlarm(owner: 'directory' | 'provisioning' | 'images' | 'idle' | 'operations', timestamp: number | null): Promise<void> {
     if (timestamp === null) this.ctx.storage.sql.exec('DELETE FROM fleet_alarms WHERE owner=?', owner);
     else this.ctx.storage.sql.exec('INSERT INTO fleet_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp', owner, timestamp);
     const operation = this.alarmLine.then(async () => {
@@ -163,6 +174,36 @@ export class FleetCatalogDO extends DurableObject<Env> {
     if (due.has('provisioning')) await this.expireProvisioningLeases(now);
     if (due.has('images')) await this.expireCloudImageOperations(now);
     if (due.has('idle')) await this.stopIdleSandboxes(now);
+    if (due.has('operations')) await this.expireMachineOperations(now);
+  }
+
+  private armOperations(): Promise<void> {
+    const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>('SELECT MIN(deadline_at) AS timestamp FROM machine_operations').toArray()[0]?.timestamp;
+    return this.scheduleAlarm('operations', next ?? null);
+  }
+
+  /** Settles power transitions whose lease lapsed: the provider's observed state when it answers, otherwise error, and
+   * always the timeout recorded on the machine with the operation id cleared so the user can retry. */
+  private async expireMachineOperations(now: number): Promise<void> {
+    for (const lease of this.ctx.storage.sql.exec<{ machine_id: string; operation_id: string }>('SELECT machine_id,operation_id FROM machine_operations WHERE deadline_at<=?', now).toArray()) {
+      const current = this.getMachine(lease.machine_id);
+      if (!current || current.operationId !== lease.operation_id || this.hasPendingSandbox(lease.machine_id)) {
+        this.ctx.storage.sql.exec('DELETE FROM machine_operations WHERE machine_id=? AND operation_id=?', lease.machine_id, lease.operation_id);
+        continue;
+      }
+      const observed = current.provider === 'cloudflare-sandbox'
+        ? await controlCloudflareSandboxMachine({ env: this.env, userId: this.env.ACCOUNT_ID, machineId: current.id, action: 'status' }).catch(() => null)
+        : null;
+      const latest = this.getMachine(lease.machine_id);
+      if (!latest || latest.operationId !== lease.operation_id) continue;
+      const transition = latest.state === 'sleeping' ? 'stop' : latest.state === 'resuming' ? 'start' : latest.state === 'deleting' ? 'destroy' : 'lifecycle';
+      this.saveMachine({
+        ...latest, state: observed?.state ?? 'error', rpcEndpoint: observed ? observed.rpcEndpoint : latest.rpcEndpoint,
+        lifecycleRevision: Math.max(latest.lifecycleRevision, observed?.lifecycleRevision ?? 0) + 1, operationId: null,
+        error: `Machine ${transition} operation timed out after ${MACHINE_OPERATION_LEASE_MS / 60_000} minutes; ${observed ? `the provider reports it ${observed.state}` : 'the provider could not be reached'}. Retry the action.`,
+      });
+    }
+    await this.armOperations();
   }
 
   /** Stops (sleeps, never destroys) running cloud sandboxes nobody intends to use. Sleep checkpoints first and keeps
@@ -633,6 +674,9 @@ export class FleetCatalogDO extends DurableObject<Env> {
         ON CONFLICT(machine_id) DO UPDATE SET definition_json = excluded.definition_json, updated_at = excluded.updated_at
       `, input.id, JSON.stringify(input), new Date().toISOString());
       this.ctx.storage.sql.exec('DELETE FROM destroyed_machines WHERE machine_id=?', input.id);
+      // Provisioning keeps its own lease; every other operation id is a power transition lease.
+      if (input.operationId === null || this.hasPendingSandbox(input.id)) this.ctx.storage.sql.exec('DELETE FROM machine_operations WHERE machine_id=?', input.id);
+      else this.ctx.storage.sql.exec('INSERT INTO machine_operations(machine_id,operation_id,deadline_at) VALUES(?,?,?) ON CONFLICT(machine_id) DO UPDATE SET operation_id=excluded.operation_id,deadline_at=excluded.deadline_at WHERE operation_id<>excluded.operation_id', input.id, input.operationId, Date.now() + MACHINE_OPERATION_LEASE_MS);
       const machines = this.listMachines();
       this.changes.append('machines', machines);
       this.directoryOutbox.enqueue({ source: 'fleet', machines });
@@ -640,6 +684,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
     this.directoryOutbox.kick();
     this.changes.wake();
     this.ctx.waitUntil(this.broadcast({ type: 'upsert', machineId: input.id, machine: input }));
+    this.ctx.waitUntil(this.armOperations());
     if (input.provider === 'cloudflare-sandbox' && input.state === 'online' && input.desiredState === 'online'
       && this.ctx.storage.sql.exec("SELECT owner FROM fleet_alarms WHERE owner='idle'").toArray().length === 0) {
       this.ctx.waitUntil(this.scheduleAlarm('idle', Date.now() + CLOUD_MACHINE_IDLE_CHECK_MS));
@@ -665,6 +710,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec('DELETE FROM sandbox_provisioning WHERE machine_id=?', machineId);
       this.ctx.storage.sql.exec('DELETE FROM forced_discards WHERE machine_id=?', machineId);
       this.ctx.storage.sql.exec('DELETE FROM machine_idle WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec('DELETE FROM machine_operations WHERE machine_id=?', machineId);
       const removed = this.ctx.storage.sql.exec('DELETE FROM fleet_machines WHERE machine_id = ?', machineId).rowsWritten > 0;
       if (removed) {
         const machines = this.listMachines();

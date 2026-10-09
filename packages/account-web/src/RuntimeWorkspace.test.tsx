@@ -142,6 +142,19 @@ it('renders a brand-new workspace whose execution and code documents are still n
   expect(container.querySelector('button[aria-label^="Environment"]')).not.toBeNull();
 });
 
+it('reads zero machines rather than offline when every attachment is lost', async () => {
+  const now = new Date().toISOString();
+  snapshot.attachments = Array.from({ length: 6 }, (_, index) => RuntimeSnapshotSchema.shape.attachments.element.parse({
+    projectId: project.id, workspaceId: workspace.id, attachmentId: `lost-${index}`, machineId: `machine-${index}`, generation: 1,
+    role: 'cache', checkout: { kind: 'shared', branch: 'work' }, state: 'lost', lossReason: 'machine-destroyed', capabilities: [], updatedAt: now, heartbeatAt: now,
+  }));
+  await act(async () => { render(); });
+  const chip = container.querySelector('button[aria-label^="Environment"]');
+  expect(chip?.getAttribute('aria-label')).toBe('Environment · 0 machines · No machine');
+  expect(chip?.textContent).toBe('Environment · 0 machines');
+  expect(chip?.querySelector('[data-status-color]')?.getAttribute('data-status-color')).toBe('dim');
+});
+
 it('changes the Environment chip to offline without another snapshot render', async () => {
   vi.useFakeTimers();
   try {
@@ -166,7 +179,7 @@ it('offers only live ready caches as terminal machines and opens terminals on th
     role: 'cache', checkout: { kind: 'shared', branch: 'work' }, state: 'ready', capabilities: [], updatedAt: now, heartbeatAt: now,
     cache: { state: 'live', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: null, reclaimAt: null, lastSyncAt: now, localWorkOptIn: false, setup: [] },
   });
-  snapshot.attachments = [cache, RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-b', machineId: 'cache-b', heartbeatAt: new Date(Date.now() - 60_000).toISOString() })];
+  snapshot.attachments = [cache, RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-b', machineId: 'cache-b', heartbeatAt: new Date(Date.now() - 60_000).toISOString() }), RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, attachmentId: 'cache-lost', machineId: 'cache-lost', state: 'lost', lossReason: 'machine-revoked' })];
   // The execution default never chooses where a terminal opens.
   snapshot.documents = { 'gitspace.execution': { defaultMachineId: 'cache-a' } };
   await act(async () => { render(); });

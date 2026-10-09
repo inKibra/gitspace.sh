@@ -707,18 +707,20 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
   const [discardCandidate, setDiscardCandidate] = useState(false);
   const [selection, setSelection] = useState<CloudImageSelection>({ kind: 'platform-default' });
   const [useAccountImage, setUseAccountImage] = useState(true);
-  const [pending, setPending] = useState<string | null>(null);
+  // Operations are tracked per key (a machine id, 'image' or 'create'): one hung machine operation never blocks another.
+  const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const [discardRequired, setDiscardRequired] = useState<Pick<MachineDiscardRequired, 'message' | 'confirmation' | 'workspaces'> | null>(null);
   const [discardPhrase, setDiscardPhrase] = useState('');
-  const operationPending = useRef(false);
+  const operationPending = useRef(new Set<string>());
   const discardMachine = discardRequired ? machines.find((machine) => machine.id === discardRequired.confirmation.machineId) : undefined;
   const requiredPhrase = discardMachine?.label || discardRequired?.confirmation.machineId;
+  const discardBusy = discardRequired !== null && pending.has(discardRequired.confirmation.machineId);
   const editingMachine = machines.find((machine) => machine.id === editing) ?? null;
   const run = async (key: string, action: () => Promise<void>) => {
-    if (operationPending.current) return;
-    operationPending.current = true;
-    setPending(key); setActionError(null);
+    if (operationPending.current.has(key)) return;
+    operationPending.current.add(key);
+    setPending(new Set(operationPending.current)); setActionError(null);
     try { await action(); }
     catch (error) {
       if (rpcErrors.machineDiscardRequired.is(error) && error.data.confirmation.machineId === key) {
@@ -726,7 +728,7 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
         setDiscardPhrase('');
       } else setActionError(rpcErrorMessage(error, 'Machine settings operation'));
     }
-    finally { operationPending.current = false; setPending(null); }
+    finally { operationPending.current.delete(key); setPending(new Set(operationPending.current)); }
   };
   const reclaimSeconds = settings.machines.cacheReclaimSeconds;
   // A value set outside these choices (for example through MCP) stays visible rather than silently displaying another option.
@@ -736,7 +738,7 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
     <Group title="Cloud image default">
       <p className="text-caption text-muted-foreground">New cloud machines use this account-owned, pinned image. Changing this default never replaces an existing machine or silently follows a platform update.</p>
       <p className="break-all font-mono text-caption">{cloudImageDefault?.image ?? 'Loading pinned account image…'}</p>
-      <Button variant="secondary" disabled={pending !== null} onClick={() => { setImageTarget('default'); setSelection({ kind: 'platform-default' }); }}>Choose account image</Button>
+      <Button variant="secondary" disabled={pending.has('image')} onClick={() => { setImageTarget('default'); setSelection({ kind: 'platform-default' }); }}>Choose account image</Button>
     </Group>
     <Group title="Paused caches"><SettingRows>
       <SettingRow title="Reclaim paused caches after" description={`Applies to every workspace. Caches pause after ${CACHE_IDLE_MINUTES} idle minutes. Reclamation waits for safe final publication; low disk may reclaim earlier.`}>
@@ -749,6 +751,7 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
       {machines.length ? <SettingRows>{machines.map((machine) => {
         const image = cloudImages.find((item) => item.machineId === machine.id);
         const active = cloudImageOperationActive(image);
+        const busy = pending.has(machine.id);
         return <Card key={machine.id} size="compact">
           <CardMedia icon={machine.kind === 'sandbox' ? ICONS.server : ICONS.monitor} />
           <CardHeader>
@@ -762,8 +765,8 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
               {image?.operation?.discardApproval ? <p className="text-caption text-destructive">{image.operation.discardReceipt ? 'Candidate stop was verified after explicit discard approval. Only completed workspace checkpoints are recoverable.' : 'Discard of uncheckpointed candidate work is explicitly authorized if checkpointing fails.'}</p> : null}
               {image?.operation?.error ? <p role="alert" className="text-destructive">{image.operation.error}</p> : null}
               {active && image?.operation ? <div className="flex flex-wrap gap-2">
-                <Button variant="secondary" size="compact" disabled={pending !== null} onClick={() => void run(machine.id, () => onRecoverCloudImage(machine.id, image.operation!.id, false))}>Continue / retry recovery</Button>
-                {cloudImageOperationCancellable(image) ? <Button variant="ghost" size="compact" disabled={pending !== null} onClick={() => void run(machine.id, () => onRecoverCloudImage(machine.id, image.operation!.id, true))}>Cancel and recover original</Button> : <Button variant="secondary" size="compact" disabled={pending !== null} onClick={() => {
+                <Button variant="secondary" size="compact" disabled={busy} onClick={() => void run(machine.id, () => onRecoverCloudImage(machine.id, image.operation!.id, false))}>Continue / retry recovery</Button>
+                {cloudImageOperationCancellable(image) ? <Button variant="ghost" size="compact" disabled={busy} onClick={() => void run(machine.id, () => onRecoverCloudImage(machine.id, image.operation!.id, true))}>Cancel and recover original</Button> : <Button variant="secondary" size="compact" disabled={busy || pending.has('image')} onClick={() => {
                   setImageTarget(machine.id); setImageRecovery({ machineId: machine.id, operationId: image.operation!.id });
                   setDiscardCandidate(false);
                   setSelection(image.currentImage ? { kind: 'custom', image: image.currentImage } : { kind: 'platform-default' });
@@ -774,12 +777,12 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
           <CardFooter>
             <Badge color={machine.state === 'online' ? 'green' : machine.state === 'error' ? 'amber' : 'gray'}>{machine.state === 'sleeping' ? 'stopping' : machine.state === 'resuming' ? 'starting' : machine.provider !== 'physical' && machine.state === 'offline' && machine.desiredState === 'offline' ? 'stopped' : machine.state}</Badge>
             <Button variant="ghost" onClick={() => { setEditing(machine.id); setNotes(machine.notes); }}>Notes</Button>
-            {machine.kind === 'sandbox' ? <Button variant="ghost" disabled={active || pending !== null || machine.state !== 'online'} onClick={() => { setImageTarget(machine.id); setImageRecovery(null); setSelection({ kind: 'platform-default' }); }}>Change image</Button> : null}
-            {machine.provider !== 'physical' && (machine.state === 'online' || machine.state === 'offline' || machine.state === 'error') ? <Button variant="ghost" disabled={active || pending !== null} onClick={() => {
+            {machine.kind === 'sandbox' ? <Button variant="ghost" disabled={active || busy || pending.has('image') || machine.state !== 'online'} onClick={() => { setImageTarget(machine.id); setImageRecovery(null); setSelection({ kind: 'platform-default' }); }}>Change image</Button> : null}
+            {machine.provider !== 'physical' && (machine.state === 'online' || machine.state === 'offline' || machine.state === 'error') ? <Button variant="ghost" disabled={active || busy} onClick={() => {
               if (machine.state === 'online' && !window.confirm(`Stop ${machine.label}?\n\nGitSpace saves supported workspace state before stopping. If saving fails, the machine stays online.\n\nStopping discards installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured, including files in the machine's home directory. Start restores saved workspaces in a fresh machine environment, not the old disk.`)) return;
               void run(machine.id, () => onControlMachine(machine.state === 'online' ? 'sleep' : 'resume', machine.id));
             }}>{machine.state === 'online' ? 'Stop' : 'Start'}</Button> : null}
-            {machine.provider !== 'physical' && machine.state !== 'deleting' ? <Button variant="ghost" disabled={active || pending !== null} onClick={() => { if (window.confirm(`Destroy ${machine.label}? This cannot be undone.`)) void run(machine.id, () => onDestroyMachine(machine.id)); }}>Destroy</Button> : null}
+            {machine.provider !== 'physical' && machine.state !== 'deleting' ? <Button variant="ghost" disabled={active || busy} onClick={() => { if (window.confirm(`Destroy ${machine.label}? This cannot be undone.`)) void run(machine.id, () => onDestroyMachine(machine.id)); }}>Destroy</Button> : null}
           </CardFooter>
         </Card>;
       })}</SettingRows> : <EmptyState icon={icon(Server01, 20)} title="No machines connected" description="Create a cloud machine or connect your own computer. You can also finish account setup and add capacity later." />}
@@ -787,7 +790,7 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
         <textarea aria-label="Machine notes" rows={4} value={notes} className={`${shape.input} w-full border border-border bg-surface-2 p-2 text-body text-foreground`} onChange={(event) => setNotes(event.currentTarget.value)} />
       </Panel> : null}
     </Group>
-    <Dialog open={discardRequired !== null} onOpenChange={(open) => { if (!open && !operationPending.current) { setDiscardRequired(null); setDiscardPhrase(''); } }}>
+    <Dialog open={discardRequired !== null} onOpenChange={(open) => { if (!open && !(discardRequired && operationPending.current.has(discardRequired.confirmation.machineId))) { setDiscardRequired(null); setDiscardPhrase(''); } }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Unsaved work on {requiredPhrase}</DialogTitle>
@@ -798,12 +801,12 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
           <ul className="space-y-1 text-caption">{discardRequired.workspaces.map((scope) => <li key={`${scope.projectId}:${scope.workspaceId}`} className="[overflow-wrap:anywhere]">Project {scope.projectId} · workspace {scope.workspaceId} · generation {scope.generation}: unpublished local work will be lost.</li>)}</ul>
           <p className="text-caption text-muted-foreground">Only completed checkpoints can be restored. Ignored files, installed packages, machine-local configuration, and other uncaptured files on this machine will also be lost.</p>
           <label className="flex flex-col gap-2 text-caption">Type <strong>{requiredPhrase}</strong> to confirm this loss.
-            <input aria-label="Confirm machine name" autoComplete="off" value={discardPhrase} disabled={pending !== null} className={`${shape.input} min-h-10 border border-border bg-surface-2 px-3 text-body`} onChange={(event) => setDiscardPhrase(event.currentTarget.value)} />
+            <input aria-label="Confirm machine name" autoComplete="off" value={discardPhrase} disabled={discardBusy} className={`${shape.input} min-h-10 border border-border bg-surface-2 px-3 text-body`} onChange={(event) => setDiscardPhrase(event.currentTarget.value)} />
           </label>
           <DialogFooter>
-            <Button variant="secondary" disabled={pending !== null} onClick={() => { setDiscardRequired(null); setDiscardPhrase(''); }}>Cancel discard</Button>
-            <Button variant="primary" disabled={pending !== null || discardPhrase !== requiredPhrase} onClick={() => {
-              if (operationPending.current || discardPhrase !== requiredPhrase) return;
+            <Button variant="secondary" disabled={discardBusy} onClick={() => { setDiscardRequired(null); setDiscardPhrase(''); }}>Cancel discard</Button>
+            <Button variant="primary" disabled={discardBusy || discardPhrase !== requiredPhrase} onClick={() => {
+              if (operationPending.current.has(discardRequired.confirmation.machineId) || discardPhrase !== requiredPhrase) return;
               const confirmation = discardRequired.confirmation;
               setDiscardRequired(null); setDiscardPhrase('');
               void run(confirmation.machineId, () => confirmation.action === 'sleep'
@@ -814,7 +817,7 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
         </> : null}
       </DialogContent>
     </Dialog>
-    {imageTarget ? <Panel title={imageTarget === 'default' ? 'Choose account cloud image' : `Change image · ${machines.find(machine => machine.id === imageTarget)?.label ?? imageTarget}`} description={imageTarget === 'default' ? 'Verify the provider can prepare this image before saving it for future machines.' : 'Only this machine will checkpoint, replace its ephemeral disk, and recover saved workspaces. Ignored files and machine-local changes are not preserved.'} footer={<><Button variant="secondary" disabled={pending !== null} onClick={() => setImageTarget(null)}>Close</Button><Button variant="primary" loading={pending === 'image'} disabled={pending !== null || !cloudImageSelectionSchema.safeParse(selection).success} onClick={() => void run('image', async () => {
+    {imageTarget ? <Panel title={imageTarget === 'default' ? 'Choose account cloud image' : `Change image · ${machines.find(machine => machine.id === imageTarget)?.label ?? imageTarget}`} description={imageTarget === 'default' ? 'Verify the provider can prepare this image before saving it for future machines.' : 'Only this machine will checkpoint, replace its ephemeral disk, and recover saved workspaces. Ignored files and machine-local changes are not preserved.'} footer={<><Button variant="secondary" disabled={pending.has('image')} onClick={() => setImageTarget(null)}>Close</Button><Button variant="primary" loading={pending.has('image')} disabled={pending.has('image') || !cloudImageSelectionSchema.safeParse(selection).success} onClick={() => void run('image', async () => {
       if (imageTarget === 'default') await onSetCloudImageDefault(selection);
       else {
         if (!window.confirm(imageRecovery?.machineId === imageTarget && discardCandidate
@@ -828,13 +831,13 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
       <CloudImagePicker value={selection} onChange={setSelection} />
       {imageRecovery?.machineId === imageTarget ? <div className="space-y-3">
         <p role="status" className="text-caption">The admission barrier stays in place. GitSpace prepares this image and checkpoints the actual candidate before replacing it. Only a candidate whose container provably never started can reuse its inherited checkpoint without checkpointing candidate work.</p>
-        <Switch label="Allow discarding uncheckpointed candidate work if saving fails" checked={discardCandidate} disabled={pending !== null} onToggle={() => setDiscardCandidate(value => !value)} />
+        <Switch label="Allow discarding uncheckpointed candidate work if saving fails" checked={discardCandidate} disabled={pending.has('image')} onToggle={() => setDiscardCandidate(value => !value)} />
         <p className="text-caption text-destructive">Leave this off to preserve candidate work. If the failed image cannot run its checkpoint control interface, explicit discard is the last-resort recovery path: stop the candidate, fence stale writers, and restore only its last completed workspace checkpoints. Uncheckpointed edits, ignored files, installed tools, and other machine-local changes cannot be recovered.</p>
       </div> : null}
     </Panel> : null}
     {setup ? <AddMachinePanel machines={machines} onClose={() => setSetup(false)} />
-      : sandboxSetup ? <Panel title="Create temporary cloud machine" description="Create a Cloudflare container using a pinned image. Runtime data not captured by workspace checkpoints is temporary. Cloudflare usage charges may apply." footer={<><Button variant="secondary" disabled={pending !== null} onClick={() => setSandboxSetup(false)}>Cancel</Button><Button variant="primary" loading={pending === 'create'} disabled={pending !== null || (!useAccountImage && !cloudImageSelectionSchema.safeParse(selection).success)} onClick={() => void run('create', async () => { await onCreateSandbox(useAccountImage ? undefined : selection); setSandboxSetup(false); })}>Create cloud machine</Button></>}>
-        <Switch label="Use pinned account image" checked={useAccountImage} disabled={pending !== null} onToggle={() => setUseAccountImage((value) => !value)} />
+      : sandboxSetup ? <Panel title="Create temporary cloud machine" description="Create a Cloudflare container using a pinned image. Runtime data not captured by workspace checkpoints is temporary. Cloudflare usage charges may apply." footer={<><Button variant="secondary" disabled={pending.has('create')} onClick={() => setSandboxSetup(false)}>Cancel</Button><Button variant="primary" loading={pending.has('create')} disabled={pending.has('create') || (!useAccountImage && !cloudImageSelectionSchema.safeParse(selection).success)} onClick={() => void run('create', async () => { await onCreateSandbox(useAccountImage ? undefined : selection); setSandboxSetup(false); })}>Create cloud machine</Button></>}>
+        <Switch label="Use pinned account image" checked={useAccountImage} disabled={pending.has('create')} onToggle={() => setUseAccountImage((value) => !value)} />
         {useAccountImage ? <p className="break-all font-mono text-caption">{cloudImageDefault?.image ?? 'Resolving account image…'}</p> : <CloudImagePicker value={selection} onChange={setSelection} />}
       </Panel>
       : <div className="flex flex-wrap items-center gap-2"><Button variant="primary" onClick={() => setSetup(true)}>{icon(Terminal)}Add a computer</Button><Button variant="secondary" onClick={() => { setSandboxSetup(true); setUseAccountImage(true); setSelection({ kind: 'platform-default' }); }}>{icon(Server01)}Create cloud machine</Button></div>}

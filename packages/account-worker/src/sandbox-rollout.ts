@@ -5,7 +5,7 @@ import {
 } from '@gitspace/protocol/cloud-image';
 import type { FleetMachineDefinition, PortableSpaceDefinition } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
-import { controlCloudflareSandboxMachine, controlCloudflareSandboxReplacement } from './sandbox-provisioner.js';
+import { callProvider, controlCloudflareSandboxMachine, controlCloudflareSandboxReplacement } from './sandbox-provisioner.js';
 import { tenantProvider } from './tenant-platform.js';
 
 export async function cloudImageProviderCall(env: Env, path: string, body?: object): Promise<unknown> {
@@ -15,13 +15,14 @@ export async function cloudImageProviderCall(env: Env, path: string, body?: obje
   let cfRay: string | null = null;
   console.info(JSON.stringify({ event: 'cloud_image_provider_request', requestId, path, outcome: 'start' }));
   try {
-    const response = await tenantProvider(env).fetch(new Request(`https://sandbox.internal${path}`, {
+    const action = path === '/v1/images/default' ? 'image-default' : path === '/v1/images/prepare' ? 'image-prepare' : path.endsWith('/image/status') ? 'image-status' : path.endsWith('/image/discard') ? 'image-discard' : 'image-switch';
+    const { response, payload: raw } = await callProvider(tenantProvider(env), action, `https://sandbox.internal${path}`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-gitspace-request-id': requestId },
       body: body ? JSON.stringify(body) : undefined,
-    }));
+    });
     status = response.status;
     cfRay = response.headers.get('cf-ray');
-    const payload = await response.json() as { status?: string; value?: unknown; error?: { code?: string; message?: string } | string };
+    const payload = raw as { status?: string; value?: unknown; error?: { code?: string; message?: string } | string };
     if (!response.ok || payload.status !== 'ok') throw new Error(typeof payload.error === 'string' ? payload.error : payload.error?.message ?? `Cloud image provider request failed (HTTP ${response.status})`);
     console.info(JSON.stringify({ event: 'cloud_image_provider_request', requestId, path, outcome: 'success', status, cfRay, elapsedMs: Date.now() - started }));
     return payload.value;

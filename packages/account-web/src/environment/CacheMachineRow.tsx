@@ -29,10 +29,27 @@ export function CacheMachineRow({ attachment, name, isDefault, pending, now, blo
       <label className="flex min-h-10 items-center gap-2 text-caption"><input type="checkbox" aria-label={`Work locally on ${name}`} checked={cache.localWorkOptIn} disabled={pending || attachment.state === 'draining'} onChange={event => onAction({ kind: 'local-work', enabled: event.target.checked })} />Work locally · keep this cache live while using local tools</label>
     </> : <p className="text-caption text-muted-foreground">{attachment.role} · {attachment.state}</p>}
     {attachment.cacheAction ? <p role="status" className="text-caption">{attachment.cacheAction.action} · {attachment.cacheAction.status}{attachment.cacheAction.error ? ` · ${attachment.cacheAction.error}` : ''}</p> : null}
+    {attachment.failure ? <p role="status" className="break-words text-caption text-destructive">{attachment.failure.operation} failed · {attachment.failure.message} · {attachment.failure.attempts} {attachment.failure.attempts === 1 ? 'attempt' : 'attempts'}{attachment.failure.nextRetryAt ? ` · retrying at ${new Date(attachment.failure.nextRetryAt).toLocaleString()}` : ''}</p> : null}
     {blockers}{runs}
     <footer className="flex flex-wrap gap-1">
       {attachment.role === 'cache' ? <><Button variant="ghost" size="compact" className="min-h-10" disabled={pending || isDefault || !status.ready} onClick={onDefault}>Make default</Button><Button variant="secondary" size="compact" className="min-h-10" disabled={pending || attachment.state === 'draining'} onClick={() => onAction({ kind: 'setup' })}>Setup again</Button><Button variant="ghost" size="compact" className="min-h-10" disabled={pending || cache?.state === 'reclaimed' || attachment.state === 'draining'} onClick={() => onAction({ kind: 'reclaim' })}>Reclaim now</Button></> : null}
       <Button variant="ghost" size="compact" className="min-h-10" disabled={pending || attachment.state === 'draining'} onClick={onDetach}>{attachment.state === 'draining' ? 'Detaching…' : 'Detach'}</Button>
     </footer>
   </section>;
+}
+
+const LOSS_REASON: Record<NonNullable<Attachment['lossReason']>, string> = {
+  deadline: 'lease expired',
+  'machine-destroyed': 'machine destroyed',
+  'machine-revoked': 'machine revoked',
+  operator: 'released by operator',
+};
+
+/** Lost attachments are terminal history: listed compactly, collapsed, and never actionable. */
+export function ReleasedMachineList({ attachments, label }: { attachments: readonly Attachment[]; label(machineId: string): string }) {
+  if (!attachments.length) return null;
+  return <details className="text-caption">
+    <summary className="min-h-10 cursor-pointer text-muted-foreground">Released machines · {attachments.length}</summary>
+    <ul aria-label="Released machines" className="flex flex-col gap-1 pt-1">{attachments.map(attachment => <li key={attachment.attachmentId} className="flex flex-wrap items-center justify-between gap-2 tabular-nums"><span>{label(attachment.machineId)}</span><span className="text-muted-foreground">Lost{attachment.lossReason ? ` — ${LOSS_REASON[attachment.lossReason]}` : ''} · {new Date(attachment.updatedAt).toLocaleString()}</span></li>)}</ul>
+  </details>;
 }

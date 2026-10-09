@@ -116,11 +116,11 @@ it('requests fenced detach and retains the working copy until the runtime confir
   expect([...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Detaching…')?.disabled).toBe(true);
 });
 
-it('requires explicit LFS consent on a lost machine and cancels detach when committing first', async () => {
+it('requires explicit LFS consent on an offline machine and cancels detach when committing first', async () => {
   const snapshot = fixture();
   const checkpoint = RuntimeGitCheckpointSchema.parse(snapshot.documents['gitspace.code']);
   snapshot.documents['gitspace.code'] = { ...checkpoint, lfs: { objects: [], heldBack: [{ path: 'assets/local.psd', kind: 'modified' }] } };
-  snapshot.attachments.push(RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'fixed', machineId: 'runner', generation: 4, role: 'runner', checkout: { kind: 'snapshot', commit }, state: 'lost', capabilities: [], updatedAt: stamp }));
+  snapshot.attachments.push(RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'fixed', machineId: 'runner', generation: 4, role: 'runner', checkout: { kind: 'snapshot', commit }, state: 'ready', capabilities: [], updatedAt: stamp }));
   const commitFirst = vi.fn();
   await act(() => root.render(<RuntimeMachines snapshot={snapshot} onCommitFirst={commitFirst} />));
   const click = async (text: string) => {
@@ -176,6 +176,34 @@ it('shows why a machine setup step failed', async () => {
   expect(container.querySelector('[aria-label="Machine setup progress"] [role="status"]')?.textContent).toBe('Workspace Hub lifecycle execution is unavailable');
 });
 
+it('lists lost attachments only as released history, never as live machines or default choices', async () => {
+  const snapshot = fixture();
+  const cache = RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'live', machineId: 'live-machine', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: [], updatedAt: stamp, heartbeatAt: stamp });
+  snapshot.attachments.push(cache, ...[
+    { attachmentId: 'destroyed', machineId: 'runner', state: 'lost', lossReason: 'machine-destroyed' },
+    { attachmentId: 'expired', machineId: 'expired-machine', state: 'lost', lossReason: 'deadline' },
+    { attachmentId: 'gone', machineId: 'gone-machine', state: 'detached' },
+  ].map(change => RuntimeSnapshotSchema.shape.attachments.element.parse({ ...cache, ...change })));
+  await act(() => root.render(<RuntimeMachines snapshot={snapshot} />));
+  expect([...container.querySelectorAll('section[aria-label^="Machine "]')].map(row => row.getAttribute('aria-label'))).toEqual(['Machine live-machine']);
+  expect(container.querySelector('summary')?.textContent).toBe('Released machines · 2');
+  const released = [...container.querySelectorAll('[aria-label="Released machines"] li')].map(item => item.textContent);
+  expect(released).toEqual([expect.stringMatching(/^Runner workstationLost — machine destroyed · /), expect.stringMatching(/^expired-machineLost — lease expired · /)]);
+  expect(container.querySelectorAll('[aria-label="Released machines"] button')).toHaveLength(0);
+  const select = container.querySelector<HTMLSelectElement>('[aria-describedby="execution-machine-help"]')!;
+  expect([...select.options].map(option => option.value)).toEqual(['', 'live-machine']);
+  expect(container.querySelector('[role="status"]')?.textContent).toContain('/ 1 machines');
+});
+
+it('shows the last attachment failure with its retry time', async () => {
+  vi.useFakeTimers({ now: Date.parse(stamp) });
+  const snapshot = fixture();
+  const retry = '2026-10-03T00:05:00.000Z';
+  snapshot.attachments.push(RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'cache', machineId: 'runner', generation: 4, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: [], updatedAt: stamp, heartbeatAt: stamp, failure: { operation: 'sync', message: 'Cloud refused the push', attempts: 3, nextRetryAt: retry, at: stamp } }));
+  await act(() => root.render(<RuntimeMachines snapshot={snapshot} />));
+  const row = container.querySelector('[aria-label="Machine Runner workstation"]')!;
+  expect([...row.querySelectorAll('[role="status"]')].map(item => item.textContent)).toContain(`sync failed · Cloud refused the push · 3 attempts · retrying at ${new Date(retry).toLocaleString()}`);
+});
 
 it('requires an explicit continue for reclaim and never reuses consent on the next request', async () => {
   const snapshot = fixture();

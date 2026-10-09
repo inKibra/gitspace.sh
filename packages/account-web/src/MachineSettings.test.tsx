@@ -85,3 +85,34 @@ it('edits the account-wide paused cache retention through the settings draft', a
   await act(() => options.find((option) => option.textContent === '72 hours')?.click());
   expect(onChange).toHaveBeenCalledWith({ ...settings, machines: { cacheReclaimSeconds: 259200 } });
 });
+it('keeps every other machine and its discard dialog usable while one machine operation hangs', async () => {
+  const machine = (id: string, label: string) => ({ id, label, state: 'online' as const, kind: 'sandbox' as const, provider: 'cloudflare-sandbox' as const, notes: '', desiredState: 'online' as const, lifecycleRevision: 1, operationId: null, error: null });
+  const confirmation: MachineDiscardConfirmation = { machineId: 'cloud-b', action: 'sleep', token: 'bound-work-and-revision-token' };
+  const refusal = rpcErrors.machineDiscardRequired({ message: 'Workspace checkpoint could not publish local work.', confirmation, workspaces: [{ projectId: 'project-alpha', workspaceId: 'workspace-review', generation: 7, reason: 'unpublished-local-work' }] });
+  const hung = Promise.withResolvers<void>();
+  const destroy = vi.fn((_id: string) => hung.promise);
+  const control = vi.fn(async (_action: 'sleep' | 'resume', _id: string, approval?: MachineDiscardConfirmation) => { if (!approval) throw refusal; });
+  await render({ machines: [machine('cloud-a', 'Stuck cloud'), machine('cloud-b', 'Healthy cloud')], onControlMachine: control, onDestroyMachine: destroy });
+  // The nearest ancestor of a machine's title that holds buttons is that machine's card.
+  const card = (label: string) => {
+    let element = [...document.body.querySelectorAll('*')].find((candidate) => candidate.children.length === 0 && candidate.textContent === label)?.parentElement ?? null;
+    while (element && !element.querySelector('button')) element = element.parentElement;
+    return element;
+  };
+  const action = (label: string, text: string) => {
+    const target = [...(card(label)?.querySelectorAll('button') ?? [])].find((candidate) => candidate.textContent === text);
+    if (!target) throw new Error(`Missing ${text} on ${label}`);
+    return target;
+  };
+  await act(() => action('Stuck cloud', 'Destroy').click());
+  expect(destroy).toHaveBeenCalledWith('cloud-a');
+  expect(action('Stuck cloud', 'Stop').disabled).toBe(true);
+  expect(action('Healthy cloud', 'Destroy').disabled).toBe(false);
+  await act(() => action('Healthy cloud', 'Stop').click());
+  const input = document.body.querySelector<HTMLInputElement>('input[aria-label="Confirm machine name"]');
+  expect(input?.disabled).toBe(false);
+  await phrase('Healthy cloud');
+  await button('Discard and stop');
+  expect(control).toHaveBeenLastCalledWith('sleep', 'cloud-b', confirmation);
+  await act(async () => { hung.resolve(); await hung.promise; });
+});

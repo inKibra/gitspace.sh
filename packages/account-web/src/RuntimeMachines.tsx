@@ -10,8 +10,8 @@ import { useAccountMachines } from './SynchronizationProvider.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
 import { RuntimeBrowserGroups } from './RuntimeBrowser.js';
 import { runtimeLfsHeldBack, useLfsTransition } from './LfsTransition.js';
-import { CacheMachineRow } from './environment/CacheMachineRow.js';
-import { environmentCacheSummary } from './environment/cache-presentation.js';
+import { CacheMachineRow, ReleasedMachineList } from './environment/CacheMachineRow.js';
+import { environmentCacheSummary, partitionAttachments } from './environment/cache-presentation.js';
 import { useCacheFreshnessClock } from './environment/useCacheFreshnessClock.js';
 
 export function RuntimeMachines({ snapshot, onCommitFirst, profile, renderBlockers, renderRuns, onOpenLog }: {
@@ -31,8 +31,9 @@ export function RuntimeMachines({ snapshot, onCommitFirst, profile, renderBlocke
   const [branch, setBranch] = useState('');
   const checkpoint = RuntimeGitCheckpointSchema.safeParse(snapshot.documents['gitspace.code']);
   const execution = RuntimeExecutionDocumentSchema.parse(snapshot.documents['gitspace.execution'] ?? { defaultMachineId: null });
-  const caches = snapshot.attachments.filter(attachment => attachment.role === 'cache' && attachment.state !== 'detached');
-  const attached = snapshot.attachments.filter(attachment => attachment.state !== 'detached');
+  const { live: attached, lost } = partitionAttachments(snapshot.attachments);
+  const caches = attached.filter(attachment => attachment.role === 'cache');
+  const machineLabel = (id: string) => machines?.find(machine => machine.id === id)?.label ?? id;
   const summary = environmentCacheSummary(snapshot, now);
   const lfsTransition = useLfsTransition();
   const perform = async (operation: () => Promise<void>) => {
@@ -78,9 +79,10 @@ export function RuntimeMachines({ snapshot, onCommitFirst, profile, renderBlocke
     <header className="flex flex-col gap-2"><h2 className="text-body font-medium">Machines</h2><p role="status" className="flex flex-wrap items-center gap-2 text-caption tabular-nums"><StatusDot color={summary.color} />{profile ? `${profile} · ` : ''}{summary.ready} ready / {summary.count} machines · {summary.label}</p><p className="text-caption text-muted-foreground">Workspace files belong to the cloud. Every normal attachment is an equal local cache. Commands require an online, prepared cache.</p></header>
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
     {runtimeLfsHeldBack(snapshot).length ? <p role="alert" className="text-caption text-warning">Uncommitted Git LFS changes are held back on their machine. Commit them before reclamation or detaching.</p> : null}
-    <label className="flex flex-col gap-2 text-caption">Default machine<select aria-describedby="execution-machine-help" className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={execution.defaultMachineId ?? ''} disabled={pending} onChange={event => void changeExecutionMachine(event.target.value || null)}><option value="">Automatic · first ready cache</option>{execution.defaultMachineId && !caches.some(item => item.machineId === execution.defaultMachineId) ? <option value={execution.defaultMachineId} disabled>{execution.defaultMachineId} · unavailable</option> : null}{caches.map(item => <option key={item.attachmentId} value={item.machineId}>{machines?.find(machine => machine.id === item.machineId)?.label ?? item.machineId}</option>)}</select></label>
+    <label className="flex flex-col gap-2 text-caption">Default machine<select aria-describedby="execution-machine-help" className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={execution.defaultMachineId ?? ''} disabled={pending} onChange={event => void changeExecutionMachine(event.target.value || null)}><option value="">Automatic · first ready cache</option>{execution.defaultMachineId && !caches.some(item => item.machineId === execution.defaultMachineId) ? <option value={execution.defaultMachineId} disabled>{execution.defaultMachineId} · unavailable</option> : null}{caches.map(item => <option key={item.attachmentId} value={item.machineId}>{machineLabel(item.machineId)}</option>)}</select></label>
     <p id="execution-machine-help" className="text-caption text-muted-foreground">Default selects where commands run; conversation and terminal selection stay independent.</p>
-    {!attached.length ? <EmptyState title="No machine" description="Cloud files and conversations remain available. Add a machine to run commands." /> : attached.map(attachment => <CacheMachineRow key={attachment.attachmentId} attachment={attachment} name={machines?.find(machine => machine.id === attachment.machineId)?.label ?? attachment.machineId} isDefault={execution.defaultMachineId === attachment.machineId} pending={pending} now={now} onAction={next => void action(attachment, next)} onDefault={() => void changeExecutionMachine(attachment.machineId)} onDetach={() => void detach(attachment)} onOpenLog={onOpenLog} blockers={renderBlockers?.(attachment.machineId)} runs={renderRuns?.(attachment.machineId)} />)}
+    {!attached.length ? <EmptyState title="No machine" description="Cloud files and conversations remain available. Add a machine to run commands." /> : attached.map(attachment => <CacheMachineRow key={attachment.attachmentId} attachment={attachment} name={machineLabel(attachment.machineId)} isDefault={execution.defaultMachineId === attachment.machineId} pending={pending} now={now} onAction={next => void action(attachment, next)} onDefault={() => void changeExecutionMachine(attachment.machineId)} onDetach={() => void detach(attachment)} onOpenLog={onOpenLog} blockers={renderBlockers?.(attachment.machineId)} runs={renderRuns?.(attachment.machineId)} />)}
+    <ReleasedMachineList attachments={lost} label={machineLabel} />
     <form className={`${shape.container} flex flex-col gap-3 bg-surface-2 p-4 shadow-surface-1`} onSubmit={event => { event.preventDefault(); void requestAttachment(); }}>
       <h3 className="text-body font-medium">Add machine</h3>
       <label className="flex flex-col gap-2 text-caption">Enrolled machine<select aria-label="Enrolled machine" className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={machineId} onChange={event => setMachineId(event.target.value)} disabled={pending}><option value="">Choose a machine</option>{(machines ?? []).map(machine => <option key={machine.id} value={machine.id}>{machine.label} · {machine.state}</option>)}</select></label>
