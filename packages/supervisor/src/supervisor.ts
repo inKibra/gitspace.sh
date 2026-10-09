@@ -27,6 +27,9 @@ export class ProcessSupervisor {
   private readonly completions = new Map<string, Extract<DaemonResponse, { op: 'describe' }>>();
   private closing = false;
   private readonly privatePipes = new Set<string>();
+  /** Advances on every process start and state transition; `watch` callers long-poll on it. */
+  private revision = 0;
+  private readonly observers = new Set<() => void>();
   /** Native authority only: deliberately absent from the broker request schema. */
   async startPrivatePipe(request: Extract<DaemonRequest, { op: 'start' }>): Promise<DaemonResponse> {
     if (request.spec.pty || request.spec.detached || request.spec.restart !== 'no') throw new Error('Private pipes require a non-restarting owned process');
@@ -124,14 +127,19 @@ export class ProcessSupervisor {
     })().finally(() => { run.writing = false; });
     return run.writes;
   }
-  private changed(run: Running): void { for (const listener of run.listeners) listener(); }
+  /** A start or state transition: advances the inventory revision. */
+  private changed(run: Running): void { this.revision++; this.notify(run); }
+  private notify(run: Running): void {
+    for (const listener of run.listeners) listener();
+    for (const observer of this.observers) observer();
+  }
   private output(run: Running, text: string): void {
     run.text += text;
     run.stored.cursor += text.length;
     if (run.text.length > MAX_LOG) { const removed = run.text.length - MAX_LOG; run.text = run.text.slice(removed); run.stored.base += removed; }
     run.projection.push(text);
     void this.persist(run).catch(error => { run.stored.daemon.failure = `Log persistence failed: ${String(error)}`; this.changed(run); });
-    this.changed(run);
+    this.notify(run);
   }
   private async readDetachedOutput(run: Running): Promise<void> {
     const file = await open(join(this.root, 'daemons', run.stored.daemon.name, 'output.log'), 'a+', 0o600);
@@ -298,7 +306,7 @@ export class ProcessSupervisor {
       if (Date.now() >= hardDeadline) throw new Error('Process-tree termination could not be confirmed');
       await Bun.sleep(25);
     }
-    if (!run.recovered && (run.pipe || run.pty) && !finished(run) && !await this.wait(run, () => finished(run), 5000)) throw new Error('Process exit stream did not close after termination');
+    if (!run.recovered && (run.pipe || run.pty) && !finished(run) && !await this.wait(run.listeners, () => finished(run), 5000)) throw new Error('Process exit stream did not close after termination');
     // Recovery's failure denotes an unresolved effect, not an execution failure.
     // Clear it only after the identity-verified cleanup barrier above succeeds.
     if (run.recovered) delete run.stored.daemon.failure;
@@ -318,14 +326,14 @@ export class ProcessSupervisor {
     await run.writes;
     if (run.backgroundFailure) throw run.backgroundFailure;
   }
-  private wait(run: Running, predicate: () => boolean, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+  private wait(listeners: Set<() => void>, predicate: () => boolean, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
     if (predicate()) return Promise.resolve(true);
     const result = Promise.withResolvers<boolean>();
-    const finish = (value: boolean) => { clearTimeout(timer); run.listeners.delete(check); signal?.removeEventListener('abort', abort); result.resolve(value); };
+    const finish = (value: boolean) => { clearTimeout(timer); listeners.delete(check); signal?.removeEventListener('abort', abort); result.resolve(value); };
     const check = () => { if (predicate()) finish(true); };
-    const abort = () => { clearTimeout(timer); run.listeners.delete(check); result.reject(signal?.reason ?? new Error('Request aborted')); };
+    const abort = () => { clearTimeout(timer); listeners.delete(check); result.reject(signal?.reason ?? new Error('Request aborted')); };
     const timer = setTimeout(() => finish(false), timeoutMs);
-    run.listeners.add(check); signal?.addEventListener('abort', abort, { once: true });
+    listeners.add(check); signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort(); else check();
     return result.promise;
   }
@@ -351,6 +359,11 @@ export class ProcessSupervisor {
       return { op: 'shutdown' };
     }
     if (this.closing) throw new Error('Supervisor is shutting down');
+    if (request.op === 'watch') {
+      const cursor = () => request.name === undefined ? null : this.runs.get(request.name)?.stored.cursor ?? null;
+      await this.wait(this.observers, () => request.revision !== this.revision || (request.name !== undefined && cursor() !== (request.cursor ?? null)), request.timeoutMs ?? 30_000, signal);
+      return { op: 'watch', revision: this.revision, cursor: cursor() };
+    }
     if ((request.op === 'describe' || request.op === 'stop') && request.instanceId !== undefined && request.restartCount !== undefined) {
       const completion = this.completions.get(`${request.instanceId}:${request.restartCount}`);
       if (completion && completion.daemon.name === request.name) return request.op === 'describe' ? structuredClone(completion) : { op: 'stop', daemon: structuredClone(completion.daemon) };
@@ -414,12 +427,12 @@ export class ProcessSupervisor {
       }
       case 'wait': {
         const regex = request.pattern ? new RegExp(request.pattern, 'u') : null;
-        const observed = await this.wait(run, () => finished(run) || (regex ? regex.test(run.text) : request.for === 'ready' && (run.stored.daemon.state === 'ready' || run.stored.daemon.readiness?.timedOut === true)), request.timeoutMs ?? 30_000, signal);
+        const observed = await this.wait(run.listeners, () => finished(run) || (regex ? regex.test(run.text) : request.for === 'ready' && (run.stored.daemon.state === 'ready' || run.stored.daemon.readiness?.timedOut === true)), request.timeoutMs ?? 30_000, signal);
         const matched = regex?.exec(run.text)?.[0];
         return { op: 'wait', daemon: { ...run.stored.daemon }, timedOut: !observed || (!regex && request.for === 'ready' && run.stored.daemon.readiness?.timedOut === true), ...(matched === undefined ? {} : { matched }) };
       }
       case 'logs': {
-        if (request.follow && request.cursor === run.stored.cursor && !finished(run)) await this.wait(run, () => run.stored.cursor !== request.cursor || finished(run), request.timeoutMs ?? 30_000, signal);
+        if (request.follow && request.cursor === run.stored.cursor && !finished(run)) await this.wait(run.listeners, () => run.stored.cursor !== request.cursor || finished(run), request.timeoutMs ?? 30_000, signal);
         const resync = request.cursor !== undefined && request.cursor < run.stored.base ? 'cursor-expired' : request.cursor !== undefined && request.cursor > run.stored.cursor ? 'cursor-ahead' : undefined;
         const offset = request.cursor === undefined || resync ? 0 : request.cursor - run.stored.base;
         const pattern = request.grep ? new RegExp(request.grep, 'u') : null;

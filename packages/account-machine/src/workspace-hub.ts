@@ -1,7 +1,7 @@
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { mkdtemp, open, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { watch, type FSWatcher } from 'node:fs';
+import { watch } from 'node:fs';
 import { getDaemonRuntimeDir } from '@gitspace/supervisor';
 import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
 import { TerminalSnapshotJournal, type TerminalSnapshot } from './terminal-stream.js';
@@ -206,45 +206,37 @@ export class WorkspaceHubTerminalCoordinator {
     let failure: Error | null = null;
     let wake: (() => void) | undefined;
     const notify = () => { wake?.(); wake = undefined; };
-    const runtimeDir = getDaemonRuntimeDir(scope.client.projectDir);
-    const daemonsDir = join(runtimeDir, 'daemons');
-    const watchers = new Map<string, FSWatcher>();
-    const changed = () => { dirty = true; notify(); };
-    const install = (path: string, relevant: (file: string | null) => boolean) => {
-      if (watchers.has(path)) return;
-      try {
-        const watcher = watch(path, (_event, file) => { if (relevant(file?.toString() ?? null)) changed(); });
-        watcher.on('error', (error) => { failure = error; notify(); });
-        watchers.set(path, watcher);
-      } catch (error) {
-        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
-      }
-    };
     signal.addEventListener('abort', notify, { once: true });
+    // The supervisor confirms every start, state transition, and the selected terminal's output.
+    // Transient shells keep no runtime files, so file notifications cannot observe them.
+    void (async () => {
+      let revision: number | undefined;
+      let cursor: number | null = null;
+      while (!signal.aborted) {
+        const observed = await scope.client.request({
+          op: 'watch',
+          ...(revision === undefined ? {} : { revision }),
+          ...(name === null ? {} : { name, ...(cursor === null ? {} : { cursor }) }),
+        }, signal);
+        if (observed.op !== 'watch') throw new Error('Supervisor returned an invalid watch response');
+        if (observed.revision === revision && observed.cursor === cursor) continue;
+        revision = observed.revision;
+        cursor = observed.cursor;
+        dirty = true;
+        notify();
+      }
+    })().catch((error: unknown) => {
+      if (signal.aborted) return;
+      failure = error instanceof Error ? error : new Error(String(error));
+      notify();
+    });
     try {
-      await scope.client.request({ op: 'list' });
-      install(runtimeDir, (file) => file === null || file === 'daemons');
       while (!signal.aborted) {
         const changed = Promise.withResolvers<void>();
         wake = changed.resolve;
         if (failure) throw failure;
         if (dirty) {
           dirty = false;
-          install(daemonsDir, () => true);
-          const directories = await readdir(daemonsDir, { withFileTypes: true }).catch((error: unknown) => {
-            if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return [];
-            throw error;
-          });
-          const currentDirectories = new Set<string>();
-          for (const directory of directories) {
-            if (!directory.isDirectory()) continue;
-            const path = join(daemonsDir, directory.name);
-            currentDirectories.add(path);
-            install(path, (file) => file === null || file === 'meta.json' || (name === directory.name && file === 'output.log'));
-          }
-          for (const [path, watcher] of watchers) {
-            if (path !== runtimeDir && path !== daemonsDir && !currentDirectories.has(path)) { watcher.close(); watchers.delete(path); }
-          }
           const terminals = await this.list(spaceId);
           // Keep only the selected completed lifecycle terminal visible, rather
           // than replaying an unbounded list of historical runs.
@@ -263,7 +255,6 @@ export class WorkspaceHubTerminalCoordinator {
         await changed.promise;
       }
     } finally {
-      for (const watcher of watchers.values()) watcher.close();
       signal.removeEventListener('abort', notify);
     }
   }

@@ -43,6 +43,8 @@ export const DaemonRequestSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('send'), name, data: z.string().optional(), text: z.string().optional(), enter: z.boolean().optional(), keys: z.array(z.enum(['ENTER', 'TAB', 'ESCAPE', 'CTRL_C', 'CTRL_D', 'UP', 'DOWN', 'LEFT', 'RIGHT'])).optional(), signal: z.enum(['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT', 'SIGKILL']).optional(), cols: z.number().int().positive().optional(), rows: z.number().int().positive().optional() }),
   z.object({ op: z.literal('wait'), name, for: z.enum(['ready', 'exit']).optional(), pattern: z.string().optional(), timeoutMs: timeout.optional() }),
   z.object({ op: z.literal('logs'), name, lines: z.number().int().positive().max(10000).optional(), head: z.boolean().optional(), grep: z.string().optional(), follow: z.boolean().optional(), cursor: z.number().int().nonnegative().optional(), renderTerminalRows: z.boolean().optional(), timeoutMs: timeout.optional() }),
+  /** Long-poll until the inventory revision differs from `revision` (absent: answer at once) or the named process's output cursor differs from `cursor`. */
+  z.object({ op: z.literal('watch'), revision: z.number().int().nonnegative().optional(), name: name.optional(), cursor: z.number().int().nonnegative().optional(), timeoutMs: timeout.optional() }),
   z.object({ op: z.literal('shutdown') }),
 ]);
 export type DaemonRequest = z.infer<typeof DaemonRequestSchema>;
@@ -55,6 +57,8 @@ export const DaemonResponseSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('send'), daemon: DaemonSnapshotSchema }),
   z.object({ op: z.literal('wait'), daemon: DaemonSnapshotSchema, timedOut: z.boolean(), matched: z.string().optional() }),
   z.object({ op: z.literal('logs'), state: DaemonStateSchema, text: z.string(), terminalText: z.string().optional(), cursor: z.number().int().nonnegative(), resync: z.enum(['cursor-expired', 'cursor-ahead']).optional() }),
+  /** `revision` changes on every process start and state transition; `cursor` is the named process's output cursor, null when it is unknown. */
+  z.object({ op: z.literal('watch'), revision: z.number().int().nonnegative(), cursor: z.number().int().nonnegative().nullable() }),
   z.object({ op: z.literal('shutdown') }),
 ]);
 export type DaemonResponse = z.infer<typeof DaemonResponseSchema>;

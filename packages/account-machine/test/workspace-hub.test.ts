@@ -3,8 +3,18 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
+import type { StreamEvent } from '@gitspace/protocol-sync';
 import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
+import type { TerminalSnapshot } from '../src/terminal-stream.js';
+
+async function observe(events: AsyncGenerator<StreamEvent<TerminalSnapshot>>, accept: (snapshot: TerminalSnapshot) => boolean): Promise<TerminalSnapshot> {
+  for (;;) {
+    const event = await events.next();
+    if (event.done) throw new Error('Terminal stream ended');
+    if (event.value.type !== 'resync' && accept(event.value.value)) return event.value.value;
+  }
+}
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -146,5 +156,43 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     expect(exited).toMatchObject({ op: 'wait', timedOut: false });
     expect((await coordinator.read('workspace-a', terminal.name, null)).data).toContain('bundle-tool:bundle-env');
     database.close();
+  }, 20_000);
+
+  it('streams a cache checkout shell and its output to subscribers that started before the shell', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-stream-'));
+    roots.push(root);
+    const cachePath = join(root, 'workspace');
+    mkdirSync(cachePath, { recursive: true });
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const coordinator = new WorkspaceHubTerminalCoordinator(database, 'machine-a', undefined, {
+      path: (spaceId) => spaceId === 'workspace-a' ? cachePath : null,
+      use: async () => {},
+      changed: async () => {},
+    });
+    const controller = new AbortController();
+    const inventory = coordinator.events('workspace-a', null, null, controller.signal);
+    try {
+      expect(await observe(inventory, () => true)).toEqual({ terminals: [], output: null });
+      const terminal = await coordinator.createShell('workspace-a');
+      const listed = await observe(inventory, (snapshot) => snapshot.terminals.length > 0);
+      expect(listed.terminals.map((entry) => entry.name)).toEqual([terminal.name]);
+
+      const selected = coordinator.events('workspace-a', terminal.name, null, controller.signal);
+      try {
+        await observe(selected, (snapshot) => snapshot.output?.name === terminal.name);
+        await coordinator.send('workspace-a', terminal.name, "printf 'stream-%s\\n' delivered\r");
+        const output = await observe(selected, (snapshot) => snapshot.output?.data.includes('stream-delivered') === true);
+        expect(output.terminals.map((entry) => entry.name)).toEqual([terminal.name]);
+
+        await coordinator.send('workspace-a', terminal.name, 'exit\r');
+        await observe(inventory, (snapshot) => snapshot.terminals.length === 0);
+      } finally {
+        await selected.return(undefined);
+      }
+    } finally {
+      controller.abort();
+      await inventory.return(undefined);
+      database.close();
+    }
   }, 20_000);
 });
