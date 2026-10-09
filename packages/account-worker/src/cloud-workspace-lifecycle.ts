@@ -145,7 +145,8 @@ async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore,
       // The cloud repository is the project's origin: `origin/` and remote-tracking forms name its branches.
       const branch = input.sourceRef.replace(/^(?:refs\/heads\/|refs\/remotes\/origin\/|origin\/)/u, '');
       if (!isSupportedBranchName(branch)) throw new Error(`${input.sourceRef} is not a branch of the project repository`);
-      const commit = await code.resolveRef(repository, `refs/heads/${branch}`);
+      const commit = await code.resolveRef(repository, `refs/heads/${branch}`)
+        ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/heads/${branch}`) : null);
       if (commit === null) throw new Error(`Branch ${branch} does not exist in the project repository`);
       return { sourceRef: branch, sourceCommit: commit, repository };
     }

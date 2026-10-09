@@ -249,12 +249,15 @@ export class ArtifactsCodeStore {
   async importSourceRef(projectId: string, url: string, ref: string): Promise<string> {
     const origin = new URL(url);
     if (origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash) throw new Error('Source import requires a credential-free HTTPS repository root without redirects');
-    if (!/^refs\/(?:tags\/.+|pull\/[1-9][0-9]*\/head)$/u.test(ref)) throw new Error('Unsupported source ref');
+    const branch = ref.startsWith('refs/heads/') && isSupportedBranchName(ref.slice('refs/heads/'.length));
+    if (!branch && !/^refs\/(?:tags\/.+|pull\/[1-9][0-9]*\/head)$/u.test(ref)) throw new Error('Unsupported source ref');
+    const repository = artifactsProjectRepository(projectId);
+    const existing = branch ? await this.resolveRef(repository, ref) : await this.resolveAdvertisedRef(repository, ref);
+    if (existing !== null) return existing;
     const advertised = await readAdvertisedRefs({ remote: origin.href, token: null });
     const object = advertised.get(ref);
     if (!object) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
     const pack = await readCommitPack({ remote: origin.href, token: null, commit: object });
-    const repository = artifactsProjectRepository(projectId);
     const repo = await this.binding.get(repository);
     try {
       const info = await repo.info();
@@ -263,7 +266,7 @@ export class ArtifactsCodeStore {
         await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: '0'.repeat(40), commit: object, pack });
       } finally { await repo.revokeToken(token.id); }
     } finally { await disposeArtifactsRepository(repo); }
-    const commit = await this.resolveAdvertisedRef(repository, ref);
+    const commit = branch ? await this.resolveRef(repository, ref) : await this.resolveAdvertisedRef(repository, ref);
     if (!commit) throw new Error(`Imported source ref ${ref} does not resolve to a commit`);
     return commit;
   }

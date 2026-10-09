@@ -17,7 +17,7 @@ import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
 import { requireRuntimeIdentity } from './runtime-access.js';
 import { z } from 'zod';
-import { credentialProtocolBase64 } from '@gitspace/protocol';
+import { credentialProtocolBase64, normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
 import { deriveWorkspaceStatusSummary, parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type GitLfsConfirmedObject, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { readEncryptedCheckpoint } from './git-lfs-store.js';
@@ -289,7 +289,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       const repository = artifactsWorkspaceRepository(identity.workspaceId);
       const source = artifactsProjectRepository(project.id);
       await ensureProjectCodeRepository(code, project);
-      const commit = change?.checkpoint.headCommit ?? await code.resolveRef(source, `refs/heads/${branch}`);
+      const commit = change?.checkpoint.headCommit ?? await code.resolveRef(source, `refs/heads/${branch}`)
+        ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/heads/${branch}`) : null);
       if (!commit) throw new Error(`Branch ${branch} does not exist in the project repository`);
       const metadata = await code.readCommit(source, commit);
       if (!metadata) throw new Error('Base branch commit is unavailable');

@@ -639,7 +639,7 @@ test('workspace branches move only to held commits, and tags and pull heads reso
   } finally { request.mockRestore(); await f.close(); }
 });
 
-test('cloud transfer imports public tag and PR object graphs and updates an existing fork without machines', async () => {
+test('cloud transfer imports public branch, tag and PR object graphs and updates an existing fork without machines', async () => {
   const source = await fixture();
   const target = await fixture();
   const unsupported = async (): Promise<never> => { throw new Error('Unexpected provider operation'); };
@@ -658,10 +658,21 @@ test('cloud transfer imports public tag and PR object graphs and updates an exis
   });
   const sourceRepo = repository(source, 'source.invalid');
   const targetRepo = repository(target, 'target.invalid');
+  let originRequests = 0;
+  let originAvailable = true;
+  let concurrentBranch: string | null = null;
   const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = new URL(String(input));
     const dir = url.hostname === 'source.invalid' ? source.dir : url.hostname === 'target.invalid' ? target.dir : null;
     if (!dir) throw new Error('Unexpected network destination');
+    if (url.hostname === 'source.invalid') {
+      originRequests += 1;
+      if (!originAvailable) throw new Error('Origin unavailable');
+      if (concurrentBranch && url.pathname.endsWith('/git-upload-pack')) {
+        await git.writeRef({ fs, dir: target.dir, ref: concurrentBranch, value: target.previous.worktreeCommit });
+        concurrentBranch = null;
+      }
+    }
     const authorization = new Headers(init?.headers).get('authorization');
     if (url.hostname === 'source.invalid' && init?.redirect === 'error') expect(authorization).toBeNull();
     else expect(authorization).toBe('Bearer secret');
@@ -683,6 +694,8 @@ test('cloud transfer imports public tag and PR object graphs and updates an exis
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/develop', value: head });
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/pull/9/head', value: head });
     await git.annotatedTag({ fs, dir: source.dir, ref: 'release-v2', object: head, tagger: author, message: 'release\n' });
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/develop')).toBe(head);
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(head);
     expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/tags/release-v2')).toBe(head);
     expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/pull/9/head')).toBe(head);
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/pull/9/head' })).toBe(head);
@@ -690,7 +703,18 @@ test('cloud transfer imports public tag and PR object graphs and updates an exis
     expect((await git.readCommit({ fs, dir: target.dir, oid: head })).commit.parent).toEqual([source.previous.worktreeCommit]);
     const next = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'later branch\n' } });
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/develop', value: next, force: true });
-    await code.copyCommit('source', 'target', 'refs/heads/develop', next, null);
+    const fetched = originRequests;
+    originAvailable = false;
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/develop')).toBe(head);
+    expect(originRequests).toBe(fetched);
+    originAvailable = true;
+    await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/missing')).rejects.toThrow('not advertised by the public origin');
+    expect(await git.listBranches({ fs, dir: target.dir })).not.toContain('missing');
+    await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/racing', value: next });
+    concurrentBranch = 'refs/heads/racing';
+    await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', concurrentBranch)).rejects.toThrow('ref has advanced');
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/racing' })).toBe(target.previous.worktreeCommit);
+    await code.copyCommit('source', 'target', 'refs/heads/develop', next, head);
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(next);
     expect((await git.readCommit({ fs, dir: target.dir, oid: next })).commit.parent).toEqual([head]);
     await expect(code.copyCommit('source', 'target', 'refs/heads/develop', head, null)).rejects.toThrow('ref has advanced');

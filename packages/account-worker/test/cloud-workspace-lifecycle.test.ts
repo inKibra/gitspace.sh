@@ -24,6 +24,7 @@ function cloudArtifacts() {
   const repository = (name: string): ArtifactsRepoInfo => ({ id: name, name, description: null, defaultBranch: 'main', createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false, remote: `https://artifacts.invalid/${name}.git` });
   const ref = (name: string, value: string) => `${name} ${value === 'HEAD' || value.startsWith('refs/') ? value : `refs/heads/${value}`}`;
   vi.spyOn(ArtifactsCodeStore.prototype, 'ensureEmptyProject').mockImplementation(async (projectId) => repository(`project-${projectId}`));
+  vi.spyOn(ArtifactsCodeStore.prototype, 'importProject').mockImplementation(async projectId => repository(`project-${projectId}`));
   vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockImplementation(async (projectId, workspaceId, source) => {
     const name = `workspace-${workspaceId}`;
     if (!forks.some(fork => fork.workspaceId === workspaceId)) {
@@ -70,10 +71,10 @@ async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.writ
   return { userId, client };
 }
 
-async function cloudProject(name: string) {
+async function cloudProject(name: string, repositoryUrl: string | null = null) {
   const artifacts = cloudArtifacts();
   const { userId, client } = await account();
-  const created = await client.project.create({ name, baseBranch: null, repositoryUrl: null });
+  const created = await client.project.create({ name, baseBranch: repositoryUrl ? 'main' : null, repositoryUrl });
   if (created.status === 'error') throw created.error;
   const project = created.value.project;
   artifacts.refs.set(`project-${project.id} refs/heads/main`, commit('1'));
@@ -132,6 +133,47 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree')).toEqual([]);
     expect(await create({ sourceKind: 'branch', sourceRef: 'refs/remotes/origin/main' })).toMatchObject({ status: 'ok', value: { workspace: { branch: 'refused' } } });
     expect(await create({ name: 'From commit', branch: 'from-commit', sourceKind: 'commit', sourceRef: commit('1') })).toMatchObject({ status: 'ok' });
+  });
+
+  it('imports missing public branches for workspace sources and base switches without refreshing cached refs', async () => {
+    const { userId, client, project, artifacts, authority } = await cloudProject('Public branches', 'https://github.com/octocat/Hello-World.git');
+    const importRef = vi.spyOn(ArtifactsCodeStore.prototype, 'importSourceRef').mockImplementation(async (projectId, _url, ref) => {
+      const hash = ref === 'refs/heads/feature/public' ? commit('2') : ref === 'refs/heads/release/public' ? commit('3') : null;
+      if (!hash) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
+      artifacts.refs.set(`project-${projectId} ${ref}`, hash);
+      return hash;
+    });
+    const created = await client.workspace.create({ projectId: project.id, name: 'Public feature', branch: 'work', sourceKind: 'branch', sourceRef: 'origin/feature/public' });
+    if (created.status === 'error') throw created.error;
+    expect((await authority.listWorkspaces()).find(workspace => workspace.id === created.value.workspace.id)).toMatchObject({ sourceRef: 'feature/public', sourceCommit: commit('2'), lifecycle: 'active' });
+    expect(await env.SPACE_AUTHORITY.getByName(`${userId}:${created.value.workspace.id}`).runtimeRepositoryCheckpoint({ projectId: project.id, workspaceId: created.value.workspace.id })).toMatchObject({ branch: 'work', headCommit: commit('2') });
+
+    const identity = { projectId: project.id, workspaceId: project.id };
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
+    const current = await authority.getProject();
+    if (!current) throw new Error('Missing project');
+    const beforeMissing = await authority.listWorkspaces();
+    expect(await client.workspace.create({ projectId: project.id, name: 'Missing public branch', branch: 'missing', sourceKind: 'branch', sourceRef: 'missing' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('not advertised by the public origin') } } });
+    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'missing' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('not advertised by the public origin') } } });
+    expect(await authority.getProject()).toEqual(current);
+    expect(await authority.listWorkspaces()).toEqual(beforeMissing);
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
+    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision - 1, baseBranch: 'release/public' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('revision conflict') } } });
+    expect(artifacts.refs.has(`project-${project.id} refs/heads/release/public`)).toBe(false);
+    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'release/public' })).toMatchObject({ status: 'ok', value: { baseBranch: 'release/public' } });
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'release/public', headCommit: commit('3'), indexCommit: commit('3'), worktreeCommit: commit('3') });
+    expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'release/public', sourceCommit: commit('3') });
+    expect((await authority.listWorkspaces()).find(workspace => workspace.id === created.value.workspace.id)?.branch).toBe('work');
+
+    importRef.mockRejectedValue(new Error('Origin unavailable'));
+    const cached = await client.workspace.create({ projectId: project.id, name: 'Cached public feature', branch: 'cached', sourceKind: 'branch', sourceRef: 'refs/heads/feature/public' });
+    if (cached.status === 'error') throw cached.error;
+    expect((await authority.listWorkspaces()).find(workspace => workspace.id === cached.value.workspace.id)?.sourceCommit).toBe(commit('2'));
+    const latest = await authority.getProject();
+    if (!latest) throw new Error('Missing project');
+    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: latest.revision, baseBranch: 'feature/public' })).toMatchObject({ status: 'ok' });
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'feature/public', headCommit: commit('2') });
   });
 
   it('resumes a failed creation from the cloud and refuses to retry a finished one', async () => {
