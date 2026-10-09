@@ -338,7 +338,7 @@ export class AttachmentStore {
       const rows = this.storage.sql.exec<{ dispatch: string }>("SELECT dispatch FROM runtime_attempts WHERE status='dispatched'").toArray();
       for (const row of rows) {
         const dispatch = RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch));
-        if (dispatch.attachmentId === attachment.attachmentId && dispatch.generation === attachment.generation) await this.reconcile(dispatch, signal);
+        if (dispatch.attachmentId === attachment.attachmentId && dispatch.generation === attachment.generation) await this.accept(dispatch, await this.exchange(dispatch, 'observe', signal));
       }
     }
     // Receipt I/O can race a lease or action change. Re-read authority before mutation.
