@@ -586,10 +586,13 @@ export async function createMachineExecutor(options: {
       return;
     }
     const setupRequested = attachment.cacheAction?.action === 'setup' && ['requested', 'running'].includes(attachment.cacheAction.status);
-    if (attachment.state === 'detached' || !setupRequested && (attachment.cache?.state === 'reclaimed' || attachment.cache?.state === 'paused' && !attachment.cache.localWorkOptIn)) {
+    // A pause heartbeat may finish after an older ready assignment was fetched.
+    // Only explicit setup or local work may resume that locally paused generation.
+    const locallyPaused = prior?.attachment.generation === attachment.generation && prior.attachment.cache?.state === 'paused';
+    if (attachment.state === 'detached' || !setupRequested && (attachment.cache?.state === 'reclaimed' || (attachment.cache?.state === 'paused' || locallyPaused) && !attachment.cache?.localWorkOptIn)) {
       if (prior) {
         await stopFollowing(prior);
-        journal.installAttachment({ ...prior, attachment: { ...attachment, cache: prior.attachment.cache ? { ...prior.attachment.cache, localWorkOptIn: attachment.cache?.localWorkOptIn ?? false } : attachment.cache } });
+        journal.installAttachment({ ...prior, attachment: { ...attachment, state: locallyPaused && attachment.state === 'ready' ? 'attaching' : attachment.state, cache: prior.attachment.cache ? { ...prior.attachment.cache, localWorkOptIn: attachment.cache?.localWorkOptIn ?? false } : attachment.cache } });
         const paused = journal.attachment(attachment.attachmentId);
         if (paused?.attachment.cache?.state === 'paused') await updateActivity(paused);
       }

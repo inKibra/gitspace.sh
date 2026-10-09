@@ -71,6 +71,10 @@ async function watcherProof(run: (proof: {
           });
           return schema.parse({ assignments: [{ grant: { attachment, executionSecret: 'proof-secret' }, source: null, checkpoint }] });
         }
+        if (operation === 'runtime.attachment.cache.request') {
+          attachment = { ...attachment, state: 'attaching', cacheAction: { requestId: z.string().parse(payload.requestId), action: 'setup', status: 'requested', error: null } };
+          return schema.parse({ attachment });
+        }
         if (operation === 'runtime.attachment.ready') { attachment = { ...attachment, state: 'ready' }; return schema.parse({ attachment }); }
         if (operation === 'runtime.heartbeat') return schema.parse({ attachment });
         throw new Error(`Unexpected operation: ${operation}`);
@@ -163,6 +167,18 @@ test('expired cache grace pauses cloud following while retaining its canonical f
     expect(watcherCount()).toBe(0);
     expect(await Bun.file(join(checkout, 'tracked.txt')).text()).toBe('base\n');
     expect(publications).toEqual([]);
+    const paused = runtime.journal.attachments()[0];
+    if (!paused) throw new Error('Missing paused cache');
+    // A pause heartbeat can finish while an older ready assignment is still in flight.
+    runtime.journal.installAttachment({ ...paused, attachment: { ...paused.attachment, state: 'attaching' } });
+    await clock.until(runtime.sync());
+    expect(runtime.journal.attachments()[0]?.attachment.cache?.state).toBe('paused');
+    expect(runtime.journal.attachments()[0]?.attachment.state).toBe('attaching');
+    expect(runtime.journal.attachments()[0]?.attachment.cache?.lastActivityAt).toBe(paused.attachment.cache?.lastActivityAt);
+    expect(watcherCount()).toBe(0);
+    await clock.until(runtime.useWorkspace('workspace'));
+    expect(runtime.journal.attachments()[0]?.attachment.state).toBe('ready');
+    expect(runtime.journal.attachments()[0]?.attachment.cache?.state).toBe('live');
   }, false);
 });
 

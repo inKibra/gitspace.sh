@@ -65,6 +65,8 @@ Commands catch up before execution and publish changes when they finish. Service
 
 An idle copy pauses before it is reclaimed. The default reclaim delay is 24 hours; the workspace cache policy can change it. Low disk space may trigger earlier reclaim of an idle copy. A final acknowledged snapshot, no held-back LFS edits, and no unresolved effects are required before deletion. **Reclaim now** uses the same barriers. The next command rebuilds the copy and runs approved local setup again. Machines without a heartbeat for 30 seconds cannot receive new work; reconnecting requires catch-up before they become ready.
 
+A paused cache ignores older ready assignments for the same generation. It resumes only for an explicit setup request, including terminal or command selection, or when **Work locally** is enabled.
+
 Stopping a command requests native cancellation and observes its completion before settling the execution receipt. Cache resumption reconciles outstanding receipts without rerunning commands and reports receipt transport failures rather than hiding them as unfinished work. Authenticated receipt recovery remains available while a cache is paused, but new execution still requires readiness. Running or unknown effects continue to block setup; a stopped UI task alone is not proof that its machine-side work has finished.
 
 ## Release caches, archive, and retire
