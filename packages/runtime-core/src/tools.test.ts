@@ -319,14 +319,16 @@ test('codemode child mutation asks independently and rejection prevents its effe
   await fixture.harness.commit(async tx => { await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
   const watch = await fixture.harness.watchDoc(QuestionsDoc, BACKGROUND_CONTEXT);
   if (!watch) throw new Error('Questions fixture document missing');
-  const asked = Promise.withResolvers<string>();
+  const asked = Promise.withResolvers<NonNullable<typeof watch.value>['items'][number]>();
   watch.start(async value => {
-    const question = value?.items.find(item => item.prompt.startsWith('Allow write?') && item.answer === null);
-    if (question) asked.resolve(question.id);
+    const question = value?.items.find(item => item.kind === 'approval' && item.answer === null);
+    if (question) asked.resolve(question);
   });
   try {
     await fixture.root.submit({ type: 'input', content: 'Request a denied mutation.' }, BACKGROUND_CONTEXT);
-    const id = await asked.promise;
+    const { id, prompt, tool } = await asked.promise;
+    expect(tool).toEqual({ name: 'write', args: { path: 'denied', content: 'denied' } });
+    expect(prompt).not.toContain('"content"');
     expect(mutations).toBe(0);
     await fixture.harness.commit(async tx => {
       const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === id);

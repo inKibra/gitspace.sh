@@ -66,7 +66,7 @@ export async function enforceSessionApproval(api: ToolExecutionApi, context: Con
   const readOnly = runtimeOperationIsReadOnly(tool, args);
   if (readOnly && (tool === 'bash' || tool === 'proc' || (controls?.approvalMode ?? 'write') === 'write')) return true;
   const id = `approval:${api.taskId}`;
-  await api.commit(async tx => { const questions = await tx.doc(QuestionsDoc); if (!questions.items.some(item => item.id === id)) questions.items.push({ id, conversationId: String(api.conversationId), kind: 'approval', prompt: browser ? `Create browser group "${browser.groupName}" with access to ${browser.origins.join(', ')}?` : `Allow ${tool}?\n${JSON.stringify(args)}`, choices: ['Approve', 'Reject'], answer: null, ...(browser ? { browser } : {}) }); }, context);
+  await api.commit(async tx => { const questions = await tx.doc(QuestionsDoc); if (!questions.items.some(item => item.id === id)) questions.items.push({ id, conversationId: String(api.conversationId), kind: 'approval', prompt: browser ? `Create browser group "${browser.groupName}" with access to ${browser.origins.join(', ')}?` : `Allow ${tool}?`, choices: ['Approve', 'Reject'], answer: null, ...(browser ? { browser } : { tool: { name: tool, args } }) }); }, context);
   const watch = await api.watchDoc(QuestionsDoc, context);
   if (!watch) throw new Error('Approval document missing');
   const answer = watch.value?.items.find(item => item.id === id)?.answer;

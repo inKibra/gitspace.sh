@@ -18,6 +18,7 @@ import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
 import { cachePresentation, environmentCacheSummary } from './environment/cache-presentation.js';
 import { useCacheFreshnessClock } from './environment/useCacheFreshnessClock.js';
 import { BrowserApprovalCard } from './RuntimeBrowser.js';
+import { ToolApprovalCard } from './ToolApprovalCard.js';
 import { RELEASE_TARGETS } from './release.js';
 import { LaunchSheet, LaunchedBanner, RevertSheet } from './LaunchSheet.js';
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
@@ -102,7 +103,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const transcript = useTranscriptHistory(transcriptSource);
   const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null);
   const controls: SessionControlsProps | undefined = value ? {
-    value: value.pendingAsk || !question || question.browser ? value : { ...value, pendingAsk: { id: question.id, source: 'gitspace', links: [], questions: [{ id: question.id, question: question.prompt, header: question.kind === 'approval' ? 'Approval required' : null, multi: false, recommended: null, options: (question.kind === 'approval' ? ['Approve', 'Reject'] : question.choices).map(label => ({ label, description: null, preview: null })) }] } },
+    value: value.pendingAsk || !question || question.browser || question.tool ? value : { ...value, pendingAsk: { id: question.id, source: 'gitspace', links: [], questions: [{ id: question.id, question: question.prompt, header: question.kind === 'approval' ? 'Approval required' : null, multi: false, recommended: null, options: (question.kind === 'approval' ? ['Approve', 'Reject'] : question.choices).map(label => ({ label, description: null, preview: null })) }] } },
     onCycleRole: async direction => { await run({ type: 'cycleRole', direction }); },
     onSetModel: async (provider, model) => { await run({ type: 'setModel', provider, model }); },
     onSetThinking: async thinking => { await run({ type: 'setThinking', thinking }); },
@@ -162,6 +163,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
       approvalCard={question?.browser ? <BrowserApprovalCard key={`${question.id}:${question.browser.id}`} request={question.browser} requestDetails={question.prompt} connected={connected} machineName={inspection.machines.find(machine => question.browser && 'machineId' in question.browser && machine.id === question.browser.machineId)?.label} onAnswer={async approved => {
         const response = await rpcClient.runtime.answer({ ...identity, questionId: question.id, answer: approved, expectedBrowserPreparationId: question.browser!.id });
+        if (response.status === 'error') throw response.error;
+        await run({ type: 'control' });
+      }} /> : question?.tool ? <ToolApprovalCard key={question.id} tool={question.tool} machines={inspection.machines} connected={connected} onAnswer={async approved => {
+        const response = await rpcClient.runtime.answer({ ...identity, questionId: question.id, answer: approved });
         if (response.status === 'error') throw response.error;
         await run({ type: 'control' });
       }} /> : undefined}

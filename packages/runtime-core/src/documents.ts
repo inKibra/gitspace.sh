@@ -1,4 +1,4 @@
-import type { RuntimeBrowserApprovalCard } from '@gitspace/protocol-runtime';
+import type { RuntimeBrowserApprovalCard, RuntimeQuestionTool } from '@gitspace/protocol-runtime';
 import { defineDoc } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
@@ -6,7 +6,7 @@ export const WorkspaceDoc = defineDoc<{ phase: 'plan' | 'code' | 'review' | 'shi
 export const MachinesDoc = defineDoc<{ attachments: RuntimeAttachment[] }>({ kind: 'gitspace.machines', version: 1, scope: 'session', initial: () => ({ attachments: [] }) });
 export const TodosDoc = defineDoc<{ items: { id: string; text: string; status: 'pending' | 'active' | 'completed' }[] }>({ kind: 'gitspace.todos', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ items: [] }) });
 export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 'approved' | 'rejected'; questionId: string | null }>({ kind: 'gitspace.plan', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ text: '', status: 'draft', questionId: null }) });
-export const QuestionsDoc = defineDoc<{ items: { id: string; conversationId: string; kind: 'ask' | 'approval'; prompt: string; choices: string[]; answer: JsonValue | null; browser?: RuntimeBrowserApprovalCard }[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }) });
+export const QuestionsDoc = defineDoc<{ items: { id: string; conversationId: string; kind: 'ask' | 'approval'; prompt: string; choices: string[]; answer: JsonValue | null; browser?: RuntimeBrowserApprovalCard; tool?: RuntimeQuestionTool }[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }) });
 export const EnvironmentDoc = defineDoc<{ profile: string | null; runs: JsonValue[] }>({ kind: 'gitspace.environment', version: 1, scope: 'session', initial: () => ({ profile: null, runs: [] }) });
 export const JobsDoc = defineDoc<{ jobs: JsonValue[]; processes: JsonValue[] }>({ kind: 'gitspace.jobs', version: 1, scope: 'session', initial: () => ({ jobs: [], processes: [] }) });
 export const QaDoc = defineDoc<{ items: JsonValue[] }>({ kind: 'gitspace.qa', version: 1, scope: 'session', initial: () => ({ items: [] }) });
