@@ -95,6 +95,10 @@ Use the product's deployment entrypoints, not a new upload or activation script.
 
 The account targets are `worker` (the tenant Worker), `machine`, `omp`, and `frontend`. The shared operator/control Worker is not the account's `worker` target. Treat changes to shared platform services as a separate platform deployment.
 
+The platform compatibility release accepts integrity-checked ESM/WASM module envelopes and tenant-scoped Artifacts, Worker Loader, and Browser Rendering bindings. Artifacts namespaces derive from the configured account root key, never a caller-supplied namespace. Historical single-module JavaScript releases remain deployable and available for health-check rollback; shared channel contents and tenant selections are not rewritten.
+
+For a code-only shared rollout, omit local variable overrides and use Wrangler's `--keep-vars`. Verify the live binding inventory and runtime settings after deployment, especially the CPU limit and default cloud image; checkout defaults may differ from the running service. This compatibility update does not require publishing new defaults, replacing machine images, or selecting other tenant releases.
+
 Account deployment progress comes from `DeploymentLauncher` through `deployment.status` and project `deployment` events. The client uses these for its Source indicator and launch progress sheet. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
 
 Do not manually write runtime-selection files or call `/__environment/launch` as an alternate deployment procedure. Those are implementation details of the product's replacement path. If the supported path fails, diagnose that failure and fix the path rather than bypassing it. **Back to stable** uses the account's `deployment.revert` operation.
