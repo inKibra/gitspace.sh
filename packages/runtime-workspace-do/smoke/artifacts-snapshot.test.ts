@@ -261,6 +261,7 @@ for (const empty of [false, true]) test(`initial checkpoint distinguishes ${empt
 
 test('committed sources resolve observed branch and HEAD forms without treating populated history as unborn', async () => {
   const f = await fixture();
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => f.request(String(input), init), { preconnect: fetch.preconnect }));
   const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
   const repo: ArtifactsRepo = {
     ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readBlob: unsupported, readFile: unsupported, fork: unsupported,
@@ -280,7 +281,45 @@ test('committed sources resolve observed branch and HEAD forms without treating 
     for (const ref of [f.previous.checkpointRef, 'refs/tags/v1', 'refs/remotes/origin/main', 'HEAD~1', 'main..other', 'refs/heads/', 'main.lock']) {
       await expect(code.resolveRef('fixture', ref)).rejects.toThrow();
     }
-  } finally { await f.close(); }
+  } finally { request.mockRestore(); await f.close(); }
+});
+
+test('committed fork initialization publishes a fetchable canonical ref without rewinding later checkpoints', async () => {
+  const f = await fixture();
+  const cache = await mkdtemp(join(tmpdir(), 'initial-checkpoint-cache-'));
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => f.request(String(input), init), { preconnect: fetch.preconnect }));
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  const repo: ArtifactsRepo = { ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readFile: unsupported, fork: unsupported };
+  const code = new ArtifactsCodeStore({ get: async () => repo, create: unsupported, import: unsupported, delete: unsupported, list: unsupported });
+  const nativeGit = async (...args: string[]) => {
+    const child = Bun.spawn(['git', '-C', cache, ...args], { stdout: 'pipe', stderr: 'pipe' });
+    const output = await new Response(child.stdout).text();
+    const error = await new Response(child.stderr).text();
+    expect(await child.exited, error).toBe(0);
+    return output.trimEnd();
+  };
+  try {
+    // Like a fork, the source has committed objects and another workspace's ref,
+    // but has never published the new workspace's canonical checkpoint.
+    const checkpoint = await code.initialCheckpoint('fixture', 'new-workspace', 'main');
+    if (!checkpoint) throw new Error('Committed source requires a checkpoint');
+    expect(checkpoint.headCommit).toBe(f.previous.headCommit);
+    expect(await code.initialCheckpoint('fixture', 'new-workspace', 'main')).toEqual(checkpoint);
+    await nativeGit('init');
+    await nativeGit('fetch', '--no-write-fetch-head', f.dir, `${checkpoint.checkpointRef}:${checkpoint.checkpointRef}`);
+    expect(await nativeGit('rev-parse', checkpoint.checkpointRef)).toBe(checkpoint.worktreeCommit);
+    expect(await nativeGit('show', `${checkpoint.checkpointRef}:script`)).toBe('before');
+
+    const changed = await code.writeSnapshot({ repository: 'fixture', workspaceId: 'new-workspace', previous: checkpoint, mutations: [{ path: 'script', content: text.encode('after') }] });
+    if (changed.isErr()) throw changed.error;
+    await nativeGit('fetch', '--no-write-fetch-head', f.dir, `${checkpoint.checkpointRef}:${checkpoint.checkpointRef}`);
+    expect(await nativeGit('rev-parse', checkpoint.checkpointRef)).toBe(changed.value.worktreeCommit);
+    expect(await nativeGit('show', `${checkpoint.checkpointRef}:script`)).toBe('after');
+    await expect(code.initialCheckpoint('fixture', 'new-workspace', 'main')).rejects.toThrow();
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: checkpoint.checkpointRef })).toBe(changed.value.worktreeCommit);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: 'refs/heads/main' })).toBe(checkpoint.worktreeCommit);
+    expect(f.credentials().revoked).toBe(f.credentials().minted);
+  } finally { request.mockRestore(); await rm(cache, { recursive: true, force: true }); await f.close(); }
 });
 
 test('repository operations support proxy handles without disposal and release workerd handles on failure', async () => {
@@ -651,14 +690,15 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
       catch (error) { if (error instanceof git.Errors.NotFoundError) return null; throw error; }
     },
     log: async options => {
-      const result = Bun.spawnSync(['git', '-C', f.dir, 'rev-parse', '--verify', `${options?.ref ?? 'HEAD'}^{commit}`]);
+      const result = Bun.spawnSync(['git', '-C', f.dir, 'rev-list', `--max-count=${options?.limit ?? 1}`, `${options?.ref ?? 'HEAD'}^{commit}`]);
       if (result.exitCode !== 0) return [];
-      return [await f.repo.readCommit(new TextDecoder().decode(result.stdout).trim())];
+      return Promise.all(new TextDecoder().decode(result.stdout).trim().split('\n').map(oid => f.repo.readCommit(oid)));
     },
   });
   const sourceRepo = repository(source, 'source-artifacts.invalid');
   const targetRepo = repository(target, 'target.invalid');
   let originRequests = 0;
+  const originPackBytes: number[] = [];
   let originAvailable = true;
   let concurrentBranch: string | null = null;
   const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -685,13 +725,29 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
     const error = await new Response(child.stderr).text();
     if (await child.exited !== 0) throw new Error(error);
+    if (url.hostname === 'source.invalid' && service === 'upload-pack' && !advertise && headers.get('git-protocol') !== 'version=2') originPackBytes.push(bytes.byteLength);
     return new Response(advertise && service === 'upload-pack' ? new Blob(['001e# service=git-upload-pack\n0000', bytes]) : bytes);
   }, { preconnect: fetch.preconnect }));
   const code = new ArtifactsCodeStore({ get: async name => name === 'source' ? sourceRepo : targetRepo, create: unsupported, import: unsupported, list: unsupported, delete: unsupported });
   try {
+    // Already-held history is larger than the allowed transfer below, even though the
+    // requested tip no longer contains this file. Negotiation must retain its ancestry.
+    const history = new Uint8Array(256 * 1024);
+    let seed = 1;
+    for (let index = 0; index < history.length; index++) {
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+      history[index] = seed & 255;
+    }
+    for (const f of [source, target]) {
+      const historyBlob = await git.writeBlob({ fs, dir: f.dir, blob: history });
+      const historyTree = await git.writeTree({ fs, dir: f.dir, tree: [{ mode: '100644', path: 'history-only', oid: historyBlob, type: 'blob' }] });
+      const common = await git.writeCommit({ fs, dir: f.dir, commit: { tree: historyTree, parent: [f.previous.worktreeCommit], author, committer: author, message: 'shared history\n' } });
+      await git.writeRef({ fs, dir: f.dir, ref: 'refs/heads/main', value: common, force: true });
+    }
+    const base = await git.resolveRef({ fs, dir: source.dir, ref: 'refs/heads/main' });
     const blob = await git.writeBlob({ fs, dir: source.dir, blob: text.encode('new public ref content') });
     const tree = await git.writeTree({ fs, dir: source.dir, tree: [{ mode: '100755', path: 'new-script', oid: blob, type: 'blob' }] });
-    const head = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [source.previous.worktreeCommit], author, committer: author, message: 'new branch\n' } });
+    const head = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [base], author, committer: author, message: 'new branch\n' } });
     const tagHead = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'tagged commit\n' } });
     const pullHead = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'pull request commit\n' } });
     const addUnrelatedRefs = async () => {
@@ -720,7 +776,9 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/pull/9/head' })).toBe(pullHead);
     expect((await git.readCommit({ fs, dir: target.dir, oid: pullHead })).commit.parent).toEqual([head]);
     expect(new TextDecoder().decode((await git.readBlob({ fs, dir: target.dir, oid: head, filepath: 'new-script' })).blob)).toBe('new public ref content');
-    expect((await git.readCommit({ fs, dir: target.dir, oid: head })).commit.parent).toEqual([source.previous.worktreeCommit]);
+    expect((await git.readCommit({ fs, dir: target.dir, oid: head })).commit.parent).toEqual([base]);
+    expect((await git.readBlob({ fs, dir: target.dir, oid: base, filepath: 'history-only' })).blob).toEqual(history);
+    expect(Math.max(...originPackBytes)).toBeLessThan(64 * 1024);
     const next = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'later branch\n' } });
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/develop', value: next, force: true });
     const fetched = originRequests;
@@ -740,6 +798,16 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     expect((await git.readCommit({ fs, dir: target.dir, oid: next })).commit.parent).toEqual([head]);
     await expect(code.copyCommit('source', 'target', 'refs/heads/develop', head, null)).rejects.toThrow('ref has advanced');
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(next);
+    // No common have is also valid: the origin returns NAK and the complete graph.
+    const privateHead = await git.writeCommit({ fs, dir: target.dir, commit: { tree: target.tree, parent: [], author, committer: author, message: 'private destination history\n' } });
+    await git.writeRef({ fs, dir: target.dir, ref: 'refs/heads/main', value: privateHead, force: true });
+    const unshared = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [next], author, committer: author, message: 'unshared commit\n' } });
+    await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/no-common-have', value: unshared });
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/no-common-have')).toBe(unshared);
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/no-common-have' })).toBe(unshared);
+    expect((await git.readCommit({ fs, dir: target.dir, oid: unshared })).commit.parent).toEqual([next]);
+    const integrity = Bun.spawnSync(['git', '-C', target.dir, 'fsck', '--strict', '--no-dangling']);
+    expect(integrity.exitCode).toBe(0);
     if (protocolVersion === 0) {
       await addUnrelatedRefs();
       const before = originRequests;

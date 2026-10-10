@@ -117,7 +117,15 @@ export class ArtifactsCodeStore {
       }
       const metadata = await repo.readCommit(commit);
       if (!metadata) throw new Error('Initial workspace commit is unavailable');
-      return { checkpointRef: `refs/gitspace/spaces/${workspaceId}/checkpoints`, headCommit: commit, branch, indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: metadata.treeHash, worktreeTree: metadata.treeHash };
+      // A fork holds the source objects and branches, not this workspace's checkpoint
+      // ref. Publish that ref before the runtime can persist or hand out its checkpoint.
+      // Creation is replayable at the same tip, but must never rewind an advanced ref.
+      const checkpointRef = `refs/gitspace/spaces/${workspaceId}/checkpoints`;
+      const info = await repo.info();
+      const token = await repo.createToken('write', 60);
+      try { await publishRef({ remote: info.remote, token: token.plaintext, ref: checkpointRef, previous: null, commit }); }
+      finally { await repo.revokeToken(token.id); }
+      return { checkpointRef, headCommit: commit, branch, indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: metadata.treeHash, worktreeTree: metadata.treeHash };
     } finally { await disposeArtifactsRepository(repo); }
   }
 
@@ -235,7 +243,8 @@ export class ArtifactsCodeStore {
             const sourceInfo = await origin.info();
             const readToken = await origin.createToken('read', 60);
             try {
-              const pack = await readCommitPack({ remote: sourceInfo.remote, token: readToken.plaintext, commit });
+              const haves = (await target.log({ ...(previous === null ? {} : { ref: previous }), limit: 32 })).map(entry => entry.hash);
+              const pack = await readCommitPack({ remote: sourceInfo.remote, token: readToken.plaintext, commit, haves });
               await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: previous ?? '0'.repeat(40), commit, pack });
             } finally { await origin.revokeToken(readToken.id); }
           } finally { await disposeArtifactsRepository(origin); }
@@ -257,9 +266,12 @@ export class ArtifactsCodeStore {
     const advertised = await readAdvertisedRefs({ remote: origin.href, token: null, refPrefix: ref });
     const object = advertised.get(ref);
     if (!object) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
-    const pack = await readCommitPack({ remote: origin.href, token: null, commit: object });
     const repo = await this.binding.get(repository);
     try {
+      // The project already holds its imported base history. Negotiate from that history,
+      // not an empty clone, so the byte bound applies to the missing graph rather than all ancestry.
+      const haves = (await repo.log({ limit: 32 })).map(entry => entry.hash);
+      const pack = await readCommitPack({ remote: origin.href, token: null, commit: object, haves });
       const info = await repo.info();
       const token = await repo.createToken('write', 60);
       try {

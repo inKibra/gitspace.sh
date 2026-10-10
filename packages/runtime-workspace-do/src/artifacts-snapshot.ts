@@ -123,16 +123,19 @@ export async function readAdvertisedRefs(input: { remote: string; token: string 
   return refs;
 }
 
-/** Transfer a reachable commit and its complete object graph through Git's stateless upload-pack.
+/** Transfer the reachable object graph not already held by the destination.
+ * Haves must name commits with complete ancestry there; no shallow or thin packs are requested.
  * No credentials follow redirects, and a failed download has no destination-side effect. */
-export async function readCommitPack(input: { remote: string; token: string | null; commit: string }, request: ArtifactsFetch = fetch): Promise<Uint8Array> {
+export async function readCommitPack(input: { remote: string; token: string | null; commit: string; haves?: readonly string[] }, request: ArtifactsFetch = fetch): Promise<Uint8Array> {
   const remote = new URL(input.remote);
   if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid Artifacts Git remote');
   if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new Error('Invalid Git commit');
-  const want = packet(`want ${input.commit}\n`);
-  const done = packet('done\n');
-  const body = new Uint8Array(want.length + 4 + done.length);
-  body.set(want); body.set(encoder.encode('0000'), want.length); body.set(done, want.length + 4);
+  const haves = new Set(input.haves);
+  if (haves.size > 32 || [...haves].some(oid => !/^[0-9a-f]{40}$/u.test(oid))) throw new Error('Invalid Git negotiation commits');
+  const parts = [packet(`want ${input.commit}\n`), encoder.encode('0000'), ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n')];
+  const body = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { body.set(part, offset); offset += part.length; }
   const signal = AbortSignal.timeout(15_000);
   const response = await request(`${remote.href.replace(/\/$/u, '')}/git-upload-pack`, {
     method: 'POST', headers: { ...(input.token === null ? {} : { Authorization: `Bearer ${input.token}` }), 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
@@ -141,8 +144,21 @@ export async function readCommitPack(input: { remote: string; token: string | nu
   if (!response.ok) throw new Error(`Git fetch failed (${response.status})`);
   if (!response.body) throw new Error('Git fetch returned no pack');
   const bytes = await collectBytes(streamBytes(response.body, signal), 40 * 1024 * 1024);
-  if (decoder.decode(bytes.subarray(0, 8)) !== '0008NAK\n' || decoder.decode(bytes.subarray(8, 12)) !== 'PACK') throw new Error('Git fetch did not return a complete pack');
-  return bytes.subarray(8);
+  // Stateless servers may ACK each common have before the raw pack. Neither side-band
+  // nor multi_ack was requested, so only plain ACK/NAK packets are valid here.
+  let packOffset = 0;
+  let acknowledgments = 0;
+  while (decoder.decode(bytes.subarray(packOffset, packOffset + 4)) !== 'PACK') {
+    if (++acknowledgments > haves.size + 1) throw new Error('Git fetch did not return a complete pack');
+    const prefix = decoder.decode(bytes.subarray(packOffset, packOffset + 4));
+    const size = /^[0-9a-f]{4}$/u.test(prefix) ? Number.parseInt(prefix, 16) : 0;
+    if (size < 8 || size > 49 || packOffset + size > bytes.length) throw new Error('Git fetch did not return a complete pack');
+    const acknowledgment = decoder.decode(bytes.subarray(packOffset + 4, packOffset + size));
+    if (acknowledgment !== 'NAK\n' && (!/^ACK [0-9a-f]{40}\n$/u.test(acknowledgment) || !haves.has(acknowledgment.slice(4, -1)))) throw new Error('Git fetch did not return a complete pack');
+    packOffset += size;
+  }
+  if (acknowledgments === 0) throw new Error('Git fetch did not return a complete pack');
+  return bytes.subarray(packOffset);
 }
 
 /** Deterministic root objects make interrupted initialization safely replayable. */
