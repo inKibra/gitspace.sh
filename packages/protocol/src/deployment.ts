@@ -28,6 +28,26 @@ export const releaseArtifactSchema = z.object({
 });
 export type ReleaseArtifact = z.infer<typeof releaseArtifactSchema>;
 
+/** Immutable transport envelope: module bytes, names and per-module integrity travel together. */
+export const workerBundleSchema = z.object({
+  version: z.literal(1),
+  modules: z.array(z.object({
+    name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/u),
+    type: z.enum(['esm', 'wasm']),
+    hash: hashSchema,
+    bytes: z.number().int().nonnegative().max(32 * 1024 * 1024),
+    base64: z.string().max(44 * 1024 * 1024),
+  }).strict()).min(1).max(64),
+}).strict().superRefine((bundle, context) => {
+  const names = new Set<string>();
+  for (const module of bundle.modules) {
+    if (names.has(module.name)) context.addIssue({ code: 'custom', message: `Duplicate worker module ${module.name}` });
+    names.add(module.name);
+  }
+  if (bundle.modules.reduce((bytes, module) => bytes + module.bytes, 0) > 48 * 1024 * 1024) context.addIssue({ code: 'custom', message: 'Worker module graph exceeds its transport limit' });
+});
+export type WorkerBundle = z.infer<typeof workerBundleSchema>;
+
 /** Worker metadata the platform needs to upload the bundle; derived from the workspace's wrangler config. */
 export const workerReleaseMetadataSchema = z.object({
   mainModule: z.string().min(1).max(160),
@@ -36,7 +56,7 @@ export const workerReleaseMetadataSchema = z.object({
   durableObjects: z.array(z.object({ name: idSchema, className: idSchema })).max(64),
   resources: z.array(z.object({
     name: idSchema,
-    source: z.enum(['object-storage', 'object-storage-name', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'literal']),
+    source: z.enum(['object-storage', 'artifacts', 'worker-loader', 'browser-rendering', 'object-storage-name', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'literal']),
     value: z.string().max(4096).optional(),
   })).max(64),
   /** Ordered migration tags; the platform applies only the ones after the tenant's current tag. */

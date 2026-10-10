@@ -3,6 +3,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { env } from 'cloudflare:workers';
 import { createRelayAuthorization } from '@gitspace/protocol/relay';
 import type { PlatformDeployResponse, WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../src/index.js';
 import { CHANNEL_BUNDLE_KEY, CHANNEL_METADATA_KEY, migrationDelta, type ScriptUploadMetadata } from '../src/deployer.js';
@@ -13,6 +14,7 @@ const ADMIN_PUBLIC_KEY = btoa(String.fromCharCode(...publicKey));
 interface Upload {
   metadata: ScriptUploadMetadata;
   module: string;
+  wasm?: number[];
 }
 
 /** What the fake Cloudflare API has "deployed": script name → module source; the dispatcher stub serves from it. */
@@ -20,6 +22,8 @@ const scripts = new Map<string, string>();
 const uploads: Upload[] = [];
 const objects = new Map<string, Map<string, string>>();
 const allocatedBuckets = new Set<string>();
+const allocatedNamespaces = new Set<string>();
+let rejectNamespaceCreation = false;
 const probeVersions = new Map<string, string[]>();
 // An in-flight dispatch response retains its script version until its body is released.
 const activeProbes = new Map<string, { version: string; bodies: number }>();
@@ -108,7 +112,7 @@ async function adminPost(tenant: string, body?: unknown): Promise<Response> {
       ...(body === undefined ? { 'content-length': '0' } : { 'content-type': 'application/json' }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  }), testEnv);
+  }), testEnv, createExecutionContext());
 }
 
 async function mintToken(tenant: string, appliedMigrationTag?: string | null): Promise<string> {
@@ -128,7 +132,7 @@ async function tenantPost(tenant: string, action: 'deploy' | 'revert', token: st
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
-  }), testEnv);
+  }), testEnv, createExecutionContext());
 }
 
 async function accountId(tenant: string): Promise<string> {
@@ -148,6 +152,16 @@ async function stageRelease(tenant: string, sha: string, version = sha): Promise
   return { bundleKey, bundleHash: await sha256(source) };
 }
 
+async function stageModuleRelease(tenant: string, sha: string, version = sha) {
+  const staged = await stageRelease(tenant, sha, version);
+  const source = new TextDecoder().decode(encodeWorkerBundle([
+    { name: 'worker.mjs', type: 'esm', content: new TextEncoder().encode(bundleSource(version)) },
+    { name: 'engine.wasm', type: 'wasm', content: new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]) },
+  ]));
+  objects.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`)!.set(staged.bundleKey, source);
+  return { ...staged, bundleHash: await sha256(source) };
+}
+
 async function deploy(tenant: string, token: string, sha: string, tags: string[], version = sha): Promise<PlatformDeployResponse> {
   const staged = await stageRelease(tenant, sha, version);
   const response = await tenantPost(tenant, 'deploy', token, { sha, ...staged, metadata: metadata(tags) });
@@ -161,12 +175,24 @@ beforeEach(() => {
   scripts.clear();
   objects.clear();
   allocatedBuckets.clear();
+  allocatedNamespaces.clear();
+  rejectNamespaceCreation = false;
   uploads.length = 0;
   probeVersions.clear();
   activeProbes.clear();
   rejectNextUpload = null;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
+    const namespaceLookup = /^\/client\/v4\/accounts\/test-account\/artifacts\/namespaces\/([^/]+)$/u.exec(url.pathname);
+    if (url.hostname === 'api.cloudflare.com' && namespaceLookup && (!init?.method || init.method === 'GET')) {
+      return Response.json({ success: allocatedNamespaces.has(namespaceLookup[1]!) }, { status: allocatedNamespaces.has(namespaceLookup[1]!) ? 200 : 404 });
+    }
+    if (url.hostname === 'api.cloudflare.com' && url.pathname === '/client/v4/accounts/test-account/artifacts/namespaces' && init?.method === 'POST') {
+      if (rejectNamespaceCreation) return Response.json({ success: false }, { status: 403 });
+      const body = JSON.parse(String(init.body)) as { namespace: string };
+      allocatedNamespaces.add(body.namespace);
+      return Response.json({ success: true });
+    }
     const bucketLookup = /^\/client\/v4\/accounts\/test-account\/r2\/buckets\/([^/]+)$/u.exec(url.pathname);
     if (url.hostname === 'api.cloudflare.com' && bucketLookup && (!init?.method || init.method === 'GET')) return Response.json({ success: allocatedBuckets.has(bucketLookup[1]!) }, { status: allocatedBuckets.has(bucketLookup[1]!) ? 200 : 404 });
     if (url.hostname === 'api.cloudflare.com' && url.pathname === '/client/v4/accounts/test-account/r2/buckets' && init?.method === 'POST') {
@@ -192,7 +218,9 @@ beforeEach(() => {
       return Response.json({ success: false, errors: [{ code: 10021, message }], result: null }, { status: 400 });
     }
     const module = await modulePart.text();
-    uploads.push({ metadata: parsed as ScriptUploadMetadata, module });
+    const wasm = init.body.get('engine.wasm');
+    if (wasm instanceof File && wasm.type !== 'application/wasm') throw new Error('Incorrect WASM media type');
+    uploads.push({ metadata: parsed as ScriptUploadMetadata, module, ...(wasm instanceof File ? { wasm: [...new Uint8Array(await wasm.arrayBuffer())] } : {}) });
     scripts.set(match[1]!, module);
     return Response.json({ success: true, errors: [], result: { id: match[1] } });
   };
@@ -221,7 +249,7 @@ describe('migrationDelta', () => {
 
 describe('tenant deployment token', () => {
   it('mints once, rejects bad tokens, and rotation invalidates the old token', async () => {
-    const unsigned = await worker.fetch(new Request('https://platform.test/__platform/admin/tenants/alpha/token', { method: 'POST' }), testEnv);
+    const unsigned = await worker.fetch(new Request('https://platform.test/__platform/admin/tenants/alpha/token', { method: 'POST' }), testEnv, createExecutionContext());
     expect(unsigned.status).toBe(401);
 
     const first = await mintToken('alpha');
@@ -231,7 +259,7 @@ describe('tenant deployment token', () => {
     const request = { sha: 'a1', ...staged, metadata: metadata(['v1']) };
     const forged = await tenantPost('alpha', 'deploy', `${first}x`, request);
     expect(forged.status).toBe(401);
-    const missing = await worker.fetch(new Request('https://platform.test/__platform/tenants/alpha/deploy', { method: 'POST', body: '{}' }), testEnv);
+    const missing = await worker.fetch(new Request('https://platform.test/__platform/tenants/alpha/deploy', { method: 'POST', body: '{}' }), testEnv, createExecutionContext());
     expect(missing.status).toBe(401);
 
     const second = await mintToken('alpha');
@@ -289,6 +317,61 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     const state = await env.DEPLOYMENTS.getByName('bravo').getState();
     expect(state.appliedMigrationTag).toBe('v10');
     expect(state.active?.sha).toBe('abc123');
+  });
+
+  it.each(['valid', 'corrupt', 'namespace-denied'] as const)('handles a %s module release without weakening the legacy deployment path', async condition => {
+    const tenant = `modules-${condition}`;
+    const token = await mintToken(tenant);
+    const staged = await stageModuleRelease(tenant, 'modules1');
+    const releaseMetadata = metadata(['v1']);
+    releaseMetadata.resources.push(
+      { name: 'ARTIFACTS', source: 'artifacts', value: 'another-account-namespace' },
+      { name: 'LOADER', source: 'worker-loader' },
+      { name: 'BROWSER', source: 'browser-rendering' },
+    );
+    if (condition === 'namespace-denied') rejectNamespaceCreation = true;
+    if (condition === 'corrupt') {
+      const bucket = objects.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`)!;
+      const bundle = JSON.parse(bucket.get(staged.bundleKey)!) as { modules: Array<{ base64: string }> };
+      bundle.modules[1]!.base64 = btoa('changed');
+      const corrupted = JSON.stringify(bundle);
+      bucket.set(staged.bundleKey, corrupted);
+      staged.bundleHash = await sha256(corrupted);
+    }
+    const response = await tenantPost(tenant, 'deploy', token, { sha: 'modules1', ...staged, metadata: releaseMetadata });
+    if (condition === 'valid') {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ healthy: true, sha: 'modules1' });
+      expect(uploads[0]!.wasm).toEqual([0, 97, 115, 109, 1, 0, 0, 0]);
+      expect(uploads[0]!.module).toBe(bundleSource('modules1'));
+      expect(uploads[0]!.metadata.bindings).toEqual(expect.arrayContaining([
+        { type: 'artifacts', name: 'ARTIFACTS', namespace: `gsp-${await accountId(tenant)}` },
+        { type: 'worker_loader', name: 'LOADER' },
+        { type: 'browser', name: 'BROWSER' },
+      ]));
+      expect(allocatedNamespaces.has('another-account-namespace')).toBe(false);
+    } else {
+      expect(response.status).toBe(condition === 'corrupt' ? 409 : 502);
+      expect(await response.json()).toMatchObject({ error: { code: condition === 'corrupt' ? 'WORKER_MODULE_INVALID' : 'ARTIFACTS_NAMESPACE_FAILED' } });
+      expect(uploads).toHaveLength(0);
+      expect((await env.DEPLOYMENTS.getByName(tenant).getState()).active).toBeNull();
+      expect((await env.DEPLOYMENTS.getByName(tenant).acquireLease()).status).toBe('ok');
+    }
+  });
+
+  it('restores a historical JavaScript release when a module release fails its health probe', async () => {
+    const token = await mintToken('module-rollback');
+    const legacy = await stageRelease('module-rollback', 'legacy');
+    const legacySource = `{ const initialized = true; } ${bundleSource('legacy')}`;
+    objects.get(`${env.DISPATCH_NAMESPACE}-tenant-module-rollback`)!.set(legacy.bundleKey, legacySource);
+    const initial = await tenantPost('module-rollback', 'deploy', token, { sha: 'legacy', ...legacy, bundleHash: await sha256(legacySource), metadata: metadata(['v1']) });
+    expect(initial.status).toBe(200);
+    const staged = await stageModuleRelease('module-rollback', 'next', 'wrong-version');
+    const response = await tenantPost('module-rollback', 'deploy', token, { sha: 'next', ...staged, metadata: metadata(['v1']) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ healthy: false, revertedTo: 'legacy' });
+    expect((await env.DEPLOYMENTS.getByName('module-rollback').getState()).active?.sha).toBe('legacy');
+    expect(uploads.at(-1)!.module).toBe(legacySource);
   });
 
   it('sends every migration without old_tag on a tenant that was never migrated', async () => {
@@ -421,7 +504,7 @@ describe('operator account-bound deployment', () => {
     const bBundle = await stageRelease(b, 'account-b');
     const post = (tenant: string, action: 'deploy' | 'revert', body: Record<string, unknown>, token = 'test-bootstrap-token') => worker.fetch(new Request(`https://platform.test/__platform/operator/tenants/${tenant}/${action}`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
-    }), testEnv);
+    }), testEnv, createExecutionContext());
     const aRequest = { accountId: aId, sha: 'account-a', ...aBundle, metadata: metadata(['v1']) };
     const bRequest = { accountId: bId, sha: 'account-b', ...bBundle, metadata: metadata(['v1']) };
     expect((await post(a, 'deploy', aRequest)).status).toBe(200);

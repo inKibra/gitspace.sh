@@ -6,6 +6,7 @@ import {
   type WorkerReleaseMetadata,
 } from '@gitspace/protocol/deployment';
 import type { TenantDeployRecord, TenantDeploymentsDO, TenantDeploymentState } from './tenant-deployments.js';
+import { decodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 
 export const CLOUDFLARE_API = 'https://api.cloudflare.com/client/v4';
 /** Our channel build, placed in RELEASES by the GitSpace release pipeline. */
@@ -37,6 +38,9 @@ export interface ScriptUploadMetadata {
   bindings: Array<
     | { type: 'durable_object_namespace'; name: string; class_name: string }
     | { type: 'r2_bucket'; name: string; bucket_name: string }
+    | { type: 'artifacts'; name: string; namespace: string }
+    | { type: 'worker_loader'; name: string }
+    | { type: 'browser'; name: string }
     | { type: 'plain_text'; name: string; text: string }
     | { type: 'secret_text'; name: string; text: string }
     | { type: 'service'; name: string; service: string }
@@ -91,6 +95,9 @@ export function scriptUploadMetadata(
     if (names.has(resource.name)) throw new Error('Duplicate provider binding: ' + resource.name);
     names.add(resource.name);
     if (resource.source === 'object-storage') { bindings.push({ type: 'r2_bucket', name: resource.name, bucket_name: tenant.blobBucket }); continue; }
+    if (resource.source === 'artifacts') { bindings.push({ type: 'artifacts', name: resource.name, namespace: `gsp-${tenant.accountId}` }); continue; }
+    if (resource.source === 'worker-loader') { bindings.push({ type: 'worker_loader', name: resource.name }); continue; }
+    if (resource.source === 'browser-rendering') { bindings.push({ type: 'browser', name: resource.name }); continue; }
     if (resource.source === 'public-assets') { bindings.push({ type: 'service', name: resource.name, service: tenant.publicAssetsService }); continue; }
     if (resource.source === 'platform-service') { bindings.push({ type: 'service', name: resource.name, service: tenant.platformService }); continue; }
     if (resource.source === 'provider-token') { bindings.push({ type: 'secret_text', name: resource.name, text: tenant.token }); continue; }
@@ -114,6 +121,26 @@ export function scriptUploadMetadata(
   };
 }
 
+async function ensureArtifactsNamespace(env: Env, namespace: string): Promise<DeployFailure | null> {
+  const base = `${CLOUDFLARE_API}/accounts/${env.CF_ACCOUNT_ID}/artifacts/namespaces`;
+  const headers = { authorization: `Bearer ${env.CF_API_TOKEN}`, 'content-type': 'application/json' };
+  try {
+    const existing = await fetch(`${base}/${encodeURIComponent(namespace)}`, { headers });
+    if (existing.ok && (await readCloudflareEnvelope(existing))?.success) return null;
+    if (existing.status !== 404) return { status: 502, code: 'ARTIFACTS_NAMESPACE_FAILED', message: `Artifacts namespace lookup returned ${existing.status}` };
+    const created = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ namespace }) });
+    if (created.ok && (await readCloudflareEnvelope(created))?.success) return null;
+    // A concurrent tenant deployment may have created this deterministic namespace.
+    if (created.status === 409) {
+      const concurrent = await fetch(`${base}/${encodeURIComponent(namespace)}`, { headers });
+      if (concurrent.ok && (await readCloudflareEnvelope(concurrent))?.success) return null;
+    }
+    return { status: 502, code: 'ARTIFACTS_NAMESPACE_FAILED', message: `Artifacts namespace creation returned ${created.status}` };
+  } catch (error) {
+    return { status: 502, code: 'ARTIFACTS_NAMESPACE_FAILED', message: error instanceof Error ? error.message : 'Artifacts namespace request failed' };
+  }
+}
+
 async function sha256Prefixed(bytes: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
@@ -125,10 +152,31 @@ interface CloudflareApiEnvelope {
   errors: string[];
 }
 
+async function readCloudflareEnvelope(response: Response): Promise<CloudflareApiEnvelope | null> {
+  try {
+    const parsed: unknown = await response.json();
+    if (!parsed || typeof parsed !== 'object' || !('success' in parsed) || typeof parsed.success !== 'boolean') return null;
+    const errors: string[] = [];
+    if ('errors' in parsed && Array.isArray(parsed.errors)) {
+      for (const entry of parsed.errors) {
+        if (!entry || typeof entry !== 'object') continue;
+        const code = 'code' in entry && typeof entry.code === 'number' ? String(entry.code) : '?';
+        const message = 'message' in entry && typeof entry.message === 'string' ? entry.message : 'unknown';
+        errors.push(`${code}: ${message}`);
+      }
+    }
+    return { success: parsed.success, errors };
+  } catch {
+    return null;
+  }
+}
+
 async function uploadScript(env: Env, tenant: string, bundle: ArrayBuffer, metadata: ScriptUploadMetadata): Promise<DeployFailure | null> {
+  const decoded = decodeWorkerBundle(bundle, metadata.main_module, true);
+  if (decoded.isErr()) return { status: 409, code: 'WORKER_MODULE_INVALID', message: decoded.error.message };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }), 'metadata.json');
-  form.append(metadata.main_module, new Blob([bundle], { type: 'application/javascript+module' }), metadata.main_module);
+  for (const module of decoded.value) form.append(module.name, new Blob([module.content], { type: module.type === 'wasm' ? 'application/wasm' : 'application/javascript+module' }), module.name);
   const url = `${CLOUDFLARE_API}/accounts/${env.CF_ACCOUNT_ID}/workers/dispatch/namespaces/${env.DISPATCH_NAMESPACE}/scripts/${env.DISPATCH_NAMESPACE}-tenant-${tenant}`;
   let response: Response;
   try {
@@ -136,24 +184,7 @@ async function uploadScript(env: Env, tenant: string, bundle: ArrayBuffer, metad
   } catch (error) {
     return { status: 502, code: 'UPLOAD_UNREACHABLE', message: error instanceof Error ? error.message : String(error) };
   }
-  let envelope: CloudflareApiEnvelope | null = null;
-  try {
-    const parsed: unknown = await response.json();
-    if (parsed && typeof parsed === 'object' && 'success' in parsed && typeof parsed.success === 'boolean') {
-      const errors: string[] = [];
-      if ('errors' in parsed && Array.isArray(parsed.errors)) {
-        for (const entry of parsed.errors) {
-          if (!entry || typeof entry !== 'object') continue;
-          const code = 'code' in entry && typeof entry.code === 'number' ? String(entry.code) : '?';
-          const message = 'message' in entry && typeof entry.message === 'string' ? entry.message : 'unknown';
-          errors.push(`${code}: ${message}`);
-        }
-      }
-      envelope = { success: parsed.success, errors };
-    }
-  } catch {
-    envelope = null;
-  }
+  const envelope = await readCloudflareEnvelope(response);
   if (response.ok && envelope?.success) return null;
   const detail = envelope?.errors.join('; ');
   return {
@@ -235,6 +266,13 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
   const accountHash = new Uint8Array(await crypto.subtle.digest('SHA-256', accountKey));
   const accountId = `u-${Array.from(accountHash.subarray(0, 16), byte => byte.toString(16).padStart(2, '0')).join('')}`;
   const token = await deployments.providerToken();
+  if (candidate.metadata.resources.some(resource => resource.source === 'artifacts')) {
+    const failure = await ensureArtifactsNamespace(env, `gsp-${accountId}`);
+    if (failure) {
+      await deployments.releaseLease();
+      return { status: 'error', error: failure };
+    }
+  }
   const uploadMetadata = scriptUploadMetadata(candidate.metadata, delta, [tenant, candidate.sha], {
     id: tenant,
     accountId,
