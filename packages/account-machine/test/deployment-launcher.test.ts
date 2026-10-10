@@ -95,7 +95,6 @@ describe('canonical cache deployment sources', () => {
     const completed = Promise.withResolvers<void>();
     const launcher = new DeploymentLauncher({
       attachments: () => journal.attachments(), machineId: 'builder', buildRoot: join(root, 'builds'),
-      events: { append: event => { expect(event.projectId).toBe('project'); } },
       blobs: { put: async (key, bytes) => { uploaded.set(key, new TextDecoder().decode(bytes)); return `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`; } },
       authority: {
         reportLaunchProgress: async value => { progress.push(value); if (value.status !== 'running') completed.resolve(); },

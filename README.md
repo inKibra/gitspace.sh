@@ -197,9 +197,11 @@ For source recovery on a compatible host, use the CLI's product entrypoint:
 gitspace machine recover --source /path/to/held/gitspace-checkout --workspace <workspace-id>
 # The same product command from an installed source checkout:
 bun packages/cli/src/index.ts machine recover --source . --workspace <workspace-id>
+# Recover only the Worker and frontend without replacing any machine:
+bun packages/cli/src/index.ts machine recover --source . --workspace <workspace-id> --targets worker,frontend
 ```
 
-Run recovery from a native shell or linked provider console, not a managed terminal that replacement will drain. It uses the source checkout's builders and the ordinary authenticated deployment transaction. It is not permission to edit runtime-selection files, bypass approvals, or replace another tenant. Current native packaging includes the authenticated executable inventory and pinned Git LFS; it does not build WalGit or an OMP installation.
+Recovery defaults to the `machine` target; `--targets` explicitly limits which account selections change. It uses the source checkout's launcher and builders, reports account-owned launch progress without requiring a legacy local project row, and waits for the selected targets to activate. Run machine replacement from a native shell with the linked CLI configuration, or a provider console supplied with the linked machine environment—not a managed terminal that replacement will drain. Managed workspace terminals intentionally do not inherit machine credentials. Recovery is not permission to edit runtime-selection files, bypass approvals, or replace another tenant. Current native packaging includes the authenticated executable inventory and pinned Git LFS; it does not build WalGit or an OMP installation.
 
 Cloud container images build on GitHub through `.github/workflows/publish-container.yml`. Push a `container-*` tag to build and publish that commit.
 

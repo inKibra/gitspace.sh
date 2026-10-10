@@ -641,8 +641,10 @@ before execution; there is no silent legacy alias.
   `gitspace machine recover --source <ready-GitSpace-cache> --workspace <id>`.
   From this source checkout the same CLI is
   `bun packages/cli/src/index.ts machine recover --source <checkout> --workspace <id>`.
-  Run outside a managed agent/terminal that the old machine will drain; a native
-  shell or linked provider console is suitable. Keep the old host running.
+  Run machine replacement outside a managed agent/terminal that the old machine
+  will drain. Use a linked native CLI or a provider console supplied with the
+  machine environment; managed workspace terminals do not inherit those credentials.
+  Keep the old host running.
   The recovery command uses its installed Bun and machine authority, reads the
   executor's canonical cache attachment journal through genuine readonly SQLite
   (no create, migrations or persistent initialization), closes that reader, and
@@ -651,9 +653,11 @@ before execution; there is no silent legacy alias.
   and resolve to the supplied source path. Lost, detached, paused, reclaimed,
   runner-only, and incomplete checkouts cannot build a release. Recovery does
   not require a fresh heartbeat from the old host or a legacy workspace-holder row.
-  It emits ordinary account project
-  deployment progress, stages/launches only the selected source's `machine`
-  target, and waits for the complete machine's applied/failed health report.
+  It emits ordinary account-owned launch progress without writing the machine's
+  legacy project event table. The default target remains `machine`; use
+  `--targets worker,frontend` to recover those targets without replacing a machine.
+  Recovery waits for each selected target to be applied, verifies the running
+  Worker/machine revision where applicable, and rejects superseded selections.
   The command stages account selection; the candidate updater performs the
   host handoff. It does not substitute stock code for selected tenant code.
   Failure leaves the predecessor under the existing rollback contract. For

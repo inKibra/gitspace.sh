@@ -809,7 +809,7 @@ export async function createMachineExecutor(options: {
   return { executor, journal, sync,
     useWorkspace: async workspaceId => {
       await settled(workspaceId);
-      const local = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.role === 'cache');
+      const local = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.role === 'cache' && item.attachment.state !== 'detached' && item.attachment.state !== 'lost');
       if (!local) throw new Error('Workspace has no canonical cache assignment');
       if (local.attachment.cache?.state === 'reclaimed' || local.attachment.cache?.state === 'paused' || local.attachment.state === 'attaching') {
         await options.cloud.call('runtime.attachment.cache.request', { projectId: local.attachment.projectId, workspaceId, machineId: options.machineId, requestId: crypto.randomUUID() }, RuntimeJsonSchema, stopping.signal);

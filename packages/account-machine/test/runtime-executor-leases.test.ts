@@ -12,6 +12,7 @@ import { CloudRuntimeClient } from '../src/cloud-runtime-client.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { createMachineExecutor, type MachineExecutorRuntime } from '../src/runtime-executor.js';
 import type { GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
+import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 import { ManualWorktreeClock } from './git-worktree-clock.js';
 
 async function git(cwd: string, ...args: string[]) {
@@ -25,11 +26,13 @@ type Preparation = (local: LocalAttachment, signal: AbortSignal, progress: (step
 type Acceptance = (local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previous: string | null, final?: boolean) => Promise<GitIntermediateCheckpoint>;
 type LeaseProof = {
   root: string;
+  database: GitSpaceDatabase;
   runtime: MachineExecutorRuntime;
   clock: ManualWorktreeClock;
   leaseClock: ManualWorktreeClock;
   attachments: Map<string, RuntimeAttachment>;
   heartbeats: RuntimeHeartbeatInput[];
+  cacheRequests: Record<string, unknown>[];
   nextHeartbeat(): Promise<RuntimeHeartbeatInput>;
 };
 
@@ -61,9 +64,14 @@ async function leaseProof(workspaces: readonly string[], options: { prepareAttac
       attachments.set(`cache-${workspace}`, RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: workspace, machineId: 'machine', attachmentId: `cache-${workspace}`, generation: 0, ownershipGeneration: owned.generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write'], updatedAt: new Date().toISOString() }));
     }
     const heartbeats: RuntimeHeartbeatInput[] = [];
+    const cacheRequests: Record<string, unknown>[] = [];
     let arrived = Promise.withResolvers<RuntimeHeartbeatInput>();
     class LocalCloud extends CloudRuntimeClient {
       override async call<S extends z.ZodType>(operation: ControlOperation, payload: Record<string, unknown>, schema: S, signal?: AbortSignal): Promise<z.output<S>> {
+        if (operation === 'runtime.attachment.cache.request') {
+          cacheRequests.push(payload);
+          throw new Error('A ready replacement already owns the canonical checkout');
+        }
         if (operation === 'runtime.assignments') {
           if (RuntimeAssignmentsInputSchema.parse(payload).afterSnapshot) await new Promise<void>((_, reject) => {
             const abort = () => reject(new Error('Subscription canceled'));
@@ -115,7 +123,7 @@ async function leaseProof(workspaces: readonly string[], options: { prepareAttac
       prepareAttachment: options.prepareAttachment ?? (async () => {}),
       commitSnapshot: options.commitSnapshot ?? (async (_local, checkpoint) => checkpoint),
     });
-    await run({ root, runtime, clock, leaseClock, attachments, heartbeats, nextHeartbeat: () => arrived.promise });
+    await run({ root, database, runtime, clock, leaseClock, attachments, heartbeats, cacheRequests, nextHeartbeat: () => arrived.promise });
   } finally { await runtime?.close(); database.close(); await rm(root, { recursive: true, force: true }); }
 }
 
@@ -154,6 +162,58 @@ test("a workspace operation never waits for another workspace's long setup", asy
     release.resolve();
     await clock.until(everything, 15_000);
     expect(runtime.journal.attachment('cache-slow')?.attachment.state).toBe('ready');
+  });
+}, 30_000);
+
+test('a terminal uses the ready replacement cache after its predecessor detaches', async () => {
+  let retired = false;
+  const publications: { attachmentId: string; generation: number; checkpoint: GitIntermediateCheckpoint }[] = [];
+  await leaseProof(['workspace'], {
+    commitSnapshot: async (local, checkpoint) => {
+      if (retired && local.attachment.attachmentId === 'cache-workspace') throw new Error('Detached cache cannot publish the replacement checkout');
+      publications.push({ attachmentId: local.attachment.attachmentId, generation: local.attachment.generation, checkpoint });
+      return checkpoint;
+    },
+  }, async ({ root, database, runtime, clock, attachments, cacheRequests }) => {
+    await clock.until(runtime.sync(), 15_000);
+    const original = attachments.get('cache-workspace');
+    if (original?.state !== 'ready') throw new Error('Original cache did not become ready');
+    attachments.set(original.attachmentId, { ...original, state: 'draining', detachRequest: {} });
+    await clock.until(runtime.sync(), 15_000);
+    expect(runtime.journal.attachment(original.attachmentId)?.attachment.state).toBe('detached');
+    retired = true;
+
+    const replacement = { ...original, attachmentId: 'replacement-cache', generation: original.generation + 1, state: 'attaching' as const };
+    attachments.set(replacement.attachmentId, replacement);
+    await clock.until(runtime.sync(), 15_000);
+    expect(runtime.journal.attachment(replacement.attachmentId)?.attachment).toMatchObject({ state: 'ready', generation: 1 });
+    const detached = runtime.journal.attachment(original.attachmentId);
+    const checkout = join(root, 'workspace');
+    // A real edit forces useWorkspace to publish through the selected generation,
+    // rather than merely accepting a ready state from the journal.
+    publications.length = 0;
+    await writeFile(join(checkout, 'tracked.txt'), 'replacement terminal checkout\n');
+    const terminals = new WorkspaceHubTerminalCoordinator(database, 'machine', undefined, {
+      path: workspaceId => runtime.journal.attachments().find(local => local.attachment.workspaceId === workspaceId && local.attachment.role === 'cache' && local.attachment.state === 'ready')?.rootPath ?? null,
+      use: workspaceId => runtime.useWorkspace(workspaceId),
+      changed: () => runtime.sync(),
+    });
+    const client = await daemonClientForProject(checkout);
+    try {
+      const terminal = await clock.until(terminals.createShell('workspace'), 15_000);
+      expect(terminal).toMatchObject({ kind: 'user', cwd: checkout, machineId: 'machine' });
+      await terminals.send('workspace', terminal.name, 'cat tracked.txt; exit\r');
+      await client.request({ op: 'wait', name: terminal.name, for: 'exit', timeoutMs: 5000 });
+      expect((await terminals.read('workspace', terminal.name, null)).data).toContain('replacement terminal checkout');
+      const published = publications.at(-1);
+      expect(published).toMatchObject({ attachmentId: replacement.attachmentId, generation: 1 });
+      if (!published) throw new Error('Terminal use did not publish the checkout edit');
+      expect(await git(join(root, 'remote.git'), 'show', `${published.checkpoint.worktreeCommit}:tracked.txt`)).toBe('replacement terminal checkout');
+      expect(cacheRequests).toEqual([]);
+      expect(runtime.journal.attachment(original.attachmentId)).toEqual(detached);
+    } finally {
+      await client.request({ op: 'shutdown' });
+    }
   });
 }, 30_000);
 

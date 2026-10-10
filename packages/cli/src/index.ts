@@ -4,7 +4,7 @@ import { closeSync, existsSync, openSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import { createRelayAuthorization, createSignedControlRequest, decodeMachinePairingToken, signRpcRequest } from '@gitspace/protocol';
+import { createRelayAuthorization, createSignedControlRequest, decodeMachinePairingToken, releaseTargetSchema, signRpcRequest } from '@gitspace/protocol';
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
@@ -270,10 +270,12 @@ machine.command('setup').description('Link using the pairing command from your a
   });
 machine.command('start').description('Start the installed account-managed runtime').action(startMachine);
 machine.command('stop').description('Stop this machine runtime').action(stopMachine);
-machine.command('recover').description('Build and activate a complete tenant machine release from its held source workspace')
+machine.command('recover').description('Build and activate selected tenant releases from a ready source workspace')
   .requiredOption('--source <path>', 'GitSpace source checkout held by this machine')
   .requiredOption('--workspace <id>', 'Account workspace id of that checkout')
-  .action(async (options: { source: string; workspace: string }) => {
+  .option('--targets <targets>', 'Comma-separated release targets: worker, machine, frontend', 'machine')
+  .action(async (options: { source: string; workspace: string; targets: string }) => {
+    const targets = options.targets.split(',').map(target => releaseTargetSchema.parse(target.trim()));
     const source = resolve(options.source);
     const entrypoint = join(source, 'packages/account-machine/src/source-recovery.ts');
     if (!existsSync(entrypoint)) throw new Error('Recovery requires a GitSpace source checkout containing the source-recovery entrypoint');
@@ -304,8 +306,8 @@ machine.command('recover').description('Build and activate a complete tenant mac
     console.log('Preparing source recovery dependencies; the current host and tenant selection remain active.');
     const install = Bun.spawn([bun, 'install', '--frozen-lockfile'], { cwd: source, env: environment, stdout: 'inherit', stderr: 'inherit' });
     if (await install.exited !== 0) throw new Error('Recovery source dependency installation failed; the existing host was not changed');
-    const recovery = Bun.spawn([bun, entrypoint, options.workspace, source], { cwd: source, env: environment, stdout: 'inherit', stderr: 'inherit' });
-    if (await recovery.exited !== 0) throw new Error('Source recovery did not confirm activation; inspect the account deployment progress for the machine update outcome.');
+    const recovery = Bun.spawn([bun, entrypoint, options.workspace, source, targets.join(',')], { cwd: source, env: environment, stdout: 'inherit', stderr: 'inherit' });
+    if (await recovery.exited !== 0) throw new Error('Source recovery did not confirm activation; inspect the account deployment progress for the selected targets.');
   });
 machine.command('status').description('Show local runtime and relay status').action(async () => {
   const config = await requireConfig();

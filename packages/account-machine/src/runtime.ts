@@ -656,7 +656,6 @@ export async function startMachineRuntime() {
     machineId,
     authority,
     blobs: checkpointBlobs,
-    events: projectEventWriter,
     buildRoot: join(environmentRoot, 'builds'),
   });
   const rpc = createGitSpaceRpcHandler({

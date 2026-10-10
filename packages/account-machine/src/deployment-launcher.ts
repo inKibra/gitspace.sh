@@ -1,7 +1,6 @@
 import { readdir, readFile, rm } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { AppendFactEvent } from '@gitspace/core';
 import type { ExecutorJournal, LocalAttachment } from '@gitspace/runtime-machine';
 import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { hashArtifactPath, workspaceSha } from '@gitspace/deployment';
@@ -98,16 +97,11 @@ export interface ReleaseBlobWriter {
   put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`>;
 }
 
-export interface ProjectFactEvents {
-  append(input: AppendFactEvent): void;
-}
-
 export interface DeploymentLauncherOptions {
   attachments: ExecutorJournal['attachments'];
   machineId: string;
   authority: ReleaseAuthority;
   blobs: ReleaseBlobWriter;
-  events: ProjectFactEvents;
   /** Scratch root for build output; each release builds under `<buildRoot>/<sha>`. */
   buildRoot: string;
   installTimeoutMs?: number;
@@ -174,7 +168,7 @@ export class DeploymentLauncher {
     );
     const isGitSpace = typeof protocolPackage === 'object' && protocolPackage !== null && 'name' in protocolPackage && protocolPackage.name === '@gitspace/protocol';
     const current = this.progress!;
-    const progress = (phase: string, message: string, payload: Record<string, unknown> = {}, status: LaunchProgress['status'] = 'running'): void => {
+    const progress = (phase: string, message: string, status: LaunchProgress['status'] = 'running'): void => {
       const sha = current.sha ?? 'pending';
       console.log(`[gitspace-deploy] ${sha.slice(0, 12)} ${phase}: ${message}`);
       current.phase = phase;
@@ -183,18 +177,9 @@ export class DeploymentLauncher {
       current.updatedAt = new Date().toISOString();
       if (status === 'failed') current.error = message;
       this.report(current);
-      this.options.events.append({
-        projectId: workspace.projectId,
-        scope: 'code',
-        entity: 'deployment',
-        entityId: sha,
-        revision: Date.now(),
-        operation: 'updated',
-        payload: { ...payload, launchId: current.launchId, phase, message, status, workspaceId: workspace.workspaceId, targets },
-      });
     };
     if (!isGitSpace) {
-      progress('failed', `Workspace ${workspace.workspaceId} is not a GitSpace checkout`, {}, 'failed');
+      progress('failed', `Workspace ${workspace.workspaceId} is not a GitSpace checkout`, 'failed');
       throw new DeploymentLaunchError('NOT_GITSPACE', `Workspace ${workspace.workspaceId} is not a GitSpace checkout`);
     }
 
@@ -261,13 +246,10 @@ export class DeploymentLauncher {
       });
       progress('launch', `launching into ${targets.join(', ')}`);
       const launched = await this.options.authority.launchRelease(sha, targets);
-      progress('launched', `worker=${launched.record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} frontend=${launched.record.status.frontend}`, {
-        release: launched.record.status,
-        releaseError: launched.record.error,
-      }, 'succeeded');
+      progress('launched', `worker=${launched.record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} frontend=${launched.record.status.frontend}`, 'succeeded');
       return launched.record;
     } catch (error) {
-      progress('failed', error instanceof Error ? error.message : String(error), {}, 'failed');
+      progress('failed', error instanceof Error ? error.message : String(error), 'failed');
       throw error;
     } finally {
       await rm(buildRoot, { recursive: true, force: true });
