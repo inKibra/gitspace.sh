@@ -99,6 +99,8 @@ The platform compatibility release accepts integrity-checked ESM/WASM module env
 
 For a code-only shared rollout, omit local variable overrides and use Wrangler's `--keep-vars`. Verify the live binding inventory and runtime settings after deployment, especially the CPU limit and default cloud image; checkout defaults may differ from the running service. This compatibility update does not require publishing new defaults, replacing machine images, or selecting other tenant releases.
 
+The production deployer's `CF_API_TOKEN` needs account-scoped **Artifacts Read** and **Artifacts Write** in addition to its existing Workers permissions. Wrangler's interactive OAuth permissions do not grant permissions to that separate production token. Preserve the token's account restriction and existing policies when adding these permissions; do not substitute an interactive OAuth credential.
+
 Account deployment progress comes from `DeploymentLauncher` through `deployment.status` and project `deployment` events. The client uses these for its Source indicator and launch progress sheet. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
 
 Do not manually write runtime-selection files or call `/__environment/launch` as an alternate deployment procedure. Those are implementation details of the product's replacement path. If the supported path fails, diagnose that failure and fix the path rather than bypassing it. **Back to stable** uses the account's `deployment.revert` operation.
