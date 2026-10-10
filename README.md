@@ -101,6 +101,8 @@ For a code-only shared rollout, omit local variable overrides and use Wrangler's
 
 The production deployer's `CF_API_TOKEN` needs account-scoped **Artifacts Read** and **Artifacts Write** in addition to its existing Workers permissions. Wrangler's interactive OAuth permissions do not grant permissions to that separate production token. Preserve the token's account restriction and existing policies when adding these permissions; do not substitute an interactive OAuth credential.
 
+Verify affected stateful APIs as well as the edge Worker's health and version. [Durable Object code updates propagate independently](https://developers.cloudflare.com/durable-objects/platform/known-issues/#code-updates), so a new Worker stamp can briefly coexist with old credential-service behavior.
+
 Account deployment progress comes from `DeploymentLauncher` through `deployment.status` and project `deployment` events. The client uses these for its Source indicator and launch progress sheet. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
 
 Do not manually write runtime-selection files or call `/__environment/launch` as an alternate deployment procedure. Those are implementation details of the product's replacement path. If the supported path fails, diagnose that failure and fix the path rather than bypassing it. **Back to stable** uses the account's `deployment.revert` operation.
