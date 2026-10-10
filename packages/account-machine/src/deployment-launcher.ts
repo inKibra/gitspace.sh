@@ -57,8 +57,7 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
 /**
  * "Launch into": build GitSpace from a ready workspace cache on this machine, put the
  * bundles in the tenant's data bucket, stage the release, and point the
- * tenant's `desired` at it. Progress is logged and mirrored as `deployment`
- * fact events on the workspace's project.
+ * tenant's `desired` at it. Progress is logged and reported to the account.
  */
 
 export type DeploymentLaunchErrorCode = 'WORKSPACE_NOT_FOUND' | 'CACHE_UNAVAILABLE' | 'NOT_GITSPACE' | 'BUSY';
@@ -139,7 +138,7 @@ export class DeploymentLauncher {
 
   /**
    * Validate synchronously, then build in the background. The caller gets the
-   * progress record at once; phases arrive through `status()` and fact events.
+   * progress record at once; later phases are reported to the account.
    */
   launch(input: DeploymentLaunchInput): LaunchProgress {
     if (this.active) throw new DeploymentLaunchError('BUSY', 'A release is already being built on this machine');
@@ -246,6 +245,11 @@ export class DeploymentLauncher {
       });
       progress('launch', `launching into ${targets.join(', ')}`);
       const launched = await this.options.authority.launchRelease(sha, targets);
+      // Worker/frontend activation finishes in this call; machine hosts follow asynchronously.
+      if ((targets.includes('worker') && launched.record.status.worker === 'failed')
+        || (targets.includes('frontend') && launched.record.status.frontend === 'failed')) {
+        throw new Error(launched.record.error ?? 'Release activation failed');
+      }
       progress('launched', `worker=${launched.record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} frontend=${launched.record.status.frontend}`, 'succeeded');
       return launched.record;
     } catch (error) {

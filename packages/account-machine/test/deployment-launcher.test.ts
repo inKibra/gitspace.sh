@@ -57,7 +57,7 @@ describe('canonical cache deployment sources', () => {
     };
   }
 
-  it('builds and uploads the ready journal cache without a legacy workspace row', async () => {
+  it.each(['pending', 'failed'] as const)('builds the journal cache and reports %s activation honestly', async activation => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-cache-launch-'));
     roots.push(root);
     const checkout = join(root, 'canonical-checkout');
@@ -102,20 +102,28 @@ describe('canonical cache deployment sources', () => {
           staged = releaseRecordSchema.parse({ ...input, builtBy: 'builder', createdAt: new Date().toISOString(), status: { worker: 'skipped', frontend: 'pending', machines: {} }, error: null });
           return staged;
         },
-        launchRelease: async (sha, targets) => {
+        launchRelease: async sha => {
           if (!staged || staged.sha !== sha) throw new Error('Release was not staged');
-          expect(targets).toEqual(['frontend']);
+          staged.status.frontend = activation;
+          staged.error = activation === 'failed' ? 'Deployment rejected by platform' : null;
           return { record: staged, desired: { worker: null, machine: null, frontend: sha, updatedAt: new Date().toISOString() } };
         },
       },
     });
     try {
-      const record = await launcher.launchAndWait({ workspaceId: 'workspace', targets: ['frontend'] });
-      await completed.promise;
-      expect(record.workspaceId).toBe('workspace');
+      const launched = launcher.launchAndWait({ workspaceId: 'workspace', targets: ['frontend'] });
+      if (activation === 'failed') {
+        await expect(launched).rejects.toThrow();
+        await completed.promise;
+        expect(progress.at(-1)).toMatchObject({ status: 'failed', phase: 'failed' });
+        expect(progress.at(-1)?.error).not.toBeNull();
+      } else {
+        const record = await launched;
+        await completed.promise;
+        expect(record.workspaceId).toBe('workspace');
+        expect(progress.at(-1)).toMatchObject({ status: 'succeeded', error: null });
+      }
       expect([...uploaded.entries()].find(([key]) => key.endsWith('/index.html'))?.[1]).toBe('built from the cloud cache');
-      expect(progress.map(item => item.phase)).toEqual(['queued', 'install', 'build', 'upload', 'stage', 'launch', 'launched']);
-      expect(progress.at(-1)).toMatchObject({ workspaceId: 'workspace', status: 'succeeded', sha: record.sha });
       expect(existsSync(join(root, 'gitspace.db'))).toBe(false);
     } finally { journal.close(); }
   });

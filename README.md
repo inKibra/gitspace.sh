@@ -162,7 +162,7 @@ Use the product's deployment entrypoints, not a new upload or activation script.
 
 | Change | Supported path |
 |---|---|
-| A user's GitSpace account | In the GitSpace source workspace's menu, choose **Launch GitSpace from here**, select the build machine, and confirm **Launch**. This calls `deployment.launch({ workspaceId, machineId, targets })` on exactly that online, enrolled machine. Resume a paused cache before launching. `DeploymentLauncher` owns install, build, upload, staging, launch, and project progress events. The release follower and runtime hosts own activation. |
+| A user's GitSpace account | In the GitSpace source workspace's menu, choose **Launch GitSpace from here**, select the build machine, and confirm **Launch**. This calls `deployment.launch({ workspaceId, machineId, targets })` on exactly that online, enrolled machine. Resume a paused cache before launching. `DeploymentLauncher` owns install, build, upload, staging, launch, and account-owned progress reporting. The release follower and runtime hosts own activation. |
 | Platform/operator-managed releases | Use the existing platform/operator deployment workflow for that component. Tenant Worker deploys and reverts use the authenticated `/__platform/operator/tenants/:tenant/deploy` and `/revert` routes. Native distributions and cloud images use their existing GitHub publication and rollout workflows. |
 
 The active account targets are `worker` (the tenant Worker and Pi runtime), `machine` (tool execution), and `frontend`. Historical OMP release fields remain readable but are not launch targets. Shared-contract changes require a compatible set of these targets. The shared operator/control Worker is not the account's `worker` target.
@@ -183,7 +183,7 @@ bun packages/deployment/src/default-release-cli.ts --fake
 
 Use `--help` for build, native-input, `--publish`, and rollback options. A real build pushes its cloud image; publication and rollback require separate platform authorization.
 
-Account deployment progress comes from `DeploymentLauncher` through `deployment.status` and project `deployment` events. The client uses these for its Source indicator and launch progress sheet. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
+Account deployment progress comes from `DeploymentLauncher` through `deployment.status`. The client uses this account-owned record for its Source indicator and launch progress sheet. A rejected Worker or frontend activation marks the launch failed even when another target applied; machine hosts report their asynchronous convergence separately. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
 
 In **Settings > Source > Running**, **Worker** reports the version stamp of the Worker answering the request. A separate **Platform record** row appears when the platform's last recorded deployment differs. The platform record does not prove which Worker answered.
 
