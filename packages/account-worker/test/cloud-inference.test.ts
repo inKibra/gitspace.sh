@@ -134,13 +134,30 @@ describe('Cloud inference credential authority', () => {
     expect((await vault.cloudResolveCredential({ profileId: 'default', credentialId: first.id })).credential).toMatchObject({ access: 'updated-access', orgId: 'org-a' });
   });
 
-  it('finishes device login from a durable alarm after the browser disconnects', async () => {
+  it('blocks new legacy Codex sign-ins without changing stored credentials', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'kept', provider: 'openai-codex', access: 'kept-access', accountId: 'kept-account' }]));
+    const before = await vault.cloudCredentialAccounts('default');
+    const providers = await vault.cloudProviders('default');
+    expect(providers.find(provider => provider.id === 'openai-codex')).toMatchObject({ available: false, supportsOAuth: false, loginable: false, hasAuth: true });
+    let requests = 0;
+    network.use(http.post('https://auth.openai.com/api/accounts/deviceauth/usercode', () => {
+      requests += 1;
+      return HttpResponse.json({ device_auth_id: 'unexpected', user_code: 'UNEXPECTED', interval: 5 });
+    }));
+    await runInDurableObject(vault, async instance => {
+      await expect(instance.cloudLoginStart({ profileId: 'default', providerId: 'openai-codex' })).rejects.toThrow();
+    });
+    expect(requests).toBe(0);
+    expect(await vault.cloudCredentialAccounts('default')).toEqual(before);
+    expect((await vault.cloudResolveCredential({ profileId: 'default', credentialId: before[0]!.id })).credential).toMatchObject({ access: 'kept-access' });
+  });
+
+  it('finishes an existing device login from a durable alarm after the browser disconnects', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([]));
     const access = `header.${btoa(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'alarm-account' } }))}.signature`;
     let tokenPolls = 0;
     let exchanges = 0;
     network.use(
-      http.post('https://auth.openai.com/api/accounts/deviceauth/usercode', () => HttpResponse.json({ device_auth_id: 'device-auth', user_code: 'USER-CODE', interval: 5 })),
       http.post('https://auth.openai.com/api/accounts/deviceauth/token', () => {
         tokenPolls += 1;
         return HttpResponse.json({ authorization_code: 'authorized-code', code_verifier: 'provider-verifier' });
@@ -150,7 +167,23 @@ describe('Cloud inference credential authority', () => {
         return HttpResponse.json({ access_token: access, refresh_token: 'alarm-refresh', expires_in: 3600 });
       }),
     );
-    const { flowId } = await vault.cloudLoginStart({ profileId: 'default', providerId: 'openai-codex' });
+    // Seed a flow persisted before the provider was disabled; new starts are blocked.
+    const flowId = crypto.randomUUID();
+    await runInDurableObject(vault, async (instance, state) => {
+      await instance.alarm();
+      const expiresAt = Date.now() + 15 * 60_000;
+      const pending = { kind: 'device', provider: 'openai-codex', expiresAt: new Date(expiresAt).toISOString(),
+        deviceAuthId: 'device-auth', userCode: 'USER-CODE', intervalMs: 8000,
+        nextPollAt: new Date(Date.now() + 5000).toISOString(), authorizationUrl: 'https://auth.openai.com/codex/device' };
+      const key = await crypto.subtle.importKey('raw', new Uint8Array(32).fill(2), 'AES-GCM', false, ['encrypt']);
+      const nonce = crypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce,
+        additionalData: new TextEncoder().encode(JSON.stringify(['provider-login/v1', 'default', flowId, 0])) }, key, new TextEncoder().encode(JSON.stringify(pending)));
+      const sealed = new Uint8Array(nonce.length + ciphertext.byteLength);
+      sealed.set(nonce); sealed.set(new Uint8Array(ciphertext), nonce.length);
+      state.storage.sql.exec("INSERT INTO cloud_provider_logins VALUES (?, 'default', 'openai-codex', 0, ?, '[]', 'pending', ?)", flowId, credentialProtocolBase64.encode(sealed), expiresAt);
+      await state.storage.setAlarm(Date.now() + 5000);
+    });
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     try {
       // No loginEvents/respond/poll call drives the exchange: only the durable alarm does.

@@ -1,4 +1,4 @@
-OAuth protocol implementations adapted from @oh-my-pi/pi-ai and @oh-my-pi/pi-catalog 18.2.11 and the GitSpace portable OAuth refresh patch.
+OAuth protocol implementations and client-registration metadata adapted from @oh-my-pi/pi-ai and @oh-my-pi/pi-catalog 18.2.11 and the GitSpace portable OAuth refresh patch. The vendored metadata in src/catalog.ts comes from pi-catalog's src/compat/rules.json.
 
 MIT License
 

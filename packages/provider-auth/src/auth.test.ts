@@ -22,6 +22,11 @@ describe('portable refresh rotation safety', () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ access_token: '', expires_in: 3600 }));
     await expect(refreshCredential(credential, fetcher)).rejects.toMatchObject({ kind: 'invalid-response' });
   });
+  it('does not send upstream OpenAI credentials through a GitSpace-owned refresh flow', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(refreshCredential({ ...credential, provider: 'openai' }, fetcher)).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 });
 
 describe('durable cloud login secret and state boundaries', () => {

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { beginLoginInputSchema, loginResponseSchema, type LoginState, type LoginTransition, type LoginView, type StoredOAuthCredential } from './schemas';
 import { request, parseProvider, tokenSchema, cursorTokenSchema, jwt, cursorExpiry, ProviderRefreshError } from './refresh';
-import { oauthClient, requireCursorPolicy } from './catalog';
+import { oauthClient } from './catalog';
 import { discoverProject, pollProject } from './project';
 
 /** Login errors share the sanitized provider failure contract. */
@@ -44,7 +44,6 @@ export async function beginLogin(input: z.input<typeof beginLoginInputSchema>, f
   const verifier = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const challenge = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   if (provider === 'cursor') {
-    requireCursorPolicy();
     const uuid = crypto.randomUUID();
     return pending({ kind: 'cursor', provider, expiresAt, uuid, verifier, intervalMs: 1000, nextPollAt: new Date(Date.now() + 1000).toISOString(), authorizationUrl: `https://cursor.com/loginDeepControl?${new URLSearchParams({ challenge, uuid, mode: 'login', redirectTarget: 'cli' })}` });
   }
@@ -104,7 +103,6 @@ export async function pollLogin(state: LoginState, fetcher: typeof fetch = fetch
   if (Date.parse(state.nextPollAt) > Date.now()) return pending(state);
   if (state.kind === 'project') return pollProject(state, fetcher);
   if (state.kind === 'cursor') {
-    requireCursorPolicy();
     const raw = await request('cursor', `https://api2.cursor.sh/auth/poll?${new URLSearchParams({ uuid: state.uuid, verifier: state.verifier })}`, {}, fetcher, [404]);
     if (raw === null) { const intervalMs = Math.min(10_000, state.intervalMs * 1.2); return pending({ ...state, intervalMs, nextPollAt: new Date(Date.now() + intervalMs).toISOString() }); }
     const token = parseProvider('cursor', cursorTokenSchema, raw);
@@ -112,7 +110,6 @@ export async function pollLogin(state: LoginState, fetcher: typeof fetch = fetch
     if (!token.refreshToken || typeof sub !== 'string' || !sub.trim()) throw new ProviderRefreshError('cursor', 'invalid-response', 'Cursor token omitted refresh token or account identity', 200);
     return completed(state, { provider: 'cursor', access: token.accessToken, refresh: token.refreshToken, expires: cursorExpiry(token.accessToken), accountId: sub.split('|').at(-1) });
   }
-  oauthClient('openai-codex');
   const raw = await request('openai-codex', 'https://auth.openai.com/api/accounts/deviceauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_auth_id: state.deviceAuthId, user_code: state.userCode }) }, fetcher, [403, 404]);
   if (raw === null) return pending({ ...state, nextPollAt: new Date(Date.now() + state.intervalMs).toISOString() });
   const token = parseProvider('openai-codex', z.object({ authorization_code: z.string().min(1), code_verifier: z.string().min(1) }), raw);

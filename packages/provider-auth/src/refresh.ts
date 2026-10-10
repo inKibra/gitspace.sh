@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import type { StoredOAuthCredential, WorkerOAuthProvider } from './schemas';
 
-import { oauthClient, requireCursorPolicy } from './catalog';
+import { oauthClient } from './catalog';
 export class ProviderRefreshError extends Error {
   constructor(readonly provider: WorkerOAuthProvider, readonly kind: 'network' | 'rejected' | 'invalid-response', message: string, readonly status?: number) {
     super(message); this.name = 'ProviderRefreshError';
@@ -55,7 +55,6 @@ export function cursorExpiry(token: string): number {
 export async function refreshCredential(credential: StoredOAuthCredential, fetcher: typeof fetch = fetch): Promise<StoredOAuthCredential> {
   const provider = credential.provider;
   if (provider === 'cursor') {
-    requireCursorPolicy();
     const data = parseProvider(provider, cursorTokenSchema, await request(provider, 'https://api2.cursor.sh/auth/exchange_user_api_key', { method: 'POST', headers: { Authorization: `Bearer ${credential.refresh}`, 'Content-Type': 'application/json' }, body: '{}' }, fetcher));
     return { ...credential, access: data.accessToken, refresh: data.refreshToken || credential.refresh, expires: cursorExpiry(data.accessToken) };
   }

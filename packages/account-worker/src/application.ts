@@ -1418,7 +1418,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       const active = owned.filter(account => !account.disabled);
       const descriptor = descriptors.find(item => item.id === provider);
       const oauth = descriptor?.supportsOAuth ?? false;
-      return { id: provider, credentialProvider: descriptor?.credentialProvider ?? provider, name: descriptor?.name ?? provider, available: true, loginable: oauth || descriptor?.supportsApiKey === true,
+      return { id: provider, credentialProvider: descriptor?.credentialProvider ?? provider, name: descriptor?.name ?? provider, available: descriptor !== undefined, loginable: oauth || descriptor?.supportsApiKey === true,
         supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
         hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'cursor', 'google-antigravity'].includes(provider),
@@ -1611,6 +1611,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
   async cloudLoginStart(input: { profileId: string; providerId: string }): Promise<{ flowId: string }> {
     await this.ensureInference();
     this.assertProfileAccess(input.profileId);
+    const descriptor = describeCloudProviders(this.requireInferenceProfile(input.profileId).settings).find(provider => provider.id === input.providerId);
+    if (!descriptor?.supportsOAuth) throw new Error('This provider is unavailable for OAuth sign-in');
     if (isUpstreamOAuthProvider(input.providerId)) return this.startUpstreamLogin(input.profileId, input.providerId);
     const provider = gitspaceOAuthProviderSchema.parse(input.providerId);
     const transition = await beginLogin({ provider });

@@ -8,5 +8,5 @@
     "test": "bun ../../scripts/test-isolated.ts src",
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json"
   },
-  "dependencies": { "@oh-my-pi/pi-catalog": "18.2.11", "zod": "^4.4.3" }
+  "dependencies": { "zod": "^4.4.3" }
 }

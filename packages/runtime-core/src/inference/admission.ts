@@ -64,8 +64,14 @@ function patchModel(model: Model<Api>, patch: ModelPatch): Model<Api> {
   };
 }
 
+// Legacy Codex uses ChatGPT web egress that rejects cloud requests. Keep its
+// implementation and saved credentials for now, but do not admit it for use.
+// Pi's separate `openai` provider remains enabled for Sign in with ChatGPT.
+const disabledProviders: Readonly<Record<string, true>> = { 'openai-codex': true };
+
 /** Profile settings are the only custom endpoint/model authority, never local files or environment. */
 export function admitProfileProviders(settings: InferenceProfile['settings'], providers: readonly Provider[]): readonly Provider[] {
+  providers = providers.filter(provider => disabledProviders[provider.id] !== true);
   const effective = applyInferenceSettings({}, inferenceSettingsSchema.parse(settings));
   validateRouting(effective);
   const allowed = z.object({ enabledModels: z.array(z.string()).optional() }).parse(effective).enabledModels ?? [];
@@ -82,6 +88,7 @@ export function admitProfileProviders(settings: InferenceProfile['settings'], pr
     });
   }
   for (const [id, config] of Object.entries(configured)) {
+    if (disabledProviders[id] === true) continue;
     const original = result.get(id);
     const materialize = (): Model<Api>[] => {
       const models = new Map((original?.getModels() ?? []).map(model => [model.id, patchModel(model, config)]));

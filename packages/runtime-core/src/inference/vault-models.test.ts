@@ -15,6 +15,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { createVaultModels, type VaultModelsOptions } from './index';
 import type { CredentialAccount, CredentialPin, CredentialPins, VaultAccess } from './selection';
+import { describeCloudProviders, listCloudModels } from './admission';
 
 const providerId = 'vault-test-provider';
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -159,6 +160,14 @@ const classifierContext = {
 };
 
 describe('vault-bound provider dispatch', () => {
+  it('disables legacy Codex even with profile overrides while retaining supported OpenAI', () => {
+    const settings = { 'providers.models': { 'openai-codex': { name: 'Re-enabled legacy Codex' } } };
+    const providers = describeCloudProviders(settings);
+    expect(providers.find(provider => provider.id === 'openai-codex')).toBeUndefined();
+    expect(providers.find(provider => provider.id === 'openai')).toMatchObject({ supportsOAuth: true, supportsApiKey: true });
+    expect(listCloudModels(settings, ['openai-codex'])).toEqual([]);
+  });
+
   it('isolates concurrent conversation accounts when every usage observation is unavailable', async () => {
     const first = new AbortController();
     const second = new AbortController();
