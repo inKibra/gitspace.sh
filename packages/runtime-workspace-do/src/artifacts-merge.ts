@@ -67,6 +67,22 @@ export function hasSnapshotConflictMarkers(text: string): boolean {
   return /^(?:<<<<<<< cloud|\|\|\|\|\|\|\| base|>>>>>>> machine)\r?$/mu.test(text);
 }
 
+/** Replaces every conflict region written by `mergeSnapshotText` with one side. Text outside regions is kept. */
+export function resolveSnapshotConflictText(text: string, keep: 'cloud' | 'machine'): string {
+  let section: 'outside' | 'cloud' | 'base' | 'machine' = 'outside';
+  let resolved = '';
+  for (const line of text.split(/(?<=\n)/u)) {
+    const marker = line.replace(/\r?\n$/u, '');
+    if (section === 'outside' && marker === '<<<<<<< cloud') { section = 'cloud'; continue; }
+    if (section === 'cloud' && marker === '||||||| base') { section = 'base'; continue; }
+    if (section === 'base' && marker === '=======') { section = 'machine'; continue; }
+    if (section === 'machine' && marker === '>>>>>>> machine') { section = 'outside'; continue; }
+    if (section === 'outside' || section === keep) resolved += line;
+  }
+  if (section !== 'outside') throw new Error('Conflict markers are incomplete; edit the file directly');
+  return resolved;
+}
+
 const snapshotTextLimit = 8 * 1024 * 1024;
 export function isSnapshotTextEntry(entry: Pick<Entry, 'type' | 'mode'>): boolean {
   return entry.type === 'blob' && (entry.mode === '100644' || entry.mode === '100755');

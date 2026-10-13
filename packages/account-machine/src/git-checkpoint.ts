@@ -104,11 +104,13 @@ export async function createGitIntermediateCheckpoint(input: {
   spaceId: string;
   revision: number;
   captureId?: string;
+  /** Overrides the space checkpoint ref, e.g. for a backup. */
+  checkpointRef?: string;
   portableUntrackedPaths?: string[];
   lfs?: MachineGitLfsPublication;
 }): Promise<GitIntermediateCheckpoint> {
   const { branch, headCommit } = await readGitCheckpointHead(input.repositoryPath);
-  const checkpointRef = spaceGitCheckpointRef(input.captureId ?? input.spaceId, input.revision);
+  const checkpointRef = input.checkpointRef ?? spaceGitCheckpointRef(input.captureId ?? input.spaceId, input.revision);
   const temporary = await mkdtemp(join(tmpdir(), 'gitspace-checkpoint-'));
   const temporaryIndex = join(temporary, 'index');
   const indexEnvironment = { GIT_INDEX_FILE: temporaryIndex };
@@ -212,6 +214,56 @@ export async function restoreGitIntermediateCheckpoint(input: {
   await checkoutGitLfs(input.repositoryPath, input.checkpoint.worktreeCommit);
   await gitLfsRestoreReceipt(input.repositoryPath, await restoredGitLfsPaths(input.repositoryPath, input.checkpoint.worktreeCommit, input.checkpoint.lfs));
   await saveGitCacheBase(input.repositoryPath, await completeGitCheckpoint(input.repositoryPath, input.checkpoint));
+}
+
+export interface GitTreeChange { status: string; path: string }
+/** Paths that differ between two trees as Git name-status entries, at most `limit` of them. */
+export async function gitTreeChanges(repositoryPath: string, from: string, to: string, limit: number): Promise<{ changes: GitTreeChange[]; truncated: boolean }> {
+  const fields = (await runGit(repositoryPath, ['diff-tree', '-r', '-z', '--no-renames', '--name-status', from, to], { raw: true })).stdout.split('\0').filter(Boolean);
+  const changes: GitTreeChange[] = [];
+  for (let index = 0; index + 1 < fields.length && changes.length < limit; index += 2) changes.push({ status: fields[index]!, path: fields[index + 1]! });
+  return { changes, truncated: fields.length / 2 > limit };
+}
+
+/** A unified diff of one path between two trees. */
+export async function gitTreePatch(repositoryPath: string, from: string, to: string, path: string): Promise<string> {
+  return (await runGit(repositoryPath, ['diff-tree', '-p', '--no-renames', from, to, '--', path], { raw: true })).stdout;
+}
+
+export async function deleteGitRef(repositoryPath: string, ref: string): Promise<void> {
+  await runGit(repositoryPath, ['update-ref', '-d', ref]);
+}
+
+/** The working copy exactly as a snapshot would send it, without publishing anything. */
+export async function readGitWorktreeSnapshot(repositoryPath: string, spaceId: string): Promise<GitIntermediateCheckpoint> {
+  const scratch = await createGitIntermediateCheckpoint({ repositoryPath, spaceId, captureId: `status-${crypto.randomUUID()}`, revision: Date.now() });
+  await runGit(repositoryPath, ['update-ref', '-d', scratch.checkpointRef]);
+  return scratch;
+}
+
+/** Resets the working copy, index, HEAD and branch to `base`. Files `current` added are removed too;
+ * ignored files are never touched. */
+export async function resetGitWorktree(input: { repositoryPath: string; current: GitIntermediateCheckpoint; base: GitIntermediateCheckpoint; lfs?: MachineGitLfs }): Promise<void> {
+  // Track everything the snapshot holds, so the reset below removes what the base lacks.
+  await runGit(input.repositoryPath, ['read-tree', input.current.worktreeCommit]);
+  await restoreGitIntermediateCheckpoint({ repositoryPath: input.repositoryPath, checkpoint: input.base, branch: input.base.branch, lfs: input.lfs });
+}
+
+/** Re-applies the changes `backup` made since `base` onto the current files, as unsent changes. HEAD, the branch
+ * and the index stay where they are. Overlapping edits are left as Git conflict markers and returned. */
+export async function mergeGitBackupIntoWorktree(input: { repositoryPath: string; current: GitIntermediateCheckpoint; base: string; backup: string }): Promise<{ changes: GitTreeChange[]; conflicts: string[] }> {
+  // Exit 1 means the merge has conflicts; the tree is still written, with markers.
+  const fields = (await runGit(input.repositoryPath, ['merge-tree', '--write-tree', '-z', '--name-only', `--merge-base=${input.base}`, input.current.worktreeCommit, input.backup], { raw: true, allowMissingRef: true })).stdout.split('\0');
+  const tree = fields[0]!;
+  const end = fields.indexOf('', 1);
+  const conflicts = [...new Set(fields.slice(1, end === -1 ? fields.length : end))];
+  const { changes } = await gitTreeChanges(input.repositoryPath, input.current.worktreeTree, tree, 10_000);
+  // Track everything the snapshot holds, so files the backup deleted are removed too.
+  await runGit(input.repositoryPath, ['read-tree', input.current.worktreeCommit]);
+  await runGit(input.repositoryPath, ['read-tree', '--reset', '-u', tree], { env: { GIT_LFS_SKIP_SMUDGE: '1' } });
+  await runGit(input.repositoryPath, ['read-tree', input.current.indexTree]);
+  await checkoutGitLfs(input.repositoryPath, tree);
+  return { changes, conflicts };
 }
 
 /** Apply only the portable delta. Git checks preimages before writing, so concurrent

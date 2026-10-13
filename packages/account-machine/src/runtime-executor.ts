@@ -4,16 +4,16 @@ import { join, relative, resolve, isAbsolute, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, cleanupMachineAttachment, type ExecutorArtifactAccess, type MachineBrowserOptions } from '@gitspace/runtime-machine';
-import { RuntimeJsonSchema, RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeAttachmentRequestResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, RuntimeCacheObservationSchema, browserUnbase64, verifyRuntimeBrowserAuthorization, type RuntimeAttachment, type RuntimeAttachmentFailure, type RuntimeAttachmentProgress, type RuntimeCacheObservation, type RuntimeCachePolicy } from '@gitspace/protocol-runtime';
+import { RuntimeJsonSchema, RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeAttachmentRequestResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, RuntimeCacheObservationSchema, browserUnbase64, verifyRuntimeBrowserAuthorization, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema, type RuntimeToolDispatch, type RuntimeAttachment, type RuntimeAttachmentFailure, type RuntimeAttachmentProgress, type RuntimeCacheObservation, type RuntimeCachePolicy } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import type { GitSpaceDatabase, LocalArtifactResolver } from '@gitspace/core';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
-import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, completeGitCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase, readGitCheckpointInputStamp, gitCheckpointRejectionError, gitCheckpointRejectionNeedsRevalidation } from './git-checkpoint.js';
+import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, completeGitCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase, readGitCheckpointInputStamp, gitCheckpointRejectionError, gitCheckpointRejectionNeedsRevalidation } from './git-checkpoint.js';
 import type { GitIntermediateCheckpoint, GitCheckpointRejection } from './git-checkpoint.js';
 import { ArtifactsRepositoryIncompatibleError, artifactsPublicationRejection, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { spaceGitCheckpointRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
-import type { LocalAttachment, ExecutorOperationHandler } from '@gitspace/runtime-machine';
+import type { LocalAttachment, ExecutorOperationHandler, ExecutorContent } from '@gitspace/runtime-machine';
 import { createArtifactsCredentialHelper } from './artifacts-credential-helper.js';
 import { daemonClientForProject } from '@gitspace/supervisor';
 import { checkoutGitLfs, gitLfsRestoreReceipt, hydrateGitLfs, type MachineGitLfsAccess } from './git-lfs.js';
@@ -292,6 +292,84 @@ export async function createMachineExecutor(options: {
     },
   });
   void browser.recover().catch(error => console.error('[runtime-browser-recovery]', error instanceof Error ? error.message : String(error)));
+  /** The machine half of `sync`. Reads report an in-flight capture as `pending`; writes wait for it, so none races the snapshot stream. */
+  const syncMachine = async (dispatch: RuntimeToolDispatch, local: LocalAttachment): Promise<ExecutorContent> => {
+    if (local.attachment.role !== 'cache') throw new Error('Sync requires a workspace cache');
+    const args = RuntimeSyncMachineArgumentsSchema.parse(dispatch.args);
+    const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
+    const reply = (value: unknown): ExecutorContent => [{ type: 'text', text: JSON.stringify(value) }];
+    const binding = { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` };
+    if (args.op === 'capture') {
+      const accepted = await capture(local);
+      return reply(RuntimeSyncMachineCaptureSchema.parse({ version: accepted?.worktreeCommit ?? null, conflicts: accepted?.conflicts ?? [] }));
+    }
+    const committed = () => {
+      const row = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
+      return { base: row?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)) : null, pending: Boolean(row?.pending) };
+    };
+    const emptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+    if (args.op === 'status' || args.op === 'diff') {
+      const { base, pending } = committed();
+      const current = await readGitWorktreeSnapshot(local.rootPath, local.attachment.workspaceId);
+      const { changes, truncated } = await gitTreeChanges(local.rootPath, base?.worktreeTree ?? emptyTree, current.worktreeTree, 500);
+      if (args.op === 'diff') {
+        const patch = args.path ? await gitTreePatch(local.rootPath, base?.worktreeTree ?? emptyTree, current.worktreeTree, args.path) : null;
+        return reply(RuntimeSyncMachineDiffSchema.parse({ base: base?.worktreeCommit ?? null, unsent: changes, unsentTruncated: truncated, patch }));
+      }
+      return reply(RuntimeSyncMachineStatusSchema.parse({ base: base?.worktreeCommit ?? null, pending, unsent: changes, unsentTruncated: truncated, lastSyncAt: cacheFor(local).lastSyncAt, problem: local.attachment.failure?.message ?? null }));
+    }
+    await captures.get(key)?.settle();
+    const { base } = committed();
+    if (args.op === 'restore') {
+      await stopFollowing(local);
+      try {
+        await options.gitRemote.fetchCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef: args.checkpointRef, commit: args.commit });
+        await options.gitRemote.fetchCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef: args.baseRef, commit: args.base });
+        const current = await readGitWorktreeSnapshot(local.rootPath, local.attachment.workspaceId);
+        const merged = await mergeGitBackupIntoWorktree({ repositoryPath: local.rootPath, current, base: args.base, backup: args.commit });
+        const accepted = await capture(local);
+        return reply(RuntimeSyncMachineRestoreSchema.parse({ restored: merged.changes, mergeConflicts: merged.conflicts, version: accepted?.worktreeCommit ?? null, conflicts: accepted?.conflicts ?? [] }));
+      } finally { resumeFollowing(local); }
+    }
+    // Discard: back the changes up to the cloud store, then reset the checkout to its base.
+    if (!base) throw new Error('Nothing has synced on this machine yet, so there is no base to reset to');
+    await stopFollowing(local);
+    const checkpointRef = `refs/gitspace/backups/${options.machineId}/${Date.now()}`;
+    const publication = await lfs?.publish(local.attachment.projectId, checkpointRef);
+    // A published backup keeps its LFS pin; the cloud releases it when the backup is pruned.
+    let published = false;
+    try {
+      const snapshot = await createGitIntermediateCheckpoint({ repositoryPath: local.rootPath, spaceId: local.attachment.workspaceId, revision: Date.now(), checkpointRef, lfs: publication });
+      const { changes } = await gitTreeChanges(local.rootPath, base.worktreeTree, snapshot.worktreeTree, 10_000);
+      if (!changes.length && snapshot.headCommit === base.headCommit) {
+        await deleteGitRef(local.rootPath, checkpointRef);
+        return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: [], backup: null, machineId: options.machineId }));
+      }
+      // No upload, no discard.
+      await options.gitRemote.publishCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef, headCommit: snapshot.headCommit });
+      published = true;
+      const backup = { checkpointRef, commit: snapshot.worktreeCommit, base: base.worktreeCommit };
+      try {
+        await resetGitWorktree({ repositoryPath: local.rootPath, current: snapshot, base, lfs: await lfs?.read(local.attachment.projectId) });
+      } catch (error) {
+        // The backup exists in the cloud either way; report it so it is recorded.
+        return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: [], backup, machineId: options.machineId, error: error instanceof Error ? error.message : String(error) }));
+      }
+      snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
+      saveRejectedSnapshot(key, null);
+      // The capture stream's in-memory snapshot may still hold the discarded changes.
+      captures.delete(key);
+      return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: changes, backup, machineId: options.machineId }));
+    } finally {
+      if (!published) await publication?.releasePublication?.();
+      resumeFollowing(local);
+    }
+  };
+  /** updateActivity re-establishes the watcher and cloud subscription that sync operations stop. */
+  const resumeFollowing = (local: LocalAttachment) => {
+    const current = journal.attachment(local.attachment.attachmentId) ?? local;
+    void updateActivity(current).catch((error: unknown) => console.error('[runtime-sync]', local.attachment.attachmentId, error instanceof Error ? error.message : String(error)));
+  };
   const executor = new MachineExecutor({
     machineId: options.machineId, journal, runCommand: runSupervisorCommand,
     onMutationSettled: async local => {
@@ -299,6 +377,8 @@ export async function createMachineExecutor(options: {
       return capture(local);
     },
     onBeforeExecute: async (local, dispatch) => {
+      // Sync operations manage the checkout and its snapshots themselves.
+      if (dispatch.tool === 'sync_machine') return;
       local = touch(local);
       // A sync hiccup never blocks the command; it runs on the files the machine has.
       await reconcile(local, dispatch.snapshot).catch((error: unknown) => { console.error('[runtime-cache-sync]', local.attachment.attachmentId, error instanceof Error ? error.message : String(error)); });
@@ -312,7 +392,7 @@ export async function createMachineExecutor(options: {
         return;
       }
     },
-    operations: { ...options.operations, browser: (dispatch, local, signal) => browser.execute(dispatch, local, signal), browser_control: (dispatch, local, signal) => browser.execute(dispatch, local, signal) },
+    operations: { ...options.operations, sync_machine: (dispatch, local) => syncMachine(dispatch, local), browser: (dispatch, local, signal) => browser.execute(dispatch, local, signal), browser_control: (dispatch, local, signal) => browser.execute(dispatch, local, signal) },
     artifacts: local => {
       const capability = { kind: 'workspace' as const, projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId };
       const adapter: ExecutorArtifactAccess = {
@@ -331,7 +411,7 @@ export async function createMachineExecutor(options: {
       return adapter;
     },
   });
-  const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'checkpoint', ...Object.keys(options.operations ?? {})];
+  const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'checkpoint', 'sync_machine', ...Object.keys(options.operations ?? {})];
   const browserCapabilities = async (): Promise<string[]> => {
     if (options.browser?.enabled !== true) return [];
     return ['browser', 'browser_control', 'browser.headless'];

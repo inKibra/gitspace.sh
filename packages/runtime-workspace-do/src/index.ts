@@ -4,3 +4,4 @@ export * from './attachments.js';
 export * from './artifacts.js';
 export * from './cloud-files.js';
 export { readRuntimeSnapshot } from './replica-store.js';
+export { snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText } from './artifacts-merge.js';

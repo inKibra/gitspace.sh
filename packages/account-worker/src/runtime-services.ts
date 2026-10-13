@@ -4,9 +4,9 @@ import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentStat
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { profileApprovalMode } from '@gitspace/protocol/inference';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, CloudPublicationUncertain, ExecutorNotConnected, isAttachmentOnline, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, ExecutorNotConnected, isAttachmentOnline, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
-import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
+import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
 import { createCloudRuntimeMcp } from './runtime-mcp.js';
@@ -339,6 +339,111 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     }
     throw new Error('Environment approval, recovery, secret access and protected I/O require human control');
   }
+  ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_sync_backups (ref TEXT PRIMARY KEY, commit_id TEXT NOT NULL, base_id TEXT NOT NULL, source TEXT NOT NULL, reason TEXT NOT NULL, paths TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS runtime_sync_backups_created ON runtime_sync_backups(created_at)');
+  /** Records a backup and writes `<ref>-base`, so a machine can fetch the base to restore against. Keeps the newest 20
+   * backups or the last 30 days, whichever keeps more; a pruned machine backup releases its LFS pin. Refs stay in the store. */
+  async function recordBackup(code: ArtifactsCodeStore, repository: string, backup: { checkpointRef: string; commit: string; base: string }, source: string, reason: string, paths: readonly { status: string; path: string }[]) {
+    await code.copyCommit(repository, repository, `${backup.checkpointRef}-base`, backup.base, null);
+    const now = Date.now();
+    ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_sync_backups(ref,commit_id,base_id,source,reason,paths,created_at) VALUES(?,?,?,?,?,?,?)', backup.checkpointRef, backup.commit, backup.base, source, reason, JSON.stringify(paths), now);
+    const pruned = ctx.storage.sql.exec<{ ref: string; source: string }>('SELECT ref,source FROM runtime_sync_backups WHERE created_at < ? AND ref NOT IN (SELECT ref FROM runtime_sync_backups ORDER BY created_at DESC LIMIT 20)', now - 30 * 86_400_000).toArray();
+    for (const row of pruned) {
+      if (row.source !== 'cloud') await authority.lfsReleasePublication(row.ref);
+      ctx.storage.sql.exec('DELETE FROM runtime_sync_backups WHERE ref=?', row.ref);
+    }
+  }
+  async function onMachine<S extends z.ZodType>(input: Invocation, args: z.input<typeof RuntimeSyncMachineArgumentsSchema>, schema: S): Promise<z.output<S>> {
+    const defined = RuntimeJsonSchema.parse(Object.fromEntries(Object.entries(args).filter(([, value]) => value !== undefined)));
+    // The machine attempt needs its own id: history resolves a tool call's attemptId to that attempt's result, and
+    // the `sync` result is not the machine's.
+    const result = await executeMachine({ ...input, attemptId: `${input.attemptId}:sync`, tool: 'sync_machine', args: defined, replay: runtimeOperationIsReadOnly('sync_machine', defined) ? 'safe' : 'unsafe' });
+    const text = result.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('');
+    if (result.status !== 'completed') throw new Error(result.status === 'failed' ? result.error.message : text || 'The machine did not finish the sync operation');
+    return schema.parse(JSON.parse(text));
+  }
+  /** Paths that differ between a machine's base commit and the cloud working copy: cloud changes not yet on the machine. */
+  async function cloudChangesSince(code: ArtifactsCodeStore, repository: string, base: string, tree: string) {
+    const reader = code.reader(repository);
+    try {
+      const commit = await reader.readCommit(base);
+      if (!commit) return { changes: [], truncated: false };
+      const [before, after] = await Promise.all([snapshotEntries(reader, commit.treeHash), snapshotEntries(reader, tree)]);
+      const changes: { status: string; path: string }[] = [];
+      let total = 0;
+      for (const path of [...new Set([...before.keys(), ...after.keys()])].sort()) {
+        const a = before.get(path), b = after.get(path);
+        if (a?.oid === b?.oid && a?.mode === b?.mode) continue;
+        total++;
+        if (changes.length < 500) changes.push({ status: !a ? 'A' : !b ? 'D' : 'M', path });
+      }
+      return { changes, truncated: total > changes.length };
+    } finally { await reader.close(); }
+  }
+  /** Settles one conflict with a cloud write. The conflicted version holds both sides, so it is kept under a backup ref first. */
+  async function resolveConflict(input: Invocation, path: string, keep: 'cloud' | 'machine', code: ArtifactsCodeStore, repository: string) {
+    const runtime = options.runtime();
+    const cloud = await runtime.cloudFiles.initializeSnapshot();
+    if (!cloud) throw new Error('Cloud working copy is unavailable');
+    if (!(cloud.conflicts ?? []).includes(path)) throw new Error(`${path} is not in conflict. Current conflicts: ${(cloud.conflicts ?? []).join(', ') || 'none'}`);
+    const reader = code.reader(repository);
+    const entries = await snapshotEntries(reader, cloud.worktreeTree).finally(() => reader.close());
+    const sibling = [...entries.keys()].find(other => other.startsWith(`${path}.gitspace-machine-`)) ?? null;
+    const textOf = async (target: string) => { const blob = await code.readFile(repository, cloud.worktreeCommit, target); return blob ? readSnapshotText(blob) : null; };
+    const current = entries.has(path) ? await textOf(path) : null;
+    const machineCopy = sibling ? await textOf(sibling) : null;
+    const markers = current !== null && hasSnapshotConflictMarkers(current);
+    if (!markers && (!sibling || machineCopy === null || (entries.has(path) && current === null))) {
+      throw new Error(sibling
+        ? `${path} is a binary conflict. On the machine, move ${sibling} over ${path} to keep the machine's version, or delete ${sibling} to keep the cloud's; the conflict clears on the next sync.`
+        : `${path} has no conflict markers or machine copy left; edit it directly to clear the conflict.`);
+    }
+    const checkpointRef = `refs/gitspace/backups/cloud/${Date.now()}`;
+    await code.copyCommit(repository, repository, checkpointRef, cloud.worktreeCommit, null);
+    const message = `Resolve conflict in ${path}: keep ${keep}`;
+    const mutate = async (step: number, tool: 'write' | 'apply_patch', args: z.infer<typeof RuntimeJsonSchema>) => {
+      const result = await runtime.cloudFiles.execute({ ...input, requestId: `${input.requestId}:resolve:${step}`, attemptId: `${input.attemptId}:resolve:${step}`, tool, args }, input.signal);
+      if (result.status !== 'completed') throw new Error(result.status === 'failed' ? result.error.message : `Resolving ${path} was interrupted; check sync status before retrying`);
+    };
+    if (markers) await mutate(1, 'write', { path, content: resolveSnapshotConflictText(current, keep), message });
+    else {
+      if (keep === 'machine' && machineCopy !== null) await mutate(1, 'write', { path, content: machineCopy, message });
+      else if (current !== null) await mutate(1, 'write', { path, content: current, message });
+      await mutate(2, 'apply_patch', { patch: `*** Begin Patch\n*** Delete File: ${sibling}\n*** End Patch`, message });
+    }
+    // Restoring this backup re-applies the conflicted version on top of the resolution.
+    const resolved = await runtime.cloudFiles.snapshot();
+    await recordBackup(code, repository, { checkpointRef, commit: cloud.worktreeCommit, base: resolved?.worktreeCommit ?? cloud.worktreeCommit }, 'cloud', `resolve ${path}: keep ${keep}`, [{ status: 'C', path }]);
+    return { resolved: path, keep, backup: checkpointRef, conflicts: resolved?.conflicts ?? [] };
+  }
+  async function sync(input: Invocation) {
+    const args = RuntimeSyncArgumentsSchema.parse(input.args);
+    const code = new ArtifactsCodeStore(env.ARTIFACTS);
+    const repository = artifactsWorkspaceRepository(identity.workspaceId);
+    if (args.method === 'backups') {
+      const rows = ctx.storage.sql.exec<{ ref: string; commit_id: string; source: string; reason: string; paths: string; created_at: number }>('SELECT ref,commit_id,source,reason,paths,created_at FROM runtime_sync_backups ORDER BY created_at DESC').toArray();
+      return completed(input, rows.map(row => ({ ref: row.ref, commit: row.commit_id, source: row.source, reason: row.reason, paths: JSON.parse(row.paths), createdAt: new Date(row.created_at).toISOString() })));
+    }
+    if (args.method === 'resolve') return completed(input, await resolveConflict(input, args.path, args.keep, code, repository));
+    if (args.method === 'now') return completed(input, await onMachine(input, { op: 'capture', on: args.on }, RuntimeSyncMachineCaptureSchema));
+    if (args.method === 'restore') {
+      const row = ctx.storage.sql.exec<{ commit_id: string; base_id: string }>('SELECT commit_id,base_id FROM runtime_sync_backups WHERE ref=?', args.ref).toArray()[0];
+      if (!row) throw new Error(`Unknown backup ${args.ref}; list backups with {"method":"backups"}`);
+      return completed(input, await onMachine(input, { op: 'restore', on: args.on, checkpointRef: args.ref, commit: row.commit_id, baseRef: `${args.ref}-base`, base: row.base_id }, RuntimeSyncMachineRestoreSchema));
+    }
+    if (args.method === 'discard') {
+      const result = await onMachine(input, { op: 'discard', on: args.on }, RuntimeSyncMachineDiscardSchema);
+      if (result.backup) await recordBackup(code, repository, result.backup, result.machineId, args.reason ?? 'discarded unsent machine changes', result.discarded);
+      if (result.error) throw new Error(`Backed up to ${result.backup?.checkpointRef ?? 'nowhere'}, but resetting the machine failed: ${result.error}`);
+      return completed(input, { discarded: result.discarded, backup: result.backup?.checkpointRef ?? null });
+    }
+    // status and diff: the machine's unsent changes, plus cloud changes the machine has not applied yet.
+    const machine = args.method === 'diff'
+      ? await onMachine(input, { op: 'diff', on: args.on, path: args.path }, RuntimeSyncMachineDiffSchema)
+      : await onMachine(input, { op: 'status', on: args.on }, RuntimeSyncMachineStatusSchema);
+    const cloud = await options.runtime().cloudFiles.snapshot();
+    const behind = cloud && machine.base && machine.base !== cloud.worktreeCommit ? await cloudChangesSince(code, repository, machine.base, cloud.worktreeTree) : { changes: [], truncated: false };
+    return completed(input, { ...machine, cloudVersion: cloud?.worktreeCommit ?? null, conflicts: cloud?.conflicts ?? [], notOnMachine: behind.changes, notOnMachineTruncated: behind.truncated });
+  }
   async function invoke(input: Invocation): Promise<RuntimeToolResult> {
     try {
       const conversation = await options.runtime().browserConversation(input.conversationId);
@@ -403,6 +508,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind') return options.runtime().invokeConversationTool(input);
       if (input.tool === 'environment') return environment(input);
+      if (input.tool === 'sync') return sync(input);
       if (input.tool === 'generate_image') return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: await options.generateImage(input) };
       if (input.tool === 'report_issue') return completed(input, await appendRuntimeQa(env, identity, input.attemptId, RuntimeReportIssueArgumentsSchema.parse(input.args)));
       if (runtimeSpaceToolNames.includes(input.tool)) return completed(input, await invokeRuntimeSpaceTool(env, identity, input));
@@ -553,6 +659,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         } else if (input.tool === 'environment') {
           const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);
           if (args.method === 'runChecks' || args.method === 'runPhase') await selections.cache(args);
+        } else if (input.tool === 'sync') {
+          const args = RuntimeSyncArgumentsSchema.parse(input.args);
+          if (args.method !== 'backups' && args.method !== 'resolve') await selections.cache(args);
         } else if (input.tool === 'mcp_invoke' || input.tool === 'mcp_discover') {
           const args = object.parse(input.args);
           if (typeof args.connectionId === 'string' && await mcp.isStdio(args)) await selections.cache(args);

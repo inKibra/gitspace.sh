@@ -60,12 +60,43 @@ export const RuntimeAgentsArgumentsSchema = z.union([
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
   if (['read', 'grep', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
-  if (['machines', 'agents', 'bash', 'proc'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait'].includes(String(args.op));
+  if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
+  if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
   if (name === 'service') return args.op === 'list' || args.op === 'logs';
   if (name.startsWith('space_') || name === 'environment') return ['get', 'current', 'list', 'operations', 'describe', 'read', 'readCode', 'listScopes', 'listPromotions', 'runLog', 'log'].includes(String(args.method));
   return false;
 }
 export const RuntimeMachinesArgumentsSchema = z.union([z.object({ op: z.literal('list').default('list') }), z.object({ op: z.literal('detach'), attachmentId: path, generation: z.number().int().nonnegative() }), z.object({ op: z.literal('setDefault'), machineId: path.nullable() })]);
+/** Agent-facing sync control. `on` selects the machine; omitted, the single ready machine is used. */
+export const RuntimeSyncArgumentsSchema = z.discriminatedUnion('method', [
+  RuntimeDispatchSelectionSchema.pick({ on: true }).extend({ method: z.literal('status') }),
+  RuntimeDispatchSelectionSchema.pick({ on: true }).extend({ method: z.literal('now') }),
+  RuntimeDispatchSelectionSchema.pick({ on: true }).extend({ method: z.literal('diff'), path: path.optional() }),
+  RuntimeDispatchSelectionSchema.pick({ on: true }).extend({ method: z.literal('discard'), reason: z.string().trim().min(1).max(500).optional() }),
+  z.object({ method: z.literal('backups') }),
+  RuntimeDispatchSelectionSchema.pick({ on: true }).extend({ method: z.literal('restore'), ref: path }),
+  z.object({ method: z.literal('resolve'), path, keep: z.enum(['cloud', 'machine']) }),
+]);
+const commitId = z.string().regex(/^[0-9a-f]{40}$/u);
+/** The machine half of `sync`: what only the machine holding the checkout can do. */
+export const RuntimeSyncMachineArgumentsSchema = z.discriminatedUnion('op', [
+  RuntimeDispatchSelectionSchema.extend({ op: z.literal('status') }),
+  RuntimeDispatchSelectionSchema.extend({ op: z.literal('capture') }),
+  RuntimeDispatchSelectionSchema.extend({ op: z.literal('diff'), path: path.optional() }),
+  RuntimeDispatchSelectionSchema.extend({ op: z.literal('discard') }),
+  RuntimeDispatchSelectionSchema.extend({ op: z.literal('restore'), checkpointRef: path, commit: commitId, baseRef: path, base: commitId }),
+]);
+export const RuntimeSyncChangeSchema = z.object({ status: z.string().min(1), path });
+export const RuntimeSyncMachineStatusSchema = z.object({
+  base: commitId.nullable(), pending: z.boolean(), unsent: z.array(RuntimeSyncChangeSchema), unsentTruncated: z.boolean(),
+  lastSyncAt: z.iso.datetime().nullable(), problem: z.string().nullable(),
+});
+export const RuntimeSyncMachineDiffSchema = z.object({ base: commitId.nullable(), unsent: z.array(RuntimeSyncChangeSchema), unsentTruncated: z.boolean(), patch: z.string().nullable() });
+/** A backup holds `commit`; restoring re-applies its changes since `base` onto the current files. */
+export const RuntimeSyncBackupSchema = z.object({ checkpointRef: path, commit: commitId, base: commitId });
+export const RuntimeSyncMachineDiscardSchema = z.object({ discarded: z.array(RuntimeSyncChangeSchema), backup: RuntimeSyncBackupSchema.nullable(), machineId: path, error: z.string().optional() });
+export const RuntimeSyncMachineCaptureSchema = z.object({ version: commitId.nullable(), conflicts: z.array(path) });
+export const RuntimeSyncMachineRestoreSchema = RuntimeSyncMachineCaptureSchema.extend({ restored: z.array(RuntimeSyncChangeSchema), mergeConflicts: z.array(path) });
 export const RuntimeHistoryReadArgumentsSchema = z.union([
   z.object({ mode: z.literal('page').default('page'), workspaceId: path.optional(), conversationId: path, offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(200).default(50) }),
   z.object({ mode: z.literal('content'), workspaceId: path.optional(), conversationId: path, ordinal: z.number().int().nonnegative(), contentOffset: z.number().int().nonnegative().default(0), contentLimit: z.number().int().min(1).max(65_536).default(16_384) }),

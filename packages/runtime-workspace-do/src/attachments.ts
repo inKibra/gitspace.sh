@@ -217,18 +217,21 @@ export class AttachmentStore {
     if (bytesToHex(sha256(utf8ToBytes(canonicalJson(result)))) !== row.result_digest || result.attemptId !== id) throw new Error('Materialized result integrity check failed');
     return result;
   }
+  /** The executor result a history entry references, or undefined to keep the entry's own content. They differ when a
+   * call was interrupted and its attempt settled afterwards; the entry holds what the agent saw. */
   historyResult(reference: { attemptId: string; sha256: string }, conversationId: string): RuntimeToolResult | undefined {
     const attempt = this.getAttempt(reference.attemptId);
     if (!attempt?.result || attempt.dispatch.conversationId !== conversationId) return;
-    if (bytesToHex(sha256(utf8ToBytes(canonicalJson(attempt.result)))) !== reference.sha256) throw new Error('History result reference integrity check failed');
+    if (bytesToHex(sha256(utf8ToBytes(canonicalJson(attempt.result)))) !== reference.sha256) return;
     return attempt.result;
   }
+  /** Materializes the executor result a history entry references. A reference whose digest is not this attempt's result
+   * (an interrupted call that settled later) names a result history never held, so there is nothing to materialize. */
   materializedReference(reference: { attemptId: string; sha256: string }, conversationId: string): void {
-    const saved = this.storage.sql.exec<{ result_digest: string }>('SELECT result_digest FROM runtime_materialized_attempts WHERE id=?', reference.attemptId).toArray()[0];
-    if (saved) { if (saved.result_digest !== reference.sha256) throw new Error('History reference changed'); return; }
+    if (this.storage.sql.exec('SELECT 1 FROM runtime_materialized_attempts WHERE id=?', reference.attemptId).toArray().length) return;
     const attempt = this.getAttempt(reference.attemptId);
     if (!attempt?.result || attempt.dispatch.conversationId !== conversationId) return;
-    if (bytesToHex(sha256(utf8ToBytes(canonicalJson(attempt.result)))) !== reference.sha256) throw new Error('History reference does not match executor result');
+    if (bytesToHex(sha256(utf8ToBytes(canonicalJson(attempt.result)))) !== reference.sha256) return;
     this.materialized(attempt.result);
   }
   pendingMaterialization(): RuntimeToolDispatch[] {

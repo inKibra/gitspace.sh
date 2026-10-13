@@ -2,7 +2,7 @@ import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema,
 import type { RuntimeAttachment, RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
 import type { AttachmentStore, ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 
-export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser'];
+export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser', 'sync_machine'];
 
 /** Invoked behind canonical project/workspace and enrolled-machine authorization. */
 export class RuntimeAttachmentController {

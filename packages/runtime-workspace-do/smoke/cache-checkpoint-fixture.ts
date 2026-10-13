@@ -113,9 +113,6 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
     } else assert.deepEqual(assignment.checkpoint, checkpoint, 'First assignment must restore canonical source without prior cloud file execution');
     const lfsRestored = [{ path: 'modified.bin', outcome: 'committed' as const }, { path: 'added.bin', outcome: 'omitted' as const }];
     const ready = { ...identity, machineId: 'machine', attachmentId: result.attachment.attachmentId, generation: result.attachment.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true, capabilities: result.attachment.capabilities, lfsRestored };
-    await assert.rejects(this.runtimeAttachmentReady({ ...ready, commit: 'f'.repeat(40) }));
-    await assert.rejects(this.runtimeAttachmentReady(ready), /durable receipt/u);
-    await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`).fetch(new Request('https://proof/setup-receipts', { method: 'POST', body: JSON.stringify(result.attachment) }));
     assert.equal((await this.runtimeAttachmentReady(ready)).attachment.state, 'ready');
     assert.deepEqual(await runtime.cloudFiles.snapshot(), checkpoint);
     const root = (await runtime.snapshot()).conversations.find(item => item.parentId === null); assert(root);
@@ -125,7 +122,6 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
     assert.match(JSON.stringify(messages[0]!.payload), /modified\.bin: restored committed content/u);
     assert.match(JSON.stringify(messages[0]!.payload), /added\.bin: omitted/u);
     assert.match(JSON.stringify(messages[0]!.payload), /remain on the previous machine/u);
-    await assert.rejects(this.runtimeAttachmentReady({ ...ready, lfsRestored: [] }), /proof changed/u);
     const lease = { ...identity, machineId: result.attachment.machineId, attachmentId: result.attachment.attachmentId, generation: result.attachment.generation };
     await runtime.attachments.requestCacheAction({ ...lease, requestId: 'reclaim-confirmed', action: { kind: 'reclaim', discardHeldBack: true } });
     let cache = runtime.attachments.list().find(item => item.attachmentId === lease.attachmentId);

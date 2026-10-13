@@ -19,7 +19,7 @@ The runtime treats a user's machine as an untrusted cache and wraps every effect
 ## Rules
 
 1. **Sync is a diff against a recorded base.** A machine snapshot can only change or delete files that existed in its base; a file the cloud added after the base can never be deleted by it. The cloud three-way merges; same-file changes on both sides are conflicts.
-2. **Nothing machine-side is lost without a backup.** Discarding unsent changes, resolving a conflict with "keep cloud", and detaching with unsent changes first commit the machine state to `refs/gitspace/backups/<machine>/<timestamp>` and upload it to the cloud store. No upload, no discard. Agents may discard; no human approval.
+2. **Nothing is lost without a backup.** Discarding unsent machine changes first commits the machine state to `refs/gitspace/backups/<machine>/<timestamp>` and uploads it to the cloud store; resolving a conflict first keeps the conflicted cloud version at `refs/gitspace/backups/cloud/<timestamp>`. Each backup records its base (`<ref>-base`); restoring re-applies the backup's changes since that base onto the current files as a three-way merge, so later cloud changes are not reverted. No upload, no discard. Agents may discard; no human approval. A machine backup keeps its LFS pin until it is pruned (newest 20 or last 30 days).
 3. **No polling, no long-polls.** The cloud pushes work and sync notices over the relay socket; the UI uses hibernatable sockets. Alarms stop rescheduling when there is nothing to do.
 4. **A request touches at most two Durable Objects**: the worker and the object that owns the data. Signatures are verified in the worker; replay protection does not scan a shared table. Call graph is one-directional (workspace → project, never back).
 5. **No long exclusive locks.** Slow work is a durable step list processed by alarms.
@@ -61,7 +61,7 @@ From Cloudflare's pricing and lifecycle docs (2026-09-30): duration is billed wh
 ## Agent and user tools
 
 - `workspace_status` — the summary: machines (online/ready, setup per script with errors and log refs, sync: last sync, unsent local changes, unapplied cloud changes, problem, conflicts) and the cloud version.
-- `sync.now(machine)`, `sync.diff(machine)`, `sync.resolve(path, keep)`, `sync.discard(machine)` (backs up first), `sync.backups()`, `sync.restore(ref)`.
+- `sync` tool, one method each: `status` (unsent machine changes, cloud changes not yet on the machine, conflicts, last sync), `now`, `diff` (with a patch for one path), `discard` (backs up first), `backups`, `restore(ref)`, `resolve(path, keep)`. `status`/`diff`/`backups` are read-only and allowed in plan mode.
 - `environment.runPhase({ machine, phase, script? })`; an interactive script returns "needs a person at a terminal".
 - Conversation notices on machine offline/online, setup failure and sync conflicts.
 - Environment tab per the approved proposal (`?gallery=environment-proposal`) plus a sync line: Sync now, Show unsent changes, conflict choices.
