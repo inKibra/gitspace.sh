@@ -86,6 +86,15 @@ export async function createMachineExecutor(options: {
   };
   const retryRejected = new Set<string>();
   const captures = new Map<string, IncrementalGitSnapshots>();
+  const captureAborts = new Map<string, AbortController>();
+  /** Drops a capture stream without waiting, since a stuck upload never settles. What it has in flight can no longer
+   * save or commit, and its pending snapshot is forgotten; the files are still on disk for the next capture. */
+  const abandonCapture = (key: string) => {
+    captureAborts.get(key)?.abort(new Error('Capture abandoned by sync'));
+    captureAborts.delete(key);
+    captures.delete(key);
+    snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
+  };
   const clock = options.checkpointClock ?? gitWorktreeClock;
   const leaseClock = options.leaseClock ?? gitWorktreeClock;
   const lfs = options.lfs;
@@ -121,6 +130,8 @@ export async function createMachineExecutor(options: {
     let stream = captures.get(key);
     if (!stream) {
       snapshots.query('INSERT OR IGNORE INTO snapshots (attachment, revision) VALUES (?, ?)').run(key, Date.now());
+      const abort = new AbortController();
+      captureAborts.set(key, abort);
       stream = new IncrementalGitSnapshots({
         repositoryPath: local.rootPath,
         spaceId: local.attachment.workspaceId,
@@ -131,7 +142,7 @@ export async function createMachineExecutor(options: {
         // separate edits; no timestamp policy proves an arbitrary writer done.
         settleWindowMs: 1000,
         clock: options.checkpointClock,
-        signal: stopping.signal,
+        signal: AbortSignal.any([stopping.signal, abort.signal]),
         allocateRevision: async () => {
           const row = snapshots.query<{ revision: number }, [string]>('UPDATE snapshots SET revision=revision+1 WHERE attachment=? RETURNING revision').get(key);
           if (!row) throw new Error('Snapshot journal row missing');
@@ -318,10 +329,10 @@ export async function createMachineExecutor(options: {
       }
       return reply(RuntimeSyncMachineStatusSchema.parse({ base: base?.worktreeCommit ?? null, pending, unsent: changes, unsentTruncated: truncated, lastSyncAt: cacheFor(local).lastSyncAt, problem: local.attachment.failure?.message ?? null }));
     }
-    await captures.get(key)?.settle();
     const { base } = committed();
     if (args.op === 'restore') {
       await stopFollowing(local);
+      abandonCapture(key);
       try {
         await options.gitRemote.fetchCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef: args.checkpointRef, commit: args.commit });
         await options.gitRemote.fetchCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef: args.baseRef, commit: args.base });
@@ -334,6 +345,7 @@ export async function createMachineExecutor(options: {
     // Discard: back the changes up to the cloud store, then reset the checkout to its base.
     if (!base) throw new Error('Nothing has synced on this machine yet, so there is no base to reset to');
     await stopFollowing(local);
+    abandonCapture(key);
     const checkpointRef = `refs/gitspace/backups/${options.machineId}/${Date.now()}`;
     const publication = await lfs?.publish(local.attachment.projectId, checkpointRef);
     // A published backup keeps its LFS pin; the cloud releases it when the backup is pruned.
@@ -355,10 +367,9 @@ export async function createMachineExecutor(options: {
         // The backup exists in the cloud either way; report it so it is recorded.
         return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: [], backup, machineId: options.machineId, error: error instanceof Error ? error.message : String(error) }));
       }
-      snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
       saveRejectedSnapshot(key, null);
-      // The capture stream's in-memory snapshot may still hold the discarded changes.
-      captures.delete(key);
+      // A capture that started while the checkout was being reset may hold part of the discarded changes.
+      abandonCapture(key);
       return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: changes, backup, machineId: options.machineId }));
     } finally {
       if (!published) await publication?.releasePublication?.();

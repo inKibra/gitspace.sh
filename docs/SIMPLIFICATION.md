@@ -61,7 +61,7 @@ From Cloudflare's pricing and lifecycle docs (2026-09-30): duration is billed wh
 ## Agent and user tools
 
 - `workspace_status` — the summary: machines (online/ready, setup per script with errors and log refs, sync: last sync, unsent local changes, unapplied cloud changes, problem, conflicts) and the cloud version.
-- `sync` tool, one method each: `status` (unsent machine changes, cloud changes not yet on the machine, conflicts, last sync), `now`, `diff` (with a patch for one path), `discard` (backs up first), `backups`, `restore(ref)`, `resolve(path, keep)`. `status`/`diff`/`backups` are read-only and allowed in plan mode.
+- `sync` tool, one method each: `status` (unsent machine changes, cloud changes not yet on the machine, conflicts, last sync), `now`, `diff` (with a patch for one path), `discard` (backs up first), `backups`, `restore(ref)`, `resolve(path, keep)`.
 - `environment.runPhase({ machine, phase, script? })`; an interactive script returns "needs a person at a terminal".
 - Conversation notices on machine offline/online, setup failure and sync conflicts.
 - Environment tab per the approved proposal (`?gallery=environment-proposal`) plus a sync line: Sync now, Show unsent changes, conflict choices.

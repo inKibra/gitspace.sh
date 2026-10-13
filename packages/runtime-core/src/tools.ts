@@ -6,7 +6,7 @@ import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/conte
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
 import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserArgumentsSchema, receiptDigest, type RuntimeBrowserApprovalCard, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
-import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc } from './documents.js';
+import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
 import { cronToolScopes } from './cron.js';
 import { enforceSessionApproval, type ApprovalMode } from './session-controls.js';
 import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
@@ -61,7 +61,7 @@ const contracts = {
   sync: contract(Arguments.RuntimeSyncArgumentsSchema, 'Inspect and repair sync between the cloud working copy and a machine. status: unsent machine changes, cloud changes not yet on the machine, conflicts and the last sync. now: send the machine\'s changes immediately. diff: changed paths, with a patch when path is given. discard: back up the machine\'s unsent changes to the cloud, then reset the machine to the cloud version; no approval needed. backups: list backups. restore: put a backup\'s files back on the machine as unsent changes. resolve: settle one conflicted path by keeping the cloud or machine version; the conflicted version is backed up first. on selects the machine.'),
   environment: contract(Arguments.RuntimeEnvironmentArgumentsSchema, 'Inspect workspace lifecycle configuration, read a run log, run checks or a lifecycle phase, change profile or project/workspace values, or cancel a run. Reuse runId to reconcile admission. Human-only approvals, interactive runs and cloud destruction are unavailable.'),
   space_goal: contract(spaceSchemas.space_goal, 'Read or update the workspace goal and attach requirement evidence. Mutations require the current expectedRevision. describe returns an operation schema. Omit workspaceId for this workspace.'),
-  space_phase: contract(Arguments.RuntimeSpacePhaseArgumentsSchema, 'Set the current workspace phase to plan, code, review or ship. Plan mode is read-only; phase changes do not waive human workflow gates.'),
+  space_phase: contract(Arguments.RuntimeSpacePhaseArgumentsSchema, 'Set the current workspace phase to plan, code, review or ship. Phase changes do not waive human workflow gates.'),
   space_workspace: contract(spaceSchemas.space_workspace, 'Inspect current/project workspaces and operations, create a workspace from an explicit source, open/restore it, or update dependency relations. Read the current generation/revision before management. Agents cannot close or archive their own workspace.'),
   space_artifacts: contract(Arguments.RuntimeSpaceArtifactsArgumentsSchema, 'List workspace artifacts, scopes or promotions; read an artifact URL or a repository path at an immutable commit. Public sharing requires an explicit human action and is not exposed here.'),
   space_workflow: contract(spaceSchemas.space_workflow, 'Read or replace the typed workspace workflow at the current expectedRevision. describe returns the put schema. Agents cannot waive human gates.'),
@@ -148,8 +148,6 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
       if (child && !isSubagentToolCallAllowed(name, args)) throw new Error('Subagent tools are read-only');
       const run = async () => {
         context.abortSignal?.throwIfAborted();
-        const phase = await api.snapshot(WorkspaceDoc, context);
-        if (phase?.phase === 'plan' && !safe && !child) return { isError: true, content: [{ type: 'text' as const, text: 'Plan mode is read-only. Propose a plan and wait for human approval before effects.' }] };
         for (const scope of await cronToolScopes(api, context)) await services.authorizeCronTool({ tool: name, args, ...scope });
         const attemptId = await api.memo('gitspace.attempt', `tool:${api.taskId}`, context);
         const invocation = { tool: name, args, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: api.callId, attemptId, replay: safe ? 'safe' as const : 'unsafe' as const, signal: context.abortSignal };

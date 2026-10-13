@@ -349,7 +349,7 @@ test('bash logs exposes executor failures as tool errors rather than successful 
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 4000);
 
-test('codemode children own durable attempts and recheck plan permissions rather than inheriting parent approval', async () => {
+test('codemode children own durable attempts rather than inheriting parent approval', async () => {
   const invoked: Array<Parameters<ToolServices['invoke']>[0]> = [];
   const fixture = await registered([[call('codemode', { code: 'composed' })]], async input => {
     invoked.push(input);
@@ -358,8 +358,6 @@ test('codemode children own durable attempts and recheck plan permissions rather
     const signal = AbortSignal.timeout(2000);
     await input.codemodeTools({ tool: 'read', args: { path: 'before.txt' }, callId: 'nested-read', signal });
     await input.codemodeTools({ tool: 'write', args: { path: 'allowed.txt', content: 'allowed' }, callId: 'nested-write', signal });
-    await fixture.harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'plan'; }, BACKGROUND_CONTEXT);
-    await expect(input.codemodeTools({ tool: 'write', args: { path: 'denied.txt', content: 'denied' }, callId: 'nested-denied', signal })).resolves.toMatchObject({ status: 'failed', error: expect.stringContaining('Plan mode') });
     await expect(input.codemodeTools({ tool: 'codemode', args: { code: 'return 1' }, callId: 'nested-isolate', signal })).resolves.toMatchObject({ status: 'failed', error: expect.stringContaining('Nested codemode') });
     return completed(input);
   });
@@ -369,7 +367,6 @@ test('codemode children own durable attempts and recheck plan permissions rather
     expect(invoked.map(input => input.tool)).toEqual(['codemode', 'read', 'write']);
     expect(new Set(invoked.map(input => input.attemptId)).size).toBe(3);
     const rawResults = (await fixture.root.entries({}, 100, undefined, BACKGROUND_CONTEXT)).items.flatMap(entry => entry.model ?? []).filter(message => message.role === 'toolResult');
-    expect(rawResults.find(result => result.toolCallId === 'nested-denied')?.isError).toBe(true);
     const results = (await fixture.root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.some(result => result.toolCallId.startsWith('nested-'))).toBe(false);
     const parentResult = results.find(result => result.toolCallId === 'codemode');

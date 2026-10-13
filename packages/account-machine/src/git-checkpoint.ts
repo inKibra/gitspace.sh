@@ -446,6 +446,7 @@ export class IncrementalGitSnapshots {
       await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();
       throw gitCheckpointRejectionError(rejected);
     }
+    this.options.signal?.throwIfAborted();
     this.unpublished = { checkpoint, base };
     await this.options.savePending({ checkpoint, base });
     if (storedRejection) await this.options.saveRejected(null);
@@ -466,6 +467,8 @@ export class IncrementalGitSnapshots {
       }
       throw error;
     }
+    // An aborted stream (e.g. a sync discard reset the checkout meanwhile) must not commit what it published.
+    this.options.signal?.throwIfAborted();
     let accepted: GitIntermediateCheckpoint;
     try { accepted = await this.options.commit(checkpoint, base); }
     catch (error) { this.unpublished = undefined; throw error; }

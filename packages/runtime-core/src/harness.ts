@@ -63,7 +63,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
     const extra = await options.tools.instructions(String(input.conversationId), context);
-    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'Read-only planning. Do not perform effects without explicit plan approval. Conversational replies do not require a plan.' : '', extra].filter(Boolean).join('\n\n');
+    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'This workspace is in plan mode: in general, use it for planning rather than coding.' : '', extra].filter(Boolean).join('\n\n');
   } }], hooks: [hook(GenerationTask, { async beforeRequest(_input, runtime, context) {
     if ((await runtime.snapshot(ConversationLifecycleDoc, runtime.conversationId, context))?.stopped) throw new Error('Conversation is stopped; only an explicit user message may resume it');
     await bindCronGeneration(harness, runtime, context);
