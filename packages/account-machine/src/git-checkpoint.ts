@@ -281,10 +281,13 @@ export function gitCheckpointRejectionError(rejection: GitCheckpointRejection): 
   return error;
 }
 
+/** A captured snapshot and the committed worktree it was taken against. */
+export interface PendingGitSnapshot { checkpoint: GitIntermediateCheckpoint; base: string | null }
+
 /** Serializes capture/publication; only uncertain writes retain their immutable pending ref. */
 export class IncrementalGitSnapshots {
   private pending: Promise<GitIntermediateCheckpoint> | undefined;
-  private unpublished: GitIntermediateCheckpoint | undefined;
+  private unpublished: PendingGitSnapshot | undefined;
 
   constructor(private readonly options: {
     repositoryPath: string;
@@ -299,14 +302,15 @@ export class IncrementalGitSnapshots {
     signal?: AbortSignal;
     normalizeBranch?(branch: string, committed: GitIntermediateCheckpoint | null): string;
     allocateRevision(): Promise<number>;
-    loadPending(): Promise<GitIntermediateCheckpoint | null>;
+    loadPending(): Promise<PendingGitSnapshot | null>;
     loadCommitted(): Promise<GitIntermediateCheckpoint | null>;
-    savePending(checkpoint: GitIntermediateCheckpoint): Promise<void>;
+    savePending(pending: PendingGitSnapshot): Promise<void>;
     loadRejected(): Promise<GitCheckpointRejection | null>;
     /** A rejection atomically clears pending, never committed. */
     saveRejected(rejection: GitCheckpointRejection | null): Promise<void>;
     publish(checkpoint: GitIntermediateCheckpoint): Promise<void>;
-    commit(checkpoint: GitIntermediateCheckpoint): Promise<GitIntermediateCheckpoint>;
+    /** `base` is the committed worktree the snapshot was taken against, never the current one. */
+    commit(checkpoint: GitIntermediateCheckpoint, base: string | null): Promise<GitIntermediateCheckpoint>;
   }) {}
 
   capture(options: { retryRejected?: boolean } = {}): Promise<GitIntermediateCheckpoint> {
@@ -325,8 +329,19 @@ export class IncrementalGitSnapshots {
     const storedRejection = await this.options.loadRejected();
     const rejected = storedRejection && !gitCheckpointRejectionNeedsRevalidation(storedRejection) ? storedRejection : null;
     if (rejected && !retryRejected && rejected.stamp === await readGitCheckpointInputStamp(this.options.repositoryPath)) throw gitCheckpointRejectionError(rejected);
-    let checkpoint = this.unpublished ?? await this.options.loadPending();
     const committed = await this.options.loadCommitted();
+    const base = committed?.worktreeCommit ?? null;
+    let stored = this.unpublished ?? await this.options.loadPending();
+    // A snapshot taken against an older base would undo everything applied since. The checkout already
+    // holds those changes, so drop the stale snapshot and capture again.
+    if (stored && stored.base !== base) {
+      // The ref may already be gone; it is only this snapshot's own publication ref.
+      await runGit(this.options.repositoryPath, ['update-ref', '-d', stored.checkpoint.checkpointRef], { allowMissingRef: true }).catch(() => undefined);
+      await (await this.options.lfs?.(stored.checkpoint.checkpointRef))?.releasePublication?.();
+      this.unpublished = undefined;
+      stored = null;
+    }
+    let checkpoint = stored?.checkpoint ?? null;
     let capturedStamp: string | undefined;
     if (!checkpoint) {
       for (;;) {
@@ -379,8 +394,8 @@ export class IncrementalGitSnapshots {
       await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();
       throw gitCheckpointRejectionError(rejected);
     }
-    this.unpublished = checkpoint;
-    await this.options.savePending(checkpoint);
+    this.unpublished = { checkpoint, base };
+    await this.options.savePending({ checkpoint, base });
     if (storedRejection) await this.options.saveRejected(null);
     try { await this.options.publish(checkpoint); }
     catch (error) {
@@ -400,7 +415,7 @@ export class IncrementalGitSnapshots {
       throw error;
     }
     let accepted: GitIntermediateCheckpoint;
-    try { accepted = await this.options.commit(checkpoint); }
+    try { accepted = await this.options.commit(checkpoint, base); }
     catch (error) { this.unpublished = undefined; throw error; }
     this.unpublished = undefined;
     await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();

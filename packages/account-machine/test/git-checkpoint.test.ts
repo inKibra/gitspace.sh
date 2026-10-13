@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, readGitCacheBase, IncrementalGitSnapshots } from '../src/git-checkpoint.js';
-import type { GitIntermediateCheckpoint, GitCheckpointRejection } from '../src/git-checkpoint.js';
+import type { GitIntermediateCheckpoint, GitCheckpointRejection, PendingGitSnapshot } from '../src/git-checkpoint.js';
 import { ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError, ArtifactsUploadLimitError } from '../src/artifacts-git-remote.js';
 
 const roots: string[] = [];
@@ -359,7 +359,7 @@ describe('Git intermediate checkpoint', () => {
     const { source } = fixture();
     let revision = 0;
     let failure: 'commit' | 'publication' | null = 'commit';
-    const journal: { pending: GitIntermediateCheckpoint | null; rejected: GitCheckpointRejection | null } = { pending: null, rejected: null };
+    const journal: { pending: PendingGitSnapshot | null; rejected: GitCheckpointRejection | null } = { pending: null, rejected: null };
     const create = () => new IncrementalGitSnapshots({
       repositoryPath: source, spaceId: 'uncertain', allocateRevision: async () => ++revision,
       loadPending: async () => journal.pending, loadCommitted: async () => null,
@@ -379,9 +379,48 @@ describe('Git intermediate checkpoint', () => {
     expect(journal.pending).toEqual(uncertain);
     expect(journal.rejected).toBeNull();
     failure = null;
-    expect(await create().capture()).toEqual(uncertain);
+    expect(await create().capture()).toEqual(uncertain.checkpoint);
     expect(revision).toBe(1);
     expect(readFileSync(join(source, 'portable.txt'), 'utf8')).toBe('later edit\n');
+  });
+
+  it('never sends a pending snapshot against a base newer than the one it was taken from', async () => {
+    const { source } = fixture();
+    let revision = 0;
+    let committed: GitIntermediateCheckpoint = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'stale', revision: ++revision });
+    const journal: { pending: PendingGitSnapshot | null } = { pending: null };
+    const commits: { checkpoint: GitIntermediateCheckpoint; base: string | null }[] = [];
+    let admissionFails = true;
+    const create = () => new IncrementalGitSnapshots({
+      repositoryPath: source, spaceId: 'stale', allocateRevision: async () => ++revision,
+      loadPending: async () => journal.pending, loadCommitted: async () => committed,
+      loadRejected: async () => null, saveRejected: async () => {},
+      savePending: async pending => { journal.pending = pending; },
+      publish: async () => {},
+      commit: async (checkpoint, base) => {
+        if (admissionFails) throw new Error('admission outcome unknown');
+        commits.push({ checkpoint, base });
+        journal.pending = null;
+        committed = checkpoint;
+        return checkpoint;
+      },
+    });
+    writeFileSync(join(source, 'machine-edit.txt'), 'machine\n');
+    await expect(create().capture()).rejects.toThrow('admission outcome unknown');
+    const stale = journal.pending;
+    if (!stale) throw new Error('Expected the unadmitted snapshot to stay pending');
+    // Cloud files arrive in the checkout and become the committed base before the retry.
+    writeFileSync(join(source, 'cloud-added.txt'), 'cloud\n');
+    committed = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'stale', revision: ++revision });
+    const cloudBase = committed.worktreeCommit;
+    writeFileSync(join(source, 'machine-later.txt'), 'later\n');
+    admissionFails = false;
+    await create().capture();
+    expect(commits).toHaveLength(1);
+    expect(commits[0]!.base).toBe(cloudBase);
+    expect(commits[0]!.checkpoint.worktreeCommit).not.toBe(stale.checkpoint.worktreeCommit);
+    const paths = git(source, 'ls-tree', '-r', '--name-only', commits[0]!.checkpoint.worktreeCommit).split('\n');
+    for (const path of ['cloud-added.txt', 'machine-edit.txt', 'machine-later.txt']) expect(paths).toContain(path);
   });
 
   it('rejects ignored and escaping portable paths', async () => {

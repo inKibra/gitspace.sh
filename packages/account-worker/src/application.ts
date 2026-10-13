@@ -439,6 +439,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
           nonce TEXT PRIMARY KEY,
           used_at INTEGER NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS request_nonces_used_at ON request_nonces(used_at);
         CREATE TABLE IF NOT EXISTS refresh_leases (
           credential_id TEXT PRIMARY KEY,
           owner TEXT NOT NULL,

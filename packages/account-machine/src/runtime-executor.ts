@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, cleanupMachineAttachment, type ExecutorArtifactAccess, type MachineBrowserOptions } from '@gitspace/runtime-machine';
 import { RuntimeJsonSchema, RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeAttachmentRequestResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, RuntimeCacheObservationSchema, browserUnbase64, verifyRuntimeBrowserAuthorization, type RuntimeAttachment, type RuntimeAttachmentFailure, type RuntimeAttachmentProgress, type RuntimeCacheObservation, type RuntimeCachePolicy } from '@gitspace/protocol-runtime';
-import type { z } from 'zod';
+import { z } from 'zod';
 import type { GitSpaceDatabase, LocalArtifactResolver } from '@gitspace/core';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
@@ -22,6 +22,7 @@ import { cacheActivity } from './runtime-cache-activity.js';
 import { environmentFailure } from '@gitspace/protocol-environment';
 
 type RuntimeAssignment = z.infer<typeof RuntimeAssignmentSchema>;
+const PendingSnapshotSchema = z.object({ checkpoint: RuntimeGitCheckpointSchema, base: z.string().nullable() });
 /** Setup, materialization and drain renew their attachment lease at this cadence while they run, not only on phase transitions. */
 const LEASE_PROGRESS_INTERVAL_MS = 20_000;
 /** A failed assignment is retried at the sync cadence. */
@@ -138,23 +139,26 @@ export async function createMachineExecutor(options: {
         },
         loadPending: async () => {
           const row = snapshots.query<{ pending: string | null }, [string]>('SELECT pending FROM snapshots WHERE attachment=?').get(key);
-          return row?.pending ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.pending)) : null;
+          if (!row?.pending) return null;
+          const pending = PendingSnapshotSchema.safeParse(JSON.parse(row.pending));
+          if (pending.success) return pending.data;
+          // A pending row from before bases were recorded cannot be committed safely; the checkout is recaptured.
+          snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
+          return null;
         },
         loadCommitted: async () => {
           const row = snapshots.query<{ committed: string | null }, [string]>('SELECT committed FROM snapshots WHERE attachment=?').get(key);
           return row?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)) : null;
         },
-        savePending: async checkpoint => { snapshots.query('UPDATE snapshots SET pending=? WHERE attachment=?').run(JSON.stringify(checkpoint), key); },
+        savePending: async pending => { snapshots.query('UPDATE snapshots SET pending=? WHERE attachment=?').run(JSON.stringify(pending), key); },
         loadRejected: async () => rejectedSnapshot(key),
         saveRejected: async rejection => { saveRejectedSnapshot(key, rejection); },
         publish: checkpoint => options.gitRemote.publishCheckpoint({
           binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` },
           repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit,
         }),
-        commit: async checkpoint => {
-          const prior = snapshots.query<{ committed: string | null }, [string]>('SELECT committed FROM snapshots WHERE attachment=?').get(key);
-          const previous = prior?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(prior.committed)) : null;
-          const accepted = await options.commitSnapshot(local, checkpoint, previous?.worktreeCommit ?? null);
+        commit: async (checkpoint, base) => {
+          const accepted = await options.commitSnapshot(local, checkpoint, base);
           if (accepted.worktreeCommit !== checkpoint.worktreeCommit) {
             try { await install(local, checkpoint, accepted); }
             catch (error) {
@@ -504,7 +508,7 @@ export async function createMachineExecutor(options: {
         journal.installAttachment({ ...current, attachment: { ...current.attachment, state: attachment.detachRequest ? 'draining' : 'attaching', cache: { ...cacheFor(current), state: 'paused', reclaimBlocked: reason }, ...(action ? { cacheAction: { ...action, status: 'failed', error: reason } } : {}) } });
         return false;
       }
-      snapshots.query('INSERT INTO snapshots(attachment,revision,pending) VALUES(?,?,?) ON CONFLICT(attachment) DO UPDATE SET pending=excluded.pending').run(key, revision, JSON.stringify(checkpoint));
+      snapshots.query('INSERT INTO snapshots(attachment,revision,pending) VALUES(?,?,?) ON CONFLICT(attachment) DO UPDATE SET pending=excluded.pending').run(key, revision, JSON.stringify({ checkpoint, base: previous?.worktreeCommit ?? null }));
       journaled = true;
       try {
         await options.gitRemote.publishCheckpoint({ binding: { projectId: attachment.projectId, repository: `workspace-${attachment.workspaceId}` }, repositoryPath: owned.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit });
