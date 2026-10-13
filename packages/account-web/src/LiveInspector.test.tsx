@@ -69,7 +69,7 @@ const render = ({ possessedBy = '', generation = 0, refreshToken = 0 }: { posses
   const snapshotRead = queries.get('snapshot');
   const runtimeContext = {
     snapshot: RuntimeSnapshotSchema.parse(snapshotRead?.state === 'success' ? snapshotRead.value : { version: 1, projectId: 'project', workspaceId: 'workspace', cursor: refreshToken, conversations: [{ id: 'main', parentId: null, title: 'Main', status: 'idle', messages: [] }], tasks: [], attachments: [], questions: [], documents: {} }),
-    conversationId: 'main', sessionId: 'main', turns: [], scope: workspace, workspaces: [], onClose: () => {}, onAskAgent: async () => {},
+    conversationId: 'main', sessionId: 'main', turns: [], scope: workspace, workspaces: [], onClose: () => {}, onOpenTerminal: () => {}, onAskAgent: async () => {},
   };
   root.render(<LiveInspector projectId="project" spaceId="workspace" generation={generation} reviewerId="device" sessionId="main" scope={workspace} workspaces={[]} onSelectWorkspace={() => {}} refreshToken={refreshToken} onClose={() => {}} runtimeAvailable runtimeContext={runtimeContext} />);
 };

@@ -128,10 +128,17 @@ async function runOperation<T>(authority: ProjectAuthority, input: { projectId: 
 /** The commit a new workspace starts from, read from the cloud repositories only. */
 async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore, project: CloudProjectSummary, sourceWorkspace: CloudWorkspaceDefinition | null, input: Pick<CloudWorkspaceRequest, 'sourceKind' | 'sourceRef'>): Promise<ResolvedSource> {
   if (sourceWorkspace) {
+    const sourceRepository = artifactsWorkspaceRepository(sourceWorkspace.id);
     // The source workspace's committed HEAD as its runtime last checkpointed it; its own repository holds that commit.
-    const checkpoint = await env.SPACE_AUTHORITY.getByName(`${userId}:${sourceWorkspace.id}`).runtimeRepositoryCheckpoint({ projectId: project.id, workspaceId: sourceWorkspace.id });
-    if (!checkpoint.headCommit) throw new Error(`Source workspace ${sourceWorkspace.name} has no commit to start from yet`);
-    return { sourceRef: sourceWorkspace.id, sourceCommit: checkpoint.headCommit, repository: artifactsWorkspaceRepository(sourceWorkspace.id) };
+    // A legacy workspace whose migration is staged but not activated has no runtime yet; its uploaded repository
+    // already holds the verified closed branch, which a new workspace may start from without touching the migration.
+    const headCommit = await env.SPACE_AUTHORITY.getByName(`${userId}:${sourceWorkspace.id}`).runtimeRepositoryCheckpoint({ projectId: project.id, workspaceId: sourceWorkspace.id })
+      .then(checkpoint => checkpoint.headCommit, async (error: unknown) => {
+        if (!(error instanceof Error) || !error.message.startsWith('Legacy migration is staged but not activated')) throw error;
+        return code.resolveRef(sourceRepository, `refs/heads/${sourceWorkspace.branch}`);
+      });
+    if (!headCommit) throw new Error(`Source workspace ${sourceWorkspace.name} has no commit to start from yet`);
+    return { sourceRef: sourceWorkspace.id, sourceCommit: headCommit, repository: sourceRepository };
   }
   const repository = artifactsProjectRepository(project.id);
   await ensureProjectCodeRepository(code, project);

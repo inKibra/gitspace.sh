@@ -144,16 +144,11 @@ export class MachineExecutor {
     this.options.journal.begin(dispatch);
     const controller = new AbortController();
     this.controllers.set(dispatch.attemptId, controller);
-    const bypassQueue = jobControl !== null;
+    // Browser tools never touch the checkout, so they never wait behind (or block) its commands.
+    const bypassQueue = jobControl !== null || dispatch.tool === 'browser' || dispatch.tool === 'browser_control';
     const prior = bypassQueue ? Promise.resolve() : this.checkoutQueues.get(local.rootPath) ?? Promise.resolve();
     const pending = prior.catch(() => {}).then(async (): Promise<RuntimeToolResult> => {
       if (this.options.journal.attempt(dispatch.attemptId)?.state === 'fenced') throw new ExecutorEffectUncertain('Durable launch barrier prevented execution');
-      // A rejected predecessor releases the promise queue, not its durable execution claim.
-      // Starting successors cannot own effects yet and must not block one another.
-      if (!bypassQueue && this.options.journal.hasRunningCheckout(local.rootPath)) {
-        this.options.journal.fence(dispatch);
-        throw new ExecutorEffectUncertain('Unresolved checkout execution prevents another launch');
-      }
       const duration = Date.parse(dispatch.deadlineAt) - Date.now();
       if (duration <= 0 || controller.signal.aborted) {
         const result: RuntimeToolResult = { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: 'failed', content: [], error: { code: 'deadline', message: 'Execution deadline expired while queued' } };

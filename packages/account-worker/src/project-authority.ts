@@ -18,7 +18,7 @@ import type {
   ProjectOperationState,
 } from '@gitspace/protocol';
 import { ProjectEnvironmentStore } from './project-environment.js';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { LifecycleMutationSchema, environmentFailure, type LifecycleActor, type EnvironmentFailure, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
@@ -31,7 +31,6 @@ import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import { GitLfsSnapshotSchema, WorkspaceDomainError, WorkspaceRelationsSchema, resolveWorkspaceRelations, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspaceRelations, type WorkspaceRelationsInput } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
-import { canonicalLfsObjects } from './git-lfs-reachability.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
 import { z } from 'zod';
@@ -749,6 +748,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
           record_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS artifact_shares_path ON artifact_shares(workspace_id,path);
+        CREATE INDEX IF NOT EXISTS project_events_entity ON project_events(entity,offset);
+        CREATE INDEX IF NOT EXISTS operations_workspace_kind ON operations(workspace_id,kind,created_at);
         CREATE TABLE IF NOT EXISTS artifact_promotions(
           operation_id TEXT PRIMARY KEY,
           source_workspace_id TEXT NOT NULL,
@@ -831,7 +832,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS deleted_workspaces(workspace_id TEXT PRIMARY KEY)');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_relations(workspace_id TEXT PRIMARY KEY,relations_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS lfs_origin_confirmations(origin TEXT NOT NULL,endpoint TEXT NOT NULL,oid TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(origin,endpoint,oid))');
-      this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
+      if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length && await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
       this.directoryOutbox.kick();
     });
   }
@@ -855,8 +856,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (project.lifecycle === 'deleting') throw new Error('LFS project is unavailable');
     this.lfs.snapshot(input);
     await this.ctx.storage.sync();
-    this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
   }
+
 
   async lfsOriginConfirmed(input: { origin: string; endpoint: string; objects: GitLfsObject[] }): Promise<void> {
     const project = this.requireProject();
@@ -865,7 +866,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error('Invalid LFS origin endpoint');
     for (const object of input.objects) this.ctx.storage.sql.exec('INSERT INTO lfs_origin_confirmations VALUES(?,?,?,?) ON CONFLICT(origin,endpoint,oid) DO UPDATE SET size=excluded.size', input.origin, endpoint.href, object.oid, object.size);
     await this.ctx.storage.sync();
-    this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
   }
 
   lfsResolveSources(objects: GitLfsSnapshot['objects']) {
@@ -879,93 +879,9 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
 
   async lfsReleasePublication(publicationId: string): Promise<void> {
     this.lfs.release(`publication:${publicationId}`);
-    try { await this.lfsCollect(); }
-    catch { await this.ctx.storage.setAlarm(Date.now() + 1_000); }
+    await this.ctx.storage.sync();
   }
 
-
-  async lfsCollect(): Promise<void> {
-    const result = await this.ctx.blockConcurrencyWhile(() => Result.tryPromise(async () => {
-      const project = this.getProject();
-      if (!project || this.lfs.objects().length === 0) return;
-      const inventories = this.lfs.snapshots();
-      const workspaceIds = new Set([...this.listWorkspaces().map(workspace => workspace.id), ...inventories.map(snapshot => snapshot.workspaceId)]);
-      const roots = new Set<string>();
-      const spaces = [];
-      const cloudConfirmed: GitLfsConfirmedObject[] = [];
-      const recheck = LfsRecheckSchema.parse(await this.ctx.storage.get('lfs-origin-recheck') ?? { after: 0, cursor: '' });
-      const candidates = new Map<string, { object: GitLfsObject; repository: string; commit: string }>();
-      for (const workspaceId of workspaceIds) {
-        const authority = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`);
-        const state = await authority.lfsRoots();
-        spaces.push(authority);
-        const workspace = this.listWorkspaces().find(item => item.id === workspaceId);
-        const live = project.lifecycle !== 'archived' && project.lifecycle !== 'deleting' && workspace !== undefined && workspace.lifecycle !== 'archived' && workspace.lifecycle !== 'deleting';
-        for (const id of state.pending) roots.add(id);
-        if (live || state.active || state.pendingRuntime) {
-          for (const checkpoint of state.checkpoints) roots.add(`runtime:${workspaceId}:${checkpoint.worktreeCommit}`);
-          if (state.portableRevision) roots.add(`portable:${workspaceId}:${state.portableRevision}`);
-        }
-        if (project.repositoryReference && Date.now() >= recheck.after) for (const checkpoint of state.checkpoints) {
-          for (const object of checkpoint.lfs?.objects ?? []) {
-            if (object.source === 'r2' && !candidates.has(object.oid)) candidates.set(object.oid, { object, repository: artifactsWorkspaceRepository(workspaceId), commit: checkpoint.worktreeCommit });
-          }
-        }
-      }
-      this.lfs.reconcile(roots);
-      if (project.repositoryReference) {
-        const ordered = [...candidates.keys()].sort();
-        const next = ordered.findIndex(oid => oid > recheck.cursor);
-        const rotated = next < 0 ? ordered : [...ordered.slice(next), ...ordered.slice(0, next)];
-        const batch: GitLfsObject[] = [];
-        const first = rotated[0] ? candidates.get(rotated[0]) : undefined;
-        if (first) {
-          for (const oid of rotated) {
-            const candidate = candidates.get(oid);
-            if (!candidate || candidate.repository !== first.repository || candidate.commit !== first.commit || batch.length === 64) break;
-            batch.push(candidate.object);
-          }
-          await this.ctx.storage.put('lfs-origin-recheck', { after: Date.now() + 60_000, cursor: batch.at(-1)?.oid ?? recheck.cursor });
-          cloudConfirmed.push(...await confirmCloudOrigin({ code: new ArtifactsCodeStore(this.env.ARTIFACTS), repository: first.repository, commit: first.commit, origin: project.repositoryReference, objects: batch }));
-        }
-        const alarm = await this.ctx.storage.getAlarm();
-        if (alarm === null || alarm > Date.now() + 60_000) await this.ctx.storage.setAlarm(Date.now() + 60_000);
-        this.ctx.storage.sql.exec('DELETE FROM lfs_origin_confirmations WHERE origin<>?', project.repositoryReference);
-        const confirmations = this.ctx.storage.sql.exec<{ oid: string; size: number; origin: string; endpoint: string }>('SELECT oid,size,origin,endpoint FROM lfs_origin_confirmations WHERE origin=?', project.repositoryReference).toArray();
-        const confirmed: GitLfsConfirmedObject[] = [];
-        for (const object of this.lfs.objects()) {
-          const receipt = confirmations.find(row => row.oid === object.oid && row.size === object.size);
-          const cloud = cloudConfirmed.find(row => row.oid === object.oid && row.size === object.size);
-          if (receipt) confirmed.push({ ...object, location: { origin: receipt.origin, endpoint: receipt.endpoint } });
-          else if (cloud) confirmed.push(cloud);
-        }
-        // All mutable restore records change before the project's authoritative
-        // override, and before a single encrypted R2 byte can be removed.
-        for (const space of spaces) await space.reconcileLfsSources(confirmed);
-        this.lfs.origin(confirmed);
-        await this.ctx.storage.sync();
-        for (const object of this.lfs.candidates()) {
-          if (!confirmed.some(item => item.oid === object.oid && item.size === object.size)) continue;
-          if (!this.lfs.beginDelete(object)) continue;
-          await deleteGitLfsObject(this.env.DATA, this.env.ACCOUNT_ID, project.id, object);
-          this.lfs.forget(object);
-          this.ctx.storage.sql.exec('DELETE FROM lfs_origin_confirmations WHERE oid=?', object.oid);
-        }
-      } else {
-        const candidates = this.lfs.candidates();
-        if (candidates.length === 0) return;
-        const reachable = await canonicalLfsObjects(this.env.ARTIFACTS, [artifactsProjectRepository(project.id), ...[...workspaceIds].map(artifactsWorkspaceRepository)]);
-        const protectedOids = new Set(reachable.map(object => object.oid));
-        for (const object of candidates) {
-          if (protectedOids.has(object.oid) || !this.lfs.beginDelete(object)) continue;
-          await deleteGitLfsObject(this.env.DATA, this.env.ACCOUNT_ID, project.id, object);
-          this.lfs.forget(object);
-        }
-      }
-    }));
-    // A failed scan must fail closed, not break the Durable Object input gate.
-    if (result.isErr()) throw result.error;
-  }
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'project' }> | null {
     const project = this.getProject();
@@ -974,8 +890,13 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     await this.directoryOutbox.flush();
-    try { await this.lfsCollect(); }
-    catch { await this.ctx.storage.setAlarm(Date.now() + 1_000); }
+    // Legacy machines mirrored every local fact (streamed transcript updates, agent activity, generations) into this
+    // log; the cloud runtime reads none of it. Delete it in bounded batches so no single invocation scans or locks it all.
+    if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length) {
+      const deleted = this.ctx.storage.sql.exec(`DELETE FROM project_events WHERE offset IN (SELECT offset FROM project_events WHERE entity NOT IN (${CURRENT_EVENT_ENTITIES.map(() => '?').join(',')}) LIMIT 20000)`, ...CURRENT_EVENT_ENTITIES).rowsWritten;
+      if (deleted === 0) this.ctx.storage.sql.exec('CREATE TABLE legacy_events_purged(done INTEGER)');
+      else await this.ctx.storage.setAlarm(Date.now() + 1_000);
+    }
   }
 
   watch(after: number | null): DurableStreamSubscription {
@@ -987,20 +908,29 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.changes.watch(`environment:${spaceId}`, after, () => this.getLifecycleState(spaceId));
   }
   private committing = false;
+  /** Workspace rows of the last committed directory publication. Only `project`/`workspace` commits write those rows,
+   * so every other commit republishes (bumping the directory revision) without re-reading the whole table. */
+  private publishedWorkspaces: CloudWorkspaceDefinition[] | undefined;
   private commit<T>(entity: string, entityId: string | null, mutate: () => T): T {
     if (this.committing) return mutate();
-    const result = this.ctx.storage.transactionSync(() => {
-      this.committing = true;
-      try {
-        const value = mutate();
-        this.changes.append(`project:${this.requireProject().id}`, { entity, entityId, eventOffset: this.latestEventOffset() });
-        this.directoryOutbox.enqueue({ source: 'project', project: this.requireProject(), workspaces: this.listWorkspaces() });
-        return value;
-      } finally { this.committing = false; }
-    });
+    let result: T;
+    try {
+      result = this.ctx.storage.transactionSync(() => {
+        this.committing = true;
+        try {
+          const value = mutate();
+          this.changes.append(`project:${this.requireProject().id}`, { entity, entityId, eventOffset: this.latestEventOffset() });
+          if (entity === 'project' || entity === 'workspace' || !this.publishedWorkspaces) this.publishedWorkspaces = this.listWorkspaces();
+          this.directoryOutbox.enqueue({ source: 'project', project: this.requireProject(), workspaces: this.publishedWorkspaces });
+          return value;
+        } finally { this.committing = false; }
+      });
+    } catch (error) {
+      this.publishedWorkspaces = undefined;
+      throw error;
+    }
     this.directoryOutbox.kick();
     this.changes.wake();
-    this.ctx.waitUntil(this.lfsCollect().catch(() => this.ctx.storage.setAlarm(Date.now() + 1_000)));
     return result;
   }
 
@@ -1088,6 +1018,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   setBaseBranch(expectedRevision: number, baseBranch: string, sourceCommit: string): CloudProjectSummary {
     return this.commit('project', null, () => {
       const current = this.requireProject();
+      const migration = this.legacyMigrationArtifacts(current.id);
+      if (migration && !migration.activated) throw new Error('Base branch is fenced for legacy migration');
       if (current.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
       if (current.lifecycle !== 'active') throw new Error(`Project must be active to change its base branch; it is ${current.lifecycle}`);
       if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
@@ -1131,7 +1063,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
 
   async refreshBrowserOrigins(spaceId: string): Promise<LifecycleState> {
     const project = this.requireLifecycleWorkspace(spaceId);
-    const workspace = this.listWorkspaces().find(item => item.id === spaceId);
+    const workspace = this.getWorkspace(spaceId);
     if (!workspace) throw new Error('Committed environment workspace is unavailable');
     const identity = { projectId: project.id, workspaceId: spaceId };
     const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
@@ -1207,6 +1139,12 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).toArray().map(workspaceDefinition);
   }
 
+  /** One workspace definition by primary key; use instead of `listWorkspaces().find(...)`. */
+  getWorkspace(workspaceId: string): CloudWorkspaceDefinition | null {
+    const row = this.ctx.storage.sql.exec<WorkspaceRow>('SELECT * FROM workspaces WHERE workspace_id=?', workspaceId).toArray()[0];
+    return row ? workspaceDefinition(row) : null;
+  }
+
   /** The canonical relation graph of this project's workspaces, keyed by workspace id. */
   listWorkspaceRelations(): Record<string, WorkspaceRelations> {
     return Object.fromEntries(this.ctx.storage.sql.exec<{ workspace_id: string; relations_json: string }>('SELECT workspace_id,relations_json FROM workspace_relations').toArray()
@@ -1259,6 +1197,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }): CloudWorkspaceDefinition {
     return this.commit('workspace', input.id, () => {
     const project = this.requireProject();
+    const migration = this.legacyMigrationArtifacts(input.id);
+    if (migration && !migration.activated) throw new Error('Workspace metadata is fenced for legacy migration');
     if (this.ctx.storage.sql.exec('SELECT workspace_id FROM deleted_workspaces WHERE workspace_id=?', input.id).toArray().length > 0) {
       throw new Error('Deleted workspace identity cannot be republished');
     }
@@ -1317,8 +1257,25 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
   }
 
+  private async assertLegacyWorkspaceWriter(workspaceId: string): Promise<void> {
+    await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).assertLegacyWriter();
+    if (this.legacyMigrationArtifacts(workspaceId)) throw new Error('Legacy workspace writer is retired for migration');
+  }
+
+  async putMachineWorkspace(input: Parameters<ProjectAuthorityDO['putWorkspace']>[0]): Promise<CloudWorkspaceDefinition> {
+    await this.assertLegacyWorkspaceWriter(input.id);
+    return this.putWorkspace(input);
+  }
+
+  async removeMachineWorkspace(workspaceId: string, expectedRevision: number): Promise<boolean> {
+    await this.assertLegacyWorkspaceWriter(workspaceId);
+    return this.removeWorkspace(workspaceId, expectedRevision);
+  }
+
   removeWorkspace(workspaceId: string, expectedRevision: number): boolean {
     return this.commit('workspace', workspaceId, () => {
+    const migration = this.legacyMigrationArtifacts(workspaceId);
+    if (migration && !migration.activated) throw new Error('Workspace metadata is fenced for legacy migration');
     const current = this.ctx.storage.sql.exec<WorkspaceRow>(
       'SELECT * FROM workspaces WHERE workspace_id=?',
       workspaceId,
@@ -1414,6 +1371,12 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).one());
   }
 
+  /** Newest operation of one kind for one workspace, served by `operations_workspace_kind`. */
+  latestWorkspaceOperation(workspaceId: string, kind: string): CloudProjectOperation | null {
+    const row = this.ctx.storage.sql.exec<OperationRow>('SELECT * FROM operations WHERE workspace_id=? AND kind=? ORDER BY created_at DESC LIMIT 1', workspaceId, kind).toArray()[0];
+    return row ? projectOperation(row) : null;
+  }
+
   listOperations(): CloudProjectOperation[] {
     return this.ctx.storage.sql.exec<OperationRow>(
       'SELECT * FROM operations ORDER BY created_at DESC',
@@ -1465,10 +1428,14 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).toArray().map(canonicalSession);
   }
 
-  putCanonicalSession(input: Omit<CanonicalSession, 'revision' | 'createdAt' | 'updatedAt'> & {
+  async putCanonicalSession(input: Omit<CanonicalSession, 'revision' | 'createdAt' | 'updatedAt'> & {
     expectedRevision: number;
-  }): CanonicalSession {
+  }): Promise<CanonicalSession> {
+    await this.assertLegacyWorkspaceWriter(input.workspaceId);
+    const current = this.getCanonicalSession(input.id);
+    if (current && current.workspaceId !== input.workspaceId) await this.assertLegacyWorkspaceWriter(current.workspaceId);
     return this.commit('session', input.id, () => {
+    if (this.legacyMigrationArtifacts(input.workspaceId)) throw new Error('Legacy session writer is retired for migration');
     const current = this.getCanonicalSession(input.id);
     if ((current?.revision ?? 0) !== input.expectedRevision) {
       throw new Error(`Canonical session revision conflict: expected ${input.expectedRevision}, actual ${current?.revision ?? 0}`);
@@ -1521,10 +1488,59 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).toArray().map(artifactScope);
   }
 
+  /** Account-internal source pin and narrow branch alignment. No machine operation can create or release it. */
+  pinLegacyMigrationArtifacts(input: { operationId: string; branch: string; expectedProjectRevision: number; expectedWorkspaceRevision: number; scope: Omit<CanonicalArtifactScope, 'updatedAt'> }): void {
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS legacy_migration_artifacts(workspace_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL, scope_json TEXT NOT NULL, activated INTEGER NOT NULL DEFAULT 0)');
+    this.commit('workspace', input.scope.workspaceId, () => {
+      const project = this.requireProject();
+      const workspace = this.listWorkspaces().find(item => item.id === input.scope.workspaceId);
+      if (!workspace || !isSupportedBranchName(input.branch)) throw new Error('Legacy migration workspace or branch is unavailable');
+      const prior = this.ctx.storage.sql.exec<{ operation_id: string; scope_json: string }>('SELECT operation_id,scope_json FROM legacy_migration_artifacts WHERE workspace_id=?', input.scope.workspaceId).toArray()[0];
+      const scope = JSON.stringify(input.scope);
+      if (prior) {
+        if (prior.operation_id !== input.operationId || prior.scope_json !== scope) throw new Error('Legacy artifact migration identity conflict');
+        return;
+      }
+      if (project.revision !== input.expectedProjectRevision || workspace.revision !== input.expectedWorkspaceRevision) throw new Error('Legacy migration project or workspace metadata revision conflict');
+      if (project.lifecycle !== 'active' || (workspace.lifecycle !== 'active' && workspace.lifecycle !== 'archived')) throw new Error('Legacy migration metadata is not available for passive import');
+      const base = workspace.id === project.id;
+      if (base && project.role === GITSPACE_SOURCE_PROJECT_ROLE && project.baseBranch !== input.branch) throw new Error('Managed GitSpace source base branch cannot be changed by migration');
+      const current = this.getArtifactScope(input.scope.id);
+      if (this.listArtifactScopes().some(scope => scope.workspaceId === input.scope.workspaceId && scope.id !== input.scope.id)) throw new Error('Legacy artifact scope identity differs from canonical workspace scope');
+      if (current && (current.workspaceId !== input.scope.workspaceId || current.generation !== input.scope.generation || current.manifestHash !== input.scope.manifestHash)) throw new Error('Legacy artifact scope changed after checkpoint');
+      const now = new Date().toISOString();
+      if (workspace.branch !== input.branch) this.ctx.storage.sql.exec("UPDATE workspaces SET branch=?,source_ref=CASE WHEN kind='base' AND source_kind='base' THEN ? ELSE source_ref END,revision=revision+1,updated_at=? WHERE workspace_id=?", input.branch, input.branch, now, workspace.id);
+      if (base && project.baseBranch !== input.branch) this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,revision=revision+1,updated_at=?', input.branch, now);
+      if (!current) this.putArtifactScope({ ...input.scope, expectedGeneration: 0 });
+      this.ctx.storage.sql.exec('INSERT INTO legacy_migration_artifacts(workspace_id,operation_id,scope_json) VALUES(?,?,?)', input.scope.workspaceId, input.operationId, scope);
+    });
+  }
+
+  legacyMigrationArtifacts(workspaceId: string): { operationId: string; activated: boolean } | null {
+    if (!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='legacy_migration_artifacts'").toArray().length) return null;
+    const row = this.ctx.storage.sql.exec<{ operation_id: string; activated: number }>('SELECT operation_id,activated FROM legacy_migration_artifacts WHERE workspace_id=?', workspaceId).toArray()[0];
+    return row ? { operationId: row.operation_id, activated: row.activated === 1 } : null;
+  }
+
+  activateLegacyMigrationArtifacts(workspaceId: string, operationId: string): void {
+    const pinned = this.legacyMigrationArtifacts(workspaceId);
+    if (!pinned || pinned.operationId !== operationId) throw new Error('Legacy artifact migration identity conflict');
+    this.ctx.storage.sql.exec('UPDATE legacy_migration_artifacts SET activated=1 WHERE workspace_id=?', workspaceId);
+  }
+
+  async putMachineArtifactScope(input: Parameters<ProjectAuthorityDO['putArtifactScope']>[0]): Promise<CanonicalArtifactScope> {
+    await this.assertLegacyWorkspaceWriter(input.workspaceId);
+    const current = this.getArtifactScope(input.id);
+    if (current && current.workspaceId !== input.workspaceId) await this.assertLegacyWorkspaceWriter(current.workspaceId);
+    return this.putArtifactScope(input);
+  }
+
   putArtifactScope(input: Omit<CanonicalArtifactScope, 'updatedAt'> & {
     expectedGeneration: number;
   }): CanonicalArtifactScope {
     return this.commit('artifact', input.workspaceId, () => {
+    const migration = this.legacyMigrationArtifacts(input.workspaceId);
+    if (migration && !migration.activated) throw new Error('Legacy artifact scope is fenced for migration');
     const current = this.getArtifactScope(input.id);
     if ((current?.generation ?? 0) !== input.expectedGeneration) {
       throw new Error(`Artifact scope generation conflict: expected ${input.expectedGeneration}, actual ${current?.generation ?? 0}`);
@@ -1809,25 +1825,21 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ offset: number }>('SELECT COALESCE(MAX(offset), 0) AS offset FROM project_events').one().offset;
   }
 
+  /** One page after `afterOffset`; callers continue from the last returned offset. */
   listEvents(afterOffset: number): Response {
-    return Response.json(this.readEventRecords(afterOffset));
+    return Response.json(this.readEventRecords(afterOffset, PROJECT_EVENT_PAGE));
   }
 
-  private readEventRecords(afterOffset: number, limit = -1): ProjectEvent[] {
+  /** One page of an entity's events after `afterOffset`, served by `project_events_entity`: never scans the whole project log. */
+  listEntityEvents(entity: string, afterOffset = 0, limit = PROJECT_EVENT_PAGE): ProjectEvent[] {
+    return this.ctx.storage.sql.exec<ProjectEventRow>('SELECT * FROM project_events WHERE entity=? AND offset>? ORDER BY offset LIMIT ?', entity, afterOffset, Math.min(Math.max(1, Math.trunc(limit)), PROJECT_EVENT_PAGE)).toArray().map(projectEventRecord);
+  }
+
+  private readEventRecords(afterOffset: number, limit: number): ProjectEvent[] {
     return this.ctx.storage.sql.exec<ProjectEventRow>(
       'SELECT * FROM project_events WHERE offset>? ORDER BY offset LIMIT ?',
       afterOffset, limit,
-    ).toArray().map((row) => ({
-      offset: row.offset,
-      eventId: row.event_id,
-      scope: row.scope,
-      entity: row.entity,
-      entityId: row.entity_id,
-      revision: row.revision,
-      operation: row.operation,
-      payload: JSON.parse(row.payload_json) as Record<string, unknown>,
-      createdAt: row.created_at,
-    }));
+    ).toArray().map(projectEventRecord);
   }
 
   private requireProject(): CloudProjectSummary {
@@ -1835,4 +1847,23 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (!project) throw new Error('Project is not configured');
     return project;
   }
+}
+
+/** Most project events one list call reads; QA readers page with the runtime's applied offset. */
+const PROJECT_EVENT_PAGE = 500;
+/** Entities the cloud app writes to `project_events`; every other entity is legacy machine history. */
+const CURRENT_EVENT_ENTITIES = ['qa', 'goal', 'workflow', 'rubric', 'journal', 'change-guide', 'review-thread', 'agent-incident', 'artifact', 'mcp-grant'];
+
+function projectEventRecord(row: ProjectEventRow): ProjectEvent {
+  return {
+    offset: row.offset,
+    eventId: row.event_id,
+    scope: row.scope,
+    entity: row.entity,
+    entityId: row.entity_id,
+    revision: row.revision,
+    operation: row.operation,
+    payload: JSON.parse(row.payload_json) as Record<string, unknown>,
+    createdAt: row.created_at,
+  };
 }

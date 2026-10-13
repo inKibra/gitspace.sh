@@ -2,12 +2,12 @@ import { z } from 'zod';
 import { GitLfsObjectSchema, GitLfsSnapshotSchema, type GitLfsObject, type GitLfsLocation, type GitLfsSnapshot } from '@gitspace/protocol-workspace';
 
 export const RetainedLfsSnapshotSchema = z.object({
-  snapshotId: z.string().min(1), workspaceId: z.string().min(1), kind: z.enum(['runtime', 'portable']),
+  snapshotId: z.string().min(1), workspaceId: z.string().min(1), kind: z.enum(['runtime', 'portable', 'migration']),
   objects: GitLfsSnapshotSchema.shape.objects,
 });
 export type RetainedLfsSnapshot = z.infer<typeof RetainedLfsSnapshotSchema>;
 
-/** Project-owned inventory and pins; historical inventories are not restore roots. */
+/** Project-owned inventories; migration roots survive edits until their owning workspace is deleted. */
 export class GitLfsRetention {
   constructor(private readonly storage: DurableObjectStorage) {
     storage.sql.exec(`CREATE TABLE IF NOT EXISTS lfs_objects(oid TEXT PRIMARY KEY, size INTEGER NOT NULL, deleting INTEGER NOT NULL DEFAULT 0);
@@ -65,6 +65,7 @@ export class GitLfsRetention {
     this.storage.transactionSync(() => {
       for (const object of objects) this.storage.sql.exec('INSERT INTO lfs_origin_sources VALUES(?,?,?,?) ON CONFLICT(origin,endpoint,oid) DO UPDATE SET size=excluded.size', object.oid, object.size, object.location.origin, object.location.endpoint);
       for (const snapshot of this.snapshots()) {
+        if (snapshot.kind === 'migration') continue;
         snapshot.objects = snapshot.objects.map(object => {
           const source = confirmed.get(object.oid);
           return source?.size === object.size ? { ...object, source: 'origin', location: source.location } : object;

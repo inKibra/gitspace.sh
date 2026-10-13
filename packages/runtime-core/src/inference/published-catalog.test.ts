@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createModels, InMemoryModelsStore, type Api, type Model, type Provider } from '@earendil-works/pi-ai';
 import { CATALOG_TTL_MS, withPublishedCatalog } from './published-catalog.js';
-import { resolveModelSelection } from './admission.js';
+import { resolveAvailableProfileModel, resolveModelSelection, resolveProfileModel } from './admission.js';
 
 const floor: Model<Api> = { provider: 'test', id: 'floor', name: 'Floor', api: 'openai-responses', baseUrl: 'https://provider.invalid', reasoning: false, input: ['text'], contextWindow: 8192, maxTokens: 1024, cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } };
 const provider: Provider = {
@@ -64,5 +64,22 @@ describe('published catalog admission data', () => {
     expect(fallback.model.id).toBe('next');
     expect(fallback.notice).toContain('test/removed');
     expect((await resolveModelSelection({}, models, selection)).notice).toContain('fast');
+  });
+
+  it('resolves effort suffixes without losing literal model colons', async () => {
+    const literal = { ...floor, id: 'floor:0' };
+    const models = createModels(); models.setProvider({ ...provider, getModels: () => [floor, literal] });
+    for (const thinking of ['low', 'medium', 'high'] as const) expect(await resolveAvailableProfileModel({ modelRoles: { default: `test/floor:0:${thinking}` } }, models)).toEqual({ model: literal, thinking });
+    expect(resolveProfileModel({ modelRoles: { default: 'test/floor:0' } }, models)).toEqual({ model: literal, thinking: null });
+    expect(() => resolveProfileModel({ modelRoles: { default: 'test/floor:unknown' } }, models)).toThrow('no admitted model');
+  });
+
+  it('takes effort from the selected alternative through aliases and honors the outer alias effort', async () => {
+    const models = createModels(); models.setProvider(provider);
+    const settings = { modelRoles: { default: ['other/floor:high', 'pi/review'], review: ['test/missing:low', '@available'], available: 'test/floor:medium', override: 'pi/review:low' } };
+    expect(resolveProfileModel(settings, models)).toEqual({ model: floor, thinking: 'medium' });
+    expect(await resolveModelSelection(settings, models, { kind: 'role', role: 'override' })).toEqual({ model: floor, thinking: 'low' });
+    expect(await resolveModelSelection(settings, models, { kind: 'role', role: 'removed' })).toMatchObject({ model: floor, thinking: 'medium', notice: expect.stringContaining('removed') });
+    expect(() => resolveProfileModel({ modelRoles: { default: 'pi/review:high', review: '@default:low' } }, models)).toThrow('Circular profile model role');
   });
 });

@@ -202,7 +202,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
       }
       if (path === '/setup') {
         const grant = await runtime.attachments.attach({ ...identity, machineId: RuntimeMachineIdSchema.parse('proof-machine'), generation: 7, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash', 'write', 'read', 'proc'] });
-        if (grant.attachment.state === 'attaching') grant.attachment = runtime.attachments.ready({ ...grant.attachment, commit: 'a'.repeat(40), prerequisitesComplete: true }, 'a'.repeat(40)).attachment;
+        if (grant.attachment.state === 'attaching') grant.attachment = runtime.attachments.ready({ ...grant.attachment, commit: 'a'.repeat(40), prerequisitesComplete: true }).attachment;
         await this.ctx.storage.put('proof-grant', grant);
         await root.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'yolo'; }, BACKGROUND_CONTEXT);
         return Response.json(grant);
@@ -227,7 +227,7 @@ export class ExecutionSmoke extends DurableObject<Environment> {
         runtime.harness.resume();
         const jobs = await runtime.harness.snapshot(DurableJobsDoc, root.id, BACKGROUND_CONTEXT);
         const todos = await runtime.harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT);
-        const transcript = await runtime.transcript(String(root.id));
+        const transcript = await (await runtime.transcript(String(root.id))).json();
         const entries = (await root.entries({}, 100, undefined, BACKGROUND_CONTEXT)).items;
         const completions = entries.flatMap(entry => (entry.model ?? []).flatMap(message => {
           if (message.role !== 'user' || typeof message.content !== 'string') return [];

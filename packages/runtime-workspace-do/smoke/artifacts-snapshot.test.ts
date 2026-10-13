@@ -142,6 +142,38 @@ test('oversized mutation batches fail before any credential or ref effect', asyn
   } finally { await f.close(); }
 });
 
+test.each(['mutations', 'indexMutations', 'trackedMutations'] as const)('rejects a blob above the decimal storage limit in %s without changing the checkpoint', async layer => {
+  const f = await fixture();
+  try {
+    const result = await writeArtifactsSnapshot(f.repo, {
+      repository: 'fixture', workspaceId: 'workspace', previous: f.previous,
+      mutations: [], [layer]: [{ path: 'large.bin', content: new Uint8Array(32_000_001) }],
+    }, f.request);
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.certainty).toBe('not-published');
+    expect(f.credentials()).toEqual({ minted: 0, revoked: 0 });
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: f.previous.checkpointRef })).toBe(f.previous.worktreeCommit);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: 'refs/heads/main' })).toBe(f.previous.headCommit!);
+  } finally { await f.close(); }
+});
+
+test('publishes a blob exactly at the decimal storage limit without truncating its bytes', async () => {
+  const f = await fixture();
+  try {
+    const content = new Uint8Array(32_000_000);
+    content[0] = 7; content[content.length - 1] = 19;
+    const result = await writeArtifactsSnapshot(f.repo, {
+      repository: 'fixture', workspaceId: 'workspace', previous: f.previous,
+      mutations: [{ path: 'boundary.bin', content }],
+    }, f.request);
+    if (result.isErr()) throw result.error;
+    const restored = (await git.readBlob({ fs, dir: f.dir, oid: result.value.worktreeCommit, filepath: 'boundary.bin' })).blob;
+    expect(new Bun.CryptoHasher('sha256').update(restored).digest('hex')).toBe(new Bun.CryptoHasher('sha256').update(content).digest('hex'));
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: result.value.checkpointRef })).toBe(result.value.worktreeCommit);
+    expect(result.value.indexCommit).toBe(f.previous.indexCommit);
+  } finally { await f.close(); }
+});
+
 for (const interrupted of [false, true]) test(`scratch initialization publishes a real initial commit on its default branch${interrupted ? ' after an interrupted push' : ''}`, async () => {
   const f = await fixture();
   let metadata: ArtifactsRepoInfo | null = null;
@@ -538,6 +570,30 @@ test('first machine publication creates the canonical ref even when all uploaded
   } finally { await f.close(); }
 });
 
+test('migrated cloud edits and machine merges preserve runtime and immutable numeric legacy refs', async () => {
+  const f = await fixture();
+  try {
+    await git.deleteRef({ fs, dir: f.dir, ref: f.previous.checkpointRef });
+    const legacyRef = `${f.previous.checkpointRef}/9`;
+    const runtimeRef = 'refs/gitspace/spaces/workspace/runtime/checkpoints';
+    await git.writeRef({ fs, dir: f.dir, ref: legacyRef, value: f.previous.worktreeCommit });
+    await git.writeRef({ fs, dir: f.dir, ref: runtimeRef, value: f.previous.worktreeCommit });
+    const migrated = { ...f.previous, checkpointRef: runtimeRef };
+    const edited = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: migrated, mutations: [{ path: 'script', content: text.encode('fresh cloud edit') }] }, f.request);
+    if (edited.isErr()) throw edited.error;
+    expect(edited.value.checkpointRef).toBe(runtimeRef);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: runtimeRef })).toBe(edited.value.worktreeCommit);
+    const machine = { ...edited.value, checkpointRef: 'refs/gitspace/machines/cache/checkpoints' };
+    const merged = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: edited.value, machine, mutations: [{ path: 'script', content: text.encode('fresh machine merge') }] }, f.request);
+    if (merged.isErr()) throw merged.error;
+    expect(merged.value.checkpointRef).toBe(runtimeRef);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: runtimeRef })).toBe(merged.value.worktreeCommit);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: legacyRef })).toBe(f.previous.worktreeCommit);
+    expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: merged.value.worktreeCommit, filepath: 'script' })).blob)).toBe('fresh machine merge');
+    expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: f.previous.worktreeCommit, filepath: 'script' })).blob)).toBe('before');
+  } finally { await f.close(); }
+});
+
 for (const publication of ['initial', 'recovery'] as const) test(`${publication} machine publication discovers unchanged conflict markers without metadata`, async () => {
   const f = await fixture();
   try {
@@ -698,7 +754,7 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
   const sourceRepo = repository(source, 'source-artifacts.invalid');
   const targetRepo = repository(target, 'target.invalid');
   let originRequests = 0;
-  const originPackBytes: number[] = [];
+  const originTransferBytes: number[] = [];
   let originAvailable = true;
   let concurrentBranch: string | null = null;
   const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -725,7 +781,7 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
     const error = await new Response(child.stderr).text();
     if (await child.exited !== 0) throw new Error(error);
-    if (url.hostname === 'source.invalid' && service === 'upload-pack' && !advertise && headers.get('git-protocol') !== 'version=2') originPackBytes.push(bytes.byteLength);
+    if (url.hostname === 'source.invalid' && service === 'upload-pack' && !advertise) originTransferBytes.push(bytes.byteLength);
     return new Response(advertise && service === 'upload-pack' ? new Blob(['001e# service=git-upload-pack\n0000', bytes]) : bytes);
   }, { preconnect: fetch.preconnect }));
   const code = new ArtifactsCodeStore({ get: async name => name === 'source' ? sourceRepo : targetRepo, create: unsupported, import: unsupported, list: unsupported, delete: unsupported });
@@ -778,7 +834,7 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     expect(new TextDecoder().decode((await git.readBlob({ fs, dir: target.dir, oid: head, filepath: 'new-script' })).blob)).toBe('new public ref content');
     expect((await git.readCommit({ fs, dir: target.dir, oid: head })).commit.parent).toEqual([base]);
     expect((await git.readBlob({ fs, dir: target.dir, oid: base, filepath: 'history-only' })).blob).toEqual(history);
-    expect(Math.max(...originPackBytes)).toBeLessThan(64 * 1024);
+    expect(Math.max(...originTransferBytes)).toBeLessThan(64 * 1024);
     const next = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [head], author, committer: author, message: 'later branch\n' } });
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/develop', value: next, force: true });
     const fetched = originRequests;
@@ -817,3 +873,100 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     }
   } finally { request.mockRestore(); await source.close(); await target.close(); }
 }, 15_000);
+
+for (const protocolVersion of [0, 2] as const) test(`copies a shallow checkpoint graph over Git v${protocolVersion}, edits it in cloud, and cold-clones the unchanged HEAD boundary`, async () => {
+  const source = await fixture();
+  const target = await fixture();
+  const cold = await mkdtemp(join(tmpdir(), 'cloud-shallow-cold-'));
+  const absent = 'e'.repeat(40);
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected provider operation'); };
+  const repository = (f: typeof source, host: string): ArtifactsRepo => ({
+    ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readFile: unsupported, fork: unsupported,
+    info: async () => ({ ...await f.repo.info(), remote: `https://${host}/repo.git` }),
+    readCommit: async oid => {
+      try { return await f.repo.readCommit(oid); }
+      catch (error) { if (error instanceof git.Errors.NotFoundError) return null; throw error; }
+    },
+  });
+  const origin = repository(source, 'source.invalid');
+  const destination = repository(target, 'target.invalid');
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    const dir = url.hostname === 'source.invalid' ? source.dir : target.dir;
+    const advertise = url.pathname.endsWith('/info/refs');
+    const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
+    const child = Bun.spawn(['git', '-c', 'core.bare=true', '-c', 'receive.shallowUpdate=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), dir], {
+      stdin: advertise ? 'ignore' : new Response(init?.body).body, stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, GIT_PROTOCOL: protocolVersion === 2 ? new Headers(init?.headers).get('git-protocol') ?? 'version=0' : 'version=0' },
+    });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    const error = await new Response(child.stderr).text();
+    if (await child.exited !== 0) throw new Error(error);
+    return new Response(bytes);
+  }, { preconnect: fetch.preconnect }));
+  const code = new ArtifactsCodeStore({ get: async name => name === 'source' ? origin : destination, create: unsupported, import: unsupported, list: unsupported, delete: unsupported });
+  try {
+    const head = await git.writeCommit({ fs, dir: source.dir, commit: { tree: source.tree, parent: [absent], author, committer: author, message: 'Original shallow HEAD\n' } });
+    const index = await git.writeCommit({ fs, dir: source.dir, commit: { tree: source.tree, parent: [head], author, committer: author, message: 'Index\n' } });
+    const tracked = await git.writeCommit({ fs, dir: source.dir, commit: { tree: source.tree, parent: [index], author, committer: author, message: 'Tracked\n' } });
+    const worktree = await git.writeCommit({ fs, dir: source.dir, commit: { tree: source.tree, parent: [tracked], author, committer: author, message: 'Worktree\n' } });
+    await Bun.write(join(source.dir, '.git/shallow'), `${head}\n`);
+    await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/topic', value: worktree });
+    await code.copyCommit('source', 'target', 'refs/heads/topic', worktree, null);
+    expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/topic' })).toBe(worktree);
+    expect((await destination.readCommit(head))?.parents).toEqual([absent]);
+    await code.copyCommit('source', 'target', source.previous.checkpointRef, worktree, target.previous.worktreeCommit);
+    expect(await destination.readCommit(absent)).toBeNull();
+    expect((await Bun.file(join(target.dir, '.git/shallow')).text()).trim()).toBe(head);
+    const previous: RuntimeGitCheckpoint = { ...source.previous, headCommit: head, branch: 'topic', indexCommit: index, trackedWorktreeCommit: tracked, worktreeCommit: worktree };
+    const result = await code.writeSnapshot({ repository: 'target', workspaceId: 'workspace', previous, mutations: [{ path: 'script', content: text.encode('cloud edit above shallow HEAD') }] });
+    if (result.isErr()) throw result.error;
+    expect(result.value.headCommit).toBe(head);
+    expect(result.value.indexCommit).toBe(index);
+    expect((await git.readCommit({ fs, dir: target.dir, oid: result.value.trackedWorktreeCommit })).commit.parent).toEqual([tracked]);
+    expect(new TextDecoder().decode((await git.readBlob({ fs, dir: target.dir, oid: result.value.worktreeCommit, filepath: 'script' })).blob)).toBe('cloud edit above shallow HEAD');
+    await code.copyCommit('target', 'target', 'refs/heads/topic', result.value.worktreeCommit, worktree);
+    const cloned = Bun.spawnSync(['git', 'clone', '--no-local', '--branch', 'topic', `file://${target.dir}`, cold]);
+    expect(cloned.exitCode).toBe(0);
+    expect((await Bun.file(join(cold, '.git/shallow')).text()).trim()).toBe(head);
+    expect((await git.readCommit({ fs, dir: cold, oid: head })).commit.parent).toEqual([absent]);
+    expect(new TextDecoder().decode((await git.readBlob({ fs, dir: cold, oid: result.value.worktreeCommit, filepath: 'script' })).blob)).toBe('cloud edit above shallow HEAD');
+    const missing = Bun.spawnSync(['git', '-C', cold, 'cat-file', '-e', absent]);
+    expect(missing.exitCode).not.toBe(0);
+  } finally { request.mockRestore(); await source.close(); await target.close(); await rm(cold, { recursive: true, force: true }); }
+}, 15_000);
+
+test('native reconciliation preserves staged and working layers across a large directory change', async () => {
+  const f = await fixture();
+  try {
+    const layer = async (content: string) => {
+      const blob = await git.writeBlob({ fs, dir: f.dir, blob: text.encode(content) });
+      const entries = [];
+      for (let index = 0; index < 257; index++) {
+        const tree = await git.writeTree({ fs, dir: f.dir, tree: [{ mode: '100644', path: `file-${index}`, oid: blob, type: 'blob' }] });
+        entries.push({ mode: '040000', path: `directory-${index}`, oid: tree, type: 'tree' as const });
+      }
+      return git.writeTree({ fs, dir: f.dir, tree: entries });
+    };
+    const baseTree = await layer('original\n');
+    const indexTree = await layer('staged\n');
+    const worktreeTree = await layer('working\n');
+    const headCommit = await git.writeCommit({ fs, dir: f.dir, commit: { tree: baseTree, parent: [], author, committer: author, message: 'large base\n' } });
+    const indexCommit = await git.writeCommit({ fs, dir: f.dir, commit: { tree: indexTree, parent: [headCommit], author, committer: author, message: 'staged layer\n' } });
+    const trackedWorktreeCommit = await git.writeCommit({ fs, dir: f.dir, commit: { tree: worktreeTree, parent: [indexCommit], author, committer: author, message: 'tracked working layer\n' } });
+    const worktreeCommit = await git.writeCommit({ fs, dir: f.dir, commit: { tree: worktreeTree, parent: [trackedWorktreeCommit], author, committer: author, message: 'working layer\n' } });
+    const base = { ...f.previous, headCommit, indexCommit: headCommit, trackedWorktreeCommit: headCommit, worktreeCommit: headCommit, indexTree: baseTree, worktreeTree: baseTree };
+    const machine = { ...base, indexCommit, trackedWorktreeCommit, worktreeCommit, indexTree, worktreeTree };
+    await git.writeRef({ fs, dir: f.dir, ref: base.checkpointRef, value: headCommit, force: true });
+    const plan = await planSnapshotMerge(f.repo, base, base, machine);
+    const result = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: base, ...plan }, f.request);
+    if (result.isErr()) throw result.error;
+    expect(result.value.headCommit).toBe(headCommit);
+    expect(result.value.indexTree).toBe(indexTree);
+    expect(result.value.worktreeTree).toBe(worktreeTree);
+    expect((await f.repo.readCommit(result.value.trackedWorktreeCommit)).treeHash).toBe(worktreeTree);
+    expect(await git.resolveRef({ fs, dir: f.dir, ref: base.checkpointRef })).toBe(result.value.worktreeCommit);
+    expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: result.value.indexCommit, filepath: 'directory-256/file-256' })).blob)).toBe('staged\n');
+    expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: result.value.worktreeCommit, filepath: 'directory-256/file-256' })).blob)).toBe('working\n');
+  } finally { await f.close(); }
+});

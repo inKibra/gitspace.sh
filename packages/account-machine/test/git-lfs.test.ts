@@ -91,7 +91,7 @@ it('only uploads committed objects, dedupes oids and retains history across dele
 
 it('publishes heldBack transitions even when sanitized trees are identical', async () => {
   const f = fixture(); let revision = 0; let committed: GitIntermediateCheckpoint | null = null; const publications: GitIntermediateCheckpoint[] = [];
-  const snapshots = new IncrementalGitSnapshots({ repositoryPath: f.root, spaceId: 'space', lfs: async () => f.lfs, allocateRevision: async () => ++revision, loadPending: async () => null, loadCommitted: async () => committed, savePending: async () => {}, publish: async value => { publications.push(value); }, commit: async value => { committed = value; return value; } });
+  const snapshots = new IncrementalGitSnapshots({ repositoryPath: f.root, spaceId: 'space', lfs: async () => f.lfs, allocateRevision: async () => ++revision, loadPending: async () => null, loadCommitted: async () => committed, loadRejected: async () => null, saveRejected: async () => {}, savePending: async () => {}, publish: async value => { publications.push(value); }, commit: async value => { committed = value; return value; } });
   const clean = await snapshots.capture(); writeFileSync(join(f.root, 'asset.bin'), 'held edit'); const held = await snapshots.capture();
   expect(held.indexTree).toBe(clean.indexTree); expect(held.worktreeTree).toBe(clean.worktreeTree); expect(publications).toEqual([clean, held]);
 });
@@ -135,7 +135,7 @@ it('publishes only private Git refs without invoking snapshot LFS or pre-push or
   const hook = join(f.root, '.git/hooks/pre-push');
   writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`); chmodSync(hook, 0o755);
   const publication = new ArtifactsGitRemote({ credentials: async () => ({ remote: 'https://artifacts.invalid/repository', plaintext: 'offline-token', expiresAt: new Date(Date.now() + 3_600_000).toISOString() }) });
-  await publication.publishCheckpoint({ repositoryPath: f.root, binding: { projectId: 'project', repository: 'workspace-space' }, checkpointRef: checkpoint.checkpointRef });
+  await publication.publishCheckpoint({ repositoryPath: f.root, binding: { projectId: 'project', repository: 'workspace-space' }, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit });
   expect(git(remote, 'rev-parse', checkpoint.checkpointRef)).toBe(checkpoint.worktreeCommit);
   expect(existsSync(marker)).toBe(false);
   // Normal deliberate pushes still execute the unchanged project hook.
@@ -282,8 +282,8 @@ it('uses rewritten project SSH authentication and acknowledges fresh canonical-o
   const f = fixture();
   git(f.root, 'config', 'remote.origin.url', 'https://git.invalid/team/repo.git');
   const ssh = join(f.root, '.git', 'test-ssh');
-  const args = join(f.root, '.git', 'ssh-args');
-  writeFileSync(ssh, `#!/bin/sh\nprintf '%s\\n' \"$@\" > '${args}'\nprintf '%s' '{\"href\":\"https://lfs.invalid/team/repo\",\"header\":{\"Authorization\":\"Bearer ssh-token\"}}'\n`);
+  // A restricted SSH server tokenizes its forced command rather than running a shell.
+  writeFileSync(ssh, `#!/bin/sh\nset -f\nset -- $4\n[ "$#" = 3 ] && [ "$1" = git-lfs-authenticate ] && [ "$2" = team/repo.git ] && [ "$3" = download ] || exit 1\nprintf '%s' '{"href":"https://lfs.invalid/team/repo","header":{"Authorization":"Bearer ssh-token"}}'\n`);
   chmodSync(ssh, 0o755);
   let acknowledgements = 0;
   const lfs = {
@@ -310,7 +310,6 @@ it('uses rewritten project SSH authentication and acknowledges fresh canonical-o
     expect((await capture(2)).lfs?.objects[0]?.source).toBe('origin');
     await capture(3);
     expect(requests).toBe(2); expect(acknowledgements).toBe(2);
-    expect(readFileSync(args, 'utf8')).toContain("git-lfs-authenticate 'team/repo.git' download");
     git(f.root, 'config', 'remote.origin.url', 'https://git.invalid/other/fork.git');
     expect((await capture(4)).lfs?.objects[0]?.source).toBe('r2');
     expect(requests).toBe(2);

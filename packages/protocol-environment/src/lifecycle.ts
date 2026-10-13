@@ -52,6 +52,11 @@ export function isInteractiveLifecycleScript(content: string): boolean {
   return false;
 }
 
+/** Output line recording an interactive script that a run without a terminal skipped instead of executing. */
+export function skippedInteractiveScriptLine(script: string): string {
+  return `skipped: ${script} needs a terminal; run setup from a terminal to execute it`;
+}
+
 export function authorizeLifecycleMachineMutation(input: LifecycleMutation, facts: {
   machineId: string; projectId: string; machineOnline: boolean;
   placement: { projectId: string; machineId: string | null; generation: number; state: string } | null;
@@ -310,22 +315,23 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     case 'policy': state.policy = { automatic: input.automatic }; break;
     case 'claim': {
       if (input.attachment && (actor.attachment?.attachmentId !== input.attachment.attachmentId || actor.attachment.generation !== input.attachment.generation)) throw new EnvironmentError('PermissionDenied', 'Attachment lifecycle claim lacks authenticated admission');
+      // Without a terminal, interactive scripts are skipped rather than executed, so they are neither claimed nor approval-gated.
+      const executionHashes = input.interactive ? input.executionHashes : input.executionHashes.filter((hash) => !state.executions.some((execution) => execution.kind === 'script' && execution.hash === hash && isInteractiveLifecycleScript(execution.content)));
       const existing = facts.runs.find((entry) => entry.run.id === input.runId);
       if (existing) {
         const run = existing.run;
         if (JSON.stringify(run.attachment) !== JSON.stringify(input.attachment)) throw new EnvironmentError('RunConflict', 'Run identity belongs to another attachment');
-        if (run.spaceId !== state.spaceId || run.phase !== input.phase || Boolean(run.interactive) !== Boolean(input.interactive) || run.profile !== input.profile || run.generation !== input.generation || !sameHashes(run.executionHashes, input.executionHashes)) throw new EnvironmentError('RunConflict', 'Run identity already belongs to a different operation', { runId: input.runId });
+        if (run.spaceId !== state.spaceId || run.phase !== input.phase || Boolean(run.interactive) !== Boolean(input.interactive) || run.profile !== input.profile || run.generation !== input.generation || !sameHashes(run.executionHashes, executionHashes)) throw new EnvironmentError('RunConflict', 'Run identity already belongs to a different operation', { runId: input.runId });
         return { state: { ...state, claim: { runId: run.id, status: 'existing', reason: null, token: null } }, changed: false, sharedChanged: false };
       }
-      const scope = lifecycleRunScope(input, actor.machineId, state.spaceId);
+      const scope = lifecycleRunScope({ ...input, executionHashes }, actor.machineId, state.spaceId);
       const lock = input.phase === 'machine/prepare' ? `machine:${actor.machineId}` : input.attachment ? `attachment:${input.attachment.attachmentId}:${input.attachment.generation}` : `workspace:${state.spaceId}`;
       if (facts.runs.some((entry) => entry.token && (entry.run.spaceId === state.spaceId || entry.lock === lock))) throw new EnvironmentError('RunConflict', 'A runner still owns this lifecycle claim; stop it or confirm machine destruction before recovery');
       if (state.destroyedAt && input.phase !== 'cloud/destroy' && !(input.phase === 'cloud/provision' && input.rerun)) throw new EnvironmentError('PreconditionFailed', 'This workspace lifecycle was explicitly destroyed');
       if (input.phase.startsWith('cloud/') && !input.rerun && facts.runs.some((entry) => entry.scope === scope && entry.run.phase === input.phase && !isLifecycleRunActive(entry.run) && entry.run.status !== 'succeeded')) throw new EnvironmentError('RecoveryRequired', 'Previous cloud effects require inspection and an explicit rerun');
       if (input.phase === 'cloud/provision' && !state.policy.automatic) throw new EnvironmentError('PreconditionFailed', 'Explicit workspace setup must enable lifecycle policy first');
-      if (input.executionHashes.some((hash) => !state.approvals.some((approval) => approval.executionHash === hash))) throw new EnvironmentError('ApprovalRequired', 'Awaiting human approval for execution content');
+      if (executionHashes.some((hash) => !state.approvals.some((approval) => approval.executionHash === hash))) throw new EnvironmentError('ApprovalRequired', 'Awaiting human approval for execution content');
       if (input.phase === 'checks' && input.interactive) throw new EnvironmentError('InvalidConfiguration', 'Environment checks cannot run interactively');
-      if (!input.interactive && state.executions.some((execution) => execution.kind === 'script' && input.executionHashes.includes(execution.hash) && isInteractiveLifecycleScript(execution.content))) throw new EnvironmentError('InteractionRequired', 'This lifecycle phase requires protected interactive execution');
       const deadlineAt = new Date(input.deadlineAt === undefined ? Date.parse(now) + DEFAULT_LIFECYCLE_TIMEOUT_MS : Date.parse(input.deadlineAt)).toISOString();
       if (deadlineAt <= now) throw new EnvironmentError('DeadlineExceeded', 'Lifecycle deadline has already elapsed', { deadlineAt });
       const skipped = !input.rerun && (input.phase === 'cloud/provision' && state.provisioned !== null || input.phase === 'cloud/destroy' && state.destroyedAt !== null || !input.phase.startsWith('cloud/') && input.phase !== 'checks' && facts.runs.some((entry) => entry.scope === scope && entry.run.status === 'succeeded'));
@@ -333,7 +339,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         status: skipped ? 'succeeded' : 'accepted', profile: input.profile, machineId: actor.machineId, generation: input.generation,
         interactive: input.interactive ?? false,
         ...(input.attachment ? { attachment: input.attachment } : {}),
-        executionHashes: input.executionHashes, terminalName: input.terminalName ?? null, results: [], output: '',
+        executionHashes, terminalName: input.terminalName ?? null, results: [], output: '',
         exitCode: skipped ? 0 : null, startedAt: now, finishedAt: skipped ? now : null, deadlineAt, cancelRequestedAt: null, failure: null, incidents: [] };
       record = { run, scope, lock, token: skipped ? null : input.ownershipToken ?? facts.token };
       state.claim = { runId: run.id, status: skipped ? 'skipped' : 'claimed', reason: skipped ? 'This lifecycle scope already succeeded' : null, token: record.token };

@@ -3,13 +3,14 @@ import { z } from 'zod';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { Type } from 'typebox';
-import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api, type ToolCall } from '@earendil-works/pi-ai';
+import { createModels, createAssistantMessageEventStream, getCurrentTools, type AssistantMessage, type Models, type Model, type Api, type ToolCall } from '@earendil-works/pi-ai';
 import { RuntimeBrowserApprovalCardSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema } from '@gitspace/protocol-runtime';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
-import { createRuntimeTools, type ToolServices } from './tools.js';
+import { createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { DurableJobsDoc, createJobTool, type JobServices } from './jobs.js';
+import { RuntimeBashArgumentsSchema } from '@gitspace/protocol-runtime/tool-arguments';
 
 const model: Model<Api> = { id: 'tool-contract', name: 'Tool contract', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
 const unused = async (): Promise<never> => { throw new Error('Unexpected operation'); };
@@ -38,7 +39,9 @@ async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] =
   const tools = [...createRuntimeTools({ ...services, invoke, approvalDefault }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools }));
   let generation = 0;
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
+  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, context) {
+    const providerSchema = z.object({ type: z.literal('object'), properties: z.record(z.string(), z.unknown()), anyOf: z.never().optional(), oneOf: z.never().optional(), allOf: z.never().optional() });
+    for (const tool of getCurrentTools(context.messages)) providerSchema.parse(tool.parameters);
     const calls = rounds[generation++];
     const reply: AssistantMessage = { role: 'assistant', content: calls ?? [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: model.id, stopReason: calls ? 'toolUse' : 'stop', timestamp: generation, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
@@ -56,12 +59,6 @@ test('every registered tool advertises its real object contract and executes thr
   const { harness, root, tools } = fixture;
   try {
     expect(tools.map(tool => tool.name).sort()).toEqual(Object.keys(samples).sort());
-    for (const tool of tools) {
-      expect(tool.name).not.toBe('jobs');
-      const schema = z.object({ type: z.literal('object'), properties: z.record(z.string(), z.unknown()).optional(), anyOf: z.array(z.unknown()).optional(), oneOf: z.array(z.unknown()).optional(), allOf: z.array(z.unknown()).optional() }).parse(tool.parameters);
-      expect(Boolean(schema.properties || schema.anyOf || schema.oneOf || schema.allOf)).toBe(true);
-      expect(schema.properties?.args).not.toEqual({});
-    }
     await root.submit({ type: 'input', content: 'Exercise all registered contracts.' }, BACKGROUND_CONTEXT);
     await root.waitForIdle(BACKGROUND_CONTEXT);
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
@@ -74,14 +71,20 @@ test('every registered tool advertises its real object contract and executes thr
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
+test('published operation parameters admit both command and control arguments', () => {
+  const advertised = z.fromJSONSchema(runtimeToolParameters(RuntimeBashArgumentsSchema));
+  expect(advertised.parse({ command: 'pwd' })).toEqual({ command: 'pwd' });
+  expect(advertised.parse({ op: 'list' })).toEqual({ op: 'list' });
+});
+
 
 test('registration rejects missing required fields and invalid nested edits without dispatching', async () => {
   const routed: string[] = [];
-  const { harness, root } = await registered([[call('read', {}), call('edit', { path: 'file', edits: [{ oldText: '', newText: 'value' }] }), call('mcp_invoke', { connectionId: 'connection' })]], async input => { routed.push(input.tool); return completed(input); });
+  const { harness, root } = await registered([[call('read', {}), call('edit', { path: 'file', edits: [{ oldText: '', newText: 'value' }] }), call('mcp_invoke', { connectionId: 'connection' }), call('bash', { op: 'status' }, 'bash-missing-job'), call('bash', { op: 'list', command: 'pwd' }, 'bash-mixed-operation')]], async input => { routed.push(input.tool); return completed(input); });
   try {
     await root.submit({ type: 'input', content: 'Exercise invalid arguments.' }, BACKGROUND_CONTEXT); await root.waitForIdle(BACKGROUND_CONTEXT);
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
-    expect(results.map(result => result.toolCallId).sort()).toEqual(['edit', 'mcp_invoke', 'read']);
+    expect(results.map(result => result.toolCallId).sort()).toEqual(['bash-missing-job', 'bash-mixed-operation', 'edit', 'mcp_invoke', 'read']);
     expect(results.every(result => result.isError)).toBe(true);
     expect(routed).toEqual([]);
   } finally { await harness.close(BACKGROUND_CONTEXT); }

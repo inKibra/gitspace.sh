@@ -197,7 +197,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         }
         return Response.json({ conversationId: String(root.id), ids: ids.map(String), pivot: String(pivot), branches });
       }
-      if (url.pathname === '/transcript') return Response.json(await runtime.transcript());
+      if (url.pathname === '/transcript') return runtime.transcript();
       return Response.json(await runtime.snapshot());
     } catch (error) { return Response.json({ error: String(error) }, { status: 500 }); }
   }

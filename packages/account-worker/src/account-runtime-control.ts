@@ -38,9 +38,14 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     }
     const spaces = await env.FLEET_CATALOG.getByName(userId).listSpaces();
     const assignments = [];
+    // One failing workspace (for example an isolate reset) must not withhold every other workspace's assignment.
     for (const space of spaces) {
-      const result = await env.SPACE_AUTHORITY.getByName(`${userId}:${space.spaceId}`).runtimeAssignments({ projectId: space.projectId, workspaceId: space.spaceId, machineId: machine });
-      assignments.push(...result.assignments);
+      try {
+        const result = await env.SPACE_AUTHORITY.getByName(`${userId}:${space.spaceId}`).runtimeAssignments({ projectId: space.projectId, workspaceId: space.spaceId, machineId: machine });
+        assignments.push(...result.assignments);
+      } catch (error) {
+        console.error(JSON.stringify({ event: 'runtime_assignments_space_failed', projectId: space.projectId, workspaceId: space.spaceId, message: error instanceof Error ? error.message : String(error) }));
+      }
     }
     return { assignments };
   }

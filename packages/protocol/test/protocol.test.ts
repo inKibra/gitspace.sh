@@ -78,4 +78,19 @@ describe('artifact encryption', () => {
     expect(await decryptArtifactBytes(sealed, key)).toEqual(plaintext);
     await expect(decryptArtifactBytes(sealed, new Uint8Array(32))).rejects.toThrow();
   });
+
+  it('respects subarray boundaries and authenticates sliced or shared-backed ciphertext', async () => {
+    const key = new Uint8Array(40).fill(7).subarray(4, 36);
+    const plaintext = new TextEncoder().encode('prefix:preserved:suffix').subarray(7, 16);
+    const nonce = new Uint8Array(20).fill(9).subarray(3, 15);
+    const sealed = await encryptArtifactBytes(plaintext, key, nonce);
+    const backing = new Uint8Array(sealed.byteLength + 12).fill(255);
+    backing.set(sealed, 5);
+    expect(await decryptArtifactBytes(backing.subarray(5, 5 + sealed.byteLength), key)).toEqual(plaintext);
+    const shared = new Uint8Array(new SharedArrayBuffer(sealed.byteLength + 8));
+    shared.set(sealed, 4);
+    expect(await decryptArtifactBytes(shared.subarray(4, 4 + sealed.byteLength), key)).toEqual(plaintext);
+    shared[shared.byteLength - 5] = shared[shared.byteLength - 5]! ^ 1;
+    await expect(decryptArtifactBytes(shared.subarray(4, 4 + sealed.byteLength), key)).rejects.toThrow();
+  });
 });

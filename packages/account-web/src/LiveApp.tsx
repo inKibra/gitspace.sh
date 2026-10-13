@@ -151,7 +151,7 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
     machines: machineId ? [{
       id: machineId ?? 'unavailable',
       label: machineValues?.find(candidate => candidate.id === machineId)?.label ?? machineId,
-      platform: runtimeContext?.snapshot.attachments.find(attachment => attachment.machineId === machineId)?.cache?.platform ?? null,
+      platform: runMachine.machine?.attachment.cache?.platform ?? null,
       current: true,
       capabilities: Object.fromEntries(remote.executions.filter((item) => item.kind === 'check').map((item) => {
         const result = latestChecks?.results.find((candidate) => candidate.id === item.id);
@@ -187,9 +187,11 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
     <section className="flex flex-col gap-2 px-4 pt-4" aria-label="Environment run machine">
       <label className="flex flex-col gap-2 text-caption">Run on machine<select aria-label="Environment run machine" className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={machineId ?? ''} onChange={event => runMachine.select(event.target.value)} disabled={busy}>
         <option value="">Choose a machine</option>
-        {runMachine.machines.map(candidate => <option key={candidate.id} value={candidate.id}>{machineValues?.find(item => item.id === candidate.id)?.label ?? candidate.id} · {candidate.state}</option>)}
+        {runMachine.machines.map(candidate => <option key={candidate.id} value={candidate.id}>{machineValues?.find(item => item.id === candidate.id)?.label ?? candidate.id} · {candidate.label}</option>)}
       </select></label>
-      {!machineId ? <p role="status" className="text-caption text-muted-foreground">{runMachine.machines.length ? 'Choose a machine to run checks or lifecycle phases.' : 'Attach a machine to run checks or lifecycle phases. Records remain available.'}</p> : !runMachine.machine?.ready ? <p className="text-caption text-muted-foreground">This cache will resume before the requested run. Choosing it does not execute scripts.</p> : null}
+      {!machineId ? <p role="status" className="text-caption text-muted-foreground">{runMachine.machines.length ? 'Choose a machine to run checks or lifecycle phases.' : 'Attach a machine to run checks or lifecycle phases. Records remain available.'}</p>
+        : runMachine.machine?.label === 'Paused' || runMachine.machine?.label === 'Reclaimed' ? <p className="text-caption text-muted-foreground">This cache will resume before the requested run. Choosing it does not execute scripts.</p>
+        : runMachine.machine && !runMachine.machine.ready ? <p role="status" className={`break-words text-caption ${runMachine.machine.errors.length ? 'text-destructive' : 'text-muted-foreground'}`}>{runMachine.machine.status}</p> : null}
       {!runtimeContext ? <Button variant="ghost" size="compact" disabled={busy || runtime.fetch === 'fetching'} onClick={() => void runtime.refetch()}>Refresh machines</Button> : null}
     </section>
     <EnvironmentView
@@ -207,7 +209,7 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
             {origins.map(origin => <div key={origin.hash} className="flex flex-wrap items-center justify-between gap-2 text-caption"><span>Browser origin · {origin.pattern} · Waiting approval</span><Button variant="secondary" size="compact" className="min-h-10" disabled={busy} onClick={() => openExecution(origin.hash, true)}>Review & approve</Button></div>)}
           </div>;
         }}
-        renderRuns={selectedMachineId => <div className="flex flex-col gap-1"><h4 className="text-caption font-medium">Recent setup runs</h4>{remote.lifecycle.runs.filter(run => run.machineId === selectedMachineId).slice(-5).reverse().map(run => <div className="flex flex-col gap-1 text-caption" key={run.id}><span>{run.phase} · {run.status} · {new Date(run.startedAt).toLocaleString()}</span>{run.results.map(step => <Button key={step.id} variant="ghost" size="compact" className="min-h-10 justify-start" onClick={() => openRunLog(run.id, { id: step.id, label: step.id })}>View {step.id} log</Button>)}</div>)}</div>}
+        renderRuns={selectedMachineId => <div className="flex flex-col gap-1"><h4 className="text-caption font-medium">Recent setup runs</h4>{remote.lifecycle.runs.filter(run => run.machineId === selectedMachineId).slice(0, 5).map(run => <div className="flex flex-col gap-1 text-caption" key={run.id}><span>{run.phase} · {run.status} · {new Date(run.startedAt).toLocaleString()}</span>{run.results.map(step => <Button key={step.id} variant="ghost" size="compact" className="min-h-10 justify-start" onClick={() => openRunLog(run.id, { id: step.id, label: step.id })}>View {step.id} log</Button>)}</div>)}</div>}
       /> : undefined}
       busy={busy}
       runtimeAvailable={!!machineId}
@@ -246,6 +248,8 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
         if (phase === 'cloud/destroy' && !options?.retire) throw new Error('Explicit human retirement confirmation is required.');
         const result = await rpcClient.environment.runPhase({ spaceId, machineId, runId: crypto.randomUUID(), phase, rerun: options?.rerun ?? null, interactive: options?.interactive });
         if (result.status === 'error') throw result.error;
+        // The prompts are in the run's terminal on that machine; show it so they can be answered.
+        if (options?.interactive && result.value.terminalName) runtimeContext?.onOpenTerminal(result.value.machineId, result.value.terminalName);
       })}
     />
     {lfsTransition.dialog}

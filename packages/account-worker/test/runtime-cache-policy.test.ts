@@ -1,13 +1,15 @@
-import { env } from 'cloudflare:test';
+import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol';
-import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, ArtifactsSnapshotError } from '@gitspace/runtime-workspace-do';
+import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
+import { Result } from 'better-result';
 import { afterEach, expect, it, vi } from 'vitest';
 import { tenantRootPrivateKey } from './setup.js';
 
 afterEach(() => vi.restoreAllMocks());
 
-it('delivers a changed account cache setting to an existing workspace cache assignment', async () => {
+async function cacheFixture() {
   const userId = env.ACCOUNT_ID;
   const projectId = 'cache-policy-project';
   const workspaceId = 'cache-policy-workspace';
@@ -30,7 +32,12 @@ it('delivers a changed account cache setting to an existing workspace cache assi
   await project.setProjectLifecycle(created.revision, 'active');
   await project.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Cached', branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
   const authority = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
-  await authority.runtimeCacheAttachmentRequest({ projectId, workspaceId, machineId, requestId: 'attach-cache' });
+  const { attachment } = await authority.runtimeCacheAttachmentRequest({ projectId, workspaceId, machineId, requestId: 'attach-cache' });
+  return { userId, projectId, workspaceId, machineId, authority, attachment };
+}
+
+it('delivers a changed account cache setting to an existing workspace cache assignment', async () => {
+  const { userId, projectId, workspaceId, machineId, authority } = await cacheFixture();
   const policies = async () => (await authority.runtimeAssignments({ projectId, workspaceId, machineId })).assignments.map(assignment => assignment.cachePolicy);
   expect(await policies()).toEqual([{ idleGraceSeconds: 900, reclaimSeconds: 86400 }]);
 
@@ -38,4 +45,28 @@ it('delivers a changed account cache setting to an existing workspace cache assi
   const current = await settings.get('browser');
   expect(await settings.update('browser', { expectedRevision: current.revision, onboardingComplete: current.onboardingComplete, profile: current.profile, git: current.git, defaults: current.defaults, machines: { cacheReclaimSeconds: 3600 } })).toMatchObject({ status: 'ok' });
   expect(await policies()).toEqual([{ idleGraceSeconds: 900, reclaimSeconds: 3600 }]);
+});
+
+it('lists an existing cache while a failed publication stays fenced against readiness', async () => {
+  const { projectId, workspaceId, machineId, authority, attachment } = await cacheFixture();
+  const checkpoint = RuntimeGitCheckpointSchema.parse({
+    checkpointRef: 'refs/gitspace/spaces/cache-policy-workspace/native/1', branch: 'main',
+    headCommit: '1'.repeat(40), indexCommit: '1'.repeat(40), trackedWorktreeCommit: '1'.repeat(40),
+    worktreeCommit: '1'.repeat(40), indexTree: '2'.repeat(40), worktreeTree: '2'.repeat(40),
+  });
+  vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockResolvedValue({
+    hash: checkpoint.worktreeCommit, treeHash: checkpoint.worktreeTree, parents: [], message: 'Initial cache',
+    author: { name: 'Fixture', email: 'fixture@example.invalid' }, committer: { name: 'Fixture', email: 'fixture@example.invalid' }, authoredAt: 0, committedAt: 0,
+  });
+  vi.spyOn(ArtifactsCodeStore.prototype, 'mergeSnapshot').mockResolvedValue(Result.err(new ArtifactsSnapshotError({
+    operation: 'writeSnapshot', certainty: 'not-published', message: 'Snapshot provider unavailable',
+  })));
+  await runInDurableObject(authority, async instance => {
+    await expect(instance.runtimeSnapshotCommit({ projectId, workspaceId, attachmentId: attachment.attachmentId, generation: attachment.generation, checkpoint, previousWorktreeCommit: null })).rejects.toThrow('Snapshot provider unavailable');
+  });
+  const assignments = await authority.runtimeAssignments({ projectId, workspaceId, machineId });
+  expect(assignments.assignments.map(item => item.grant.attachment.attachmentId)).toEqual([attachment.attachmentId]);
+  await runInDurableObject(authority, async instance => {
+    await expect(instance.runtimeAttachmentReady({ projectId, workspaceId, machineId, attachmentId: attachment.attachmentId, generation: attachment.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true, capabilities: attachment.capabilities })).rejects.toThrow('Snapshot provider unavailable');
+  });
 });

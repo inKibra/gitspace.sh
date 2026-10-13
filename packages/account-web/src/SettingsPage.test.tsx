@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { deploymentStatusFixture } from './App.js';
-import { RuntimeSettingsEditor, requestedSettingsSection, SourceSettings, type RuntimeSettingView } from './SettingsPage.js';
+import { parseRoleModel, RuntimeSettingsEditor, requestedSettingsSection, SourceSettings, type RuntimeSettingView } from './SettingsPage.js';
 
 describe('requestedSettingsSection', () => {
   it('opens account sections without exposing the removed provider editor', () => {
@@ -10,6 +10,14 @@ describe('requestedSettingsSection', () => {
     expect(requestedSettingsSection('?section=runtime-providers')).not.toEqual({ section: 'runtime-providers' });
     expect(requestedSettingsSection('?section=source')).toEqual({ section: 'source' });
   });
+});
+
+it('recognizes Bedrock model revisions and separates only supported effort suffixes', () => {
+  const model = { provider: 'amazon-bedrock', id: 'anthropic.claude-v1:0', name: 'Claude', contextWindow: 200000 };
+  const selector = `${model.provider}/${model.id}`;
+  expect(parseRoleModel(selector, [model])).toEqual({ modelKey: selector, thinking: 'auto', known: true });
+  expect(parseRoleModel(`${selector}:medium`, [model])).toEqual({ modelKey: selector, thinking: 'medium', known: true });
+  expect(parseRoleModel(`${selector}:unknown`, [model])).toEqual({ modelKey: `${selector}:unknown`, thinking: 'auto', known: false });
 });
 
 it('keeps inference-owned runtime controls out of shared Advanced', () => {

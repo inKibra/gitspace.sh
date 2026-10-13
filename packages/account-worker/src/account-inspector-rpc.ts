@@ -56,7 +56,7 @@ import { InspectorCloudArtifacts, InspectorGenerationConflict, InspectorWorkspac
 import { readSavedInspectorTranscriptContent, readSavedInspectorTranscriptPage } from './account-inspector-data.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
-import { cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, readCloudCheckout } from './cloud-repository.js';
+import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, type CloudCheckout } from './cloud-repository.js';
 import type { RepositoryMode } from '@gitspace/protocol/inspector-contract';
 import { canonicalLocalResourceUrl, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import type { InspectorCloudContext } from './account-inspector-data.js';
@@ -91,15 +91,13 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   const view = server.implement(inspectorViewContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.workspaceId ?? input.projectId, input.projectId);
-      const [overview, artifacts, saved, machines, operations] = await Promise.all([
+      const [overview, artifacts, saved, machines, created] = await Promise.all([
         source.context.getOverview(source.identity),
         new InspectorCloudArtifacts(env, userId, source).list(),
         readSavedInspectorMetadata(env, userId, source),
         catalog.listMachines(),
-        source.workspace.kind === 'worktree' ? source.authority.listOperations() : [],
+        source.workspace.kind === 'worktree' ? source.authority.latestWorkspaceOperation(source.workspace.id, 'workspace.create') : null,
       ]);
-      const created = operations.filter((operation) => operation.kind === 'workspace.create' && operation.workspaceId === source.workspace.id)
-        .reduce<(typeof operations)[number] | null>((latest, operation) => !latest || operation.createdAt > latest.createdAt ? operation : latest, null);
       return ok({ identity: source.identity, project: source.project, workspace: source.workspace, workspaces: source.workspaces,
         placement: source.placement ? { state: source.placement.state, machineId: source.placement.machineId, generation: source.placement.generation, updatedAt: source.placement.updatedAt } : null,
         overview, artifacts, machines, ...saved,
@@ -119,7 +117,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
       await requireSubscription();
       const events = await readSavedInspectorTranscript(env, userId, source);
       await requireSubscription();
-      for (const event of events) {
+      for await (const event of events) {
         for (const chunk of encodeTranscriptEventChunks(event)) {
           if (signal.aborted) return;
           yield ok(chunk);
@@ -490,16 +488,16 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   });
   // Only a legacy machine-held space without a live holder reaches these handlers without cloud runtime state.
   const legacyRuntimeUnavailable = 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.';
-  const repositoryCheckout = async (input: { spaceId: string; expectedGeneration: number; mode: RepositoryMode }) => {
+  /** Null for a legacy space without cloud runtime state; otherwise `read` runs against its checkout. */
+  const withRepositoryCheckout = async <T>(input: { spaceId: string; expectedGeneration: number; mode: RepositoryMode; baseRef?: string | null }, read: (checkout: CloudCheckout) => Promise<T>) => {
     const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
     if (!await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).hasCloudRuntime()) return null;
-    return readCloudCheckout(env, userId, source, input.mode);
+    return withCloudCheckout(env, userId, source, input.mode, input.baseRef ?? null, read);
   };
   const repositoryTree = server.implement(inspectorRepositoryTreeContract).stream(async function* ({ input, errors, signal }) {
     try {
-      const checkout = await repositoryCheckout(input);
-      if (!checkout) { yield err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable })); return; }
-      const entries = cloudRepositoryTree(checkout, input.mode, input.path);
+      const entries = await withRepositoryCheckout(input, checkout => cloudRepositoryTree(checkout, input.mode, input.path));
+      if (!entries) { yield err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable })); return; }
       // Sixteen entries per frame stay below the frame limit, as on a machine.
       if (entries.length === 0 && !signal.aborted) yield ok([]);
       for (let offset = 0; offset < entries.length && !signal.aborted; offset += 16) yield ok(entries.slice(offset, offset + 16));
@@ -511,9 +509,8 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   });
   const repositoryTreePage = server.implement(inspectorRepositoryTreePageContract).handler(async ({ input, errors }) => {
     try {
-      const checkout = await repositoryCheckout(input);
-      if (!checkout) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
-      const entries = cloudRepositoryTree(checkout, input.mode, input.path);
+      const entries = await withRepositoryCheckout(input, checkout => cloudRepositoryTree(checkout, input.mode, input.path));
+      if (!entries) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
       const frames = [];
       for (let offset = 0; offset < entries.length; offset += 16) frames.push(entries.slice(offset, offset + 16));
       const { cursor, limit, ...identity } = input;
@@ -562,9 +559,9 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   });
   const repositoryStatus = server.implement(inspectorRepositoryStatusContract).handler(async ({ input, errors }) => {
     try {
-      const checkout = await repositoryCheckout(input);
-      if (!checkout) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
-      return ok(cloudRepositoryStatus(checkout, input.mode, input.path));
+      const entries = await withRepositoryCheckout(input, checkout => cloudRepositoryStatus(checkout, input.mode, input.path));
+      if (!entries) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      return ok(entries);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
@@ -573,9 +570,9 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   });
   const repositoryFile = server.implement(inspectorRepositoryFileContract).handler(async ({ input, errors }) => {
     try {
-      const checkout = await repositoryCheckout(input);
-      if (!checkout) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
-      return ok(await cloudRepositoryFile(env, userId, checkout, input.mode, input.path));
+      const file = await withRepositoryCheckout(input, checkout => cloudRepositoryFile(env, userId, checkout, input.mode, input.path));
+      if (!file) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      return ok(file);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
@@ -584,9 +581,9 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   });
   const repositoryDiff = server.implement(inspectorRepositoryDiffContract).handler(async ({ input, errors }) => {
     try {
-      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
-      if (!await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).hasCloudRuntime()) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
-      return err(errors.InspectorState({ resource: 'repository', message: 'Diffs are not available for cloud workspaces yet. The Files view lists each changed path with its status, and opening a file shows its committed content.' }));
+      const diff = await withRepositoryCheckout(input, checkout => cloudRepositoryDiff(env, userId, checkout, input.mode, input.path));
+      if (!diff) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      return ok(diff);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));

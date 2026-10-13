@@ -179,6 +179,7 @@ const control = new Miniflare({
     USER_MCP_CONNECTIONS: { className: 'UserMcpConnectionsDO', useSQLite: true },
     TENANT_RELEASES: { className: 'TenantReleasesDO', useSQLite: true },
     SPACE_AUTHORITY: { className: 'SpaceAuthorityDO', useSQLite: true },
+    SAVED_TRANSCRIPTS: { className: 'SavedTranscriptIndexDO', useSQLite: true },
     FLEET_CATALOG: { className: 'FleetCatalogDO', useSQLite: true },
   },
   r2Buckets: ['DATA'],

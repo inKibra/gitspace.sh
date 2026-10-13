@@ -24,6 +24,40 @@ async function seedVault(credentials: Array<{ id: string; provider: 'anthropic' 
 }
 
 describe('Cloud inference credential authority', () => {
+  it('reads only initialized profile and masked credential metadata without migrations, decryption, or health writes', async () => {
+    const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+    await vault.bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(2)) });
+    await runInDurableObject(vault, (instance, state) => {
+      const before = state.storage.sql.exec('SELECT * FROM inference_migration').toArray();
+      expect(instance.cloudInferenceCatalog('project')).toBeNull();
+      expect(state.storage.sql.exec('SELECT * FROM inference_migration').toArray()).toEqual(before);
+      expect(state.storage.sql.exec('SELECT * FROM inference_assignments').toArray()).toEqual([]);
+    });
+    await vault.ensureInference();
+    await vault.putBrowserApiKey('default', 'openai', 'catalog-test-key');
+    await runInDurableObject(vault, (instance, state) => {
+      state.storage.sql.exec("INSERT INTO inference_assignments(project_id, profile_id, revision) VALUES ('project', 'default', 2)");
+      // Catalog availability needs no decrypted key, even when key material is unavailable.
+      state.storage.sql.exec("UPDATE inference_credentials SET sealed_json = 'unavailable-for-passive-read'");
+      const before = {
+        profiles: state.storage.sql.exec('SELECT * FROM inference_profiles').toArray(),
+        migration: state.storage.sql.exec('SELECT * FROM inference_migration').toArray(),
+        credentials: state.storage.sql.exec('SELECT * FROM inference_credentials').toArray(),
+        health: state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'cloud_account_health'").toArray(),
+      };
+      expect(instance.cloudInferenceCatalog('missing')).toBeNull();
+      const catalog = instance.cloudInferenceCatalog('project');
+      expect(catalog).toMatchObject({ profile: { id: 'default' }, assignmentRevision: 2, accounts: [{ provider: 'openai', type: 'api_key', expiresAt: null, identity: null }] });
+      expect(catalog?.accounts[0]).not.toHaveProperty('credential');
+      expect({
+        profiles: state.storage.sql.exec('SELECT * FROM inference_profiles').toArray(),
+        migration: state.storage.sql.exec('SELECT * FROM inference_migration').toArray(),
+        credentials: state.storage.sql.exec('SELECT * FROM inference_credentials').toArray(),
+        health: state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'cloud_account_health'").toArray(),
+      }).toEqual(before);
+    });
+  });
+
   it('lists independently selectable accounts without exposing grant secrets', async () => {
     const userId = await seedVault([
       { id: 'first', provider: 'openai-codex', access: 'access-first', accountId: 'account-first' },

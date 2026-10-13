@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { controlFleetMachine, reconcileFleetMachines } from '../src/index.js';
+import { controlFleetMachine, reconcileFleetMachines } from '../src/application.js';
 import { PhysicalMachineProvider } from '../src/machine-providers.js';
 import type { FleetMachineDefinition } from '../src/fleet-catalog.js';
 import { http } from 'msw';

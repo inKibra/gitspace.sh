@@ -25,7 +25,6 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
   const attachmentController = () => new RuntimeAttachmentController({ attachments: options.runtime().attachments, code, publish: () => options.runtime().publish(),
     snapshot: () => options.runtime().cloudFiles.initializeSnapshot(),
     origin: async () => (await authority.getProject())?.repositoryReference ?? null,
-    lifecycle: () => authority.getLifecycleState(identity.workspaceId),
     authorizeMachine: async machineId => {
       const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(machineId);
       if (!machine || machine.desiredState === 'removed' || !await env.CREDENTIALS.getByName(env.ACCOUNT_ID).hasRuntimeMachine(machineId)) throw new Error('Attachment target is not an enrolled account machine');

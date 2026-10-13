@@ -66,7 +66,11 @@ export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof Ru
   return false;
 }
 export const RuntimeMachinesArgumentsSchema = z.union([z.object({ op: z.literal('list').default('list') }), z.object({ op: z.literal('detach'), attachmentId: path, generation: z.number().int().nonnegative() }), z.object({ op: z.literal('setDefault'), machineId: path.nullable() })]);
-export const RuntimeHistoryReadArgumentsSchema = z.object({ conversationId: path, offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(200).default(50) });
+export const RuntimeHistoryReadArgumentsSchema = z.union([
+  z.object({ mode: z.literal('page').default('page'), workspaceId: path.optional(), conversationId: path, offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(200).default(50) }),
+  z.object({ mode: z.literal('content'), workspaceId: path.optional(), conversationId: path, ordinal: z.number().int().nonnegative(), contentOffset: z.number().int().nonnegative().default(0), contentLimit: z.number().int().min(1).max(65_536).default(16_384) }),
+]);
+export type RuntimeHistoryReadArguments = z.infer<typeof RuntimeHistoryReadArgumentsSchema>;
 export const RuntimeHistorySearchArgumentsSchema = z.object({ query: path, scope: z.enum(['workspace', 'project']).default('workspace') });
 export const RuntimeWebSearchArgumentsSchema = z.object({ query: z.string().min(1).max(2048) });
 export const RuntimeReportIssueArgumentsSchema = z.object({ message: z.string().min(1).max(16384), tool: z.string().max(160).optional(), model: z.string().max(256).optional(), reference: z.string().max(2048).optional() });

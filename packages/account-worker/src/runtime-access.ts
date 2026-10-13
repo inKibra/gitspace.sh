@@ -8,7 +8,7 @@ export async function requireRuntimeIdentity(
   const project = await projectAuthority.getProject();
   if (!project || project.id !== identity.projectId || project.lifecycle === 'deleting') throw new Error('Runtime project is unavailable');
   const workspace = identity.workspaceId === project.id ? null
-    : (await projectAuthority.listWorkspaces()).find(item => item.id === identity.workspaceId && item.projectId === project.id);
+    : await projectAuthority.getWorkspace(identity.workspaceId).then(item => item?.projectId === project.id ? item : undefined);
   if (workspace === undefined) throw new Error('Workspace does not belong to the requested project');
   if (workspace?.lifecycle === 'deleting') throw new Error('Runtime workspace is unavailable');
   // Opening a cloud-only project or provisioning a new one bootstraps runtime state before the project turns active.

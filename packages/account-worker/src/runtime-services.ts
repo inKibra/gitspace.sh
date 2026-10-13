@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalJson, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeTranscriptSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { canonicalJson, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { profileApprovalMode } from '@gitspace/protocol/inference';
@@ -11,7 +11,8 @@ import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-co
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
 import { createCloudRuntimeMcp } from './runtime-mcp.js';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
-import { RuntimeHistoryIndex, type HistoryDocument } from '@gitspace/runtime-core/history';
+import { RuntimeHistoryIndex } from '@gitspace/runtime-core/history';
+import { readRuntimeTranscript, readRuntimeHistory } from './runtime-transcript-reader.js';
 import type { RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
 import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createDispatchSelector } from './runtime-dispatch-selection.js';
@@ -57,27 +58,36 @@ export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: s
   const event = projectEventSchema.parse(await (await authority.appendEvent({ eventId: `qa:${id}`, scope: 'workspace', entity: 'qa', entityId: id, revision: 1, operation: 'created', payload: { item, workspaceId: identity.workspaceId } })).json());
   return RuntimeQaItemSchema.parse(event.payload.item);
 }
-export async function listRuntimeQa(env: Env, projectId: string) {
-  const events = z.array(projectEventSchema).parse(await (await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).listEvents(0)).json());
-  const items = new Map<string, z.infer<typeof RuntimeQaItemSchema>>();
-  for (const event of events) {
-    if (event.entity !== 'qa') continue;
-    const item = RuntimeQaItemSchema.parse(event.payload.item);
-    items.set(item.id, item);
-  }
-  return [...items.values()];
-}
-
+/** QA events read per page; the project authority caps every entity page at this size. */
+const QA_EVENT_PAGE = 500;
 export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+  // Project QA is append-only and folded by item id; each runtime keeps its fold and reads only events after the
+  // last applied offset (indexed by `project_events_entity`), so a rebuild no longer re-reads all QA history.
+  const items = new Map<string, z.infer<typeof RuntimeQaItemSchema>>();
+  let applied = 0;
+  let reading: Promise<void> = Promise.resolve();
+  function list(): Promise<z.infer<typeof RuntimeQaItemSchema>[]> {
+    reading = reading.catch(() => {}).then(async () => {
+      for (;;) {
+        const events = z.array(projectEventSchema).parse(await authority.listEntityEvents('qa', applied, QA_EVENT_PAGE));
+        for (const event of events) {
+          if (event.entity === 'qa') { const item = RuntimeQaItemSchema.parse(event.payload.item); items.set(item.id, item); }
+          applied = Math.max(applied, event.offset);
+        }
+        if (events.length < QA_EVENT_PAGE) return;
+      }
+    });
+    return reading.then(() => [...items.values()]);
+  }
   return {
-    list: () => listRuntimeQa(env, identity.projectId),
+    list,
     async act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> {
       if (!actor.canApprove) throw new Error('QA management requires explicit human control');
       if (input.projectId !== identity.projectId || input.workspaceId !== identity.workspaceId) throw new Error('QA action scope changed');
-      const items = await listRuntimeQa(env, identity.projectId);
-      const item = items.find(candidate => candidate.id === input.itemId);
+      const current = await list();
+      const item = current.find(candidate => candidate.id === input.itemId);
       if (!item) throw new Error('QA item does not belong to this project');
-      const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
       if (input.action.kind === 'share') {
         const reference = input.action.target === 'gitspace' ? GITSPACE_SOURCE_REPOSITORY : (await authority.getProject())?.repositoryReference;
         if (!reference) throw new Error('Project has no canonical repository');
@@ -92,7 +102,7 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
       }
       if (input.action.kind === 'merge') {
         const targetId = input.action.targetId;
-        const target = items.find(candidate => candidate.id === targetId);
+        const target = current.find(candidate => candidate.id === targetId);
         if (!target || target.id === item.id || target.state === 'merged') throw new Error('Duplicate target must be a distinct canonical QA item');
       }
       const next = { ...item, state: input.action.kind === 'dismiss' ? 'dismissed' as const : 'merged' as const, duplicateOf: input.action.kind === 'merge' ? input.action.targetId : null };
@@ -164,7 +174,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       const project = await authority.getProject();
       if (!project) throw new Error('Browser workspace project is unavailable');
       if (identity.workspaceId === project.id) return project.name;
-      const workspace = (await authority.listWorkspaces()).find(item => item.id === identity.workspaceId);
+      const workspace = await authority.getWorkspace(identity.workspaceId);
       if (!workspace) throw new Error('Browser workspace is unavailable');
       return workspace.name;
     },
@@ -436,8 +446,12 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const args = object.parse(input.args);
         if (input.tool === 'history_read') {
           const request = RuntimeHistoryReadArgumentsSchema.parse(args);
-          const events = await options.runtime().transcript(request.conversationId);
-          return completed(input, events.slice(request.offset, request.offset + request.limit));
+          const workspaceId = request.workspaceId ?? identity.workspaceId;
+          if (workspaceId !== identity.workspaceId && workspaceId !== identity.projectId && !await authority.getWorkspace(workspaceId)) throw new Error('History workspace is outside this project');
+          const response = workspaceId === identity.workspaceId
+            ? await options.runtime().transcript(request.conversationId, 'ndjson')
+            : await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`).runtimeTranscript({ ...RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId }), conversationId: request.conversationId }, 'ndjson');
+          return completed(input, await readRuntimeHistory(response, request, workspaceId));
         }
         const request = RuntimeHistorySearchArgumentsSchema.parse(args);
         const workspaceIds = request.scope === 'workspace' ? [identity.workspaceId]
@@ -447,9 +461,10 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           const remote = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`);
           const snapshot = workspaceId === identity.workspaceId ? await options.runtime().snapshot() : RuntimeSnapshotSchema.parse(await (await remote.runtimeSnapshot(owned)).json());
           for (const conversation of snapshot.conversations) {
-            const events = workspaceId === identity.workspaceId ? await options.runtime().transcript(conversation.id) : RuntimeTranscriptSchema.parse(await (await remote.runtimeTranscript({ ...owned, conversationId: conversation.id })).json());
-            const documents: HistoryDocument[] = events.map(event => ({ workspaceId, conversationId: conversation.id, ordinal: event.ordinal, payload: event.payload, createdAt: event.createdAt }));
-            history.index(documents);
+            const response = workspaceId === identity.workspaceId ? await options.runtime().transcript(conversation.id, 'ndjson') : await remote.runtimeTranscript({ ...owned, conversationId: conversation.id }, 'ndjson');
+            for await (const event of readRuntimeTranscript(response)) {
+              history.index([{ workspaceId, conversationId: conversation.id, ordinal: event.ordinal, payload: event.payload, createdAt: event.createdAt }]);
+            }
           }
         }
         return completed(input, await history.search(request.query, workspaceIds, (state, questions) => options.judge(input.conversationId, state, questions)));
@@ -546,7 +561,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       async instructions(conversationId) {
       const project = await authority.getProject();
       if (!project) throw new Error('Project is not configured');
-      const workspace = (await authority.listWorkspaces()).find(item => item.id === identity.workspaceId);
+      const workspace = await authority.getWorkspace(identity.workspaceId);
       if (!workspace && identity.workspaceId !== baseWorkspaceId) throw new Error('Workspace does not belong to this project');
       const main = (await options.runtime().browserConversation(conversationId)).root;
       if (!main) {

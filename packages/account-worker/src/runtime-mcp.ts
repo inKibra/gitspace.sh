@@ -26,7 +26,7 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
   const connections = (env.USER_MCP_CONNECTIONS as DurableObjectNamespace<UserMcpConnectionsDO>).getByName(env.ACCOUNT_ID);
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   async function admitted(connectionId: string) {
-    const [connection, grant, workspace] = await Promise.all([connections.get(env.ACCOUNT_ID, connectionId), authority.getMcpGrant(connectionId), authority.listWorkspaces().then(workspaces => workspaces.find(workspace => workspace.id === identity.workspaceId))]);
+    const [connection, grant, workspace] = await Promise.all([connections.get(env.ACCOUNT_ID, connectionId), authority.getMcpGrant(connectionId), authority.getWorkspace(identity.workspaceId)]);
     if (!workspace) throw new Error('MCP workspace is unavailable');
     const scope = workspace.kind === 'base' ? null : identity.workspaceId;
     if (!connection?.enabled || !grant?.enabled || (scope === null ? !grant.projectSpaceEnabled : !grant.workspacesEnabled)) throw new Error('MCP connection is not granted to this workspace');
@@ -105,7 +105,7 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     async discover(args: RuntimeJson, signal?: AbortSignal): Promise<RuntimeJson> {
       const parsed = RuntimeMcpDiscoverArgumentsSchema.parse(args);
       if ('connectionId' in parsed) return execute(parsed, false, signal);
-      const [all, grants, workspace] = await Promise.all([connections.list(env.ACCOUNT_ID), authority.listMcpGrants(), authority.listWorkspaces().then(workspaces => workspaces.find(workspace => workspace.id === identity.workspaceId))]);
+      const [all, grants, workspace] = await Promise.all([connections.list(env.ACCOUNT_ID), authority.listMcpGrants(), authority.getWorkspace(identity.workspaceId)]);
       if (!workspace) throw new Error('MCP workspace is unavailable');
       return RuntimeJsonSchema.parse(all.filter(connection => connection.enabled && grants.some(grant => grant.connectionId === connection.id && grant.enabled && (workspace.kind === 'base' ? grant.projectSpaceEnabled : grant.workspacesEnabled))).map(connection => ({ connectionId: connection.id, label: connection.label, transport: connection.transport.type, machineId: connection.target.kind === 'machine' ? connection.target.machineId : null })));
     },

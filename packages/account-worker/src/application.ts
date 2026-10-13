@@ -1,4 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
+import { setBedrockProviderModule } from '@earendil-works/pi-ai/api/bedrock-converse-stream.lazy';
+import { bedrockProviderModule } from '@earendil-works/pi-ai/bedrock-provider';
 import { runtimeMachineControl } from './account-runtime-control.js';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
@@ -108,6 +110,7 @@ export * from './hosted-route-registry.js';
 export * from './account-state.js';
 export { TenantReleasesDO } from './tenant-releases.js';
 import type { TenantReleasesDO } from './tenant-releases.js';
+import { LegacySpaceMigrationInputSchema, LegacySpaceMigrationFinalizeInputSchema } from '@gitspace/protocol/legacy-migration';
 import { SpaceAuthorityDO } from './space-authority.js';
 import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
@@ -134,6 +137,9 @@ import {
   type WorkerVersion,
   type LaunchResult,
 } from './tenant-releases.js';
+
+// Pi's variable-specifier Bedrock import cannot run inside a Worker bundle.
+setBedrockProviderModule(bedrockProviderModule);
 
 /** `request_nonces` accepts `data.put` for the upload window, the longest it admits. */
 const REQUEST_NONCE_RETENTION_MS = SIGNED_UPLOAD_MAX_AGE_MS;
@@ -271,6 +277,11 @@ interface InferenceProfileRow extends Record<string, SqlStorageValue> {
   profile_json: string;
   deleted_at: string | null;
   credential_generation: number;
+}
+export interface CloudInferenceCatalog {
+  profile: InferenceProfile;
+  assignmentRevision: number;
+  accounts: CredentialAccount[];
 }
 export type InferenceWriteResult =
   | { status: 'ok'; value: InferenceState }
@@ -1341,6 +1352,25 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const config = this.config();
     if (!config) throw new Error('Vault is not configured');
     return openVaultText(ciphertext, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['runtime-grant/v1', config.user_id, scope.projectId, scope.workspaceId, scope.attachmentId, scope.generation]));
+  }
+
+  /** Passive runtime reads never initialize profiles, unseal credentials, or repair account health. */
+  cloudInferenceCatalog(projectId: string): CloudInferenceCatalog | null {
+    if (!this.config() || this.ctx.storage.sql.exec<{ version: number }>('SELECT version FROM inference_migration WHERE id = 1').one().version !== 1) return null;
+    const assignment = this.ctx.storage.sql.exec<{ profile_id: string; revision: number }>('SELECT profile_id, revision FROM inference_assignments WHERE project_id = ?', projectId).toArray()[0];
+    if (!assignment) return null;
+    const row = this.ctx.storage.sql.exec<InferenceProfileRow>('SELECT * FROM inference_profiles WHERE profile_id = ? AND deleted_at IS NULL', assignment.profile_id).toArray()[0];
+    if (!row) return null;
+    const accounts = this.ctx.storage.sql.exec<{ row_id: number; provider: string; revision: number; expires_at: number }>("SELECT rowid AS row_id, provider, revision, expires_at FROM inference_credentials WHERE profile_id = ? AND state = 'active' ORDER BY rowid", assignment.profile_id).toArray();
+    return {
+      profile: JSON.parse(row.profile_json) as InferenceProfile,
+      assignmentRevision: assignment.revision,
+      accounts: accounts.map(account => ({
+        id: String(account.row_id), provider: account.provider, revision: account.revision,
+        type: account.expires_at === 0 ? 'api_key' : 'oauth',
+        expiresAt: account.expires_at === 0 ? null : account.expires_at, identity: null,
+      })),
+    };
   }
 
   async resolveCloudInference(projectId: string, profileId?: string) {
@@ -3459,6 +3489,16 @@ const worker = {
         if (diagnostics) diagnostics.stage = 'authorize';
         const authorized = await authorizeControl(env, body, capability);
         if (authorized.status === 'error') return accountAccessResponse(authorized)!;
+        if (body.operation === 'space.migrateLegacy' || body.operation === 'space.stageLegacyMigration' || body.operation === 'space.legacyMigrationStatus') {
+          if (body.userId !== env.ACCOUNT_ID) throw new Error('Migration account identity mismatch');
+          const input = body.operation === 'space.migrateLegacy' ? LegacySpaceMigrationFinalizeInputSchema.parse(body.payload) : LegacySpaceMigrationInputSchema.parse(body.payload);
+          // space.control grants portable ownership transitions, not account administration.
+          // The authority additionally checks canonical workspace membership and the exact closed source.
+          const authority = env.SPACE_AUTHORITY.getByName(`${body.userId}:${input.workspaceId}`);
+          const value = body.operation === 'space.legacyMigrationStatus' ? await authority.legacyMigrationStatus(input)
+            : body.operation === 'space.stageLegacyMigration' ? await authority.stageLegacyMigration(input) : await authority.migrateLegacy(input);
+          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
+        }
         if (body.operation.startsWith('runtime.')) {
           const value = await runtimeMachineControl(env, body);
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
@@ -3847,8 +3887,8 @@ const worker = {
               value = await authority.listWorkspaces();
               break;
             case 'project.workspaces.put': {
-              const workspace = await authority.putWorkspace(
-                body.payload.workspace as Parameters<ProjectAuthorityDO['putWorkspace']>[0],
+              const workspace = await authority.putMachineWorkspace(
+                body.payload.workspace as Parameters<ProjectAuthorityDO['putMachineWorkspace']>[0],
               );
               const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
               await namespace.get(namespace.idFromName(body.userId)).putWorkspaceLocation(workspace.id, projectId);
@@ -3857,7 +3897,7 @@ const worker = {
             }
             case 'project.workspaces.remove': {
               const workspaceId = String(body.payload.workspaceId ?? '');
-              value = await authority.removeWorkspace(workspaceId, Number(body.payload.expectedRevision ?? -1));
+              value = await authority.removeMachineWorkspace(workspaceId, Number(body.payload.expectedRevision ?? -1));
               if (value) {
                 const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
                 await namespace.get(namespace.idFromName(body.userId)).removeWorkspaceLocation(workspaceId);
@@ -3901,8 +3941,8 @@ const worker = {
               value = await authority.listArtifactScopes();
               break;
             case 'project.artifacts.put':
-              value = await authority.putArtifactScope(
-                body.payload.scope as Parameters<ProjectAuthorityDO['putArtifactScope']>[0],
+              value = await authority.putMachineArtifactScope(
+                body.payload.scope as Parameters<ProjectAuthorityDO['putMachineArtifactScope']>[0],
               );
               break;
             case 'project.promotions.get':

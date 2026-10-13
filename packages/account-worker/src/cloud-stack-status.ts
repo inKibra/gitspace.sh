@@ -10,41 +10,47 @@ const LEFT = 1;
 const RIGHT = 2;
 const STALE = 4;
 
-interface Commit { hash: string; parents: string[]; committedAt: number }
-/** A tip and the repositories holding everything it reaches. */
-interface Tip { head: string; repositories: readonly string[] }
+type Commit = Pick<ArtifactsCommitMetadata, 'hash' | 'parents' | 'committedAt'>;
+/** Repositories that may hold a tip's graph, which can end at a shallow boundary. */
+type Tip = { head: string; repositories: readonly string[] };
+type HistoryReader = Pick<ArtifactsCodeStore, 'log' | 'readCommit'>;
 
 /** Commit metadata across a project's Artifacts repositories. A commit ID is a content address: the same
  * commit read from any repository holding it is the same commit. */
 class CommitHistory {
   private readonly commits = new Map<string, Commit>();
-  constructor(private readonly code: ArtifactsCodeStore) {}
+  constructor(private readonly code: HistoryReader) {}
 
-  async read(hash: string, repositories: readonly string[]): Promise<Commit> {
+  async read(hash: string, repositories: readonly string[]): Promise<Commit | null> {
     for (const repository of repositories) {
       if (this.commits.has(hash)) break;
+      // log on an absent explicit ref can throw; a missing ancestor is not a missing tip.
+      const root = await this.code.readCommit(repository, hash);
+      if (!root) continue;
+      this.commits.set(hash, root);
       for (const commit of await this.code.log(repository, hash, HISTORY_PAGE)) {
-        this.commits.set(commit.hash, { hash: commit.hash, parents: commit.parents, committedAt: commit.committedAt });
+        this.commits.set(commit.hash, commit);
       }
     }
-    const commit = this.commits.get(hash);
-    if (!commit) throw new Error(`Commit ${hash} is missing from the workspace's cloud repository`);
-    return commit;
+    return this.commits.get(hash) ?? null;
   }
 }
 
 /**
  * Git's merge-base walk: newest commit first, each commit marked with the tips that reach it, and every
  * ancestor of a common ancestor marked stale. It stops once only stale commits remain, so it reads history
- * back to the merge base and no further. Returns each commit's marks and the merge bases, newest first.
+ * back to the merge base and no further. An absent ancestor cannot prove separation or a count.
  */
-async function paint(history: CommitHistory, left: Tip, right: Tip) {
+export async function compareCloudHistory(code: HistoryReader, left: Tip, right: Tip) {
+  const history = new CommitHistory(code);
+  const repositories = [...new Set([...left.repositories, ...right.repositories])];
+  const missing = new Set<string>();
   const flags = new Map<string, number>();
   const queue: Commit[] = [];
   const queued = new Set<string>();
   const bases: string[] = [];
   let active = 0;
-  const reach = async (hash: string, flag: number) => {
+  const reach = async (hash: string, flag: number, required = false) => {
     const previous = flags.get(hash) ?? 0;
     const next = previous | flag;
     if (next === previous) return;
@@ -53,14 +59,20 @@ async function paint(history: CommitHistory, left: Tip, right: Tip) {
       if (!(previous & STALE) && next & STALE) active--;
       return;
     }
-    const commit = await history.read(hash, [...(next & LEFT ? left.repositories : []), ...(next & RIGHT ? right.repositories : [])]);
+    const commit = await history.read(hash, repositories);
+    if (!commit) {
+      if (required) throw new Error(`Commit ${hash} is missing from the workspace's cloud repository`);
+      missing.add(hash);
+      return;
+    }
+    missing.delete(hash);
     const index = queue.findIndex(entry => entry.committedAt < commit.committedAt);
     queue.splice(index < 0 ? queue.length : index, 0, commit);
     queued.add(hash);
     if (!(next & STALE)) active++;
   };
-  await reach(left.head, LEFT);
-  await reach(right.head, RIGHT);
+  await reach(left.head, LEFT, true);
+  await reach(right.head, RIGHT, true);
   for (let examined = 0; active > 0; examined++) {
     if (examined >= STACK_WALK_LIMIT) throw new Error(`Stack history exceeds ${STACK_WALK_LIMIT} commits`);
     const commit = queue.shift();
@@ -77,7 +89,12 @@ async function paint(history: CommitHistory, left: Tip, right: Tip) {
     }
     for (const parent of commit.parents) await reach(parent, flag);
   }
-  return { flags, bases };
+  const complete = [...missing].every(hash => (flags.get(hash) ?? 0) & STALE);
+  return {
+    complete,
+    bases,
+    leftAhead: complete ? [...flags].filter(([hash, flag]) => !missing.has(hash) && (flag & (LEFT | RIGHT)) === LEFT).length : null,
+  };
 }
 
 /**
@@ -105,15 +122,19 @@ export async function readCloudStackStatus(env: Env, userId: string, projectId: 
     return head === null ? null : { head, repositories: [repository] };
   };
   const [child, parentCheckpoint, base] = await Promise.all([checkpoint(workspaceId), checkpoint(parent.id), baseTip()]);
-  const history = new CommitHistory(code);
   const parentTip = parentCheckpoint.headCommit === null ? null : { head: parentCheckpoint.headCommit, repositories: [artifactsWorkspaceRepository(parent.id)] };
-  const stack = parentTip && child.headCommit !== null ? await paint(history, parentTip, { head: child.headCommit, repositories: [artifactsWorkspaceRepository(workspaceId)] }) : null;
-  const parentAhead = stack ? [...stack.flags.values()].filter(flag => (flag & (LEFT | RIGHT)) === LEFT).length : 0;
+  const stack = parentTip && child.headCommit !== null ? await compareCloudHistory(code, parentTip, { head: child.headCommit, repositories: [artifactsWorkspaceRepository(workspaceId)] }) : null;
+  if (stack && !stack.complete) throw new Error('Stack comparison is unavailable because cloud history is shallow or incomplete');
+  const parentAhead = stack?.leftAhead ?? 0;
   // A parent working on the base branch itself trivially reaches it; that is not a merge.
   let parentMerged: StackStatus['parentMerged'] = 'not-merged';
   if (parent.branch !== baseBranch) {
     if (!parentTip || !base) parentMerged = 'unknown';
-    else if ((await paint(history, parentTip, base)).bases.includes(parentTip.head)) parentMerged = 'merged';
+    else {
+      const comparison = await compareCloudHistory(code, parentTip, base);
+      if (comparison.bases.includes(parentTip.head)) parentMerged = 'merged';
+      else if (!comparison.complete) parentMerged = 'unknown';
+    }
   }
   const instruction = parentMerged === 'merged'
     ? `The parent merged into ${baseBranch}. Rebase only your own commits: \`git rebase --onto ${baseBranch} ${parent.branch}\`, then this workspace is no longer stacked.`

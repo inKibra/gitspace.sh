@@ -2,7 +2,7 @@ import { InboxDoc, LiveDoc, type Harness, type Storage, type Cursor, type Conver
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { Context } from '@earendil-works/chord';
 import { CronRequestsDoc, CronScopeDoc, type CronScope } from './documents.js';
-import { SessionControlsDoc } from './session-controls.js';
+import { applyInferenceThinking, SessionControlsDoc } from './session-controls.js';
 import type { RuntimeHarnessOptions } from './harness.js';
 import { PROJECT_CRON_OVERDUE_MS } from '@gitspace/protocol/cron-contract';
 export type RuntimeCronInput = { requestId: string; text: string; readScopes: string[]; writeScopes: string[] };
@@ -95,6 +95,7 @@ export function createCronRuntime(options: Pick<RuntimeHarnessOptions, 'admitInf
         const selection = (await options.harness.snapshot(SessionControlsDoc, target.id, context))?.selection ?? { kind: 'default' as const };
         const model = await options.admitInference({ conversationId: id, requestId: input.requestId, selection });
         await options.configureModel(target.id, model);
+        await applyInferenceThinking(target, model);
         await target.submit({ type: 'input', content: `[Scheduled cron: ${input.requestId}]\n${input.text}`, requestId: input.requestId, whenBusy: 'followUp' }, context);
       }
       await options.wake();

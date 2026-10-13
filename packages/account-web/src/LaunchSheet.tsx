@@ -33,13 +33,13 @@ export function LaunchMachineDialog({ projectId, workspaceId, machines, onClose,
       {runtime.error ? <p role="alert" className="text-caption text-destructive">{runtime.error}<Button variant="ghost" onClick={runtime.retry}>Retry machines</Button></p> : null}
       <label className="flex flex-col gap-2 text-caption">Build machine<select aria-label="Build machine" className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={machine?.id ?? ''} disabled={busy} onChange={event => selection.select(event.target.value)}>
         <option value="">Choose a machine</option>
-        {selection.machines.map(candidate => <option key={candidate.id} value={candidate.id}>{machines.find(item => item.id === candidate.id)?.label ?? candidate.id} · {candidate.state}</option>)}
+        {selection.machines.map(candidate => <option key={candidate.id} value={candidate.id}>{machines.find(item => item.id === candidate.id)?.label ?? candidate.id} · {candidate.label}</option>)}
       </select></label>
-      {!runtime.snapshot ? <p role="status">Loading workspace machines…</p> : !machine ? <p role="status" className="text-caption text-muted-foreground">{selection.machines.length ? 'Choose a machine to build the release.' : 'Attach a machine to this workspace to launch GitSpace.'}</p> : !machine.ready ? <p role="status" className="text-caption text-muted-foreground">Resume this cache and wait until it is live before launching. Resuming does not launch a release.</p> : null}
+      {!runtime.snapshot ? <p role="status">Loading workspace machines…</p> : !machine ? <p role="status" className="text-caption text-muted-foreground">{selection.machines.length ? 'Choose a machine to build the release.' : 'Attach a machine to this workspace to launch GitSpace.'}</p> : machine.label === 'Paused' || machine.label === 'Reclaimed' ? <p role="status" className="text-caption text-muted-foreground">Resume this cache and wait until it is live before launching. Resuming does not launch a release.</p> : !machine.ready ? <p role="status" className="break-words text-caption text-muted-foreground">{machine.status}. Launching requires a live machine.</p> : null}
       {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
       <DialogFooter>
         <Button variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
-        {machine && !machine.ready ? <Button variant="secondary" disabled={busy || !runtime.connected} onClick={() => void perform(async () => {
+        {machine && (machine.label === 'Paused' || machine.label === 'Reclaimed') ? <Button variant="secondary" disabled={busy || !runtime.connected} onClick={() => void perform(async () => {
           const result = await rpcClient.runtime.attachment.cache.request({ ...RuntimeIdentitySchema.parse({ projectId, workspaceId }), machineId: RuntimeMachineIdSchema.parse(machine.id), requestId: crypto.randomUUID() });
           if (result.status === 'error') throw result.error;
         })}>Resume cache</Button> : null}

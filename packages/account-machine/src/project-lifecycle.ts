@@ -13,7 +13,7 @@ import {
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { PublishedSpaceHeadResolver } from './inspector-base.js';
 import { readGitCheckpointHead } from './git-checkpoint.js';
-import { ArtifactsBranchDivergedError, type ArtifactsGitRemote } from './artifacts-git-remote.js';
+import { artifactsPublicationRejection, ArtifactsBranchDivergedError, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 
 export interface ProjectLifecycleAuthority extends Pick<CloudSpaceCheckpointAuthority, 'getSpace'> {
   bootstrap(input: { projectId: string; spaceId: string }): Promise<unknown>;
@@ -128,13 +128,13 @@ export class ProjectLifecycleManager {
     private readonly checkpointSpace?: (spaceId: string) => Promise<void>,
     private readonly gitEnvironment?: (repositoryUrl: string) => Record<string, string> | Promise<Record<string, string>>,
     private readonly resolvePublishedHead?: PublishedSpaceHeadResolver,
-    /** Seeds `project-<projectId>` with the base history this machine cloned. */
+    /** Seeds `project-<projectId>` with compatible history at the cloned base commit. */
     private readonly projectRepository?: Pick<ArtifactsGitRemote, 'publishBranch'>,
   ) {}
 
-  /** Publishes the base branch's full history to `project-<projectId>` so cloud workspaces can fork
-   * private or over-limit origins. A branch the cloud import (or another seed) already published
-   * is never overwritten: equal history is a no-op, other history is kept with a warning. */
+  /** Publishes the base branch to `project-<projectId>` so cloud workspaces can fork
+   * private or over-limit origins, using a shallow boundary only for oversized old blobs.
+   * Equal history is a no-op; an existing different branch is kept with a warning. */
   private async seedProjectRepository(projectId: string, repositoryPath: string, branch: string, commit: string): Promise<void> {
     if (!this.projectRepository) return;
     try {
@@ -296,6 +296,10 @@ export class ProjectLifecycleManager {
       return { project: active, operation };
     } catch (error) {
       await this.failed(projectId, operation, error);
+      // A permanent publication rejection needs explicit user remediation. Keep
+      // the checkout, projection, and any good checkpoint instead of compensating
+      // the import into deletion or treating it as an activated source.
+      if (artifactsPublicationRejection(error)) throw error;
       // A failed first upload is not unpublished user work when this invocation
       // still has the exact clean clone. Ambiguous checkpoint outcomes stay put.
       let removeLocal = !checkpointAttempted;
@@ -413,6 +417,7 @@ export class ProjectLifecycleManager {
       return { project, operation };
     } catch (error) {
       if (operation) await this.failed(projectId, operation, error);
+      if (artifactsPublicationRejection(error)) throw error;
       try {
         let canRemoveLocal = true;
         if (bootstrapAttempted) {

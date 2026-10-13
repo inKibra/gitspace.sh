@@ -1,6 +1,6 @@
 import { createProvider, isModelType, type Api, type AnyModel, type Model, type Models, type Provider, type ProviderStreams } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
-import { applyInferenceSettings, inferenceSettingsSchema, type InferenceProfile } from '@gitspace/protocol/inference';
+import { applyInferenceSettings, inferenceSettingsSchema, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { z } from 'zod';
 import { applyProviderCatalog } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
@@ -167,8 +167,10 @@ export function listCloudModels(settings: InferenceProfile['settings'], authenti
   });
 }
 
+export type ResolvedProfileModel = { model: Model<Api>; thinking: ModelRoleSelector['thinking'] };
+
 /** Resolve profile roles and model patterns against the admitted registry only. */
-export function resolveProfileModel(settings: InferenceProfile['settings'], models: Models, role = 'default'): Model<Api> {
+export function resolveProfileModel(settings: InferenceProfile['settings'], models: Models, role = 'default'): ResolvedProfileModel {
   const effective = applyInferenceSettings({}, inferenceSettingsSchema.parse(settings));
   const selection = z.object({
     modelRoles: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
@@ -181,8 +183,9 @@ export function resolveProfileModel(settings: InferenceProfile['settings'], mode
   };
   const candidates = models.getModels().filter(model => !selection.enabledModels?.length || selection.enabledModels.some(pattern => matches(pattern, model)));
   const visited = new Set<string>();
-  const resolve = (value: string | string[]): Model<Api> | undefined => {
-    for (const pattern of typeof value === 'string' ? [value] : value) {
+  const resolve = (value: string | string[]): ResolvedProfileModel | undefined => {
+    for (const valueSelector of typeof value === 'string' ? [value] : value) {
+      const { selector: pattern, thinking } = parseModelRoleSelector(valueSelector);
       const alias = pattern.startsWith('pi/') ? pattern.slice(3) : pattern.startsWith('@') ? pattern.slice(1) : undefined;
       if (alias !== undefined) {
         if (visited.has(alias)) throw new Error(`Circular profile model role: ${alias}`);
@@ -190,22 +193,22 @@ export function resolveProfileModel(settings: InferenceProfile['settings'], mode
         const configured = selection.modelRoles?.[alias];
         const found = configured ? resolve(configured) : undefined;
         visited.delete(alias);
-        if (found) return found;
+        if (found) return thinking === null ? found : { ...found, thinking };
       } else {
         const found = candidates.find(model => matches(pattern, model));
-        if (found) return found;
+        if (found) return { model: found, thinking };
       }
     }
     return undefined;
   };
   const configured = selection.modelRoles?.[role] ?? selection.modelRoles?.default;
-  const selected = configured ? resolve(configured) : candidates[0];
+  const selected = configured ? resolve(configured) : candidates[0] ? { model: candidates[0], thinking: null } : undefined;
   if (!selected) throw new Error(`Inference profile has no admitted model for role ${role}`);
   return selected;
 }
 
 /** Availability is resolved before defaults so unauthenticated providers never win. */
-export async function resolveAvailableProfileModel(settings: InferenceProfile['settings'], models: Models, role = 'default'): Promise<Model<Api>> {
+export async function resolveAvailableProfileModel(settings: InferenceProfile['settings'], models: Models, role = 'default'): Promise<ResolvedProfileModel> {
   const available = await models.getAvailable();
   const snapshot: Models = {
     ...models,
@@ -215,7 +218,7 @@ export async function resolveAvailableProfileModel(settings: InferenceProfile['s
 }
 
 /** Selection is intent; only an admission turns it into an immutable model identity. */
-export async function resolveModelSelection(settings: InferenceProfile['settings'], models: Models, selection: ModelSelectionIntent): Promise<{ model: Model<Api>; notice?: string }> {
+export async function resolveModelSelection(settings: InferenceProfile['settings'], models: Models, selection: ModelSelectionIntent): Promise<{ model: Model<Api>; thinking?: ModelRoleSelector['thinking']; notice?: string }> {
   const available = await models.getAvailable();
   const snapshot: Models = { ...models, getModels: provider => available.filter(model => provider === undefined || model.provider === provider) };
   if (selection.kind === 'explicit') {
@@ -225,14 +228,14 @@ export async function resolveModelSelection(settings: InferenceProfile['settings
     const role = selection.kind === 'role' ? selection.role : 'default';
     try {
       if (selection.kind === 'role' && !profileModelRoles(settings).includes(role)) throw new Error(`Inference role ${role} was removed`);
-      return { model: resolveProfileModel(settings, snapshot, role) };
+      return resolveProfileModel(settings, snapshot, role);
     } catch (error) { if (!available.length) throw error; }
   }
-  let model: Model<Api>;
-  try { model = resolveProfileModel(settings, snapshot); }
-  catch { if (!available[0]) throw new Error('Inference profile has no available model'); model = available[0]; }
+  let selected: ResolvedProfileModel;
+  try { selected = resolveProfileModel(settings, snapshot); }
+  catch { if (!available[0]) throw new Error('Inference profile has no available model'); selected = { model: available[0], thinking: null }; }
   const requested = selection.kind === 'explicit' ? `${selection.provider}/${selection.modelId}` : `${selection.kind === 'role' ? selection.role : 'default'} role`;
-  return { model, notice: `Model selection ${requested} is no longer available. Using ${model.provider}/${model.id} for this run.` };
+  return { ...selected, notice: `Model selection ${requested} is no longer available. Using ${selected.model.provider}/${selected.model.id} for this run.` };
 }
 
 export function profileModelRoles(settings: InferenceProfile['settings']): string[] {

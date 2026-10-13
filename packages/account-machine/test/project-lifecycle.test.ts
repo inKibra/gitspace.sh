@@ -9,7 +9,7 @@ import { ProjectLifecycleManager, type ProjectLifecycleAuthority } from '../src/
 import type { CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
 import { createPublishedSpaceHeadResolver } from '../src/inspector-base.js';
 import { createGitIntermediateCheckpoint, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
-import { ArtifactsGitRemote, type ArtifactsRepositoryBinding } from '../src/artifacts-git-remote.js';
+import { ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError, type ArtifactsRepositoryBinding } from '../src/artifacts-git-remote.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -143,6 +143,7 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
 function projectRepositoryRemote(root: string) {
   const remote = join(root, 'project.git');
   git(root, 'init', '--bare', remote);
+  git(remote, 'config', 'receive.shallowUpdate', 'true');
   const config = join(root, 'gitconfig');
   writeFileSync(config, `[url "${remote}"]\n\tinsteadOf = https://artifacts.invalid/project\n`);
   const previous = process.env.GIT_CONFIG_GLOBAL;
@@ -731,6 +732,107 @@ describe('ProjectLifecycleManager', () => {
       database.close();
     }
   });
+
+  it.each(['source', 'import'] as const)('preserves an incompatible %s checkout without activation, credentials, or losing a good checkpoint', async kind => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-incompatible-import-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    const good = git(source, 'rev-parse', 'HEAD');
+    const project = projectRepositoryRemote(root);
+    git(source, 'push', project.remote, `${good}:refs/heads/trunk`);
+    writeFileSync(join(source, 'current.bin'), Buffer.alloc(32_000_001));
+    git(source, 'add', 'current.bin');
+    git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-m', 'oversized current HEAD');
+    const commit = git(source, 'rev-parse', 'HEAD');
+    writeFileSync(join(source, 'README.txt'), 'original local work\n');
+    const originalRefs = git(source, 'show-ref');
+    const originalIndex = readFileSync(join(source, '.git/index'));
+    const originalStatus = git(source, 'status', '--porcelain=v1', '-z');
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    if (kind === 'source') authority.projects.set('source', {
+      id: 'source', name: 'GitSpace', lifecycle: 'cloud-only', repositoryReference: source, baseBranch: 'trunk',
+      role: 'gitspace-source', source: { release: commit, branch: 'trunk', commit },
+      revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
+    });
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), undefined, undefined, undefined, project.gitRemote);
+    try {
+      const pending = kind === 'source' ? manager.openProject('source') : manager.createProject({ name: 'Incompatible', repositoryUrl: source, baseBranch: null });
+      await expect(pending).rejects.toBeInstanceOf(ArtifactsRepositoryIncompatibleError);
+      const operation = [...authority.operations.values()][0]!;
+      const base = database.getBaseSpace(operation.projectId);
+      if (!base) throw new Error('Rejected import lost its checkout');
+      expect(operation.state).toBe('failed');
+      expect((await authority.getProject(operation.projectId))?.lifecycle).toBe(kind === 'source' ? 'cloud-only' : 'provisioning');
+      expect(git(base.rootPath, 'rev-parse', 'HEAD')).toBe(commit);
+      expect(readFileSync(join(base.rootPath, 'README.txt'), 'utf8')).toBe('imported\n');
+      expect(project.leases).toEqual([]);
+      expect(git(project.remote, 'rev-parse', 'refs/heads/trunk')).toBe(good);
+      if (kind === 'source') {
+        git(base.rootPath, 'update-ref', 'refs/gitspace/checkpoints/good', good);
+        writeFileSync(join(base.rootPath, 'README.txt'), 'staged retry work');
+        git(base.rootPath, 'add', 'README.txt');
+        writeFileSync(join(base.rootPath, 'README.txt'), 'unstaged retry work');
+        const refs = git(base.rootPath, 'show-ref');
+        const index = readFileSync(join(base.rootPath, '.git/index'));
+        const status = git(base.rootPath, 'status', '--porcelain=v1', '-z');
+        await expect(manager.openProject('source')).rejects.toBeInstanceOf(ArtifactsRepositoryIncompatibleError);
+        expect(git(base.rootPath, 'show-ref')).toBe(refs);
+        expect(readFileSync(join(base.rootPath, '.git/index'))).toEqual(index);
+        expect(git(base.rootPath, 'status', '--porcelain=v1', '-z')).toBe(status);
+        expect(readFileSync(join(base.rootPath, 'README.txt'), 'utf8')).toBe('unstaged retry work');
+      }
+      expect(git(source, 'show-ref')).toBe(originalRefs);
+      expect(readFileSync(join(source, '.git/index'))).toEqual(originalIndex);
+      expect(git(source, 'status', '--porcelain=v1', '-z')).toBe(originalStatus);
+      expect(readFileSync(join(source, 'README.txt'), 'utf8')).toBe('original local work\n');
+    } finally {
+      project.restore();
+      database.close();
+    }
+  }, 120_000);
+
+  it.each(['source', 'import'] as const)('activates a %s project with oversized old history at its original shallow HEAD', async kind => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-historical-import-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    writeFileSync(join(source, 'old.bin'), Buffer.alloc(32_000_001));
+    git(source, 'add', 'old.bin');
+    git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-m', 'oversized history');
+    const historical = git(source, 'rev-parse', 'HEAD');
+    git(source, 'rm', 'old.bin');
+    git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-m', 'compatible current HEAD');
+    const commit = git(source, 'rev-parse', 'HEAD');
+    const project = projectRepositoryRemote(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    try {
+      const authority = new MemoryProjectAuthority();
+      if (kind === 'source') authority.projects.set('source', {
+        id: 'source', name: 'GitSpace', lifecycle: 'cloud-only', repositoryReference: source, baseBranch: 'trunk',
+        role: 'gitspace-source', source: { release: commit, branch: 'trunk', commit },
+        revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
+      });
+      const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), async projectId => {
+        const base = database.getBaseSpace(projectId);
+        if (!base) throw new Error('Missing cloned base');
+        const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: base.rootPath, spaceId: projectId, revision: 1 });
+        await project.gitRemote.publishCheckpoint({ binding: { projectId, repository: `workspace-${projectId}` }, repositoryPath: base.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit });
+      }, undefined, undefined, project.gitRemote);
+      const result = kind === 'source' ? await manager.openProject('source') : await manager.createProject({ name: 'Historical', repositoryUrl: source, baseBranch: null });
+      expect(result.project.lifecycle).toBe('active');
+      const base = database.getBaseSpace(result.project.id);
+      if (!base) throw new Error('Successful import lost its checkout');
+      expect(git(base.rootPath, 'rev-parse', 'HEAD')).toBe(commit);
+      expect(git(base.rootPath, 'rev-parse', 'HEAD^')).toBe(historical);
+      expect(git(base.rootPath, 'rev-parse', '--is-shallow-repository')).toBe('false');
+      expect(git(project.remote, 'rev-list', 'refs/heads/trunk')).toBe(commit);
+      expect(git(project.remote, 'show', `${commit}:README.txt`)).toBe('imported');
+      expect(git(source, 'rev-parse', 'HEAD^')).toBe(historical);
+    } finally {
+      project.restore();
+      database.close();
+    }
+  }, 120_000);
 
   it('preserves a cloud-only definition and leaves no fake local repository after a failed source clone', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-source-failed-'));

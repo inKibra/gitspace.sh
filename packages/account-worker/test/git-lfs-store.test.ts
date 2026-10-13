@@ -1,5 +1,5 @@
 import { lfsBytes, readLfs } from './git-lfs-fixture.js';
-import { env, runInDurableObject } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { deriveArtifactScopeKey } from '@gitspace/protocol';
 import { CHECKPOINT_CHUNK_BYTES, GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 import { describe, expect, it, vi } from 'vitest';
@@ -45,6 +45,8 @@ describe('account encrypted LFS ownership', () => {
     await expect(new AccountGitLfsStore(env.DATA, env.ACCOUNT_ID, projectId, new Uint8Array(32), noPin).get(object)).rejects.toThrow();
     await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
     await authority.lfsReleasePublication(publicationId);
+    // Release only schedules collection; it runs from the project authority's own alarm.
+    expect(await runDurableObjectAlarm(authority)).toBe(true);
     expect(await readLfs(store, object)).toBeNull();
   });
 
@@ -83,6 +85,7 @@ describe('account encrypted LFS ownership', () => {
     expect(await readLfs(store, object)).toEqual(bytes);
     await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
     await authority.lfsReleasePublication(publicationId);
+    expect(await runDurableObjectAlarm(authority)).toBe(true);
 
     expect(await readLfs(store, object)).toBeNull();
   });
@@ -143,6 +146,7 @@ describe('account encrypted LFS ownership', () => {
     });
     await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
     await authority.lfsReleasePublication(publicationId);
+    expect(await runDurableObjectAlarm(authority)).toBe(true);
     expect(await readLfs(store, object)).toBeNull();
     await authority.lfsPin({ publicationId: 'racing-publisher', objects: [object] });
   });
@@ -163,6 +167,7 @@ describe('account encrypted LFS ownership', () => {
     await expect(readLfs(store, object)).rejects.toThrow('integrity');
     await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
     await authority.lfsReleasePublication(publicationId);
+    expect(await runDurableObjectAlarm(authority)).toBe(true);
     expect(await env.DATA.head(path)).toBeNull();
     expect((await env.DATA.list({ prefix: `${path}.chunks/` })).objects).toEqual([]);
   });

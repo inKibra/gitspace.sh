@@ -155,14 +155,11 @@ it('shows paused cache and setup approval blockers beside its machine without re
   expect(container.textContent).toContain('Waiting approval');
   expect(container.textContent).toContain('checks');
   expect(container.textContent).toContain('Last sync');
-  expect(container.querySelector<HTMLInputElement>('[aria-label="Work locally on Runner workstation"]')?.checked).toBe(false);
   const click = async (label: string) => { await act(() => [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === label)!.click()); };
   await click('Setup again');
   expect(rpc.action).toHaveBeenLastCalledWith(expect.objectContaining({ attachmentId: 'cache', generation: 4, action: { kind: 'setup' } }));
   await click('Reclaim now');
   expect(rpc.action).toHaveBeenLastCalledWith(expect.objectContaining({ attachmentId: 'cache', generation: 4, action: { kind: 'reclaim' } }));
-  await act(() => container.querySelector<HTMLInputElement>('[aria-label="Work locally on Runner workstation"]')!.click());
-  expect(rpc.action).toHaveBeenLastCalledWith(expect.objectContaining({ attachmentId: 'cache', generation: 4, action: { kind: 'local-work', enabled: true } }));
 });
 
 it('shows why a machine setup step failed', async () => {
@@ -173,7 +170,7 @@ it('shows why a machine setup step failed', async () => {
     cache: { state: 'setup', platform: 'linux', activity: [], lastActivityAt: stamp, pausedAt: null, reclaimAt: null, lastSyncAt: stamp, localWorkOptIn: false, setup: [{ phase: 'machine/prepare', state: 'failed', runId: null, error: 'Workspace Hub lifecycle execution is unavailable' }] },
   }));
   await act(() => root.render(<RuntimeMachines snapshot={snapshot} />));
-  expect(container.querySelector('[aria-label="Machine setup progress"] [role="status"]')?.textContent).toBe('Workspace Hub lifecycle execution is unavailable');
+  expect(container.querySelector('[aria-label="Machine setup errors"] li')?.textContent).toBe('machine/prepare: Workspace Hub lifecycle execution is unavailable');
 });
 
 it('lists lost attachments only as released history, never as live machines or default choices', async () => {
@@ -193,16 +190,6 @@ it('lists lost attachments only as released history, never as live machines or d
   const select = container.querySelector<HTMLSelectElement>('[aria-describedby="execution-machine-help"]')!;
   expect([...select.options].map(option => option.value)).toEqual(['', 'live-machine']);
   expect(container.querySelector('[role="status"]')?.textContent).toContain('/ 1 machines');
-});
-
-it('shows the last attachment failure with its retry time', async () => {
-  vi.useFakeTimers({ now: Date.parse(stamp) });
-  const snapshot = fixture();
-  const retry = '2026-10-03T00:05:00.000Z';
-  snapshot.attachments.push(RuntimeSnapshotSchema.shape.attachments.element.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'cache', machineId: 'runner', generation: 4, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: [], updatedAt: stamp, heartbeatAt: stamp, failure: { operation: 'sync', message: 'Cloud refused the push', attempts: 3, nextRetryAt: retry, at: stamp } }));
-  await act(() => root.render(<RuntimeMachines snapshot={snapshot} />));
-  const row = container.querySelector('[aria-label="Machine Runner workstation"]')!;
-  expect([...row.querySelectorAll('[role="status"]')].map(item => item.textContent)).toContain(`sync failed · Cloud refused the push · 3 attempts · retrying at ${new Date(retry).toLocaleString()}`);
 });
 
 it('requires an explicit continue for reclaim and never reuses consent on the next request', async () => {

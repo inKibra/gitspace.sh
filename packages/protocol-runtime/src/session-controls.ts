@@ -33,7 +33,7 @@ export const AgentDefinitionSchema = z.object({ name: z.string(), description: z
 export const RuntimeSubagentRecordSchema = z.object({ parentId: z.string(), name: z.string(), requestedName: z.string().nullable().optional(), attemptId: z.string(), definition: AgentDefinitionSchema.nullable(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).nullable(), tools: z.array(z.string()), model: z.object({ provider: z.string(), modelId: z.string() }).nullable() });
 export type RuntimeSubagentRecord = z.infer<typeof RuntimeSubagentRecordSchema>;
 export const AgentDefinitionDiagnosticSchema = z.object({ name: z.string(), winnerPath: z.string(), ignoredPath: z.string() });
-export const AgentSetupSchema = z.object({ sessionId: z.string(), agents: z.array(AgentDefinitionSchema), diagnostics: z.array(AgentDefinitionDiagnosticSchema).optional() });
+export const AgentSetupSchema = z.object({ sessionId: z.string(), agents: z.array(AgentDefinitionSchema), diagnostics: z.array(AgentDefinitionDiagnosticSchema).optional(), definitionErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional() });
 const simple = ['control', 'agentSetup', 'historyAnchorId', 'messages', 'usage', 'persist', 'handoff', 'resume', 'stop', 'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'] as const;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),

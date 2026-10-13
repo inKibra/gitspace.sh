@@ -37,12 +37,12 @@ const ACTIVITY_KEEPS_MACHINE: Record<RuntimeCacheObservation['activity'][number]
 };
 
 /** Usable intent the cloud must never stop: opted-in local work, live activity or executions, setup or reclaim in
- * flight, a scheduled retry, or a reclaim waiting on the user (held-back LFS). Lost and detached hold nothing. */
+ * flight, an unresolved failure, or a reclaim waiting on the user (held-back LFS). Lost and detached hold nothing. */
 export function attachmentKeepsMachineRunning(attachment: RuntimeAttachment): boolean {
   if (attachment.state === 'lost' || attachment.state === 'detached') return false;
   if (attachment.state !== 'ready') return true;
   const cache = attachment.cache;
-  return (attachment.failure?.nextRetryAt ?? null) !== null
+  return attachment.failure != null
     || attachment.cacheAction?.status === 'requested' || attachment.cacheAction?.status === 'running'
     || (attachment.executionObservation?.activeExecutions ?? 0) > 0
     || (cache !== undefined && (cache.localWorkOptIn || cache.reclaimBlocked !== null

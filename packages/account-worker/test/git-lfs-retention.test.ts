@@ -45,6 +45,22 @@ describe('durable LFS restore roots', () => {
     });
   });
 
+  it('keeps migrated history in canonical storage across edits and origin confirmation until its root is deleted', async () => {
+    await ledger(value => {
+      const migration = { snapshotId: 'migration:workspace:source', workspaceId: 'workspace', kind: 'migration' as const, objects: [{ ...object, source: 'r2' as const }] };
+      value.snapshot(migration);
+      value.snapshot({ snapshotId: 'runtime:before', workspaceId: 'workspace', kind: 'runtime', objects: [{ ...object, source: 'r2' }] });
+      value.snapshot({ snapshotId: 'runtime:after', workspaceId: 'workspace', kind: 'runtime', objects: [] });
+      value.reconcile(new Set([migration.snapshotId, 'runtime:after']));
+      value.origin([{ ...object, location: { origin: 'https://origin.invalid/repo.git', endpoint: 'https://lfs.invalid/objects' } }]);
+      expect(value.snapshots().find(snapshot => snapshot.snapshotId === migration.snapshotId)).toEqual(migration);
+      expect(value.candidates()).toEqual([]);
+      expect(value.beginDelete(object)).toBe(false);
+      value.reconcile(new Set());
+      expect(value.candidates()).toEqual([object]);
+    });
+  });
+
   it('does not begin deletion of an object owned by a current or pending publication', async () => {
     await ledger(value => {
       value.retain('publication:pending', [object]);
@@ -85,6 +101,33 @@ describe('durable LFS restore roots', () => {
     missing = true;
     await expect(canonicalLfsObjects({ get: async () => repo }, ['canonical'], fetcher)).rejects.toThrow('unavailable');
     expect(revoked).toBe(2);
+  });
+
+  it('retains pointers above an advertised shallow boundary without tolerating missing required objects', async () => {
+    const head = '1'.repeat(40), absentParent = '2'.repeat(40), tree = '3'.repeat(40), blob = '4'.repeat(40);
+    const packet = (line: string) => `${(line.length + 4).toString(16).padStart(4, '0')}${line}`;
+    let missing: 'commit' | 'tree' | 'blob' | null = null;
+    let declared = true;
+    const repo = {
+      async info(): Promise<ArtifactsRepoInfo> { return { id: 'repo', name: 'repo', remote: 'https://git.invalid/repo.git', description: null, defaultBranch: 'main', createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false }; },
+      async createToken(): Promise<ArtifactsCreateTokenResult> { return { id: 'token', plaintext: 'secret', scope: 'read', expiresAt: '' }; },
+      async revokeToken() { return true; },
+      async readCommit(oid: string): Promise<ArtifactsCommitMetadata | null> {
+        if (oid !== head || missing === 'commit') return null;
+        return { hash: head, treeHash: tree, parents: [absentParent], message: '', author: { name: 'Fixture', email: 'f@example.invalid' }, committer: { name: 'Fixture', email: 'f@example.invalid' }, authoredAt: 0, committedAt: 0 };
+      },
+      async readTree(): Promise<ArtifactsTreeEntry[] | null> { return missing === 'tree' ? null : [{ name: 'asset', hash: blob, mode: '100644', type: 'blob' }]; },
+      async readBlob() { return missing === 'blob' ? null : new Blob([`version https://git-lfs.github.com/spec/v1\noid sha256:${object.oid}\nsize ${object.size}\n`]); },
+    };
+    const fetcher: typeof fetch = async () => new Response(packet('# service=git-upload-pack\n') + '0000' + packet(`${head} refs/heads/main\0shallow\n`) + (declared ? packet(`shallow ${head}\n`) : '') + '0000');
+    expect(await canonicalLfsObjects({ get: async () => repo }, ['canonical'], fetcher)).toEqual([object]);
+    for (const required of ['commit', 'tree', 'blob'] as const) {
+      missing = required;
+      await expect(canonicalLfsObjects({ get: async () => repo }, ['canonical'], fetcher)).rejects.toThrow('unavailable');
+    }
+    missing = null;
+    declared = false;
+    await expect(canonicalLfsObjects({ get: async () => repo }, ['canonical'], fetcher)).rejects.toThrow('unavailable');
   });
 
   it('does not retain a stale portable close inventory', async () => {

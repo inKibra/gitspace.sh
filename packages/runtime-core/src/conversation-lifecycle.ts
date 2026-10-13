@@ -1,7 +1,7 @@
 import { defineDoc, type Harness, type Storage, type Cursor, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { RuntimeHarnessOptions } from './harness.js';
-import { SessionControlsDoc } from './session-controls.js';
+import { applyInferenceThinking, SessionControlsDoc } from './session-controls.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { z } from 'zod';
 import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
@@ -60,6 +60,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, conversation.id, context))?.selection ?? { kind: 'default' as const };
       const model = await options.admitInference({ conversationId: id, requestId: event.requestId, selection });
       await options.configureModel(conversation.id, model);
+      await applyInferenceThinking(conversation, model);
       const content = event.sender ? `Message from ${event.sender.name} (${event.sender.id}):\n${event.text}` : `${event.kind}:\n${event.text}`;
       await conversation.submit({ type: 'input', requestId: event.requestId, content, whenBusy: 'followUp' }, context);
       await conversation.commit(async tx => { const draft = await tx.doc(ConversationLifecycleDoc, conversation.id); const stored = draft.events.find(item => item.event.requestId === event.requestId); if (stored) stored.delivered = true; }, context);

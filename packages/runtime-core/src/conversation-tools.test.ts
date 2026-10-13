@@ -10,9 +10,10 @@ import { createConversationTools } from './conversation-tools.js';
 import { createConversationLifecycle, type ConversationLifecycle } from './conversation-lifecycle.js';
 import { createBackgroundAgentTask } from './background-agents.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
-import { SessionControlsDoc, createSessionControls, parseCloudAgentDefinition } from './session-controls.js';
+import { SessionControlsDoc, createSessionControls, parseCloudAgentDefinition, sessionControlsExtension } from './session-controls.js';
 import { PlanDoc, WorkspaceDoc } from './documents.js';
 import type { RuntimeHarnessOptions } from './harness.js';
+import { resolveModelSelection, resolveProfileModel } from './inference/admission.js';
 
 const context = BACKGROUND_CONTEXT;
 const model: Model<Api> = { id: 'child-fixture', name: 'Child fixture', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
@@ -25,20 +26,31 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const backgroundAgentTask = createBackgroundAgentTask(async event => (await ready.promise).deliver(event));
   const tools = ['read', 'write', 'agents'].map(name => defineTool({ name, description: name, parameters: Type.Object({}), async execute() { return { content: [{ type: 'text' as const, text: name }] }; } }));
   registry.install(defineExtension({ name: 'proof.agents', tasks: [Owner, backgroundAgentTask], tools }));
+  registry.install(sessionControlsExtension);
   const seen: string[] = [];
+  const requests: Array<{ model: string; reasoning: NonNullable<Parameters<Models['streamSimple']>[2]>['reasoning'] }> = [];
   const backgroundReceived = Promise.withResolvers<void>();
-  const models: Models = { ...createModels(), getModel: (_provider, id) => ({ ...model, id }), streamSimple(selected, input) {
+  const available = ['file-model', 'role-model', 'default-model', 'parent-only-model'].map(id => ({ ...model, id }));
+  const settings = { modelRoles: { default: 'test/default-model:high', review: ['other/role-model:low', 'pi/reviewer'], reviewer: 'test/role-model:medium' } };
+  const models: Models = { ...createModels(), getModels: provider => available.filter(model => provider === undefined || model.provider === provider), getAvailable: async () => available, getModel: (_provider, id) => ({ ...model, id }), streamSimple(selected, input, options) {
     seen.push(JSON.stringify({ model: selected.id, system: input.systemPrompt, messages: input.messages }));
+    requests.push({ model: selected.id, reasoning: options?.reasoning });
     if (JSON.stringify(input.messages).includes('Message from BackgroundReviewer')) backgroundReceived.resolve();
     const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: selected.id, stopReason: 'stop', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(reply); return stream;
   } };
-  const harness = await Harness.open(storage, { registry, models, settings: { compaction: { enabled: false } } }, context);
+  const harness = await Harness.open(storage, { registry, models, settings: { extensions: registry.snapshot().installed(), compaction: { enabled: false } } }, context);
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: 'parent-only-model' }, thinkingLevel: 'max', instructions: 'PRIVATE PARENT PERSONA', tools } });
   await root.commit(async tx => { const state = await tx.doc(SessionControlsDoc, root.id); state.definitions = files ? [] : [definition]; state.fastMode = true; state.approvalMode = 'yolo'; state.role = 'parent'; state.selection = { kind: 'explicit', provider: 'test', modelId: 'parent-only-model' }; }, context);
-  const catalog = async () => ({ models: [{ provider: 'test', id: 'file-model', name: 'File model', contextWindow: 100000 }], roles: [{ id: 'review', label: 'Reviewer role', provider: 'test', model: 'role-model', thinking: 'medium', current: false }] });
-  const admitInference: RuntimeHarnessOptions['admitInference'] = async ({ selection }) => selection?.kind === 'explicit' ? { provider: selection.provider, modelId: selection.modelId } : { provider: 'test', modelId: selection?.kind === 'role' ? 'role-model' : 'default-model' };
-  const configureModel = async (id: ConversationId, selected: ModelRef) => { const child = await harness.conversation(id, context); if (!child) throw new Error('Missing child'); const metadata = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child; await child.configure({ model: selected, tools: metadata ? tools.filter(tool => metadata.tools.includes(tool.name)) : tools }, context); };
+  const catalog = async () => {
+    const role = resolveProfileModel(settings, models, 'review');
+    return { models: available.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })), roles: [{ id: 'review', label: 'Reviewer role', provider: role.model.provider, model: role.model.id, thinking: role.thinking, current: false }] };
+  };
+  const admitInference: RuntimeHarnessOptions['admitInference'] = async ({ selection }) => {
+    const selected = await resolveModelSelection(settings, models, selection ?? { kind: 'default' });
+    return { provider: selected.model.provider, modelId: selected.model.id, thinking: selected.thinking };
+  };
+  const configureModel = async (id: ConversationId, selected: ModelRef) => { const child = await harness.conversation(id, context); if (!child) throw new Error('Missing child'); const metadata = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child; await child.configure({ model: { provider: selected.provider, modelId: selected.modelId }, tools: metadata ? tools.filter(tool => metadata.tools.includes(tool.name)) : tools }, context); };
   const lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, wake: async () => {} }); ready.resolve(lifecycle);
   const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog, refreshDefinitions: target => controls.loadDefinitions(target) });
   const browserTargets: string[] = [];
@@ -74,7 +86,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
     await child.waitForIdle(context);
     return { output, child };
   }
-  return { harness, root, storage, lifecycle, call, spawned, seen, controls, browserTargets, backgroundReceived: backgroundReceived.promise };
+  return { harness, root, storage, lifecycle, call, spawned, seen, requests, controls, browserTargets, backgroundReceived: backgroundReceived.promise };
 }
 
 test('both agent directories accept declared names and invalid paths explain both choices', () => {
@@ -107,6 +119,74 @@ test.each([false, true])('canonical agent name wins discovery and spawn regardle
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 });
 
+test.each([
+  { metadata: 'tools: read, write', error: /disallowed non-read-only tools/u },
+  { metadata: 'model: test/unadmitted-model', error: /not admitted/u },
+  { metadata: 'tools: [', error: /sequence/iu },
+])('invalid repository definitions do not block root prompts and clear on correction or removal ($metadata)', async ({ metadata, error }) => {
+  const invalidContent = `---\nname: unavailable\n${metadata}\n---\nUNAVAILABLE PERSONA`;
+  const invalid = { path: '.omp/agents/legacy.md', content: invalidContent };
+  const valid = { path: '.agents/agents/reviewer.md', content: '---\nname: reviewer\ntools: read\n---\nVALID PERSONA' };
+  const files = [invalid, valid];
+  const f = await fixture('spawns', files);
+  try {
+    await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Proceed despite unavailable definitions' });
+    await f.root.waitForIdle(context);
+    const report = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup!;
+    expect(report.agents.map(agent => agent.path)).toEqual([valid.path]);
+    expect(report.definitionErrors).toEqual([{ path: invalid.path, message: expect.stringMatching(error) }]);
+    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.definitionErrors).toEqual(report.definitionErrors);
+    const rootTurn = JSON.parse(f.seen[0]!);
+    const systemText = (turn: { messages: Array<{ role: string; sections?: Record<string, string | null> }> }) => turn.messages.filter(message => message.role === 'system' && message.sections && 'session-controls' in message.sections).at(-1)?.sections?.['session-controls'] ?? '';
+    expect(JSON.stringify(rootTurn.messages)).toContain('Proceed despite unavailable definitions');
+    expect(systemText(rootTurn)).toContain(invalid.path);
+    expect(systemText(rootTurn)).toContain(report.definitionErrors![0]!.message);
+    expect(systemText(rootTurn)).not.toContain('UNAVAILABLE PERSONA');
+    for (const agent of ['unavailable', invalid.path]) await expect(f.call({ op: 'spawn', agent, task: 'Must not run' })).rejects.toThrow('Requested agent definition not found');
+    const available = await f.spawned({ op: 'spawn', agent: 'reviewer', task: 'Inspect' });
+    expect((await available.child.agent(context)).instructions).toContain('VALID PERSONA');
+    expect((await f.controls.execute(String(available.child.id), { type: 'agentSetup' })).setup?.definitionErrors).toEqual([]);
+
+    invalid.content = '---\nname: unavailable\ntools: read\n---\nCORRECTED PERSONA';
+    const corrected = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup!;
+    expect(corrected.definitionErrors).toEqual([]);
+    const restored = await f.spawned({ op: 'spawn', agent: 'unavailable', task: 'Inspect corrected definition' });
+    expect((await restored.child.agent(context)).instructions).toContain('CORRECTED PERSONA');
+    expect((await restored.child.agent(context)).tools.map(tool => tool.name)).toEqual(['read', 'agents']);
+
+    invalid.content = invalidContent;
+    await expect(f.call({ op: 'spawn', agent: 'unavailable', task: 'Do not reuse the previous valid definition' })).rejects.toThrow('Requested agent definition not found');
+    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.definitionErrors).toEqual(report.definitionErrors);
+    files.splice(0, 1);
+    const removed = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup!;
+    expect(removed.agents.map(agent => agent.path)).toEqual([valid.path]);
+    expect(removed.definitionErrors).toEqual([]);
+    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.definitionErrors).toEqual([]);
+    await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Proceed after removal' });
+    await f.root.waitForIdle(context);
+    expect(systemText(JSON.parse(f.seen.at(-1)!))).not.toContain(invalid.path);
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
+test('strict cloud saves replace unavailable repository definitions and mask same-path errors', async () => {
+  const file = { path: '.omp/agents/reviewer.md', content: '---\nname: reviewer\ntools: write\n---\nINVALID PERSONA' };
+  const f = await fixture('spawns', [file]);
+  try {
+    await expect(f.controls.execute(String(f.root.id), { type: 'saveAgentDefinition', path: file.path, expectedRevision: null, content: file.content })).rejects.toThrow(/disallowed non-read-only tools/u);
+    await expect(f.controls.execute(String(f.root.id), { type: 'saveAgentDefinition', path: file.path, expectedRevision: null, content: '---\nmodel: test/unadmitted-model\n---\nInspect' })).rejects.toThrow(/not admitted/u);
+    const saved = (await f.controls.execute(String(f.root.id), { type: 'saveAgentDefinition', path: file.path, expectedRevision: null, content: '---\nname: reviewer\ntools: read\n---\nCLOUD PERSONA' })).setup!;
+    expect(saved.definitionErrors).toEqual([]);
+    expect(saved.agents).toEqual([expect.objectContaining({ path: file.path, source: 'cloud', tools: ['read'] })]);
+    file.content = '---\nmodel: test/unadmitted-model\n---\nCHANGED INVALID PERSONA';
+    const refreshed = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup!;
+    expect(refreshed.definitionErrors).toEqual([]);
+    expect(refreshed.agents).toEqual(saved.agents);
+    const { child } = await f.spawned({ op: 'spawn', agent: 'reviewer', task: 'Use saved override' });
+    expect((await child.agent(context)).instructions).toContain('CLOUD PERSONA');
+    expect((await child.agent(context)).tools.map(tool => tool.name)).toEqual(['read', 'agents']);
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
 test('legacy-only discovery refreshes before spawn when canonical files appear', async () => {
   const files = [{ path: '.omp/agents/reviewer.md', content: 'Legacy instructions' }];
   const f = await fixture('spawns', files);
@@ -128,6 +208,7 @@ test('role and file children independently resolve selection, persona, thinking 
     expect((await role.child.agent(context)).thinkingLevel).toBe('medium');
     expect((await file.child.agent(context)).model?.modelId).toBe('file-model');
     expect((await file.child.agent(context)).thinkingLevel).toBe('low');
+    expect(f.requests.map(value => value.reasoning)).toEqual(['medium', 'low']);
     expect((await file.child.agent(context)).tools.map(tool => tool.name)).toEqual(['read', 'agents']);
     expect((await role.child.agent(context)).tools.map(tool => tool.name)).not.toContain('write');
     expect(f.seen.join('\n')).not.toContain('PRIVATE PARENT PERSONA');
@@ -214,5 +295,71 @@ test.each(childMutations)('a child session rejects $type before workspace or bro
       await f.controls.execute(String(f.root.id), command, true);
       expect(f.browserTargets).toEqual([String(f.root.id)]);
     }
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
+test('passive controls leave approval unadopted until a prompt is admitted and preserve explicit overrides', async () => {
+  const f = await fixture();
+  try {
+    await f.root.commit(async tx => { (await tx.doc(SessionControlsDoc, f.root.id)).approvalMode = null; }, context);
+    await f.controls.execute(String(f.root.id), { type: 'control' });
+    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.approvalMode).toBeNull();
+    const admitted = await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Admit using the configured approval default.' });
+    await f.root.waitForIdle(context);
+    expect(admitted.control.approvalMode).toBe('write');
+    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.approvalMode).toBe('write');
+    await f.controls.execute(String(f.root.id), { type: 'setApproval', approvalMode: 'always-ask' }, true);
+    const overridden = await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Keep my explicit approval override.' });
+    await f.root.waitForIdle(context);
+    expect(overridden.control.approvalMode).toBe('always-ask');
+    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.approvalMode).toBe('always-ask');
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
+test('default and named admissions apply effort while explicit conversation thinking wins until cycling roles', async () => {
+  const f = await fixture();
+  try {
+    await f.root.commit(async tx => { const controls = await tx.doc(SessionControlsDoc, f.root.id); controls.selection = { kind: 'default' }; controls.role = null; }, context);
+    await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Use the default role.' });
+    await f.root.waitForIdle(context);
+    for (const thinking of ['low', null] as const) {
+      await f.controls.execute(String(f.root.id), { type: 'setThinking', thinking });
+      await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Keep my explicit thinking.' });
+      await f.root.waitForIdle(context);
+      expect((await f.root.agent(context)).thinkingLevel).toBe(thinking ?? 'off');
+    }
+    await f.controls.execute(String(f.root.id), { type: 'cycleRole', direction: 'forward' });
+    await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Use the named role.' });
+    await f.root.waitForIdle(context);
+    await f.controls.execute(String(f.root.id), { type: 'setModel', provider: 'test', model: 'file-model' });
+    await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Use the selected model without inheriting the previous role effort.' });
+    await f.root.waitForIdle(context);
+    expect(f.requests.map(value => value.reasoning)).toEqual(['high', 'low', undefined, 'medium', undefined]);
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
+test('file alternatives retain only the selected suffix and explicit frontmatter overrides it', async () => {
+  const files = [
+    { path: '.agents/agents/suffixed.md', content: '---\nmodel: [test/missing:low, test/file-model:high]\n---\nInspect suffix' },
+    { path: '.agents/agents/override.md', content: '---\nmodel: pi/review:high\nthinking: low\n---\nInspect override' },
+    { path: '.agents/agents/default.md', content: 'Inspect using profile default' },
+  ];
+  const f = await fixture('spawns', files);
+  try {
+    for (const agent of ['suffixed', 'override', 'default']) await f.spawned({ op: 'spawn', agent, task: 'Inspect' });
+    expect(f.requests).toEqual([
+      { model: 'file-model', reasoning: 'high' }, { model: 'role-model', reasoning: 'low' }, { model: 'default-model', reasoning: 'high' },
+    ]);
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
+test('persisted conversation effort predating role effort remains an explicit override', async () => {
+  const f = await fixture();
+  try {
+    await f.root.configure({ thinkingLevel: 'low' }, context);
+    await f.root.commit(async tx => { const controls = await tx.doc(SessionControlsDoc, f.root.id); controls.selection = { kind: 'default' }; delete controls.thinkingSelection; }, context);
+    await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Keep my saved thinking override.' });
+    await f.root.waitForIdle(context);
+    expect(f.requests).toEqual([{ model: 'default-model', reasoning: 'low' }]);
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 });

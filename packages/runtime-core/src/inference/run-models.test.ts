@@ -23,7 +23,17 @@ it('dispatches the signal-bound admission even when the picker changes the model
   });
   const first = new AbortController();
   const second = new AbortController();
-  const router = createRunModelsRouter(models, async signal => ({ ...models, getModel: () => signal === first.signal ? original : next }));
+  const router = createRunModelsRouter(null, async signal => ({ ...models, getModel: () => signal === first.signal ? original : next }));
+  expect(router.models.getModels()).toEqual([]);
+  router.register(models);
+  expect(router.models.getProviders().map(provider => provider.id)).toEqual(['test']);
+  expect(router.models.getProvider('test')?.id).toBe('test');
+  expect(router.models.getModels()).toEqual([original, next]);
+  expect(router.models.getAllModels()).toEqual([original, next]);
+  expect(router.models.getModelsOfType('chat', 'test')).toEqual([original, next]);
+  expect(await router.models.getAvailable()).toEqual([original, next]);
+  expect(await router.models.getAllAvailable()).toEqual([original, next]);
+  expect(await router.models.getAvailableOfType('chat', 'test')).toEqual([original, next]);
   const [inFlight, newAdmission] = await Promise.all([
     router.models.completeSimple(next, { messages: [] }, { signal: first.signal }),
     router.models.completeSimple(next, { messages: [] }, { signal: second.signal }),

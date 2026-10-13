@@ -34,7 +34,13 @@ import { fetchInternalService, isHostedServiceHostname } from './service-access.
 import { ServiceSessions, ServiceSessionSchema, type ServiceSession, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, browserRelayArchive } from './browser-relay.js';
 import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
-export * from './application.js';
+export {
+  AccountStateDO, CredentialVaultDO, FleetCatalogDO, HostedRouteRegistryDO,
+  ProjectAuthorityDO, ProjectCronsDO, ProjectSecretsDO, SpaceAuthorityDO,
+  SpaceContextDO, TenantReleasesDO, UserMcpConnectionsDO, UserProjectIndexDO,
+  UserSettingsDO, UserSkillsDO, UserStorageDO,
+} from './application.js';
+export { SavedTranscriptIndexDO } from './saved-transcript-index-do.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
 const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : 'channel';

@@ -65,13 +65,12 @@ describe('isomorphic environment decisions', () => {
     expect(context.apply(claim('identity', { interactive: false })).claim?.status).toBe('existing');
   });
 
-  it('requires explicit protected execution for approved interactive script bytes', () => {
+  it('skips approved interactive script bytes without a terminal and runs them only in a protected run', () => {
     const context = scenario();
     context.apply({ op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'prepare', kind: 'script', label: 'Prepare', command: '01-prepare.sh', content: '# gitspace: interactive\nread value', fileName: '01-prepare.sh', phase: 'machine/prepare', hash }] });
-    let failure: unknown;
-    try { context.apply(claim('automatic')); } catch (error) { failure = error; }
-    expect(environmentFailure(failure)?.code).toBe('InteractionRequired');
-    expect(context.apply(claim('manual', { interactive: true })).runs[0]).toMatchObject({ status: 'accepted', interactive: true });
+    expect(context.apply(claim('automatic')).runs[0]).toMatchObject({ status: 'accepted', interactive: false, executionHashes: [] });
+    context.apply(finish('automatic'));
+    expect(context.apply(claim('manual', { interactive: true })).runs[0]).toMatchObject({ status: 'accepted', interactive: true, executionHashes: [hash] });
   });
   it('authorizes explicit client lifecycle control without impersonating a browser or bypassing recovery proof', () => {
     const context = scenario();

@@ -2,6 +2,7 @@ import type { ConversationId, EntryId, Storage } from '@earendil-works/pi-durabl
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { TranscriptProjector, previewTranscriptItem, transcriptPageRequestSchema, transcriptContentRequestSchema, TRANSCRIPT_PAGE_ROWS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_CONTENT_CHUNK_CHARACTERS, type TranscriptItem, type TranscriptRow, type TranscriptPageRequest, type TranscriptPage, type TranscriptContentRequest, type TranscriptContentPage } from '@gitspace/blocks';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { LegacyHistoryBoundary, legacyHistoryProjection, readLegacyHistoryEvent } from '@gitspace/runtime-core';
 
 /** Disposable SQLite projection of immutable Pi entries. Cold builds stream ancestry;
  * warm reads visit only appended entries and bounded preview/content windows. */
@@ -66,8 +67,15 @@ export function createTranscriptIndex(durable: DurableObjectStorage, storage: St
         const found = await storage.entry(next.entry as EntryId, BACKGROUND_CONTEXT);
         if (!found) throw new Error('Transcript source entry unavailable');
         const entry = found.entry;
+        const legacy = await readLegacyHistoryEvent(storage, entry);
         durable.transactionSync(() => {
           let ordinal = Number(entry.id) * 1024;
+          if (legacy) projector.apply({ ...legacyHistoryProjection(legacy), sessionId: `pi:${id}`, ordinal: ordinal++ });
+          if (LegacyHistoryBoundary.is(entry)) {
+            projector.apply({ sessionId: `pi:${id}`, ordinal: ordinal++, kind: 'agent_end', payload: {} });
+            projector.apply({ sessionId: `pi:${id}`, ordinal: ordinal++, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.legacy-history', display: true, content: entry.data.text } } });
+            projector.apply({ sessionId: `pi:${id}`, ordinal: ordinal++, kind: 'agent_end', payload: {} });
+          }
           for (const source of entry.model ?? []) {
             let message = source;
             if (source.role === 'toolResult' && source.details && typeof source.details === 'object' && 'executorResultReference' in source.details) {

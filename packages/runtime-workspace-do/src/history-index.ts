@@ -5,6 +5,7 @@ import type { SessionHistoryService } from '@gitspace/runtime-core/session-contr
 import { createTranscriptIndex } from './transcript-index.js';
 import { readCloudUsage } from './usage.js';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { LegacyHistoryChunk, LegacyHistoryEntry } from '@gitspace/runtime-core';
 
 type Branch = { id: number; family: number; leaf: string | null };
 type RecallRow = { parentId: string | null; prompt: string | null; tokens: number | null };
@@ -44,9 +45,13 @@ export function createHistoryIndex(durable: DurableObjectStorage, storage: Stora
     sql.exec('UPDATE runtime_history_progress SET conversation=? WHERE id=1', Number(record.id));
   }
   function addEntry(record: EntryRecord) {
+    if (LegacyHistoryChunk.is(record)) {
+      sql.exec('UPDATE runtime_history_progress SET entry=? WHERE id=1', Number(record.id));
+      return;
+    }
     const owner = branch(Number(record.conversationId));
     if (!owner) throw new Error('History owner index is unavailable');
-    const metadata = sourceHistoryMetadata(record.model?.[0]);
+    const metadata = LegacyHistoryEntry.is(record) ? record.data.metadata : sourceHistoryMetadata(record.model?.[0]);
     const promptText = (record.model ?? []).filter(message => message.role === 'user').flatMap(message => typeof message.content === 'string' ? [message.content] : message.content.filter(part => part.type === 'text').map(part => part.text)).join('\n');
     const assistant = record.model?.find(message => message.role === 'assistant');
     const tokens = assistant?.role === 'assistant' ? assistant.usage.input + assistant.usage.cacheRead + assistant.usage.cacheWrite : null;

@@ -315,13 +315,13 @@ describe('ProjectAuthorityDO', () => {
             revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
           );`);
       }
-      const initial = authority.putCanonicalSession({
+      const initial = await authority.putCanonicalSession({
         id: `session-${projectId}`, workspaceId: projectId, ompSessionId: '1', machineId: 'machine-a',
         state: 'active', sessionObjectKey: 'retained/session.jsonl', sessionObjectHash: `sha256:${'b'.repeat(64)}`,
         sessionFormatVersion: 'omp-jsonl-1', activity: { active: true, reasons: [{ kind: 'turn' }] },
         health: { revision: 3, issues: {} }, expectedRevision: 0,
       });
-      const retained = authority.putCanonicalSession({ ...initial, id: `session-${projectId}-a`, workspaceId: `${projectId}-a`, ompSessionId: '2', machineId: null, state: 'closed', expectedRevision: 0 });
+      const retained = await authority.putCanonicalSession({ ...initial, id: `session-${projectId}-a`, workspaceId: `${projectId}-a`, ompSessionId: '2', machineId: null, state: 'closed', expectedRevision: 0 });
       await authority.alarm();
       let reopened = new ProjectAuthorityDO(state, env);
       await state.blockConcurrencyWhile(async () => {});
@@ -329,19 +329,19 @@ describe('ProjectAuthorityDO', () => {
       expect(reopened.getCanonicalSession(retained.id)).toEqual(retained);
       for (const workspaceId of spaces.slice(1)) {
         const existing = reopened.getCanonicalSession(`session-${workspaceId}`);
-        reopened.putCanonicalSession({ ...initial, id: `session-${workspaceId}`, workspaceId, expectedRevision: existing?.revision ?? 0 });
+        await reopened.putCanonicalSession({ ...initial, id: `session-${workspaceId}`, workspaceId, expectedRevision: existing?.revision ?? 0 });
       }
       const beforeReopen = reopened.listCanonicalSessions();
       expect(beforeReopen.map(session => session.workspaceId).sort()).toEqual([...spaces].sort());
       expect(beforeReopen.map(session => session.ompSessionId)).toEqual(['1', '1', '1']);
-      expect(() => reopened.putCanonicalSession({ ...initial, id: 'duplicate-space', ompSessionId: '2', expectedRevision: 0 })).toThrow();
+      await expect(reopened.putCanonicalSession({ ...initial, id: 'duplicate-space', ompSessionId: '2', expectedRevision: 0 })).rejects.toThrow();
       await reopened.alarm();
       reopened = new ProjectAuthorityDO(state, env);
       await state.blockConcurrencyWhile(async () => {});
       expect(reopened.listCanonicalSessions()).toEqual(beforeReopen);
-      const updated = reopened.putCanonicalSession({ ...initial, state: 'closed', expectedRevision: initial.revision });
+      const updated = await reopened.putCanonicalSession({ ...initial, state: 'closed', expectedRevision: initial.revision });
       expect(updated).toEqual({ ...initial, state: 'closed', revision: initial.revision + 1, updatedAt: updated.updatedAt });
-      expect(() => reopened.putCanonicalSession({ ...initial, id: 'duplicate-after-reopen', ompSessionId: '3', expectedRevision: 0 })).toThrow();
+      await expect(reopened.putCanonicalSession({ ...initial, id: 'duplicate-after-reopen', ompSessionId: '3', expectedRevision: 0 })).rejects.toThrow();
       await reopened.alarm();
     });
   });

@@ -12,6 +12,7 @@
     "test": "bun ../../scripts/test-isolated.ts test"
   },
   "dependencies": {
+    "@gitspace/account-machine": "workspace:*",
     "@gitspace/deployment": "workspace:*",
     "@noble/curves": "^2.2.0",
     "@gitspace/protocol": "workspace:*",

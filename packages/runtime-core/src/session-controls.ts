@@ -1,4 +1,4 @@
-import { InboxDoc, UsageDoc, defineDoc, defineExtension, type ToolExecutionApi, type Harness, type Conversation, type ConversationId, type ModelRef, type EntryRecord, type EntryId, type Cursor } from '@earendil-works/pi-durable';
+import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type ToolExecutionApi, type Harness, type Conversation, type ConversationId, type ModelRef, type EntryId, type Cursor } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { Context, JsonValue } from '@earendil-works/chord';
 import { z } from 'zod';
@@ -6,7 +6,7 @@ import { parse as parseYaml } from 'yaml';
 import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type AgentSetupView, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc } from './documents.js';
 import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRequest } from '@gitspace/protocol-agent';
-import type { RuntimeHarnessOptions } from './harness.js';
+import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, type RuntimeBrowserApprovalCard, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage } from '@gitspace/protocol-runtime';
@@ -14,11 +14,26 @@ import { isSubagentReadonlyTool, isSubagentToolCallAllowed, runtimeOperationIsRe
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { cronHasOutstanding } from './cron.js';
+import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/protocol/inference';
 
-const ThinkingSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+const ThinkingSchema = modelRoleThinkingSchema.unwrap();
+const ThinkingSelectionSchema = z.discriminatedUnion('source', [z.object({ source: z.literal('profile') }), z.object({ source: z.literal('conversation'), thinking: modelRoleThinkingSchema })]);
 // `approvalMode` is null until the conversation first needs it; it then adopts its inference profile's default once.
-const ControlsSchema = z.object({ revision: z.number(), settingsRevision: z.number(), instructionsRevision: z.number(), inferenceRevision: z.number(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), fastMode: z.boolean(), approvalMode: SessionControlSchema.shape.approvalMode.nullable(), goal: SessionControlSchema.shape.goal, definitions: z.array(AgentDefinitionSchema) });
-export const SessionControlsDoc = defineDoc<z.infer<typeof ControlsSchema>>({ kind: 'gitspace.session-controls', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ revision: 0, settingsRevision: 0, instructionsRevision: 0, inferenceRevision: 0, selection: { kind: 'default' }, role: null, fastMode: false, approvalMode: null, goal: null, definitions: [] }) });
+const ControlsSchema = z.object({ revision: z.number(), settingsRevision: z.number(), instructionsRevision: z.number(), inferenceRevision: z.number(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), thinkingSelection: ThinkingSelectionSchema.optional(), fastMode: z.boolean(), approvalMode: SessionControlSchema.shape.approvalMode.nullable(), goal: SessionControlSchema.shape.goal, definitions: z.array(AgentDefinitionSchema), definitionErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional() });
+export const SessionControlsDoc = defineDoc<z.infer<typeof ControlsSchema>>({ kind: 'gitspace.session-controls', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ revision: 0, settingsRevision: 0, instructionsRevision: 0, inferenceRevision: 0, selection: { kind: 'default' }, role: null, thinkingSelection: { source: 'profile' }, fastMode: false, approvalMode: null, goal: null, definitions: [] }) });
+/** An explicit session effort (including auto/null) wins until the user selects another role. */
+export async function applyInferenceThinking(target: Conversation, admission: InferenceModelAdmission): Promise<void> {
+  const thinking = await target.commit(async tx => {
+    const controls = await tx.doc(SessionControlsDoc, target.id);
+    if (!controls.thinkingSelection) {
+      // Older conversations stored explicit effort only on AgentDoc.
+      const thinking = (await tx.doc(AgentDoc, target.id)).thinkingLevel;
+      controls.thinkingSelection = thinking === undefined ? { source: 'profile' } : { source: 'conversation', thinking };
+    }
+    return controls.thinkingSelection.source === 'conversation' ? controls.thinkingSelection.thinking : admission.thinking;
+  }, BACKGROUND_CONTEXT);
+  await target.configure({ thinkingLevel: thinking ?? null }, BACKGROUND_CONTEXT);
+}
 export const SessionSelectionDoc = defineDoc<{ conversationId: string | null }>({ kind: 'gitspace.session-selection', version: 1, scope: 'session', initial: () => ({ conversationId: null }) });
 const GoalClockDoc = defineDoc<{ startedAt: number | null; elapsedSeconds: number; tokensAtStart: number }>({ kind: 'gitspace.goal-clock', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ startedAt: null, elapsedSeconds: 0, tokensAtStart: 0 }) });
 const DefinitionMetadataSchema = z.object({ name: z.string().min(1).optional(), description: z.string().default(''), model: z.union([z.string(), z.array(z.string())]).optional(), thinking: ThinkingSchema.nullable().optional(), tools: z.union([z.string(), z.array(z.string())]).optional(), spawns: z.union([z.string(), z.array(z.string())]).optional() });
@@ -51,7 +66,7 @@ export function resolveAgentDefinitions(definitions: readonly z.infer<typeof Age
 export const sessionControlsExtension = defineExtension({ name: 'gitspace.session-controls', sections: [{ key: 'session-controls', async render(input, context) {
   const controls = await input.read.snapshot(SessionControlsDoc, input.conversationId, context);
   if (!controls) return '';
-  return [controls.goal?.status === 'active' ? `Active goal: ${controls.goal.objective}` : '', ...resolveAgentDefinitions(controls.definitions).agents.map(definition => `Available agent ${definition.name}: ${definition.description}; model ${definition.modelSelectors.join(', ') || 'workspace default (independent of parent)'}; tools ${definition.tools.join(', ') || 'fixed read-only defaults'}. Invoke agents spawn with agent: "${definition.name}" and task; name is a separate optional address. This child uses only its saved instructions and retained repository rules.`)].filter(Boolean).join('\n\n');
+  return [controls.goal?.status === 'active' ? `Active goal: ${controls.goal.objective}` : '', ...(controls.definitionErrors ?? []).map(error => `Unavailable agent definition ${error.path}: ${error.message}`), ...resolveAgentDefinitions(controls.definitions).agents.map(definition => `Available agent ${definition.name}: ${definition.description}; model ${definition.modelSelectors.join(', ') || 'workspace default (independent of parent)'}; tools ${definition.tools.join(', ') || 'fixed read-only defaults'}. Invoke agents spawn with agent: "${definition.name}" and task; name is a separate optional address. This child uses only its saved instructions and retained repository rules.`)].filter(Boolean).join('\n\n');
 } }] });
 export async function committedSessionApproval(harness: Harness, conversationId: string, taskId: string) {
   const questions = await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT);
@@ -100,10 +115,11 @@ export interface SessionHistoryService {
   transcriptContent(target: ConversationId, request: TranscriptContentRequest): Promise<TranscriptContentPage>;
   usage(target: ConversationId, harness: Harness): Promise<SessionUsageReport>;
 }
-export type SessionCatalog = { models: SessionControlView['models']; roles: SessionControlView['roles']; inference?: SessionControlView['inference'] };
+/** A passive snapshot; an unavailable profile has no displayed default to adopt. */
+export type SessionCatalog = { models: SessionControlView['models']; roles: SessionControlView['roles']; inference?: SessionControlView['inference']; approvalDefault?: ApprovalMode };
 export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference' | 'setWorkspacePhase'> & {
   harness: Harness;
-  /** The inference profile's default approval mode for conversations that have not adopted one. */
+  /** Resolves the authoritative profile default on admission, never for passive control reads. */
   approvalDefault(): Promise<ApprovalMode>;
   root: Conversation;
   history: SessionHistoryService;
@@ -126,30 +142,58 @@ export function createSessionControls(services: SessionControlServices) {
   }
   async function definition(path: string, content: string, source: 'workspace' | 'cloud', catalog: SessionCatalog, previous?: z.infer<typeof AgentDefinitionSchema>): Promise<z.infer<typeof AgentDefinitionSchema>> {
     const parsed = parseCloudAgentDefinition(path, content);
-    const selections = parsed.modelSelectors.map(selector => {
-      const role = selector.startsWith('pi/') ? catalog.roles.find(value => value.id === selector.slice(3)) : undefined;
-      const model = role ? catalog.models.find(value => value.provider === role.provider && value.id === role.model) : catalog.models.find(value => `${value.provider}/${value.id}` === selector || value.id === selector);
-      return { role, model };
+    const selections = parsed.modelSelectors.map(value => {
+      const { selector, thinking } = parseModelRoleSelector(value);
+      const alias = selector.startsWith('pi/') ? selector.slice(3) : selector.startsWith('@') ? selector.slice(1) : undefined;
+      const role = alias === undefined ? undefined : catalog.roles.find(value => value.id === alias);
+      const model = role ? catalog.models.find(value => value.provider === role.provider && value.id === role.model) : alias === undefined ? catalog.models.find(value => `${value.provider}/${value.id}` === selector || value.id === selector) : undefined;
+      return { role, model, thinking };
     });
     const selected = selections.find(value => value.model !== undefined);
     if (parsed.modelSelectors.length && !selected) throw new Error(`Agent model selector for ${path} is not admitted by the inference profile`);
     const revision = previous?.content === content ? previous.revision : Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content))), value => value.toString(16).padStart(2, '0')).join('');
-    return { name: parsed.name, description: parsed.description, source, path, editable: true, content, revision, modelSelectors: parsed.modelSelectors, role: selected?.role?.id ?? null, provider: selected?.model?.provider ?? null, model: selected?.model?.id ?? null, thinking: parsed.thinking ?? selected?.role?.thinking ?? null, selection: parsed.modelSelectors.length ? 'definition' : 'settings', tools: parsed.tools, spawns: parsed.spawns };
+    return { name: parsed.name, description: parsed.description, source, path, editable: true, content, revision, modelSelectors: parsed.modelSelectors, role: selected?.role?.id ?? null, provider: selected?.model?.provider ?? null, model: selected?.model?.id ?? null, thinking: parsed.thinking ?? selected?.thinking ?? selected?.role?.thinking ?? null, selection: parsed.modelSelectors.length ? 'definition' : 'settings', tools: parsed.tools, spawns: parsed.spawns };
   }
   async function loadDefinitions(target: Conversation) {
     if (!services.loadAgentDefinitions || (await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child) return;
     const [files, catalog, state] = await Promise.all([services.loadAgentDefinitions(), services.catalog(), harness.snapshot(SessionControlsDoc, target.id, ctx)]);
     const previous = state?.definitions ?? [];
-    const loaded = await Promise.all(files.map(file => definition(file.path, file.content, 'workspace', catalog, previous.find(item => item.path === file.path))));
+    const results = await Promise.allSettled(files.map(file => definition(file.path, file.content, 'workspace', catalog, previous.find(item => item.path === file.path))));
     await target.commit(async tx => {
       const draft = await tx.doc(SessionControlsDoc, target.id);
       const overrides = draft.definitions.filter(item => item.source === 'cloud');
       const paths = new Set(overrides.map(item => item.path));
-      const merged = [...loaded.filter(item => !paths.has(item.path)), ...overrides];
-      if (JSON.stringify(draft.definitions) !== JSON.stringify(merged)) { draft.definitions = merged; draft.revision++; }
+      const loaded: z.infer<typeof AgentDefinitionSchema>[] = [];
+      const definitionErrors: NonNullable<AgentSetupView['definitionErrors']> = [];
+      for (let index = 0; index < results.length; index++) {
+        const path = files[index]!.path;
+        if (paths.has(path)) continue;
+        const result = results[index]!;
+        if (result.status === 'fulfilled') loaded.push(result.value);
+        else definitionErrors.push({ path, message: result.reason instanceof Error ? result.reason.message : String(result.reason) });
+      }
+      const merged = [...loaded, ...overrides];
+      if (JSON.stringify(draft.definitions) !== JSON.stringify(merged) || JSON.stringify(draft.definitionErrors ?? []) !== JSON.stringify(definitionErrors)) {
+        draft.definitions = merged;
+        draft.definitionErrors = definitionErrors;
+        draft.revision++;
+      }
     }, ctx);
   }
-  async function entries(target: Conversation) { const values: EntryRecord[] = []; let cursor: Cursor | undefined; do { const page = await target.entries({}, 100, cursor, ctx); values.push(...page.items); cursor = page.next; } while (cursor); return values; }
+  async function messages(target: Conversation): Promise<NonNullable<RuntimeSessionResult['messages']>> {
+    const values: NonNullable<RuntimeSessionResult['messages']> = [];
+    let cursor: Cursor | undefined;
+    do {
+      // Pi has no model/kind scan filter. Discard each bounded passive-payload page
+      // immediately; reverse messages within entries as well as the final result.
+      const page = await target.entries({}, 128, cursor, ctx);
+      for (const entry of page.items) {
+        for (let index = (entry.model?.length ?? 0) - 1; index >= 0; index--) values.push(entry.model![index]!);
+      }
+      cursor = page.next;
+    } while (cursor);
+    return values.reverse();
+  }
   async function control(target: Conversation): Promise<SessionControlView> {
     await target.commit(async tx => { await tx.doc(SessionControlsDoc, target.id); }, ctx);
     const [state, agent, inbox, usage, todos, questions, history, catalog, workspace] = await Promise.all([harness.snapshot(SessionControlsDoc, target.id, ctx), target.agent(ctx), harness.snapshot(InboxDoc, target.id, ctx), harness.snapshot(UsageDoc, target.id, ctx), harness.snapshot(TodosDoc, target.id, ctx), harness.snapshot(QuestionsDoc, ctx), services.history.recent(target.id), services.catalog(), harness.snapshot(WorkspaceDoc, ctx)]);
@@ -164,7 +208,10 @@ export function createSessionControls(services: SessionControlServices) {
     const context = tokens !== null && currentModel?.contextWindow ? { tokens, contextWindow: currentModel.contextWindow, percent: tokens / currentModel.contextWindow * 100 } : null;
     const clock = await harness.snapshot(GoalClockDoc, target.id, ctx);
     const goal = state.goal ? { ...state.goal, tokensUsed: Math.max(0, buckets.reduce((sum, value) => sum + value.totalTokens, 0) - (clock?.tokensAtStart ?? 0)), timeUsedSeconds: (clock?.elapsedSeconds ?? 0) + (clock?.startedAt === null || clock?.startedAt === undefined ? 0 : Math.max(0, (Date.now() - clock.startedAt) / 1000)) } : null;
-    return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role, roleLabel: child ? child.role : catalog.roles.find(role => role.id === state.role)?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? null, thinking: child ? child.thinking : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', approvalMode: await sessionApprovalMode(target, target.id, ctx, services.approvalDefault), context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null }] } : null };
+    // A missing profile displays a conservative mode without freezing it into the
+    // conversation. Actual admission/effects still resolve the authoritative default.
+    const approvalMode = state.approvalMode ?? catalog.approvalDefault ?? 'always-ask';
+    return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role, roleLabel: child ? child.role : catalog.roles.find(role => role.id === state.role)?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? null, thinking: child ? child.thinking : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', approvalMode, context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null }] } : null };
   }
   async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false): Promise<RuntimeSessionResult> {
     let target = await conversation(id);
@@ -189,15 +236,17 @@ export function createSessionControls(services: SessionControlServices) {
           const requestId = crypto.randomUUID();
           const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, target.id, ctx))?.selection ?? { kind: 'default' as const };
           const model = await services.admitInference({ conversationId: String(target.id), requestId, selection });
+          await sessionApprovalMode(target, target.id, ctx, services.approvalDefault);
           await services.configureModel(target.id, model);
+          await applyInferenceThinking(target, model);
           const cronOutstanding = await target.commit(tx => cronHasOutstanding(tx, target.id), ctx);
           await target.submit({ type: 'input', requestId, content: command.images?.length ? [{ type: 'text', text: command.text }, ...command.images] : command.text, whenBusy: cronOutstanding ? 'followUp' : command.streamingBehavior ?? 'followUp' }, ctx);
         });
         break;
       }
       case 'setModel': { const catalog = await services.catalog(); if (!catalog.models.some(model => model.provider === command.provider && model.id === command.model)) throw new Error('Model is not admitted by the inference profile'); await services.configureModel(target.id, { provider: command.provider, modelId: command.model }); await mutate(draft => { draft.role = null; draft.selection = { kind: 'explicit', provider: command.provider, modelId: command.model }; }); break; }
-      case 'setThinking': await target.configure({ thinkingLevel: command.thinking === null ? null : ThinkingSchema.parse(command.thinking) }, ctx); break;
-      case 'cycleRole': { const catalog = await services.catalog(); if (!catalog.roles.length) throw new Error('No configured inference roles'); const state = await harness.snapshot(SessionControlsDoc, target.id, ctx); const index = catalog.roles.findIndex(role => role.id === state?.role); const next = index < 0 ? command.direction === 'forward' ? 0 : catalog.roles.length - 1 : (index + (command.direction === 'forward' ? 1 : catalog.roles.length - 1)) % catalog.roles.length; const role = catalog.roles[next]!; await services.configureModel(target.id, { provider: role.provider, modelId: role.model }); await target.configure({ thinkingLevel: role.thinking === null ? null : ThinkingSchema.parse(role.thinking) }, ctx); await mutate(draft => { draft.role = role.id; draft.selection = role.id === 'default' ? { kind: 'default' } : { kind: 'role', role: role.id }; }); break; }
+      case 'setThinking': { const thinking = modelRoleThinkingSchema.parse(command.thinking); await target.configure({ thinkingLevel: thinking }, ctx); await mutate(draft => { draft.thinkingSelection = { source: 'conversation', thinking }; }); break; }
+      case 'cycleRole': { const catalog = await services.catalog(); if (!catalog.roles.length) throw new Error('No configured inference roles'); const state = await harness.snapshot(SessionControlsDoc, target.id, ctx); const index = catalog.roles.findIndex(role => role.id === state?.role); const next = index < 0 ? command.direction === 'forward' ? 0 : catalog.roles.length - 1 : (index + (command.direction === 'forward' ? 1 : catalog.roles.length - 1)) % catalog.roles.length; const role = catalog.roles[next]!; await services.configureModel(target.id, { provider: role.provider, modelId: role.model }); await target.configure({ thinkingLevel: modelRoleThinkingSchema.parse(role.thinking) }, ctx); await mutate(draft => { draft.role = role.id; draft.selection = role.id === 'default' ? { kind: 'default' } : { kind: 'role', role: role.id }; draft.thinkingSelection = { source: 'profile' }; }); break; }
       case 'setFast': await mutate(draft => { draft.fastMode = command.enabled; }); break;
       case 'setApproval': {
         if (!canApprove) throw new Error('Human approval authority required');
@@ -280,6 +329,7 @@ export function createSessionControls(services: SessionControlServices) {
           const previous = draft.definitions.find(definition => definition.path === command.path);
           if ((previous?.revision ?? null) !== command.expectedRevision) throw new Error('Agent definition revision conflict');
           if (previous) draft.definitions.splice(draft.definitions.indexOf(previous), 1, saved); else draft.definitions.push(saved);
+          draft.definitionErrors = (draft.definitionErrors ?? []).filter(error => error.path !== command.path);
         });
         break;
       }
@@ -289,8 +339,11 @@ export function createSessionControls(services: SessionControlServices) {
       case 'control': case 'agentSetup': case 'historyAnchorId': case 'messages': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': break;
     }
     const result: RuntimeSessionResult = { control: await control(target) };
-    if (command.type === 'agentSetup' || command.type === 'saveAgentDefinition') result.setup = { sessionId: String(target.id), ...(child ? { agents: child.definition ? [{ ...child.definition, editable: false }] : [], diagnostics: [] } : resolveAgentDefinitions((await harness.snapshot(SessionControlsDoc, target.id, ctx))?.definitions ?? [])) };
-    if (command.type === 'messages') result.messages = (await entries(target)).reverse().flatMap(entry => entry.model ?? []);
+    if (command.type === 'agentSetup' || command.type === 'saveAgentDefinition') {
+      const state = await harness.snapshot(SessionControlsDoc, target.id, ctx);
+      result.setup = { sessionId: String(target.id), ...(child ? { agents: child.definition ? [{ ...child.definition, editable: false }] : [], diagnostics: [], definitionErrors: [] } : { ...resolveAgentDefinitions(state?.definitions ?? []), definitionErrors: state?.definitionErrors ?? [] }) };
+    }
+    if (command.type === 'messages') result.messages = await messages(target);
     if (command.type === 'historyPage') result.historyPage = await services.history.page(target.id, command.request);
     if (command.type === 'transcriptPage') result.transcriptPage = await services.history.transcriptPage(target.id, command.request);
     if (command.type === 'transcriptContent') result.transcriptContent = await services.history.transcriptContent(target.id, command.request);

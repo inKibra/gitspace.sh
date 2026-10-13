@@ -91,7 +91,7 @@ class TestAuthority implements SpaceCheckpointAuthority {
 
 class BareGitRemote implements SpaceGitCheckpointRemote {
   constructor(private readonly remote: string, private readonly failPublish = false) {}
-  async publishCheckpoint(input: { repositoryPath: string; checkpointRef: string }): Promise<void> {
+  async publishCheckpoint(input: Parameters<SpaceGitCheckpointRemote['publishCheckpoint']>[0]): Promise<void> {
     if (this.failPublish) throw new Error('object store unavailable');
     git(input.repositoryPath, 'push', this.remote, `${input.checkpointRef}:${input.checkpointRef}`);
   }

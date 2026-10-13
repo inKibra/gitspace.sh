@@ -1,11 +1,22 @@
 import { wire } from './json-wire.js'
 import { z } from 'zod';
 import { runtimeConfigDocumentSchema, runtimeSettingValueSchema, type RuntimeSettingValue, type RuntimeSettingSchemaItem } from './user-settings.js';
-import { SessionControlSchema, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
+import { RuntimeSubagentRecordSchema, SessionControlSchema, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 
 export const DEFAULT_INFERENCE_PROFILE_ID = 'default';
 export const INFERENCE_PROFILE_VERSION = 1 as const;
 export type InferenceSettingSection = 'Models' | 'Agents' | 'Providers';
+export const modelRoleThinkingSchema = RuntimeSubagentRecordSchema.shape.thinking;
+export type ModelRoleSelector = { selector: string; thinking: z.infer<typeof modelRoleThinkingSchema> };
+/** Only a recognized terminal effort is syntax; provider model IDs may contain literal colons. */
+export function parseModelRoleSelector(value: string): ModelRoleSelector {
+  const separator = value.lastIndexOf(':');
+  if (separator > value.indexOf('/')) {
+    const thinking = modelRoleThinkingSchema.safeParse(value.slice(separator + 1));
+    if (thinking.success) return { selector: value.slice(0, separator), thinking: thinking.data };
+  }
+  return { selector: value, thinking: null };
+}
 const unsafeSegments = new Set(['__proto__', 'prototype', 'constructor']);
 const credentialFields: Record<string, true> = {
   apikey: true, accesstoken: true, refreshtoken: true, authorization: true, password: true,

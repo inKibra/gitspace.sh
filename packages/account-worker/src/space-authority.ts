@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Result } from 'better-result';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { abortSpaceClose, beginSpaceClose, beginSpaceOpen, bootstrapSpaceAuthority, commitSpaceClosed, commitSpaceOpen, failSpaceOpen, SpaceAuthorityRecordSchema, WorkspaceDomainError, type SpaceAuthorityMutation, type SpaceAuthorityRecord, type SpaceAuthorityResult, type VerifiedSpaceAuthorityIdentity } from '@gitspace/protocol-workspace';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
@@ -24,6 +25,9 @@ import { readEncryptedCheckpoint } from './git-lfs-store.js';
 import { attachmentMachineKind } from './runtime-machine-loss.js';
 import { isDispatchableCache } from './runtime-dispatch-selection.js';
 import { LifecycleRunRequestSchema, LifecycleRunSchema, type EnvironmentFailure, type LifecycleRun } from '@gitspace/protocol-environment';
+import { migrationDigest, requireLegacyMigrationSource, readLegacyMigrationBundle, preflightLegacyMigrationBundle, verifyLegacyMigrationArtifacts, prepareLegacyMigrationRepository, stageLegacyMigrationCode, type LegacyMigrationIntent } from './legacy-space-migration.js';
+import { LegacySpaceMigrationInputSchema, LegacySpaceMigrationFinalizeInputSchema, type LegacySpaceMigrationInput, type LegacySpaceMigrationReceipt, type LegacySpaceMigrationStage, type LegacySpaceMigrationStatus } from '@gitspace/protocol/legacy-migration';
+import { openLegacyCheckpointTranscript } from './account-inspector-data.js';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
 const BaseBranchChangeSchema = z.object({
   projectId: z.string(), previousBranch: z.string(), branch: z.string(),
@@ -42,6 +46,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   private cloudRuntime: z.infer<typeof RuntimeIdentitySchema> | null = null;
   private cloudRuntimePublished = false;
   private alarmLine: Promise<void> = Promise.resolve();
+  private migrationLine: Promise<void> = Promise.resolve();
+  private migrationArtifactsActivated = false;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
@@ -73,6 +79,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     )`);
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_recovery_receipts(operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)');
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS portable_lfs_outbox(snapshot_id TEXT PRIMARY KEY,inventory TEXT NOT NULL)');
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS legacy_migration(singleton INTEGER PRIMARY KEY CHECK(singleton=1), intent TEXT NOT NULL)');
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS legacy_migration_tokens(token_id TEXT PRIMARY KEY)');
   }
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'space' }> | null {
@@ -222,13 +230,19 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   }
 
   private async getRuntime(raw: unknown): Promise<WorkspaceRuntime> {
+    this.assertMigrationReadable();
     const identity = RuntimeIdentitySchema.parse(raw);
     await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, identity, false);
+    const migrated = this.migrationIntent();
+    if (migrated?.receipt && !this.migrationArtifactsActivated) {
+      await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`).activateLegacyMigrationArtifacts(identity.workspaceId, migrated.input.operationId);
+      this.migrationArtifactsActivated = true;
+    }
     if (await this.ctx.storage.get('runtime.baseBranchChange') !== undefined) throw new Error('Base branch change is awaiting recovery; retry project.setBaseBranch with the same branch');
     const authority = this.get();
     if (authority && (authority.projectId !== identity.projectId || authority.spaceId !== identity.workspaceId)) throw new Error('Runtime workspace identity mismatch');
     const stored = await this.ctx.storage.get('runtime.identity');
-    if (stored === undefined && authority?.machineId) throw new Error('This legacy workspace must be migrated from its machine checkout before cloud lifecycle operations are available.');
+    if (stored === undefined && authority && (authority.machineId !== null || authority.publishedRevision > 0)) throw new Error('This legacy workspace requires explicit closed-checkpoint migration before cloud lifecycle operations are available.');
     if (stored !== undefined) {
       const previous = RuntimeIdentitySchema.parse(stored);
       if (previous.projectId !== identity.projectId || previous.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
@@ -250,6 +264,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeSnapshot(raw: unknown): Promise<Response> { return Response.json(await (await this.getRuntime(raw)).snapshot()); }
   async runtimeAttachments(raw: unknown) { return (await this.getRuntime(raw)).attachments.list(); }
   async runtimeCodeCheckpoint(raw: unknown) {
+    this.assertMigrationReadable();
     const identity = RuntimeIdentitySchema.parse(raw);
     if (await this.ctx.storage.get('runtime.baseBranchChange') !== undefined) throw new Error('Base branch change is awaiting recovery; retry project.setBaseBranch with the same branch');
     const authority = this.get();
@@ -345,6 +360,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   /** A cloud workspace's checkout lives in this DO's runtime; machines only attach as caches.
    * Spaces without cloud runtime state are legacy machine-held placements. */
   async hasCloudRuntime(): Promise<boolean> {
+    const migration = this.migrationIntent();
+    if (migration && !migration.receipt) return false;
     return await this.ctx.storage.get('runtime.identity') !== undefined || await readCurrentCheckpoint(this.ctx.storage) !== null;
   }
   /** A workspace leaving active use: its working conversations stop and every live attachment is asked to drain and detach.
@@ -481,12 +498,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   private async attachmentController(raw: unknown) {
     const runtime = await this.getRuntime(raw);
-    await runtime.cloudFiles.recover();
     return new RuntimeAttachmentController({
       attachments: runtime.attachments, code: new ArtifactsCodeStore(this.env.ARTIFACTS), publish: () => runtime.publish(),
       snapshot: () => runtime.cloudFiles.initializeSnapshot(),
       origin: async projectId => (await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getProject())?.repositoryReference ?? null,
-      lifecycle: (projectId, workspaceId) => this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getLifecycleState(workspaceId),
       authorizeMachine: async machineId => {
         const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId);
         if (!machine || machine.desiredState === 'removed' || !await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).hasRuntimeMachine(machineId)) throw new Error('Attachment target is not an enrolled account machine');
@@ -497,6 +512,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   async runtimeAttachmentRequest(raw: unknown) {
     const input = RuntimeAttachmentRequestInputSchema.parse(raw);
+    await (await this.getRuntime(input)).cloudFiles.recover();
     const result = await (await this.attachmentController(input)).request(input);
     await this.scheduleLeases(await this.getRuntime(input));
     return result;
@@ -553,8 +569,9 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   async runtimeAttachmentReady(raw: unknown) {
     const input = RuntimeAttachmentReadyInputSchema.parse(raw);
-    const result = await (await this.attachmentController(input)).ready(input);
     const runtime = await this.getRuntime(input);
+    await runtime.cloudFiles.recover();
+    const result = await (await this.attachmentController(input)).ready(input);
     await runtime.cacheReady(input.attachmentId, input.generation);
     await this.scheduleLeases(runtime);
     return result;
@@ -585,7 +602,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     runtime.publish();
     if (attachment.state === 'lost') await this.releaseLostClaims(runtime);
     await this.scheduleLeases(runtime);
-    this.ctx.waitUntil(this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${input.projectId}`).lfsCollect());
     return { attachment };
   }
 
@@ -616,9 +632,9 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return (await this.getRuntime(input)).cronNotifyOverdue(input.requestId);
   }
 
-  async runtimeTranscript(raw: unknown): Promise<Response> {
+  async runtimeTranscript(raw: unknown, format: 'json' | 'ndjson' = 'json'): Promise<Response> {
     const input = RuntimeIdentitySchema.extend({ conversationId: z.string().optional() }).parse(raw);
-    return Response.json(await (await this.getRuntime(input)).transcript(input.conversationId));
+    return (await this.getRuntime(input)).transcript(input.conversationId, format);
   }
 
 
@@ -626,6 +642,180 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), args: z.object({ connectionId: z.string().min(1) }) }).parse(raw);
     await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
     return (await this.getRuntime(input)).manage({ tool: 'mcp_discover', requestId: input.requestId, args: input.args });
+  }
+
+  private migrationIntent(): LegacyMigrationIntent | null {
+    const row = this.ctx.storage.sql.exec<{ intent: string }>('SELECT intent FROM legacy_migration WHERE singleton=1').toArray()[0];
+    return row ? JSON.parse(row.intent) as LegacyMigrationIntent : null;
+  }
+
+  assertLegacyWriter(): void {
+    if (this.migrationIntent()) throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_POSSESSION_DENIED', message: 'Legacy ownership is fenced for one-time cloud migration; retry the same migration operation', context: {} });
+    if (this.cloudRuntime !== null) throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_POSSESSION_DENIED', message: 'Legacy writers cannot modify a cloud-owned workspace', context: {} });
+  }
+
+  private assertMigrationReadable(): void {
+    const migration = this.migrationIntent();
+    if (migration && !migration.receipt) throw new Error('Legacy migration is staged but not activated; cloud runtime is unavailable');
+  }
+
+  private serializeMigration<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.migrationLine.then(operation);
+    this.migrationLine = result.then(() => {}, () => {});
+    return result;
+  }
+
+  private async migrationAccess(input: LegacySpaceMigrationInput, active = true) {
+    const access = await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, RuntimeIdentitySchema.parse(input), false);
+    const workspace = (await access.projectAuthority.listWorkspaces()).find(item => item.id === input.workspaceId && item.projectId === input.projectId);
+    if (!workspace || (active && (access.project.lifecycle !== 'active' || (workspace.lifecycle !== 'active' && workspace.lifecycle !== 'archived')))) throw new Error('Legacy migration requires an active project and an active or archived canonical workspace');
+    return { ...access, workspace };
+  }
+
+
+  async legacyMigrationStatus(raw: unknown): Promise<LegacySpaceMigrationStatus> {
+    const input = LegacySpaceMigrationInputSchema.parse(raw);
+    await this.migrationAccess(input, !this.migrationIntent()?.receipt);
+    const intent = this.migrationIntent();
+    if (intent) {
+      if (migrationDigest(intent.input) !== migrationDigest(input)) throw new Error('Legacy migration operation or source identity conflict');
+      if (intent.receipt) return { state: 'activated', source: intent.source, receipt: intent.receipt };
+    }
+    if (await this.hasCloudRuntime()) throw new Error('Workspace already contains an unrelated cloud runtime');
+    const source = requireLegacyMigrationSource(this.get(), input, this.env.ACCOUNT_ID);
+    const bundle = await preflightLegacyMigrationBundle(this.env, source);
+    const current = requireLegacyMigrationSource(this.get(), input, this.env.ACCOUNT_ID);
+    if (migrationDigest(current) !== migrationDigest(source)) throw new Error('Legacy migration source changed during preflight');
+    const after = this.migrationIntent();
+    if (after && migrationDigest(after.input) !== migrationDigest(input)) throw new Error('Legacy migration operation changed during preflight');
+    const lastPhase = await this.ctx.storage.get<string>('legacyMigration.lastPhase');
+    return { state: after ? 'staging' : 'ready', source, repository: bundle.manifest.repository, ...(after && lastPhase ? { lastPhase } : {}) };
+  }
+
+  private async beginLegacyMigration(input: LegacySpaceMigrationInput): Promise<LegacyMigrationIntent> {
+    // Direct stage/apply callers receive the same no-write integrity gate as dry preflight.
+    if (!this.migrationIntent()) await this.legacyMigrationStatus(input);
+    const { project, workspace } = await this.migrationAccess(input, !this.migrationIntent()?.receipt);
+    const result = await this.ctx.blockConcurrencyWhile(() => Result.tryPromise({ try: async () => {
+      const previous = this.migrationIntent();
+      if (previous) {
+        if (migrationDigest(previous.input) !== migrationDigest(input)) throw new Error('Legacy migration operation or source identity conflict');
+        return previous;
+      }
+      if (await this.hasCloudRuntime()) throw new Error('Workspace already contains an unrelated cloud runtime');
+      const source = requireLegacyMigrationSource(this.get(), input, this.env.ACCOUNT_ID);
+      const intent: LegacyMigrationIntent = { input, source, receipt: null, metadata: { projectRevision: project.revision, workspaceRevision: workspace.revision, projectBranch: project.baseBranch, workspaceBranch: workspace.branch, base: workspace.id === project.id } };
+      this.ctx.storage.sql.exec('INSERT INTO legacy_migration(singleton,intent) VALUES(1,?)', JSON.stringify(intent));
+      await this.ctx.storage.sync();
+      return intent;
+    }, catch: error => error instanceof Error ? error : new Error(String(error)) }));
+    if (result.isErr()) throw result.error;
+    return result.value;
+  }
+
+  /** Explicit operator-only preparation for copying old WalGit objects into the fenced Artifacts destination. */
+  stageLegacyMigration(raw: unknown): Promise<LegacySpaceMigrationStage> {
+    const input = LegacySpaceMigrationInputSchema.parse(raw);
+    return this.serializeMigration(async () => {
+      const intent = await this.beginLegacyMigration(input);
+      if (intent.receipt) throw new Error('Legacy migration already activated; read its stable receipt instead of issuing another write lease');
+      const bundle = await readLegacyMigrationBundle(this.env, intent.source);
+      await verifyLegacyMigrationArtifacts(this.env, bundle.scope);
+      const project = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${input.projectId}`);
+      await project.pinLegacyMigrationArtifacts({ operationId: input.operationId, branch: bundle.manifest.repository.branch, expectedProjectRevision: intent.metadata.projectRevision, expectedWorkspaceRevision: intent.metadata.workspaceRevision, scope: bundle.scope });
+      const repository = await prepareLegacyMigrationRepository(this.env, intent.source, bundle.manifest);
+      const repo = await this.env.ARTIFACTS.get(repository.name);
+      try {
+        const info = await repo.info();
+        const token = await repo.createToken('write', 3600);
+        this.ctx.storage.sql.exec('INSERT INTO legacy_migration_tokens(token_id) VALUES(?)', token.id);
+        await this.ctx.storage.sync();
+        return { operationId: input.operationId, source: intent.source, repository, credentials: { remote: info.remote, plaintext: token.plaintext, expiresAt: token.expiresAt } };
+      } finally { await repo[Symbol.dispose]?.(); }
+    });
+  }
+
+  private async revokeMigrationWriters(workspaceId: string): Promise<void> {
+    const tokens = this.ctx.storage.sql.exec<{ token_id: string }>('SELECT token_id FROM legacy_migration_tokens').toArray();
+    if (!tokens.length) return;
+    const repo = await this.env.ARTIFACTS.get(artifactsWorkspaceRepository(workspaceId));
+    try {
+      for (const token of tokens) {
+        try { await repo.revokeToken(token.token_id); }
+        catch (error) { if (!z.object({ code: z.literal('NOT_FOUND') }).safeParse(error).success) throw error; }
+        this.ctx.storage.sql.exec('DELETE FROM legacy_migration_tokens WHERE token_id=?', token.token_id);
+      }
+      await this.ctx.storage.sync();
+    } finally { await repo[Symbol.dispose]?.(); }
+  }
+
+  /** Resumable import; the only cutover is the atomic identity/receipt/retirement transaction below. */
+  migrateLegacy(raw: unknown): Promise<LegacySpaceMigrationReceipt> {
+    const { historicalLfs: uploaded, transportVerifiedBlobs, ...input } = LegacySpaceMigrationFinalizeInputSchema.parse(raw);
+    const historicalLfs = uploaded.sort((left, right) => left.oid.localeCompare(right.oid));
+    let phase = 'opening the migration fence';
+    // Durable, synced breadcrumb: an isolate reset (for example the memory limit) loses the in-memory phase.
+    const mark = async (next: string) => { phase = next; await this.ctx.storage.put('legacyMigration.lastPhase', next); await this.ctx.storage.sync(); };
+    return this.serializeMigration(async () => {
+      const intent = await this.beginLegacyMigration(input);
+      const project = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${input.projectId}`);
+      if (intent.receipt) {
+        if (migrationDigest(intent.receipt.historicalLfs) !== migrationDigest(historicalLfs)) throw new Error('Legacy migration historical LFS inventory changed');
+        await project.activateLegacyMigrationArtifacts(input.workspaceId, input.operationId);
+        this.migrationArtifactsActivated = true;
+        this.publishCloudRuntime(RuntimeIdentitySchema.parse(input));
+        return intent.receipt;
+      }
+      requireLegacyMigrationSource(this.get(), input, this.env.ACCOUNT_ID);
+      await mark('revoking staged Git write tokens');
+      await this.revokeMigrationWriters(input.workspaceId);
+      await mark('reading the legacy checkpoint');
+      const bundle = await readLegacyMigrationBundle(this.env, intent.source);
+      await mark('verifying legacy artifacts');
+      await verifyLegacyMigrationArtifacts(this.env, bundle.scope);
+      await mark('pinning legacy artifacts');
+      await project.pinLegacyMigrationArtifacts({ operationId: input.operationId, branch: bundle.manifest.repository.branch, expectedProjectRevision: intent.metadata.projectRevision, expectedWorkspaceRevision: intent.metadata.workspaceRevision, scope: bundle.scope });
+      await mark('verifying and publishing the staged Git checkpoint');
+      const checkpoint = await stageLegacyMigrationCode(this.env, intent.source, bundle.manifest, historicalLfs, transportVerifiedBlobs);
+      await mark('opening the legacy transcript');
+      const opened = await openLegacyCheckpointTranscript(this.env, this.env.ACCOUNT_ID, bundle.transcript);
+      const identity = RuntimeIdentitySchema.parse(input);
+      await mark('opening the passive runtime');
+      const runtime = await (this.runtime ??= createAccountWorkspaceRuntime(this.ctx, this.env, identity, async () => { throw new Error('Migration cannot schedule execution'); }, { initialCheckpoint: checkpoint, progress: mark }).catch(error => { this.runtime = undefined; throw error; }));
+      await mark('initializing the runtime snapshot');
+      const accepted = await runtime.cloudFiles.initializeSnapshot();
+      if (migrationDigest(accepted) !== migrationDigest(checkpoint)) throw new Error('Staged runtime code differs from the legacy checkpoint');
+      await mark('importing the preserved history');
+      const history = await runtime.importLegacyHistory({ operationId: input.operationId, sourceDigest: intent.source.sourceDigest, source: {
+        accountId: this.env.ACCOUNT_ID, projectId: input.projectId, workspaceId: input.workspaceId, generation: intent.source.generation,
+        manifestHash: intent.source.manifestHash, sessionId: bundle.transcript.sessionId, ompSessionId: bundle.transcript.ompSessionId,
+        title: (await this.migrationAccess(input)).workspace.name, originalTree: { objectKey: bundle.transcript.objectKey, objectHash: bundle.transcript.objectHash }, branch: opened.tree,
+      }, events: opened.events });
+      await mark('closing the passive runtime');
+      // Close the passive host before cutover; a later explicit action opens the ordinary execution host.
+      try { await runtime.harness.close(BACKGROUND_CONTEXT); }
+      finally { this.runtime = undefined; }
+      const receipt: LegacySpaceMigrationReceipt = { operationId: input.operationId, source: intent.source, conversationId: history.conversationId, importedEvents: history.importedEvents, importedEntries: history.importedEntries, checkpoint, historicalLfs, artifacts: { scopeId: bundle.scope.id, generation: bundle.scope.generation, manifestHash: bundle.scope.manifestHash }, branchAlignment: { project: { before: intent.metadata.projectBranch, after: intent.metadata.base ? checkpoint.branch : intent.metadata.projectBranch }, workspace: { before: intent.metadata.workspaceBranch, after: checkpoint.branch } }, activatedAt: new Date().toISOString() };
+      await mark('committing the ownership cutover');
+      await this.ctx.storage.transaction(async tx => {
+        const state = this.get();
+        requireLegacyMigrationSource(state, input, this.env.ACCOUNT_ID);
+        const current = this.migrationIntent();
+        if (!current || migrationDigest(current.input) !== migrationDigest(input) || current.receipt) throw new Error('Legacy migration activation fence changed');
+        this.save({ ...state!, machineId: null, resumeMachineId: null, generation: state!.generation + 1, revision: state!.revision + 1, updatedAt: receipt.activatedAt });
+        this.ctx.storage.sql.exec('UPDATE legacy_migration SET intent=? WHERE singleton=1', JSON.stringify({ ...intent, receipt }));
+        await tx.put('runtime.identity', identity);
+        this.directoryOutbox.enqueue({ source: 'space', state: this.get(), runtime: identity });
+        await tx.put('directory.runtimePublished', true);
+      });
+      this.cloudRuntime = identity;
+      this.cloudRuntimePublished = true;
+      await mark('activating the preserved artifact scope');
+      await project.activateLegacyMigrationArtifacts(input.workspaceId, input.operationId);
+      this.migrationArtifactsActivated = true;
+      this.directoryOutbox.kick();
+      return receipt;
+    }).catch(error => { throw new Error(`Legacy migration failed while ${phase}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); });
   }
 
   watch(spaceId: string, after: number | null): DurableStreamSubscription {
@@ -637,6 +827,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   private commit<T>(mutate: () => T): SpaceAuthorityResult<T> {
     try {
       const value = this.ctx.storage.transactionSync(() => {
+        this.assertLegacyWriter();
         const value = mutate();
         const state = this.get();
         if (state) {
@@ -690,6 +881,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   async commitClosed(input: SpaceAuthorityMutation & { revision: number; manifestKey: string; manifestHash: string; resumeOnMachineRestart?: boolean }): Promise<SpaceAuthorityResult<void>> {
     // Validate the ownership fence before reading or retaining publisher-controlled inventory.
+    try { this.assertLegacyWriter(); }
+    catch (error) {
+      if (error instanceof WorkspaceDomainError) return { status: 'error', failure: error.toJSON() };
+      throw error;
+    }
     try { commitSpaceClosed(this.get(), input, new Date().toISOString()); }
     catch (error) {
       if (error instanceof WorkspaceDomainError) return { status: 'error', failure: error.toJSON() };

@@ -3,10 +3,11 @@ export const ARTIFACT_NONCE_BYTES = 12;
 
 export * from './relay.js';
 
-function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
-  const owned = new Uint8Array(bytes.byteLength);
-  owned.set(bytes);
-  return owned.buffer;
+function cryptoBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  // WebCrypto snapshots an ArrayBuffer view, including its offset and length.
+  // SharedArrayBuffer is not a BufferSource; only that case needs an owned copy.
+  if (bytes.buffer instanceof ArrayBuffer) return bytes as Uint8Array<ArrayBuffer>;
+  return Uint8Array.from(bytes);
 }
 
 export async function encryptArtifactBytes(
@@ -16,11 +17,11 @@ export async function encryptArtifactBytes(
 ): Promise<Uint8Array> {
   if (key.byteLength !== 32) throw new RangeError('Artifact encryption key must be 32 bytes');
   if (nonce.byteLength !== ARTIFACT_NONCE_BYTES) throw new RangeError(`Artifact nonce must be ${ARTIFACT_NONCE_BYTES} bytes`);
-  const cryptoKey = await crypto.subtle.importKey('raw', ownedBuffer(key), 'AES-GCM', false, ['encrypt']);
+  const cryptoKey = await crypto.subtle.importKey('raw', cryptoBytes(key), 'AES-GCM', false, ['encrypt']);
   const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: ownedBuffer(nonce) },
+    { name: 'AES-GCM', iv: cryptoBytes(nonce) },
     cryptoKey,
-    ownedBuffer(plaintext),
+    cryptoBytes(plaintext),
   );
   const sealed = new Uint8Array(1 + nonce.byteLength + ciphertext.byteLength);
   sealed[0] = ARTIFACT_ENCRYPTION_VERSION;
@@ -36,11 +37,11 @@ export async function decryptArtifactBytes(sealed: Uint8Array, key: Uint8Array):
   }
   const nonce = sealed.subarray(1, 1 + ARTIFACT_NONCE_BYTES);
   const ciphertext = sealed.subarray(1 + ARTIFACT_NONCE_BYTES);
-  const cryptoKey = await crypto.subtle.importKey('raw', ownedBuffer(key), 'AES-GCM', false, ['decrypt']);
+  const cryptoKey = await crypto.subtle.importKey('raw', cryptoBytes(key), 'AES-GCM', false, ['decrypt']);
   const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: ownedBuffer(nonce) },
+    { name: 'AES-GCM', iv: cryptoBytes(nonce) },
     cryptoKey,
-    ownedBuffer(ciphertext),
+    cryptoBytes(ciphertext),
   );
   return new Uint8Array(plaintext);
 }

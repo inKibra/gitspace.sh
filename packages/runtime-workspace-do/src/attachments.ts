@@ -44,6 +44,7 @@ export class ExecutorNotConnected extends TaggedError('ExecutorNotConnected')<{ 
 }
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 export class AttachmentStore {
+  private cached: { revision: number; records: RuntimeAttachment[] } | undefined;
   constructor(private readonly storage: DurableObjectStorage, private readonly services: AttachmentServices) {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attachments(id TEXT PRIMARY KEY, record TEXT NOT NULL, secret TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attempts(id TEXT PRIMARY KEY, dispatch TEXT NOT NULL, status TEXT NOT NULL, result TEXT)');
@@ -61,6 +62,11 @@ export class AttachmentStore {
     if (!columns.some(column => column.name === 'request_id')) storage.sql.exec('ALTER TABLE runtime_attachments ADD COLUMN request_id TEXT');
     if (!columns.some(column => column.name === 'source')) storage.sql.exec('ALTER TABLE runtime_attachments ADD COLUMN source TEXT');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_kinds(machine_id TEXT PRIMARY KEY, kind TEXT NOT NULL)');
+    // Every write to runtime_attachments, by any writer, draws a fresh random revision. A rolled-back write restores
+    // the prior token and a later write draws a new one, so a token match always means the cached rows are current.
+    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attachments_revision(singleton INTEGER PRIMARY KEY CHECK(singleton=1), token INTEGER NOT NULL)');
+    storage.sql.exec('INSERT OR IGNORE INTO runtime_attachments_revision(singleton,token) VALUES(1,random() >> 11)');
+    for (const event of ['INSERT', 'UPDATE', 'DELETE']) storage.sql.exec(`CREATE TRIGGER IF NOT EXISTS runtime_attachments_revision_${event.toLowerCase()} AFTER ${event} ON runtime_attachments BEGIN UPDATE runtime_attachments_revision SET token=random() >> 11 WHERE singleton=1; END`);
   }
   /** `null` until the cloud records it; meanwhile leases use the patient computer windows so no user checkout is stranded. */
   machineKind(machineId: string): AttachmentMachineKind | null {
@@ -182,7 +188,18 @@ export class AttachmentStore {
     if (chunks.length !== metadata.parts || units !== metadata.units || bytesToHex(digest.digest()) !== metadata.digest) throw new Error('Terminal payload integrity check failed');
     return chunks.join('');
   }
-  list(): RuntimeAttachment[] { return this.storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments').toArray().map(row => RuntimeAttachmentSchema.parse(JSON.parse(row.record))); }
+  /** Parsed only when the trigger-maintained revision changed: heartbeats, sweeps, dispatch selection and every
+   * snapshot rebuild read this, and each otherwise re-read and re-parsed every attachment row ever admitted.
+   * Callers receive copies they may mutate. */
+  list(): RuntimeAttachment[] {
+    const revision = this.storage.sql.exec<{ token: number }>('SELECT token FROM runtime_attachments_revision WHERE singleton=1').one().token;
+    if (this.cached?.revision !== revision) this.cached = { revision, records: this.storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments').toArray().map(row => RuntimeAttachmentSchema.parse(JSON.parse(row.record))) };
+    return structuredClone(this.cached.records);
+  }
+  /** The machine an attempt was dispatched to, by key lookup without reassembling its result. */
+  attemptMachine(attemptId: string): RuntimeToolDispatch['machineId'] | null {
+    return this.storage.sql.exec<{ machine_id: RuntimeToolDispatch['machineId'] | null }>("SELECT json_extract(dispatch,'$.machineId') AS machine_id FROM runtime_attempts WHERE id=?", attemptId).toArray()[0]?.machine_id ?? null;
+  }
   getAttempt(attemptId: string): { dispatch: RuntimeToolDispatch; status: string; result: RuntimeToolResult | null } | null {
     const row = this.storage.sql.exec<{ dispatch: string; status: string; result: string | null }>('SELECT dispatch,status,result FROM runtime_attempts WHERE id=?', attemptId).toArray()[0];
     return row ? { dispatch: RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)), status: row.status, result: this.isCollected(attemptId) ? this.materializedResult(attemptId) : row.result === null ? null : RuntimeToolResultSchema.parse(JSON.parse(this.terminalPayload(attemptId, 'result', row.result))) } : null;
@@ -215,7 +232,9 @@ export class AttachmentStore {
     this.materialized(attempt.result);
   }
   pendingMaterialization(): RuntimeToolDispatch[] {
-    return this.storage.sql.exec<{ dispatch: string }>('SELECT a.dispatch FROM runtime_attempts a JOIN runtime_executor_receipts r ON r.id=a.id LEFT JOIN runtime_materialized_attempts m ON m.id=a.id WHERE m.id IS NULL').toArray().map(row => RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)));
+    // Drive from the receipt table: receipts are deleted once collected, so this is bounded by outstanding work,
+    // never by every attempt ever dispatched.
+    return this.storage.sql.exec<{ dispatch: string }>('SELECT a.dispatch FROM runtime_executor_receipts r CROSS JOIN runtime_attempts a ON a.id=r.id WHERE NOT EXISTS (SELECT 1 FROM runtime_materialized_attempts m WHERE m.id=r.id)').toArray().map(row => RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)));
   }
   /** Caller must supply the exact result recovered from a committed task/history transaction. */
   materialized(result: RuntimeToolResult): void {
@@ -288,7 +307,7 @@ export class AttachmentStore {
           if (saved?.request_id !== assignment.requestId || saved.source !== JSON.stringify(assignment.source)) throw new Error('Attachment request identity changed');
         }
         existing.capabilities = input.capabilities;
-        this.storage.sql.exec('UPDATE runtime_attachments SET record=? WHERE id=?', JSON.stringify(existing), existing.attachmentId);
+        this.save(existing);
         return existing;
       }
       if (current.some(a => a.machineId === input.machineId && a.generation >= input.generation)) throw new Error('Attachment generation is stale');
@@ -358,9 +377,8 @@ export class AttachmentStore {
       if (attachment.cacheAction && ['requested', 'running'].includes(attachment.cacheAction.status)) throw new Error('Cache action is already pending');
       if (attachment.detachRequest) throw new Error('Cache detach must finish before another cache action');
       if (input.action.kind === 'setup' && attachment.state === 'draining') throw new Error('Cache drain must finish before setup');
-      if (input.action.kind === 'setup' && this.storage.sql.exec<{ dispatch: string }>("SELECT dispatch FROM runtime_attempts WHERE status='dispatched'").toArray().some(row => RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)).attachmentId === attachment.attachmentId)) throw new Error('Unresolved execution prevents cache setup');
       attachment.cacheAction = { requestId: input.requestId, action: input.action.kind, status: 'requested', error: null, ...(input.action.kind === 'reclaim' && input.action.discardHeldBack === true ? { discardHeldBack: true } : {}) };
-      attachment.state = input.action.kind === 'reclaim' ? 'draining' : 'attaching';
+      if (input.action.kind === 'reclaim') attachment.state = 'draining';
       attachment.cache.state = input.action.kind === 'reclaim' ? 'draining' : 'setup';
       attachment.cache.reclaimBlocked = null;
       if (input.action.kind === 'reclaim') this.storage.sql.exec('DELETE FROM runtime_primary_flush WHERE attachment=? AND generation=?', attachment.attachmentId, attachment.generation);
@@ -373,17 +391,17 @@ export class AttachmentStore {
   }
 
   async assignments(machineId: RuntimeAttachment['machineId'], cacheCapabilities?: readonly string[]) {
-    const records = this.storage.sql.exec<{ record: string; source: string | null; secret: string }>('SELECT record,source,secret FROM runtime_attachments').toArray();
     const assignments = [];
-    for (const row of records) {
-      const attachment = RuntimeAttachmentSchema.parse(JSON.parse(row.record));
+    for (const attachment of this.list()) {
       if (attachment.machineId !== machineId || attachment.state === 'detached') continue;
+      const row = this.storage.sql.exec<{ source: string | null; secret: string }>('SELECT source,secret FROM runtime_attachments WHERE id=?', attachment.attachmentId).toArray()[0];
+      if (!row) throw new Error('Attachment grant missing');
       if (attachment.role === 'cache' && cacheCapabilities && ['attaching', 'ready'].includes(attachment.state)) {
         const browserCapability = (capability: string) => capability === 'browser' || capability === 'browser_control' || capability.startsWith('browser.');
         const capabilities = [...cacheCapabilities.filter(capability => !browserCapability(capability)), ...attachment.capabilities.filter(browserCapability)];
         if (JSON.stringify(capabilities) !== JSON.stringify(attachment.capabilities)) {
           attachment.capabilities = capabilities;
-          this.storage.sql.exec('UPDATE runtime_attachments SET record=? WHERE id=?', JSON.stringify(attachment), attachment.attachmentId);
+          this.save(attachment);
         }
       }
       const grant = { attachment, executionSecret: await this.services.open(row.secret, attachment) };
@@ -392,20 +410,15 @@ export class AttachmentStore {
     return assignments;
   }
 
-  ready(input: RuntimeAttachmentReadyInput, canonicalCommit?: string) {
+  ready(input: RuntimeAttachmentReadyInput) {
     const attachment = this.list().find(candidate => candidate.attachmentId === input.attachmentId);
-    const expected = attachment?.checkout.kind === 'shared' ? attachment.role === 'cache' ? canonicalCommit : undefined : attachment?.checkout.commit;
-    if (!attachment || attachment.machineId !== input.machineId || attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId || attachment.generation !== input.generation || expected === undefined || expected !== input.commit || !input.prerequisitesComplete) throw new Error('Attachment readiness proof does not match its admission');
-    if (!attachment.capabilities.every(capability => input.capabilities.includes(capability))) throw new Error('Executor lacks assigned capabilities');
-    if (attachment.state === 'ready') {
-      if (canonicalJson(attachment.lfsRestored ?? []) !== canonicalJson(input.lfsRestored ?? [])) throw new Error('Attachment readiness LFS proof changed');
-      return { attachment };
-    }
+    if (!attachment || attachment.machineId !== input.machineId || attachment.projectId !== input.projectId || attachment.workspaceId !== input.workspaceId || attachment.generation !== input.generation) throw new Error('Attachment readiness has stale authority');
+    if (attachment.state === 'ready') return { attachment };
     return this.storage.transactionSync(() => {
       const ready = this.transition(attachment.attachmentId, attachment.generation, 'ready');
       this.storage.sql.exec('DELETE FROM runtime_primary_flush WHERE attachment=? AND generation=?', attachment.attachmentId, attachment.generation);
-      const next = { ...ready, heartbeatAt: new Date(Date.now()).toISOString(), ...(ready.cache ? { cache: { ...ready.cache, state: 'live' as const, pausedAt: null, reclaimAt: null, lastSyncAt: new Date().toISOString() } } : {}), ...(input.lfsRestored ? { lfsRestored: input.lfsRestored } : {}) };
-      this.storage.sql.exec('UPDATE runtime_attachments SET record=? WHERE id=?', JSON.stringify(next), attachment.attachmentId);
+      const next = { ...ready, failure: null, heartbeatAt: new Date(Date.now()).toISOString(), ...(ready.cache ? { cache: { ...ready.cache, state: 'live' as const, pausedAt: null, reclaimAt: null, lastSyncAt: new Date().toISOString() } } : {}), ...(input.lfsRestored ? { lfsRestored: input.lfsRestored } : {}) };
+      this.save(next);
       return { attachment: next };
     });
   }
@@ -417,26 +430,27 @@ export class AttachmentStore {
     const now = Date.now();
     const observation = RuntimeExecutionObservationSchema.parse(lease.executionObservation);
     const observedAt = Date.parse(observation.observedAt);
-    if (observedAt > Date.now() + 5_000 || (attachment.executionObservation && observedAt < Date.parse(attachment.executionObservation.observedAt))) throw new Error('Execution observation clock is invalid or stale');
+    // An out-of-order observation is dropped; the heartbeat itself still counts.
+    const freshObservation = observedAt <= now + 5_000 && (!attachment.executionObservation || observedAt >= Date.parse(attachment.executionObservation.observedAt));
     if (lease.cache && (attachment.role !== 'cache' || !attachment.cache)) throw new Error('Only canonical caches report cache observations');
     if (lease.cache?.state === 'reclaimed') {
       if (!this.storage.sql.exec('SELECT attachment FROM runtime_primary_flush WHERE attachment=? AND generation=?', attachment.attachmentId, attachment.generation).toArray().length) throw new Error('Final snapshot publication prevents reclamation');
       if (this.storage.sql.exec<{ dispatch: string }>("SELECT dispatch FROM runtime_attempts WHERE status='dispatched'").toArray().some(row => RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)).attachmentId === attachment.attachmentId)) throw new Error('Unresolved execution prevents reclamation');
     }
-    if (lease.cacheAction) {
-      if (!attachment.cacheAction || attachment.cacheAction.requestId !== lease.cacheAction.requestId) throw new Error('Cache action receipt has stale authority');
-      if (['completed', 'failed'].includes(attachment.cacheAction.status) && (attachment.cacheAction.status !== lease.cacheAction.status || attachment.cacheAction.error !== lease.cacheAction.error)) throw new Error('Cache action terminal receipt changed');
-      if (lease.cacheAction.status === 'completed' && attachment.cacheAction.status !== 'completed' && (attachment.cacheAction.action === 'reclaim' ? lease.cache?.state !== 'reclaimed' : attachment.state !== 'ready')) throw new Error('Cache action effect is not complete');
-      attachment.cacheAction = { ...attachment.cacheAction, ...lease.cacheAction };
-    }
-    if (attachment.state === 'ready' && (!attachment.heartbeatAt || now - Date.parse(attachment.heartbeatAt) > ATTACHMENT_ONLINE_MS)) attachment.state = 'attaching';
+    // A receipt for an older or already-settled action is ignored; the heartbeat itself still counts.
+    if (lease.cacheAction && attachment.cacheAction?.requestId === lease.cacheAction.requestId && !['completed', 'failed'].includes(attachment.cacheAction.status)) attachment.cacheAction = { ...attachment.cacheAction, ...lease.cacheAction };
     if (lease.cache) {
       if (lease.cache.state === 'draining' && attachment.cache?.state !== 'draining') this.storage.sql.exec('DELETE FROM runtime_primary_flush WHERE attachment=? AND generation=?', attachment.attachmentId, attachment.generation);
       attachment.cache = { ...lease.cache, localWorkOptIn: attachment.cache?.localWorkOptIn ?? false };
+      // Ready means the machine is online and its sync is running; setup results never change it.
       if (lease.cache.state === 'draining') attachment.state = 'draining';
-      else if (!attachment.detachRequest && (lease.cache.state === 'reclaimed' || lease.cache.state === 'paused' || lease.cache.state === 'setup')) attachment.state = 'attaching';
+      else if (!attachment.detachRequest && (lease.cache.state === 'reclaimed' || lease.cache.state === 'paused')) attachment.state = 'attaching';
+      else if (!attachment.detachRequest && lease.cache.state === 'live' && attachment.state === 'attaching') {
+        attachment.state = 'ready';
+        this.storage.sql.exec('DELETE FROM runtime_primary_flush WHERE attachment=? AND generation=?', attachment.attachmentId, attachment.generation);
+      }
     }
-    const next: RuntimeAttachment = { ...attachment, ...(lease.browserCapabilities ? { capabilities: [...attachment.capabilities.filter(capability => capability !== 'browser' && capability !== 'browser_control' && !capability.startsWith('browser.')), ...lease.browserCapabilities] } : {}), executionObservation: observation, failure: lease.failure === undefined ? attachment.failure : lease.failure, heartbeatAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() };
+    const next: RuntimeAttachment = { ...attachment, ...(lease.browserCapabilities ? { capabilities: [...attachment.capabilities.filter(capability => capability !== 'browser' && capability !== 'browser_control' && !capability.startsWith('browser.')), ...lease.browserCapabilities] } : {}), executionObservation: freshObservation ? observation : attachment.executionObservation, failure: lease.failure === undefined ? attachment.failure : lease.failure, heartbeatAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() };
     next.deadlineAt = this.deadline(next, prior, now, { heartbeat: true, ...(lease.progress ? { progressAt: Date.parse(lease.progress.at) } : {}) });
     this.save(next);
     return next;
@@ -450,7 +464,7 @@ export class AttachmentStore {
     if (input.state === 'lost') return this.lose(input.attachmentId, input.generation, 'operator');
     if (input.state === 'draining' && attachment.role === 'cache') {
       attachment.detachRequest = input.discardHeldBack === true ? { discardHeldBack: true } : {};
-      this.storage.sql.exec('UPDATE runtime_attachments SET record=? WHERE id=?', JSON.stringify(attachment), attachment.attachmentId);
+      this.save(attachment);
     }
     if (attachment.state === input.state) return attachment;
     return this.transition(input.attachmentId, input.generation, input.state);

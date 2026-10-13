@@ -98,7 +98,9 @@ export async function originConfirmation(root: string, head: string | null, git:
       if (host.startsWith('-') || /[\r\n]/u.test(host)) throw new Error('Invalid SSH LFS host');
       const repository = decodeURIComponent(ssh.pathname.replace(/^\//u, ''));
       const command = environment.GIT_SSH_COMMAND || await config(['--get', 'core.sshCommand']) || 'ssh';
-      const remoteCommand = `git-lfs-authenticate '${repository.replace(/'/gu, `'\\''`)}' download`;
+      // Restricted SSH servers parse this command themselves; quote only shell-sensitive paths.
+      const argument = /^[A-Za-z0-9_./-]+$/u.test(repository) ? repository : `'${repository.replace(/'/gu, `'\\''`)}'`;
+      const remoteCommand = `git-lfs-authenticate ${argument} download`;
       const args = ['sh', '-c', `exec ${command} "$@"`, 'git-lfs-authenticate', '-o', 'BatchMode=yes', ...(ssh.port ? ['-p', ssh.port] : []), host, remoteCommand];
       const child = Bun.spawn(args, { cwd: root, env: { ...Bun.env, ...environment, GIT_TERMINAL_PROMPT: '0' }, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
       const timeout = setTimeout(() => child.kill('SIGKILL'), 10_000);

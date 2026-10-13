@@ -51,7 +51,8 @@ export async function acquireCheckout(input: {
     await mkdir(input.directory, { recursive: true });
     await command('git', ['init', input.directory], env);
     await command('git', ['config', 'remote.origin.url', input.source.remote], env, input.directory);
-    await command('git', ['fetch', '--no-tags', input.source.remote, input.source.ref], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
+    await command('git', ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'], env, input.directory);
+    await command('git', ['fetch', '--update-shallow', '--no-tags', input.source.remote, input.source.ref], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
     const acquired = await command('git', ['rev-parse', 'FETCH_HEAD^{commit}'], env, input.directory);
     if (acquired !== input.source.commit) throw new Error('Acquired source differs from assigned commit');
     const branch = input.source.ref.startsWith('refs/heads/') ? input.source.ref.slice('refs/heads/'.length) : input.source.ref;

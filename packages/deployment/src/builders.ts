@@ -1,5 +1,6 @@
 import { cp, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { builtinModules } from 'node:module';
 import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from './executable-manifest.js';
 import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { z } from 'zod';
@@ -66,8 +67,11 @@ async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: st
     conditions: ['workerd'],
     define: { GITSPACE_WORKER_SHA: JSON.stringify(sha) },
     plugins: [{
-      name: 'static-worker-wasm',
+      name: 'worker-runtime-modules',
       setup(build) {
+        build.onResolve({ filter: new RegExp(`^(?:${builtinModules.filter(name => !name.startsWith('node:')).join('|')})$`, 'u') }, args => ({
+          path: `node:${args.path}`, external: true,
+        }));
         build.onResolve({ filter: /\.wasm$/u }, async args => {
           const source = resolve(dirname(args.importer), args.path);
           const content = new Uint8Array(await Bun.file(source).arrayBuffer());

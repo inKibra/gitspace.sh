@@ -25,5 +25,5 @@ it('counts only live attachments so lost and detached history never drives the e
   const lost = Array.from({ length: 6 }, (_, index) => ({ ...live, attachmentId: `lost-${index}`, state: 'lost' as const, lossReason: 'machine-destroyed' as const }));
   const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId: 'workspace', cursor: 1, attachments: [...lost, { ...live, attachmentId: 'detached', state: 'detached' }], conversations: [], tasks: [], questions: [], documents: {} });
   expect(environmentCacheSummary(snapshot, Date.parse(stamp))).toEqual({ count: 0, ready: 0, label: 'No machine', color: 'dim' });
-  expect(environmentCacheSummary({ ...snapshot, attachments: [...snapshot.attachments, live] }, Date.parse(stamp))).toEqual({ count: 1, ready: 1, label: 'Live', color: 'green' });
+  expect(environmentCacheSummary({ ...snapshot, attachments: [...snapshot.attachments, live] }, Date.parse(stamp))).toEqual({ count: 1, ready: 1, label: 'Ready', color: 'green' });
 });

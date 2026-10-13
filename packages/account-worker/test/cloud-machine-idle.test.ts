@@ -34,6 +34,7 @@ describe('cloud machine idle intent', () => {
     ['a requested reclaim', { cacheAction: { requestId: 'reclaim-a', action: 'reclaim', status: 'requested', error: null } }],
     ['a running reclaim', { cacheAction: { requestId: 'reclaim-a', action: 'reclaim', status: 'running', error: null } }],
     ['a pending retry', { failure: { operation: 'sync', message: 'push rejected', attempts: 2, nextRetryAt: timestamp, at: timestamp } }],
+    ['a permanent publication rejection', { failure: { operation: 'publish', message: 'Historical Git blob exceeds storage limit', attempts: 1, nextRetryAt: null, at: timestamp } }],
     ['a reclaim blocked on the user', { cache: { ...idleCache.cache!, reclaimBlocked: 'Held-back LFS objects need a decision' } }],
     ['active executions', { executionObservation: { activeExecutions: 1, observedAt: timestamp } }],
     ['setup in flight', { state: 'attaching' }],

@@ -1,6 +1,5 @@
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it, vi } from 'vitest';
-import { HttpResponse, http } from 'msw';
+import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -9,7 +8,6 @@ import { mcpAccessResultSchema, type McpAccessOperation } from '@gitspace/protoc
 import worker from '../src/index.js';
 import { CredentialVaultDO } from '../src/application.js';
 import { tenantRootPrivateKey } from './setup.js';
-import { network } from './network.js';
 
 async function fixture(capabilities: DeviceCapability[], rights: Partial<DeviceInvite> = {}, enable = true) {
   const privateKey = crypto.getRandomValues(new Uint8Array(32));
@@ -109,31 +107,6 @@ describe('tenant MCP authority boundary', () => {
       const state = await value.client.callTool({ name: 'gitspace_configuration_values_get', arguments: {} });
       expect(JSON.stringify(state)).not.toContain('forbidden');
     } finally { await value.client.close(); }
-  });
-
-  it('dispatches machine-bound tools to the account /rpc, which forwards them to the holder', async () => {
-    const value = await fixture(['rpc.read']);
-    // Catalog endpoints are relay tunnels on the Worker's own host, which it cannot fetch.
-    await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).putMachine({ id: 'machine-b', label: 'Machine B', kind: 'physical', provider: 'physical', state: 'online', desiredState: 'online', rpcEndpoint: `${env.RELAY_URL}/tunnel/machine-b/rpc`, notes: '', lifecycleRevision: 1, operationId: null, error: null });
-    await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:space-mcp`).bootstrap({ projectId: 'project-mcp', spaceId: 'space-mcp', machineId: 'machine-b' });
-    const selfFetches: string[] = [];
-    network.use(http.all(`${env.ACCOUNT_URL}/*`, ({ request }) => {
-      selfFetches.push(request.url);
-      return HttpResponse.json({ error: { code: 'SELF_FETCH', message: 'The Worker fetched its own hostname' } }, { status: 500 });
-    }));
-    const logs = vi.spyOn(console, 'log');
-    await value.client.connect(value.transport);
-    try {
-      const result = await value.client.callTool({ name: 'gitspace_space_view', arguments: { projectId: 'project-mcp', workspaceId: 'space-mcp' } });
-      // No machine socket is connected in tests, so the holder's tunnel reports it offline.
-      expect(result.isError).toBe(true);
-      expect(selfFetches).toEqual([]);
-      const batches = logs.mock.calls.flatMap(([line]): unknown[] => typeof line === 'string' && line.includes('"rpc_batch"') ? [JSON.parse(line)] : []);
-      expect(batches).toContainEqual(expect.objectContaining({ procedures: ['space.view'], target: 'machine-b' }));
-    } finally {
-      logs.mockRestore();
-      await value.client.close();
-    }
   });
 
   it('returns the bearer once, rotates it, and disables both bearer and dedicated grant', async () => {

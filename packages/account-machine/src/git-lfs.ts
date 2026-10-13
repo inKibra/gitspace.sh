@@ -70,7 +70,8 @@ async function tree(root: string, ref: string): Promise<Map<string, Entry>> {
   }
   return entries;
 }
-async function pointers(root: string, revisions: string[]): Promise<Map<string, GitLfsObject>> {
+/** All reachable LFS pointers, including payloads deleted from the current tree. */
+export async function readGitLfsPointers(root: string, revisions: string[]): Promise<Map<string, GitLfsObject>> {
   const result = new Map<string, GitLfsObject>();
   if (!revisions.length) return result;
   const objects = text(await git(root, ['rev-list', '--objects', '--no-object-names', ...revisions])).trim();
@@ -87,7 +88,7 @@ async function pointers(root: string, revisions: string[]): Promise<Map<string, 
 export async function captureGitLfs(root: string, head: string | null, authorityIndex: string, access?: MachineGitLfsPublication) {
   const snapshot: GitLfsSnapshot = { objects: [], heldBack: [] };
   const headEntries = head ? await tree(root, head) : new Map<string, Entry>();
-  const history = await committedLfsInventory(root, head, git, pointers);
+  const history = await committedLfsInventory(root, head, git, readGitLfsPointers);
   const confirm = await originConfirmation(root, head, git, access?.canonicalOrigin === null ? {} : await access?.originEnvironment(root) ?? {}, access);
   const origin = new Map((await confirm([...history.values()])).map(object => [object.oid, object]));
   const unconfirmed = [...history.values()].filter(object => !origin.has(object.oid));
@@ -175,7 +176,7 @@ export async function recheckGitLfsOrigin(root: string, access: MachineGitLfs): 
 /** Resolve every required object before changing HEAD, index or worktree. */
 export async function hydrateGitLfs(root: string, refs: string[], snapshot: GitLfsSnapshot | undefined, access?: MachineGitLfs): Promise<void> {
   if (snapshot && access?.resolveSources) snapshot.objects = await access.resolveSources(snapshot.objects);
-  const required = await pointers(root, refs);
+  const required = await readGitLfsPointers(root, refs);
   for (const object of snapshot?.objects ?? []) required.set(object.oid, object);
   const sources = new Map(snapshot?.objects.map(object => [object.oid, object]));
   for (const object of required.values()) {

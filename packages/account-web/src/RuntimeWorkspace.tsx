@@ -15,7 +15,7 @@ import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
-import { cachePresentation, environmentCacheSummary } from './environment/cache-presentation.js';
+import { attachedMachines, environmentCacheSummary } from './environment/cache-presentation.js';
 import { useCacheFreshnessClock } from './environment/useCacheFreshnessClock.js';
 import { BrowserApprovalCard } from './RuntimeBrowser.js';
 import { ToolApprovalCard } from './ToolApprovalCard.js';
@@ -37,6 +37,8 @@ export interface RuntimeInspectorContext {
   onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations'];
   initialView?: 'environment';
   resourceRequest?: ResourceRequest;
+  /** Opens the terminal panel on `machineId` and selects the named terminal, such as an interactive setup run. */
+  onOpenTerminal(machineId: string, name: string): void;
 }
 export interface RuntimeWorkspaceProps {
   projectId: string;
@@ -151,11 +153,9 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const environment = environmentCacheSummary(snapshot, now);
   // Terminals open only on a cache the user picked for this workspace: never a default machine or a placement holder.
   // A cache paused while idle stays listed; picking it wakes it, and its terminals open once it is live again.
-  const terminalMachines = snapshot.attachments.flatMap((item): WorkspaceTerminalMachine[] => {
-    if (item.role !== 'cache') return [];
-    const status = cachePresentation(item, now);
-    const state = status.ready ? 'live' : status.label === 'Paused' ? 'paused' : null;
-    return state ? [{ id: item.machineId, label: inspection.machines.find(machine => machine.id === item.machineId)?.label ?? item.machineId, state }] : [];
+  const terminalMachines = attachedMachines(snapshot.attachments, now).flatMap((machine): WorkspaceTerminalMachine[] => {
+    const state = machine.ready ? 'live' : machine.label === 'Paused' ? 'paused' : null;
+    return state ? [{ id: machine.id, label: inspection.machines.find(candidate => candidate.id === machine.id)?.label ?? machine.id, state }] : [];
   });
   const selectTerminalMachine = (machineId: string) => {
     setTerminalChoice({ spaceId, machineId });
@@ -199,7 +199,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
         send: async (machineId, name, data) => { const result = await rpcClient.terminals.send({ spaceId, machineId, name, data }); if (result.status === 'error') throw result.error; },
         stop: async (machineId, name) => { const result = await rpcClient.terminals.stop({ spaceId, machineId, name }); if (result.status === 'error') throw result.error; },
       }}
-      renderInspector={(onClose, initialView, resourceRequest) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest })}
+      renderInspector={(onClose, initialView, resourceRequest, openTerminal) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
     />
     {launchRequest ? <LaunchMachineDialog key={launchRequest.workspaceId} projectId={props.projectId} workspaceId={launchRequest.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.workspaceId, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => setLaunchRequest({ workspaceId: launch.launch!.workspaceId, targets: launch.launch!.targets })} /> : null}

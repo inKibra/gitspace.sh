@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
-import { inferenceSettingSection } from '@gitspace/protocol/inference';
+import { inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
@@ -210,9 +210,8 @@ function SettingRowsEditor({ items, saving, onSetRuntimeSetting }: { items: read
 const THINKING_LEVELS = ['auto', 'off', 'low', 'medium', 'high', 'xhigh'] as const;
 /** A model role is `provider/model[:thinking]`; `known` means this profile's model catalog can run it. */
 export function parseRoleModel(value: string, models: readonly AvailableModel[]): { modelKey: string; thinking: string; known: boolean } {
-  const separator = value.lastIndexOf(':');
-  const modelKey = separator > value.indexOf('/') ? value.slice(0, separator) : value;
-  return { modelKey, thinking: separator > value.indexOf('/') ? value.slice(separator + 1) : 'auto', known: models.some((model) => `${model.provider}/${model.id}` === modelKey) };
+  const { selector: modelKey, thinking } = parseModelRoleSelector(value);
+  return { modelKey, thinking: thinking ?? 'auto', known: models.some((model) => `${model.provider}/${model.id}` === modelKey) };
 }
 function RoleModelPicker({ role, label, value, models, modelsReady, disabled, onChange }: { role: string; label: string; value: string; models: readonly AvailableModel[]; modelsReady: boolean; disabled: boolean; onChange(value: string): void }) {
   const { modelKey, thinking, known } = parseRoleModel(value, models);

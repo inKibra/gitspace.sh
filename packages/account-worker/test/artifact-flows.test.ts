@@ -9,6 +9,10 @@ import { describe, expect, it } from 'vitest';
 import worker from '../src/index.js';
 import type { ProjectAuthorityDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
+import { createCipheriv, createHash } from 'node:crypto';
+import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION } from '@gitspace/protocol-workspace';
+import { readArtifactObject } from '../src/artifact-object-reader.js';
+import { verifyLegacyMigrationArtifacts } from '../src/legacy-space-migration.js';
 
 async function fixture() {
   const userId = env.ACCOUNT_ID;
@@ -33,12 +37,12 @@ async function fixture() {
     await index.putWorkspaceLocation(id, projectId);
   }
   const key = credentialProtocolBase64.decode(await vault.artifactKey(userId));
-  const persist = async (scopeId: string, content: string) => {
-    const sealed = await encryptArtifactBytes(new TextEncoder().encode(content), await deriveArtifactScopeKey(key, scopeId));
-    const hash = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(sealed))), (byte) => byte.toString(16).padStart(2, '0')).join('')}` as const;
+  const store = async (sealed: Uint8Array) => {
+    const hash = `sha256:${createHash('sha256').update(sealed).digest('hex')}` as const;
     await env.DATA.put(`users/${userId}/accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${hash.slice(7)}`, sealed);
     return hash;
   };
+  const persist = async (scopeId: string, content: string) => store(await encryptArtifactBytes(new TextEncoder().encode(content), await deriveArtifactScopeKey(key, scopeId)));
   const publish = async (spaceId: string, generation: number, files: Array<{ path: string; content: string; mediaType?: string }>) => {
     const scopeId = `space:${spaceId}`;
     const entries: ArtifactManifest['entries'] = [];
@@ -47,12 +51,62 @@ async function fixture() {
     await authority.putArtifactScope({ id: scopeId, workspaceId: spaceId, generation, expectedGeneration: generation - 1, manifestHash });
     return entries;
   };
+  const publishChunked = async () => {
+    const scopeId = `space:${workspaceId}`;
+    const scopeKey = await deriveArtifactScopeKey(key, scopeId);
+    const expected = createHash('sha256');
+    const chunks = [];
+    for (const size of [CHECKPOINT_CHUNK_BYTES, 17]) {
+      const bytes = new Uint8Array(size).fill(size === 17 ? 2 : 1);
+      expected.update(bytes);
+      chunks.push({ hash: await store(await encryptArtifactBytes(bytes, scopeKey)), size });
+    }
+    const size = CHECKPOINT_CHUNK_BYTES + 17;
+    const encrypted = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify({ version: 1, size, chunks })), scopeKey);
+    const envelope = new Uint8Array(encrypted.byteLength + 1);
+    envelope[0] = CHUNKED_CHECKPOINT_VERSION;
+    envelope.set(encrypted, 1);
+    const blobHash = await store(envelope);
+    const entries = [{ path: 'large.bin', blobHash, size, mediaType: 'application/octet-stream' }];
+    const manifestHash = await persist(scopeId, JSON.stringify({ version: 1, scopeId, generation: 1, entries }));
+    await authority.putArtifactScope({ id: scopeId, workspaceId, generation: 1, expectedGeneration: 0, manifestHash });
+    return { blobHash, size, digest: expected.digest('hex'), finalKey: `users/${userId}/accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${chunks[1]!.hash.slice(7)}` };
+  };
+  const publishLegacy = async () => {
+    const scopeId = `space:${workspaceId}`;
+    const scopeKey = await deriveArtifactScopeKey(key, scopeId);
+    // Match the largest retained old envelope without allocating a second full payload.
+    const size = 39_479_629;
+    const nonce = new Uint8Array(12).fill(7);
+    const cipher = createCipheriv('aes-256-gcm', scopeKey, nonce);
+    const sealed = new Uint8Array(size + 29);
+    sealed[0] = 1;
+    sealed.set(nonce, 1);
+    const block = Uint8Array.from({ length: 64 * 1024 }, (_, index) => index % 251);
+    const expected = createHash('sha256');
+    for (let offset = 0; offset < size; offset += block.byteLength) {
+      const bytes = block.subarray(0, Math.min(block.byteLength, size - offset));
+      expected.update(bytes);
+      sealed.set(cipher.update(bytes), 13 + offset);
+    }
+    sealed.set(cipher.final(), 13 + size);
+    sealed.set(cipher.getAuthTag(), 13 + size);
+    const blobHash = await store(sealed);
+    const entries = [{ path: 'legacy.pcm', blobHash, size, mediaType: 'audio/pcm' }];
+    const manifestHash = await persist(scopeId, JSON.stringify({ version: 1, scopeId, generation: 1, entries }));
+    const scope = { id: scopeId, workspaceId, generation: 1, manifestHash };
+    await authority.putArtifactScope({ ...scope, expectedGeneration: 0 });
+    return {
+      blobHash, size, scopeKey, scope, digest: expected.digest('hex'),
+      objectKey: `users/${userId}/accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${blobHash.slice(7)}`,
+    };
+  };
   const origin = `https://${handle}.gitspace.sh`;
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return worker.fetch(new Request(input, init), env);
   }) as typeof fetch;
   const client = createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({ homeUrl: `${origin}/rpc`, fetch: createSignedRpcFetch({ deviceId: binding.deviceId, userId, signingPrivateKey: deviceKey, fetch: fetcher }) }) });
-  return { client, authority, projectId, workspaceId, publish, origin };
+  return { client, authority, projectId, workspaceId, publish, publishChunked, publishLegacy, origin };
 }
 
 async function readBytes(stream: AsyncIterable<{ status: 'ok'; value: ResourcePreviewFrame } | { status: 'error'; error: unknown }>): Promise<Buffer> {
@@ -241,4 +295,100 @@ describe('user artifact flows', () => {
     expect((await worker.fetch(new Request(new URL(expired.value.url, origin)), env)).status).toBe(404);
     expect(await client.inspector.artifacts.shares.list({ spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/demo.html' })).toMatchObject({ status: 'ok', value: [] });
   });
+
+  it('authenticates large original envelopes for migration and downloads their exact bytes', async () => {
+    const { client, workspaceId, publishLegacy, origin } = await fixture();
+    const artifact = await publishLegacy();
+    await verifyLegacyMigrationArtifacts(env, artifact.scope);
+    for (const size of [artifact.size - 1, artifact.size + 1]) {
+      await expect(readArtifactObject(env, env.ACCOUNT_ID, artifact.blobHash, artifact.scopeKey, size)).rejects.toThrow('Artifact size mismatch');
+    }
+    const created = await client.inspector.artifacts.shares.create({
+      spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/legacy.pcm', hash: artifact.blobHash, expiresAt: null,
+    });
+    if (created.status === 'error') throw created.error;
+    const response = await worker.fetch(new Request(new URL(created.value.url, origin)), env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-length')).toBe(String(artifact.size));
+    const received = createHash('sha256');
+    let size = 0;
+    const reader = response.body!.getReader();
+    try {
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        size += next.value.byteLength;
+        received.update(next.value);
+      }
+    } finally { reader.releaseLock(); }
+    expect(size).toBe(artifact.size);
+    expect(received.digest('hex')).toBe(artifact.digest);
+    const withoutSize = createHash('sha256');
+    for await (const bytes of await readArtifactObject(env, env.ACCOUNT_ID, artifact.blobHash, artifact.scopeKey)) withoutSize.update(bytes);
+    expect(withoutSize.digest('hex')).toBe(artifact.digest);
+  }, 30_000);
+
+  it('withholds all large legacy plaintext on content-address or GCM authentication failure', async () => {
+    const { client, workspaceId, publishLegacy, origin } = await fixture();
+    const artifact = await publishLegacy();
+    const request = { spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/legacy.pcm', hash: artifact.blobHash, expiresAt: null };
+    const created = await client.inspector.artifacts.shares.create(request);
+    if (created.status === 'error') throw created.error;
+    const object = await env.DATA.get(artifact.objectKey);
+    const sealed = new Uint8Array(await object!.arrayBuffer());
+    sealed[sealed.byteLength - 1] = sealed[sealed.byteLength - 1]! ^ 1;
+    await env.DATA.put(artifact.objectKey, sealed);
+    await expect(verifyLegacyMigrationArtifacts(env, artifact.scope)).rejects.toThrow('Artifact object failed content verification');
+    expect((await client.inspector.artifacts.shares.create(request)).status).toBe('error');
+    const response = await worker.fetch(new Request(new URL(created.value.url, origin)), env);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('content-disposition')).toBeNull();
+    // A valid content address is not a substitute for AES-GCM authentication.
+    // Rejection before an iterable is returned guarantees that no prefix was emitted.
+    sealed[sealed.byteLength - 1] = sealed[sealed.byteLength - 1]! ^ 1;
+    for (const offset of [sealed.byteLength - 1, 13 + CHECKPOINT_CHUNK_BYTES]) {
+      sealed[offset] = sealed[offset]! ^ 1;
+      const hash = `sha256:${createHash('sha256').update(sealed).digest('hex')}`;
+      await env.DATA.put(`${artifact.objectKey.slice(0, -64)}${hash.slice(7)}`, sealed);
+      await expect(readArtifactObject(env, env.ACCOUNT_ID, hash, artifact.scopeKey, artifact.size)).rejects.toThrow();
+      sealed[offset] = sealed[offset]! ^ 1;
+    }
+  }, 30_000);
+
+  it('streams chunked shares completely, keeps preview/copy size limits honest, and rejects corrupt final parts', async () => {
+    const { client, workspaceId, publishChunked, origin } = await fixture();
+    const artifact = await publishChunked();
+    const request = { spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/large.bin', hash: artifact.blobHash };
+    const previews = [];
+    for await (const frame of client.inspector.artifacts.read(request)) previews.push(frame);
+    expect(previews).toMatchObject([{ status: 'error' }]);
+    expect((await client.inspector.artifacts.copyToProject({ spaceId: workspaceId, expectedGeneration: 0, expectedProjectGeneration: 0, files: [{ url: request.url, hash: request.hash, destinationPath: 'large.bin', expectedDestinationHash: null }] })).status).toBe('error');
+    const created = await client.inspector.artifacts.shares.create({ ...request, expiresAt: null });
+    if (created.status === 'error') throw created.error;
+    const url = new URL(created.value.url, origin);
+    const response = await worker.fetch(new Request(url), env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-length')).toBe(String(artifact.size));
+    const received = createHash('sha256');
+    let size = 0;
+    const reader = response.body!.getReader();
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      received.update(next.value);
+    }
+    reader.releaseLock();
+    expect(size).toBe(artifact.size);
+    expect(received.digest('hex')).toBe(artifact.digest);
+    await env.DATA.put(artifact.finalKey, new Uint8Array([1, 2, 3]));
+    expect((await client.inspector.artifacts.shares.create({ ...request, expiresAt: null })).status).toBe('error');
+    expect((await worker.fetch(new Request(url, { method: 'HEAD' }), env)).status).toBe(404);
+    const corrupt = await worker.fetch(new Request(url), env);
+    await expect((async () => {
+      const reader = corrupt.body!.getReader();
+      try { while (!(await reader.read()).done) { /* Verify the stream fails, rather than ending successfully. */ } }
+      finally { reader.releaseLock(); }
+    })()).rejects.toThrow();
+  }, 30_000);
 });

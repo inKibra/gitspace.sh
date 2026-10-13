@@ -11,12 +11,13 @@ export async function canonicalLfsObjects(binding: { get(name: string): Promise<
       if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid canonical Git remote');
       const token = await repo.createToken('read', 60);
       let refs: Map<string, string>;
+      let shallow: Set<string>;
       try {
         const response = await fetcher(`${remote.href.replace(/\/$/u, '')}/info/refs?service=git-upload-pack`, { redirect: 'error', signal: AbortSignal.timeout(30_000), headers: { Authorization: `Bearer ${token.plaintext}`, Accept: 'application/x-git-upload-pack-advertisement' } });
         if (!response.ok) throw new Error('Canonical Git discovery unavailable');
         const bytes = new Uint8Array(await response.arrayBuffer());
         if (bytes.length > 16 * 1024 * 1024) throw new Error('Canonical Git advertisement too large');
-        refs = parseCanonicalRefs(bytes);
+        ({ refs, shallow } = parseCanonicalAdvertisement(bytes));
       } finally { if (!await repo.revokeToken(token.id)) throw new Error('Canonical Git token revocation failed'); }
       const pending = [...refs].filter(([ref]) => !ref.endsWith('^{}')).map(([ref, oid]) => refs.get(`${ref}^{}`) ?? oid);
       const commits = new Set<string>(); const trees = new Set<string>(); const blobs = new Set<string>();
@@ -26,7 +27,9 @@ export async function canonicalLfsObjects(binding: { get(name: string): Promise<
         commits.add(oid);
         const commit = await repo.readCommit(oid);
         if (!commit) throw new Error('Canonical branch/tag commit unavailable');
-        pending.push(...commit.parents);
+        // Only an advertised shallow boundary proves intentionally absent ancestry.
+        // Missing required roots or objects remain fatal so retention cannot delete on partial evidence.
+        if (!shallow.has(oid)) pending.push(...commit.parents);
         const pendingTrees = [commit.treeHash];
         while (pendingTrees.length) {
           const tree = pendingTrees.pop()!;
@@ -56,7 +59,12 @@ export async function canonicalLfsObjects(binding: { get(name: string): Promise<
 }
 
 export function parseCanonicalRefs(bytes: Uint8Array): Map<string, string> {
+  return parseCanonicalAdvertisement(bytes).refs;
+}
+
+function parseCanonicalAdvertisement(bytes: Uint8Array) {
   const decoder = new TextDecoder('utf-8', { fatal: true }); const refs = new Map<string, string>(); let service = false;
+  const shallow = new Set<string>();
   for (let offset = 0; offset < bytes.length;) {
     const prefix = decoder.decode(bytes.subarray(offset, offset + 4));
     if (!/^[0-9a-f]{4}$/u.test(prefix)) throw new Error('Invalid Git discovery packet');
@@ -65,10 +73,12 @@ export function parseCanonicalRefs(bytes: Uint8Array): Map<string, string> {
     if (size < 4 || offset + size - 4 > bytes.length) throw new Error('Truncated Git discovery');
     const line = decoder.decode(bytes.subarray(offset, offset + size - 4)); offset += size - 4;
     if (line === '# service=git-upload-pack\n') { service = true; continue; }
+    const boundary = /^shallow ([0-9a-f]{40})\n?$/u.exec(line);
+    if (boundary) { shallow.add(boundary[1]!); continue; }
     const ref = /^([0-9a-f]{40}) ([^\0\n]+)(?:\0[^\n]*)?\n?$/u.exec(line);
     if (!ref) throw new Error('Invalid Git discovery advertisement');
     if (ref[2]!.startsWith('refs/heads/') || ref[2]!.startsWith('refs/tags/')) refs.set(ref[2]!, ref[1]!);
   }
   if (!service) throw new Error('Missing Git discovery service');
-  return refs;
+  return { refs, shallow };
 }

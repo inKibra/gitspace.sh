@@ -1,6 +1,5 @@
 import { defineDoc, type Harness, type Storage, type Conversation, type ConversationId, type Cursor, type EntryRecord } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { z } from 'zod';
 import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, SUBAGENT_READONLY_TOOLS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
 import type { ToolServices } from './tools.js';
 import { CronScopeDoc } from './documents.js';
@@ -9,8 +8,8 @@ import { SessionControlsDoc, parseCloudAgentDefinition, resolveAgentDefinitions,
 import { BackgroundAgentsDoc, type BackgroundAgentTask } from './background-agents.js';
 import { AgentDefinitionContextDoc, type SubagentMetadata } from './subagent-state.js';
 import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
+import { modelRoleThinkingSchema } from '@gitspace/protocol/inference';
 const Anchors = defineDoc<{ entries: Record<string, string>; children: Record<string, string> }>({ kind: 'gitspace.context-anchors', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ entries: {}, children: {} }) });
-const ThinkingSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).nullable();
 export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask; refreshDefinitions?(target: Conversation): Promise<void> } & Pick<SessionControlServices, 'admitInference' | 'configureModel' | 'catalog'>;
 export function createConversationTools(options: ConversationToolOptions) {
   const { harness, storage } = options;
@@ -62,7 +61,7 @@ export function createConversationTools(options: ConversationToolOptions) {
         const role = roleId ? catalog.roles.find(value => value.id === roleId) : undefined;
         if (!previous && roleId && !role) throw new Error('Requested inference role not found');
         const selection: ModelSelectionIntent = previous?.selection ?? (role ? { kind: 'role', role: role.id } : definition?.provider && definition.model ? { kind: 'explicit', provider: definition.provider, modelId: definition.model } : { kind: 'default' });
-        const thinking = previous ? previous.thinking : ThinkingSchema.parse(parsed?.thinking ?? definition?.thinking ?? role?.thinking ?? null);
+        const thinking = previous ? previous.thinking : modelRoleThinkingSchema.parse(parsed?.thinking ?? definition?.thinking ?? null);
         const narrowedTools = parsed?.toolsSpecified ? parsed.tools : [...SUBAGENT_READONLY_TOOLS];
         const tools = previous?.tools ?? (narrowedTools.includes('agents') ? narrowedTools : [...narrowedTools, 'agents']);
         const name = previous?.name ?? args.name ?? `${definition?.name ?? role?.id}-${input.attemptId}`;
@@ -104,10 +103,11 @@ export function createConversationTools(options: ConversationToolOptions) {
         const submission = await options.lifecycle.runWhileActive(childId, async () => {
           input.signal?.throwIfAborted();
           const model = await options.admitInference({ conversationId: childId, requestId: input.attemptId, parentConversationId: input.conversationId, selection: metadata.model ? { kind: 'explicit', ...metadata.model } : metadata.selection });
-          await child.commit(async tx => { const childState = await tx.doc(AgentDefinitionContextDoc, child.id); if (childState.child && !childState.child.model) childState.child.model = model; }, context);
+          const thinking = metadata.thinking ?? model.thinking ?? null;
+          await child.commit(async tx => { const childState = await tx.doc(AgentDefinitionContextDoc, child.id); if (childState.child && !childState.child.model) { childState.child.model = { provider: model.provider, modelId: model.modelId }; childState.child.thinking = thinking; } }, context);
           await options.configureModel(child.id, model);
           const instructions = metadata.definition ? parseCloudAgentDefinition(metadata.definition.path, metadata.definition.content).instructions : '';
-          await child.configure({ thinkingLevel: metadata.thinking, instructions: `${instructions}\n\nYou are ${metadata.name} (${childId}), a read-only subagent. Your parent is available at parent (${metadata.parentId}). Use agents list to discover sibling names and ids, agents send to message parent or siblings, and agents wait for events. You cannot spawn or stop agents.` }, context);
+          await child.configure({ thinkingLevel: thinking, instructions: `${instructions}\n\nYou are ${metadata.name} (${childId}), a read-only subagent. Your parent is available at parent (${metadata.parentId}). Use agents list to discover sibling names and ids, agents send to message parent or siblings, and agents wait for events. You cannot spawn or stop agents.` }, context);
           input.signal?.throwIfAborted();
           return child.submit({ type: 'input', content: args.task, requestId: input.attemptId }, context);
         });

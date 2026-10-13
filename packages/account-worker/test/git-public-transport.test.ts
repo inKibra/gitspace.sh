@@ -17,6 +17,7 @@ describe('public Git transport in Workers', () => {
 
   it.each(['discovery', 'pack'] as const)('rejects a %s redirect without contacting its destination', async operation => {
     let redirectedRequests = 0;
+    if (operation === 'pack') network.use(http.get(`${remote}/info/refs`, () => new HttpResponse(packet(`${commit} refs/heads/main\n`) + '0000')));
     network.use(
       http.get('https://redirected.invalid/repository.git', () => {
         redirectedRequests++;

@@ -1,4 +1,4 @@
-import { lazyStream, type Api, type Model, type Context, type ModelsApiStreamOptions, type Models, type AssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { createModels, lazyStream, type Api, type AnyModel, type Model, type Context, type ModelsApiStreamOptions, type Models, type AssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { interceptRuntimeModelStream } from '../retained-rules.js';
 
 /** API-specific options can only be forwarded to the same admitted transport. */
@@ -7,8 +7,14 @@ function hasApi<T extends Api>(model: Model<Api>, api: T): model is Model<T> {
 }
 
 /** A request's signal is bound by the durable generation hook, never a process-global account. */
-export function createRunModelsRouter(initial: Models, resolve: (signal?: AbortSignal) => Promise<Models>) {
-  const catalogs = [initial];
+export function createRunModelsRouter(initial: Models | null, resolve: (signal?: AbortSignal) => Promise<Models>) {
+  const catalog = initial ?? createModels();
+  const catalogs: Array<{ key: Models | string; models: Models }> = initial ? [{ key: initial, models: initial }] : [];
+  function unique<T>(rows: readonly T[], key: (row: T) => string): T[] {
+    const seen = new Set<string>();
+    return rows.filter(row => { const id = key(row); if (seen.has(id)) return false; seen.add(id); return true; });
+  }
+  const modelKey = (model: AnyModel) => JSON.stringify([model.provider, model.type ?? 'chat', model.id]);
   function intercept(signal: AbortSignal | undefined, start: (signal: AbortSignal) => AssistantMessageEventStream): AssistantMessageEventStream {
     const controller = new AbortController();
     const abort = () => controller.abort(signal?.reason);
@@ -24,9 +30,17 @@ export function createRunModelsRouter(initial: Models, resolve: (signal?: AbortS
     }
   }
   const routed: Models = {
-    ...initial,
-    getModel: (provider, id) => { for (const models of catalogs) { const model = models.getModel(provider, id); if (model) return model; } return undefined; },
-    getModelOfType: (type, provider, id) => { for (const models of catalogs) { const model = models.getModelOfType(type, provider, id); if (model) return model; } return undefined; },
+    ...catalog,
+    getProviders: () => unique(catalogs.flatMap(({ models }) => models.getProviders()), provider => provider.id),
+    getProvider: id => { for (const { models } of catalogs) { const provider = models.getProvider(id); if (provider) return provider; } return undefined; },
+    getModels: provider => unique(catalogs.flatMap(({ models }) => models.getModels(provider)), modelKey),
+    getAllModels: provider => unique(catalogs.flatMap(({ models }) => models.getAllModels(provider)), modelKey),
+    getModelsOfType: (type, provider) => unique(catalogs.flatMap(({ models }) => models.getModelsOfType(type, provider)), modelKey),
+    getModel: (provider, id) => { for (const { models } of catalogs) { const model = models.getModel(provider, id); if (model) return model; } return undefined; },
+    getModelOfType: (type, provider, id) => { for (const { models } of catalogs) { const model = models.getModelOfType(type, provider, id); if (model) return model; } return undefined; },
+    getAvailable: async (provider, options) => unique((await Promise.all(catalogs.map(({ models }) => models.getAvailable(provider, options)))).flat(), modelKey),
+    getAllAvailable: async (provider, options) => unique((await Promise.all(catalogs.map(({ models }) => models.getAllAvailable(provider, options)))).flat(), modelKey),
+    getAvailableOfType: async (type, provider, options) => unique((await Promise.all(catalogs.map(({ models }) => models.getAvailableOfType(type, provider, options)))).flat(), modelKey),
     stream<T extends Api>(model: Model<T>, context: Context, options?: ModelsApiStreamOptions<T>) {
       return lazyStream(model, async () => {
         const models = await resolve(options?.signal);
@@ -44,5 +58,16 @@ export function createRunModelsRouter(initial: Models, resolve: (signal?: AbortS
     generateImages: async (model, context, options) => { const models = await resolve(options?.signal); const canonical = models.getModelOfType('image', model.provider, model.id); if (!canonical) throw new Error('Image model is not admitted for this run'); return models.generateImages(canonical, context, options); },
     classify: async (model, context, options) => { const models = await resolve(options?.signal); const canonical = models.getModelOfType('classifier', model.provider, model.id); if (!canonical) throw new Error('Classifier model is not admitted for this run'); return models.classify(canonical, context, options); },
   };
-  return { models: routed, register(models: Models) { if (!catalogs.includes(models)) catalogs.unshift(models); } };
+  return {
+    models: routed,
+    register(models: Models, key: Models | string = models) {
+      const previous = catalogs.findIndex(catalog => catalog.key === key);
+      if (previous !== -1) catalogs.splice(previous, 1);
+      catalogs.unshift({ key, models });
+    },
+    unregister(key: Models | string) {
+      const previous = catalogs.findIndex(catalog => catalog.key === key);
+      if (previous !== -1) catalogs.splice(previous, 1);
+    },
+  };
 }

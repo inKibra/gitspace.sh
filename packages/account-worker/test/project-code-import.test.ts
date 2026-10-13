@@ -97,16 +97,17 @@ describe('project import classification', () => {
 });
 
 describe('runtime workspace code ref', () => {
-  it('retries a failed repository preparation instead of caching the rejection', async () => {
+  it.each(['private', 'too-large', 'pending'] as const)('allows machine remediation after %s instead of permanently caching the refusal', async reason => {
     const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
     await project.bootstrap({ id: projectId, name: 'Imported', repositoryReference: origin.url, baseBranch: 'main', createdBy: 'machine' });
     await project.putWorkspace({ id: 'imported-feature', projectId, kind: 'worktree', name: 'Feature', branch: 'feature', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     const importProject = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject')
-      .mockRejectedValueOnce(new ProjectImportRequiresMachineError('pending'))
+      .mockRejectedValueOnce(new ProjectImportRequiresMachineError(reason))
       .mockResolvedValue(info);
-    vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(info);
+    const forkWorkspace = vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(info);
     const ref = runtimeWorkspaceCodeRef(env, RuntimeIdentitySchema.parse({ projectId, workspaceId: 'imported-feature' }));
-    await expect(ref()).rejects.toThrow("The initial import from a machine hasn't finished yet.");
+    await expect(ref()).rejects.toMatchObject({ reason });
+    expect(forkWorkspace).not.toHaveBeenCalled();
     await expect(ref()).resolves.toBe('refs/heads/feature');
     await expect(ref()).resolves.toBe('refs/heads/feature');
     expect(importProject).toHaveBeenCalledTimes(2);

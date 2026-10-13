@@ -20,7 +20,7 @@ test('builds Worker nodejs_compat imports as native runtime dependencies', async
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('bundled CommonJS node:path and memfs run filesystem operations in workerd', async () => {
+test('bundled bare Node imports and CommonJS memfs run filesystem operations in workerd', async () => {
   const root = await mkdtemp(join(tmpdir(), 'worker-commonjs-build-'));
   let worker: Miniflare | undefined;
   try {
@@ -41,7 +41,7 @@ module.exports = () => {
 `);
     await Bun.write(join(source, 'index.ts'), `
 import snapshot from './snapshot.cjs';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'crypto';
 export default { fetch() {
   return Response.json({ ...snapshot(), equal: timingSafeEqual(new Uint8Array([1]), new Uint8Array([1])) });
 } };

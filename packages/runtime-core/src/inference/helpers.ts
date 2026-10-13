@@ -1,9 +1,9 @@
-import type { ClassifierQuestion, Model, Models, ModelTypeMap, JsonObject } from '@earendil-works/pi-ai';
-import { applyInferenceSettings, type InferenceProfile } from '@gitspace/protocol/inference';
+import type { ClassifierQuestion, Models, ModelTypeMap, JsonObject } from '@earendil-works/pi-ai';
+import { applyInferenceSettings, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { Check } from 'typebox/schema';
 import { z } from 'zod';
-import { resolveAvailableProfileModel } from './admission.js';
+import { resolveAvailableProfileModel, type ResolvedProfileModel } from './admission.js';
 
 export type RuntimeJson = z.infer<typeof RuntimeJsonSchema>;
 const jsonObject = z.record(z.string(), RuntimeJsonSchema);
@@ -17,7 +17,7 @@ const questionSchema = z.discriminatedUnion('type', [
 ]);
 const judgeArgs = z.object({ state: RuntimeJsonSchema, questions: z.record(z.string(), questionSchema).refine(value => Object.keys(value).length > 0, 'At least one question is required'), model: modelSelection }).strict();
 const selectionSettings = z.object({ modelRoles: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(), enabledModels: z.array(z.string()).optional() });
-function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: readonly T[], settings: InferenceProfile['settings'], selection: string | undefined, role: string): T | undefined {
+function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: readonly T[], settings: InferenceProfile['settings'], selection: string | undefined, role: string): { model: T; thinking: ModelRoleSelector['thinking'] } | undefined {
   const config = selectionSettings.parse(applyInferenceSettings({}, settings));
   const matches = (pattern: string, model: T) => {
     const expression = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/gu, '\\$&').replace(/\*/gu, '.*')}$`, 'iu');
@@ -25,8 +25,9 @@ function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: rea
   };
   const admitted = candidates.filter(model => !config.enabledModels?.length || config.enabledModels.some(pattern => matches(pattern, model)));
   const visited = new Set<string>();
-  const resolve = (value: string | string[]): T | undefined => {
-    for (const pattern of typeof value === 'string' ? [value] : value) {
+  const resolve = (value: string | string[]): { model: T; thinking: ModelRoleSelector['thinking'] } | undefined => {
+    for (const valueSelector of typeof value === 'string' ? [value] : value) {
+      const { selector: pattern, thinking } = parseModelRoleSelector(valueSelector);
       const alias = pattern.startsWith('pi/') ? pattern.slice(3) : pattern.startsWith('@') ? pattern.slice(1) : config.modelRoles?.[pattern] !== undefined ? pattern : undefined;
       if (alias !== undefined) {
         if (visited.has(alias)) throw new Error(`Circular inference model role: ${alias}`);
@@ -34,26 +35,26 @@ function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: rea
         const configured = config.modelRoles?.[alias];
         const selected = configured ? resolve(configured) : undefined;
         visited.delete(alias);
-        if (selected) return selected;
+        if (selected) return thinking === null ? selected : { ...selected, thinking };
       } else {
         const selected = admitted.find(model => matches(pattern, model));
-        if (selected) return selected;
+        if (selected) return { model: selected, thinking };
       }
     }
     return undefined;
   };
   const configured = selection ?? config.modelRoles?.[role];
-  return configured === undefined ? admitted[0] : resolve(configured);
+  return configured === undefined ? admitted[0] ? { model: admitted[0], thinking: null } : undefined : resolve(configured);
 }
 
-async function chatModel(models: Models, settings: InferenceProfile['settings'], selection: string | undefined): Promise<Model<string>> {
+async function chatModel(models: Models, settings: InferenceProfile['settings'], selection: string | undefined): Promise<ResolvedProfileModel> {
   if (selection === undefined || ['default', 'smol', 'slow'].includes(selection)) return resolveAvailableProfileModel(settings, models, selection ?? 'default');
   const model = chooseModel(await models.getAvailable(), settings, selection, 'default');
   if (!model) throw new Error(`No authenticated admitted chat model matches ${selection}`);
   return model;
 }
-async function completeText(models: Models, model: Model<string>, prompt: string, system: string | undefined, signal: AbortSignal | undefined): Promise<string> {
-  const message = await models.completeSimple(model, { systemPrompt: system, messages: [{ role: 'user', content: prompt, timestamp: Date.now() }] }, { signal });
+async function completeText(models: Models, selected: ResolvedProfileModel, prompt: string, system: string | undefined, signal: AbortSignal | undefined): Promise<string> {
+  const message = await models.completeSimple(selected.model, { systemPrompt: system, messages: [{ role: 'user', content: prompt, timestamp: Date.now() }] }, { signal, ...(selected.thinking === null || selected.thinking === 'off' ? {} : { reasoning: selected.thinking }) });
   if (message.stopReason === 'error' || message.stopReason === 'aborted') throw new Error(message.errorMessage ?? `Model request ${message.stopReason}`);
   if (message.stopReason !== 'stop') throw new Error(`Model helper returned an incomplete response (${message.stopReason})`);
   return message.content.filter(part => part.type === 'text').map(part => part.text).join('');
@@ -84,7 +85,7 @@ export async function generateProfileImage(models: Models, args: unknown, signal
   const input = RuntimeGenerateImageArgumentsSchema.parse(args);
   const model = chooseModel(await models.getAvailableOfType('image', undefined, { signal }), settings, input.model, 'image');
   if (!model) throw new Error('No authenticated admitted image model matches the image role or requested model');
-  const result = await models.generateImages(model, { input: [{ type: 'text', text: input.prompt }, ...(input.images ?? [])] }, { signal });
+  const result = await models.generateImages(model.model, { input: [{ type: 'text', text: input.prompt }, ...(input.images ?? [])] }, { signal });
   if (result.stopReason !== 'stop') throw new Error(result.errorMessage ?? `Image generation ${result.stopReason}`);
   if (!result.output.some(part => part.type === 'image')) throw new Error('Image provider returned no image');
   return result.output;
@@ -119,7 +120,7 @@ export async function runProfileModelHelper(models: Models, operation: 'completi
   const classifier = chooseModel(await models.getAvailableOfType('classifier', undefined, { signal }), settings, input.model, 'judge');
   if (classifier) {
     const state: JsonObject = typeof input.state === 'object' && input.state !== null && !Array.isArray(input.state) ? input.state : { state: input.state };
-    const result = await models.classify(classifier, { state, questions }, { signal });
+    const result = await models.classify(classifier.model, { state, questions }, { signal });
     if (result.stopReason !== 'stop') throw new Error(result.errorMessage ?? `Classification ${result.stopReason}`);
     const answers: JsonObject = {};
     for (const [id, answer] of Object.entries(result.answers)) {

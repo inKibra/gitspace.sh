@@ -1,16 +1,16 @@
 import { z } from 'zod';
-import { inferenceProfileSchema, type InferenceProfile } from '@gitspace/protocol/inference';
+import { applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, profileApprovalMode, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
-  createVaultModels, createRunModelsRouter, createDurableModelsStore, resolveProfileModel,
-  resolveModelSelection, StoredPiModelSchema, profileModelRoles, modelEditTool, generateProfileImage, runProfileModelHelper,
+  createVaultModels, createRunModelsRouter, createDurableModelsStore,
+  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, modelEditTool, generateProfileImage, runProfileModelHelper,
   type CredentialPins, type VaultModels,
 } from '@gitspace/runtime-core/inference';
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
 export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
-const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, notice: z.string().optional() });
+const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, thinking: modelRoleThinkingSchema.optional(), notice: z.string().optional() });
 type Admission = z.infer<typeof admissionSchema>;
 const pinSchema = z.object({ credentialId: z.string(), lastUsedAt: z.number() });
 const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stringify([kind, ...parts])}`;
@@ -20,9 +20,6 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   const scopes = new WeakMap<AbortSignal, { admission: Admission; models: VaultModels }>();
   const collections = new Map<string, Promise<VaultModels>>();
-  const initial = await vault.resolveCloudInference(identity.projectId);
-  let currentProfile = initial.profile;
-  let currentAssignment = initial.assignmentRevision;
   const pinsFor = (profileId: string, conversationId: string): CredentialPins => ({
     async read(provider) { const stored = await ctx.storage.get<unknown>(key('pin', profileId, conversationId, provider)); return stored === undefined ? null : pinSchema.parse(stored); },
     async write(provider, pin) { await ctx.storage.put(key('pin', profileId, conversationId, provider), pinSchema.parse(pin)); },
@@ -46,12 +43,9 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     }
     return pending;
   }
-  let currentModels = await collection(currentProfile, 'catalog');
-  let initialModel;
-  try { initialModel = resolveProfileModel(currentProfile.settings, currentModels); }
-  catch { initialModel = currentModels.getModels()[0]; }
-  if (!initialModel) throw new Error('Inference profile has no catalog models');
-  const router = createRunModelsRouter(currentModels, async signal => {
+  // Opening history must neither migrate vault state nor choose a replacement provider.
+  // Real collections are registered only by explicit admission or catalog interaction.
+  const router = createRunModelsRouter(null, async signal => {
     const scope = signal ? scopes.get(signal) : undefined;
     if (!scope) throw new Error('Model request has no durable inference admission');
     signal?.throwIfAborted();
@@ -82,7 +76,6 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
   }
   return {
     models: router.models,
-    model: { provider: initialModel.provider, modelId: initialModel.id },
     editTool(model: { provider: string; modelId: string }) { const selected = router.models.getModel(model.provider, model.modelId); return modelEditTool(selected ?? { provider: model.provider, id: model.modelId }); },
     async admitInference(input: { conversationId: string; requestId: string; parentConversationId?: string; selection?: ModelSelectionIntent }) {
       const admissionKey = key('admission', input.conversationId, input.requestId);
@@ -96,13 +89,17 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         const models = await collection(resolved.profile, 'catalog');
         // Published catalog refresh is credential-free data, not a provider request.
         if (!inherited) await models.refresh({ allowNetwork: true });
-        const selected = inherited && !input.selection ? { model: inherited.model } : await resolveModelSelection(resolved.profile.settings, models, selection);
+        // A configured default is authority, not permission to fall back to a
+        // different provider merely because it still has a usable credential.
+        const selected = inherited && !input.selection ? { model: inherited.model, thinking: inherited.thinking }
+          : selection.kind === 'default' || (selection.kind === 'role' && selection.role === 'default') ? await resolveAvailableProfileModel(resolved.profile.settings, models)
+          : await resolveModelSelection(resolved.profile.settings, models, selection);
         admission = admissionSchema.parse({ requestId: input.requestId, conversationId: input.conversationId, profile: resolved.profile, assignmentRevision: resolved.assignmentRevision, selection, ...selected });
         await ctx.storage.put(admissionKey, admission);
       }
       const models = await collection(admission.profile, input.conversationId, false, admission);
       router.register(models);
-      return { provider: admission.model.provider, modelId: admission.model.id };
+      return { provider: admission.model.provider, modelId: admission.model.id, ...(admission.thinking === undefined ? {} : { thinking: admission.thinking }) };
     },
     bindInferenceConversation,
     async generateImage(input: { args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']> {
@@ -117,18 +114,38 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     },
     session: {
       async catalog() {
-        const resolved = await vault.resolveCloudInference(identity.projectId);
-        currentProfile = resolved.profile;
-        currentAssignment = resolved.assignmentRevision;
-        currentModels = await collection(currentProfile, 'catalog');
-        await currentModels.refresh({ allowNetwork: true });
+        const resolved = await vault.cloudInferenceCatalog(identity.projectId);
+        if (!resolved) { router.unregister('catalog'); return { models: [], roles: [] }; }
+        const currentProfile = resolved.profile;
+        const currentAssignment = resolved.assignmentRevision;
+        const readonly = async (): Promise<never> => { throw new Error('Passive inference catalogs cannot mutate state or resolve credentials'); };
+        const currentModels = await createVaultModels({
+          profileId: currentProfile.id, conversationId: 'catalog', settings: currentProfile.settings,
+          modelsStore: createDurableModelsStore({
+            read: name => ctx.storage.get<unknown>(key('catalog', name)), write: readonly, delete: readonly,
+          }),
+          pins: { read: async () => null, write: readonly },
+          vault: {
+            list: async (_profileId, provider) => resolved.accounts.filter(account => provider === undefined || account.provider === provider),
+            resolve: readonly,
+          },
+        });
+        router.register(currentModels, 'catalog');
         const models = await currentModels.getAvailable();
         const roles: SessionControlView['roles'] = [];
-        for (const role of models.length ? profileModelRoles(currentProfile.settings) : []) {
-          const selected = (await resolveModelSelection(currentProfile.settings, currentModels, role === 'default' ? { kind: 'default' } : { kind: 'role', role })).model;
-          roles.push({ id: role, label: role, provider: selected.provider, model: selected.id, thinking: null, current: role === 'default' });
+        const configured = z.object({ modelRoles: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional() }).parse(applyInferenceSettings({}, currentProfile.settings)).modelRoles;
+        const availableModels: VaultModels = { ...currentModels, getModels: provider => models.filter(model => provider === undefined || model.provider === provider) };
+        for (const role of Object.keys(configured ?? {})) {
+          try {
+            const selected = resolveProfileModel(currentProfile.settings, availableModels, role);
+            roles.push({ id: role, label: role, provider: selected.model.provider, model: selected.model.id, thinking: selected.thinking, current: role === 'default' });
+          } catch (error) {
+            // A historical role may name a retired transport/model. It is not a
+            // request to pick a replacement or a reason to block history.
+            if (!(error instanceof Error) || error.message !== `Inference profile has no admitted model for role ${role}`) throw error;
+          }
         }
-        return { models: models.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })), roles,
+        return { models: models.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })), roles, approvalDefault: profileApprovalMode(currentProfile.settings),
           ...(currentAssignment === null ? {} : { inference: { profileId: currentProfile.id, profileName: currentProfile.name, profileRevision: currentProfile.revision, assignmentRevision: currentAssignment } }) };
       },
       async reload(_kind: 'settings' | 'instructions' | 'inference') {
@@ -136,9 +153,6 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         const models = await collection(resolved.profile, 'catalog');
         const result = await models.refresh({ allowNetwork: true, force: true });
         if (result.errors.size) throw new AggregateError([...result.errors.values()], 'Provider catalog refresh failed');
-        currentProfile = resolved.profile;
-        currentAssignment = resolved.assignmentRevision;
-        currentModels = models;
         router.register(models);
       },
     },

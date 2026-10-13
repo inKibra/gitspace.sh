@@ -8,7 +8,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./browser-extension": "./src/browser-relay-extension.ts"
+    "./browser-extension": "./src/browser-relay-extension.ts",
+    "./legacy-migration-client": "./src/legacy-migration-client.ts"
   },
   "scripts": {
     "start": "bun src/runtime.ts",

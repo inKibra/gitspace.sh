@@ -34,6 +34,8 @@ export default defineConfig({
     }),
   ],
   test: {
+    // Each file boots an isolated workerd; bound fan-out so streaming and lease checks retain CPU time.
+    maxWorkers: 4,
     include: ['test/**/*.test.ts'],
     setupFiles: ['./test/setup.ts'],
   },

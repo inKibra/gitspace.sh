@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { strict as assert } from 'node:assert';
 import { createModels } from '@earendil-works/pi-ai';
-import { RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, RuntimeSnapshotCommitInputSchema, RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
 import { GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 import { SpaceAuthorityDO } from '../../account-worker/src/space-authority.js';
 export { UserSettingsDO } from '../../account-worker/src/user-settings.js';
@@ -120,7 +120,7 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
     assert.deepEqual(await runtime.cloudFiles.snapshot(), checkpoint);
     const root = (await runtime.snapshot()).conversations.find(item => item.parentId === null); assert(root);
     await this.runtimeAttachmentReady(ready);
-    const messages = (await runtime.transcript(root.id)).filter(event => JSON.stringify(event.payload).includes('LFS handoff'));
+    const messages = RuntimeTranscriptSchema.parse(await (await runtime.transcript(root.id)).json()).filter(event => JSON.stringify(event.payload).includes('LFS handoff'));
     assert.equal(messages.length, 1);
     assert.match(JSON.stringify(messages[0]!.payload), /modified\.bin: restored committed content/u);
     assert.match(JSON.stringify(messages[0]!.payload), /added\.bin: omitted/u);
@@ -152,6 +152,7 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
 export class CheckpointMetadata extends DurableObject {
   getProject() { return { id: identity.projectId, lifecycle: 'active', baseBranch: 'main', repositoryReference: null }; }
   listWorkspaces() { return [{ id: identity.workspaceId, projectId: identity.projectId, branch: 'main', lifecycle: 'active' }]; }
+  getWorkspace(workspaceId: string) { return this.listWorkspaces().find(workspace => workspace.id === workspaceId) ?? null; }
   getMachine() { return { id: 'machine', desiredState: 'online' }; }
   hasRuntimeMachine() { return true; }
   async fetch(request: Request) {

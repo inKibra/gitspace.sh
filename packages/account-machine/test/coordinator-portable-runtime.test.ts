@@ -174,7 +174,7 @@ class Authority implements SpaceCheckpointAuthority {
 
 class BareRemote implements SpaceGitCheckpointRemote {
   constructor(private readonly remote: string) {}
-  async publishCheckpoint(input: { repositoryPath: string; checkpointRef: string }) {
+  async publishCheckpoint(input: Parameters<SpaceGitCheckpointRemote['publishCheckpoint']>[0]) {
     git(input.repositoryPath, 'push', this.remote, `${input.checkpointRef}:${input.checkpointRef}`);
   }
   async fetchCheckpoint(input: { repositoryPath: string; checkpointRef: string }) {

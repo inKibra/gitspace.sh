@@ -5,7 +5,7 @@ import { watch, type FSWatcher } from 'node:fs';
 import type { GitSpaceDatabase } from '@gitspace/core';
 import {
   executionHash, loadEnvironmentBundle, parseEnvironmentBundleJson, parseLifecycleBindingsJson, resolveEnvironmentProfile,
-  resolveExecutionApproval, deriveLifecycleExecutions, isInteractiveLifecycleScript,
+  resolveExecutionApproval, deriveLifecycleExecutions, isInteractiveLifecycleScript, skippedInteractiveScriptLine,
   effectiveEnvironmentValues, assertEnvironmentExecutionReady, shouldPrepareEnvironment, environmentPreparationPhases,
   EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
   type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleMutation, type LifecycleIncident,
@@ -241,7 +241,7 @@ export class WorkspaceEnvironmentManager {
     }
   }
 
-  /** Every machine cache completes its own approved preparation before readiness. */
+  /** Runs every setup phase on a machine cache. A failed phase is recorded on its step and the next phase still runs. */
   async prepareAttachment(local: LocalAttachment, signal: AbortSignal, progress?: (step: RuntimeCacheObservation['setup'][number]) => Promise<void>): Promise<void> {
     const { workspaceId, projectId, attachmentId, generation } = local.attachment;
     for (const phase of ['machine/prepare', 'checks', 'workspace/materialize'] as const) {
@@ -263,7 +263,7 @@ export class WorkspaceEnvironmentManager {
         const waiting = error instanceof EnvironmentError && ['ApprovalRequired', 'RunConflict'].includes(error.code);
         const message = error instanceof Error ? error.message : String(error);
         await progress?.({ phase, state: waiting ? 'waiting-for-approval' : 'failed', runId, error: message.slice(0, 2000) });
-        throw error;
+        if (signal.aborted) throw error;
       } finally {
         signal.removeEventListener('abort', cancel);
         await cancellation;
@@ -338,8 +338,13 @@ export class WorkspaceEnvironmentManager {
     } : this.database.getSpace(spaceId);
     if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
     const current = await this.view(spaceId, workingDirectory !== undefined, attachment);
-    const planned = current.executions.filter((execution) => phase === 'checks' ? execution.kind === 'check' : execution.phase === phase);
-    if (request?.interactive && (phase === 'checks' || workingDirectory !== undefined)) throw new EnvironmentError('InvalidConfiguration', 'Interactive lifecycle execution requires a script phase in an open workspace');
+    const phaseExecutions = current.executions.filter((execution) => phase === 'checks' ? execution.kind === 'check' : execution.phase === phase);
+    // Without a terminal, interactive scripts are skipped and recorded instead of refusing the whole phase.
+    const skipped = request?.interactive ? [] : phaseExecutions.filter((execution) => execution.interactive);
+    const planned = phaseExecutions.filter((execution) => !skipped.includes(execution));
+    const skippedOutput = skipped.map((execution) => `${skippedInteractiveScriptLine(execution.fileName ?? execution.label)}\n`).join('');
+    // An attached machine runs in its own checkout, so it can open a terminal; a detached runner directory cannot.
+    if (request?.interactive && (phase === 'checks' || (workingDirectory !== undefined && !attachment))) throw new EnvironmentError('InvalidConfiguration', 'Interactive lifecycle execution requires a script phase in an open workspace');
     assertEnvironmentExecutionReady({
       phase, state: current.lifecycle, bundle: current.bundle, effective: current.effective, values: current.values.effective,
       configuredSecrets: current.configuredSecrets, executionCount: planned.length,
@@ -350,7 +355,6 @@ export class WorkspaceEnvironmentManager {
     const steps = await Promise.all(planned.map(async (execution): Promise<WorkspaceLifecyclePlanStep> => {
       const content = workingDirectory ? execution.content : execution.kind === 'script' ? await readFile(execution.command, 'utf8') : execution.command;
       if (await executionHash({ kind: execution.kind, command: content }) !== execution.hash) throw new EnvironmentError('ContentChanged', `Execution content changed before claim: ${execution.label}`, { executionId: execution.id });
-      if (execution.kind === 'script' && isInteractiveLifecycleScript(content) && !request?.interactive) throw new EnvironmentError('InteractionRequired', 'This lifecycle phase requires protected interactive execution', { executionId: execution.id, phase });
       const command = workingDirectory && execution.kind === 'script'
         ? join(workingDirectory, '.gitspace', 'lifecycle', execution.phase!, execution.fileName!)
         : execution.command;
@@ -478,6 +482,7 @@ export class WorkspaceEnvironmentManager {
       pending.started = true;
       await writeFile(`${journal}.tmp`, JSON.stringify(pending), { mode: 0o600 });
       await rename(`${journal}.tmp`, journal);
+      if (skippedOutput) await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: skippedOutput, incidents: pending.incidents }).catch(retainTransportFailure);
       let previous = '{}';
       let dirty = false;
       let syncing = false;
@@ -549,7 +554,7 @@ export class WorkspaceEnvironmentManager {
       await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: chunk, results: scriptLog.results, incidents: pending.incidents }).catch(retainTransportFailure);
     }
     const exitCode = failure ? 1 : result?.exitCode ?? 1;
-    const output = sanitize([result?.output ?? '', failure ? failure instanceof Error ? failure.message : String(failure) : ''].filter(Boolean).join('\n'));
+    const output = sanitize([skippedOutput + (result?.output ?? ''), failure ? failure instanceof Error ? failure.message : String(failure) : ''].filter(Boolean).join('\n'));
     const results = (scriptLog.results.length ? scriptLog.results : result?.steps ?? []).map((step) => ({ ...step, output: sanitize(step.output) }));
     const domainFailure = environmentFailure(failure);
     const completion: NonNullable<PendingLifecycleRun['completion']> = {

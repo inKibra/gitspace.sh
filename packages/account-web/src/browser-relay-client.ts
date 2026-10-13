@@ -13,7 +13,7 @@ async function request(...[action, body]:
 ) {
   const device = await currentDevice();
   if (!device) throw new Error('Reconnect your account browser first');
-  const response = await signedFetch(new URL(`/api/browser-relay/${action}`, device.enrollUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: device.userId, ...body }) });
+  const response = await signedFetch(new URL(`/api/browser-relay/${action}`, window.location.origin), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: device.userId, ...body }) });
   if (!response.ok) throw new Error(`Account browser ${action} failed (${response.status})`);
   return response;
 }

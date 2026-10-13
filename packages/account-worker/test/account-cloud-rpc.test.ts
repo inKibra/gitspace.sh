@@ -19,7 +19,7 @@ import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
 import { RuntimeAttachmentSchema, RuntimeLifecycleDispatchArgumentsSchema, type RuntimeGitCheckpoint, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { Result } from 'better-result';
-import type { SpaceAuthorityDO } from '../src/space-authority.js';
+import { SpaceAuthorityDO } from '../src/space-authority.js';
 
 afterEach(() => vi.restoreAllMocks());
 function emptyCommittedSource() {
@@ -532,7 +532,6 @@ describe('account cloud RPC without machines', () => {
     const result = parse(text) as { status: 'ok'; value: { providers: ProviderView[] } };
     expect(result.value.providers.find(provider => provider.id === 'openai')).toMatchObject({ hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: true, accounts: [] });
     expect(result.value.providers.find(provider => provider.id === 'anthropic')).toMatchObject({ hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: true, accounts: [] });
-    expect(result.value.providers.find(provider => provider.id === 'openai-codex')).toMatchObject({ name: 'OpenAI Codex (ChatGPT)', hasAuth: false, authKind: 'none', supportsOAuth: true, supportsApiKey: false, accounts: [] });
     expect(text).not.toContain('default-private-key');
     const missing = await SELF.fetch(fixture.request(single('providers.apiKey.set', { providerId: 'openai', key: 'unscoped-key' })));
     expect(parse(await missing.text())).toMatchObject({ status: 'error' });
@@ -665,15 +664,22 @@ describe('account routing of machine work', () => {
   function committedCheckout(spaceId: string) {
     const id = (digit: string) => digit.repeat(40);
     const checkpoint = { checkpointRef: `refs/gitspace/spaces/${spaceId}/checkpoints`, headCommit: id('1'), branch: 'review', indexCommit: id('2'), trackedWorktreeCommit: id('3'), worktreeCommit: id('4'), indexTree: id('5'), worktreeTree: id('6') };
-    const committed = { 'README.md': id('a'), 'src/app.ts': id('b') };
-    const trees: Record<string, Record<string, string>> = { [id('7')]: committed, [id('5')]: committed, [id('6')]: { 'README.md': id('a'), 'src/app.ts': id('c'), 'notes.txt': id('d') } };
+    const file = (name: string, hash: string): ArtifactsTreeEntry => ({ name, hash, mode: '100644', type: 'blob' });
+    const committed = [file('README.md', id('a')), { name: 'src', hash: id('8'), mode: '40000', type: 'tree' as const }];
+    const trees: Record<string, ArtifactsTreeEntry[]> = {
+      [id('7')]: committed, [id('5')]: committed, [id('8')]: [file('app.ts', id('b'))], [id('9')]: [file('app.ts', id('c'))],
+      [id('6')]: [file('README.md', id('a')), { name: 'src', hash: id('9'), mode: '40000', type: 'tree' }, file('notes.txt', id('d'))],
+    };
     const blobs: Record<string, string> = { [id('a')]: '# Review\n', [id('b')]: "export const source = 'head';\n", [id('c')]: "export const source = 'cloud checkpoint';\n", [id('d')]: 'scratch\n' };
-    vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (_repository, hash) => hash === checkpoint.headCommit
-      ? { hash, treeHash: id('7'), message: 'head', author: { name: 'a', email: 'a@test' }, committer: { name: 'a', email: 'a@test' }, parents: [], authoredAt: 0, committedAt: 0 }
-      : null);
-    vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotInventories').mockImplementation(async (_repository, requested) => requested.map(tree =>
-      new Map(Object.entries(trees[tree] ?? {}).map(([path, oid]) => [path, { oid, mode: '100644', type: 'blob' as const }]))));
-    vi.spyOn(ArtifactsCodeStore.prototype, 'readBlob').mockImplementation(async (_repository, oid) => blobs[oid] === undefined ? null : new Blob([blobs[oid]]));
+    vi.spyOn(ArtifactsCodeStore.prototype, 'reader').mockImplementation(() => ({
+      readTree: async oid => trees[oid] ?? null,
+      readBlob: async oid => blobs[oid] === undefined ? null : new Blob([blobs[oid]]),
+      readCommit: async hash => hash === checkpoint.headCommit
+        ? { hash, treeHash: id('7'), message: 'head', author: { name: 'a', email: 'a@test' }, committer: { name: 'a', email: 'a@test' }, parents: [], authoredAt: 0, committedAt: 0 }
+        : null,
+      log: async () => [],
+      close: async () => {},
+    }));
     return { checkpoint, worktreeContent: blobs[id('c')] };
   }
 
@@ -701,8 +707,18 @@ describe('account routing of machine work', () => {
       { spaceId: held.spaceId, generation: 1, mode: 'current', path: 'notes.txt', status: 'untracked', oldPath: null, staged: false, working: true },
       { spaceId: held.spaceId, generation: 1, mode: 'current', path: 'src/app.ts', status: 'modified', oldPath: null, staged: false, working: true },
     ] });
-    // A cloud-specific refusal, not the legacy "open the workspace" runtime stub.
-    expect(await client.inspector.repository.diff({ ...read, mode: 'working', path: null, baseRef: null })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state', data: { resource: 'repository' } } });
+    expect(await client.inspector.repository.diff({ ...read, mode: 'working', path: null, baseRef: null })).toEqual({ status: 'ok', value: {
+      spaceId: held.spaceId, generation: 1, mode: 'working', path: null, baseCommit: checkpoint.headCommit, headCommit: checkpoint.headCommit,
+      patch: [
+        'diff --git a/notes.txt b/notes.txt', 'new file mode 100644', `index ${'0'.repeat(40)}..${'d'.repeat(40)}`, '--- /dev/null', '+++ b/notes.txt', '@@ -0,0 +1 @@', '+scratch',
+        'diff --git a/src/app.ts b/src/app.ts', `index ${'b'.repeat(40)}..${'c'.repeat(40)} 100644`, '--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1 +1 @@',
+        "-export const source = 'head';", "+export const source = 'cloud checkpoint';", '',
+      ].join('\n'),
+      files: [
+        { path: 'notes.txt', oldPath: null, oldBlobId: null, newBlobId: 'd'.repeat(40), status: 'untracked', additions: 1, deletions: 0, binary: false },
+        { path: 'src/app.ts', oldPath: null, oldBlobId: 'b'.repeat(40), newBlobId: 'c'.repeat(40), status: 'modified', additions: 1, deletions: 1, binary: false },
+      ],
+    } });
     expect(await client.inspector.repository.file({ ...read, path: 'src/app.ts' })).toMatchObject({ status: 'ok', value: {
       path: 'src/app.ts', content: worktreeContent, encoding: 'utf-8', binary: false, blobId: 'c'.repeat(40), commitId: checkpoint.headCommit, headCommit: checkpoint.headCommit, status: 'modified',
     } });
@@ -891,11 +907,11 @@ describe('cloud projects and workspace relations with no machines', () => {
   });
 });
 
-async function inspectorWorkspace(userId: string) {
+async function inspectorWorkspace(userId: string, repositoryReference: string | null = null) {
   const projectId = `project-${crypto.randomUUID()}`;
   const spaceId = `space-${crypto.randomUUID()}`;
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
-  const project = await authority.bootstrap({ id: projectId, name: 'Saved inspection', repositoryReference: null, baseBranch: 'main', createdBy: 'human' });
+  const project = await authority.bootstrap({ id: projectId, name: `Saved inspection ${projectId}`, repositoryReference, baseBranch: 'main', createdBy: 'human' });
   await env.USER_PROJECTS.getByName(userId).put(await authority.setProjectLifecycle(project.revision, 'active'));
   for (const [id, kind] of [[projectId, 'base'], [spaceId, 'worktree']] as const) {
     await authority.putWorkspace({ id, projectId, kind, name: kind === 'base' ? 'Project' : 'Review', branch: kind === 'base' ? 'main' : 'review', phase: kind === 'base' ? null : 'review', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
@@ -1082,20 +1098,61 @@ describe('bounded saved Inspector transcripts', () => {
     expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
   });
 
-  it('distinguishes empty cloud and legacy conversations from missing saved objects', async () => {
+  it('distinguishes empty cloud and legacy conversations from cold missing saved objects', async () => {
     const fixture = await account(['rpc.read']);
-    const space = await inspectorWorkspace(fixture.userId);
+    const native = await inspectorWorkspace(fixture.userId);
     const client = inspectorClient(fixture);
+    expect(await client.inspector.view({ projectId: native.projectId, workspaceId: native.spaceId })).toMatchObject({ status: 'ok', value: { checkpoint: null, savedTranscript: { status: 'available' } } });
+    expect(await collectInspectorTranscript(client, native.projectId, native.spaceId)).toEqual([]);
+    const space = await inspectorWorkspace(fixture.userId);
     const input = { projectId: space.projectId, workspaceId: space.spaceId };
-    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { checkpoint: null, savedTranscript: { status: 'available' } } });
-    expect(await collectInspectorTranscript(client, space.projectId, space.spaceId)).toEqual([]);
     const published = await publishInspectorSession(fixture, space, []);
     expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'available' } } });
-    expect(await collectInspectorTranscript(client, space.projectId, space.spaceId)).toEqual([]);
     await env.DATA.delete(`users/${fixture.userId}/${published.snapshotKey}`);
     expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'unavailable' } } });
     const error = await collectInspectorTranscript(client, space.projectId, space.spaceId).then(() => null, (error: unknown) => error);
     expect(rpcErrors.operationFailed.is(error)).toBe(true);
+    const missingPage = await client.inspector.transcriptPage({ ...input, generation: null, before: null, after: null, around: null });
+    expect(missingPage.status === 'error' && rpcErrors.operationFailed.is(missingPage.error)).toBe(true);
+    await env.DATA.put(`users/${fixture.userId}/${published.snapshotKey}`, published.snapshot, { customMetadata: { sha256: published.snapshotHash } });
+    expect(await collectInspectorTranscript(client, space.projectId, space.spaceId)).toEqual([]);
+  });
+
+  it('keeps completely verified saved history readable after its original object is lost', async () => {
+    const fixture = await account(['rpc.read']);
+    const space = await inspectorWorkspace(fixture.userId);
+    const message = { role: 'user', content: 'Verified saved conversation \u{10400} '.repeat(5_000) };
+    const at = '2026-09-01T12:00:00.000Z';
+    const published = await publishInspectorSession(fixture, space, [{ type: 'message', id: 'root', parentId: null, timestamp: at, message }]);
+    const client = inspectorClient(fixture);
+    const input = { projectId: space.projectId, workspaceId: space.spaceId };
+    const pageRequest = { ...input, generation: null, before: null, after: null, around: null };
+    const cold = await client.inspector.transcriptPage(pageRequest);
+    if (cold.status !== 'ok') throw new Error('Expected verified saved transcript page');
+    expect(cold.value).toMatchObject({ total: 1, rows: [{ truncated: true }] });
+    await env.DATA.delete(`users/${fixture.userId}/${published.snapshotKey}`);
+    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'available' } } });
+    const warm = await client.inspector.transcriptPage(pageRequest);
+    expect(warm).toEqual(cold);
+    let text = '';
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const requestOffset: number = offset;
+      const content = await client.inspector.transcriptContent({ ...input, generation: cold.value.generation, rowId: cold.value.rows[0]!.id, offset: requestOffset });
+      if (content.status !== 'ok') throw new Error('Expected retained saved content');
+      expect(content.value.offset).toBe(offset);
+      text += content.value.text;
+      offset = content.value.nextOffset;
+    }
+    expect(JSON.parse(text)).toMatchObject({ text: message.content });
+    // The retained projection serves browsing, not an archival semantic export.
+    const exportError = await collectInspectorTranscript(client, space.projectId, space.spaceId).then(() => null, (error: unknown) => error);
+    expect(rpcErrors.operationFailed.is(exportError)).toBe(true);
+    const replacement = await publishInspectorSession(fixture, space, [], 1);
+    await env.DATA.delete(`users/${fixture.userId}/${replacement.snapshotKey}`);
+    expect(await client.inspector.view(input)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'unavailable' } } });
+    const unavailable = await client.inspector.transcriptPage(pageRequest);
+    expect(unavailable.status === 'error' && rpcErrors.operationFailed.is(unavailable.error)).toBe(true);
   });
 
   it('rejects content-address tampering rather than presenting the replacement as history', async () => {
@@ -1187,7 +1244,53 @@ describe('bounded saved Inspector transcripts', () => {
 });
 
 describe('machine-independent Inspector', () => {
-  it('reads and edits unplaced canonical workspaces without making a placement or contacting a provider', async () => {
+  it('isolates saved history, native context and account reads from a refused repository import', async () => {
+    const fixture = await account();
+    const origin = 'https://github.com/example/incompatible.git';
+    const saved = await inspectorWorkspace(fixture.userId, origin);
+    const native = await inspectorWorkspace(fixture.userId, origin);
+    const published = await publishInspectorSession(fixture, saved, [
+      { type: 'message', id: 'answer', parentId: null, timestamp: '2026-09-01T12:00:00.000Z', message: { role: 'assistant', content: 'Preserved independently of Git' } },
+    ]);
+    // The binding does not expose a distinct blob-limit code. Preserve its refusal,
+    // rather than treating an unavailable import as an empty repository.
+    const refusal = new Error('Artifacts refused repository history');
+    const imports = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject').mockRejectedValue(refusal);
+    const forks = vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace');
+    const client = inspectorClient(fixture);
+    const identity = { projectId: native.projectId, workspaceId: native.spaceId };
+    const readIndependentState = async () => {
+      expect(await collectInspectorTranscript(client, saved.projectId, saved.spaceId)).toMatchObject([
+        { sessionId: published.sessionId, payload: { message: { content: 'Preserved independently of Git' } } },
+      ]);
+      expect(await client.inspector.view(identity)).toMatchObject({ status: 'ok', value: { savedTranscript: { status: 'available' }, checkpoint: null } });
+      expect(await collectInspectorTranscript(client, native.projectId, native.spaceId)).toEqual([]);
+      expect(await client.inspector.overview({ spaceId: native.spaceId, expectedGeneration: 0 })).toMatchObject({ status: 'ok', value: { spaceId: native.spaceId } });
+      const response = await SELF.fetch(fixture.request({ v: 1, batch: [
+        { ...single('settings.get'), id: 'settings' },
+        { ...single('machines'), id: 'fleet' },
+        { ...single('project.list', { lifecycle: 'active' }), id: 'projects' },
+      ] }));
+      expect(parse(await response.text())).toMatchObject({ v: 1, batch: [
+        { id: 'settings', response: { status: 'ok', value: { profile: { handle: fixture.handle } } } },
+        { id: 'fleet', response: { status: 'ok', value: [] } },
+        { id: 'projects', response: { status: 'ok', value: expect.arrayContaining([
+          expect.objectContaining({ id: saved.projectId }), expect.objectContaining({ id: native.projectId }),
+        ]) } },
+      ] });
+    };
+    await readIndependentState();
+    expect(imports).not.toHaveBeenCalled();
+    const code = await client.inspector.repository.status({ spaceId: native.spaceId, expectedGeneration: 0, mode: 'working', path: null });
+    expect(code.status === 'error' && rpcErrors.operationFailed.is(code.error)).toBe(true);
+    expect(imports).toHaveBeenCalledTimes(1);
+    expect(forks).not.toHaveBeenCalled();
+    expect(await native.placement.runtimeCodeCheckpoint(identity)).toBeNull();
+    await readIndependentState();
+    expect(imports).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['active', 'archived'] as const)('keeps an unplaced %s native workspace authoritative without contacting a provider', async lifecycle => {
     const fixture = await account();
     const space = await inspectorWorkspace(fixture.userId);
     const providerCalls: string[] = [];
@@ -1208,18 +1311,32 @@ describe('machine-independent Inspector', () => {
     expect(parse(await saved.text())).toMatchObject({ status: 'ok', value: { id: 'offline-goal', revision: 1 } });
     const overview = await worker.fetch(fixture.request(single('inspector.overview', { spaceId: space.spaceId, expectedGeneration: 0 })), cloudEnv);
     expect(parse(await overview.text())).toMatchObject({ status: 'ok', value: { goal: { title: 'Review without compute' } } });
-    const snapshot = new TextEncoder().encode([
-      { type: 'session', version: 3, id: 'canonical-omp', timestamp: '2026-09-01T12:00:00.000Z', cwd: '/saved' },
-      { type: 'message', id: 'root', parentId: null, timestamp: '2026-09-01T12:00:00.000Z', message: { role: 'user', content: 'Published canonical conversation' } },
-    ].map((entry) => JSON.stringify(entry)).join('\n'));
-    const snapshotHash = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', snapshot)), (byte) => byte.toString(16).padStart(2, '0')).join('')}` as const;
-    const snapshotKey = `projects/${space.projectId}/sessions/canonical/${snapshotHash.slice(7)}.jsonl`;
-    await env.DATA.put(`users/${fixture.userId}/${snapshotKey}`, snapshot, { customMetadata: { sha256: snapshotHash } });
-    await space.authority.putCanonicalSession({ id: 'canonical', workspaceId: space.spaceId, ompSessionId: 'canonical-omp', machineId: null, state: 'closed', sessionObjectKey: snapshotKey, sessionObjectHash: snapshotHash, sessionFormatVersion: 'omp-jsonl-1', activity: { active: false, reasons: [] }, health: { revision: 0, issues: {} }, expectedRevision: 0 });
+    expect(await space.placement.hasCloudRuntime()).toBe(true);
+    const workspace = (await space.authority.listWorkspaces()).find(candidate => candidate.id === space.spaceId)!;
+    await space.authority.putWorkspace({ ...workspace, lifecycle, expectedRevision: workspace.revision });
+    const definitions = await space.authority.listWorkspaces();
+    const definition = definitions.find(candidate => candidate.id === space.spaceId)!;
+    const scopes = await space.authority.listArtifactScopes();
+    await expect(publishInspectorSession(fixture, space, [
+      { type: 'message', id: 'root', parentId: null, timestamp: '2026-09-01T12:00:00.000Z', message: { role: 'user', content: 'Must not shadow native history' } },
+    ])).rejects.toThrow();
+    await runInDurableObject(space.authority, async instance => {
+      await expect(instance.putMachineWorkspace({ ...definition, branch: 'old-machine', lifecycle: 'active', expectedRevision: definition.revision })).rejects.toThrow();
+      await expect(instance.removeMachineWorkspace(definition.id, definition.revision)).rejects.toThrow();
+      await expect(instance.putMachineArtifactScope({ ...scopes[0]!, generation: 1, expectedGeneration: 0, manifestHash: `sha256:${'1'.repeat(64)}` })).rejects.toThrow();
+    });
+    await runInDurableObject(space.placement, async (_instance, state) => {
+      const reopened = new SpaceAuthorityDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      expect(reopened.bootstrap({ projectId: space.projectId, spaceId: space.spaceId, machineId: 'old-machine' })).toMatchObject({ status: 'error', failure: { code: 'WORKSPACE_POSSESSION_DENIED' } });
+    });
+    expect(await space.authority.listWorkspaces()).toEqual(definitions);
+    expect(await space.authority.listArtifactScopes()).toEqual(scopes);
+    expect(await space.authority.listCanonicalSessions()).toEqual([]);
     const published = await worker.fetch(fixture.request(single('inspector.view', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
     expect(parse(await published.text())).toMatchObject({ status: 'ok', value: { checkpoint: null, savedTranscript: { status: 'available' } } });
     const transcript = await collectInspectorTranscript(inspectorClient(fixture, (request) => worker.fetch(request, cloudEnv)), space.projectId, space.spaceId);
-    expect(transcript).toMatchObject([{ sessionId: 'canonical', ordinal: 1, payload: { message: { content: 'Published canonical conversation' } } }]);
+    expect(transcript).toEqual([]);
     expect(await space.placement.get()).toBeNull();
     expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
     expect(providerCalls).toEqual([]);

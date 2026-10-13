@@ -32,6 +32,10 @@
         "class_name": "SpaceAuthorityDO"
       },
       {
+        "name": "SAVED_TRANSCRIPTS",
+        "class_name": "SavedTranscriptIndexDO"
+      },
+      {
         "name": "FLEET_CATALOG",
         "class_name": "FleetCatalogDO"
       },
@@ -112,6 +116,10 @@
         "HostedRouteRegistryDO",
         "AccountStateDO"
       ]
+    },
+    {
+      "tag": "account-v2-saved-transcripts",
+      "new_sqlite_classes": ["SavedTranscriptIndexDO"]
     }
   ],
   "vars": {

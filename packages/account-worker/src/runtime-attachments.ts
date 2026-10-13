@@ -1,7 +1,6 @@
 import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
 import type { AttachmentStore, ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
-import type { LifecycleState } from '@gitspace/protocol-environment';
 
 export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser'];
 
@@ -14,7 +13,6 @@ export class RuntimeAttachmentController {
     snapshot(): Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>;
     /** Canonical project origin; never supplied by the request or the execution grant. */
     origin(projectId: string): Promise<string | null>;
-    lifecycle(projectId: string, workspaceId: string): Promise<LifecycleState>;
     /** Enrollment/trust checks are required even when the target is offline. */
     authorizeMachine(machineId: RuntimeAttachment['machineId']): Promise<void>;
   }) {}
@@ -77,16 +75,7 @@ export class RuntimeAttachmentController {
   async ready(raw: unknown) {
     const input = RuntimeAttachmentReadyInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
-    const attachment = this.options.attachments.list().find(item => item.attachmentId === input.attachmentId && item.generation === input.generation);
-    const lifecycle = await this.options.lifecycle(input.projectId, input.workspaceId);
-    for (const phase of ['machine/prepare', 'checks', 'workspace/materialize']) {
-      const runId = attachment?.cacheAction?.action === 'setup' ? `attachment:${input.attachmentId}:${input.generation}:${attachment.cacheAction.requestId}:${phase}` : `attachment:${input.attachmentId}:${input.generation}:${phase}`;
-      const run = lifecycle.runs.find(candidate => candidate.id === runId);
-      if (!run || run.status !== 'succeeded' || run.machineId !== input.machineId || run.attachment?.attachmentId !== input.attachmentId || run.attachment.generation !== input.generation) throw new Error(`Attachment prerequisite ${phase} lacks a successful durable receipt`);
-    }
-    const checkpoint = attachment?.role === 'cache' ? await this.options.snapshot() : null;
-    if (attachment?.role === 'cache' && !checkpoint) throw new Error('Cache readiness requires its canonical checkpoint');
-    const result = this.options.attachments.ready(input, checkpoint?.worktreeCommit);
+    const result = this.options.attachments.ready(input);
     this.options.publish();
     return result;
   }

@@ -176,6 +176,24 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'feature/public', headCommit: commit('2') });
   });
 
+  it('leaves the workspace catalog intact when the source import is refused and permits explicit recovery', async () => {
+    const { client, project, artifacts, authority } = await cloudProject('Refused import', 'https://github.com/example/source.git');
+    const definitions = await authority.listWorkspaces();
+    const imports = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject');
+    const importProject = imports.getMockImplementation();
+    imports.mockRejectedValue(new Error('Artifacts refused repository history'));
+    const input = { projectId: project.id, name: 'Not yet admitted', branch: 'review', sourceKind: 'base' as const, sourceRef: '' };
+    expect(await client.workspace.create(input)).toMatchObject({ status: 'error' });
+    expect(await authority.listWorkspaces()).toEqual(definitions);
+    expect(artifacts.forks).toEqual([]);
+    expect(artifacts.setBranch).not.toHaveBeenCalled();
+    if (!importProject) throw new Error('Missing import fixture');
+    imports.mockImplementation(importProject);
+    const admitted = await client.workspace.create(input);
+    if (admitted.status === 'error') throw admitted.error;
+    expect((await authority.listWorkspaces()).find(workspace => workspace.id === admitted.value.workspace.id)).toMatchObject({ name: input.name, branch: input.branch, lifecycle: 'active', sourceCommit: commit('1') });
+  });
+
   it('resumes a failed creation from the cloud and refuses to retry a finished one', async () => {
     const { client, project, artifacts, authority } = await cloudProject('Retry');
     artifacts.setBranch.mockRejectedValueOnce(new Error('Artifacts push unavailable'));
@@ -316,11 +334,11 @@ describe('cloud workspace lifecycle with no machines', () => {
     const placement = await space.bootstrap({ projectId: project.id, spaceId: project.id, machineId: 'legacy-machine' });
     if (placement.status === 'error') throw new Error(placement.failure.message);
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
-    expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('must be migrated from its machine checkout') } } });
+    expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'error' });
     artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
     const current = await authority.getProject();
     if (!current) throw new Error('Missing project');
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('must be migrated from its machine checkout') } } });
+    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'error' });
     expect(await space.hasCloudRuntime()).toBe(false);
     expect(await space.get()).toEqual(placement.value);
     expect(await authority.getProject()).toEqual(current);

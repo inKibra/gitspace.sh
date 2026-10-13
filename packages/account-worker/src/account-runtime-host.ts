@@ -1,5 +1,5 @@
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
-import { RuntimeReceiptTransportSchema, type RuntimeReceiptTransport } from '@gitspace/protocol-runtime';
+import { RuntimeReceiptTransportSchema, type RuntimeReceiptTransport, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
 import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } from './runtime-services.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
@@ -22,7 +22,7 @@ export async function ensureRuntimeCodeRepository(env: Env, userId: string, iden
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${identity.projectId}`);
   const project = await authority.getProject();
   if (!project || project.id !== identity.projectId) throw new Error('Project is unavailable');
-  if (identity.workspaceId !== project.id && !(await authority.listWorkspaces()).some(workspace => workspace.id === identity.workspaceId)) throw new Error('Workspace is not owned by this project');
+  if (identity.workspaceId !== project.id && !await authority.getWorkspace(identity.workspaceId)) throw new Error('Workspace is not owned by this project');
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   await ensureProjectCodeRepository(code, project);
   return code.forkWorkspace(project.id, identity.workspaceId);
@@ -39,7 +39,7 @@ export function runtimeWorkspaceCodeRef(env: Env, identity: RuntimeIdentity): ()
       throw error;
     });
     await codeReady;
-    const workspace = (await project.listWorkspaces()).find(item => item.id === identity.workspaceId);
+    const workspace = await project.getWorkspace(identity.workspaceId);
     if (!workspace) throw new Error('Canonical workspace code source is unavailable');
     return `refs/heads/${workspace.branch}`;
   };
@@ -51,15 +51,17 @@ export async function createAccountWorkspaceRuntime(
   env: Env,
   identity: RuntimeIdentity,
   schedule: (timestamp: number) => Promise<void>,
+  migration?: { initialCheckpoint: RuntimeGitCheckpoint; progress?(step: string): Promise<void> },
 ): Promise<WorkspaceRuntime> {
   const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
-  const workspaces = await project.listWorkspaces();
-  const canonicalProject = await project.getProject();
-  if (!canonicalProject || canonicalProject.id !== identity.projectId || (identity.workspaceId !== canonicalProject.id && !workspaces.some(workspace => workspace.id === identity.workspaceId && workspace.projectId === identity.projectId))) throw new Error('Workspace is not owned by this project');
-  const definition = identity.workspaceId === canonicalProject.id
+  const [workspace, canonicalProject] = await Promise.all([project.getWorkspace(identity.workspaceId), project.getProject()]);
+  if (!canonicalProject || canonicalProject.id !== identity.projectId || (identity.workspaceId !== canonicalProject.id && workspace?.projectId !== identity.projectId)) throw new Error('Workspace is not owned by this project');
+  const base = identity.workspaceId === canonicalProject.id;
+  const definition = base
     ? await project.ensureBaseWorkspace({ userId: env.ACCOUNT_ID, projectId: identity.projectId })
-    : workspaces.find(workspace => workspace.id === identity.workspaceId);
+    : workspace;
   if (!definition) throw new Error('Canonical workspace definition is unavailable');
+  await migration?.progress?.('opening the passive runtime: inference');
   const inference = await createCloudRuntimeInference(ctx, env, identity);
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
   const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
@@ -79,14 +81,17 @@ export async function createAccountWorkspaceRuntime(
   const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   let runtime: WorkspaceRuntime | undefined;
+  await migration?.progress?.('opening the passive runtime: services');
   const services = createRuntimeServices({ ctx, env, identity, schedule, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
+  await migration?.progress?.('opening the passive runtime: harness');
   runtime = await createWorkspaceRuntime({
     ...inference,
-    workspacePhase: definition.phase ?? 'plan',
+    // A project's base space has no phase; it is never plan-locked.
+    workspacePhase: base ? 'code' : definition.phase ?? 'plan',
     async setWorkspacePhase(phase) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase); },
     code,
     lfs,
@@ -95,7 +100,7 @@ export async function createAccountWorkspaceRuntime(
       if (publicationId) await project.lfsReleasePublication(publicationId);
       else await lfs.releasePublication();
     },
-    initialCheckpoint: async () => {
+    initialCheckpoint: migration ? async () => migration.initialCheckpoint : async () => {
       const branchRef = await ref();
       return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length));
     },
@@ -125,7 +130,7 @@ export async function createAccountWorkspaceRuntime(
       dispatch: input => dispatchRuntimeAttachment(env, input),
     },
   });
-  ctx.waitUntil(runtime.wake());
+  if (!migration) ctx.waitUntil(runtime.wake());
   return runtime;
 }
 

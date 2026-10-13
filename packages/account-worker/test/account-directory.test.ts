@@ -152,7 +152,7 @@ describe('account directory projection', () => {
     expect(await index.directorySnapshot()).toMatchObject({ workspaces: [], placements: [] });
   });
 
-  it('marks a space as a cloud workspace once it has runtime state and stops publishing its stale legacy placement', async () => {
+  it('preserves legacy placement until explicit migration, even after committing a closed checkpoint', async () => {
     const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
     const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${project.id}`);
     await authority.bootstrap({ ...project, createdBy: machine.id });
@@ -163,13 +163,20 @@ describe('account directory projection', () => {
     await runInDurableObject(space, (instance) => instance.alarm());
     expect(await index.directorySnapshot()).toMatchObject({ workspaces: [{ id: workspace.id, cloudRuntime: false }], placements: [{ spaceId: workspace.id, holderId: machine.id }] });
     await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(41)) });
-    await space.runtimeAttachments({ projectId: project.id, workspaceId: workspace.id });
+    const identity = { projectId: project.id, workspaceId: workspace.id };
+    await runInDurableObject(space, async instance => { await expect(instance.runtimeAttachments(identity)).rejects.toThrow(); });
     await runInDurableObject(space, (instance) => instance.alarm());
-    expect(await index.directorySnapshot()).toMatchObject({ workspaces: [{ id: workspace.id, cloudRuntime: true }], placements: [] });
-    // A later legacy commit keeps the space a cloud workspace.
-    await space.beginClose({ projectId: project.id, spaceId: workspace.id, machineId: machine.id, expectedGeneration: 1 });
+    expect(await space.hasCloudRuntime()).toBe(false);
+    expect(await index.directorySnapshot()).toMatchObject({ workspaces: [{ id: workspace.id, cloudRuntime: false }], placements: [{ spaceId: workspace.id, holderId: machine.id, state: 'open' }] });
+    const writer = { projectId: project.id, spaceId: workspace.id, machineId: machine.id, expectedGeneration: 1 };
+    expect(await space.beginClose(writer)).toMatchObject({ status: 'ok' });
+    expect(await space.commitClosed({ ...writer, revision: 1, ...await persistPortableCheckpoint(project.id, workspace.id, 1) })).toMatchObject({ status: 'ok' });
+    const closed = await space.get();
+    await runInDurableObject(space, async instance => { await expect(instance.runtimeAttachments(identity)).rejects.toThrow(); });
     await runInDurableObject(space, (instance) => instance.alarm());
-    expect(await index.directorySnapshot()).toMatchObject({ workspaces: [{ id: workspace.id, cloudRuntime: true }], placements: [] });
+    expect(await space.hasCloudRuntime()).toBe(false);
+    expect(await space.get()).toEqual(closed);
+    expect(await index.directorySnapshot()).toMatchObject({ workspaces: [{ id: workspace.id, cloudRuntime: false }], placements: [{ spaceId: workspace.id, holderId: 'unassigned', state: 'closed', generation: 2 }] });
   });
 
   it('retries durable unacknowledged publication after reconstruction and stops alarms when drained', async () => {

@@ -14,7 +14,7 @@ import {
 } from '@gitspace/protocol-workspace';
 import { decryptArtifactBytes, encryptArtifactBytes } from '@gitspace/protocol';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
-import type { ArtifactsRepositoryBinding } from './artifacts-git-remote.js';
+import type { ArtifactsGitRemote, ArtifactsRepositoryBinding } from './artifacts-git-remote.js';
 import type { MachineGitLfsAccess } from './git-lfs.js';
 
 export interface CheckpointBlobStore {
@@ -149,10 +149,7 @@ export interface SpaceCheckpointAuthority {
   failOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; message: string }): Promise<void>;
 }
 
-export interface SpaceGitCheckpointRemote {
-  publishCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string }): Promise<void>;
-  fetchCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string }): Promise<void>;
-}
+export type SpaceGitCheckpointRemote = Pick<ArtifactsGitRemote, 'publishCheckpoint' | 'fetchCheckpoint'>;
 export type PortableAgentSnapshot =
   | { kind: 'cloud'; sessionId: string; conversationId: string; cursor: number; resumePending?: boolean }
   | { kind: 'legacy'; sessionId: string; ompSessionId: string; ompSession: Uint8Array; resumePending?: boolean };
@@ -223,7 +220,7 @@ export class PortableSpaceLifecycle {
         portableUntrackedPaths: space.portableUntrackedPaths,
         lfs,
       });
-      await this.gitRemote.publishCheckpoint({ binding: space.binding, repositoryPath: space.repositoryPath, checkpointRef: repository.checkpointRef });
+      await this.gitRemote.publishCheckpoint({ binding: space.binding, repositoryPath: space.repositoryPath, checkpointRef: repository.checkpointRef, headCommit: repository.headCommit });
       const [agent, artifacts] = await Promise.all([runtime.captureAgent(), runtime.captureArtifacts()]);
       const agentCheckpoint = agent.kind === 'cloud' ? agent : {
         kind: 'legacy' as const, sessionId: agent.sessionId, ompSessionId: agent.ompSessionId,

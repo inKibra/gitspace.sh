@@ -213,9 +213,7 @@ export class CloudFilesProof extends DurableObject {
     assert.equal(files.get('concurrent-other.txt'), 'second');
     const attached = (await attachments.attach(admission)).attachment;
     const ready = { projectId: attached.projectId, workspaceId: attached.workspaceId, machineId: attached.machineId, attachmentId: attached.attachmentId, generation: attached.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true as const, capabilities: attached.capabilities };
-    assert.throws(() => attachments.ready(ready), /readiness proof/);
-    assert.throws(() => attachments.ready(ready, 'f'.repeat(40)), /readiness proof/);
-    attachments.ready(ready, checkpoint.worktreeCommit);
+    attachments.ready(ready);
     caches = attachments.list();
     assert.equal((await invoke('write', { path: 'owned.txt', content: 'with ready cache' })).status, 'completed');
     assert.equal(store.hasAttempt('write-once'), true);
@@ -232,7 +230,7 @@ export class CloudFilesProof extends DurableObject {
     assert.deepEqual((await invoke('read', { path: 'after-detach.txt' })).content, [{ type: 'text', text: 'resumed' }]);
     const nextCache = (await attachments.attach(RuntimeAttachInputSchema.parse({ ...admission, machineId: 'machine-b' }))).attachment;
     const cloudCheckpoint = await store.snapshot(); assert(cloudCheckpoint);
-    attachments.ready({ ...ready, machineId: nextCache.machineId, attachmentId: nextCache.attachmentId, generation: nextCache.generation, commit: cloudCheckpoint.worktreeCommit }, cloudCheckpoint.worktreeCommit);
+    attachments.ready({ ...ready, machineId: nextCache.machineId, attachmentId: nextCache.attachmentId, generation: nextCache.generation, commit: cloudCheckpoint.worktreeCommit });
     caches = attachments.list();
     const handoffPushes = pushes;
     assert.deepEqual(await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach'), afterDetach);

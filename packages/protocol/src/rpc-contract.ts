@@ -1336,6 +1336,7 @@ export const AgentSetupViewCodec = wire.object({
   sessionId: wire.string,
   agents: wire.array(AgentDefinitionSetupCodec),
   diagnostics: wire.optional(wire.array(runtimeWire(AgentDefinitionDiagnosticSchema, 'gitspace/agent-definition-diagnostic/v1'))),
+  definitionErrors: wire.optional(wire.array(wire.object({ path: wire.string, message: wire.string }))),
 });
 export type AgentSetupView = InputOf<typeof AgentSetupViewCodec>;
 const SaveAgentDefinitionFields = {

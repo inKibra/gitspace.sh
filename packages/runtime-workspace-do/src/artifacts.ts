@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
-import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, publishSnapshotPack, readCommitPack, readAdvertisedRefs, validateSnapshotPath, writeArtifactsSnapshot, type WriteSnapshotInput } from './artifacts-snapshot.js';
+import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, publishSnapshotPack, readCommitPack, readAdvertisedRefs, readShallowCommits, validateSnapshotPath, writeArtifactsSnapshot, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
-import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
+import type { GitCommitPack, RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
 
 const commitSchema = z.string().regex(/^[0-9a-f]{40}$/u);
@@ -42,6 +42,15 @@ const ArtifactsNotFoundSchema = z.object({ name: z.literal('ArtifactsError'), co
 export function isSupportedBranchName(branch: string): boolean {
   return branch !== 'HEAD' && !branch.startsWith('refs/') && /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/u.test(branch) && !branch.includes('..') && !branch.includes('//')
     && !branch.endsWith('/') && !branch.split('/').some(part => part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'));
+}
+
+/** Object reads through one repository handle, opened by the first read; `close` releases it. */
+export interface ArtifactsRepositoryReader {
+  readTree(oid: string): Promise<ArtifactsTreeEntry[] | null>;
+  readBlob(oid: string): Promise<Blob | null>;
+  readCommit(oid: string): Promise<ArtifactsCommitMetadata | null>;
+  log(commit: string, limit: number): Promise<ArtifactsCommitMetadata[]>;
+  close(): Promise<void>;
 }
 
 /** The binding is supplied by the tenant Worker, never an account control-plane token. */
@@ -96,6 +105,23 @@ export class ArtifactsCodeStore {
       };
       return await Promise.all(trees.map(tree => snapshotEntries(reader, tree)));
     } finally { await disposeArtifactsRepository(repo); }
+  }
+
+  /** A request's many object reads share one handle instead of opening one per object. */
+  reader(repository: string): ArtifactsRepositoryReader {
+    const name = repositorySchema.parse(repository);
+    let opened: Promise<ArtifactsRepo> | null = null;
+    const repo = () => opened ??= this.binding.get(name);
+    return {
+      readTree: async oid => (await repo()).readTree(commitSchema.parse(oid)),
+      readBlob: async oid => (await repo()).readBlob(commitSchema.parse(oid)),
+      readCommit: async oid => (await repo()).readCommit(commitSchema.parse(oid)),
+      log: async (commit, limit) => (await repo()).log({ ref: commitSchema.parse(commit), limit }),
+      close: async () => {
+        const handle = await opened?.catch(() => null);
+        if (handle) await disposeArtifactsRepository(handle);
+      },
+    };
   }
 
   async info(repository: string) {
@@ -155,12 +181,15 @@ export class ArtifactsCodeStore {
   }
   async importProject(projectId: string, source: { url: string; branch?: string }) {
     const name = artifactsProjectRepository(projectId);
-    if (await this.find(name)) {
+    const existing = await this.find(name);
+    if (existing) {
       // A machine seed creates the repository before pushing history: until the base
       // branch exists it is not an import a workspace may fork. A resolvable default
       // branch keeps a completed import usable after the project's base branch changes.
       const base = source.branch === undefined || source.branch === 'HEAD' ? 'HEAD' : `refs/heads/${source.branch}`;
-      if (await this.resolveRef(name, base) === null && (base === 'HEAD' || await this.resolveRef(name, 'HEAD') === null)) throw new ProjectImportRequiresMachineError('pending');
+      // An explicitly migrated unborn base is complete without a branch, not a pending machine seed.
+      const migratedUnborn = source.branch !== undefined && existing.description?.startsWith(`GitSpace legacy-migrated unborn project ${projectId} (${source.branch}) from sha256:`);
+      if (!migratedUnborn && await this.resolveRef(name, base) === null && (base === 'HEAD' || await this.resolveRef(name, 'HEAD') === null)) throw new ProjectImportRequiresMachineError('pending');
       return this.info(name);
     }
     const url = new URL(source.url);
@@ -177,7 +206,7 @@ export class ArtifactsCodeStore {
     } finally { await disposeArtifactsRepository(repo); }
   }
 
-  /** The empty repository a connected machine seeds with the base branch's full history.
+  /** The empty repository a connected machine seeds with the audited base branch graph.
    * Never imports or commits: importProject reports 'pending' until the branch exists. */
   async ensureMachineSeedTarget(projectId: string, branch: string) {
     const name = artifactsProjectRepository(projectId);
@@ -195,6 +224,42 @@ export class ArtifactsCodeStore {
       await repo.revokeToken(created.token);
       return await repo.info();
     } finally { await disposeArtifactsRepository(repo); }
+  }
+
+  /** Seed a migrated base's canonical source from its committed HEAD, never its index/worktree.
+   * Fork inside Artifacts: a valid graph can exceed the Worker's bounded pack buffer.
+   * A creation marker makes interrupted seeds resumable without taking over unrelated repositories. */
+  async seedLegacyProjectSource(input: { projectId: string; sourceRepository: string; branch: string; headCommit: string | null; sourceDigest: string }): Promise<void> {
+    if (!isSupportedBranchName(input.branch)) throw new Error('Unsupported migrated project branch');
+    const name = artifactsProjectRepository(input.projectId);
+    const description = `GitSpace legacy-migrated ${input.headCommit === null ? 'unborn ' : ''}project ${input.projectId} (${input.branch}) from ${input.sourceDigest}`;
+    let existing = await this.find(name);
+    if (!existing) {
+      let created: ArtifactsCreateRepoResult | null = null;
+      try {
+        if (input.headCommit === null) {
+          created = await this.binding.create(name, { setDefaultBranch: input.branch, readOnly: false, description });
+        } else {
+          const source = await this.binding.get(repositorySchema.parse(input.sourceRepository));
+          try {
+            if ((await source.info()).defaultBranch !== input.branch) throw new Error('Migrated base repository has a different default branch');
+            created = await source.fork(name, { defaultBranchOnly: false, readOnly: false, description });
+          } finally { await disposeArtifactsRepository(source); }
+        }
+      } catch (error) {
+        if (!ArtifactsAlreadyExistsSchema.safeParse(error).success) throw error;
+      }
+      const repo = await this.binding.get(name);
+      try {
+        if (created) await repo.revokeToken(created.token);
+        existing = await repo.info();
+      } finally { await disposeArtifactsRepository(repo); }
+    }
+    const ref = `refs/heads/${input.branch}`;
+    const current = await this.resolveRef(name, ref);
+    if (input.headCommit !== null && current === input.headCommit) return;
+    if (current !== null || existing.description !== description || await this.resolveRef(name, 'HEAD') !== null) throw new Error('Destination project repository differs from the closed legacy base; refusing to replace its source');
+    if (input.headCommit !== null) await this.copyCommit(input.sourceRepository, name, ref, input.headCommit, null);
   }
 
   /** A workspace forked from another workspace starts from that workspace's repository, which holds commits the project never received. */
@@ -240,12 +305,14 @@ export class ArtifactsCodeStore {
         } else {
           const origin = await this.binding.get(repositorySchema.parse(source));
           try {
+            if (!await origin.readCommit(commit)) throw new Error(`Commit ${commit} is not in repository ${source}`);
             const sourceInfo = await origin.info();
             const readToken = await origin.createToken('read', 60);
             try {
               const haves = (await target.log({ ...(previous === null ? {} : { ref: previous }), limit: 32 })).map(entry => entry.hash);
-              const pack = await readCommitPack({ remote: sourceInfo.remote, token: readToken.plaintext, commit, haves });
-              await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: previous ?? '0'.repeat(40), commit, pack });
+              const shallow = await readShallowCommits({ remote: info.remote, token: token.plaintext });
+              const transfer = await readCommitPack({ remote: sourceInfo.remote, token: readToken.plaintext, commit, haves, shallow });
+              await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: previous ?? '0'.repeat(40), commit, ...transfer });
             } finally { await origin.revokeToken(readToken.id); }
           } finally { await disposeArtifactsRepository(origin); }
         }
@@ -268,14 +335,19 @@ export class ArtifactsCodeStore {
     if (!object) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
     const repo = await this.binding.get(repository);
     try {
-      // The project already holds its imported base history. Negotiate from that history,
-      // not an empty clone, so the byte bound applies to the missing graph rather than all ancestry.
+      // Qualify negotiation haves with the project's shallow boundaries: a machine seed
+      // may deliberately omit old history while retaining the original base commit ID.
       const haves = (await repo.log({ limit: 32 })).map(entry => entry.hash);
-      const pack = await readCommitPack({ remote: origin.href, token: null, commit: object, haves });
       const info = await repo.info();
+      const readToken = await repo.createToken('read', 60);
+      let transfer: GitCommitPack;
+      try {
+        const shallow = await readShallowCommits({ remote: info.remote, token: readToken.plaintext });
+        transfer = await readCommitPack({ remote: origin.href, token: null, commit: object, haves, shallow });
+      } finally { await repo.revokeToken(readToken.id); }
       const token = await repo.createToken('write', 60);
       try {
-        await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: '0'.repeat(40), commit: object, pack });
+        await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: '0'.repeat(40), commit: object, ...transfer });
       } finally { await repo.revokeToken(token.id); }
     } finally { await disposeArtifactsRepository(repo); }
     const commit = branch ? await this.resolveRef(repository, ref) : await this.resolveAdvertisedRef(repository, ref);

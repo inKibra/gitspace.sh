@@ -169,6 +169,7 @@ const control = new Miniflare({
     CREDENTIALS: { className: 'CredentialVaultDO', useSQLite: true },
     USER_STORAGE: { className: 'UserStorageDO', useSQLite: true },
     SPACE_AUTHORITY: { className: 'SpaceAuthorityDO', useSQLite: true },
+    SAVED_TRANSCRIPTS: { className: 'SavedTranscriptIndexDO', useSQLite: true },
     FLEET_CATALOG: { className: 'FleetCatalogDO', useSQLite: true },
   },
   r2Buckets: ['DATA'],

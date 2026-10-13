@@ -1,5 +1,5 @@
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
-import type { ConversationId, Cursor, EntryRecord, Harness, TaskId, EntryId, CommitPublication } from '@earendil-works/pi-durable';
+import type { ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication } from '@earendil-works/pi-durable';
 import { defineDoc } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
@@ -8,7 +8,7 @@ import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, type AttachmentServices } from './attachments.js';
 import { createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
-import type { RuntimeSessionCommand, RuntimeSessionResult, TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
+import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, RuntimeExecutionDocumentSchema, RuntimeMachineIdSchema, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { createCronRuntime, type RuntimeCronInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
@@ -20,6 +20,8 @@ import type { WorkspaceDraftSave, WorkspaceDraftSaveResult } from '@gitspace/pro
 import { CloudFileStore } from './cloud-files.js';
 import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifacts.js';
 import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
+import { importLegacyHistory, LegacyHistoryDoc, type LegacyHistoryImportInput, type LegacyHistoryReceipt } from '@gitspace/runtime-core';
+import { transcriptResponse, type RuntimeTranscriptFormat } from './transcript.js';
 export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'listSnapshotEntries' | 'readBlob'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 /** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. */
@@ -28,6 +30,7 @@ type ManagementTool = keyof typeof MANAGEMENT_TIMEOUT_MS;
 type RuntimeBrowserService = NonNullable<SessionControlServices['browser']>;
 export type WorkspaceRuntime = {
   harness: Harness;
+  importLegacyHistory(input: LegacyHistoryImportInput): Promise<LegacyHistoryReceipt>;
   attachments: AttachmentStore;
   cloudFiles: CloudFileStore;
   snapshot(): Promise<RuntimeSnapshot>;
@@ -60,15 +63,19 @@ export type WorkspaceRuntime = {
   cronWithdraw(requestId: string): Promise<RuntimeRequestStatus>;
   cronCancel(requestId: string, confirmStopWorkspaceAgent: boolean): Promise<RuntimeRequestStatus>;
   cronNotifyOverdue(requestId: string): Promise<void>;
-  transcript(conversationId?: string): Promise<(TranscriptEvent & { sessionId: string })[]>;
+  transcript(conversationId?: string, format?: RuntimeTranscriptFormat): Promise<Response>;
   publish(): void;
 };
+/** Materialization recovery scans at most this many 128-entry pages per affected conversation. */
+const RECOVERY_ENTRY_PAGES = 8;
+type StoredTask = TaskRecord<JsonValue, JsonValue, JsonValue>;
 // Retain the persisted document kind so acknowledged cache notices are not emitted again.
 const CacheNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }) });
 export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): Promise<WorkspaceRuntime> {
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
   const runtime = await createRuntimeHarness({ ...options, storage });
   const { harness } = runtime;
+  let importingLegacyHistory = false;
   const attachments = new AttachmentStore(options.storage, options.attachments);
   const execution = RuntimeExecutionDocumentSchema.parse(await options.storage.get('runtime.execution') ?? { defaultMachineId: null });
   const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.lfs, async (checkpoint, publicationId) => {
@@ -203,16 +210,20 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       }
     }
     // Auxiliary attempts (for example job log reads) are materialized by their
-    // consuming tool's history entry, not by the source job's task.
+    // consuming tool's history entry, not by the source job's task. Live commits are
+    // materialized as they land; recovery only covers a crash window, so it scans the
+    // newest entries (Pi scans newest-first) instead of each conversation's whole history.
+    // An attempt referenced only by older history keeps its receipt and stays readable.
     for (const conversationId of conversations) {
       const id = Number(conversationId);
       if (!Number.isSafeInteger(id)) continue;
       let cursor: Cursor | undefined;
+      let pages = 0;
       do {
         const page = await storage.scanEntries({ conversationId: id as ConversationId }, 128, cursor, BACKGROUND_CONTEXT);
         for (const entry of page.items) materializeEntry(entry);
         cursor = page.next;
-      } while (cursor);
+      } while (cursor && ++pages < RECOVERY_ENTRY_PAGES);
     }
     await collectReceipts();
   }
@@ -231,56 +242,118 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const current = replica.snapshot();
   let snapshot: RuntimeSnapshot = current ? RuntimeSnapshotSchema.parse(JSON.parse(current)) : RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: 0, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
   const conversationIds = new Map<string, ConversationId>();
+  // Derived snapshot state is cached per conversation/task and refreshed only for records a commit touched, so a
+  // rebuild reads O(changed) rows instead of every conversation's 256-entry window and every task on each commit.
+  type ConversationView = Omit<RuntimeSnapshot['conversations'][number], 'status' | 'error'> & { failure: string | null; subagent: JsonValue | null };
+  type TaskView = RuntimeSnapshot['tasks'][number];
+  const conversationViews = new Map<string, ConversationView>();
+  const dirtyConversations = new Set<ConversationId>();
+  const taskViews = new Map<number, { status: StoredTask['state']['status']; view: TaskView }>();
+  const dirtyTasks = new Map<number, StoredTask>();
+  let conversationsLoaded = false;
+  let tasksLoaded = false;
+  const TASK_ORDER: Record<StoredTask['state']['status'], number> = { pending: 0, running: 1, waiting: 2, completing: 3, terminal: 4 };
+  const TERMINAL_TASK_WINDOW = 128;
+  async function conversationView(record: ConversationRecord): Promise<ConversationView | undefined> {
+    const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
+    if (!conversation) return undefined;
+    // Pi scans fork-aware entries newest-first; one bounded page includes inherited history.
+    const entries = [...(await conversation.entries({}, 256, undefined, BACKGROUND_CONTEXT)).items].reverse();
+    const parentId = record.parent?.conversationId ?? record.owner?.conversationId;
+    const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
+    const legacy = child ? undefined : (await harness.snapshot(LegacyHistoryDoc, record.id, BACKGROUND_CONTEXT))?.state;
+    // A rejected model request leaves an empty assistant message; its error is the user's only explanation.
+    const latest = entries.flatMap(entry => entry.model ?? []).findLast(message => message.role === 'assistant');
+    return {
+      id: String(record.id), parentId: parentId === undefined ? null : String(parentId),
+      title: child ? child.name : legacy ? legacy.source.title : record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`,
+      failure: latest?.role === 'assistant' && latest.stopReason === 'error' ? latest.errorMessage ?? 'The model request failed' : null,
+      subagent: child ? { conversationId: String(record.id), ...child } : null,
+      messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))),
+    };
+  }
+  async function refreshConversations(): Promise<void> {
+    if (!conversationsLoaded) {
+      conversationViews.clear();
+      let cursor: Cursor | undefined;
+      do {
+        const page = await storage.scanConversations({}, 128, cursor, BACKGROUND_CONTEXT);
+        for (const record of page.items) {
+          conversationIds.set(String(record.id), record.id);
+          const view = await conversationView(record);
+          if (view) conversationViews.set(view.id, view);
+        }
+        cursor = page.next;
+      } while (cursor);
+      conversationsLoaded = true;
+    }
+    // Commits during this refresh mark again and queue the next rebuild.
+    const dirty = [...dirtyConversations];
+    dirtyConversations.clear();
+    for (const id of dirty) {
+      const record = await storage.conversation(id, BACKGROUND_CONTEXT);
+      if (record) conversationIds.set(String(record.id), record.id);
+      const view = record ? await conversationView(record) : undefined;
+      if (view) conversationViews.set(view.id, view);
+      else conversationViews.delete(String(id));
+    }
+  }
+  function taskView(task: StoredTask): TaskView {
+    const terminal = task.state.status === 'terminal' || task.state.status === 'completing' ? task.state.outcome : null;
+    const result = terminal?.result ?? null;
+    const encodedResult = JSON.stringify(result);
+    return { id: String(task.id), kind: task.kind, conversationId: String(task.conversationId), parentId: task.owner === undefined ? null : String(task.owner), background: task.background, state: terminal ? terminal.status === 'completed' ? 'completed' : terminal.status === 'aborted' ? 'interrupted' : 'failed' : task.state.status === 'waiting' ? 'waiting' : task.state.status === 'running' ? 'running' : 'pending', machineId: attachments.attemptMachine(`task:${task.id}`) ?? attachments.attemptMachine(`tool:${task.id}`), result: encodedResult.length <= 4096 ? result : { truncated: true, taskId: String(task.id), preview: encodedResult.slice(0, 4096) } };
+  }
+  async function refreshTasks(): Promise<void> {
+    if (!tasksLoaded) {
+      taskViews.clear();
+      // Pi task scans are ascending. Seed the terminal cursor from the indexed newest-128 boundary,
+      // then let the portable SDK decode records. Receipt GC follows materialization independently of this display window.
+      const terminalFloor = options.storage.sql.exec<{ id: number }>(`SELECT id FROM tasks WHERE status='terminal' ORDER BY id DESC LIMIT 1 OFFSET ${TERMINAL_TASK_WINDOW - 1}`).toArray()[0]?.id;
+      for (const status of ['pending', 'running', 'waiting', 'completing', 'terminal'] as const) {
+        let taskCursor: Cursor | undefined = status === 'terminal' && terminalFloor !== undefined ? { after: terminalFloor - 1 } : undefined;
+        do {
+          const page = await storage.scanTasks({ status }, 128, taskCursor, BACKGROUND_CONTEXT);
+          for (const task of page.items) taskViews.set(Number(task.id), { status: task.state.status, view: taskView(task) });
+          taskCursor = status === 'terminal' ? undefined : page.next;
+        } while (taskCursor);
+      }
+      tasksLoaded = true;
+    }
+    for (const [id, task] of dirtyTasks) taskViews.set(id, { status: task.state.status, view: taskView(task) });
+    dirtyTasks.clear();
+    const terminal = [...taskViews].flatMap(([id, task]) => task.status === 'terminal' ? [id] : []).sort((left, right) => left - right);
+    for (const id of terminal.slice(0, Math.max(0, terminal.length - TERMINAL_TASK_WINDOW))) taskViews.delete(id);
+    // Dispatch is not a task commit: refresh the assigned machine of live tasks by key lookup.
+    for (const [id, task] of taskViews) if (task.status !== 'terminal' && task.status !== 'completing' && task.view.machineId === null) {
+      const machineId = attachments.attemptMachine(`task:${id}`) ?? attachments.attemptMachine(`tool:${id}`);
+      if (machineId !== null) task.view = { ...task.view, machineId };
+    }
+  }
   async function rebuild() {
+    const inspection = await harness.inspect(BACKGROUND_CONTEXT);
+    await refreshConversations();
+    await refreshTasks();
+    const running = new Set(inspection.tasks.flatMap(task => task.state.kind === 'running' ? [String(task.record.conversationId)] : []));
+    const questions = await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT);
+    const waiting = new Set(questions?.items.flatMap(question => question.answer === null ? [question.conversationId] : []) ?? []);
     const conversations: RuntimeSnapshot['conversations'] = [];
     const subagents: JsonValue[] = [];
-    let cursor: Cursor | undefined;
-    const inspection = await harness.inspect(BACKGROUND_CONTEXT);
-    do {
-      const page = await storage.scanConversations({}, 128, cursor, BACKGROUND_CONTEXT);
-      for (const record of page.items) {
-        conversationIds.set(String(record.id), record.id);
-        const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
-        if (!conversation) continue;
-        // Pi scans fork-aware entries newest-first; one bounded page includes inherited history.
-        const entries = [...(await conversation.entries({}, 256, undefined, BACKGROUND_CONTEXT)).items].reverse();
-        const parentId = record.parent?.conversationId ?? record.owner?.conversationId;
-        const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
-        if (child) subagents.push({ conversationId: String(record.id), ...child });
-        const running = inspection.tasks.some(task => task.record.conversationId === record.id && task.state.kind === 'running');
-        // A rejected model request leaves an empty assistant message; its error is the user's only explanation.
-        const latest = entries.flatMap(entry => entry.model ?? []).findLast(message => message.role === 'assistant');
-        const failure = !running && latest?.role === 'assistant' && latest.stopReason === 'error' ? latest.errorMessage ?? 'The model request failed' : null;
-        conversations.push({ id: String(record.id), parentId: parentId === undefined ? null : String(parentId), title: record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`, status: running ? 'running' : failure ? 'failed' : 'idle', ...(failure ? { error: failure } : {}), messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))) });
-        if (child) conversations[conversations.length - 1]!.title = child.name;
-      }
-      cursor = page.next;
-    } while (cursor);
-    const tasks: RuntimeSnapshot['tasks'] = [];
-    // Pi task scans are ascending. Seed the terminal cursor from the indexed newest-128 boundary,
-    // then let the portable SDK decode records. Receipt GC follows materialization independently of this display window.
-    const terminalFloor = options.storage.sql.exec<{ id: number }>("SELECT id FROM tasks WHERE status='terminal' ORDER BY id DESC LIMIT 1 OFFSET 127").toArray()[0]?.id;
-    for (const status of ['pending', 'running', 'waiting', 'completing', 'terminal'] as const) {
-      let taskCursor: Cursor | undefined = status === 'terminal' && terminalFloor !== undefined ? { after: terminalFloor - 1 } : undefined;
-      do {
-        const page = await storage.scanTasks({ status }, 128, taskCursor, BACKGROUND_CONTEXT);
-        for (const task of page.items) {
-          const attempt = attachments.getAttempt(`task:${task.id}`) ?? attachments.getAttempt(`tool:${task.id}`);
-          const terminal = task.state.status === 'terminal' || task.state.status === 'completing' ? task.state.outcome : null;
-          const result = terminal?.result ?? null;
-          const encodedResult = JSON.stringify(result);
-          tasks.push({ id: String(task.id), kind: task.kind, conversationId: String(task.conversationId), parentId: task.owner === undefined ? null : String(task.owner), background: task.background, state: terminal ? terminal.status === 'completed' ? 'completed' : terminal.status === 'aborted' ? 'interrupted' : 'failed' : task.state.status === 'waiting' ? 'waiting' : task.state.status === 'running' ? 'running' : 'pending', machineId: attempt?.dispatch.machineId ?? null, result: encodedResult.length <= 4096 ? result : { truncated: true, taskId: String(task.id), preview: encodedResult.slice(0, 4096) } });
-        }
-        taskCursor = status === 'terminal' ? undefined : page.next;
-      } while (taskCursor);
+    for (const { failure, subagent, ...view } of conversationViews.values()) {
+      const active = running.has(view.id);
+      const error = !active ? failure : null;
+      conversations.push({ ...view, status: waiting.has(view.id) ? 'waiting' : active ? 'running' : error ? 'failed' : 'idle', ...(error ? { error } : {}) });
+      if (subagent) subagents.push(subagent);
     }
-    const questions = await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT);
-    for (const conversation of conversations) if (questions?.items.some(question => question.conversationId === conversation.id && question.answer === null)) conversation.status = 'waiting';
+    const tasks = [...taskViews].sort(([leftId, left], [rightId, right]) => TASK_ORDER[left.status] - TASK_ORDER[right.status] || leftId - rightId).map(([, task]) => task.view);
     const workspace = await harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT);
     const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
     const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.execution': execution, 'gitspace.draft': drafts.snapshot() } });
-    const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops: diffRevisions(snapshot, next) });
+    const ops = diffRevisions(snapshot, next);
+    // An unchanged projection publishes nothing: no replica rewrite, no cursor advance, no listener traffic.
+    if (ops.length === 0) { for (const notify of snapshotWaiters) notify(); return; }
+    const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
     snapshot = next;
@@ -304,6 +377,13 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     options.waitUntil(publication);
   }
   harness.subscribeCommits(publication => {
+    for (const change of publication.changes) {
+      if (change.type === 'entry') dirtyConversations.add(change.value.conversationId);
+      else if (change.type === 'conversation') dirtyConversations.add(change.value.id);
+      else if (change.type === 'task') dirtyTasks.set(Number(change.value.id), change.value);
+      else if ((change.type === 'document' || change.type === 'document.copy') && change.conversationId !== undefined) dirtyConversations.add(change.conversationId);
+    }
+    if (importingLegacyHistory) return;
     committedMaterialization(publication);
     if (publication.changes.some(change => change.type === 'entry' || change.type === 'conversation')) {
       const indexed = history.refresh();
@@ -334,6 +414,17 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     return lost;
   }
   return {
+    async importLegacyHistory(input) {
+      if (importingLegacyHistory) throw new Error('Legacy history import is already running');
+      if (input.source.projectId !== options.identity.projectId || input.source.workspaceId !== options.identity.workspaceId) throw new Error('Legacy history source workspace mismatch');
+      importingLegacyHistory = true;
+      try {
+        const receipt = await importLegacyHistory({ ...input, harness, storage, conversationId: runtime.root.id });
+        await history.refresh();
+        await rebuild();
+        return receipt;
+      } finally { importingLegacyHistory = false; }
+    },
     harness, attachments, cloudFiles,
     invokeConversationTool,
     loseAttachment,
@@ -373,22 +464,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     cronWithdraw: cron.withdraw,
     cronCancel: cron.cancel,
     cronNotifyOverdue: cron.notifyOverdue,
-    async transcript(conversationId) {
-      const target = await conversation(conversationId);
-      const events: (TranscriptEvent & { sessionId: string })[] = [];
-      const entries: EntryRecord[] = [];
-      let cursor: Cursor | undefined;
-      do {
-        const page = await target.entries({}, 128, cursor, BACKGROUND_CONTEXT);
-        entries.push(...page.items);
-        cursor = page.next;
-      } while (cursor);
-      for (let index = entries.length - 1; index >= 0; index--) {
-        const entry = entries[index];
-        if (!entry) continue;
-        for (const message of entry.model ?? []) events.push({ sessionId: String(target.id), ordinal: events.length, kind: 'message_end', payload: { message, entryId: String(entry.id) }, createdAt: new Date(message.timestamp).toISOString() });
-      }
-      return events;
+    async transcript(conversationId, format) {
+      return transcriptResponse(storage, await conversation(conversationId), format);
     },
     async qa(input, actor) {
       if (!actor.canApprove) throw new Error('QA management requires human capability');
@@ -454,7 +531,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     },
     async setExecutionMachine(machineId) {
       const selected = machineId === null ? null : RuntimeMachineIdSchema.parse(machineId);
-      if (selected !== null && !attachments.list().some(item => item.machineId === selected && (item.role === 'cache') && item.state === 'ready')) throw new Error('Default execution machine must have a ready workspace cache');
       execution.defaultMachineId = selected;
       await options.storage.put('runtime.execution', execution);
       publish(); await line;

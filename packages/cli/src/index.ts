@@ -2,13 +2,14 @@
 import { chmod, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { closeSync, existsSync, openSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { delimiter, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createRelayAuthorization, createSignedControlRequest, decodeMachinePairingToken, releaseTargetSchema, signRpcRequest } from '@gitspace/protocol';
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
 import { installRuntime } from './bootstrap.js';
+import { LegacyMigrationPlanSchema, runLegacyMigrationPlan } from '@gitspace/account-machine/legacy-migration-client';
 
 const CONFIG_ROOT = process.env.GITSPACE_CONFIG_HOME ?? join(homedir(), '.config', 'gitspace');
 const CONFIG_PATH = join(CONFIG_ROOT, 'config.json');
@@ -47,13 +48,13 @@ interface EnrolledPairing {
   grant: SignedCredentialAuthorityGrant;
 }
 
-async function loadConfig(): Promise<MachineConfig | null> {
+async function loadConfig(options: { readOnly?: boolean } = {}): Promise<MachineConfig | null> {
   try {
     const config = JSON.parse(await readFile(CONFIG_PATH, 'utf8')) as Omit<MachineConfig, 'version'> & { version: number };
     if (config.version !== 3 && config.version !== 4) throw new Error('This is a legacy enrollment. Revoke the old machine in your account before relinking it. Your local files have not been changed.');
     if (config.version === 3) {
       const migrated: MachineConfig = { version: 4, apiUrl: config.apiUrl, accountUrl: config.accountUrl, handle: config.handle, userId: config.userId, relayUrl: config.relayUrl, rootPublicKey: config.rootPublicKey, machine: config.machine };
-      await savePrivateJson(CONFIG_PATH, migrated);
+      if (!options.readOnly) await savePrivateJson(CONFIG_PATH, migrated);
       return migrated;
     }
     return config as MachineConfig;
@@ -270,6 +271,22 @@ machine.command('setup').description('Link using the pairing command from your a
   });
 machine.command('start').description('Start the installed account-managed runtime').action(startMachine);
 machine.command('stop').description('Stop this machine runtime').action(stopMachine);
+machine.command('migrate').description('Preflight a retained legacy checkpoint plan; --apply stages and activates cloud Pi ownership')
+  .requiredOption('--plan <path>', 'Private version-1 account migration plan with retained Git repository and LFS paths')
+  .option('--apply', 'Apply the verified plan; never closes workspaces or changes machine releases')
+  .option('--receipts <directory>', 'Private immutable migration receipts directory')
+  .action(async (options: { plan: string; apply?: boolean; receipts?: string }) => {
+    const config = await loadConfig({ readOnly: true });
+    if (!config) throw new Error('Migration requires this account’s existing linked-machine identity.');
+    const path = resolve(options.plan);
+    const plan = LegacyMigrationPlanSchema.parse(JSON.parse(await readFile(path, 'utf8')));
+    const result = await runLegacyMigrationPlan({
+      plan, account: config, baseDirectory: dirname(path), apply: options.apply === true,
+      receiptsDirectory: resolve(options.receipts ?? `${path}.receipts`),
+      progress: event => console.log(`${event.workspaceId}: ${event.state} (${event.lfsObjects} LFS objects)`),
+    });
+    console.log(`${result.applied ? 'Activated' : 'Verified without remote writes'} ${result.workspaces} workspace(s).${result.applied ? ` Receipts: ${resolve(options.receipts ?? `${path}.receipts`)}` : ' Run with --apply only after live cutover approval.'}`);
+  });
 machine.command('recover').description('Build and activate selected tenant releases from a ready source workspace')
   .requiredOption('--source <path>', 'GitSpace source checkout held by this machine')
   .requiredOption('--workspace <id>', 'Account workspace id of that checkout')
