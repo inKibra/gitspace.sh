@@ -21,8 +21,7 @@ import { invokeRuntimeSpaceTool, runtimeSpaceToolNames } from './runtime-space-t
 import { createRuntimeBrowserAuthority, type RuntimeBrowserAuthority } from './runtime-browser.js';
 import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper } from './runtime-inference.js';
-import { RuntimeProcArgumentsSchema, RuntimeGrepArgumentsSchema } from '@gitspace/protocol-runtime';
-import { caughtUpSearchCache, type RuntimeAttachment, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
+import { RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
@@ -60,6 +59,8 @@ const artifactContent = (input: Pick<Invocation, 'requestId' | 'attemptId'>, fra
 };
 const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
 machineTools.browser = true;
+/** Exact search is ripgrep on a machine checkout; the cloud answers code_search from its index instead. */
+const GREP_REQUIRES_MACHINE = 'grep runs on an attached machine; use code_search, or attach a machine';
 
 /** QA is written to the existing project event authority; nothing is sent externally. */
 export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: string, report: z.infer<typeof RuntimeReportIssueArgumentsSchema>) {
@@ -129,8 +130,8 @@ export async function authorizeCronTool(input: { tool: string; args: Invocation[
   const args = object.parse(input.args);
   let resource: string;
   let write = false;
-  if (['read', 'write', 'edit', 'grep', 'find', 'ast_grep'].includes(input.tool)) {
-    const path = z.string().min(1).parse(args.path ?? (input.tool === 'find' || input.tool === 'grep' ? '.' : undefined));
+  if (['read', 'write', 'edit', 'grep', 'code_search', 'find', 'ast_grep'].includes(input.tool)) {
+    const path = z.string().min(1).parse(args.path ?? (input.tool === 'find' || input.tool === 'grep' || input.tool === 'code_search' ? '.' : undefined));
     if (path.startsWith('local://')) {
       const uri = new URL(path);
       const segments = decodeURIComponent(uri.pathname).split('/').filter(Boolean);
@@ -214,16 +215,21 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     const row = ctx.storage.sql.exec<{ dispatch: string }>('SELECT dispatch FROM runtime_host_dispatch WHERE id=?', attemptId).toArray()[0];
     return row ? RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)) : null;
   };
+  /** Replays follow the admitted dispatch; a new grep needs a ready machine. */
+  function requireGrepMachine(attemptId: string): void {
+    if (savedDispatch(attemptId) || selections.load(attemptId)) return;
+    if (!options.runtime().attachments.list().some(item => isAttachmentReady(item, Date.now()))) throw new Error(GREP_REQUIRES_MACHINE);
+  }
   const selecting = new Map<string, { fingerprint: string; promise: Promise<RuntimeToolResult> }>();
-  async function executeMachine(input: Invocation, deadlineAt?: string, selectedSnapshot?: { attachment: RuntimeAttachment; checkpoint: RuntimeGitCheckpoint }): Promise<RuntimeToolResult> {
+  async function executeMachine(input: Invocation, deadlineAt?: string): Promise<RuntimeToolResult> {
     const fingerprint = canonicalJson({ requestId: input.requestId, conversationId: input.conversationId, taskId: input.taskId, tool: input.tool, args: input.args, replay: input.replay });
     const prior = selecting.get(input.attemptId);
     if (prior) return prior.fingerprint === fingerprint ? prior.promise : failed(input, new Error('Concurrent attempt identity changed'));
-    const promise = executeMachineOnce(input, deadlineAt, selectedSnapshot);
+    const promise = executeMachineOnce(input, deadlineAt);
     selecting.set(input.attemptId, { fingerprint, promise });
     try { return await promise; } finally { selecting.delete(input.attemptId); }
   }
-  async function executeMachineOnce(input: Invocation, deadlineAt?: string, selectedSnapshot?: { attachment: RuntimeAttachment; checkpoint: RuntimeGitCheckpoint }): Promise<RuntimeToolResult> {
+  async function executeMachineOnce(input: Invocation, deadlineAt?: string): Promise<RuntimeToolResult> {
     const conversation = await options.runtime().browserConversation(input.conversationId);
     if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args)) return failed(input, new Error('Subagent machine dispatch is read-only'));
     let dispatch = savedDispatch(input.attemptId);
@@ -250,8 +256,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (!dispatch) {
         const runtime = options.runtime();
         if (!(await runtime.snapshot()).conversations.some(item => item.id === input.conversationId)) throw new Error('Conversation is not owned by this workspace');
-        const selected = selectedSnapshot?.attachment ?? await selections.cache(input.args);
-        const snapshot = selectedSnapshot?.checkpoint ?? await runtime.cloudFiles.initializeSnapshot();
+        const selected = await selections.cache(input.args);
+        const snapshot = await runtime.cloudFiles.initializeSnapshot();
         if (!snapshot) throw new Error('Cloud working copy is unavailable');
         const tool = input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool;
         dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, conversationKind: conversation.root ? 'main' : 'subagent', taskId: input.taskId, machineId: selected.machineId, attachmentId: selected.attachmentId, generation: selected.generation, requestId: input.requestId, attemptId: input.attemptId, snapshot, tool, args: input.args, deadlineAt: deadline, replay: input.replay });
@@ -455,25 +461,13 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args)) throw new Error('Subagent tools are read-only');
       input.signal?.throwIfAborted();
       if (input.tool === 'grep') {
-        const args = RuntimeGrepArgumentsSchema.parse(input.args);
-        if (args.on !== undefined) return executeMachine(input);
+        requireGrepMachine(input.attemptId);
+        return executeMachine(input);
+      }
+      if (input.tool === 'code_search') {
         const runtime = options.runtime();
-        if (!runtime.cloudFiles.hasAttempt(input.attemptId)) {
-          const cacheResult = await runtime.cloudFiles.withCurrentSnapshot(async checkpoint => {
-            const attachment = caughtUpSearchCache(runtime.attachments.list(), checkpoint);
-            if (!attachment) return null;
-            try {
-              const result = await executeMachine({ ...input, replay: 'safe' }, undefined, { attachment, checkpoint });
-              return result.status === 'completed' ? result : null;
-            } catch {
-              // Search has no effects. A disconnected or newly dirty cache
-              // cannot prevent a search of the authoritative cloud snapshot.
-              return null;
-            }
-          });
-          if (cacheResult) return cacheResult;
-        }
-        return runtime.cloudFiles.execute({ ...input, tool: 'grep' }, input.signal);
+        if (!(await runtime.cloudFiles.snapshot() ?? await runtime.cloudFiles.initializeSnapshot())) throw new Error('Workspace has no committed source snapshot');
+        return completed(input, await runtime.codeSearch.search(RuntimeCodeSearchArgumentsSchema.parse(input.args)));
       }
       if (input.tool === 'codemode') return codemode.execute(input);
       if (input.tool === 'browser') return browser.execute(input);
@@ -663,6 +657,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         // Replay/reconciliation follows the admitted identity, not today's cache availability.
         if (savedDispatch(input.attemptId) || selections.load(input.attemptId)?.result) return;
         if (machineTools[input.tool] && input.tool !== 'browser') {
+          await selections.cache(input.args);
+        } else if (input.tool === 'grep') {
+          requireGrepMachine(input.attemptId);
           await selections.cache(input.args);
         } else if (input.tool === 'environment') {
           const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);

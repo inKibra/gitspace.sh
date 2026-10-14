@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
-import { createSearchMatcher, searchSnapshotFiles } from './search.js';
+import { Database } from 'bun:sqlite';
+import { RRegex } from 'rregex';
+import { createSearchMatcher, searchSnapshotFiles, searchTrigramQuery } from './search.js';
 
 const files = [
   { path: '.gitignore', content: 'ignored/\n*.log\n!keep.log\n' },
@@ -34,4 +36,30 @@ test('multiline literal spans emit every covered line and never fall back to per
   const source = [{ path: 'span.txt', content: 'start\nend\nother\n' }];
   expect(searchSnapshotFiles(source, { pattern: 'start\nend', path: '.', multiline: true }).text).toBe('span.txt:1:start\nspan.txt:2:end');
   expect(searchSnapshotFiles(source, { pattern: '\\Aend', path: '.', multiline: true }).text).toBe('');
+});
+
+test('required trigrams never exclude a line the regex matches, and literals narrow the candidates', () => {
+  const lines = [
+    'export async function searchOrderedFiles(files) {', 'export function plain() {}', 'const Needle = 1;', 'NEEDLE shouting', 'temperature in \u212Aelvin',
+    'the mi\u017F\u017Fion', 'colour and color', 'foobarqux foobazbazqux', 'a"quoted"b', 'x123-abc', 'import { Foo } from "bar"', 'ünïcödé needle', 'tab\tseparated\tvalues',
+  ];
+  const index = new Database(':memory:');
+  index.run("CREATE VIRTUAL TABLE lines USING fts5(body, tokenize='trigram case_sensitive 0', content='', contentless_delete=1, detail=none)");
+  lines.forEach((line, row) => index.run('INSERT INTO lines(rowid, body) VALUES(?, ?)', [row, line]));
+  const narrowed: Record<string, number[]> = {
+    searchOrderedFiles: [0], '(?i)needle': [2, 3, 11], 'colou?r': [6], 'foo(bar|baz)+qux': [7], 'a"quoted"': [8], '[0-9]{3}-abc': [9],
+    'import \\{ [A-Z]\\w+ \\}': [10], '^export (async )?function': [0, 1], 'tab\\tsep': [12], '(?i)kelvin': [4], '(?i)MISSION': [5],
+  };
+  for (const pattern of [...Object.keys(narrowed), 'ünïcödé', '\\w+\\(', 'e', '(?s).+']) {
+    const regex = new RRegex(pattern);
+    try {
+      const query = searchTrigramQuery(regex.syntax());
+      const matching = lines.flatMap((line, row) => regex.isMatch(line) ? [row] : []);
+      expect(matching.length, pattern).toBeGreaterThan(0);
+      if (query === null) { expect(narrowed[pattern], pattern).toBeUndefined(); continue; }
+      const candidates = index.query<{ rowid: number }, [string]>('SELECT rowid FROM lines WHERE lines MATCH ?').all(query).map(row => row.rowid);
+      for (const row of matching) expect(candidates, `${pattern} → ${query}`).toContain(row);
+      expect(candidates, `${pattern} → ${query}`).toEqual(narrowed[pattern] ?? candidates);
+    } finally { regex.free(); }
+  }
 });

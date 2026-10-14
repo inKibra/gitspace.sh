@@ -15,29 +15,36 @@ import { SessionControlsDoc } from '@gitspace/runtime-core/session-controls';
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
 async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentitySchema.parse({ projectId: 'owner-project', workspaceId: 'owner-workspace' })) {
-    const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/checkpoints', headCommit: 'a'.repeat(40), branch: 'main', indexCommit: 'b'.repeat(40), trackedWorktreeCommit: 'c'.repeat(40), worktreeCommit: 'c'.repeat(40), indexTree: 'd'.repeat(40), worktreeTree: 'e'.repeat(40) });
     const files = new Map([['hello.txt', 'cloud original\n'], ['src/a.ts', 'one\n'], ['src/nested/b.md', 'two\n'], ['other/c.ts', 'three\n']]);
-    let revision = 1;
+    const trees = new Map<string, ArtifactsTreeEntry[]>();
     const blobs = new Map<string, Blob>();
+    const digest = async (value: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-1', new TextEncoder().encode(value)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    /** Content-addressed trees of the current files, as Artifacts serves them. */
+    const writeTree = async (prefix = ''): Promise<string> => {
+      const names = new Map<string, boolean>();
+      for (const path of files.keys()) if (path.startsWith(prefix)) { const rest = path.slice(prefix.length), slash = rest.indexOf('/'); names.set(slash < 0 ? rest : rest.slice(0, slash), slash >= 0); }
+      const entries: ArtifactsTreeEntry[] = [];
+      for (const [name, directory] of [...names].sort(([left], [right]) => left < right ? -1 : 1)) {
+        if (directory) { entries.push({ name, type: 'tree', mode: '40000', hash: await writeTree(`${prefix}${name}/`) }); continue; }
+        const content = files.get(prefix + name) ?? '', hash = await digest(`blob ${content}`);
+        blobs.set(hash, new Blob([content]));
+        entries.push({ name, type: 'blob', mode: '100644', hash });
+      }
+      const hash = await digest(`tree ${JSON.stringify(entries)}`);
+      trees.set(hash, entries);
+      return hash;
+    };
+    const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/checkpoints', headCommit: 'a'.repeat(40), branch: 'main', indexCommit: 'b'.repeat(40), trackedWorktreeCommit: 'c'.repeat(40), worktreeCommit: 'c'.repeat(40), indexTree: 'd'.repeat(40), worktreeTree: await writeTree() });
+    let revision = 1;
     const code: WorkspaceRuntimeOptions['code'] = {
       async readFile(_repository, _commit, path) { const value = files.get(path); return value === undefined ? null : new Blob([value]); },
       async listSnapshotPaths() { return [...files.keys()]; },
-      async listSnapshotEntries() {
-        const entries = new Map<string, { oid: string; mode: string; type: 'blob' | 'commit' }>();
-        for (const [path, content] of files) {
-          const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(content));
-          const oid = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
-          blobs.set(oid, new Blob([content]));
-          entries.set(path, { oid, mode: '100644', type: 'blob' });
-        }
-        return entries;
-      },
-      async readBlob(_repository, oid) { return blobs.get(oid) ?? null; },
+      reader: () => ({ readTree: async oid => trees.get(oid) ?? null, readBlob: async oid => blobs.get(oid) ?? null, close: async () => {} }),
       mergeSnapshot: unsupported,
       async writeSnapshot(input) {
         for (const mutation of input.mutations) if (mutation.content === null) files.delete(mutation.path); else files.set(mutation.path, new TextDecoder().decode(mutation.content));
         const commit = (++revision).toString(16).padStart(40, '0');
-        return Result.ok({ ...input.previous, worktreeCommit: commit, trackedWorktreeCommit: commit, worktreeTree: commit });
+        return Result.ok({ ...input.previous, worktreeCommit: commit, trackedWorktreeCommit: commit, worktreeTree: await writeTree() });
       },
     };
     let runtime: WorkspaceRuntime | undefined;
@@ -59,7 +66,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
     const root = await runtime.harness.root(BACKGROUND_CONTEXT);
     const invoke = (tool: string, args: Parameters<typeof services.tools.invoke>[0]['args']) => services.tools.invoke({ tool, args, conversationId: String(root.id), taskId: 'proof', requestId: crypto.randomUUID(), attemptId: crypto.randomUUID(), replay: 'unsafe', signal: AbortSignal.timeout(500) });
     const text = (result: RuntimeToolResult) => result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-    return { runtime, services, root, invoke, text, identity, checkpoint, calls, reports, code };
+    return { runtime, services, root, invoke, text, identity, checkpoint, calls, reports };
 }
 
 test('the agent machines list and dispatch see only live attachments heard from recently', async () => {
@@ -125,58 +132,48 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
   });
 });
 
-test('grep searches the current cloud snapshot without a machine cache', async () => {
-  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-proof:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const { runtime, invoke, text } = await ownerFixture(ctx);
+test('grep runs only on an attached machine and points at code_search without one', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-machine:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, services, root, invoke, text, identity, checkpoint } = await ownerFixture(ctx);
+    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'ripgrep result' }] }));
     try {
-      const result = await invoke('grep', { pattern: '(?i)CLOUD', path: '.' });
-      expect(result.status).toBe('completed');
-      expect(text(result)).toContain('hello.txt:1:cloud original');
-    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
-  });
-});
-
-test('grep admits only a caught-up cache and falls back to the current cloud snapshot', async () => {
-  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-routing:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const { runtime, invoke, text, identity, checkpoint } = await ownerFixture(ctx);
-    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-cache', machineId: 'search-machine', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
-    const seed = (commit: string) => ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify({ ...cache, executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: commit } }), 'fixture');
-    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'cache-hit' }] }));
-    try {
-      seed('0'.repeat(40));
-      expect(text(await invoke('grep', { pattern: 'cloud' }))).toContain('hello.txt:1:cloud original');
+      const unattached = await invoke('grep', { pattern: 'cloud' });
+      expect(unattached.status).toBe('failed');
+      expect(text(unattached)).toBe('grep runs on an attached machine; use code_search, or attach a machine');
+      // The same refusal comes before any approval question.
+      await expect(services.tools.preflight({ tool: 'grep', args: { pattern: 'cloud' }, conversationId: String(root.id), taskId: 'proof', requestId: 'preflight', attemptId: 'preflight', replay: 'safe' })).rejects.toThrow('grep runs on an attached machine; use code_search, or attach a machine');
       expect(machine).not.toHaveBeenCalled();
-      seed(checkpoint.worktreeCommit);
-      expect(text(await invoke('grep', { pattern: 'cloud' }))).toBe('cache-hit');
-      expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ machineId: cache.machineId, snapshot: checkpoint });
-      await invoke('write', { path: 'hello.txt', content: 'updated cloud snapshot\n' });
-      expect(text(await invoke('grep', { pattern: 'cloud' }))).toContain('hello.txt:1:updated cloud snapshot');
-      expect(machine).toHaveBeenCalledTimes(1);
-      const current = await runtime.cloudFiles.snapshot();
-      if (!current) throw new Error('Expected current snapshot');
-      seed(current.worktreeCommit);
-      machine.mockRejectedValueOnce(new Error('Cache worktree changed after heartbeat'));
-      expect(text(await invoke('grep', { pattern: 'cloud' }))).toContain('hello.txt:1:updated cloud snapshot');
-      expect(machine).toHaveBeenCalledTimes(2);
+      const now = new Date().toISOString();
+      const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-cache', machineId: 'search-machine', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: now, heartbeatAt: now });
+      ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
+      expect(text(await invoke('grep', { pattern: 'cloud' }))).toBe('ripgrep result');
+      expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ tool: 'grep', machineId: cache.machineId, snapshot: checkpoint });
     } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
 
-test('grep selects a healthy caught-up cache before a failing cloud index', async () => {
-  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-index-failure:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const { runtime, invoke, text, identity, checkpoint, code } = await ownerFixture(ctx);
-    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-cache', machineId: 'search-machine', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
-    ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
-    ctx.storage.sql.exec('DELETE FROM runtime_search_state');
-    const index = vi.spyOn(code, 'listSnapshotEntries').mockRejectedValue(new Error('Search index unavailable'));
-    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'cache-hit' }] }));
+test('code_search answers from the cloud index with no machine and says how far the index trails', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`code-search:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text, checkpoint } = await ownerFixture(ctx);
+    const SearchResult = z.object({ matches: z.array(z.string()), partial: z.boolean(), indexedCommit: z.string(), behind: z.number().nullable() });
+    const search = async (args: Parameters<typeof invoke>[1]) => {
+      const result = await invoke('code_search', args);
+      expect(result.status, text(result)).toBe('completed');
+      return SearchResult.parse(JSON.parse(text(result)));
+    };
     try {
-      const result = await invoke('grep', { pattern: 'cloud' });
-      expect(result.status).toBe('completed');
-      expect(text(result)).toBe('cache-hit');
-      expect(index).not.toHaveBeenCalled();
-      expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ tool: 'grep', snapshot: checkpoint });
-    } finally { index.mockRestore(); machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+      const building = await invoke('code_search', { pattern: 'cloud' });
+      expect(building.status).toBe('failed');
+      expect(text(building)).toContain('still building');
+      await runtime.codeSearch.drive();
+      expect(await search({ pattern: '(?i)CLOUD', path: '.' })).toEqual({ matches: ['hello.txt:1:cloud original'], partial: false, indexedCommit: checkpoint.worktreeCommit, behind: 0 });
+      expect((await search({ pattern: 'one|two', path: 'src' })).matches).toEqual(['src/a.ts:1:one', 'src/nested/b.md:1:two']);
+      await invoke('write', { path: 'hello.txt', content: 'updated cloud snapshot\n' });
+      // Indexing waits for an alarm; until then the indexed snapshot answers and says it is one behind.
+      expect(await search({ pattern: 'cloud' })).toMatchObject({ matches: ['hello.txt:1:cloud original'], indexedCommit: checkpoint.worktreeCommit, behind: 1 });
+      await runtime.codeSearch.drive();
+      expect(await search({ pattern: 'cloud' })).toMatchObject({ matches: ['hello.txt:1:updated cloud snapshot'], indexedCommit: (await runtime.cloudFiles.snapshot())?.worktreeCommit, behind: 0 });
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
 

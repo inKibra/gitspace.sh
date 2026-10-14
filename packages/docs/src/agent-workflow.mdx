@@ -53,7 +53,7 @@ The selected file or role supplies the child's own settings. A child inherits re
 
 Session controls for a child conversation support inspection only. Send workspace changes, browser controls, and other mutating session commands to the workspace's root conversation.
 
-Children can use `read`, `find`, `grep`, `ast_grep`, `history_search`, `history_read`, `web_search`, `todo`, the headless browser, and agent messaging. They cannot access the user's relay browser. A definition can narrow this allowlist, but cannot grant writes or nested spawning. Children can message their parent and siblings; they cannot spawn or stop agents.
+Children can use `read`, `find`, `code_search`, `grep`, `ast_grep`, `history_search`, `history_read`, `web_search`, `todo`, the headless browser, and agent messaging. `code_search` searches the cloud working copy through its index with no machine; `grep` is exact ripgrep and needs an attached machine. Children cannot access the user's relay browser. A definition can narrow this allowlist, but cannot grant writes or nested spawning. Children can message their parent and siblings; they cannot spawn or stop agents.
 
 Use `agents` with `{ "op": "send", "to": "Reviewer", "message": "Focus on removed fields." }`. Addresses can be names or conversation IDs; children can use `parent`. `list` and `status` show the conversation family. Messages enter durable history with the sender's name and ID.
 

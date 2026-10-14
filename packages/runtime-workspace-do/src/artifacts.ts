@@ -85,12 +85,6 @@ export class ArtifactsCodeStore {
     finally { await disposeArtifactsRepository(repo); }
   }
 
-  async listSnapshotEntries(repository: string, tree: string) {
-    const repo = await this.binding.get(repositorySchema.parse(repository));
-    try { return await snapshotEntries(repo, tree); }
-    finally { await disposeArtifactsRepository(repo); }
-  }
-
   /** Inventories of several trees through one repository handle; subtrees they share are read once. */
   async listSnapshotInventories(repository: string, trees: readonly string[]) {
     const repo = await this.binding.get(repositorySchema.parse(repository));

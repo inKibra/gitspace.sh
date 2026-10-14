@@ -7,11 +7,9 @@ import { bytesToHex } from '@noble/hashes/utils.js';
 import type { AttachmentStore } from './attachments.js';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository } from './artifacts.js';
 import { validateSnapshotPath } from './artifacts-snapshot.js';
-import { CloudSearchIndex, type CloudSearchSource } from './cloud-search-index.js';
-import { RuntimeGrepArgumentsSchema } from '@gitspace/protocol-runtime';
 import { parseEnvironmentBundleJson } from '@gitspace/protocol-environment';
 
-const InvocationSchema = z.object({ tool: z.enum(['read', 'edit', 'write', 'find', 'grep', 'apply_patch']), args: z.unknown(), requestId: z.string(), attemptId: z.string() });
+const InvocationSchema = z.object({ tool: z.enum(['read', 'edit', 'write', 'find', 'apply_patch']), args: z.unknown(), requestId: z.string(), attemptId: z.string() });
 const PathSchema = z.object({ path: z.string().min(1) });
 type Checkpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 type Invocation = z.infer<typeof InvocationSchema>;
@@ -52,14 +50,12 @@ export class CloudFileStore {
   private readonly machineRunning = new Map<string, Promise<Checkpoint>>();
   private retaining: Promise<void> | undefined;
   private admission: Promise<void> = Promise.resolve();
-  private readonly searchIndex: CloudSearchIndex;
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.admission.then(operation);
     this.admission = result.then(() => {}, () => {});
     return result;
   }
-  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CloudSearchSource, private readonly workspaceId: string, private readonly publish: () => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
-    this.searchIndex = new CloudSearchIndex(storage, code, artifactsWorkspaceRepository(workspaceId));
+  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: () => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_writer(singleton INTEGER PRIMARY KEY CHECK(singleton=1), fence INTEGER NOT NULL, attempt TEXT)');
     storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_writer(singleton,fence,attempt) VALUES(1,0,NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
@@ -70,17 +66,16 @@ export class CloudFileStore {
     if (!storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_machine_publications)').toArray().some(column => column.name === 'abandoned')) storage.sql.exec('ALTER TABLE runtime_machine_publications ADD COLUMN abandoned TEXT');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_paths(commit_id TEXT PRIMARY KEY, paths TEXT NOT NULL)');
   }
-  hasAttempt(attemptId: string): boolean {
-    return this.storage.sql.exec('SELECT id FROM runtime_cloud_files WHERE id=?', attemptId).toArray().length > 0;
-  }
   snapshot(): Promise<Checkpoint | null> { return readCurrentCheckpoint(this.storage); }
-  /** Hold the canonical publication queue through readiness verification and cache dispatch. */
-  withCurrentSnapshot<T>(operation: (checkpoint: Checkpoint) => Promise<T>): Promise<T> {
-    return this.serialize(async () => {
-      const checkpoint = await this.initializeSnapshot();
-      if (!checkpoint) throw new Error('Workspace has no committed source snapshot');
-      return operation(checkpoint);
-    });
+  /** Snapshots published from `ancestor` to `descendant` along recorded predecessors; null past `limit` or across an
+   * unrecorded history. */
+  snapshotDistance(ancestor: string, descendant: string, limit: number): number | null {
+    let commit: string | null = descendant;
+    for (let steps = 0; commit !== null && steps <= limit; steps++) {
+      if (commit === ancestor) return steps;
+      commit = this.storage.sql.exec<{ predecessor: string | null }>('SELECT predecessor FROM runtime_code_commits WHERE commit_id=?', commit).toArray()[0]?.predecessor ?? null;
+    }
+    return null;
   }
   /** A base-branch change holds the same queue as cloud edits and cache publications. Its durable
    * writer fence survives failures until the lifecycle operation retries its idempotent effects. */
@@ -283,10 +278,10 @@ export class CloudFileStore {
     let pending: z.infer<typeof PendingSchema> | undefined;
     try {
       signal?.throwIfAborted();
-      const readOnly = input.tool === 'read' || input.tool === 'find' || input.tool === 'grep';
+      const readOnly = input.tool === 'read' || input.tool === 'find';
       const previous = readOnly ? await this.snapshot() ?? await this.initializeSnapshot() : await this.initializeSnapshot();
       if (!previous) throw new Error('Workspace has no committed source snapshot');
-      const path = input.tool === 'find' || input.tool === 'grep' || input.tool === 'apply_patch' ? '' : PathSchema.parse(input.args).path.replace(/^\.\//u, '');
+      const path = input.tool === 'find' || input.tool === 'apply_patch' ? '' : PathSchema.parse(input.args).path.replace(/^\.\//u, '');
       if (path) validateSnapshotPath(path);
       const fence = this.storage.transactionSync(() => {
         if (readOnly) {
@@ -302,12 +297,6 @@ export class CloudFileStore {
         return lease.fence + 1;
       });
       await this.storage.sync();
-      if (input.tool === 'grep') {
-        await this.searchIndex.update(previous);
-        const matches = this.searchIndex.search(RuntimeGrepArgumentsSchema.parse(input.args));
-        const completed = result('completed', matches.text);
-        this.complete(input, completed, fence); return completed;
-      }
       if (input.tool === 'find') {
         const args = RuntimeFindArgumentsSchema.parse(input.args);
         const root = args.path.replace(/^\.\//u, '').replace(/\/$/u, '');

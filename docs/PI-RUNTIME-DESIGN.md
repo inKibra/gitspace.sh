@@ -207,8 +207,8 @@ packages/
 
 Each tool is declared **cloud** or **machine**:
 
-- **Cloud:** repository `read`, `write`, `edit`, `apply_patch`, and `find` always use the DO's Artifacts working-copy snapshot, whether machines are attached or not. `find` reads a commit-keyed path index and accepts `pattern` and `path`; it rejects the unsupported `glob` option. History, workspace reads, web search, judging, and cloud MCP also run here.
-- **Machine:** `bash`, jobs, processes, environment runs, and AST matching execute on the chosen cache. Default `grep` uses pinned ripgrep on a verified caught-up cache, otherwise the cloud snapshot index. Cloud codemode sends nested calls through the normal tool authority.
+- **Cloud:** repository `read`, `write`, `edit`, `apply_patch`, and `find` always use the DO's Artifacts working-copy snapshot, whether machines are attached or not. `find` reads a commit-keyed path index and accepts `pattern` and `path`; it rejects the unsupported `glob` option. `code_search` answers from the DO's FTS5 trigram index of the last fully indexed snapshot (alarm-built, keyed by blob), reports `partial` when its verification budget runs out and `behind` while newer snapshots are being indexed. History, workspace reads, web search, judging, and cloud MCP also run here.
+- **Machine:** `bash`, jobs, processes, environment runs, AST matching, and `grep` execute on the chosen cache; `grep` is exact pinned ripgrep over the canonical snapshot and fails without a machine, pointing at `code_search`. Cloud codemode sends nested calls through the normal tool authority.
 
 The workspace has one main conversation. Only it and human edits to local caches can change the shared cloud working copy. Main-agent mutations serialize within a turn; independent reads can run in parallel. No conversation carries machine placement. Each admitted machine command carries the latest cloud snapshot as its minimum input.
 
@@ -254,7 +254,7 @@ A settle window cannot prove that a writer has finished. A writer paused for lon
 |---|---|---|
 | `read`, `write`, `edit`, `bash` | Owner-schema registrations | File tools use the cloud copy; bash uses an execution cache. Each model gets `edit` or `apply_patch` by family (§8.8). |
 | `apply_patch` | Cloud file mutation | Shared V4A parser and atomic snapshot publication for OpenAI families (§8.8). |
-| `grep`, `find` | Separate owners | `grep` uses caught-up machine ripgrep or the cloud snapshot index; `find` uses the DO's commit-keyed path index. |
+| `grep`, `code_search`, `find` | Separate owners | `grep` runs machine ripgrep only; `code_search` uses the cloud trigram index; `find` uses the DO's commit-keyed path index. |
 | `codemode` | Keep | Cloud WorkerLoader isolate with nested durable tool calls (§7.4). |
 | `space_*` | New | Our host namespace as tools: environment, goal, artifacts, phase, workspace. |
 | `agents`, `jobs`, `proc` | New, replace `hub` | §8.2. |

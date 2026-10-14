@@ -51,6 +51,8 @@ function cloudArtifacts() {
     return head ? { checkpointRef: `refs/gitspace/spaces/${workspaceId}/checkpoints`, headCommit: head, branch, indexCommit: head, trackedWorktreeCommit: head, worktreeCommit: head, indexTree: commit('9'), worktreeTree: commit('9') } : null;
   });
   vi.spyOn(ArtifactsCodeStore.prototype, 'deleteRepository').mockImplementation(async (name) => { deleted.push(name); return true; });
+  // An opened runtime indexes its snapshot for code_search; these source trees are empty.
+  vi.spyOn(ArtifactsCodeStore.prototype, 'reader').mockImplementation(() => ({ readTree: async () => [], readBlob: async () => null, readCommit: async () => null, log: async () => [], close: async () => {} }));
   return { refs, forks, deleted, setBranch, copyCommit };
 }
 

@@ -48,7 +48,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
     this.operations = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => ctx.storage.setAlarm(timestamp) };
     this.runtime = createWorkspaceRuntime({
       storage: ctx.storage, identity, models, model: modelRef,
-      code: { readFile: async (_repository, _commit, path) => path === '.agents/agents/repository.md' ? new Blob([repositoryDefinition]) : null, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], listSnapshotEntries: unsupported, readBlob: unsupported },
+      code: { readFile: async (_repository, _commit, path) => path === '.agents/agents/repository.md' ? new Blob([repositoryDefinition]) : null, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], reader: () => ({ readTree: async () => [], readBlob: unsupported, close: async () => {} }) },
       initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported, approvalDefault: async () => 'write', preflight: async () => {} },

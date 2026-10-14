@@ -21,12 +21,14 @@ export const RuntimeBashControlArgumentsSchema = z.discriminatedUnion('op', [
 ]);
 export const RuntimeBashArgumentsSchema = z.union([RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema]);
 export const RuntimeFindArgumentsSchema = z.object({ pattern: z.string(), path: z.string().default('.') }).strict();
-export const RuntimeGrepArgumentsSchema = RuntimeFindArgumentsSchema.extend({
-  ...RuntimeDispatchSelectionSchema.shape, glob: z.string().optional(),
+/** The cloud index answers grep's pattern, path, visibility and paging contract; it never selects a machine. */
+export const RuntimeCodeSearchArgumentsSchema = RuntimeFindArgumentsSchema.extend({
+  glob: z.string().optional(),
   hidden: z.boolean().default(false), gitignore: z.boolean().default(true),
   multiline: z.boolean().default(false), caseSensitive: z.boolean().default(true),
   offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(10000).default(1000),
 });
+export const RuntimeGrepArgumentsSchema = RuntimeCodeSearchArgumentsSchema.extend(RuntimeDispatchSelectionSchema.shape);
 export const RuntimeAstGrepArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ pattern: z.string().min(1), path: z.string().default('.'), language: z.string().optional() });
 export const RuntimeAstEditArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ ops: z.array(z.object({ pat: z.string().min(1), out: z.string() })).min(1), paths: z.array(path).min(1), language: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/u) });
 export const RuntimeAstResolveArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ proposalId: path, action: z.enum(['apply', 'reject']) });
@@ -58,7 +60,7 @@ export const RuntimeAgentsArgumentsSchema = z.union([
   RuntimeChildAgentsArgumentsSchema,
 ]);
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
-  if (['read', 'grep', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status'].includes(name)) return true;
+  if (['read', 'grep', 'code_search', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));

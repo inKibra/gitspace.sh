@@ -13,7 +13,7 @@ try {
   const [status, stdout, stderr] = await Promise.all([build.exited, new Response(build.stdout).text(), new Response(build.stderr).text()]);
   if (status !== 0) throw new Error(`Search fixture bundle failed: ${stdout}${stderr}`);
   const contents = await Bun.file(output).text();
-  worker = new Miniflare({ modules: [{ type: 'ESModule', path: output, contents }, await searchWasmModule(directory)], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { PROOF: { className: 'CloudSearchProof', useSQLite: true } }, outboundService: () => { throw new Error('Live provider access forbidden'); } });
+  worker = new Miniflare({ modules: [{ type: 'ESModule', path: output, contents }, await searchWasmModule(directory)], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { PROOF: { className: 'CodeSearchProof', useSQLite: true } }, outboundService: () => { throw new Error('Live provider access forbidden'); } });
   const response = await worker.dispatchFetch(`http://proof/${process.argv.includes('--benchmark') ? '?benchmark' : ''}`);
   const result = await response.text();
   if (!response.ok) throw new Error(result);

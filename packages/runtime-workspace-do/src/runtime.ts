@@ -18,11 +18,12 @@ import { createReplicaStore } from './replica-store.js';
 import { WorkspaceDraftStore } from './draft.js';
 import type { WorkspaceDraftSave, WorkspaceDraftSaveResult } from '@gitspace/protocol-runtime/draft';
 import { CloudFileStore } from './cloud-files.js';
+import { CodeSearchIndex, type CodeSearchSource } from './cloud-search-index.js';
 import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifacts.js';
 import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat } from './transcript.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'listSnapshotEntries' | 'readBlob'>; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 /** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. */
 const MANAGEMENT_TIMEOUT_MS: Readonly<Record<'mcp_discover' | 'lifecycle', number>> = { mcp_discover: 30_000, lifecycle: 240_000 };
@@ -32,6 +33,8 @@ export type WorkspaceRuntime = {
   harness: Harness;
   attachments: AttachmentStore;
   cloudFiles: CloudFileStore;
+  /** Indexed search of the canonical snapshot; needs no machine. */
+  codeSearch: CodeSearchIndex;
   snapshot(): Promise<RuntimeSnapshot>;
   browserConversation(conversationId: string): Promise<{ id: ConversationId; root: boolean }>;
   submit(input: RuntimeSubmitInput, deviceId?: string): Promise<RuntimeAccepted>;
@@ -69,10 +72,17 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const runtime = await createRuntimeHarness({ ...options, storage });
   const { harness } = runtime;
   const attachments = new AttachmentStore(options.storage, options.attachments);
-  const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, publish, options.lfs, async (checkpoint, publicationId) => {
+  const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, codeChanged, options.lfs, async (checkpoint, publicationId) => {
     try { await options.retainLfs(checkpoint, publicationId); }
     catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
   }, options.initialCheckpoint);
+  const codeSearch = new CodeSearchIndex({
+    storage: options.storage, source: options.code, repository: artifactsWorkspaceRepository(options.identity.workspaceId),
+    snapshots: { current: () => cloudFiles.snapshot(), distance: (ancestor, descendant, limit) => cloudFiles.snapshotDistance(ancestor, descendant, limit) },
+    schedule: options.schedule, report: options.onReport,
+  });
+  /** Every canonical snapshot change republishes the projection and queues indexing for the next alarm. */
+  function codeChanged() { publish(); options.waitUntil(codeSearch.changed()); }
   async function recoverCloudFiles() {
     try { await cloudFiles.recover(); }
     catch (error) { options.onReport(error); await options.schedule(Date.now() + 5_000); }
@@ -285,7 +295,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     return value;
   }
   return {
-    harness, attachments, cloudFiles,
+    harness, attachments, cloudFiles, codeSearch,
     invokeConversationTool,
     async browserConversation(conversationId) {
       const target = await conversation(conversationId);
@@ -442,7 +452,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       }, cancel() { listeners.delete(controller); } }, { highWaterMark: 257 });
       return new Response(stream, { headers: { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' } });
     },
-    async wake() { await recoverCloudFiles(); await runtime.lifecycle.recover(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); },
+    async wake() { await recoverCloudFiles(); await runtime.lifecycle.recover(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); await codeSearch.drive(); },
     publish,
   };
 }

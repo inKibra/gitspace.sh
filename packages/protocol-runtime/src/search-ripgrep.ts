@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { RuntimeGrepArgumentsSchema } from './tool-arguments.js';
-import { searchPathFilter, type SearchFile } from './search-paths.js';
+import { compileSearchIgnores, searchPathFilter, type SearchFile } from './search-paths.js';
 
 const DataText = z.union([z.object({ text: z.string() }), z.object({ bytes: z.string() })]);
 const Event = z.discriminatedUnion('type', [
@@ -20,7 +20,7 @@ export function searchRipgrepArguments(input: z.input<typeof RuntimeGrepArgument
 
 export function searchRipgrepOutput(output: string, input: z.input<typeof RuntimeGrepArgumentsSchema>, root: string, ignoreFiles: readonly SearchFile[]): string {
   const args = RuntimeGrepArgumentsSchema.parse(input);
-  const accepts = searchPathFilter(args, ignoreFiles);
+  const accepts = searchPathFilter(args, compileSearchIgnores(ignoreFiles));
   const matches: { path: string; line: number; text: string }[] = [];
   const binary = new Set<string>();
   for (const line of output.split('\n')) {
