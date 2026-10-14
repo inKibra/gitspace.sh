@@ -10,6 +10,7 @@ import { ModelCombobox, modelOptions } from './ModelCombobox.js';
 import { navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
 import type { WorkspaceDraftBinding } from './workspace-draft.js';
+import { uploadArtifactFile, uploadRejection, type ArtifactUploadClient } from './inspector/artifact-upload.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -79,6 +80,8 @@ export interface ComposerProps {
   running: boolean;
   onSend?: GitSpaceShellProps['onSend'];
   draft?: WorkspaceDraftBinding;
+  /** Stores attachments that are not sent inline in the session's `uploads/` artifact folder. */
+  artifactUpload?: ArtifactUploadClient;
   pending: boolean;
   recovering?: boolean;
   error?: string;
@@ -86,7 +89,7 @@ export interface ComposerProps {
   onRetryControls?: () => void;
 }
 
-export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, pending, recovering = false, error, controlsError, onRetryControls }: ComposerProps) {
+export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, artifactUpload, pending, recovering = false, error, controlsError, onRetryControls }: ComposerProps) {
   const icons = useIcons();
   const inference = useInference();
   const assignment = inference?.state?.assignments.find((entry) => entry.projectId === workspace.projectId);
@@ -100,17 +103,35 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const [attachments, setAttachments] = useState<File[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState<string | null>(null);
   const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
     const text = draft.trim();
-    if (!text || !onSend || pending || recovering || inferenceUnavailable) return false;
+    if (!text || !onSend || pending || recovering || inferenceUnavailable || uploading !== null) return false;
     setSubmitError(null);
     const sentDraft = workspaceDraft?.capture();
     try {
       const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
+      const uploads = files.filter((file) => !file.type.startsWith('text/') || file.size > 256 * 1024);
+      const uploaded = new Map<File, string>();
+      if (uploads.length) {
+        if (!artifactUpload) throw new Error('Files other than images and small text files can only be attached in an open workspace.');
+        for (const file of uploads) {
+          const rejection = uploadRejection(file);
+          if (rejection) throw new Error(`${file.name}: ${rejection}`);
+        }
+        // Sequential, like the Inspector's uploads: one chunk body in flight keeps requests under the Worker's size cap.
+        for (const file of uploads) {
+          setUploading(file.name);
+          const artifact = await uploadArtifactFile(artifactUpload, file, { signal: new AbortController().signal, onSession: () => undefined });
+          // Catalog URLs carry raw names ("report (1).pdf"); the agent's `read` takes encoded resource URIs.
+          uploaded.set(file, `local://${artifact.url.slice('local://'.length).split('/').map(encodeURIComponent).join('/')}`);
+        }
+      }
       const images = await Promise.all(draftAttachments.filter((file) => file.type.startsWith('image/')).map(imageAttachment));
       const attached = await Promise.all(files.map(async (file) => {
-        if (file.type.startsWith('text/') && file.size <= 256 * 1024) return `<attachment name="${file.name}">\n${await file.text()}\n</attachment>`;
-        return `<attachment name="${file.name}" type="${file.type || 'application/octet-stream'}" size="${file.size}" />`;
+        const url = uploaded.get(file);
+        if (url === undefined) return `<attachment name="${file.name}">\n${await file.text()}\n</attachment>`;
+        return `<attachment name="${file.name}" url="${url}" type="${file.type || 'application/octet-stream'}" size="${file.size}" />`;
       }));
       await onSend([text, ...attached].join('\n\n'), behavior, images, sentDraft);
       if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
@@ -120,6 +141,8 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     } catch (failure) {
       setSubmitError(rpcErrorMessage(failure, 'Send message'));
       return false;
+    } finally {
+      setUploading(null);
     }
   };
   const runControl = (operation: Promise<void>): void => {
@@ -206,7 +229,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       onValueChange={setMessage}
       onSend={(text, files, meta) => { if (meta?.queuedId) return; void submit(text, files); }}
       placeholder={recovering ? 'Recovering agent…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
-      disabled={!onSend || pending || recovering || inferenceUnavailable}
+      disabled={!onSend || pending || recovering || inferenceUnavailable || uploading !== null}
       files={attachments}
       onFilesChange={setAttachments}
       accept="image/png,image/jpeg,image/webp,text/*,application/pdf"
@@ -246,6 +269,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         </DropdownMenu>
       </> : null}
     />
+    {uploading !== null ? <p role="status" className="text-caption text-muted-foreground">Uploading {uploading}…</p> : null}
     {error || submitError ? <p role="alert" className="text-caption text-destructive">{error ?? submitError}</p> : null}
   </div>;
 }

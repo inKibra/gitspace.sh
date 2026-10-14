@@ -14,8 +14,7 @@ import { SessionControlsDoc } from '@gitspace/runtime-core/session-controls';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
-async function ownerFixture(ctx: DurableObjectState) {
-    const identity = RuntimeIdentitySchema.parse({ projectId: 'owner-project', workspaceId: 'owner-workspace' });
+async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentitySchema.parse({ projectId: 'owner-project', workspaceId: 'owner-workspace' })) {
     const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/checkpoints', headCommit: 'a'.repeat(40), branch: 'main', indexCommit: 'b'.repeat(40), trackedWorktreeCommit: 'c'.repeat(40), worktreeCommit: 'c'.repeat(40), indexTree: 'd'.repeat(40), worktreeTree: 'e'.repeat(40) });
     const files = new Map([['hello.txt', 'cloud original\n'], ['src/a.ts', 'one\n'], ['src/nested/b.md', 'two\n'], ['other/c.ts', 'three\n']]);
     let revision = 1;
@@ -212,6 +211,36 @@ test('agent workspace creation and phase changes run in the cloud with no machin
     } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
   expect((await authority.listWorkspaces()).find(workspace => workspace.id === 'owner-workspace')).toMatchObject({ phase: 'review' });
+});
+
+test('agents write and edit their own workspace artifacts through local:// in the cloud', async () => {
+  const projectId = 'artifact-project';
+  const workspaceId = 'artifact-workspace';
+  await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(19)) });
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  const project = await authority.bootstrap({ id: projectId, name: 'Artifact owner', repositoryReference: null, baseBranch: 'main', createdBy: 'test' });
+  await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).put(await authority.setProjectLifecycle(project.revision, 'active'));
+  await authority.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Artifacts', branch: 'artifacts', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`artifact-proof:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
+    try {
+      const url = 'local://workspace/notes/a.md';
+      const written = await invoke('write', { path: url, content: 'first draft\n', message: 'Record notes' });
+      expect(written.status, text(written)).toBe('completed');
+      expect(text(await invoke('read', { path: url }))).toBe('first draft\n');
+      const edited = await invoke('edit', { path: url, edits: [{ oldText: 'first', newText: 'final' }], message: 'Finalize notes' });
+      expect(edited.status, text(edited)).toBe('completed');
+      expect(text(await invoke('read', { path: url }))).toBe('final draft\n');
+      const missed = await invoke('edit', { path: url, edits: [{ oldText: 'first', newText: 'again' }], message: 'Stale edit' });
+      expect(missed.status).toBe('failed');
+      expect(text(await invoke('read', { path: url }))).toBe('final draft\n');
+
+      const base = await invoke('write', { path: 'local://base/notes/a.md', content: 'shared', message: 'Write project notes' });
+      expect(base.status).toBe('failed');
+      expect(text(base)).toBe('This workspace can write local://workspace/<path>; local://base/ is written from the project session');
+    } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+  expect((await authority.listArtifactScopes()).map(scope => [scope.workspaceId, scope.generation])).toEqual([[workspaceId, 2]]);
 });
 
 test('machine availability precedes approval for shell, structural reads, and lifecycle runs', async () => {

@@ -12,6 +12,7 @@ import { useTranscriptHistory } from './useTranscriptHistory.js';
 import { useInference } from './InferenceContext.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
+import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
 import { workspaceMachines, workspaceMachinesSummary, workspaceStatus } from './workspace-status.js';
@@ -76,7 +77,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const relationValue = useRetainedQueryValue(relationQuery, JSON.stringify([props.projectId, props.workspaceId]));
   const [actionError, setActionError] = useState<string | null>(null);
   const [terminalChoice, setTerminalChoice] = useState<{ spaceId: string; machineId: string } | null>(null);
-  const scope = useMemo(() => runtimeScope(snapshot, inspection, relationValue?.workspaces), [snapshot, inspection, relationValue]);
+  const scope = useMemo(() => runtimeScope(snapshot, inspection, relationValue), [snapshot, inspection, relationValue]);
   const relationsEditable = relationQuery.state === 'success' && relationQuery.fetch !== 'fetching' && scope.relationsReady;
   const relationAuthority = useRef({ value: relationValue, editable: relationsEditable });
   relationAuthority.current = { value: relationValue, editable: relationsEditable };
@@ -176,6 +177,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', onLaunch: workspaceId => setLaunchRequest({ workspaceId, targets: RELEASE_TARGETS }), onRevert: () => perform(launch.revert) } : null}
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onRevert={() => perform(launch.revert)} onDismiss={launch.dismiss} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
+      artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
       terminals={{
         spaceId, machines: terminalMachines, machineId: terminalChoice?.spaceId === spaceId ? terminalChoice.machineId : null,
         onSelectMachine: selectTerminalMachine,

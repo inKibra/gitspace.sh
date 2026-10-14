@@ -40,22 +40,48 @@ describe('runtime to existing shell adapter', () => {
     expect(workspaceStatusLabel({ ...runtimeScope(failed, stale).workspace, freshness: 'fresh' })).toBe('Failed');
   });
 
+  const idle = { primaryColor: 'dim' as const, agents: { green: 0, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } };
+  const listedBase: InputOf<typeof SpaceViewCodec>['baseSpace'] = { id: project.id, projectId: project.id, kind: 'base', name: project.name, branch: 'main', possessedBy: null, spaceGeneration: 0, closedAt: null, status: idle };
+  function listed(id: string, status: InputOf<typeof SpaceViewCodec>['workspaces'][number]['status'] = idle): InputOf<typeof SpaceViewCodec>['workspaces'][number] {
+    return {
+      id, projectId: project.id, projectName: project.name, name: id, branch: id, rootPath: '', phase: 'code', possessedBy: null, spaceGeneration: 0, possessionGeneration: null, closedAt: null, status,
+      relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] },
+    };
+  }
+
   it('uses authoritative relations and stack findings instead of erasing the graph', () => {
     const parent = { ...workspace, id: 'parent', name: 'Parent' };
-    const saved: InputOf<typeof SpaceViewCodec>['workspaces'][number] = {
-      id: workspace.id, projectId: project.id, projectName: project.name, name: workspace.name, branch: workspace.branch, rootPath: '/workspace',
-      phase: 'review', possessedBy: '', spaceGeneration: 0, possessionGeneration: 0, closedAt: null,
-      status: { primaryColor: 'dim', agents: { green: 0, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } },
+    const saved = {
+      ...listed(workspace.id),
       relations: { dependsOn: ['parent'], relatedTo: ['related'], stackedOn: 'parent' },
-      stack: { blockedBy: ['parent'], blocking: ['child'], findings: [{ code: 'dependency-open', message: 'Blocked by Parent (code)', workspaceId: 'parent' }] },
+      stack: { blockedBy: ['parent'], blocking: ['child'], findings: [{ code: 'dependency-open' as const, message: 'Blocked by Parent (code)', workspaceId: 'parent' }] },
     };
-    const scope = runtimeScope(fixture(), { ...inspection, workspaces: [workspace, parent] }, [saved]);
+    const scope = runtimeScope(fixture(), { ...inspection, workspaces: [workspace, parent] }, { baseSpace: listedBase, workspaces: [saved] });
     expect(scope.workspaces.find(item => item.id === workspace.id)?.relations).toEqual(saved.relations);
     expect(scope.workspaces.find(item => item.id === workspace.id)?.stack).toEqual(saved.stack);
     const changed = { ...saved, relations: { dependsOn: [], relatedTo: ['parent'], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] } };
-    const refreshed = runtimeScope(fixture(), inspection, [changed]);
+    const refreshed = runtimeScope(fixture(), inspection, { baseSpace: listedBase, workspaces: [changed] });
     expect(refreshed.workspaces[0]?.relations).toEqual(changed.relations);
     expect(refreshed.workspaces[0]?.stack.blockedBy).toEqual([]);
+  });
+
+  it('paints only the open workspace with its live status; the project and siblings keep their listed status', () => {
+    const sibling = { ...workspace, id: 'sibling', name: 'Sibling' };
+    const running = fixture();
+    running.conversations[0]!.status = 'running';
+    const waiting = { ...idle, primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 } };
+    const failedBase = { ...idle, primaryColor: 'red' as const, agents: { green: 0, blue: 0, orange: 0, red: 1 } };
+    const scope = runtimeScope(running, { ...inspection, workspaces: [workspace, sibling] }, { baseSpace: { ...listedBase, status: failedBase }, workspaces: [listed(workspace.id), listed(sibling.id, waiting)] });
+    expect(scope.workspace.status.primaryColor).toBe('green');
+    expect(scope.workspaces.find(item => item.id === sibling.id)?.status).toEqual(waiting);
+    expect(scope.baseSpace.status).toEqual(failedBase);
+    const opening = runtimeScope(running, { ...inspection, workspaces: [workspace, sibling] });
+    expect(opening.workspaces.find(item => item.id === sibling.id)?.status.primaryColor).toBe('dim');
+    expect(opening.baseSpace.status.primaryColor).toBe('dim');
+    const base = { ...workspace, id: project.id, kind: 'base' as const, phase: null };
+    const baseOpen = runtimeScope(RuntimeSnapshotSchema.parse({ ...running, workspaceId: project.id }), { ...inspection, workspace: base, workspaces: [base, workspace] }, { baseSpace: listedBase, workspaces: [listed(workspace.id, waiting)] });
+    expect(baseOpen.workspace.status.primaryColor).toBe('green');
+    expect(baseOpen.workspaces[0]?.status).toEqual(waiting);
   });
 
   it('shows incoming sender-labelled messages before a child has answered', () => {

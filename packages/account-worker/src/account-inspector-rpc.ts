@@ -47,7 +47,7 @@ import {
   startWorkspaceServiceContract,
   stopWorkspaceServiceContract
 } from '@gitspace/protocol/rpc-contract';
-import type { GitSpaceRpcContext } from '@gitspace/protocol';
+import { credentialProtocolBase64, type GitSpaceRpcContext } from '@gitspace/protocol';
 import { encodeTranscriptEventChunks } from '@gitspace/protocol/transcript';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
@@ -426,16 +426,57 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
       return err(errors.OperationFailed({ operation: 'Inspector readArtifactPage', message: error instanceof Error ? error.message : 'Unable to read artifact page' }));
     }
   });
-  const writeArtifact = server.implement(inspectorWriteArtifactContract).handler(({ errors }) =>
-    err(errors.InspectorState({ resource: 'artifacts', message: 'Open this workspace on a machine before editing artifacts.' })));
-  // Uploads stage bytes on the holder's disk; without a live holder there is nowhere to stage them.
-  const beginUpload = server.implement(inspectorBeginArtifactUploadContract).handler(({ errors }) =>
-    err(errors.InspectorState({ resource: 'upload', message: 'Open this workspace on a machine before uploading artifacts.' })));
-  const uploadChunk = server.implement(inspectorUploadArtifactChunkContract).handler(({ errors }) =>
-    err(errors.InspectorState({ resource: 'upload', message: 'This upload ended because its workspace is no longer open on a machine.' })));
-  const commitUpload = server.implement(inspectorCommitArtifactUploadContract).handler(({ errors }) =>
-    err(errors.InspectorState({ resource: 'upload', message: 'This upload ended because its workspace is no longer open on a machine.' })));
-  const abortUpload = server.implement(inspectorAbortArtifactUploadContract).handler(() => ok({ aborted: false }));
+  const writeArtifact = server.implement(inspectorWriteArtifactContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).write(input.url, { bytes: credentialProtocolBase64.decode(input.base64), mediaType: input.mediaType }));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.InspectorState({ resource: 'artifacts', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  // Upload rejections are terminal for the client; only transport failures are retried at the same offset.
+  const beginUpload = server.implement(inspectorBeginArtifactUploadContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).beginUpload(input.fileName, input.size, input.mediaType));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.InspectorState({ resource: 'upload', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const uploadChunk = server.implement(inspectorUploadArtifactChunkContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).uploadChunk(input.uploadId, input.offset, input.sha256, input.data));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.InspectorState({ resource: 'upload', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const commitUpload = server.implement(inspectorCommitArtifactUploadContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).commitUpload(input.uploadId));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.InspectorState({ resource: 'upload', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const abortUpload = server.implement(inspectorAbortArtifactUploadContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).abortUpload(input.uploadId));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.InspectorState({ resource: 'upload', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   const listArtifacts = server.implement(inspectorListArtifactsContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);

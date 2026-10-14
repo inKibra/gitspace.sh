@@ -7,7 +7,6 @@ import { RuntimeAttachmentSchema, RuntimeToolDispatchSchema } from '@gitspace/pr
 import { checkoutTerminalEnvironment, executeMachineTool, type MachineToolOptions } from './tools.js';
 
 const roots: string[] = [];
-const unused = async (): Promise<never> => { throw new Error('Unexpected artifact access'); };
 // Like the supervisor launch (inheritEnv: false), the child sees exactly the environment the tool supplies.
 const options: MachineToolOptions = { runCommand: command => {
   const { promise, resolve } = Promise.withResolvers<{ exitCode: number; output: string }>();
@@ -15,7 +14,7 @@ const options: MachineToolOptions = { runCommand: command => {
     resolve({ exitCode: typeof error?.code === 'number' ? error.code : 0, output: stdout + stderr });
   });
   return promise;
-}, artifacts: () => ({ read: unused, write: unused }) };
+} };
 
 async function checkout(bundle: string | null) {
   const rootPath = await mkdtemp(join(tmpdir(), 'runtime-bundle-terminal-'));

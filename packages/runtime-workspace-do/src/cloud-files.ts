@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { TaggedError } from 'better-result';
-import { canonicalJson, RuntimeGitCheckpointSchema, RuntimeToolResultSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeFindArgumentsSchema, ApplyPatchArgumentsSchema, prepareV4APatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { applyTextEdits, canonicalJson, RuntimeGitCheckpointSchema, RuntimeToolResultSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeFindArgumentsSchema, ApplyPatchArgumentsSchema, prepareV4APatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { collectBytes, parseGitLfsPointer, type GitLfsConfirmedObject, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -391,12 +391,8 @@ export class CloudFileStore {
       let content: string;
       if (input.tool === 'write') content = RuntimeWriteArgumentsSchema.parse(input.args).content;
       else {
-        const edits = RuntimeEditArgumentsSchema.parse(input.args).edits;
-        const original = new TextDecoder('utf-8', { fatal: true }).decode(await read());
-        const replacements = edits.map(edit => { const index = original.indexOf(edit.oldText); if (index < 0 || original.indexOf(edit.oldText, index + 1) >= 0) throw new Error('Edit text must match exactly once'); return { ...edit, index }; }).sort((a, b) => a.index - b.index);
-        let end = 0; content = '';
-        for (const edit of replacements) { if (edit.index < end) throw new Error('Edit ranges overlap'); content += original.slice(end, edit.index) + edit.newText; end = edit.index + edit.oldText.length; }
-        content += original.slice(end);
+        const { edits } = RuntimeEditArgumentsSchema.parse(input.args);
+        content = applyTextEdits(new TextDecoder('utf-8', { fatal: true }).decode(await read()), edits);
       }
       const mutations = [{ path, content }];
       assertValidMutations(mutations);

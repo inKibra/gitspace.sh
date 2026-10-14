@@ -139,7 +139,7 @@ describe('Inspector artifact uploads', () => {
     expect(container.querySelector('[data-artifact-url="local://workspace/uploads/b.zip"]')?.hasAttribute('data-selected')).toBe(true);
   });
 
-  it('rejects files over 1 GiB without beginning an upload', async () => {
+  it('rejects files over 16 MiB without beginning an upload', async () => {
     const uploads = client(acknowledge);
     props.artifactUpload = uploads;
     await render();
@@ -148,7 +148,7 @@ describe('Inspector artifact uploads', () => {
 
     await choose(file);
 
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('uploads are limited to 1 GiB');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('uploads are limited to 16 MiB');
     expect(uploads.begin).not.toHaveBeenCalled();
     await click('Dismiss huge.zip');
     expect(container.querySelector('[role="alert"]')).toBeNull();

@@ -5,7 +5,7 @@ import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path
 import { homedir, tmpdir } from 'node:os';
 import { z } from 'zod';
 import { RuntimeContentSchema, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
-import { ApplyPatchArgumentsSchema, prepareV4APatch, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeBashCommandArgumentsSchema, RuntimeFindArgumentsSchema, RuntimeGrepArgumentsSchema, RuntimeAstGrepArgumentsSchema, RuntimeAstEditArgumentsSchema, RuntimeAstResolveArgumentsSchema } from '@gitspace/protocol-runtime';
+import { ApplyPatchArgumentsSchema, applyTextEdits, prepareV4APatch, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeBashCommandArgumentsSchema, RuntimeFindArgumentsSchema, RuntimeGrepArgumentsSchema, RuntimeAstGrepArgumentsSchema, RuntimeAstEditArgumentsSchema, RuntimeAstResolveArgumentsSchema } from '@gitspace/protocol-runtime';
 import { bundleTerminalSection, terminalEnvironment } from '@gitspace/protocol-environment';
 import type { LocalAttachment, ExecutorJournal } from './journal.js';
 import { proposalPath, stageProposal, resolveProposal } from './ast-proposals.js';
@@ -15,9 +15,8 @@ import { searchRipgrepArguments, searchRipgrepOutput } from '../../protocol-runt
 import { materializeSearchSnapshot } from './search-snapshot.js';
 
 export type ExecutorContent = z.infer<typeof RuntimeContentSchema>[];
-export type ExecutorArtifactAccess = { read(uri: string, signal: AbortSignal): Promise<ExecutorContent>; write(uri: string, content: string, signal: AbortSignal): Promise<void> };
 export type ExecutorOperationHandler = (dispatch: RuntimeToolDispatch, local: LocalAttachment, signal: AbortSignal) => Promise<ExecutorContent>;
-export type MachineToolOptions = { journal?: ExecutorJournal; runCommand: RunExecutorCommand; artifacts?: (attachment: LocalAttachment) => ExecutorArtifactAccess; operations?: Record<string, ExecutorOperationHandler> };
+export type MachineToolOptions = { journal?: ExecutorJournal; runCommand: RunExecutorCommand; operations?: Record<string, ExecutorOperationHandler> };
 const ProposalSchema = z.object({ changes: z.array(z.object({ path: z.string(), before: z.string(), after: z.string() })) });
 
 export async function checkoutPath(root: string, path: string): Promise<string> {
@@ -68,10 +67,6 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
   let sequence = 0;
   const command = (application: string, args: string[], cwd = local.rootPath, environment?: Record<string, string>) => options.runCommand({ application, args, cwd, project: local.rootPath, attemptId: dispatch.attemptId, sequence: sequence++, deadlineAt: dispatch.deadlineAt, signal, env: environment });
   const text = (value: string): ExecutorContent => [{ type: 'text', text: value }];
-  const artifacts = () => {
-    if (!options.artifacts) throw new Error('Artifact storage unavailable on this machine');
-    return options.artifacts(local);
-  };
   const read = async (path: string) => {
     const result = await env.readTextFile(await checkoutPath(local.rootPath, path), context);
     if (!result.ok) throw result.error;
@@ -87,7 +82,6 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
   switch (dispatch.tool) {
     case 'read': {
       const args = RuntimeReadArgumentsSchema.parse(dispatch.args);
-      if (args.path.startsWith('local://') || args.path.startsWith('artifact://')) return artifacts().read(args.path, signal);
       const path = await checkoutPath(local.rootPath, args.path);
       const binary = await env.readBinaryFile(path, context);
       if (!binary.ok) throw binary.error;
@@ -101,24 +95,12 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
     }
     case 'write': {
       const args = RuntimeWriteArgumentsSchema.parse(dispatch.args);
-      if (args.path.startsWith('local://') || args.path.startsWith('artifact://')) await artifacts().write(args.path, args.content, signal);
-      else await write(args.path, args.content);
+      await write(args.path, args.content);
       return text(`Wrote ${args.path}`);
     }
     case 'edit': {
       const args = RuntimeEditArgumentsSchema.parse(dispatch.args);
-      const original = await read(args.path);
-      const replacements = args.edits.map(edit => {
-        const index = original.indexOf(edit.oldText);
-        if (index < 0 || original.indexOf(edit.oldText, index + 1) >= 0) throw new Error('Edit text must match exactly once');
-        return { ...edit, index };
-      }).sort((a, b) => a.index - b.index);
-      let end = 0, output = '';
-      for (const edit of replacements) {
-        if (edit.index < end) throw new Error('Edit ranges overlap');
-        output += original.slice(end, edit.index) + edit.newText; end = edit.index + edit.oldText.length;
-      }
-      await write(args.path, output + original.slice(end));
+      await write(args.path, applyTextEdits(await read(args.path), args.edits));
       return text(`Edited ${args.path}`);
     }
     case 'apply_patch': {

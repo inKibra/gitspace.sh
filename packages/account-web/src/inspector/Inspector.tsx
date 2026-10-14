@@ -657,7 +657,7 @@ function ArtifactsSurface({ references, onOpen, actions, uploads }: { references
   ><ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div ref={list} className="flex flex-col gap-3 p-4">
     {uploads ? <div className="flex flex-wrap items-center gap-2">
       <ArtifactUploadButton onFiles={uploads.add} disabledReason={runtimeAvailable ? null : openWorkspaceFirst} />
-      <p className="text-caption text-muted-foreground">Files are saved to <span className="font-mono">uploads/</span> in this workspace, up to 1 GiB each. You can also drop files here.</p>
+      <p className="text-caption text-muted-foreground">Files are saved to <span className="font-mono">uploads/</span> in this workspace, up to 16 MiB each. You can also drop files here.</p>
     </div> : null}
     {uploads ? <ArtifactUploadList uploads={uploads} /> : null}
     {!references.length ? <EmptyState icon={ic(Archive, 22)} title="No artifacts" description="Published workspace and project files appear here, whether or not they are attached as evidence." /> : <>

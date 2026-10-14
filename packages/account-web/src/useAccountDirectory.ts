@@ -40,7 +40,7 @@ async function readResult<T>(request: Promise<{ status: 'ok'; value: T } | { sta
   }
 }
 
-/** One account projection owns cloud lifecycle; native reads only enrich current holders. */
+/** One account projection owns cloud lifecycle; cloud spaces take their status from one project listing read per change, native reads only enrich current holders. */
 export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleView, 'id' | 'lifecycle'>[], client: DirectoryClient = directoryClient, source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource): WorkspaceProjection {
   const owner = useSynchronizationOwner();
   const accepted = useRef<Directory>({});
@@ -151,7 +151,11 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         const errors = directoryError ? [`Directory unavailable: ${directoryError}`] : [];
         const summarize = (id: string, closedAt: Date | null, previous: SidebarSpaceSummary | undefined): SidebarSpaceSummary => {
           // Cloud-only projects have canonical workspaces before their first runtime opens; neither needs a machine.
-          if (project.lifecycle === 'cloud-only' || (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud')) return { closedAt, holder: { kind: 'cloud' }, freshness: 'unknown', refreshing: false };
+          // Their status comes from the project listing read below; until it answers, the last listed status stays.
+          if (project.lifecycle === 'cloud-only' || (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud')) {
+            const listed = !closedAt && previous?.holder.kind === 'cloud' && !previous.closedAt ? previous : undefined;
+            return { closedAt, holder: { kind: 'cloud' }, status: listed?.status, freshness: listed?.freshness ?? 'unknown', refreshing: false, detail: listed?.detail };
+          }
           const placement = placements.get(id);
           if (closedAt) return { closedAt, holder: { kind: 'released' }, generation: placement?.generation, freshness: 'fresh' };
           if (!placement) return { closedAt, holder: { kind: 'unknown' }, freshness: 'unknown', refreshing: false, detail: 'Placement unavailable' };
@@ -198,6 +202,21 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
           const runtime = previous?.runtime;
           if (runtime && !space.closedAt && !runtime.closedAt && runtime.projectId === project.id && summary.holder.kind === 'held' && runtime.possessedBy === summary.holder.machineId && runtime.generation === summary.generation && placements.get(space.id)?.state === 'open') runtimes.set(space.id, runtime);
         }
+        // One project listing read covers every cloud space of the project; machines are never consulted.
+        const cloudSpaces = [...summaries].filter(([, summary]) => summary.holder.kind === 'cloud' && !summary.closedAt).map(([id]) => id);
+        const readListing = async () => {
+          if (!cloudSpaces.length) return;
+          const listing = await readResult(client.spaceView({ projectId: project.id, workspaceId: null }, { signal: controller.signal }));
+          if (!current()) return;
+          for (const id of cloudSpaces) {
+            const summary = summaries.get(id)!;
+            const space = id === project.id ? listing.value?.baseSpace : listing.value?.workspaces.find((item) => item.id === id);
+            summaries.set(id, space
+              ? { ...summary, status: space.status, freshness: 'fresh', refreshing: false, detail: null }
+              : { ...summary, freshness: summary.status ? 'stale' : 'unknown', refreshing: false, detail: `Status unavailable: ${listing.error ?? 'not in the project listing'}` });
+          }
+          if (listing.error) errors.push(listing.error);
+        };
         const publish = (error: string | null) => {
           if (!current()) return;
           for (const [id, summary] of summaries) {
@@ -217,9 +236,10 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
           setDirectory(accepted.current);
         };
         // Cloud closes, deletes and generation changes take effect even while old native reads are pending.
-        publish(errors.length ? errors.join('; ') : holders.size ? prior?.error ?? null : null);
+        publish(errors.length ? errors.join('; ') : holders.size || cloudSpaces.length ? prior?.error ?? null : null);
         currentWork.pending = async () => {
           if (!current()) return;
+          const listed = readListing();
           await Promise.all([...holders].map(async ([holderId, placement]) => {
             const observedRevision = observationRevision.current;
             const runtime = await readResult(client.spaceView({ projectId: project.id, workspaceId: placement.spaceId === project.id ? null : placement.spaceId }, { signal: controller.signal }));
@@ -262,6 +282,7 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
             if (error) { errors.push(error); currentWork.holderErrors.set(holderId, error); }
             else currentWork.holderErrors.delete(holderId);
           }));
+          await listed;
           publish(errors.length ? errors.join('; ') : null);
         };
         if (!currentWork.reading) {

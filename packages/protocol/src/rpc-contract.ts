@@ -1642,7 +1642,8 @@ export const inspectorWriteArtifactContract = gitspaceRpc
   .errors(inspectorMutationErrors)
   .mutation();
 
-export const ARTIFACT_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024;
+/** Committed uploads are read back through the 16 MiB cloud artifact read cap. */
+export const ARTIFACT_UPLOAD_MAX_BYTES = 16 * 1024 * 1024;
 /** Raw bytes per chunk. Base64 plus the envelope must stay under the result-rpc
  * client's 1 MiB request cap and the account Worker's 512 KiB space-routed body cap. */
 export const ARTIFACT_UPLOAD_CHUNK_BYTES = 256 * 1024;

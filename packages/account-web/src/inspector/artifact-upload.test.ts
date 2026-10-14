@@ -94,7 +94,7 @@ describe('uploadArtifactFile', () => {
     expect(client.commit).toHaveBeenCalledOnce();
   });
 
-  it('rejects files over 1 GiB before beginning an upload', async () => {
+  it('rejects files over 16 MiB before beginning an upload', async () => {
     const file = new File([], 'huge.zip');
     Object.defineProperty(file, 'size', { value: ARTIFACT_UPLOAD_MAX_BYTES + 1 });
     const { client } = authority();
@@ -102,7 +102,7 @@ describe('uploadArtifactFile', () => {
     const upload = uploadArtifactFile(client, file, { signal: new AbortController().signal, onSession() {} });
 
     await expect(upload).rejects.toBeInstanceOf(ArtifactUploadRejected);
-    await expect(upload).rejects.toThrow('uploads are limited to 1 GiB');
+    await expect(upload).rejects.toThrow('uploads are limited to 16 MiB');
     expect(client.begin).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { posix } from 'node:path';
 import {
   artifactManifestSchema, credentialProtocolBase64, decryptArtifactBytes, deriveArtifactScopeKey, encryptArtifactBytes,
@@ -13,10 +14,11 @@ import { CHUNKED_CHECKPOINT_VERSION, chunkedCheckpointManifestSchema, parseWorks
 import type { SpaceContextDO } from './space-context.js';
 import { SavedTranscriptIndex } from './saved-transcript-index.js';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
-import { RuntimeIdentitySchema, RuntimeSnapshotSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime';
+import { applyTextEdits, RuntimeIdentitySchema, RuntimeSnapshotSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime';
 import { readRuntimeTranscript } from './runtime-transcript-reader.js';
 import { openLegacySession } from './legacy-checkpoint-reader.js';
 import { readArtifactObject, readArtifactManifestObject } from './artifact-object-reader.js';
+import { ARTIFACT_UPLOAD_CHUNK_BYTES } from '@gitspace/protocol/rpc-contract';
 
 export class InspectorWorkspaceMissing extends Error {
   constructor(readonly spaceId: string) { super(`Workspace ${spaceId} does not exist`); }
@@ -24,6 +26,13 @@ export class InspectorWorkspaceMissing extends Error {
 export class InspectorGenerationConflict extends Error {
   constructor(readonly spaceId: string, readonly expected: number, readonly actual: number) { super('Space generation changed'); }
 }
+
+type ArtifactChange = { bytes: Uint8Array; mediaType?: string | null } | { edits: readonly { oldText: string; newText: string }[] };
+const artifactUploadStateSchema = z.object({
+  spaceId: z.string(), generation: z.number().int(), path: z.string(), size: z.number().int().positive(), mediaType: z.string().nullable(),
+  received: z.number().int().nonnegative(), last: z.object({ offset: z.number().int().nonnegative(), sha256: z.string() }).nullable(),
+});
+type ArtifactUploadState = z.infer<typeof artifactUploadStateSchema>;
 
 export interface InspectorCloudContext {
   identity: InspectorIdentity;
@@ -95,9 +104,13 @@ async function boundedArtifactBytes(env: Env, userId: string, hash: string, key:
 
 /** Reads the same encrypted, content-addressed objects as CloudArtifactObjectStore. */
 export class InspectorCloudArtifacts {
-  private readonly key: Promise<Uint8Array>;
-  constructor(private readonly env: Env, private readonly userId: string, private readonly source: InspectorCloudContext) {
-    this.key = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId).then(credentialProtocolBase64.decode);
+  private keyRequest: Promise<Uint8Array> | undefined;
+  constructor(private readonly env: Env, private readonly userId: string, private readonly source: InspectorCloudContext) {}
+
+  /** Fetched on first use: upload staging never needs the key, and an unawaited request outlives the call. */
+  private get key(): Promise<Uint8Array> {
+    this.keyRequest ??= (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.userId).artifactKey(this.userId).then(credentialProtocolBase64.decode);
+    return this.keyRequest;
   }
 
   private objectKey(hash: string): string {
@@ -117,7 +130,8 @@ export class InspectorCloudArtifacts {
     return manifest.entries;
   }
 
-  private async resolve(url: string) {
+  /** Normalizes a local:// URL to the workspace it addresses; that workspace's scope may not exist yet. */
+  private target(url: string) {
     const parsed = new URL(url);
     if (parsed.protocol !== 'local:') throw new Error('Artifact URL must use local://');
     const decoded = decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
@@ -134,9 +148,34 @@ export class InspectorCloudArtifacts {
     } else throw new Error('Artifact scope is not accessible from this workspace');
     const workspace = this.source.workspaces.find((candidate) => candidate.id === spaceId);
     if (!workspace || (parsed.hostname === 'base' ? workspace.kind !== 'base' : workspace.kind !== 'worktree')) throw new Error('Artifact scope does not exist');
+    return { spaceId, path };
+  }
+
+  private async resolve(url: string) {
+    const { spaceId, path } = this.target(url);
     const scope = (await this.source.authority.listArtifactScopes()).find((candidate) => candidate.workspaceId === spaceId);
     if (!scope) throw new Error('Artifact scope does not exist');
     return { scope, path };
+  }
+
+  /** The workspace's committed scope, or the empty generation-0 scope its first commit creates. */
+  private scopeOf(scopes: readonly CanonicalArtifactScope[], workspaceId: string): CanonicalArtifactScope {
+    return scopes.find((scope) => scope.workspaceId === workspaceId) ?? {
+      id: `space:${workspaceId}`, workspaceId, generation: 0, manifestHash: null, updatedAt: new Date().toISOString(),
+    };
+  }
+
+  /** Encrypts and stores one content-addressed object under the scope key. */
+  private async seal(bytes: Uint8Array, scopeKey: Uint8Array): Promise<`sha256:${string}`> {
+    const sealed = await encryptArtifactBytes(bytes, scopeKey);
+    const hash = await digest(sealed);
+    await this.env.DATA.put(`users/${this.userId}/${this.objectKey(hash)}`, sealed);
+    return hash;
+  }
+
+  private async sealManifest(scope: CanonicalArtifactScope, generation: number, entries: Iterable<ArtifactManifest['entries'][number]>, scopeKey: Uint8Array) {
+    const manifest: ArtifactManifest = { version: 1, scopeId: scope.id, generation, entries: [...entries].sort((left, right) => left.path.localeCompare(right.path)) };
+    return this.seal(new TextEncoder().encode(JSON.stringify(manifest)), scopeKey);
   }
 
   async list(): Promise<InspectorView['artifacts']> {
@@ -175,9 +214,7 @@ export class InspectorCloudArtifacts {
     const scopes = await this.source.authority.listArtifactScopes();
     const source = scopes.find((scope) => scope.workspaceId === this.source.workspace.id);
     if (!source) throw new Error('Workspace artifacts have not been published yet');
-    const destination = scopes.find((scope) => scope.workspaceId === this.source.project.id) ?? {
-      id: `space:${this.source.project.id}`, workspaceId: this.source.project.id, generation: 0, manifestHash: null, updatedAt: new Date().toISOString(),
-    };
+    const destination = this.scopeOf(scopes, this.source.project.id);
     if (destination.generation !== expectedProjectGeneration) throw new Error('Project artifacts changed. Refresh and choose destination paths again.');
     const [sourceEntries, destinationEntries] = await Promise.all([this.entries(source), this.entries(destination)]);
     const sourceByPath = new Map(sourceEntries.map((entry) => [entry.path, entry]));
@@ -210,9 +247,7 @@ export class InspectorCloudArtifacts {
     const copies: ArtifactCopyRecord[] = [];
     for (const { entry, target } of selected) {
       const bytes = await boundedArtifactBytes(this.env, this.userId, entry.blobHash, sourceKey, entry.size, 32 * 1024 * 1024);
-      const copied = await encryptArtifactBytes(bytes, destinationKey);
-      const hash = await digest(copied);
-      await this.env.DATA.put(`users/${this.userId}/${this.objectKey(hash)}`, copied);
+      const hash = await this.seal(bytes, destinationKey);
       destinationByPath.set(target, { path: target, blobHash: hash, size: bytes.byteLength, mediaType: entry.mediaType });
       copies.push({
         id: crypto.randomUUID(), sourceScopeId: source.id, sourceWorkspaceId: source.workspaceId,
@@ -220,12 +255,128 @@ export class InspectorCloudArtifacts {
         destinationScopeId: destination.id, destinationPath: target, destinationHash: hash, destinationGeneration: generation, createdAt,
       });
     }
-    const manifest: ArtifactManifest = { version: 1, scopeId: destination.id, generation, entries: [...destinationByPath.values()].sort((left, right) => left.path.localeCompare(right.path)) };
-    const sealedManifest = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify(manifest)), destinationKey);
-    const manifestHash = await digest(sealedManifest);
-    await this.env.DATA.put(`users/${this.userId}/${this.objectKey(manifestHash)}`, sealedManifest);
+    const manifestHash = await this.sealManifest(destination, generation, destinationByPath.values(), destinationKey);
     await this.source.authority.commitArtifactCopies({ id: destination.id, workspaceId: destination.workspaceId, generation, manifestHash, expectedGeneration: destination.generation }, copies);
     return this.catalog();
+  }
+
+  /** This session's writable scope: a worktree session writes local://workspace/…, the project session local://base/…. */
+  private writable(): { mount: 'base' | 'workspace'; spaceId: string } {
+    return this.source.workspace.kind === 'base' ? { mount: 'base', spaceId: this.source.project.id } : { mount: 'workspace', spaceId: this.source.workspace.id };
+  }
+
+  /**
+   * Writes one artifact in this session's writable scope. Bytes keep the current media type unless one is given;
+   * `edits` apply the repository edit tool's semantics to the current text of the same generation.
+   */
+  async write(url: string, change: ArtifactChange) {
+    const writable = this.writable();
+    const resource = parseResourceUri(url);
+    if (resource?.kind !== 'local') throw new Error('Unsupported or unsafe resource URI');
+    if (resource.mount !== writable.mount) {
+      throw new Error(writable.mount === 'workspace'
+        ? 'This workspace can write local://workspace/<path>; local://base/ is written from the project session'
+        : 'The project session can write local://base/<path>; local://workspace/ is written from that workspace’s session');
+    }
+    return this.put(this.target(resource.url).path, change);
+  }
+
+  private async put(path: string, change: ArtifactChange): Promise<InspectorView['artifacts'][number]> {
+    const { mount, spaceId } = this.writable();
+    const scope = this.scopeOf(await this.source.authority.listArtifactScopes(), spaceId);
+    const scopeKey = await deriveArtifactScopeKey(await this.key, scope.id);
+    const entries = new Map((await this.entries(scope)).map((entry) => [entry.path, entry]));
+    const conflict = [...entries.keys()].find((other) => other.startsWith(`${path}/`) || path.startsWith(`${other}/`));
+    if (conflict) throw new Error(`${path} conflicts with artifact ${conflict}`);
+    const current = entries.get(path);
+    let bytes: Uint8Array;
+    let mediaType = current?.mediaType ?? null;
+    if ('bytes' in change) {
+      bytes = change.bytes;
+      if (change.mediaType !== undefined) mediaType = change.mediaType;
+    } else {
+      if (!current) throw new Error('Artifact does not exist');
+      const original = new TextDecoder('utf-8', { fatal: true }).decode(await boundedArtifactBytes(this.env, this.userId, current.blobHash, scopeKey, current.size, 16 * 1024 * 1024));
+      bytes = new TextEncoder().encode(applyTextEdits(original, change.edits));
+    }
+    const entry = { path, blobHash: await this.seal(bytes, scopeKey), size: bytes.byteLength, mediaType };
+    entries.set(path, entry);
+    const generation = scope.generation + 1;
+    const manifestHash = await this.sealManifest(scope, generation, entries.values(), scopeKey);
+    await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation });
+    return { url: `local://${mount}/${path}`, path, hash: entry.blobHash, size: entry.size, mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
+  }
+
+  /** Staged upload objects live under the account prefix until commit or abort removes them. */
+  private uploadKey(uploadId: string, part: string): string {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(uploadId)) throw new Error('Upload does not exist');
+    return `users/${this.userId}/accounts/${Buffer.from(this.userId).toString('base64url')}/artifact-uploads/${uploadId}/${part}`;
+  }
+
+  private async uploadState(uploadId: string): Promise<ArtifactUploadState | null> {
+    const object = await this.env.DATA.get(this.uploadKey(uploadId, 'state'));
+    if (!object) return null;
+    const state = artifactUploadStateSchema.parse(await object.json());
+    if (state.spaceId !== this.source.identity.spaceId || state.generation !== (this.source.placement?.generation ?? 0)) throw new Error('This upload belongs to another workspace');
+    return state;
+  }
+
+  private async requireUpload(uploadId: string): Promise<ArtifactUploadState> {
+    const state = await this.uploadState(uploadId);
+    if (!state) throw new Error('Upload does not exist');
+    return state;
+  }
+
+  /** Reserves `uploads/<fileName>` in this session's writable scope; the file is listed only after commit. */
+  async beginUpload(fileName: string, size: number, mediaType: string | null) {
+    const name = (fileName.split(/[\\/]/u).at(-1) ?? '').replace(/[\u0000-\u001f\u007f]/gu, '').trim();
+    if (!name || name === '.' || name === '..' || name.length > 255) throw new Error('Choose a file with a valid name');
+    const uploadId = crypto.randomUUID();
+    const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation: this.source.placement?.generation ?? 0, path: `uploads/${name}`, size, mediaType, received: 0, last: null };
+    await this.env.DATA.put(this.uploadKey(uploadId, 'state'), JSON.stringify(state));
+    return { uploadId, url: `local://${this.writable().mount}/${state.path}`, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES };
+  }
+
+  /** Stores the chunk at the next offset; resending the last stored chunk is acknowledged without rewriting it. */
+  async uploadChunk(uploadId: string, offset: number, sha256: string, data: string) {
+    const state = await this.requireUpload(uploadId);
+    const bytes = credentialProtocolBase64.decode(data);
+    if ((await digest(bytes)).slice(7) !== sha256) throw new Error('Chunk hash mismatch');
+    if (state.last?.offset === offset && state.last.sha256 === sha256) return { received: state.received };
+    if (offset !== state.received) throw new Error(`Expected the chunk at offset ${state.received}`);
+    const expected = Math.min(ARTIFACT_UPLOAD_CHUNK_BYTES, state.size - offset);
+    if (expected <= 0 || bytes.byteLength !== expected) throw new Error('Chunk length does not match the upload');
+    await this.env.DATA.put(this.uploadKey(uploadId, String(offset)), bytes);
+    const received = offset + bytes.byteLength;
+    await this.env.DATA.put(this.uploadKey(uploadId, 'state'), JSON.stringify({ ...state, received, last: { offset, sha256 } }));
+    return { received };
+  }
+
+  async commitUpload(uploadId: string) {
+    const state = await this.requireUpload(uploadId);
+    if (state.received !== state.size) throw new Error(`Upload is incomplete: ${state.received} of ${state.size} bytes received`);
+    const bytes = new Uint8Array(state.size);
+    for (let offset = 0; offset < state.size; offset += ARTIFACT_UPLOAD_CHUNK_BYTES) {
+      const part = await this.env.DATA.get(this.uploadKey(uploadId, String(offset)));
+      const chunk = part ? new Uint8Array(await part.arrayBuffer()) : null;
+      if (chunk?.byteLength !== Math.min(ARTIFACT_UPLOAD_CHUNK_BYTES, state.size - offset)) throw new Error(`Upload chunk at offset ${offset} is missing`);
+      bytes.set(chunk, offset);
+    }
+    const artifact = await this.put(state.path, { bytes, mediaType: state.mediaType });
+    await this.deleteUpload(uploadId, state);
+    return artifact;
+  }
+
+  async abortUpload(uploadId: string) {
+    const state = await this.uploadState(uploadId);
+    if (state) await this.deleteUpload(uploadId, state);
+    return { aborted: state !== null };
+  }
+
+  private async deleteUpload(uploadId: string, state: ArtifactUploadState) {
+    const keys = [this.uploadKey(uploadId, 'state')];
+    for (let offset = 0; offset < state.received; offset += ARTIFACT_UPLOAD_CHUNK_BYTES) keys.push(this.uploadKey(uploadId, String(offset)));
+    await this.env.DATA.delete(keys);
   }
 
   async listShares(url: string) {

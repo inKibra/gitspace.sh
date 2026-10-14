@@ -46,6 +46,7 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import { useRepositoryTree } from './useRepositoryTree.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadInspectorContent, loadInspectorResource } from './resource-content.js';
+import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useSpaceSynchronization } from './SynchronizationProvider.js';
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
 import { RuntimeMachines } from './RuntimeMachines.js';
@@ -402,6 +403,7 @@ export function LiveInspector({
     mediaType: artifact.mediaType,
     generation: artifactValue.scopes.find((scope) => scope.workspaceId === (artifact.workspaceId ?? projectId))?.generation ?? 0,
   })) : [];
+  const artifactUpload = artifactUploadRpcClient(request, (artifact) => artifactValue?.scopes.find((scope) => scope.workspaceId === (artifact.workspaceId ?? projectId))?.generation ?? generation);
 
   return <><div className="shrink-0">
     {overviewRead.refreshing ? <p role="status" className="sr-only">Refreshing Inspector…</p> : null}
@@ -462,30 +464,9 @@ export function LiveInspector({
       },
     } : undefined}
     artifactUpload={{
-      begin: async (input) => {
-        const result = await rpcClient.inspector.artifacts.uploadBegin({ ...request, ...input });
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      },
-      chunk: async (input, signal) => {
-        const result = await rpcClient.inspector.artifacts.uploadChunk({ ...request, ...input }, { signal });
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      },
+      ...artifactUpload,
       commit: async (uploadId) => {
-        try {
-          const result = await rpcClient.inspector.artifacts.uploadCommit({ ...request, uploadId });
-          if (result.status === 'error') throw result.error;
-          const artifact = result.value;
-          return {
-            kind: 'artifact', url: artifact.url, hash: artifact.hash, label: artifact.path, mediaType: artifact.mediaType,
-            generation: artifactValue?.scopes.find((scope) => scope.workspaceId === (artifact.workspaceId ?? projectId))?.generation ?? generation,
-          };
-        } finally { await artifactCatalog.refetch(); }
-      },
-      abort: async (uploadId) => {
-        const result = await rpcClient.inspector.artifacts.uploadAbort({ ...request, uploadId });
-        if (result.status === 'error') throw result.error;
+        try { return await artifactUpload.commit(uploadId); } finally { await artifactCatalog.refetch(); }
       },
     }}
     onLoadRepositoryDiff={async (path, mode, baseRef) => {

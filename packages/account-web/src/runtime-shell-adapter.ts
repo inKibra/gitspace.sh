@@ -8,21 +8,26 @@ import { z } from 'zod';
 import { deriveWorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { AgentScopeView, ProjectAgentView, WorkspaceView } from './GitSpaceShell.js';
 
-/** Runtime ownership is cloud-owned, independently of any attached working copy. */
-export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<InspectorView, 'project' | 'workspace' | 'workspaces' | 'placement'>, relationWorkspaces: InputOf<typeof SpaceViewCodec>['workspaces'] = []): { workspace: AgentScopeView; baseSpace: ProjectAgentView; workspaces: WorkspaceView[]; relationsReady: boolean } {
+/** Runtime ownership is cloud-owned, independently of any attached working copy. Only the open space shows its live
+ * snapshot status; every other row keeps the status the project listing reported for it. */
+export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<InspectorView, 'project' | 'workspace' | 'workspaces' | 'placement'>, listing?: Pick<InputOf<typeof SpaceViewCodec>, 'baseSpace' | 'workspaces'>): { workspace: AgentScopeView; baseSpace: ProjectAgentView; workspaces: WorkspaceView[]; relationsReady: boolean } {
   const attached = snapshot.attachments.filter(item => item.state !== 'detached');
   const machine = attached.find(item => item.state === 'ready') ?? attached[0];
   const document = snapshot.documents['gitspace.workspace'];
   const phaseValue = document && typeof document === 'object' && !Array.isArray(document) ? document.phase : null;
   const phase = phaseValue === 'plan' || phaseValue === 'code' || phaseValue === 'review' || phaseValue === 'ship' ? phaseValue : inspection.workspace.phase ?? 'plan';
   const status = deriveWorkspaceStatusSummary({ agents: snapshot.conversations.map(item => ({ state: item.status === 'running' ? 'running' : item.status === 'waiting' ? 'permission-needed' : 'waiting', ...(item.status === 'failed' ? { failure: { code: 'RUNTIME_FAILED', message: 'Conversation failed' } } : {}) })) });
+  // A row the listing has not reported yet shows no activity rather than the open space's.
+  const unreported = deriveWorkspaceStatusSummary({ agents: [] });
+  const relationWorkspaces = listing?.workspaces ?? [];
   // The workspace lives in the cloud whatever machines are attached; a machine only routes tools (`possessedBy`).
-  const common = { projectId: inspection.project.id, projectName: inspection.project.name, generation: inspection.placement?.generation ?? 0, possessedBy: machine?.machineId ?? '', holder: { kind: 'cloud' as const }, status };
-  const baseSpace: ProjectAgentView = { ...common, kind: 'project', id: inspection.project.id, name: inspection.project.name, branch: inspection.project.baseBranch, phase: null, closedAt: inspection.project.archivedAt ? new Date(inspection.project.archivedAt) : null };
+  const common = { projectId: inspection.project.id, projectName: inspection.project.name, generation: inspection.placement?.generation ?? 0, possessedBy: machine?.machineId ?? '', holder: { kind: 'cloud' as const } };
+  const baseSpace: ProjectAgentView = { ...common, kind: 'project', id: inspection.project.id, name: inspection.project.name, branch: inspection.project.baseBranch, phase: null, closedAt: inspection.project.archivedAt ? new Date(inspection.project.archivedAt) : null, status: inspection.workspace.kind === 'base' ? status : listing?.baseSpace.status ?? unreported };
   const definitions = inspection.workspaces.some(item => item.id === inspection.workspace.id) ? inspection.workspaces : [...inspection.workspaces, inspection.workspace];
   const workspaces: WorkspaceView[] = definitions.filter(item => item.kind === 'worktree').map(item => {
     const saved = relationWorkspaces.find(workspace => workspace.id === item.id);
-    return { ...common, kind: 'workspace', id: item.id, name: item.name, branch: item.branch, phase: item.id === snapshot.workspaceId ? phase : item.phase ?? 'plan', closedAt: item.archivedAt ? new Date(item.archivedAt) : null, relations: saved?.relations ?? { dependsOn: [], relatedTo: [], stackedOn: null }, stack: saved?.stack ?? { blockedBy: [], blocking: [], findings: [] } };
+    const open = item.id === snapshot.workspaceId;
+    return { ...common, kind: 'workspace', id: item.id, name: item.name, branch: item.branch, phase: open ? phase : item.phase ?? 'plan', status: open ? status : saved?.status ?? unreported, closedAt: item.archivedAt ? new Date(item.archivedAt) : null, relations: saved?.relations ?? { dependsOn: [], relatedTo: [], stackedOn: null }, stack: saved?.stack ?? { blockedBy: [], blocking: [], findings: [] } };
   });
   const relationsReady = workspaces.every(workspace => relationWorkspaces.some(saved => saved.id === workspace.id));
   return { baseSpace, workspaces, relationsReady, workspace: inspection.workspace.kind === 'base' ? baseSpace : workspaces.find(item => item.id === inspection.workspace.id)! };

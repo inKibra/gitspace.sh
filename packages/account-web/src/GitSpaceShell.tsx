@@ -32,6 +32,7 @@ import { Archive, GitBranch01, LayoutRight, RefreshCcw01, Terminal, XClose } fro
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject, type SidebarSpaceSummary } from './AppSidebar.js';
 import { Composer, type SendBehavior } from './Composer.js';
+import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
 import { useInference } from './InferenceContext.js';
 import { AccountDirectoryContext } from './useAccountDirectory.js';
 import type { AppView } from './routes.js';
@@ -151,6 +152,8 @@ export interface GitSpaceShellProps {
   machines?: Array<{ id: string; label: string }>;
   onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>) => void | Promise<void>;
   draft?: WorkspaceDraftBinding;
+  /** Present when composer attachments may be uploaded into the session's `uploads/` artifact folder. */
+  artifactUpload?: ArtifactUploadClient;
   sessionControls?: SessionControlsProps;
   approvalCard?: ReactNode;
   controlsError?: string;
@@ -301,7 +304,7 @@ export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, pending, error, providers, skills, banner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, pending, error, providers, skills, banner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
@@ -315,6 +318,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
   transport: TransportBlock[];
   onSend?: GitSpaceShellProps['onSend'];
   draft?: WorkspaceDraftBinding;
+  artifactUpload?: ArtifactUploadClient;
   pending: boolean;
   error?: string;
   providers?: readonly ProviderAuthView[];
@@ -443,7 +447,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
               {!workspace.closedAt ? <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || !onRetryAgent} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? 'Retrying agent…' : 'Retry agent'}</Button> : null}
               {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
             </div>
-          : <Composer workspace={workspace} draft={draft} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
+          : <Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
       </div>
     </div>
   </div>;
@@ -575,7 +579,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -673,7 +677,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content">
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} approvalCard={approvalCard} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} approvalCard={approvalCard} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}

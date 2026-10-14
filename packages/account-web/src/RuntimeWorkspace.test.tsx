@@ -34,6 +34,7 @@ const inspection: InspectorView = {
   savedTranscript: { status: 'none', reason: null },
 };
 const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 0, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
+const listedBase = { id: project.id, status: { primaryColor: 'dim', agents: { green: 0, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } } };
 const refreshInspection = vi.fn();
 let root: Root;
 let container: HTMLDivElement;
@@ -45,7 +46,7 @@ beforeEach(() => {
   snapshot.conversations = [];
   snapshot.attachments = [];
   inspectEnvironment.mockReset();
-  mocks.saved = { workspaces: [{ id: workspace.id, relations: { dependsOn: ['parent'], relatedTo: [], stackedOn: 'parent' }, stack: { blockedBy: ['parent'], blocking: [], findings: [] } }] };
+  mocks.saved = { baseSpace: listedBase, workspaces: [{ id: workspace.id, relations: { dependsOn: ['parent'], relatedTo: [], stackedOn: 'parent' }, stack: { blockedBy: ['parent'], blocking: [], findings: [] } }] };
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => { await act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
@@ -54,7 +55,7 @@ it('edits the real saved relation graph and refreshes it after accepted writes',
   expect(container.textContent).toContain('parent');
   const relations = { dependsOn: [], relatedTo: ['parent'], stackedOn: null };
   mocks.setRelations.mockImplementation(async () => {
-    mocks.saved = { workspaces: [{ id: workspace.id, relations, stack: { blockedBy: [], blocking: [], findings: [] } }] };
+    mocks.saved = { baseSpace: listedBase, workspaces: [{ id: workspace.id, relations, stack: { blockedBy: [], blocking: [], findings: [] } }] };
     return { status: 'ok', value: {} };
   });
   await act(async () => { await (mocks.shell as GitSpaceShellProps).onSetWorkspaceRelations!(workspace.id, relations); });

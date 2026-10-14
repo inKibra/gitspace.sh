@@ -1,6 +1,21 @@
 export type PatchChange = { path: string; destination?: string; before: string | null; after: string | null };
 export type PatchFiles = { read(path: string): Promise<string>; exists(path: string): Promise<boolean> };
 
+/** The `edit` tool's semantics: each oldText occurs exactly once in the original; replacements must not overlap. */
+export function applyTextEdits(original: string, edits: readonly { oldText: string; newText: string }[]): string {
+  const replacements = edits.map(edit => {
+    const index = original.indexOf(edit.oldText);
+    if (index < 0 || original.indexOf(edit.oldText, index + 1) >= 0) throw new Error('Edit text must match exactly once');
+    return { ...edit, index };
+  }).sort((a, b) => a.index - b.index);
+  let end = 0, output = '';
+  for (const edit of replacements) {
+    if (edit.index < end) throw new Error('Edit ranges overlap');
+    output += original.slice(end, edit.index) + edit.newText; end = edit.index + edit.oldText.length;
+  }
+  return output + original.slice(end);
+}
+
 /** Parse and validate every operation before modifying any file. Context is exact and unambiguous. */
 export async function prepareV4APatch(patch: string, files: PatchFiles): Promise<PatchChange[]> {
   const lines = patch.replaceAll('\r\n', '\n').split('\n');

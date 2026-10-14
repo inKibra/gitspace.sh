@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes, signDeviceInvite, type ArtifactManifest } from '@gitspace/protocol';
-import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
+import { ARTIFACT_UPLOAD_CHUNK_BYTES, gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { createBrowserClient } from 'result-rpc/client';
@@ -331,4 +331,35 @@ describe('user artifact flows', () => {
       finally { reader.releaseLock(); }
     })()).rejects.toThrow();
   }, 30_000);
+
+  it('uploads binary files in verified sequential chunks and commits them as workspace artifacts', async () => {
+    const { client, workspaceId } = await fixture();
+    const request = { spaceId: workspaceId, expectedGeneration: 0 };
+    const bytes = Uint8Array.from({ length: ARTIFACT_UPLOAD_CHUNK_BYTES + 1_000 }, (_, index) => index % 251);
+    const chunk = (offset: number) => {
+      const part = bytes.subarray(offset, offset + ARTIFACT_UPLOAD_CHUNK_BYTES);
+      return { offset, sha256: createHash('sha256').update(part).digest('hex'), data: Buffer.from(part).toString('base64') };
+    };
+    const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'capture (1).bin', size: bytes.length, mediaType: 'application/octet-stream' });
+    if (begun.status === 'error') throw begun.error;
+    expect(begun.value).toMatchObject({ url: 'local://workspace/uploads/capture (1).bin', chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES });
+    const upload = { ...request, uploadId: begun.value.uploadId };
+
+    expect(await client.inspector.artifacts.uploadChunk({ ...upload, ...chunk(ARTIFACT_UPLOAD_CHUNK_BYTES) })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
+    expect(await client.inspector.artifacts.uploadChunk({ ...upload, ...chunk(0) })).toMatchObject({ status: 'ok', value: { received: ARTIFACT_UPLOAD_CHUNK_BYTES } });
+    // A lost acknowledgement is retried at the same offset without advancing the upload.
+    expect(await client.inspector.artifacts.uploadChunk({ ...upload, ...chunk(0) })).toMatchObject({ status: 'ok', value: { received: ARTIFACT_UPLOAD_CHUNK_BYTES } });
+    expect(await client.inspector.artifacts.uploadChunk({ ...upload, ...chunk(ARTIFACT_UPLOAD_CHUNK_BYTES), sha256: '0'.repeat(64) })).toMatchObject({ status: 'error' });
+    expect(await client.inspector.artifacts.uploadCommit(upload)).toMatchObject({ status: 'error' });
+    expect(await client.inspector.artifacts.uploadChunk({ ...upload, ...chunk(ARTIFACT_UPLOAD_CHUNK_BYTES) })).toMatchObject({ status: 'ok', value: { received: bytes.length } });
+
+    const committed = await client.inspector.artifacts.uploadCommit(upload);
+    if (committed.status === 'error') throw committed.error;
+    expect(committed.value).toMatchObject({ url: 'local://workspace/uploads/capture (1).bin', path: 'uploads/capture (1).bin', size: bytes.length, mediaType: 'application/octet-stream', scope: 'workspace', workspaceId });
+    const stored = await readBytes(client.inspector.artifacts.read({ ...request, url: 'local://workspace/uploads/capture%20(1).bin', hash: committed.value.hash }));
+    expect(stored).toEqual(Buffer.from(bytes));
+    expect(await client.inspector.artifacts.uploadAbort(upload)).toMatchObject({ status: 'ok', value: { aborted: false } });
+
+    await expect(client.inspector.artifacts.uploadBegin({ ...request, fileName: 'huge.bin', size: 17 * 1024 * 1024, mediaType: null })).rejects.toThrow('less than or equal to 16777216');
+  });
 });

@@ -10,8 +10,6 @@ import { pinnedRipgrep } from '../../deployment/src/native-build.js';
 import { machineToolEnvironment } from '../../deployment/src/native-runtime.js';
 import { searchSnapshotFiles, type SearchArguments } from '../../protocol-runtime/src/search.js';
 
-const unused = async (): Promise<never> => { throw new Error('Unexpected search dependency'); };
-
 test('search advertised file filters change real search results and find rejects unsupported glob', async () => {
   const rootPath = await mkdtemp(join(tmpdir(), 'runtime-search-contract-'));
   const previousRipgrep = process.env.GITSPACE_RIPGREP_PATH;
@@ -27,7 +25,7 @@ test('search advertised file filters change real search results and find rejects
       resolve({ exitCode: error?.code === 1 ? 1 : 0, output: stdout || stderr });
     });
     return promise;
-  }, artifacts: () => ({ read: unused, write: unused }) };
+  } };
   const search = async (tool: 'find' | 'grep', args: SearchArguments, snapshot?: RuntimeGitCheckpoint) => {
     const dispatch = RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, requestId: 'request', attemptId: 'attempt', tool, args, snapshot, deadlineAt: new Date(Date.now() + 60000).toISOString(), replay: 'safe' });
     const content = await executeMachineTool(dispatch, local, new AbortController().signal, options);
