@@ -1,6 +1,7 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { z } from 'zod';
+import { createServerClock, sendSigned } from './server-clock.js';
 
 /**
  * Device grants: the single authority model for every caller of a GitSpace
@@ -416,17 +417,23 @@ export function inputWithinScope(scope: DeviceScope, input: unknown, workspacePr
   return visit(input) && targetFound;
 }
 
-/** Signs device requests; account RPCs also require the account identity used for grant lookup. */
+/**
+ * Signs device requests; account RPCs also require the account identity used for grant lookup.
+ * Each fetch keeps one server clock so its timestamps track the account.
+ */
 export function createSignedRpcFetch(options: { deviceId: string; userId?: string; signingPrivateKey: Uint8Array; fetch?: typeof globalThis.fetch }): typeof globalThis.fetch {
   const baseFetch = options.fetch ?? globalThis.fetch;
+  const clock = createServerClock();
   const signedFetch = async (input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]): Promise<Response> => {
     const original = new Request(input, init);
     const body = new Uint8Array(await original.arrayBuffer());
     const url = new URL(original.url);
-    const headers = new Headers(original.headers);
-    headers.set(RPC_DEVICE_HEADER, signRpcRequest({ deviceId: options.deviceId, method: original.method, path: `${url.pathname}${url.search}`, body, signingPrivateKey: options.signingPrivateKey }));
-    if (options.userId) headers.set('x-gitspace-user', options.userId);
-    return baseFetch(new Request(original.url, { method: original.method, headers, body: body.length > 0 ? body : null, signal: original.signal }));
+    return sendSigned(clock, (timestamp) => {
+      const headers = new Headers(original.headers);
+      headers.set(RPC_DEVICE_HEADER, signRpcRequest({ deviceId: options.deviceId, method: original.method, path: `${url.pathname}${url.search}`, body, signingPrivateKey: options.signingPrivateKey, timestamp }));
+      if (options.userId) headers.set('x-gitspace-user', options.userId);
+      return baseFetch(new Request(original.url, { method: original.method, headers, body: body.length > 0 ? body : null, signal: original.signal }));
+    });
   };
   // Bun's fetch type carries `preconnect`; the wrapper is only ever called.
   return signedFetch as typeof globalThis.fetch;

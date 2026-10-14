@@ -123,7 +123,7 @@ describe('tenant MCP authority boundary', () => {
     expect((await worker.fetch(value.request(rotated.value.token), env)).status).toBe(200);
     expect((await value.management('disable', { expectedRevision: 2 })).status).toBe(200);
     expect((await worker.fetch(value.request(rotated.value.token), env)).status).toBe(401);
-    expect(await value.vault.currentDeviceGrant(value.deviceId)).toBeNull();
+    expect((await value.vault.listDeviceGrants()).find(record => record.binding.deviceId === value.deviceId)?.revokedAt).toEqual(expect.any(Number));
     expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 3, enabled: false, active: false } });
   });
 

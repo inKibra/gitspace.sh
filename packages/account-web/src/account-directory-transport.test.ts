@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { decodeSignedRpcHeader, deviceProtocolBase64, rpcSignaturePayload } from '@gitspace/protocol/device-grant';
+import { DEVICE_SOCKET_PROTOCOL } from '@gitspace/protocol/socket-auth';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import { createAccountDirectorySource } from './account-directory-transport.js';
 import type { BrowserDevice } from './device.js';
@@ -13,7 +14,7 @@ const device: BrowserDevice = {
 const value: AccountDirectorySnapshot = { projects: [], workspaces: [], placements: [], machines: [], projectRevisions: {} };
 class Socket extends EventTarget {
   readyState = 0;
-  constructor(readonly url: string) { super(); }
+  constructor(readonly url: string, readonly protocols: string[]) { super(); }
   close = vi.fn(() => { this.readyState = 3; });
   open() { this.readyState = 1; this.dispatchEvent(new Event('open')); }
   message(data: unknown) { this.dispatchEvent(Object.assign(new Event('message'), { data })); }
@@ -25,7 +26,7 @@ function fixture() {
   const sockets: Socket[] = [];
   const source = createAccountDirectorySource({
     currentDevice: async () => current, onRejected: rejected, origin: () => 'https://account.test',
-    openSocket: (url) => { const socket = new Socket(url); sockets.push(socket); return socket as unknown as WebSocket; },
+    openSocket: (url, protocols) => { const socket = new Socket(url, protocols); sockets.push(socket); return socket as unknown as WebSocket; },
   });
   return { source, sockets, rejected, replace: (replacement: BrowserDevice) => { current = replacement; }, current: () => current };
 }
@@ -49,9 +50,12 @@ it('signs the resume cursor and accepts only validated directory frames', async 
   const socket = scene.sockets[0]!;
   const url = new URL(socket.url);
   expect(url.protocol).toBe('wss:');
-  const auth = decodeSignedRpcHeader(url.searchParams.get('auth')!);
+  // The proof is never part of the URL; it rides as the one offered subprotocol.
+  expect([...url.searchParams.keys()]).toEqual(['after']);
+  expect(socket.protocols).toHaveLength(1);
+  expect(socket.protocols[0]!.startsWith(DEVICE_SOCKET_PROTOCOL)).toBe(true);
+  const auth = decodeSignedRpcHeader(socket.protocols[0]!.slice(DEVICE_SOCKET_PROTOCOL.length));
   expect(auth).not.toBeNull();
-  url.searchParams.delete('auth');
   const payload = rpcSignaturePayload({ ...auth!, method: 'GET', path: `${url.pathname}${url.search}` });
   expect(await crypto.subtle.verify('Ed25519', keyPair.publicKey, Uint8Array.from(deviceProtocolBase64.decode(auth!.signature)).buffer, Uint8Array.from(payload).buffer)).toBe(true);
   expect(url.searchParams.get('after')).toBe('37');

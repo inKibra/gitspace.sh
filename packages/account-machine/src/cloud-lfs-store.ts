@@ -1,13 +1,14 @@
-import { createSignedControlRequest, deriveArtifactScopeKey } from '@gitspace/protocol';
+import { createSignedControlRequest, deriveArtifactScopeKey, sendSigned } from '@gitspace/protocol';
 import { collectBytes, streamBytes, GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot, type GitLfsObject, type GitLfsOriginConfirmation, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { EncryptedCheckpointBlobStore, type CheckpointBlobStore } from './checkpoint-blobs.js';
+import { cloudControlOptions, type SignedCloudRequestOptions } from './cloud-space-authority.js';
 import { z } from 'zod';
 
 export type CloudGitLfsStoreOptions = {
   projectId: string;
   blobs: CheckpointBlobStore;
   encryptionKey: Uint8Array;
-  controlOptions: { baseUrl: string; userId: string; machineId: string; signingPrivateKey: Uint8Array; fetcher?: typeof fetch };
+  controlOptions: SignedCloudRequestOptions;
 };
 /** Restores read verified objects; they hold no publication and so can neither pin nor upload. */
 export type CloudGitLfsReader = Pick<GitLfsStore, 'has' | 'get'> & {
@@ -21,9 +22,12 @@ async function cloudGitLfs(options: CloudGitLfsStoreOptions) {
   const root = `lfs/${projectStorageRoot(options.projectId)}/objects`;
   const encrypted = new EncryptedCheckpointBlobStore(options.blobs, await deriveArtifactScopeKey(options.encryptionKey, `lfs:${options.projectId}`));
   const objectKey = (object: GitLfsObject) => `${root}/${GitLfsObjectSchema.parse(object).oid}`;
+  const controlOptions = cloudControlOptions(options.controlOptions);
   const control = async <S extends z.ZodType>(operation: Extract<Parameters<typeof createSignedControlRequest>[0]['operation'], `lfs.${string}`>, payload: Record<string, unknown>, schema: S): Promise<z.output<S>> => {
-    const request = createSignedControlRequest({ ...options.controlOptions, operation, payload: { projectId: options.projectId, ...payload } });
-    const response = await (options.controlOptions.fetcher ?? fetch)(new URL('/v1/control', options.controlOptions.baseUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
+    const response = await sendSigned(controlOptions.clock, (timestamp) => {
+      const request = createSignedControlRequest({ ...controlOptions, operation, payload: { projectId: options.projectId, ...payload }, timestamp });
+      return (controlOptions.fetcher ?? fetch)(new URL('/v1/control', controlOptions.baseUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
+    });
     if (!response.ok) {
       await response.body?.cancel();
       throw new Error(`LFS publication ${operation} failed with ${response.status}`);

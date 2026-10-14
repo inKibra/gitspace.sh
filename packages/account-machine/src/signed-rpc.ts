@@ -6,6 +6,8 @@ import {
   requiredCapability,
   requiresImageSelectionControl,
   RPC_DEVICE_HEADER,
+  SIGNED_REQUEST_EXPIRED_CODE,
+  SIGNED_REQUEST_EXPIRED_MESSAGE,
   SIGNED_REQUEST_MAX_AGE_MS,
   verifyRpcSignature,
   type GitSpaceRpcCaller,
@@ -70,7 +72,6 @@ export function createSignedRpcHandler(options: SignedRpcHandlerOptions) {
     const header = decodeSignedRpcHeader(encodedHeader);
     if (!header) return transportError(401, 'RPC_DEVICE_INVALID', 'Device signature header is malformed');
     const now = Date.now();
-    if (Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return transportError(401, 'RPC_SIGNATURE_EXPIRED', 'Device signature timestamp is out of range');
     const device = await options.lookupDevice(header.deviceId);
     if (!device) return transportError(401, 'RPC_DEVICE_UNKNOWN', 'Device is not enrolled or has been revoked');
     const body = new Uint8Array(await request.arrayBuffer());
@@ -82,6 +83,8 @@ export function createSignedRpcHandler(options: SignedRpcHandlerOptions) {
     if (!verifyRpcSignature(header, { method: request.method, path: signedPath, body }, device.signingPublicKey)) {
       return transportError(401, 'RPC_SIGNATURE_INVALID', 'Device signature does not match the request');
     }
+    // Checked after the signature, so the code tells only the key holder to correct its clock and re-sign.
+    if (Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return transportError(401, SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE);
     if (now - lastSweep > SIGNED_REQUEST_MAX_AGE_MS) {
       lastSweep = now;
       for (const [nonce, seenAt] of Object.entries(nonces)) if (now - seenAt > SIGNED_REQUEST_MAX_AGE_MS) delete nonces[nonce];

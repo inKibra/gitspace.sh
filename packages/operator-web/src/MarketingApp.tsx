@@ -1,5 +1,5 @@
 import { Badge, Button, Card, CardContent } from '@gitspace/ui';
-import { createRelayAuthorization, encodeDeviceInviteToken, signDeviceInvite } from '@gitspace/protocol';
+import { createRelayAuthorization, createServerClock, encodeDeviceInviteToken, sendSigned, signDeviceInvite } from '@gitspace/protocol';
 import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -9,6 +9,8 @@ import { MarketingFooter, MarketingNav } from './MarketingChrome.js';
 import { AskSection, CapabilityMatrix, ChainSection, OmpSection, PricingSection, SelfModificationSection, WorkspaceProductsSection } from './MarketingTour.js';
 
 const installCommand = 'curl -fsSL https://gitspace.sh/install | sh';
+/** Root proofs carry a timestamp the platform checks against its own clock. */
+const platformClock = createServerClock();
 
 export function MarketingApp() {
   const [handle, setHandle] = useState('');
@@ -97,15 +99,15 @@ export function MarketingApp() {
       const rootPublicKey = credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey));
       const requestAccount = async (path: string, payload: Record<string, string>, baseUrl = window.location.origin) => {
         if (rootKeyRef.current !== rootPrivateKey) throw new Error('Resume with your saved recovery key to open this account.');
-        const response = await fetch(new URL(path, baseUrl), {
+        const response = await sendSigned(platformClock, timestamp => fetch(new URL(path, baseUrl), {
           method: 'POST',
           cache: 'no-store',
           headers: {
-            authorization: createRelayAuthorization(rootPrivateKey, path),
+            authorization: createRelayAuthorization(rootPrivateKey, path, timestamp),
             'content-type': 'application/json',
           },
           body: JSON.stringify(payload),
-        });
+        }));
         const body = await response.json() as { status: 'ok'; value: { userId: string; accountUrl: string; apiUrl: string } } | { status: 'error'; error: { code: string; message: string } };
         return { response, body };
       };

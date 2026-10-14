@@ -1,6 +1,7 @@
 import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
 import { consumeDurableStream } from './durable-stream.js';
 import { activeAccount } from './account-access.js';
+import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import type { LifecycleState } from '@gitspace/protocol-environment';
 import type { CloudImageState } from '@gitspace/protocol/cloud-image';
@@ -97,25 +98,25 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     const now = Date.now();
     return records.map((record) => ({ record, verified: verifyDeviceGrantRecord(record, rootKey, now, (id) => byId[id] ?? null) }));
   };
-  const requireAdministration = async (capability: 'account.admin' | 'lifecycle.control' = 'account.admin') => {
-    const device = await vault.currentDeviceGrant(deviceId);
-    if (!deviceCanAdminister(device, capability)) throw new Error(`Account scope, rpc.write and ${capability} authorization are required`);
-    return device!;
-  };
+  /** The current grant from the isolate's registry; a revocation reaches it within one refresh. */
   const currentDevice = async () => {
-    const device = await vault.currentDeviceGrant(deviceId);
+    const view = await deviceAuthority(env).current();
+    if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
+    const device = view.device(deviceId, Date.now());
     if (!device) throw new Error('Device authority has expired or been revoked');
+    return device;
+  };
+  const requireAdministration = async (capability: 'account.admin' | 'lifecycle.control' = 'account.admin') => {
+    const device = await currentDevice();
+    if (!deviceCanAdminister(device, capability)) throw new Error(`Account scope, rpc.write and ${capability} authorization are required`);
     return device;
   };
   // Every delivery consumes the same bounded tenant authority as request admission.
   const requireSubscription = async () => {
     const account = await activeAccount(env, userId);
     if (account.status === 'error') throw new Error(account.error.message);
-    const devices = await deviceRecords();
-    const device = devices.find(({ record }) => record.binding.deviceId === deviceId)?.verified;
-    if (!device || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.read')) {
-      throw new Error('Device subscription authorization ended');
-    }
+    const device = await currentDevice();
+    if (device.scope.kind !== 'user' || !device.capabilities.includes('rpc.read')) throw new Error('Device subscription authorization ended');
   };
   const fleet = async () => reconcileFleetMachines(env, userId, catalog);
   const composioSetup = async () => {
@@ -558,14 +559,17 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
     if (requiresImageSelectionControl(item.path, item.input) && !capabilities.includes('deployment.control')) capabilities.push('deployment.control');
   }
   const url = new URL(request.url);
-  const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId);
-  const proof = { header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body, capabilities };
-  const authorized = items.every(item => item.path.startsWith('runtime.'))
-    ? await vault.authorizeWorkspaceRuntimeRequest(proof)
-    : await vault.authorizeAccountDeviceRequest(proof);
-  if (authorized.status === 'error') return reject(authorized.error.code === 'REQUEST_REPLAY' ? 409 : authorized.error.code === 'RPC_FORBIDDEN' ? 403 : 401, authorized.error.code, authorized.error.message);
+  // Runtime routing performs canonical project/workspace scope checks after this signature admission.
+  const accountScope = !items.every(item => item.path.startsWith('runtime.'));
+  const authorized = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({
+    header: request.headers.get(RPC_DEVICE_HEADER), method: 'POST', target: `${url.pathname}${url.search}`, body, capabilities, accountScope,
+  }, now));
+  if (authorized.status === 'error') {
+    const { code, message: text } = authorized.error;
+    return reject(code === 'RPC_FORBIDDEN' ? 403 : code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : 401, code, text);
+  }
   const handler = createFetchHandler({
-    router: accountRouter(env, userId, authorized.value.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: CONTRACT_VERSION, createContext: () => ({}),
+    router: accountRouter(env, userId, authorized.value.device.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: CONTRACT_VERSION, createContext: () => ({}),
     // Incident IDs shown to users must lead somewhere: log the cause server-side, never in the response.
     onInternalError: ({ incidentId, phase, cause, procedurePath }) => {
       console.error(JSON.stringify({ event: 'rpc_internal_error', incidentId, phase, procedurePath, message: cause instanceof Error ? cause.message : String(cause), stack: cause instanceof Error ? cause.stack : undefined }));

@@ -1,6 +1,7 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { Result, TaggedError, type Result as ResultType } from 'better-result';
 import { z } from 'zod';
+import { SIGNED_REQUEST_EXPIRED_MESSAGE } from './server-clock.js';
 
 export const RELAY_PROTOCOL_VERSION = 1 as const;
 // Echo uses the existing v1 opaque frame route, including on older relays.
@@ -101,6 +102,8 @@ export class InvalidRelayMessage extends TaggedError('InvalidRelayMessage')<{
 
 export class InvalidRelayAuthorization extends TaggedError('InvalidRelayAuthorization')<{
   message: string;
+  /** Validly signed, but outside the clock window: the signer may correct its clock and re-sign. */
+  expired: boolean;
 }> {}
 
 export function parseRelaySocketMessage(input: string): ResultType<RelaySocketMessage, InvalidRelayMessage> {
@@ -184,23 +187,24 @@ export function verifyRelayAuthorization(input: {
   maxSkewMs: number;
 }): ResultType<{ timestamp: number; nonce: string }, InvalidRelayAuthorization> {
   const match = /^GitSpace (\d+)\.([0-9a-f-]{36})\.([A-Za-z0-9_-]+)$/u.exec(input.header ?? '');
-  if (!match) return Result.err(new InvalidRelayAuthorization({ message: 'Missing or malformed relay authorization' }));
+  if (!match) return Result.err(new InvalidRelayAuthorization({ message: 'Missing or malformed relay authorization', expired: false }));
   const timestamp = Number(match[1]);
   const nonce = match[2]!;
-  const now = input.now ?? Date.now();
-  if (!Number.isSafeInteger(timestamp) || Math.abs(now - timestamp) > input.maxSkewMs) {
-    return Result.err(new InvalidRelayAuthorization({ message: 'Relay authorization expired' }));
-  }
+  if (!Number.isSafeInteger(timestamp)) return Result.err(new InvalidRelayAuthorization({ message: 'Missing or malformed relay authorization', expired: false }));
+  let verified: boolean;
   try {
-    const verified = ed25519.verify(
+    verified = ed25519.verify(
       base64ToBytes(match[3]!, true),
       authorizationPayload(timestamp, nonce, input.target),
       base64ToBytes(input.signingPublicKey, false),
     );
-    return verified
-      ? Result.ok({ timestamp, nonce })
-      : Result.err(new InvalidRelayAuthorization({ message: 'Relay authorization signature is invalid' }));
   } catch {
-    return Result.err(new InvalidRelayAuthorization({ message: 'Relay authorization key or signature is invalid' }));
+    return Result.err(new InvalidRelayAuthorization({ message: 'Relay authorization key or signature is invalid', expired: false }));
   }
+  if (!verified) return Result.err(new InvalidRelayAuthorization({ message: 'Relay authorization signature is invalid', expired: false }));
+  // Checked after the signature so only the holder of the key learns its clock is off.
+  if (Math.abs((input.now ?? Date.now()) - timestamp) > input.maxSkewMs) {
+    return Result.err(new InvalidRelayAuthorization({ message: SIGNED_REQUEST_EXPIRED_MESSAGE, expired: true }));
+  }
+  return Result.ok({ timestamp, nonce });
 }

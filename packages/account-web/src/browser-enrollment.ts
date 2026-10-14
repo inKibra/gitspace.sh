@@ -1,7 +1,8 @@
 import { createRelayAuthorization, type DeviceView } from '@gitspace/protocol';
 import { decodeDeviceInviteToken, deviceInvitePayload, deviceProtocolBase64, encodeDeviceInviteToken, signDeviceInvite, type DeviceCapability, type DeviceInvite, type SignedDeviceInvite } from '@gitspace/protocol/device-grant';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { createDeviceSignedFetch, DeviceEnrollmentError, enrollDevice, type BrowserDevice } from './device.js';
+import { accountClock, createDeviceSignedFetch, DeviceEnrollmentError, enrollDevice, type BrowserDevice } from './device.js';
+import { sendSigned } from '@gitspace/protocol/server-clock';
 import { currentDevice, deviceRejected } from './device-session.js';
 
 const INVITATION_TTL_MS = 5 * 60_000;
@@ -122,10 +123,11 @@ export async function recoverAccountBrowser(handleInput: string, recoveryInput: 
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(publicBytes)));
     const userId = `u-${Array.from(digest.subarray(0, 16), byte => byte.toString(16).padStart(2, '0')).join('')}`;
     const path = '/v1/accounts/recover';
-    const response = await fetch(new URL(path, pageUrl), {
-      method: 'POST', cache: 'no-store', redirect: 'error', headers: { authorization: createRelayAuthorization(rootPrivateKey, path), 'content-type': 'application/json' },
+    const rootKey = rootPrivateKey;
+    const response = await sendSigned(accountClock, timestamp => fetch(new URL(path, pageUrl), {
+      method: 'POST', cache: 'no-store', redirect: 'error', headers: { authorization: createRelayAuthorization(rootKey, path, timestamp), 'content-type': 'application/json' },
       body: JSON.stringify({ handle, rootPublicKey }),
-    });
+    }));
     const result = await response.json() as { status: 'ok'; value: { userId: string; handle: string; accountUrl: string; apiUrl: string } } | { status: 'error'; error: { code: string; message: string } };
     if (result.status === 'error') throw new DeviceEnrollmentError(result.error.code, result.error.message);
     if (!response.ok) throw new DeviceEnrollmentError('RECOVERY_FAILED', `Account recovery failed (HTTP ${response.status}).`);

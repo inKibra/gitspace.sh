@@ -1,5 +1,6 @@
 import { credentialProtocolBase64, SIGNED_REQUEST_MAX_AGE_MS } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
+import { SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE } from '@gitspace/protocol/server-clock';
 import { tenantIdSchema } from '@gitspace/protocol/deployment';
 import { AccountRegistryDO, type OperatorAccountRecord } from './account-registry.js';
 import { InviteRegistryDO } from './invite-registry.js';
@@ -212,7 +213,7 @@ const operatorWorker = {
       const userId = await accountIdForRootPublicKey(payload.rootPublicKey);
       if (!userId) return Response.json(publicError('INVALID_ROOT', 'Root key is invalid'), { status: 400 });
       const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: payload.rootPublicKey, target: url.pathname + url.search, maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS });
-      if (verified.status === 'error') return Response.json(verified, { status: 401 });
+      if (verified.status === 'error') return Response.json(verified.error.expired ? publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE) : verified, { status: 401 });
       const invites = inviteRegistry(env);
       const reserved = await invites.reserve({ token: payload.invite.trim(), userId, handle });
       if (reserved.status === 'invalid') return Response.json(publicError('INVITE_INVALID', 'Invitation is unavailable'), { status: 403 });
@@ -239,6 +240,7 @@ const operatorWorker = {
     if (typeof body.rootPublicKey !== 'string' || typeof body.handle !== 'string') return Response.json(publicError('INVALID_RECOVERY', 'Root key and handle are required'), { status: 400 });
     const userId = await accountIdForRootPublicKey(body.rootPublicKey);
     const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: body.rootPublicKey, target: url.pathname + url.search, maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS });
+    if (userId && verified.status === 'error' && verified.error.expired) return Response.json(publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE), { status: 401 });
     if (!userId || verified.status === 'error') return Response.json(publicError('ROOT_UNAUTHORIZED', 'Recovery signature is invalid'), { status: 401 });
     const account = await accountRegistry(env).get(userId);
     if (!account || account.handle !== body.handle || account.status !== 'active') return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is unavailable'), { status: 403 });

@@ -46,6 +46,8 @@ export async function decryptArtifactBytes(sealed: Uint8Array, key: Uint8Array):
   return new Uint8Array(plaintext);
 }
 
+export * from './server-clock.js';
+export * from './socket-auth.js';
 export * from './credential-vault.js';
 export * from './device-grant.js';
 export * from './machine-pairing.js';

@@ -16,12 +16,13 @@ import { installDefaultGitSpaceSkills } from './default-skills.js';
 import { WorkspaceServiceManager } from './workspace-services.js';
 import { createServiceAccessClient } from './service-forward.js';
 import { WorkspaceEnvironmentManager } from './workspace-environment.js';
-import { credentialProtocolBase64 } from '@gitspace/protocol';
+import { createServerClock, credentialProtocolBase64 } from '@gitspace/protocol';
 import { appendFileSync, existsSync } from 'node:fs';
 import { DeviceRegistry } from './device-registry.js';
 import { createSignedRpcHandler } from './signed-rpc.js';
 import { DeploymentLauncher } from './deployment-launcher.js';
 import { atomicJson } from './machine-update.js';
+import { ReleaseFollower } from './release-follower.js';
 import { createCloudGitLfsPublisher, createCloudGitLfsStore } from './cloud-lfs-store.js';
 import type { MachineGitLfsAccess } from './git-lfs.js';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
@@ -70,6 +71,8 @@ export async function startMachineRuntime() {
     userId: requiredEnvironment('GITSPACE_USER_ID'),
     machineId,
     signingPrivateKey: signingKey(),
+    // One account clock for every signer in this process, including the settings socket that cannot see its rejection.
+    clock: createServerClock(),
   };
   const serviceAccess = createServiceAccessClient(controlOptions);
   const authority = new CloudSpaceCheckpointAuthority(controlOptions);
@@ -96,6 +99,17 @@ export async function startMachineRuntime() {
   await installDefaultGitSpaceSkills(join(environmentRoot, 'agent'));
   const mcp = new MachineMcpCoordinator(authority, machineId);
   const machineReleaseSha = process.env.GITSPACE_MACHINE_RELEASE_SHA || null;
+  const releases = new ReleaseFollower({
+    authority,
+    blobs: checkpointBlobs,
+    machineId,
+    environmentRoot,
+    hostUrl: process.env.GITSPACE_HOST_URL ?? null,
+    controlToken: process.env.GITSPACE_CONTROL_TOKEN ?? null,
+    runningMachineSha: machineReleaseSha,
+    generation: process.env.GITSPACE_GENERATION_HASH ?? null,
+    onError: (error) => console.error('[gitspace-deploy]', error),
+  });
   const managedSpaceRoot = requiredEnvironment('GITSPACE_MANAGED_SPACE_ROOT');
   const settings = new CanonicalSettingsCoordinator(
     authority,
@@ -306,6 +320,7 @@ export async function startMachineRuntime() {
         payload: { replacing: true } });
       await Bun.sleep(150);
     }
+    releases.stop();
     await serviceManager.dispose();
     await settings.stop();
     await executorRuntime?.close();
@@ -345,6 +360,7 @@ export async function startMachineRuntime() {
     startupCommitted = true;
     preparingReplacement = false;
   }
+  await releases.start();
   return { environmentRoot, settings, http, stop };
 }
 

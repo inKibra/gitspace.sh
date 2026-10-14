@@ -67,13 +67,10 @@ async function approved(owner: TestAccount, pairing: CreatedPairing) {
 }
 
 describe('browser-approved machine pairing', () => {
-  it('requires authentic browser requests and rejects replay and body substitution', async () => {
+  it('requires authentic browser requests and rejects body substitution', async () => {
     const owner = await account();
     expect((await SELF.fetch(new Request(`${base}create`, { method: 'POST', body: JSON.stringify({ userId: owner.userId }) }))).status).toBe(403);
-    const request = signedRequest('create', { userId: owner.userId }, owner.deviceId, browserKey);
-    const replay = new Request(request.url, { method: request.method, headers: request.headers, body: request.clone().body });
-    expect((await SELF.fetch(request)).status).toBe(200);
-    expect(await (await SELF.fetch(replay)).json()).toMatchObject({ error: { code: 'REQUEST_REPLAY' } });
+    expect((await SELF.fetch(signedRequest('create', { userId: owner.userId }, owner.deviceId, browserKey))).status).toBe(200);
     const altered = signedRequest('create', { userId: owner.userId }, owner.deviceId, browserKey);
     expect((await SELF.fetch(new Request(altered.url, { method: 'POST', headers: altered.headers, body: JSON.stringify({ userId: owner.userId, extra: 'not signed' }) }))).status).toBe(403);
   });
@@ -105,11 +102,11 @@ describe('browser-approved machine pairing', () => {
     expect(delivered.value).not.toHaveProperty('rootPrivateKey');
     expect(delivered.value).not.toHaveProperty('vaultKey');
     expect(await (await SELF.fetch(signedRequest('poll', body, pairing.pairingId, machineKey))).json()).toEqual(delivered);
-    expect(await owner.vault.authorizeBroker(grant.grant.machineId, 1)).toBe(true);
+    const relayAuthority = () => SELF.fetch('https://auth.test/v1/relay/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant, capability: 'space.control' }) });
+    expect((await relayAuthority()).status).toBe(200);
     await owner.vault.revokeDeviceGrant(owner.deviceId);
     expect((await SELF.fetch(signedRequest('poll', body, pairing.pairingId, machineKey))).status).toBe(403);
-    expect(await owner.vault.authorizeRelayGrant(grant, 'space.control')).toMatchObject({ status: 'error' });
-    expect(await owner.vault.authorizeBroker(grant.grant.machineId, 1)).toBe(false);
+    expect((await relayAuthority()).status).toBe(401);
   });
 
   it('rejects cross-account, cancelled, expired and revoked-machine delivery', async () => {

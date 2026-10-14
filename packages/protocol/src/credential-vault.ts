@@ -64,6 +64,9 @@ export const controlOperationSchema = z.enum([
   'deploy.launch',
   'deploy.status',
   'deploy.launchProgress',
+  'deploy.machineApplied',
+  'deploy.machineChannelApplied',
+  'deploy.machineProtocol',
   'artifacts.key.get',
   'data.head',
   'data.get',
@@ -106,14 +109,16 @@ export const signedControlRequestSchema = z.object({
 });
 export type SignedControlRequest = z.infer<typeof signedControlRequestSchema>;
 /**
- * Maximum age of every signed control, credential, relay, RPC and root request.
- * Replay tables must retain nonces at least as long as the longest window they accept.
+ * Maximum clock distance of every signed control, credential, relay, RPC and root
+ * request from the verifier. Signers correct their clock from the account's `Date`
+ * header (`createServerClock`), so the window only absorbs latency and that header's
+ * one-second resolution.
  */
-export const SIGNED_REQUEST_MAX_AGE_MS = 5 * 60_000;
+export const SIGNED_REQUEST_MAX_AGE_MS = 60_000;
 /**
  * Maximum age of a signed `data.put`. Edges buffer whole bodies before the Worker
- * runs, so large uploads arrive long after signing. The signature binds key, hash,
- * size and a single-use nonce, so a replay can only rewrite identical bytes.
+ * runs, so large uploads arrive long after signing. The signature binds key, hash
+ * and size, so a replay can only rewrite identical bytes.
  */
 export const SIGNED_UPLOAD_MAX_AGE_MS = 30 * 60_000;
 

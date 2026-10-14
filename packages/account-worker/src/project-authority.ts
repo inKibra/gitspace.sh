@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Result } from 'better-result';
-import { cloudWorkspaceDefinitionSchema, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, RPC_DEVICE_HEADER, type GitSpaceSourceProvenance } from '@gitspace/protocol';
+import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance } from '@gitspace/protocol';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 import type {
   ArtifactCopyRecord,
@@ -25,7 +25,8 @@ import { DurableChangeLog, type DurableStreamSubscription } from './durable-stre
 import { AccountDirectoryProjection, DirectoryOutbox, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
-import { activeAccount, accountAccessResponse } from './account-access.js';
+import { activeAccount, accountAccessResponse, accountStatus } from './account-access.js';
+import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
@@ -37,11 +38,12 @@ import { z } from 'zod';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 
+/** The admitted device and generation; any change to that grant ends the socket. */
 interface DirectorySocketAttachment {
-  version: 1;
+  version: 2;
   userId: string;
-  header: string | null;
-  target: string;
+  deviceId: string;
+  generation: number;
   cursor: number | null;
   initial: boolean;
 }
@@ -432,25 +434,27 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const origin = request.headers.get('origin');
     if ((upgrading || origin !== null) && origin !== new URL(this.env.ACCOUNT_URL).origin) return error('ORIGIN_REJECTED', 'Directory origin does not own this tenant', 403);
     const after = url.searchParams.get('after');
-    if ((after !== null && (!/^(0|[1-9][0-9]*)$/u.test(after) || !streamCursorSchema.safeParse(Number(after)).success))
-      || url.searchParams.getAll('after').length > 1 || url.searchParams.getAll('auth').length > 1 || (upgrading && url.searchParams.getAll('auth').length !== 1)) {
-      return error('INVALID_DIRECTORY_REQUEST', 'Directory cursor or authorization is invalid', 400);
+    if ((after !== null && (!/^(0|[1-9][0-9]*)$/u.test(after) || !streamCursorSchema.safeParse(Number(after)).success)) || url.searchParams.getAll('after').length > 1) {
+      return error('INVALID_DIRECTORY_REQUEST', 'Directory cursor is invalid', 400);
     }
-    const header = url.searchParams.get('auth') ?? request.headers.get(RPC_DEVICE_HEADER);
-    url.searchParams.delete('auth');
-    const target = url.pathname + url.search;
-    const vault = (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID);
-    const authorized = await vault.authorizeDirectorySubscription({ header, target }, true);
-    if (authorized.status === 'error') return error(authorized.error.code, authorized.error.message, 401);
+    // A socket's signed GET rides in `Sec-WebSocket-Protocol`; a plain GET (the client's rejection probe) uses the header.
+    const offered = upgrading ? socketProtocolProof(request.headers.get('sec-websocket-protocol'), DEVICE_SOCKET_PROTOCOL) : null;
+    if (upgrading && !offered) return error('INVALID_DIRECTORY_REQUEST', 'Directory authorization is missing', 400);
+    const authorized = await withDeviceAuthority(this.env, (view, now) => view.authorizeRequest({
+      header: offered?.proof ?? request.headers.get(RPC_DEVICE_HEADER), method: 'GET', target: url.pathname + url.search,
+      body: new Uint8Array(), capabilities: ['rpc.read'], accountScope: true,
+    }, now));
+    if (authorized.status === 'error') return error(authorized.error.code, authorized.error.message, authorized.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : 401);
     const denied = accountAccessResponse(await activeAccount(this.env, this.env.ACCOUNT_ID));
     if (denied) return denied;
-    if (!upgrading) return error('UPGRADE_REQUIRED', 'Expected WebSocket', 426);
+    if (!upgrading || !offered) return error('UPGRADE_REQUIRED', 'Expected WebSocket', 426);
     await this.hydrateDirectory();
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ version: 1, userId: this.env.ACCOUNT_ID, header, target, cursor: after === null ? null : Number(after), initial: true } satisfies DirectorySocketAttachment);
+    const { device } = authorized.value;
+    server.serializeAttachment({ version: 2, userId: this.env.ACCOUNT_ID, deviceId: device.deviceId, generation: device.generation, cursor: after === null ? null : Number(after), initial: true } satisfies DirectorySocketAttachment);
     await this.deliverDirectory(server);
-    return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, { status: 101, webSocket: client, headers: { 'sec-websocket-protocol': offered.protocol } });
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -486,15 +490,21 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const delivery = previous.then(async () => {
       try {
         const attachment = socket.deserializeAttachment() as DirectorySocketAttachment | null;
-        if (!attachment || attachment.version !== 1 || attachment.userId !== this.env.ACCOUNT_ID) { socket.close(4401, 'RPC_DEVICE_UNKNOWN'); return; }
-        const account = await activeAccount(this.env, attachment.userId);
+        if (!attachment || attachment.userId !== this.env.ACCOUNT_ID) { socket.close(4401, 'RPC_DEVICE_UNKNOWN'); return; }
+        // Sockets admitted before device grants were cached reconnect with a current proof.
+        if (attachment.version !== 2) { socket.close(1012, 'Directory authorization changed'); return; }
+        const view = await deviceAuthority(this.env).current();
+        if (!view) { socket.close(1013, DEVICE_AUTHORITY_UNAVAILABLE); return; }
+        const account = accountStatus(this.env, view, attachment.userId);
         if (account.status === 'error') {
           socket.close(account.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' ? 1013 : 1008, account.error.code);
           return;
         }
-        const authorized = await (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(attachment.userId)
-          .authorizeDirectorySubscription({ header: attachment.header, target: attachment.target }, false);
-        if (authorized.status === 'error') { socket.close(4401, 'RPC_DEVICE_UNKNOWN'); return; }
+        const device = view.device(attachment.deviceId, Date.now());
+        if (!device || device.generation !== attachment.generation || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.read')) {
+          socket.close(4401, 'RPC_DEVICE_UNKNOWN');
+          return;
+        }
         const events = this.changes.replay('account-directory', attachment.cursor, () => this.directory.snapshot(this.list()), attachment.initial);
         for (const event of events) {
           socket.send(JSON.stringify(event));

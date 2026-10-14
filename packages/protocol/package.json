@@ -32,7 +32,9 @@
     "./snapshot-page": "./src/snapshot-page.ts",
     "./service-access": "./src/service-access.ts",
     "./transcript": "./src/transcript.ts",
-    "./rpc-crypto": "./src/rpc-crypto.ts"
+    "./rpc-crypto": "./src/rpc-crypto.ts",
+    "./server-clock": "./src/server-clock.ts",
+    "./socket-auth": "./src/socket-auth.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",

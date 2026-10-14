@@ -18,7 +18,7 @@ const vaultKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
 
 
 describe('CredentialVaultDO', () => {
-  it('returns only a machine-sealed access token and rejects request replay', async () => {
+  it('returns only a machine-sealed access token within the signing window', async () => {
     const vault = env.CREDENTIALS.getByName(`user-fresh-${crypto.randomUUID()}`);
     expect((await vault.bootstrap({
       userId: 'user-a',
@@ -68,9 +68,7 @@ describe('CredentialVaultDO', () => {
       access: 'access-secret',
       revision: 1,
     });
-    const replay = await vault.getAccess(request);
-    expect(replay).toMatchObject({ status: 'error', error: { code: 'REQUEST_REPLAY' } });
-    const stale = { userId: 'user-a', machineId: 'machine-a', credentialId: 'openai-primary', signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - 6 * 60_000 };
+    const stale = { userId: 'user-a', machineId: 'machine-a', credentialId: 'openai-primary', signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - 90_000 };
     // Age alone is distinguishable so a signer can re-sign; any other defect stays invalid.
     expect(await vault.getAccess(createCredentialAccessRequest(stale))).toMatchObject({ status: 'error', error: { code: 'REQUEST_EXPIRED', message: 'Signed request expired' } });
     expect(await vault.getAccess(createCredentialAccessRequest({ ...stale, userId: 'user-b' }))).toMatchObject({ status: 'error', error: { code: 'INVALID_REQUEST' } });

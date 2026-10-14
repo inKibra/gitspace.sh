@@ -36,6 +36,17 @@ export const launchReleaseInputSchema = z.object({
 });
 export type LaunchReleaseInput = z.infer<typeof launchReleaseInputSchema>;
 
+export const machineAppliedInputSchema = z.object({
+  sha: z.string().min(1).max(160),
+  target: z.literal('machine'),
+  generation: z.string().min(1).max(160),
+  status: z.enum(['applied', 'failed']),
+  error: z.string().max(4_096).optional(),
+});
+export type MachineAppliedInput = z.infer<typeof machineAppliedInputSchema>;
+export const machineChannelAppliedInputSchema = machineAppliedInputSchema.pick({ target: true, generation: true });
+export type MachineChannelAppliedInput = z.infer<typeof machineChannelAppliedInputSchema>;
+
 export interface WorkerVersion {
   sha: string | null;
   version: string | null;
@@ -200,6 +211,32 @@ export class TenantReleasesDO extends DurableObject<Env> {
     record.error = error;
     this.saveRecord(record);
     return record;
+  }
+
+  async machineApplied(machineId: string, inputValue: MachineAppliedInput): Promise<ReleaseRecord | null> {
+    const input = machineAppliedInputSchema.parse(inputValue);
+    const record = this.findRelease(input.sha);
+    if (!record) return null;
+    record.status.machines[machineId] = input.status;
+    if (input.status === 'failed') {
+      record.error = input.error ?? `Machine ${machineId} failed to apply ${input.sha}`;
+    } else {
+      this.ctx.storage.sql.exec(
+        'INSERT INTO machines(machine_id, sha, generation, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET sha = excluded.sha, generation = excluded.generation, updated_at = excluded.updated_at',
+        machineId, input.sha, input.generation, new Date().toISOString(),
+      );
+    }
+    this.saveRecord(record);
+    return record;
+  }
+
+  /** Actual healthy channel activation, acknowledged by the enrolled machine after draining. */
+  async machineChannelApplied(machineId: string, inputValue: MachineChannelAppliedInput): Promise<void> {
+    const input = machineChannelAppliedInputSchema.parse(inputValue);
+    this.ctx.storage.sql.exec(
+      'INSERT INTO machines(machine_id, sha, generation, updated_at) VALUES (?, NULL, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET sha = NULL, generation = excluded.generation, updated_at = excluded.updated_at',
+      machineId, input.generation, new Date().toISOString(),
+    );
   }
 
   async machineProtocol(machineId: string, inputValue: z.input<typeof machineProtocolInputSchema>): Promise<MachineExecutionAdmission> {

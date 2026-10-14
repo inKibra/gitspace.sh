@@ -1,9 +1,10 @@
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol';
+import { CONTROL_SOCKET_PROTOCOL, createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol';
 import { parse } from 'yaml';
 import { UserSettingsDO, type SettingsSnapshot } from '../src/user-settings.js';
+import { tenantRootPrivateKey } from './setup.js';
 
 function settingsStub(userId: string): DurableObjectStub<UserSettingsDO> {
   return env.USER_SETTINGS.get(env.USER_SETTINGS.idFromName(userId));
@@ -170,7 +171,8 @@ describe('inference settings migration', () => {
 
   it('pushes the inference revision to authenticated websocket subscribers without advancing runtime generation', async () => {
     const userId = env.ACCOUNT_ID;
-    const rootPrivateKey = new Uint8Array(32).fill(21);
+    // The tenant's vault is rooted in the tenant key the Worker is deployed with.
+    const rootPrivateKey = tenantRootPrivateKey;
     const signingPrivateKey = new Uint8Array(32).fill(22);
     const vault = env.CREDENTIALS.getByName(userId);
     await vault.bootstrap({
@@ -185,7 +187,7 @@ describe('inference settings migration', () => {
     }, rootPrivateKey));
     const signed = createSignedControlRequest({ userId, machineId: 'inference-subscriber', operation: 'settings.subscribe', payload: {}, signingPrivateKey });
     const control = btoa(JSON.stringify(signed)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-    const response = await SELF.fetch(`https://auth.test/v1/settings/events?control=${encodeURIComponent(control)}`, { headers: { upgrade: 'websocket' } });
+    const response = await SELF.fetch('https://auth.test/v1/settings/events', { headers: { upgrade: 'websocket', 'sec-websocket-protocol': `${CONTROL_SOCKET_PROTOCOL}${control}` } });
     expect(response.status).toBe(101);
     const socket = response.webSocket!;
     socket.accept();

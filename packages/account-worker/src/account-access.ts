@@ -1,61 +1,75 @@
-import { SIGNED_REQUEST_MAX_AGE_MS, signedControlRequestSchema, type SignedControlRequest } from '@gitspace/protocol';
-import type { AccountStateDO, AccountRecord, AccountAuthorization } from './account-state.js';
-import type { CredentialVaultDO, CredentialVaultResult } from './application.js';
+import { CONTROL_SOCKET_PROTOCOL, SIGNED_REQUEST_MAX_AGE_MS, signedControlRequestSchema, socketProtocolProof, type ControlOperation, type SignedControlRequest } from '@gitspace/protocol';
+import { z } from 'zod';
+import type { AccountRecord, AccountAuthorization } from './account-state.js';
+import type { CredentialVaultResult } from './application.js';
+import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, deviceAuthorityUnavailable, withDeviceAuthority, type DeviceAuthorityView, type MachineCapability } from './device-authority.js';
+
+export type ActiveAccount = AccountRecord & { authorization: Extract<AccountAuthorization, { status: 'active' }> };
 
 /** Tenant ownership is immutable; platform control also fences existing subscriptions. */
-export async function activeAccount(env: Env, userId: string): Promise<CredentialVaultResult<AccountRecord & { authorization: Extract<AccountAuthorization, { status: 'active' }> }>> {
+export function accountStatus(env: Env, view: DeviceAuthorityView, userId: string): CredentialVaultResult<ActiveAccount> {
   if (userId !== env.ACCOUNT_ID) return { status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account does not own this tenant' } };
-  try {
-    const state = (env.ACCOUNT_STATE as DurableObjectNamespace<AccountStateDO>).getByName('account');
-    const authority = await state.authorization(userId);
-    if (authority.status === 'unavailable') return { status: 'error', error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE', message: 'Account authorization authority is unavailable' } };
-    if (authority.status === 'blocked') return { status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account is blocked by the platform' } };
-    const account = await state.get(userId);
-    if (!account) throw new Error('Tenant identity is unavailable');
-    return { status: 'ok', value: { ...account, authorization: authority } };
-  } catch {
-    return { status: 'error', error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE', message: 'Account authorization authority is unavailable' } };
-  }
+  const { authorization, record } = view.account;
+  if (authorization.status === 'blocked') return { status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account is blocked by the platform' } };
+  if (authorization.status === 'unavailable' || !record) return { status: 'error', error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE', message: 'Account authorization authority is unavailable' } };
+  return { status: 'ok', value: { ...record, authorization } };
+}
+
+/** The account state read with the isolate's device authority; never a per-request object call. */
+export async function activeAccount(env: Env, userId: string): Promise<CredentialVaultResult<ActiveAccount>> {
+  const view = await deviceAuthority(env).current();
+  return view ? accountStatus(env, view, userId) : deviceAuthorityUnavailable();
 }
 
 export function accountAccessResponse(result: CredentialVaultResult<unknown>): Response | null {
-  return result.status === 'error'
-    ? Response.json(result, { status: result.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' ? 503 : result.error.code === 'ACCOUNT_UNAVAILABLE' ? 403 : 401, headers: { 'cache-control': 'private, no-store' } })
-    : null;
+  if (result.status === 'ok') return null;
+  const { code } = result.error;
+  const status = code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' || code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : code === 'ACCOUNT_UNAVAILABLE' ? 403 : 401;
+  return Response.json(result, { status, headers: { 'cache-control': 'private, no-store' } });
 }
 
-export async function authorizeControl(env: Env, request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access', maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): Promise<CredentialVaultResult<{ authorized: true }>> {
-  const vaults = env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>;
-  const authorized = await vaults.get(vaults.idFromName(request.userId)).authorizeControl(request, capability, maxAgeMs);
-  if (authorized.status === 'error') return authorized;
-  const account = await activeAccount(env, request.userId);
-  return account.status === 'error' ? account : authorized;
+/** A machine's signed control request, checked against the cached registry, then the account. */
+export function authorizeControl(env: Env, request: SignedControlRequest, capability: MachineCapability, maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): Promise<CredentialVaultResult<{ machineId: string; generation: number }>> {
+  return withDeviceAuthority(env, (view, now) => {
+    const authorized = view.authorizeControl(request, capability, maxAgeMs, now);
+    if (authorized.status === 'error') return authorized;
+    const account = accountStatus(env, view, request.userId);
+    return account.status === 'error' ? { ...account, miss: false } : authorized;
+  });
 }
 
-/** Preserve the original proof, not caller-controlled user headers; recheck before every disclosure. */
-export async function subscriptionIdentity(env: Env, request: Request, capability: 'storage.access' | 'space.control'): Promise<{ signed: SignedControlRequest; generation: number }> {
-  const encoded = new URL(request.url).searchParams.get('control');
-  if (!encoded) throw new Error('Subscription identity is missing');
-  const base64 = encoded.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(encoded.length / 4) * 4, '=');
-  const signed = signedControlRequestSchema.parse(JSON.parse(atob(base64)));
-  const vaults = env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>;
-  const generation = await vaults.get(vaults.idFromName(signed.userId)).authorizeSubscription(signed, capability);
-  if (generation === null) throw new Error('Subscription identity is no longer authorized');
-  return { signed, generation };
+/** A control stream admitted at `generation` lives while that credential and the account stay current. */
+export async function controlSubscriptionActive(env: Env, signed: SignedControlRequest, generation: number, capability: MachineCapability): Promise<boolean> {
+  const view = await deviceAuthority(env).current();
+  return view !== null && accountStatus(env, view, signed.userId).status === 'ok'
+    && view.controlSubscription({ userId: signed.userId, machineId: signed.machineId, generation }, capability, Date.now());
 }
-export async function subscriptionActive(env: Env, socket: WebSocket, capability: 'storage.access' | 'space.control'): Promise<boolean> {
+
+const subscriptionAttachmentSchema = z.object({ signed: signedControlRequestSchema, generation: z.number().int() });
+export type SubscriptionAttachment = z.infer<typeof subscriptionAttachmentSchema>;
+
+/** Admits a socket whose signed control request rides in `Sec-WebSocket-Protocol`, never in the URL. */
+export async function subscriptionIdentity(env: Env, request: Request, operation: ControlOperation, capability: MachineCapability): Promise<Response | { protocol: string; attachment: SubscriptionAttachment }> {
+  const offered = socketProtocolProof(request.headers.get('sec-websocket-protocol'), CONTROL_SOCKET_PROTOCOL);
+  let signed: SignedControlRequest | null = null;
   try {
-    const attachment = socket.deserializeAttachment() as { signed?: unknown; generation?: unknown } | null;
-    const signed = signedControlRequestSchema.parse(attachment?.signed);
-    const account = await activeAccount(env, signed.userId);
-    if (account.status === 'ok') {
-      const vaults = env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>;
-      const generation = await vaults.get(vaults.idFromName(signed.userId)).authorizeSubscription(signed, capability);
-      if (generation !== null && generation === attachment?.generation) return true;
-    }
+    const proof = offered?.proof ?? '';
+    signed = signedControlRequestSchema.parse(JSON.parse(atob(proof.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(proof.length / 4) * 4, '='))));
   } catch {
-    // Legacy sockets without an identity and unavailable authorities fail closed.
+    // Reported below as a missing identity.
   }
+  if (!offered || signed?.operation !== operation) {
+    return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: 'Signed subscription identity is missing or invalid' } }, { status: 400, headers: { 'cache-control': 'private, no-store' } });
+  }
+  const authorized = await authorizeControl(env, signed, capability);
+  if (authorized.status === 'error') return accountAccessResponse(authorized)!;
+  return { protocol: offered.protocol, attachment: { signed, generation: authorized.value.generation } };
+}
+
+/** Rechecked on ping and before every delivery; a revoked or replaced credential closes the socket. */
+export async function subscriptionActive(env: Env, socket: WebSocket, capability: MachineCapability): Promise<boolean> {
+  const attachment = subscriptionAttachmentSchema.safeParse(socket.deserializeAttachment());
+  if (attachment.success && await controlSubscriptionActive(env, attachment.data.signed, attachment.data.generation, capability)) return true;
   socket.close(1008, 'Subscription authorization ended');
   return false;
 }

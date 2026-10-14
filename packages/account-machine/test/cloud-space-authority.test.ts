@@ -1,7 +1,7 @@
 import { describe, expect, it, spyOn } from 'bun:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createServer } from 'node:http';
-import { signedControlRequestSchema, verifySignedControlRequest, type DeploymentStatus, type SignedControlRequest } from '@gitspace/protocol';
+import { CONTROL_SOCKET_PROTOCOL, createServerClock, SIGNED_REQUEST_MAX_AGE_MS, signedControlRequestSchema, verifySignedControlRequest, type DeploymentStatus, type SignedControlRequest } from '@gitspace/protocol';
 import { CloudDataCheckpointBlobStore, CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
 
 it('signs each control operation with the enrolled machine key', async () => {
@@ -598,4 +598,54 @@ describe('expired signed requests', () => {
     else expect(await reading).toBeNull();
     expectFreshSignatures(signed, attempts);
   });
+});
+
+describe('account clock', () => {
+  it('shares the offset learned from one expired rejection across every client of a machine', async () => {
+    const skewMs = 5 * 60_000;
+    const timestamps: number[] = [];
+    const fetcher = Object.assign(async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const signed = signedControlRequestSchema.parse(JSON.parse(String(init?.body)));
+      timestamps.push(signed.timestamp);
+      const now = Date.now() + skewMs;
+      const headers = { date: new Date(now).toUTCString() };
+      if (Math.abs(now - signed.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) {
+        return Response.json({ status: 'error', error: { code: 'REQUEST_EXPIRED', message: 'Signed request expired' } }, { status: 401, headers });
+      }
+      return Response.json({ status: 'ok', value: null }, { headers });
+    }, { preconnect: fetch.preconnect });
+    const clock = createServerClock();
+    const options = { baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a', signingPrivateKey: new Uint8Array(32).fill(5), fetcher, clock };
+    expect(await new CloudSpaceCheckpointAuthority(options).getProject('project-a')).toBeNull();
+    expect(timestamps).toHaveLength(2);
+    expect(Math.abs(clock.now() - (Date.now() + skewMs))).toBeLessThan(SIGNED_REQUEST_MAX_AGE_MS);
+    expect(await new CloudSpaceCheckpointAuthority(options).getProject('project-a')).toBeNull();
+    expect(timestamps).toHaveLength(3);
+  });
+});
+
+it('sends the settings subscription proof as a WebSocket subprotocol, never in the URL', async () => {
+  const privateKey = new Uint8Array(32).fill(5);
+  const seen = Promise.withResolvers<{ url: string; protocol: string | null }>();
+  const server = createServer();
+  server.on('upgrade', (request, socket) => {
+    seen.resolve({ url: request.url ?? '', protocol: request.headers['sec-websocket-protocol'] ?? null });
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP test server');
+  const authority = new CloudSpaceCheckpointAuthority({ baseUrl: `http://127.0.0.1:${address.port}`, userId: 'user-a', machineId: 'machine-a', signingPrivateKey: privateKey });
+  const stop = authority.subscribeSettings(() => {}, () => {});
+  try {
+    const { url, protocol } = await seen.promise;
+    expect(url).toBe('/v1/settings/events');
+    expect(protocol?.startsWith(CONTROL_SOCKET_PROTOCOL)).toBe(true);
+    const signed = signedControlRequestSchema.parse(JSON.parse(Buffer.from(protocol!.slice(CONTROL_SOCKET_PROTOCOL.length), 'base64url').toString()));
+    expect(signed.operation).toBe('settings.subscribe');
+    expect(verifySignedControlRequest(signed, ed25519.getPublicKey(privateKey))).toBe(true);
+  } finally {
+    stop();
+    server.close();
+  }
 });

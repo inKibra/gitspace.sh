@@ -3,8 +3,6 @@ import { TaggedError } from 'better-result';
 import { signedRpcHeaderSchema } from '@gitspace/protocol/device-grant';
 import { z } from 'zod';
 import { stripGitSpaceCredentials } from '@gitspace/protocol/service-access';
-export const INTERNAL_NONCE = 'x-gitspace-auth-nonce';
-export const INTERNAL_TIMESTAMP = 'x-gitspace-auth-timestamp';
 export const INTERNAL_TUNNEL_MACHINE = 'x-gitspace-tunnel-machine';
 export const INTERNAL_TUNNEL_PATH = 'x-gitspace-tunnel-path';
 export const INTERNAL_SIGNED_TARGET = 'x-gitspace-signed-target';
@@ -56,9 +54,7 @@ export function tunnelTarget(url: URL): { machineId: string; path: string } | nu
   return { machineId, path: `${match[2] ?? '/'}${url.search}` };
 }
 
-export function relayRequest(request: Request, authorization: { nonce: string; timestamp: number }, headers: Headers): Request {
-  headers.set(INTERNAL_NONCE, authorization.nonce);
-  headers.set(INTERNAL_TIMESTAMP, String(authorization.timestamp));
+export function relayRequest(request: Request, headers: Headers): Request {
   stripGitSpaceCredentials(headers);
   return new Request(request, { headers });
 }
@@ -72,7 +68,7 @@ export async function forwardTunnelRequest(request: Request, env: Env, target: {
   headers.set(INTERNAL_TUNNEL_MACHINE, target.machineId);
   headers.set(INTERNAL_TUNNEL_PATH, target.path);
   headers.set(INTERNAL_SIGNED_TARGET, request.headers.get(INTERNAL_SIGNED_TARGET) ?? `${url.pathname}${url.search}`);
-  const forwarded = relayRequest(request, { nonce: crypto.randomUUID(), timestamp: Date.now() }, headers);
+  const forwarded = relayRequest(request, headers);
   const stub = env.RELAY.getByName(env.RELAY_NAME);
   if (!forwarded.body) return stub.fetch(forwarded);
   // DO request cancellation does not propagate through a service binding's upload.

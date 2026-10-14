@@ -21,7 +21,6 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   const attachment = RuntimeAttachmentSchema.parse({ ...identity, machineId: 'machine', attachmentId: 'attachment', generation: 1, state: 'ready', role: 'cache', checkout: { kind: 'shared', branch: 'main' }, updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), capabilities: ['browser', 'browser_control', 'browser.relay', 'browser.headless'] });
   const attachments = [attachment];
   const machines = new Map<string, Pick<FleetMachineDefinition, 'kind' | 'desiredState'>>([['machine', { kind, desiredState: 'online' }]]);
-  const credentials = new Set(['machine']);
   const signingRoot = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const harness = await Harness.open(new MemoryStorage(), { registry: createRegistry(), models: createModels() }, BACKGROUND_CONTEXT);
   harnesses.push(harness);
@@ -49,7 +48,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     dispatches.push(dispatch);
     return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(command.type === 'manage' ? state.status : { targetId: 'target' }) }] };
   } } };
-  const env = { ACCOUNT_ID: 'account', RELAY_NAME: 'account-relay', RELAY: {getByName:()=>relay}, ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) }, CREDENTIALS: { getByName: () => ({ hasRuntimeMachine: (id: string) => credentials.has(id) ? Promise.resolve(true as const) : Promise.resolve(false as const) }) } };
+  const env = { ACCOUNT_ID: 'account', RELAY_NAME: 'account-relay', RELAY: {getByName:()=>relay}, ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) } };
   const authority = createRuntimeBrowserAuthority({ storage, env, identity, runtime: () => runtime, async selectExecution(args, candidates) {
     const machineId = args.on ?? state.defaultMachineId;
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
@@ -58,7 +57,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   }, approvedOrigins: async () => state.origins, approvalDefault: async () => 'write', groupName: async () => 'Workspace' });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
   const mode = async (approvalMode: 'write' | 'always-ask' | 'yolo') => harness.commit(async tx => { (await tx.doc(SessionControlsDoc, root.id)).approvalMode = approvalMode; }, BACKGROUND_CONTEXT);
-  return { authority, input, mode, state, dispatches, attachments, machines, credentials, attachment, pairing, forgottenPairings, offlinePairings };
+  return { authority, input, mode, state, dispatches, attachments, machines, attachment, pairing, forgottenPairings, offlinePairings };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -99,13 +98,13 @@ test('expired prepared group grant cannot dispatch', async () => {
 
 
 test('relay works without any machine and rejects subagents before dispatch', async () => {
- const f=await fixture(); f.attachments.splice(0); f.machines.clear(); f.credentials.clear(); await f.mode('yolo');
+ const f=await fixture(); f.attachments.splice(0); f.machines.clear(); await f.mode('yolo');
  const card=await f.authority.prepare(f.input); expect('placement' in card && card.placement.kind).toBe('account-relay');
  await f.authority.execute(f.input); expect(f.dispatches).toHaveLength(1); f.state.root=false;
  await expect(f.authority.prepare({...f.input,attemptId:'child'})).rejects.toThrow('main-agent-only'); expect(f.dispatches).toHaveLength(1);
 });
 test('headless cloud placement does not require a registered machine attachment',async()=>{
- const f=await fixture(); f.attachments.splice(0); f.machines.clear(); f.credentials.clear();
+ const f=await fixture(); f.attachments.splice(0); f.machines.clear();
  f.input.args=RuntimeBrowserArgumentsSchema.parse({action:'open',source:'headless',url:'https://example.com/'});
  const card=await f.authority.prepare(f.input); expect(card.source).toBe('headless'); expect(card.requiresApproval).toBe(false);
  expect('placement' in card && card.placement).toEqual({kind:'cloud',accountId:'account'}); expect('machineId' in card).toBe(false);

@@ -1,5 +1,5 @@
-import { activeAccount } from './account-access.js';
-import type { AccountAuthorization } from './account-state.js';
+import { accountStatus } from './account-access.js';
+import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import { machineProtocolInputSchema } from '@gitspace/protocol/deployment';
 import { DurableObject } from 'cloudflare:workers';
 import {
@@ -14,6 +14,9 @@ import {
   socketAttachmentSchema,
   verifyRelayAuthorization,
   deviceGrantExpiresAt,
+  SIGNED_REQUEST_EXPIRED_CODE,
+  SIGNED_REQUEST_EXPIRED_MESSAGE,
+  SIGNED_REQUEST_MAX_AGE_MS,
   type SocketAttachment,
   type TunnelRequestMessage,
 } from '@gitspace/protocol';
@@ -25,8 +28,8 @@ import {
   type SignedCredentialAuthorityGrant,
 } from '@gitspace/protocol/credential-vault';
 import { WORKER_VERSION_HEADER } from '@gitspace/protocol/deployment';
-import application, { CredentialVaultDO, REQUEST_MAX_BYTES } from './application.js';
-import { forwardTunnelRequest, relayRequest, tunnelTarget, verifiedTunnelBody, TUNNEL_MAX_BODY_BYTES, TunnelBodyProofSchema, INTERNAL_TUNNEL_BODY_PROOF, INTERNAL_NONCE, INTERNAL_TIMESTAMP, INTERNAL_TUNNEL_MACHINE, INTERNAL_TUNNEL_PATH, INTERNAL_SIGNED_TARGET, INTERNAL_SERVICE_SESSION } from './relay-request.js';
+import application, { REQUEST_MAX_BYTES } from './application.js';
+import { forwardTunnelRequest, relayRequest, tunnelTarget, verifiedTunnelBody, TUNNEL_MAX_BODY_BYTES, TunnelBodyProofSchema, INTERNAL_TUNNEL_BODY_PROOF, INTERNAL_TUNNEL_MACHINE, INTERNAL_TUNNEL_PATH, INTERNAL_SIGNED_TARGET, INTERNAL_SERVICE_SESSION } from './relay-request.js';
 import { handleMcpRequest } from './mcp-server.js';
 import { z } from 'zod';
 import { rpcBodySha256 } from '@gitspace/protocol/device-grant';
@@ -49,8 +52,6 @@ const INTERNAL_ROLE = 'x-gitspace-role';
 const INTERNAL_ENDPOINT_ID = 'x-gitspace-endpoint-id';
 const MACHINE_GRANT_HEADER = 'x-gitspace-machine-grant';
 const INTERNAL_HEADERS: Record<string, true> = {
-  [INTERNAL_NONCE]: true,
-  [INTERNAL_TIMESTAMP]: true,
   [INTERNAL_ROLE]: true,
   [INTERNAL_ENDPOINT_ID]: true,
   [INTERNAL_TUNNEL_MACHINE]: true,
@@ -93,7 +94,6 @@ interface RelaySocketAttachment extends SocketAttachment {
   machineGrant?: SignedCredentialAuthorityGrant;
   authorizedUntil?: number;
   heartbeatExpiresAt?: number;
-  accountAuthorization?: Extract<AccountAuthorization, { status: 'active' }>;
 }
 
 function machineAuthorizationDeadline(grant: SignedCredentialAuthorityGrant): number {
@@ -102,32 +102,24 @@ function machineAuthorizationDeadline(grant: SignedCredentialAuthorityGrant): nu
   return deadline;
 }
 
+/** Current authority for a machine grant and its account, from the isolate's cached registry. */
 async function currentMachineAuthority(
   env: Env,
   grant: SignedCredentialAuthorityGrant,
   capability: 'space.control' | 'storage.access',
 ): Promise<Response | null> {
-  try {
-    // A self-signed (managed device) grant is never sufficient on its own: the vault below decides.
-    if (!(verifyCredentialAuthorityGrant(grant, credentialProtocolBase64.decode(env.AUTH_PUBLIC_KEY)) ?? verifyManagedDeviceGrant(grant))) {
-      return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine issuer proof is invalid or expired');
-    }
-    if (grant.grant.userId !== env.ACCOUNT_ID) return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine grant belongs to another tenant');
-    const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID);
-    const result = await vault.authorizeRelayGrant(grant, capability);
-    if (result.status === 'ok') {
-      return null;
-    }
-    return jsonError(401, 'MACHINE_GRANT_REJECTED', result.error.message);
-  } catch (error) {
-    // Current authority is required; never fall back to the offline signature.
-    console.error(JSON.stringify({
-      event: 'machine_authority_unavailable', machineId: grant.grant.machineId, capability,
-      errorName: error instanceof Error ? error.name : 'UnknownError',
-      message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-    }));
-  }
-  return jsonError(503, 'MACHINE_AUTHORITY_UNAVAILABLE', 'Machine authority could not be verified');
+  if (grant.grant.userId !== env.ACCOUNT_ID) return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine grant belongs to another tenant');
+  const result = await withDeviceAuthority(env, (view, now) => {
+    const authorized = view.authorizeRelayGrant(grant, capability, now);
+    if (authorized.status === 'error') return authorized;
+    const account = accountStatus(env, view, env.ACCOUNT_ID);
+    return account.status === 'error' ? { ...account, miss: false } : authorized;
+  });
+  if (result.status === 'ok') return null;
+  const { code, message } = result.error;
+  if (code === DEVICE_AUTHORITY_UNAVAILABLE || code === 'ACCOUNT_AUTHORITY_UNAVAILABLE') return jsonError(503, code, message);
+  if (code === 'ACCOUNT_UNAVAILABLE') return jsonError(403, code, message);
+  return jsonError(401, 'MACHINE_GRANT_REJECTED', message);
 }
 
 function jsonError(status: number, code: string, message: string): Response {
@@ -168,18 +160,16 @@ function filteredHeaders(headers: Headers, requestDirection: boolean): Array<[st
 }
 
 
-function authorizedRootRequest(request: Request, env: Env): Response | { nonce: string; timestamp: number; target: string } {
+function authorizedRootRequest(request: Request, env: Env): Response | null {
   const url = new URL(request.url);
-  const target = `${url.pathname}${url.search}`;
   const verified = verifyRelayAuthorization({
     header: request.headers.get('authorization'),
     signingPublicKey: env.AUTH_PUBLIC_KEY,
-    target,
-    maxSkewMs: Number(env.AUTH_MAX_SKEW_MS),
+    target: `${url.pathname}${url.search}`,
+    maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS,
   });
-  return verified.status === 'error'
-    ? jsonError(401, 'UNAUTHORIZED', verified.error.message)
-    : { ...verified.value, target };
+  if (verified.status === 'ok') return null;
+  return verified.error.expired ? jsonError(401, SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE) : jsonError(401, 'UNAUTHORIZED', verified.error.message);
 }
 
 function decodeMachineGrant(value: string | null) {
@@ -195,27 +185,27 @@ function decodeMachineGrant(value: string | null) {
   }
 }
 
-async function authorizedMachineRequest(request: Request, env: Env, machineId: string | null): Promise<Response | { nonce: string; timestamp: number; target: string }> {
+async function authorizedMachineRequest(request: Request, env: Env, machineId: string | null): Promise<Response | null> {
   const signedGrant = decodeMachineGrant(request.headers.get(MACHINE_GRANT_HEADER));
   if (!signedGrant) return jsonError(401, 'MACHINE_GRANT_REQUIRED', 'Machine credential grant is missing or invalid');
-  // Root-signed (paired) or self-signed (managed) claim; vault authority is checked
+  // Root-signed (paired) or self-signed (managed) claim; current authority is checked
   // below or, for machine sockets, inside the relay before the socket is accepted.
   const grant = verifyCredentialAuthorityGrant(signedGrant, credentialProtocolBase64.decode(env.AUTH_PUBLIC_KEY)) ?? verifyManagedDeviceGrant(signedGrant);
   if (!grant || (machineId !== null && grant.machineId !== machineId)) {
     return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine credential grant is not valid for this relay endpoint');
   }
   const url = new URL(request.url);
-  const target = `${url.pathname}${url.search}`;
   const verified = verifyRelayAuthorization({
     header: request.headers.get('authorization'),
     signingPublicKey: grant.signingPublicKey,
-    target,
-    maxSkewMs: Number(env.AUTH_MAX_SKEW_MS),
+    target: `${url.pathname}${url.search}`,
+    maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS,
   });
-  if (verified.status === 'error') return jsonError(401, 'UNAUTHORIZED', verified.error.message);
+  if (verified.status === 'error') {
+    return verified.error.expired ? jsonError(401, SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE) : jsonError(401, 'UNAUTHORIZED', verified.error.message);
+  }
   // WebSocket authority is checked inside the DO immediately before replacement.
-  const rejected = machineId === null ? await currentMachineAuthority(env, signedGrant, 'storage.access') : null;
-  return rejected ?? { ...verified.value, target };
+  return machineId === null ? currentMachineAuthority(env, signedGrant, 'storage.access') : null;
 }
 
 
@@ -278,8 +268,11 @@ async function handleArtifactRequest(request: Request, env: Env, hash: string): 
 
 export class UserRelayDO extends DurableObject<Env> {
   private readonly pendingTunnels = new Map<string, PendingTunnel>();
-  private readonly machineChecks = new WeakMap<WebSocket, Promise<boolean>>();
-  private readonly serviceSessions = new ServiceSessions(this.ctx.storage, this.env.ACCOUNT_ID, deviceId => this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).serviceDeviceAuthority(deviceId));
+  private readonly serviceSessions = new ServiceSessions(this.ctx.storage, this.env.ACCOUNT_ID, async (deviceId) => {
+    const view = await deviceAuthority(this.env).current();
+    if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
+    return view.serviceDeviceAuthority(deviceId, Date.now());
+  });
   private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env);
   async serviceApprove(input: { hostname: string; deviceId: string; state: string; returnTo: string }) {
     const ticket = await this.serviceSessions.approve(input);
@@ -335,20 +328,11 @@ export class UserRelayDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      ctx.storage.sql.exec(`
-        CREATE TABLE IF NOT EXISTS auth_nonces (
-          nonce TEXT PRIMARY KEY,
-          used_at INTEGER NOT NULL
-        )
-      `);
+      // Relay authorizations are bounded by the 60-second clock window, not single-use nonces.
+      ctx.storage.sql.exec('DROP TABLE IF EXISTS auth_nonces');
     });
   }
   async fetch(request: Request): Promise<Response> {
-    const nonce = request.headers.get(INTERNAL_NONCE);
-    const timestamp = Number(request.headers.get(INTERNAL_TIMESTAMP));
-    if (!nonce || !Number.isSafeInteger(timestamp) || !this.consumeAuthorization(nonce, timestamp)) {
-      return jsonError(401, 'AUTH_REPLAY', 'Relay authorization was already used or is invalid');
-    }
 
     const url = new URL(request.url);
     if (url.pathname === '/ws') return this.acceptSocket(request);
@@ -404,7 +388,7 @@ export class UserRelayDO extends DurableObject<Env> {
           server.addEventListener('message', event => {
             this.ctx.waitUntil((async () => {
               if (!await this.serviceTunnelAuthorized(message.requestId, pending)) return;
-              if (!await this.authorizeSocket(socket, true)) return server.close(1008, 'Machine authorization expired');
+              if (!await this.authorizeSocket(socket)) return server.close(1008, 'Machine authorization expired');
               socket.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.data', requestId: message.requestId, binary: typeof event.data !== 'string', data: typeof event.data === 'string' ? event.data : encodeTunnelChunk(new Uint8Array(event.data)) } satisfies TunnelRequestMessage));
             })().catch(() => server.close(1008, 'Service authorization unavailable')));
           });
@@ -467,17 +451,6 @@ export class UserRelayDO extends DurableObject<Env> {
   async webSocketError(socket: WebSocket): Promise<void> {
     this.failSocketTunnels(socket, new Error('Machine socket failed'));
     socket.close(1011, 'Machine socket failed');
-  }
-
-  consumeAuthorization(nonce: string, timestamp: number): boolean {
-    const expiry = timestamp - Number(this.env.AUTH_MAX_SKEW_MS) * 2;
-    this.ctx.storage.sql.exec('DELETE FROM auth_nonces WHERE used_at < ?', expiry);
-    try {
-      this.ctx.storage.sql.exec('INSERT INTO auth_nonces (nonce, used_at) VALUES (?, ?)', nonce, timestamp);
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   private async acceptSocket(request: Request): Promise<Response> {
@@ -550,7 +523,7 @@ export class UserRelayDO extends DurableObject<Env> {
     }
     let machine: WebSocket | undefined;
     for (const socket of this.ctx.getWebSockets(`endpoint:machine:${machineId}`)) {
-      if (await this.authorizeSocket(socket, true)) {
+      if (await this.authorizeSocket(socket)) {
         machine = socket;
         break;
       }
@@ -715,7 +688,8 @@ export class UserRelayDO extends DurableObject<Env> {
     }
   }
 
-  private async authorizeSocket(socket: WebSocket, force = false): Promise<boolean> {
+  /** Frames, tunnel traffic and alarms all recheck the isolate's cached registry; none calls the vault. */
+  private async authorizeSocket(socket: WebSocket): Promise<boolean> {
     if (socket.readyState !== 1) return false;
     const attachment = this.socketAttachment(socket);
     if (attachment?.role === 'client') return true;
@@ -729,47 +703,17 @@ export class UserRelayDO extends DurableObject<Env> {
       this.rejectMachineSocket(socket, { check: attachment?.machineGrant ? 'grant-machine-mismatch' : 'grant-missing' });
       return false;
     }
-    const now = Date.now();
-    const accountAuthorization = attachment.accountAuthorization;
-    const accountFresh = accountAuthorization !== undefined && accountAuthorization.checkedAt <= now
-      && now < accountAuthorization.refreshAt && now < accountAuthorization.expiresAt;
-    const checking = this.machineChecks.get(socket);
-    if (checking) return checking;
-    if (!force && accountFresh && (attachment.authorizedUntil ?? 0) > now) return true;
-    const check = (async () => {
-      let accountLease = accountAuthorization;
-      if (!accountFresh) {
-        const account = await activeAccount(this.env, this.env.ACCOUNT_ID);
-        if (account.status === 'error') {
-          this.rejectMachineSocket(socket, { check: 'authority-rejected', status: account.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' ? 503 : 403, code: account.error.code, message: account.error.message });
-          return false;
-        }
-        accountLease = account.value.authorization;
-      }
-      let authorizedUntil = attachment.authorizedUntil ?? 0;
-      if (force || authorizedUntil <= Date.now()) {
-        authorizedUntil = machineAuthorizationDeadline(attachment.machineGrant!);
-        const rejected = await currentMachineAuthority(this.env, attachment.machineGrant!, 'space.control');
-        const rejection = rejected ? await authorityRejection(rejected) : null;
-        if (rejection || authorizedUntil <= Date.now() || socket.readyState !== 1) {
-          this.rejectMachineSocket(socket, rejection
-            ?? (authorizedUntil <= Date.now() ? { check: 'authorization-expired', authorizedUntil } : { check: 'socket-closed' }));
-          return false;
-        }
-      }
-      if (!accountLease || Date.now() < accountLease.checkedAt || Date.now() >= accountLease.expiresAt || socket.readyState !== 1) {
-        this.rejectMachineSocket(socket, { check: 'authorization-expired', authorizedUntil: accountLease?.expiresAt ?? 0 });
-        return false;
-      }
-      socket.serializeAttachment({ ...this.socketAttachment(socket), authorizedUntil, accountAuthorization: accountLease });
-      return true;
-    })();
-    this.machineChecks.set(socket, check);
-    try {
-      return await check;
-    } finally {
-      this.machineChecks.delete(socket);
+    const authorizedUntil = machineAuthorizationDeadline(attachment.machineGrant);
+    const rejected = await currentMachineAuthority(this.env, attachment.machineGrant, 'space.control');
+    const rejection = rejected ? await authorityRejection(rejected) : null;
+    if (rejection || authorizedUntil <= Date.now() || socket.readyState !== 1) {
+      this.rejectMachineSocket(socket, rejection
+        ?? (authorizedUntil <= Date.now() ? { check: 'authorization-expired', authorizedUntil } : { check: 'socket-closed' }));
+      return false;
     }
+    // The lease only schedules the next alarm recheck; renew it without rewriting the attachment on every frame.
+    if ((attachment.authorizedUntil ?? 0) - Date.now() < MACHINE_LEASE_MS / 2) socket.serializeAttachment({ ...attachment, authorizedUntil });
+    return true;
   }
 
   private rejectMachineSocket(socket: WebSocket, detail: MachineSocketCloseDetail): void {
@@ -869,15 +813,13 @@ export default {
       if (declared !== null && Number(declared) > REQUEST_MAX_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Account request exceeds size limit');
       const body = new Uint8Array(await request.arrayBuffer());
       if (body.byteLength > REQUEST_MAX_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Account request exceeds size limit');
-      const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
       const mutatesPairing = /^\/api\/browser-relay\/(pair|unpair|confirm|project-update)$/u.test(url.pathname);
       const requiresWrite = mutatesPairing || url.pathname === '/api/services/approve';
-      const auth = await vault.authorizeBrowserRequest({ header: request.headers.get('x-gitspace-device'), target: `${url.pathname}${url.search}`, body, capabilities: [requiresWrite ? 'rpc.write' : 'rpc.read'] });
-      if (auth.status === 'error') return Response.json(auth, { status: auth.error.code === 'RPC_FORBIDDEN' ? 403 : 401 });
-      if (mutatesPairing) {
-        const device = await vault.currentDeviceGrant(auth.value.deviceId);
-        if (!device || device.kind !== 'browser' || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.write')) return jsonError(403, 'RPC_FORBIDDEN', 'Pairing requires an account-scoped browser with write access');
-      }
+      const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({
+        header: request.headers.get('x-gitspace-device'), method: 'POST', target: `${url.pathname}${url.search}`, body,
+        capabilities: [requiresWrite ? 'rpc.write' : 'rpc.read'], browserOnly: true, accountScope: true,
+      }, now));
+      if (auth.status === 'error') return Response.json(auth, { status: auth.error.code === 'RPC_FORBIDDEN' ? 403 : auth.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : 401 });
       const relay = env.RELAY.getByName(env.RELAY_NAME);
       if (url.pathname.endsWith('/extension.zip')) return new Response(Uint8Array.from(browserRelayArchive(env.ACCOUNT_URL)), { headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename=\"gitspace-browser-relay.zip\"', 'cache-control': 'no-store' } });
       if (url.pathname === '/api/services/approve') {
@@ -885,7 +827,7 @@ export default {
         if (!parsed.success || !isHostedServiceHostname(env, parsed.data.hostname) || !safeServiceReturn(parsed.data.returnTo)) return jsonError(400, 'SERVICE_APPROVAL_INVALID', 'Invalid service approval');
         const route = await env.HOSTED_ROUTES.getByName(parsed.data.hostname).get();
         if (!route || route.tenant !== env.ACCOUNT_ID) return jsonError(404, 'SERVICE_ROUTE_NOT_FOUND', 'Service unavailable');
-        const ticket = await relay.serviceApprove({ ...parsed.data, deviceId: auth.value.deviceId });
+        const ticket = await relay.serviceApprove({ ...parsed.data, deviceId: auth.value.device.deviceId });
         return Response.json({ status: 'ok', value: { callback: `https://${parsed.data.hostname}/__gitspace/auth?ticket=${encodeURIComponent(ticket)}` } });
       }
       if (url.pathname.endsWith('/pair')) return Response.json({ status: 'ok', value: await relay.browserRelayPair(await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust(), new URL('/api/browser-relay/extension', env.ACCOUNT_URL).href.replace(/^http/u, 'ws')) });
@@ -914,8 +856,8 @@ export default {
     if (url.pathname === '/api/services/fetch' || url.pathname === '/api/services/trust') {
       const machineId = request.headers.get('x-gitspace-machine') ?? '';
       const target = `${request.method}\n${url.pathname}${url.search}`;
-      const auth = await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID).authorizeMachineRequest(request.headers.get('authorization'), target, machineId);
-      if (auth.status === 'error') return Response.json(auth, { status: 401 });
+      const auth = await withDeviceAuthority(env, (view, now) => view.authorizeMachineRelay(request.headers.get('authorization'), target, machineId, now));
+      if (auth.status === 'error') return Response.json(auth, { status: auth.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : 401 });
       if (url.pathname.endsWith('/trust')) return Response.json(await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust());
       const targetUrl = url.searchParams.get('url');
       if (!targetUrl) return jsonError(400, 'SERVICE_URL_REQUIRED', 'Service URL required');
@@ -954,8 +896,11 @@ export default {
     if (tunnel) {
       let bodyProof: z.infer<typeof TunnelBodyProofSchema> | undefined;
       if (request.headers.has('x-gitspace-device')) {
-        const auth = await env.CREDENTIALS.getByName(env.ACCOUNT_ID).authorizeTunnelDeviceRequest({ header: request.headers.get('x-gitspace-device'), target: `${url.pathname}${url.search}`, method: request.method });
-        if (auth.status === 'error') return Response.json(auth, { status: 401 });
+        // Admit identity only; the tunnel destination retains procedure and scope authorization.
+        const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({
+          header: request.headers.get('x-gitspace-device'), method: request.method, target: `${url.pathname}${url.search}`, body: null, capabilities: [], accountScope: false,
+        }, now));
+        if (auth.status === 'error') return Response.json(auth, { status: auth.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : 401 });
         const declared = request.headers.get('content-length');
         if (declared === null && request.body !== null) return jsonError(411, 'REQUEST_LENGTH_REQUIRED', 'Tunnel uploads require Content-Length');
         if (declared !== null && (!/^\d+$/u.test(declared) || !Number.isSafeInteger(Number(declared)))) return jsonError(400, 'REQUEST_LENGTH_INVALID', 'Invalid tunnel content length');
@@ -964,9 +909,8 @@ export default {
         bodyProof = { length, bodySha256: auth.value.bodySha256 };
         if (!request.body && (length !== 0 || auth.value.bodySha256 !== rpcBodySha256(new Uint8Array()))) return jsonError(400, 'REQUEST_BODY_MISMATCH', 'Tunnel body does not match its signed digest and declared length');
       } else {
-        const auth = request.headers.has(MACHINE_GRANT_HEADER) ? await authorizedMachineRequest(request, env, null) : authorizedRootRequest(request, env);
-        if (auth instanceof Response) return auth;
-        if (!await env.RELAY.getByName(env.RELAY_NAME).consumeAuthorization(auth.nonce, auth.timestamp)) return jsonError(401, 'AUTH_REPLAY', 'Tunnel authorization was already used');
+        const rejected = request.headers.has(MACHINE_GRANT_HEADER) ? await authorizedMachineRequest(request, env, null) : authorizedRootRequest(request, env);
+        if (rejected) return rejected;
       }
       const headers = new Headers(request.headers);
       for (const name of Object.keys(INTERNAL_HEADERS)) headers.delete(name);
@@ -974,27 +918,25 @@ export default {
       return forwardTunnelRequest(new Request(request, { headers }), env, tunnel, bodyProof);
     }
 
-    let authorization: Response | { nonce: string; timestamp: number; target: string };
+    let rejected: Response | null;
     if (url.pathname === '/ws') {
       const role = url.searchParams.get('role');
       const id = url.searchParams.get('id');
-      authorization = role === 'machine'
+      rejected = role === 'machine'
         ? await authorizedMachineRequest(request, env, id)
         : authorizedRootRequest(request, env);
     } else if (genericObject) {
-      authorization = request.headers.has(MACHINE_GRANT_HEADER)
+      rejected = request.headers.has(MACHINE_GRANT_HEADER)
         ? await authorizedMachineRequest(request, env, null)
         : authorizedRootRequest(request, env);
     } else if (artifact) {
-      authorization = await authorizedMachineRequest(request, env, null);
+      rejected = await authorizedMachineRequest(request, env, null);
     } else {
       return application.fetch(request, env);
     }
-    if (authorization instanceof Response) return authorization;
+    if (rejected) return rejected;
 
-    const stub = env.RELAY.getByName(env.RELAY_NAME);
     if (genericObject) {
-      if (!await stub.consumeAuthorization(authorization.nonce, authorization.timestamp)) return jsonError(401, 'AUTH_REPLAY', 'Object authorization was already used');
       const key = url.searchParams.get('key');
       if (!key || new TextEncoder().encode(key).byteLength > 1024) return jsonError(400, 'INVALID_OBJECT_KEY', 'An object key within provider limits is required');
       if (request.method === 'PUT') {
@@ -1012,12 +954,7 @@ export default {
       object.writeHttpMetadata(headers);
       return new Response(request.method === 'HEAD' ? null : (object as R2ObjectBody).body, { headers });
     }
-    if (artifact) {
-      if (!await stub.consumeAuthorization(authorization.nonce, authorization.timestamp)) {
-        return jsonError(401, 'AUTH_REPLAY', 'Relay authorization was already used or is invalid');
-      }
-      return handleArtifactRequest(request, env, artifact[1]!);
-    }
+    if (artifact) return handleArtifactRequest(request, env, artifact[1]!);
 
     const headers = new Headers(request.headers);
     if (url.pathname === '/ws') {
@@ -1027,6 +964,6 @@ export default {
       headers.set(INTERNAL_ENDPOINT_ID, parsed.data.id);
     }
 
-    return stub.fetch(relayRequest(request, authorization, headers));
+    return env.RELAY.getByName(env.RELAY_NAME).fetch(relayRequest(request, headers));
   },
 } satisfies ExportedHandler<Env>;

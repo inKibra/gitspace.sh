@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { env, runInDurableObject, SELF } from 'cloudflare:test';
+import { env, SELF } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
+  CONTROL_SOCKET_PROTOCOL,
   createSignedControlRequest,
   credentialProtocolBase64,
   signCredentialAuthorityGrant,
@@ -74,11 +75,6 @@ describe('signed control transport', () => {
     });
     expect(downloaded.status).toBe(200);
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
-
-    const replay = await SELF.fetch(`https://auth.test/v1/data/${key}`, {
-      headers: { 'x-gitspace-control': signedHeader(get) },
-    });
-    expect(replay.status).toBe(401);
   });
   it('rejects oversized signed objects after authorization and preserves upload validation and immutability', async () => {
     const userId = env.ACCOUNT_ID;
@@ -164,8 +160,10 @@ describe('signed control transport', () => {
     }
     const openSubscription = async (machineId: string, signingKey: Uint8Array): Promise<WebSocket> => {
       const subscription = createSignedControlRequest({ userId, machineId, operation: 'settings.subscribe', payload: {}, signingPrivateKey: signingKey });
-      const response = await SELF.fetch(`https://auth.test/v1/settings/events?control=${encodeURIComponent(signedHeader(subscription))}`, { headers: { upgrade: 'websocket' } });
+      const protocol = `${CONTROL_SOCKET_PROTOCOL}${signedHeader(subscription)}`;
+      const response = await SELF.fetch('https://auth.test/v1/settings/events', { headers: { upgrade: 'websocket', 'sec-websocket-protocol': protocol } });
       expect(response.status).toBe(101);
+      expect(response.headers.get('sec-websocket-protocol')).toBe(protocol);
       const socket = response.webSocket!;
       socket.accept();
       return socket;
@@ -177,6 +175,9 @@ describe('signed control transport', () => {
       openSubscription('machine-a', machineSigningPrivateKey),
       openSubscription('machine-b', machineBSigningPrivateKey),
     ]);
+    // A proof in the URL is not authentication.
+    const inUrl = createSignedControlRequest({ userId, machineId: 'machine-a', operation: 'settings.subscribe', payload: {}, signingPrivateKey: machineSigningPrivateKey });
+    expect((await SELF.fetch(`https://auth.test/v1/settings/events?control=${signedHeader(inUrl)}`, { headers: { upgrade: 'websocket' } })).status).toBe(400);
     // Machines re-apply the account Git author whenever the account edits user settings.
     const settings = env.USER_SETTINGS.getByName(userId);
     const { revision, updatedAt: _updatedAt, updatedBy: _updatedBy, version: _version, ...current } = await settings.get('browser');
@@ -188,8 +189,8 @@ describe('signed control transport', () => {
     socketA.close(1000, 'done');
     socketB.close(1000, 'done');
   });
-  it('authorizes a control-plane managed sandbox device', async () => {
-    const userId = `managed-sandbox-${crypto.randomUUID()}`;
+  it('authorizes a control-plane managed sandbox device until it is removed', async () => {
+    const userId = env.ACCOUNT_ID;
     const vault = env.CREDENTIALS.getByName(userId);
     await vault.bootstrap({
       userId,
@@ -204,11 +205,16 @@ describe('signed control transport', () => {
       exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(machineBExchangePrivateKey)),
       capabilities: ['storage.access', 'space.control'],
     })).toMatchObject({ status: 'ok', value: { machineId, generation: 1 } });
-    const request = createSignedControlRequest({ userId, machineId, operation: 'settings.get', payload: {}, signingPrivateKey: machineBSigningPrivateKey });
-    expect(await vault.authorizeControl(request, 'storage.access')).toEqual({ status: 'ok', value: { authorized: true } });
+    const control = () => SELF.fetch('https://auth.test/v1/control', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(createSignedControlRequest({ userId, machineId, operation: 'settings.get', payload: {}, signingPrivateKey: machineBSigningPrivateKey })),
+    });
+    expect((await control()).status).toBe(200);
     await vault.removeManagedDevice(machineId);
-    const revokedRequest = createSignedControlRequest({ userId, machineId, operation: 'settings.get', payload: {}, signingPrivateKey: machineBSigningPrivateKey });
-    expect(await vault.authorizeControl(revokedRequest, 'storage.access')).toMatchObject({ status: 'error' });
+    const revoked = await control();
+    expect(revoked.status).toBe(401);
+    expect(await revoked.json()).toMatchObject({ error: { code: 'ACCESS_DENIED' } });
   });
 });
 
@@ -259,40 +265,31 @@ describe('signed request windows', () => {
     expect(await env.DATA.head(`users/${userId}/projects/p/spaces/s/expired.bin`)).toBeNull();
   });
 
-  it('keeps the upload window to data.put and reports age separately from invalid requests', async () => {
-    const { userId, vault } = await enroll();
-    const signed = (signedAgoMs: number) => createSignedControlRequest({
-      userId, machineId: 'machine-a', operation: 'settings.get', payload: {},
-      signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - signedAgoMs,
+  it('keeps the upload window to data.put and accepts other requests only within 60 seconds of the account clock', async () => {
+    const { userId } = await enroll();
+    const signed = (offsetMs: number, user = userId) => createSignedControlRequest({
+      userId: user, machineId: 'machine-a', operation: 'settings.get', payload: {},
+      signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() + offsetMs,
     });
-    const control = (signedAgoMs: number) => SELF.fetch('https://auth.test/v1/control', {
+    const control = (offsetMs: number, user = userId) => SELF.fetch('https://auth.test/v1/control', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(signed(signedAgoMs)),
+      body: JSON.stringify(signed(offsetMs, user)),
     });
-    expect((await control(4 * minutes)).status).toBe(200);
-    const expired = await control(6 * minutes);
-    expect(expired.status).toBe(401);
-    expect(await expired.json()).toMatchObject({ error: { code: 'REQUEST_EXPIRED' } });
-    expect(await vault.authorizeControl({ ...signed(6 * minutes), userId: 'another-user' }, 'storage.access')).toMatchObject({ error: { code: 'INVALID_REQUEST' } });
+    expect((await control(-50_000)).status).toBe(200);
+    expect((await control(50_000)).status).toBe(200);
+    for (const offset of [-90_000, 90_000]) {
+      const expired = await control(offset);
+      expect(expired.status).toBe(401);
+      expect(await expired.json()).toMatchObject({ error: { code: 'REQUEST_EXPIRED', message: 'Signed request expired' } });
+    }
+    // A validly signed proof for another account is invalid, not merely late.
+    expect(await (await control(-90_000, 'another-user')).json()).toMatchObject({ error: { code: 'INVALID_REQUEST' } });
     const read = createSignedControlRequest({
       userId, machineId: 'machine-a', operation: 'data.head', payload: { key: 'projects/p/spaces/s/missing.bin', hash: await sha256(new Uint8Array([1])) },
-      signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - 6 * minutes,
+      signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - 90_000,
     });
     const staleRead = await SELF.fetch('https://auth.test/v1/data/projects/p/spaces/s/missing.bin', { method: 'HEAD', headers: { 'x-gitspace-control': signedHeader(read) } });
     expect(staleRead.status).toBe(401);
-  });
-
-  it('rejects a replayed data.put for as long as its signature is accepted', async () => {
-    const { userId, vault } = await enroll();
-    const upload = await signedUpload(userId, 'projects/p/spaces/s/replayed.bin', 20 * minutes);
-    expect((await upload()).status).toBe(201);
-    // Nine minutes later the signature is 29 minutes old and still inside the upload window.
-    await runInDurableObject(vault, (_instance, state) => {
-      state.storage.sql.exec('UPDATE request_nonces SET used_at = used_at - ?', 9 * minutes);
-    });
-    const replay = await upload();
-    expect(replay.status).toBe(401);
-    expect(await replay.json()).toMatchObject({ error: { code: 'REQUEST_REPLAY' } });
   });
 });

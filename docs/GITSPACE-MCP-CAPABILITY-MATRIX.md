@@ -385,7 +385,7 @@ Ordinary `rpc.write` remains broad: it includes terminal execution, integrations
 ### 4. Retries and completion must be truthful
 
 - [Environment acceptance](../packages/account-machine/src/workspace-environment.ts#L198) returns the existing run for a reused space/run ID; the [lifecycle claim](../packages/protocol-environment/src/lifecycle.ts#L255) rejects identity collisions and reports an existing claim without re-executing it. Preserve that behavior and identical inputs in the adapter. A new run ID authorizes a new attempt.
-- Do not add automatic retries to prompts, terminal input, queue edits, creates, deployments, or other I=false operations after an ambiguous timeout. Read state and reconcile first. RPC anti-replay nonces are not business-operation deduplication.
+- Do not add automatic retries to prompts, terminal input, queue edits, creates, deployments, or other I=false operations after an ambiguous timeout. Read state and reconcile first. Signed RPC requests carry no replay state; their nonces never deduplicate business operations.
 - Return accepted/running/completed/failed distinctly. A deployment launch is not activation; cancellation acceptance is not process exit; log EOF is not execution success.
 - Any new I=true claim requires an end-to-end invariant and a repeated-request test, including response loss. Do not promote a hint based solely on an input field name.
 

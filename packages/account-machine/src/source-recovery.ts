@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ExecutorJournal, type LocalAttachment } from '@gitspace/runtime-machine';
-import { releaseTargetSchema, type ReleaseTarget } from '@gitspace/protocol';
+import { createServerClock, releaseTargetSchema, type ReleaseTarget } from '@gitspace/protocol';
 import { CloudSpaceCheckpointAuthority, CloudDataCheckpointBlobStore } from './cloud-space-authority.js';
 import { DeploymentLauncher, deploymentSource } from './deployment-launcher.js';
 
@@ -16,7 +16,7 @@ export async function recoverReleaseFromSource(sourceRoot: string, workspaceId: 
   const machineId = required('GITSPACE_MACHINE_ID');
   const signingPrivateKey = new Uint8Array(Buffer.from(required('GITSPACE_MACHINE_SIGNING_PRIVATE_KEY'), 'base64'));
   if (signingPrivateKey.byteLength !== 32) throw new Error('Source recovery machine signing key is invalid');
-  const control = { baseUrl: required('GITSPACE_CONTROL_URL'), userId: required('GITSPACE_USER_ID'), machineId, signingPrivateKey };
+  const control = { baseUrl: required('GITSPACE_CONTROL_URL'), userId: required('GITSPACE_USER_ID'), machineId, signingPrivateKey, clock: createServerClock() };
   const authority = new CloudSpaceCheckpointAuthority(control);
   // The old process owns this journal until health/commit. Recovery only reads its durable cache assignment.
   const journal = new ExecutorJournal(join(environmentRoot, 'executor', 'attempts.sqlite'), { readonly: true });

@@ -49,8 +49,9 @@ beforeEach(async () => {
   await vault.registerDevice(machineGrant);
 });
 
+/** The vault read behind the isolate's registry fails; authentication survives only while the cached copy is fresh enough. */
 function interruptAuthority() {
-  vi.spyOn(CredentialVaultDO.prototype, 'authorizeRelayGrant').mockRejectedValue(new Error('Authority unavailable'));
+  vi.spyOn(CredentialVaultDO.prototype, 'deviceRegistrySnapshot').mockImplementation(() => { throw new Error('Authority unavailable'); });
 }
 
 afterEach(async () => {
@@ -136,25 +137,6 @@ describe('portable RelayDO', () => {
     client.close(1000, 'done');
   });
 
-  it('rejects reuse of one signed authorization nonce', async () => {
-    const url = 'https://relay.test/ws?role=machine&id=darktop';
-    const target = '/ws?role=machine&id=darktop';
-    const header = createRelayAuthorization(
-      machinePrivateKey,
-      target,
-      Date.now(),
-      '12345678-1234-4234-8234-123456789abc',
-    );
-    const grant = btoa(JSON.stringify(machineGrant)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
-    const init = { headers: { upgrade: 'websocket', authorization: header, 'x-gitspace-machine-grant': grant } };
-    const accepted = await exports.default.fetch(new Request(url, init));
-    expect(accepted.status).toBe(101);
-    accepted.webSocket?.accept();
-    const replay = await exports.default.fetch(new Request(url, init));
-    expect(replay.status).toBe(401);
-    accepted.webSocket?.close(1000, 'done');
-  });
-
   it.each(['revoked', 'stale'] as const)('rejects a %s machine grant before replacing the live socket or accessing blobs', async (reason) => {
     const machine = await openSocket('machine', 'darktop');
     const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
@@ -174,12 +156,13 @@ describe('portable RelayDO', () => {
     machine.close(1000, 'done');
   });
 
-  it('fails closed when current authority is unreachable', async () => {
+  it('fails closed when current authority is unreachable and no usable registry is cached', async () => {
     interruptAuthority();
     const connect = await exports.default.fetch(machineAuthorizedRequest(
       'https://relay.test/ws?role=machine&id=darktop', { headers: { upgrade: 'websocket' } },
     ));
     expect(connect.status).toBe(503);
+    expect(await connect.json()).toMatchObject({ error: { code: 'DEVICE_AUTHORITY_UNAVAILABLE', message: 'Device authority is unavailable; retry shortly' } });
     const artifact = await exports.default.fetch(machineAuthorizedRequest(`https://relay.test/artifacts/${'b'.repeat(64)}`));
     expect(artifact.status).toBe(503);
   });
@@ -263,12 +246,13 @@ describe('portable RelayDO', () => {
     client.close(1000, 'done');
   });
 
-  it.each(['revoked', 'unreachable'] as const)('closes an idle socket with %s authority when its durable lease expires', async (reason) => {
+  it.each(['revoked', 'unreachable'] as const)('closes an idle socket on its alarm once its authority is %s', async (reason) => {
     const machine = await openSocket('machine', 'darktop');
     const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
     if (reason === 'revoked') await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('darktop');
     else interruptAuthority();
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 30_001);
+    // An unreachable vault is tolerated until the cached registry is two minutes old.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + (reason === 'revoked' ? 30_001 : 120_001));
     expect(await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME))).toBe(true);
     expect((await closed).code).toBe(1008);
   });
@@ -518,7 +502,7 @@ describe('portable RelayDO', () => {
       'https://relay.test/tunnel/darktop/api/hello?mode=dev',
       {
         method: 'POST',
-        headers: { 'content-type': 'text/plain', 'x-request-test': 'kept', 'x-gitspace-signed-target': '/forged', 'x-gitspace-auth-nonce': 'forged', 'x-gitspace-auth-timestamp': '0', 'x-gitspace-role': 'machine', 'x-gitspace-endpoint-id': 'forged', 'x-gitspace-tunnel-machine': 'other-machine', 'x-gitspace-tunnel-path': '/forged', 'x-gitspace-service-session': 'forged', 'x-forwarded-host': 'forged.gssh.dev', 'x-gitspace-service-assertion': 'forged' },
+        headers: { 'content-type': 'text/plain', 'x-request-test': 'kept', 'x-gitspace-signed-target': '/forged', 'x-gitspace-role': 'machine', 'x-gitspace-endpoint-id': 'forged', 'x-gitspace-tunnel-machine': 'other-machine', 'x-gitspace-tunnel-path': '/forged', 'x-gitspace-service-session': 'forged', 'x-forwarded-host': 'forged.gssh.dev', 'x-gitspace-service-assertion': 'forged' },
         body: 'request body',
       },
     ));
@@ -529,7 +513,7 @@ describe('portable RelayDO', () => {
     expect(startMessage).toMatchObject({ method: 'POST', path: '/api/hello?mode=dev' });
     expect(startMessage?.headers).toContainEqual(['x-request-test', 'kept']);
     expect(new Headers(startMessage?.headers).get('x-gitspace-signed-target')).toBe('/tunnel/darktop/api/hello?mode=dev');
-    for (const name of ['x-gitspace-auth-nonce', 'x-gitspace-auth-timestamp', 'x-gitspace-role', 'x-gitspace-endpoint-id', 'x-gitspace-tunnel-machine', 'x-gitspace-tunnel-path', 'x-gitspace-service-session', 'x-forwarded-host', 'x-gitspace-service-assertion']) expect(new Headers(startMessage?.headers).has(name)).toBe(false);
+    for (const name of ['x-gitspace-role', 'x-gitspace-endpoint-id', 'x-gitspace-tunnel-machine', 'x-gitspace-tunnel-path', 'x-gitspace-service-session', 'x-forwarded-host', 'x-gitspace-service-assertion']) expect(new Headers(startMessage?.headers).has(name)).toBe(false);
     const requestBody = new Uint8Array(bodyParts.reduce((total, part) => total + part.byteLength, 0));
     let offset = 0;
     for (const part of bodyParts) {

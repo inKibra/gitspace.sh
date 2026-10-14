@@ -1,13 +1,14 @@
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { createDeviceBinding, credentialProtocolBase64, RPC_DEVICE_HEADER, signDeviceInvite, signRpcRequest, type CloudProjectSummary, type CloudWorkspaceDefinition, type DeviceInvite } from '@gitspace/protocol';
+import { createDeviceBinding, credentialProtocolBase64, DEVICE_SOCKET_PROTOCOL, RPC_DEVICE_HEADER, signDeviceInvite, signRpcRequest, type CloudProjectSummary, type CloudWorkspaceDefinition, type DeviceInvite } from '@gitspace/protocol';
 import { accountDirectoryEventSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { http, HttpResponse } from 'msw';
 import { UserProjectIndexDO, ProjectAuthorityDO } from '../src/project-authority.js';
 import { DirectoryOutbox, type DirectoryPublication, type DirectorySource } from '../src/account-directory.js';
 import { DurableChangeLog } from '../src/durable-stream.js';
+import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
@@ -28,10 +29,11 @@ async function browserDevice(rights: Partial<Pick<DeviceInvite, 'scope' | 'capab
     issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: env.ACCOUNT_URL, ...rights }, tenantRootPrivateKey);
   const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(key)), label: 'Browser', boundAt: Date.now(), signingPrivateKey: key });
   expect(await vault.enrollDevice({ invite, binding })).toMatchObject({ status: 'ok' });
+  // Sockets carry the signed GET as a subprotocol; plain GETs (the browser's rejection probe) as a header.
   const request = (after?: number, upgrade = true) => {
     const path = `/v1/directory/events${after === undefined ? '' : `?after=${after}`}`;
     const auth = signRpcRequest({ deviceId: binding.deviceId, signingPrivateKey: key, method: 'GET', path, body: new Uint8Array() });
-    return new Request(`${env.ACCOUNT_URL}${path}${after === undefined ? '?' : '&'}auth=${encodeURIComponent(auth)}`, { headers: { origin: env.ACCOUNT_URL, ...(upgrade ? { upgrade: 'websocket' } : {}) } });
+    return new Request(`${env.ACCOUNT_URL}${path}`, { headers: { origin: env.ACCOUNT_URL, ...(upgrade ? { upgrade: 'websocket', 'sec-websocket-protocol': `${DEVICE_SOCKET_PROTOCOL}${auth}` } : { [RPC_DEVICE_HEADER]: auth }) } });
   };
   return { vault, key, deviceId: binding.deviceId, request };
 }
@@ -51,6 +53,7 @@ function socketEvents(socket: WebSocket) {
 async function openDirectory(request: Request) {
   const response = await SELF.fetch(request);
   expect(response.status).toBe(101);
+  expect(response.headers.get('sec-websocket-protocol')).toBe(request.headers.get('sec-websocket-protocol'));
   const socket = response.webSocket!;
   return { socket, events: socketEvents(socket) };
 }
@@ -138,13 +141,14 @@ describe('account directory projection', () => {
   });
 });
 
-describe('directory WebSocket authentication and replay', () => {
-  it('binds the cursor and method to the signature, consumes nonces and rejects foreign origins before upgrade', async () => {
+describe('directory WebSocket authentication', () => {
+  it('binds the cursor and method to the signature, never reads a URL proof and rejects foreign origins before upgrade', async () => {
     const device = await browserDevice();
-    const request = device.request(0, false);
-    const replay = new Request(request.url, { method: request.method, headers: request.headers, body: request.clone().body });
-    expect((await SELF.fetch(request)).status).toBe(426);
-    expect(await (await SELF.fetch(replay)).json()).toMatchObject({ error: { code: 'REQUEST_REPLAY' } });
+    expect((await SELF.fetch(device.request(0, false))).status).toBe(426);
+    const path = '/v1/directory/events?after=0';
+    const inUrl = signRpcRequest({ deviceId: device.deviceId, signingPrivateKey: device.key, method: 'GET', path, body: new Uint8Array() });
+    const urlProof = await SELF.fetch(new Request(`${env.ACCOUNT_URL}${path}&auth=${encodeURIComponent(inUrl)}`, { headers: { origin: env.ACCOUNT_URL, upgrade: 'websocket' } }));
+    expect(urlProof.status).toBe(400);
     const tampered = device.request(0, false);
     expect((await SELF.fetch(new Request(tampered.url.replace('after=0', 'after=1'), tampered))).status).toBe(401);
     const foreign = device.request();
@@ -181,7 +185,7 @@ describe('directory WebSocket authentication and replay', () => {
     expect(await parent.vault.enrollDevice({ invite, binding })).toMatchObject({ status: 'ok' });
     const path = '/v1/directory/events';
     const auth = signRpcRequest({ deviceId: binding.deviceId, signingPrivateKey: key, method: 'GET', path, body: new Uint8Array() });
-    const opened = await openDirectory(new Request(`${env.ACCOUNT_URL}${path}?auth=${encodeURIComponent(auth)}`, { headers: { origin: env.ACCOUNT_URL, upgrade: 'websocket' } }));
+    const opened = await openDirectory(new Request(`${env.ACCOUNT_URL}${path}`, { headers: { origin: env.ACCOUNT_URL, upgrade: 'websocket', 'sec-websocket-protocol': `${DEVICE_SOCKET_PROTOCOL}${auth}` } }));
     await opened.events.next();
     await parent.vault.revokeDeviceGrant(parent.deviceId);
     await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 1 });
@@ -216,7 +220,7 @@ describe('directory WebSocket authentication and replay', () => {
     expired.socket.close(1000, 'done');
   });
 
-  it('reconstructs delivery from attachments and durable state without consuming the nonce again, then fences revocation', async () => {
+  it('reconstructs delivery from attachments and durable state, then fences revocation', async () => {
     const device = await browserDevice();
     const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
     const opened = await openDirectory(device.request());
@@ -247,6 +251,8 @@ describe('directory WebSocket authentication and replay', () => {
     await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 1 });
     expect(await opened.events.next()).toMatchObject({ type: 'message', value: { type: 'change', value: { workspaces: [workspace] } } });
     clock.mockReturnValue(now + 60_001);
+    // The next refresh carries the lapsed platform observation.
+    invalidateDeviceAuthority();
     await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 2 });
     expect(await opened.events.next()).toEqual({ type: 'close', code: 1013 });
   });

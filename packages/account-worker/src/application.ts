@@ -30,13 +30,13 @@ import {
   credentialProtocolBase64,
   sealCredentialForMachine,
   signedControlRequestSchema,
+  SIGNED_REQUEST_EXPIRED_CODE,
+  SIGNED_REQUEST_EXPIRED_MESSAGE,
   SIGNED_REQUEST_MAX_AGE_MS,
   SIGNED_UPLOAD_MAX_AGE_MS,
   verifyCredentialAccessRequest,
   verifyCredentialAuthorityGrant,
-  verifyManagedDeviceGrant,
   signCredentialAuthorityGrant,
-  verifySignedControlRequest,
   verifyRelayAuthorization,
   signedCredentialAuthorityGrantSchema,
   type CredentialAccessRequest,
@@ -54,7 +54,6 @@ import {
   type SignedDeviceInvite,
   decodeSignedRpcHeader,
   verifyRpcSignature,
-  verifyRpcDigestSignature,
   RPC_DEVICE_HEADER,
   MACHINE_PAIRING_TTL_MS,
   credentialAuthorityGrantPayload,
@@ -115,7 +114,8 @@ import { SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
 import { AccountStateDO } from './account-state.js';
 import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
-import { accountAccessResponse, activeAccount, authorizeControl } from './account-access.js';
+import { accountAccessResponse, accountStatus, activeAccount, authorizeControl, controlSubscriptionActive } from './account-access.js';
+import { DEVICE_AUTHORITY_UNAVAILABLE, DeviceVerifier, invalidateDeviceAuthority, withDeviceAuthority, type DeviceRegistrySnapshot, type MachineCredential } from './device-authority.js';
 import { machineProviderFor } from './machine-providers.js';
 import { releaseMachineAttachments } from './runtime-machine-loss.js';
 import {
@@ -126,6 +126,8 @@ import {
 } from './local-mcp.js';
 import {
   launchReleaseInputSchema,
+  machineAppliedInputSchema,
+  machineChannelAppliedInputSchema,
   ReleaseNotFoundError,
   WORKER_VERSION,
   type WorkerVersion,
@@ -135,8 +137,6 @@ import {
 // Pi's variable-specifier Bedrock import cannot run inside a Worker bundle.
 setBedrockProviderModule(bedrockProviderModule);
 
-/** `request_nonces` accepts `data.put` for the upload window, the longest it admits. */
-const REQUEST_NONCE_RETENTION_MS = SIGNED_UPLOAD_MAX_AGE_MS;
 /**
  * Tolerated clock skew for persisted enrollment material (invite `issuedAt`, binding
  * `boundAt`). Not a request-signature window: it bounds pre-dating inside the
@@ -249,12 +249,28 @@ export type CredentialVaultResult<T> =
   | { status: 'ok'; value: T }
   | { status: 'error'; error: { code: string; message: string; retryAfterMs?: number } };
 
-interface DeviceRow extends Record<string, SqlStorageValue> {
+interface MachineRow extends Record<string, SqlStorageValue> {
+  machine_id: string;
   signing_public_key: string;
   exchange_public_key: string;
   capabilities_json: string;
   generation: number;
   grant_json: string | null;
+}
+
+/** A row whose stored grant or capabilities no longer parse is not a credential: it authorizes nothing. */
+function machineCredential(row: MachineRow): MachineCredential | null {
+  const capabilities = z.array(z.string()).safeParse(JSON.parse(row.capabilities_json));
+  const grant = row.grant_json === null ? null : signedCredentialAuthorityGrantSchema.safeParse(JSON.parse(row.grant_json));
+  if (!capabilities.success || (grant && !grant.success)) return null;
+  return {
+    machineId: row.machine_id,
+    signingPublicKey: row.signing_public_key,
+    exchangePublicKey: row.exchange_public_key,
+    capabilities: capabilities.data,
+    generation: row.generation,
+    grant: grant ? grant.data : null,
+  };
 }
 
 interface CredentialRow extends Record<string, SqlStorageValue> {
@@ -429,11 +445,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
           id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL,
           device_id TEXT, sealed_key TEXT, token_hash TEXT, updated_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS request_nonces (
-          nonce TEXT PRIMARY KEY,
-          used_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS request_nonces_used_at ON request_nonces(used_at);
+        DROP TABLE IF EXISTS request_nonces;
         CREATE TABLE IF NOT EXISTS refresh_leases (
           credential_id TEXT PRIMARY KEY,
           owner TEXT NOT NULL,
@@ -688,36 +700,34 @@ export class CredentialVaultDO extends DurableObject<Env> {
       input.vaultKey,
       new Date().toISOString(),
     );
+    invalidateDeviceAuthority();
     return { status: 'ok', value: { userId: input.userId } };
   }
 
-  authorizeRelayGrant(input: SignedCredentialAuthorityGrant, capability: 'space.control' | 'storage.access'): CredentialVaultResult<{ authorized: true }> {
+  /** The one read per-request authentication makes: each isolate caches it (`device-authority.ts`). */
+  deviceRegistrySnapshot(): DeviceRegistrySnapshot | null {
     const config = this.config();
-    if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
-    const now = Date.now();
-    const rooted = verifyCredentialAuthorityGrant(input, credentialProtocolBase64.decode(config.root_public_key), now, (deviceId) => this.deviceGrant(deviceId));
-    // A self-signed grant is only a claim; it is admitted solely for a managed
-    // device row (no root grant) whose identity, keys, generation and capabilities match exactly.
-    const managed = rooted ? null : verifyManagedDeviceGrant(input, now);
-    const grant = rooted ?? managed;
-    if (!grant || grant.userId !== config.user_id) return publicError('DEVICE_UNAUTHORIZED', 'Device grant is invalid');
-    if (managed) {
-      const row = this.ctx.storage.sql.exec<{ grant_json: string | null; capabilities_json: string }>(
-        'SELECT grant_json, capabilities_json FROM credential_devices WHERE machine_id = ?', managed.machineId,
-      ).toArray()[0];
-      if (!row || row.grant_json !== null || row.capabilities_json !== JSON.stringify(managed.capabilities)) {
-        return publicError('DEVICE_UNAUTHORIZED', 'Device grant is not a current managed device credential');
-      }
-    }
-    const device = this.device(grant.machineId);
-    if (!device || device.generation !== grant.generation
-      || device.signing_public_key !== grant.signingPublicKey
-      || device.exchange_public_key !== grant.exchangePublicKey
-      || !grant.capabilities.includes(capability)
-      || !(JSON.parse(device.capabilities_json) as string[]).includes(capability)) {
-      return publicError('DEVICE_UNAUTHORIZED', 'Device grant is revoked, superseded, or lacks the required capability');
-    }
-    return { status: 'ok', value: { authorized: true } };
+    if (!config) return null;
+    const machines = this.ctx.storage.sql.exec<MachineRow>(
+      'SELECT machine_id, signing_public_key, exchange_public_key, capabilities_json, generation, grant_json FROM credential_devices',
+    ).toArray().flatMap((row) => machineCredential(row) ?? []);
+    return { userId: config.user_id, rootPublicKey: config.root_public_key, machines, devices: this.listDeviceGrants() };
+  }
+
+  /** The same checks the worker runs on its snapshot, over this vault's current rows. */
+  private verifier(): DeviceVerifier {
+    const config = this.config();
+    return new DeviceVerifier(config ? {
+      userId: config.user_id,
+      rootPublicKey: config.root_public_key,
+      machine: (machineId) => {
+        const row = this.ctx.storage.sql.exec<MachineRow>(
+          'SELECT machine_id, signing_public_key, exchange_public_key, capabilities_json, generation, grant_json FROM credential_devices WHERE machine_id = ?', machineId,
+        ).toArray()[0];
+        return row ? machineCredential(row) : null;
+      },
+      device: (deviceId) => this.deviceGrant(deviceId),
+    } : null);
   }
 
   registerDevice(input: SignedCredentialAuthorityGrant): CredentialVaultResult<{ machineId: string; generation: number }> {
@@ -751,6 +761,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         updated_at = excluded.updated_at
     `, grant.machineId, grant.signingPublicKey, grant.exchangePublicKey, JSON.stringify(grant.capabilities), grant.generation, new Date().toISOString());
     this.ctx.storage.sql.exec('UPDATE credential_devices SET grant_json = ? WHERE machine_id = ?', JSON.stringify(input), grant.machineId);
+    invalidateDeviceAuthority();
     return { status: 'ok', value: { machineId: grant.machineId, generation: grant.generation } };
   }
   registerManagedDevice(input: {
@@ -781,11 +792,13 @@ export class CredentialVaultDO extends DurableObject<Env> {
         generation = excluded.generation, updated_at = excluded.updated_at
     `, input.machineId, input.signingPublicKey, input.exchangePublicKey, JSON.stringify(input.capabilities), generation, new Date().toISOString());
     this.ctx.storage.sql.exec('UPDATE credential_devices SET grant_json = NULL WHERE machine_id = ?', input.machineId);
+    invalidateDeviceAuthority();
     return { status: 'ok', value: { machineId: input.machineId, generation } };
   }
   rootPublicKey(): string | null {
     return this.config()?.root_public_key ?? null;
   }
+  /** Root-signed account operations (bootstrap, enrollment, recovery, revocation) are rare and stay here. */
   authorizeRoot(header: string | null, target: string): CredentialVaultResult<{ authorized: true }> {
     const config = this.config();
     if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
@@ -795,58 +808,21 @@ export class CredentialVaultDO extends DurableObject<Env> {
       target,
       maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS,
     });
-    if (verified.status === 'error') return publicError('ROOT_UNAUTHORIZED', verified.error.message);
-    return this.consumeRequestNonce(verified.value.nonce, verified.value.timestamp);
-  }
-  authorizeBrowserRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
-    return this.authorizeRpcRequest(input, true);
+    if (verified.status === 'ok') return { status: 'ok', value: { authorized: true } };
+    return verified.error.expired ? publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE) : publicError('ROOT_UNAUTHORIZED', verified.error.message);
   }
 
-  authorizeAccountDeviceRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
-    return this.authorizeRpcRequest(input, false);
-  }
-
-  /** Admit identity only; the tunnel destination retains procedure and scope authorization. */
-  authorizeTunnelDeviceRequest(input: { header: string | null; target: string; method: string }): CredentialVaultResult<{ deviceId: string; bodySha256: string }> {
-    const config = this.config();
-    if (!config || config.user_id !== this.env.ACCOUNT_ID || config.root_public_key !== this.env.AUTH_PUBLIC_KEY) {
-      return publicError('RPC_FORBIDDEN', 'Account credential authority does not own this tenant');
-    }
-    const header = input.header ? decodeSignedRpcHeader(input.header) : null;
-    if (!header || Math.abs(Date.now() - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError('RPC_UNAUTHORIZED', 'Device signature is missing, invalid or expired');
-    const device = this.currentDeviceGrant(header.deviceId);
-    if (!device || !verifyRpcDigestSignature(header, { method: input.method, path: input.target }, device.signingPublicKey)) return publicError('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked');
-    const nonce = this.consumeRequestNonce(header.nonce, header.timestamp);
-    return nonce.status === 'error' ? nonce : { status: 'ok', value: { deviceId: device.deviceId, bodySha256: header.bodySha256 } };
-  }
-
-  /** Runtime routing performs canonical project/workspace scope checks after this signature admission. */
-  authorizeWorkspaceRuntimeRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
-    return this.authorizeRpcRequest(input, false, false, 'workspace-runtime');
+  /** Browser-only account management this vault still owns: invitations, pairing and MCP setup. */
+  private authorizeBrowserRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
+    const authorized = this.verifier().authorizeRequest({ ...input, method: 'POST', browserOnly: true, accountScope: true }, Date.now());
+    return authorized.status === 'ok' ? { status: 'ok', value: { deviceId: authorized.value.device.deviceId } } : { status: 'error', error: authorized.error };
   }
 
   /** Current tenant-local authority, including issuer revocation and expiration. */
-  currentDeviceGrant(deviceId: string): VerifiedDevice | null {
+  private currentDeviceGrant(deviceId: string): VerifiedDevice | null {
     const config = this.config();
     if (!config || config.user_id !== this.env.ACCOUNT_ID || config.root_public_key !== this.env.AUTH_PUBLIC_KEY) return null;
-    const resolve = (id: string) => {
-      const record = this.deviceGrant(id);
-      return record?.invite.invite.userId === config.user_id ? record : null;
-    };
-    const record = resolve(deviceId);
-    return record ? verifyDeviceGrantRecord(record, credentialProtocolBase64.decode(config.root_public_key), Date.now(), resolve) : null;
-  }
-  serviceDeviceAuthority(deviceId: string): { expiresAt: number | null } | null {
-    const device = this.currentDeviceGrant(deviceId);
-    if (!device || device.kind !== 'browser' || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.write')) return null;
-    let expiresAt = device.expiresAt ?? Infinity;
-    let record = this.deviceGrant(deviceId);
-    while (record?.invite.issuer.kind === 'device') {
-      record = this.deviceGrant(record.invite.issuer.deviceId);
-      if (!record) return null;
-      expiresAt = Math.min(expiresAt, deviceGrantExpiresAt(record) ?? Infinity);
-    }
-    return { expiresAt: expiresAt === Infinity ? null : expiresAt };
+    return this.verifier().device(deviceId, Date.now());
   }
   private mcpAccessRow() {
     return this.ctx.storage.sql.exec<{ revision: number; device_id: string | null; sealed_key: string | null; token_hash: string | null; updated_at: string }>(
@@ -911,7 +887,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       tokenHash = await this.mcpTokenHash(token);
     }
     // Crypto yields: revalidate authority and revision immediately before the synchronous transaction.
-    const revalidated = this.authorizeRpcRequest({ ...input, capabilities: ['devices.manage'] }, true, true);
+    const revalidated = this.authorizeBrowserRequest({ ...input, capabilities: ['devices.manage'] });
     if (revalidated.status === 'error') return revalidated;
     if ((this.mcpAccessRow()?.revision ?? 0) !== revision) return publicError('MCP_ACCESS_CONFLICT', 'MCP access changed; reload before trying again');
     const row = this.mcpAccessRow();
@@ -952,42 +928,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const device = this.currentDeviceGrant(row.device_id);
     if (current?.revision !== row.revision || !device || device.kind !== 'client') return null;
     return { key, device };
-  }
-
-  /** Revalidate the original GET proof on wake without re-consuming its handshake nonce. */
-  authorizeDirectorySubscription(input: { header: string | null; target: string }, initial: boolean): CredentialVaultResult<{ deviceId: string }> {
-    const config = this.config();
-    if (!config || config.user_id !== this.env.ACCOUNT_ID || config.root_public_key !== this.env.AUTH_PUBLIC_KEY) {
-      return publicError('RPC_FORBIDDEN', 'Account credential authority does not own this tenant');
-    }
-    return this.authorizeRpcRequest({ ...input, method: 'GET', body: new Uint8Array(), capabilities: ['rpc.read'] }, false, !initial);
-  }
-
-  private authorizeRpcRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[]; method?: string }, browserOnly: boolean, revalidate = false, admission: 'account' | 'workspace-runtime' = 'account'): CredentialVaultResult<{ deviceId: string }> {
-    const config = this.config();
-    const header = input.header ? decodeSignedRpcHeader(input.header) : null;
-    const now = Date.now();
-    if (!config || !header || input.body.byteLength > REQUEST_MAX_BYTES || (!revalidate && Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS)) {
-      return publicError('RPC_UNAUTHORIZED', 'Device signature is missing, invalid or expired');
-    }
-    const record = this.deviceGrant(header.deviceId);
-    const resolve = (deviceId: string) => {
-      const candidate = this.deviceGrant(deviceId);
-      return candidate?.invite.invite.userId === config.user_id ? candidate : null;
-    };
-    const device = record?.invite.invite.userId === config.user_id
-      ? verifyDeviceGrantRecord(record, credentialProtocolBase64.decode(config.root_public_key), now, resolve) : null;
-    if (!device && input.method === 'GET') return publicError('RPC_DEVICE_UNKNOWN', 'Device grant is unknown, expired or revoked');
-    if (!device || !verifyRpcSignature(header, { method: input.method ?? 'POST', path: input.target, body: input.body }, device.signingPublicKey)) {
-      return publicError('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked');
-    }
-    if ((browserOnly && device.kind !== 'browser') || (admission === 'account' && device.scope.kind !== 'user')
-      || !input.capabilities.every((capability) => device.capabilities.includes(capability))) {
-      return publicError('RPC_FORBIDDEN', 'Device is out of scope or lacks permission');
-    }
-    if (revalidate) return { status: 'ok', value: { deviceId: device.deviceId } };
-    const nonce = this.consumeRequestNonce(header.nonce, header.timestamp);
-    return nonce.status === 'error' ? nonce : { status: 'ok', value: { deviceId: device.deviceId } };
   }
 
   browserInvitationRequest(input: { operation: string; header: string | null; target: string; body: Uint8Array }): CredentialVaultResult<BrowserInvitationValue> {
@@ -1090,7 +1030,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         const claimant = input.operation === 'claim' ? pairingMachineSchema.parse({
           machineId: body.machineId, label: body.label, signingPublicKey: body.signingPublicKey, exchangePublicKey: body.exchangePublicKey,
         }) : machine;
-        if (!claimant || !header || header.deviceId !== pairingId || Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof is missing or expired');
+        if (!claimant || !header || header.deviceId !== pairingId) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof is missing');
         let signingPublicKey: Uint8Array;
         try {
           signingPublicKey = credentialProtocolBase64.decode(claimant.signingPublicKey);
@@ -1099,8 +1039,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
           return publicError('PAIRING_UNAUTHORIZED', 'Machine keys are invalid');
         }
         if (!verifyRpcSignature(header, { method: 'POST', path: input.target, body: input.body }, signingPublicKey)) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof does not match request');
-        const nonce = this.consumeRequestNonce(header.nonce, header.timestamp);
-        if (nonce.status === 'error') return nonce;
+        if (Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE);
         if (input.operation === 'claim') {
           if (machine && row.state !== 'created' && claimant.machineId === machine.machineId && claimant.label === machine.label
             && claimant.signingPublicKey === machine.signingPublicKey && claimant.exchangePublicKey === machine.exchangePublicKey) {
@@ -1152,8 +1091,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
       if (row.state === 'claimed') return { status: 'ok', value: { state: 'pending' } };
       if ((row.state !== 'approved' && row.state !== 'enrolled') || !row.grant_json) return publicError('PAIRING_UNAVAILABLE', 'Pairing is not approved');
       const signed = signedCredentialAuthorityGrantSchema.parse(JSON.parse(row.grant_json));
-      const authorized = this.authorizeRelayGrant(signed, 'space.control');
-      if (authorized.status === 'error') return authorized;
+      const authorized = this.verifier().authorizeRelayGrant(signed, 'space.control', Date.now());
+      if (authorized.status === 'error') return { status: 'error', error: authorized.error };
       const settings = await (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id).get(machine.machineId);
       const handle = settings.profile.handle;
       if (!handle) return publicError('ACCOUNT_UNPROVISIONED', 'Account tenant is not provisioned');
@@ -1166,8 +1105,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
       // Retrieval is retryable for the same proof-bound key until the original
       // short expiry; a lost HTTP response never strands a newly enrolled CLI.
       if (row.expires_at <= Date.now()) return publicError('PAIRING_UNAVAILABLE', 'Pairing has expired');
-      const current = this.authorizeRelayGrant(signed, 'space.control');
-      if (current.status === 'error') return current;
+      const current = this.verifier().authorizeRelayGrant(signed, 'space.control', Date.now());
+      if (current.status === 'error') return { status: 'error', error: current.error };
       this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'enrolled' WHERE pairing_id = ?", pairingId);
       return { status: 'ok', value: {
         state: 'enrolled', userId: config.user_id, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl,
@@ -1176,25 +1115,9 @@ export class CredentialVaultDO extends DurableObject<Env> {
       } };
     });
   }
-
-
-  authorizeMachineRequest(header: string | null, target: string, machineId: string): CredentialVaultResult<{ authorized: true }> {
-    const config = this.config();
-    if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
-    const device = this.device(machineId);
-    if (!device || (JSON.parse(device.capabilities_json) as string[]).length === 0) return publicError('DEVICE_UNAUTHORIZED', 'Machine is not enrolled');
-    const verified = verifyRelayAuthorization({
-      header,
-      signingPublicKey: device.signing_public_key,
-      target,
-      maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS,
-    });
-    if (verified.status === 'error') return publicError('DEVICE_UNAUTHORIZED', verified.error.message);
-    return this.consumeRequestNonce(verified.value.nonce, verified.value.timestamp);
-  }
-
   removeManagedDevice(machineId: string): void {
     this.ctx.storage.sql.exec("UPDATE credential_devices SET capabilities_json = '[]', updated_at = ? WHERE machine_id = ?", new Date().toISOString(), machineId);
+    invalidateDeviceAuthority();
   }
 
   /**
@@ -1241,6 +1164,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     } catch {
       return publicError('DEVICE_INVITE_USED', 'Device invite was already redeemed');
     }
+    invalidateDeviceAuthority();
     return { status: 'ok', value: { deviceId: input.binding.deviceId, expiresAt: deviceGrantExpiresAt(record) } };
   }
   private deviceGrant(deviceId: string): DeviceGrantRecord | null {
@@ -1255,8 +1179,15 @@ export class CredentialVaultDO extends DurableObject<Env> {
     ).toArray().map((row) => ({ ...(JSON.parse(row.record_json) as DeviceGrantRecord), generation: row.generation, revokedAt: row.revoked_at }));
   }
   async revokeDeviceGrant(deviceId: string): Promise<CredentialVaultResult<{ deviceId: string; revokedAt: number }>> {
+    // Machines paired through this browser lose their credential with it: detach them like any revoked machine.
+    const paired = this.ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM credential_devices WHERE grant_json IS NOT NULL').toArray()
+      .map((row) => row.machine_id).filter((machineId) => this.verifier().machine(machineId, Date.now()) !== null);
     const result = this.recordDeviceRevocation(deviceId);
-    if (result.status === 'ok') await this.env.RELAY.getByName(this.env.RELAY_NAME).serviceRevokeDevice(deviceId);
+    if (result.status === 'error') return result;
+    await this.env.RELAY.getByName(this.env.RELAY_NAME).serviceRevokeDevice(deviceId);
+    for (const machineId of paired) {
+      if (!this.verifier().machine(machineId, Date.now())) await releaseMachineAttachments(this.env, this.env.ACCOUNT_ID, machineId, 'machine-revoked');
+    }
     return result;
   }
   private recordDeviceRevocation(deviceId: string): CredentialVaultResult<{ deviceId: string; revokedAt: number }> {
@@ -1268,6 +1199,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       'UPDATE device_grants SET revoked_at = ?, generation = generation + 1, updated_at = ? WHERE device_id = ?',
       revokedAt, new Date(revokedAt).toISOString(), deviceId,
     );
+    invalidateDeviceAuthority();
     return { status: 'ok', value: { deviceId, revokedAt } };
   }
 
@@ -1869,59 +1801,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
     this.assertProfileAccess(profileId);
   }
 
-
-  /**
-   * `maxAgeMs` is the signature window: `SIGNED_UPLOAD_MAX_AGE_MS` only for `data.put`,
-   * whose body may be buffered by the edge long after signing.
-   */
-  authorizeControl(request: SignedControlRequest, capability: 'storage.provision' | 'storage.access' | 'space.control' | 'credential.access', maxAgeMs = SIGNED_REQUEST_MAX_AGE_MS): CredentialVaultResult<{ authorized: true }> {
-    const config = this.config();
-    if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
-    const parsed = signedControlRequestSchema.safeParse(request);
-    if (!parsed.success || parsed.data.userId !== config.user_id) {
-      return publicError('INVALID_REQUEST', 'Control request is invalid');
-    }
-    const device = this.device(parsed.data.machineId);
-    if (!device || !verifySignedControlRequest(parsed.data, credentialProtocolBase64.decode(device.signing_public_key))) {
-      return publicError('DEVICE_UNAUTHORIZED', 'Device is not authorized');
-    }
-    const capabilities = JSON.parse(device.capabilities_json) as unknown;
-    if (!Array.isArray(capabilities) || !capabilities.includes(capability)) {
-      return publicError('ACCESS_DENIED', `Device lacks ${capability}`);
-    }
-    const now = Date.now();
-    if (Math.abs(now - parsed.data.timestamp) > maxAgeMs) return publicError('REQUEST_EXPIRED', 'Signed request expired');
-    const inserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', now - REQUEST_NONCE_RETENTION_MS);
-      try {
-        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', parsed.data.nonce, Math.max(now, parsed.data.timestamp));
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    return inserted ? { status: 'ok', value: { authorized: true } } : publicError('REQUEST_REPLAY', 'Control request was already used');
-  }
-  authorizeSubscription(request: SignedControlRequest, capability: 'storage.access' | 'space.control'): number | null {
-    const config = this.config();
-    const device = this.device(request.machineId);
-    return config && request.userId === config.user_id && device
-      && verifySignedControlRequest(request, credentialProtocolBase64.decode(device.signing_public_key))
-      && (JSON.parse(device.capabilities_json) as string[]).includes(capability)
-      ? device.generation : null;
-  }
-  hasRuntimeMachine(machineId: string): boolean {
-    const device = this.device(machineId);
-    if (!device) return false;
-    const capabilities = z.array(z.string()).safeParse(JSON.parse(device.capabilities_json));
-    return capabilities.success && capabilities.data.includes('space.control');
-  }
-
-  authorizeBroker(machineId: string, generation: number): boolean {
-    const device = this.device(machineId);
-    const capabilities = device ? JSON.parse(device.capabilities_json) as string[] : [];
-    return Boolean(device && device.generation === generation && capabilities.includes('credential.access'));
-  }
   async getAccess(request: CredentialAccessRequest): Promise<CredentialVaultResult<{
     credentialId: string;
     provider: string;
@@ -1936,26 +1815,13 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (!parsed.success || parsed.data.userId !== config.user_id) {
       return publicError('INVALID_REQUEST', 'Credential request is invalid');
     }
-    const device = this.device(parsed.data.machineId);
-    if (!device || !verifyCredentialAccessRequest(parsed.data, credentialProtocolBase64.decode(device.signing_public_key))) {
+    const now = Date.now();
+    const machine = this.verifier().machine(parsed.data.machineId, now);
+    if (!machine || !verifyCredentialAccessRequest(parsed.data, credentialProtocolBase64.decode(machine.signingPublicKey))) {
       return publicError('DEVICE_UNAUTHORIZED', 'Device is not authorized');
     }
-    const capabilities = JSON.parse(device.capabilities_json) as unknown;
-    if (!Array.isArray(capabilities) || !capabilities.includes('credential.access')) {
-      return publicError('ACCESS_DENIED', 'Device cannot access credentials');
-    }
-    const now = Date.now();
-    if (Math.abs(now - parsed.data.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError('REQUEST_EXPIRED', 'Signed request expired');
-    const nonceInserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', now - REQUEST_NONCE_RETENTION_MS);
-      try {
-        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', parsed.data.nonce, Math.max(now, parsed.data.timestamp));
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    if (!nonceInserted) return publicError('REQUEST_REPLAY', 'Credential request was already used');
+    if (!machine.capabilities.includes('credential.access')) return publicError('ACCESS_DENIED', 'Device cannot access credentials');
+    if (Math.abs(now - parsed.data.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE);
 
     let row = this.credential(parsed.data.credentialId);
     if (!row || row.state === 'disabled') return publicError('CREDENTIAL_NOT_FOUND', 'Credential is unavailable');
@@ -2017,7 +1883,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const context = `${config.user_id}\n${parsed.data.machineId}\n${row.id}\n${parsed.data.nonce}\n${row.revision}`;
     const envelope = await sealCredentialForMachine({
       plaintext: accessPayload,
-      machineExchangePublicKey: credentialProtocolBase64.decode(device.exchange_public_key),
+      machineExchangePublicKey: credentialProtocolBase64.decode(machine.exchangePublicKey),
       context,
     });
     if (this.inferenceCutover()) return publicError('INFERENCE_SCOPE_REQUIRED', 'Upgrade to the profile-scoped credential broker');
@@ -2042,37 +1908,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return credentialProtocolBase64.encode(new Uint8Array(derived));
   }
 
-  private consumeRequestNonce(nonce: string, timestamp: number): CredentialVaultResult<{ authorized: true }> {
-    const inserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - REQUEST_NONCE_RETENTION_MS);
-      try {
-        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', nonce, Math.max(Date.now(), timestamp));
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    return inserted ? { status: 'ok', value: { authorized: true } } : publicError('REQUEST_REPLAY', 'Signed request was already used');
-  }
-
   private config(): { user_id: string; root_public_key: string; vault_key: string } | undefined {
     return this.ctx.storage.sql.exec<{ user_id: string; root_public_key: string; vault_key: string }>(
       'SELECT user_id, root_public_key, vault_key FROM vault_config WHERE id = 1',
     ).toArray()[0];
-  }
-
-  private device(machineId: string): DeviceRow | undefined {
-    const row = this.ctx.storage.sql.exec<DeviceRow>(
-      'SELECT signing_public_key, exchange_public_key, capabilities_json, generation, grant_json FROM credential_devices WHERE machine_id = ?',
-      machineId,
-    ).toArray()[0];
-    if (!row) return undefined;
-    if (row.grant_json) {
-      const config = this.config();
-      if (!config || !verifyCredentialAuthorityGrant(JSON.parse(row.grant_json) as SignedCredentialAuthorityGrant,
-        credentialProtocolBase64.decode(config.root_public_key), Date.now(), (deviceId) => this.deviceGrant(deviceId))) return undefined;
-    }
-    return row;
   }
 
   private credential(id: string, profileId = DEFAULT_INFERENCE_PROFILE_ID): CredentialRow | undefined {
@@ -3155,14 +2994,20 @@ const worker = {
     if (url.pathname === '/v1/relay/authorize' && request.method === 'POST') {
       try {
         const body = await readBoundedJson(request) as { grant?: unknown; capability?: unknown };
-        if (body.capability !== 'space.control' && body.capability !== 'storage.access') {
+        const capability = body.capability;
+        if (capability !== 'space.control' && capability !== 'storage.access') {
           return Response.json(publicError('INVALID_CAPABILITY', 'Relay capability is invalid'), { status: 400 });
         }
         const grant = signedCredentialAuthorityGrantSchema.parse(body.grant);
-        const account = await activeAccount(env, grant.grant.userId);
-        if (account.status === 'error') return Response.json(account, { status: account.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' ? 503 : 401 });
-        const result = await credentialVault(env, grant.grant.userId).authorizeRelayGrant(grant, body.capability);
-        return Response.json(result, { status: result.status === 'ok' ? 200 : 401, headers: { 'cache-control': 'no-store' } });
+        const result = await withDeviceAuthority(env, (view, now) => {
+          const authorized = view.authorizeRelayGrant(grant, capability, now);
+          if (authorized.status === 'error') return authorized;
+          const account = accountStatus(env, view, grant.grant.userId);
+          return account.status === 'error' ? { ...account, miss: false } : authorized;
+        });
+        if (result.status === 'ok') return Response.json({ status: 'ok', value: { authorized: true } }, { headers: { 'cache-control': 'no-store' } });
+        const unavailable = result.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' || result.error.code === DEVICE_AUTHORITY_UNAVAILABLE;
+        return Response.json(result, { status: unavailable ? 503 : 401, headers: { 'cache-control': 'no-store' } });
       } catch {
         return Response.json(publicError('DEVICE_UNAUTHORIZED', 'Invalid relay authorization'), { status: 401 });
       }
@@ -3205,13 +3050,13 @@ const worker = {
         const body = await readBoundedJson(request) as { rootPublicKey?: unknown; vaultKey?: unknown; handle?: unknown };
         if (body.rootPublicKey !== env.AUTH_PUBLIC_KEY || body.handle !== env.TENANT_ID || typeof body.vaultKey !== 'string') return Response.json(publicError('TENANT_MISMATCH', 'Bootstrap identity does not own this tenant'), { status: 403 });
         const proof = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: env.AUTH_PUBLIC_KEY, target: url.pathname + url.search, maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS });
-        if (proof.status === 'error') return Response.json(proof, { status: 401 });
+        if (proof.status === 'error') {
+          return Response.json(proof.error.expired ? publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE) : publicError('ROOT_UNAUTHORIZED', proof.error.message), { status: 401 });
+        }
         const userId = env.ACCOUNT_ID;
         const vault = credentialVault(env, userId);
         const configured = await vault.bootstrap({ userId, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: body.vaultKey });
         if (configured.status === 'error') return Response.json(configured, { status: 409 });
-        const authorized = await vault.authorizeRoot(request.headers.get('authorization'), url.pathname + url.search);
-        if (authorized.status === 'error') return Response.json(authorized, { status: 401 });
         const settings = (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId);
         const current = await settings.get('account-bootstrap');
         if (current.profile.handle !== env.TENANT_ID) {
@@ -3244,8 +3089,8 @@ const worker = {
           return Response.json(registered, { status: 400 });
         }
         if (registered.status === 'error') {
-          const current = await vault.authorizeRelayGrant(signedGrant, 'space.control');
-          if (current.status === 'error') return Response.json(current, { status: 401 });
+          const current = await withDeviceAuthority(env, (view, now) => view.authorizeRelayGrant(signedGrant, 'space.control', now));
+          if (current.status === 'error') return accountAccessResponse(current)!;
         }
         const accountSettings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(body.userId).get(signedGrant.grant.machineId);
         if (!accountSettings.profile.handle) return Response.json(publicError('ACCOUNT_UNPROVISIONED', 'Account tenant is not provisioned'), { status: 409 });
@@ -3277,9 +3122,10 @@ const worker = {
         }
         const vault = credentialVault(env, body.userId);
         const root = await vault.authorizeRoot(request.headers.get('authorization'), `${url.pathname}${url.search}`);
+        const machineId = body.machineId;
         const authorized = root.status === 'ok' ? root
-          : await vault.authorizeMachineRequest(request.headers.get('authorization'), `${url.pathname}${url.search}`, body.machineId);
-        if (authorized.status === 'error') return Response.json(authorized, { status: 401 });
+          : await withDeviceAuthority(env, (view, now) => view.authorizeMachineRelay(request.headers.get('authorization'), `${url.pathname}${url.search}`, machineId, now));
+        if (authorized.status === 'error') return accountAccessResponse(authorized)!;
         const denied = accountAccessResponse(await activeAccount(env, body.userId));
         if (denied) return denied;
         await releaseMachineAttachments(env, body.userId, body.machineId, 'machine-revoked');
@@ -3366,19 +3212,8 @@ const worker = {
         return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: 'Application object request is invalid' } }, { status: 400 });
       }
     }
-    if (url.pathname === '/v1/settings/events') {
-      try {
-        const signed = decodeSignedHeader(url.searchParams.get('control'));
-        if (signed.operation !== 'settings.subscribe') throw new Error('Signed settings subscription is invalid');
-        const authorized = await authorizeControl(env, signed, 'storage.access');
-        if (authorized.status === 'error') return accountAccessResponse(authorized)!;
-        const namespace = env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>;
-        const settings = namespace.get(namespace.idFromName(signed.userId));
-        return settings.fetch(request);
-      } catch (error) {
-        return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: error instanceof Error ? error.message : 'Settings subscription is invalid' } }, { status: 400 });
-      }
-    }
+    // The settings object admits the socket; its signed proof rides in `Sec-WebSocket-Protocol`.
+    if (url.pathname === '/v1/settings/events') return env.USER_SETTINGS.getByName(env.ACCOUNT_ID).fetch(request);
     if (url.pathname === '/v1/devices/enroll') {
       // Browsers enroll cross-origin from the machine-served app; the invite is
       // the credential, so the route is open to any origin.
@@ -3490,6 +3325,9 @@ const worker = {
           const releases = tenantReleases(env, body.userId);
           let value: unknown;
           switch (body.operation) {
+            case 'deploy.machineProtocol':
+              value = await releases.machineProtocol(body.machineId, machineProtocolInputSchema.parse(body.payload));
+              break;
             case 'deploy.stage':
               value = await releases.stage(stageReleaseInputSchema.parse(body.payload), body.machineId);
               break;
@@ -3501,6 +3339,16 @@ const worker = {
               break;
             case 'deploy.launchProgress':
               await releases.recordLaunchProgress(body.machineId, launchProgressSchema.parse(body.payload));
+              value = null;
+              break;
+            case 'deploy.machineApplied': {
+              const input = machineAppliedInputSchema.parse(body.payload);
+              value = await releases.machineApplied(body.machineId, input);
+              if (value === null) throw new ReleaseNotFoundError(input.sha);
+              break;
+            }
+            case 'deploy.machineChannelApplied':
+              await releases.machineChannelApplied(body.machineId, machineChannelAppliedInputSchema.parse(body.payload));
               value = null;
               break;
             default:
@@ -3604,9 +3452,7 @@ const worker = {
             case 'project.environment.watch': {
               const spaceId = String(body.payload.spaceId ?? '');
               const after = body.payload.after === null || body.payload.after === undefined ? null : streamCursorSchema.parse(body.payload.after);
-              const vault = credentialVault(env, body.userId);
-              const generation = await vault.authorizeSubscription(body, 'space.control');
-              if (generation === null) return Response.json(publicError('DEVICE_UNAUTHORIZED', 'Environment subscription is unauthorized'), { status: 401 });
+              const generation = authorized.value.generation;
               const subscription = await authority.watchEnvironment(spaceId, after);
               const changes = consumeDurableStream(subscription, request.signal);
               const encoder = new TextEncoder();
@@ -3615,7 +3461,7 @@ const worker = {
                   try {
                     const next = await changes.next();
                     if (next.done) { controller.close(); return; }
-                    if (generation !== await vault.authorizeSubscription(body, 'space.control') || (await activeAccount(env, body.userId)).status === 'error') {
+                    if (!await controlSubscriptionActive(env, body, generation, 'space.control')) {
                       await changes.return(undefined);
                       controller.error(new Error('Environment subscription authorization ended'));
                       return;

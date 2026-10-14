@@ -8,6 +8,7 @@ import {
 import type { CredentialVaultDO } from '../src/index.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
+import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { tenantRootPrivateKey as rootKey } from './setup.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -95,7 +96,8 @@ describe('registered browser invitations', () => {
     const substituted = signDeviceInvite({ ...invite.invite, label: 'Substituted' }, browserKey, invite.issuer);
     expect((await SELF.fetch(new Request(request.url, { method: 'POST', headers: request.headers, body: JSON.stringify({ userId: owner.userId, invite: substituted }) }))).status).toBe(403);
     expect((await SELF.fetch(request)).status).toBe(200);
-    expect(await (await SELF.fetch(replay)).json()).toMatchObject({ error: { code: 'REQUEST_REPLAY' } });
+    // A replayed create cannot register the invitation twice.
+    expect(await (await SELF.fetch(replay)).json()).toMatchObject({ error: { code: 'DEVICE_INVITE_EXISTS' } });
     const changedTarget = signedRequest(owner, 'status', { inviteId: invite.invite.inviteId });
     expect((await SELF.fetch(new Request(changedTarget.url.replace('/status', '/cancel'), changedTarget))).status).toBe(403);
     const changedAccount = signedRequest(owner, 'status', { inviteId: invite.invite.inviteId });
@@ -234,6 +236,7 @@ describe('registered browser invitations', () => {
     const suspended = await register(owner);
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'suspended' } })));
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
+    invalidateDeviceAuthority();
     expect(await (await SELF.fetch(signedRequest(owner, 'cancel', { inviteId: suspended.invite.inviteId }))).json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
     expect(await (await redeem(suspended)).json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
   });

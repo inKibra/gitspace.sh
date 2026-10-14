@@ -15,7 +15,11 @@ import {
   type DeviceScope,
   type SignedDeviceInvite,
 } from '@gitspace/protocol/device-grant';
+import { createServerClock, sendSigned } from '@gitspace/protocol/server-clock';
 import { ed25519 } from '@noble/curves/ed25519.js';
+
+/** This page's view of the account's clock; every browser signature is stamped with it. */
+export const accountClock = createServerClock();
 
 /**
  * This browser's device identity: a non-extractable Ed25519 key pair in
@@ -155,7 +159,7 @@ export class DeviceRejectedError extends Error {
 
 /** Shared HTTP/WebSocket authentication; callers sign the exact unsigned request target. */
 export async function signDeviceRequest(device: BrowserDevice, request: { method: string; path: string; body: Uint8Array }): Promise<string> {
-  const timestamp = Date.now();
+  const timestamp = accountClock.now();
   const nonce = crypto.randomUUID();
   const bodySha256 = rpcBodySha256(request.body);
   const payload = rpcSignaturePayload({ deviceId: device.deviceId, timestamp, nonce, method: request.method, path: request.path, bodySha256 });
@@ -164,7 +168,8 @@ export async function signDeviceRequest(device: BrowserDevice, request: { method
 }
 
 /**
- * Fetch wrapper that signs each request with the current device. A 401 naming
+ * Fetch wrapper that signs each request with the current device, re-signing once
+ * with a corrected clock when the account rejects the timestamp. A 401 naming
  * the device (revoked, expired, unknown) clears the stored identity so the
  * app falls back to the enrollment screen instead of retrying forever.
  */
@@ -175,10 +180,13 @@ export function createDeviceSignedFetch(currentDevice: () => Promise<BrowserDevi
     const original = new Request(input, init);
     const body = new Uint8Array(await original.arrayBuffer());
     const url = new URL(original.url);
-    const headers = new Headers(original.headers);
-    headers.set(RPC_DEVICE_HEADER, await signDeviceRequest(device, { method: original.method, path: `${url.pathname}${url.search}`, body }));
-    headers.set('x-gitspace-user', device.userId);
-    const response = await fetch(new Request(original.url, { method: original.method, headers, body: body.length > 0 ? body : null, signal: original.signal }));
+    const signed = { method: original.method, path: `${url.pathname}${url.search}`, body };
+    const response = await sendSigned(accountClock, async () => {
+      const headers = new Headers(original.headers);
+      headers.set(RPC_DEVICE_HEADER, await signDeviceRequest(device, signed));
+      headers.set('x-gitspace-user', device.userId);
+      return fetch(new Request(original.url, { method: original.method, headers, body: body.length > 0 ? body : null, signal: original.signal }));
+    });
     if (response.status === 401) {
       const failure = await response.clone().json().catch(() => null) as { error?: { code?: string } } | null;
       const code = failure?.error?.code;

@@ -89,3 +89,25 @@ it('verifies a procedure-tagged batch the account forwards to the named machine 
   expect(signedTargets).toEqual(['/rpc?p=terminals.list']);
   expect(outcome).toMatchObject({ ok: true, response: { status: 204 } });
 });
+
+it('accepts signatures within 60 seconds of the machine clock and asks the signer to re-sign beyond it', async () => {
+  const key = ed25519.utils.randomSecretKey();
+  const id = crypto.randomUUID();
+  const handler = createSignedRpcHandler({
+    handler: async () => new Response(null, { status: 204 }),
+    lookupDevice: async () => ({ deviceId: id, kind: 'client', label: 'clock', scope: { kind: 'user' }, capabilities: ['rpc.read'], canDelegate: false, signingPublicKey: ed25519.getPublicKey(key), generation: 1, boundAt: Date.now(), expiresAt: null } satisfies VerifiedDevice),
+    procedureKind: () => 'query',
+    workspaceProject: () => null,
+  });
+  const invoke = async (skewMs: number, signer = key) => {
+    const body = new TextEncoder().encode(stringify({ v: 1, path: 'space.view', input: {} }));
+    return handler(new Request('https://machine.test/rpc', { method: 'POST', body, headers: { [RPC_DEVICE_HEADER]: signRpcRequest({ deviceId: id, method: 'POST', path: '/rpc', body, signingPrivateKey: signer, timestamp: Date.now() + skewMs }) } }));
+  };
+  expect((await invoke(-55_000)).status).toBe(204);
+  expect((await invoke(55_000)).status).toBe(204);
+  const late = await invoke(-65_000);
+  expect(late.status).toBe(401);
+  expect(await late.json()).toMatchObject({ error: { code: 'REQUEST_EXPIRED' } });
+  // Only a valid signature learns that its clock is off.
+  expect(await (await invoke(-65_000, ed25519.utils.randomSecretKey())).json()).toMatchObject({ error: { code: 'RPC_SIGNATURE_INVALID' } });
+});

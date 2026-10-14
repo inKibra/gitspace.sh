@@ -309,12 +309,13 @@ export class UserSettingsDO extends DurableObject<Env> {
   }
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
-    const identity = await subscriptionIdentity(this.env, request, 'storage.access');
+    const identity = await subscriptionIdentity(this.env, request, 'settings.subscribe', 'storage.access');
+    if (identity instanceof Response) return identity;
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment(identity);
-    return new Response(null, { status: 101, webSocket: client });
+    server.serializeAttachment(identity.attachment);
+    return new Response(null, { status: 101, webSocket: client, headers: { 'sec-websocket-protocol': identity.protocol } });
   }
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (await subscriptionActive(this.env, socket, 'storage.access') && message === 'ping') socket.send('pong');

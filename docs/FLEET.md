@@ -329,10 +329,25 @@ before execution; there is no silent legacy alias.
   and the limit. The machine includes that reason in the close error.
 - **Managed-beta key custody**: checkpoint and artifact encryption uses one
   account-scoped key derived by `CredentialVaultDO`. Enrolled machines obtain
-  it through signed, replay-protected `artifacts.key.get` requests with
+  it through signed `artifacts.key.get` requests with
   `space.control`; suspended accounts and revoked grants are denied. Random
   per-machine keys are not a portable checkpoint format. The managed vault is
   part of the trust boundary; encrypted R2 storage is not zero-knowledge hosting.
+- **Per-request authentication** never calls `CredentialVaultDO` or
+  `AccountStateDO`. Each isolate (Worker or Durable Object) caches one snapshot of
+  the vault's device registry (machine keys, capabilities and generations;
+  browser/client grants with their issuer chains) plus the account authorization,
+  refreshes it single-flight every 30 seconds, and fails closed with a 503 once
+  its last successful refresh is two minutes old. Machine controls, signed device
+  requests and relay authorizations are verified there with a 60-second clock
+  window (`data.put` keeps its upload window); signers correct their clocks from
+  `Date` and retry an expired request once. There are no replay nonce tables.
+  A revocation reaches every isolate within one refresh. Long-lived sockets and
+  streams (machine relay, settings, directory, environment SSE, service tunnels)
+  recheck their admitted credential and generation against the same cache and
+  close when it is revoked or replaced. Socket proofs travel in
+  `Sec-WebSocket-Protocol` (`gitspace-device.` / `gitspace-control.`), never in
+  URLs.
 - **Move** = drain at a safe boundary → publish git/blob state → materialize on
   target → reopen. The successful Mac→WSL move of session `019fed50` proves the
   current manual shape; 1.0 makes path translation, manifests, and final sync
@@ -1198,7 +1213,8 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     or local-only workspace lifecycle RPC remain.
     Machine/control transport is one canonical signed envelope: device key,
     capability grant, timestamp, UUID nonce, operation, payload, and Ed25519
-    signature. `CredentialVaultDO` consumes replay nonces before routing
+    signature. The Worker verifies it against its isolate-cached device registry
+    within a 60-second clock window (no replay nonces) before routing
     generation-checked space operations to `SpaceAuthorityDO`; the machine
     implements the same authority interface through `CloudSpaceCheckpointAuthority`.
     Managed Cloudflare image replacement now uses durable account-scoped

@@ -10,7 +10,6 @@ import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-work
 import { committedSessionApproval, sessionApprovalMode, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 import type { AccountStateDO } from './account-state.js';
-import type { CredentialVaultDO } from './application.js';
 import { createAccountBrowserAuthority } from './runtime-browser-account.js';
 import type { BrowserRenderingBinding } from './browser-cdp.js';
 import type { RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
@@ -28,7 +27,6 @@ type BrowserEnvironment = {
   RELAY_NAME: Env['RELAY_NAME'];
   ACCOUNT_STATE: { getByName(name: string): Pick<AccountStateDO, 'certifyBrowserAuthority'> };
   FLEET_CATALOG: { getByName(name: string): { getMachine(id: string): Promise<Pick<FleetMachineDefinition, 'kind' | 'desiredState'> | null> } };
-  CREDENTIALS: { getByName(name: string): Pick<DurableObjectStub<CredentialVaultDO>, 'hasRuntimeMachine'> };
   BROWSER?: BrowserRenderingBinding;
   RELAY?: { getByName(name: string): { browserRelayPlacement(projectId: string, pairingId?: string): Promise<RuntimeAccountBrowserPlacement>; browserRelayProjectSettings(projectId: string): Promise<RuntimeProjectBrowserSettings>; browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
 };
@@ -56,7 +54,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     for (const attachment of options.runtime().attachments.list()) {
       if (attachment.machineId !== machineId || attachment.state !== 'ready' || !attachment.heartbeatAt || Date.now() - Date.parse(attachment.heartbeatAt) > 30_000) continue;
       const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(attachment.machineId);
-      if (!machine || machine.desiredState === 'removed' || !await env.CREDENTIALS.getByName(env.ACCOUNT_ID).hasRuntimeMachine(attachment.machineId)) continue;
+      if (!machine || machine.desiredState === 'removed') continue;
       return attachment;
     }
     throw new Error('No eligible browser executor is ready');
@@ -66,7 +64,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     for (const attachment of options.runtime().attachments.list()) {
       if (!isAttachmentReady(attachment, Date.now()) || !attachment.capabilities.includes(`browser.${args.source}`)) continue;
       const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(attachment.machineId);
-      if (!machine || machine.desiredState === 'removed' || args.source === 'relay' && machine.kind !== 'physical' || !await env.CREDENTIALS.getByName(env.ACCOUNT_ID).hasRuntimeMachine(attachment.machineId)) continue;
+      if (!machine || machine.desiredState === 'removed' || args.source === 'relay' && machine.kind !== 'physical') continue;
       candidates.push(attachment);
     }
     if (!candidates.length) throw new Error(args.source === 'relay' ? 'No eligible user-owned physical browser machine is ready' : 'No eligible browser executor is ready');

@@ -1,4 +1,5 @@
 import { accountDirectoryEventSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { DEVICE_SOCKET_PROTOCOL } from '@gitspace/protocol/socket-auth';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { currentDevice, deviceRejected } from './device-session.js';
 import { createDeviceSignedFetch, DeviceRejectedError, signDeviceRequest, type BrowserDevice } from './device.js';
@@ -20,7 +21,7 @@ export function createAccountDirectorySource(options: {
   currentDevice: () => Promise<BrowserDevice | null>;
   onRejected: (code: string) => void;
   origin: () => string;
-  openSocket?: (url: string) => WebSocket;
+  openSocket?: (url: string, protocols: string[]) => WebSocket;
 }): SynchronizationSource<AccountDirectorySnapshot> {
   const signedFetch = createDeviceSignedFetch(options.currentDevice, options.onRejected);
   return async function* (after, signal) {
@@ -39,8 +40,8 @@ export function createAccountDirectorySource(options: {
       if (signal.aborted) return;
       const socketUrl = new URL(url);
       socketUrl.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-      socketUrl.searchParams.set('auth', auth);
-      socket = (options.openSocket ?? ((target) => new WebSocket(target)))(socketUrl.href);
+      // The proof rides in `Sec-WebSocket-Protocol`; URLs reach logs and history.
+      socket = (options.openSocket ?? ((target, protocols) => new WebSocket(target, protocols)))(socketUrl.href, [`${DEVICE_SOCKET_PROTOCOL}${auth}`]);
       const queue: Array<{ value: StreamEvent<AccountDirectorySnapshot>; size: number }> = [];
       let queuedBytes = 0;
       let opened = false;

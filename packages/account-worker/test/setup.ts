@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import { env, reset } from 'cloudflare:test';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
+import { invalidateDeviceAuthority } from '../src/device-authority.js';
 
 export const tenantRootPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 
@@ -13,5 +14,7 @@ beforeEach(() => network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${
 afterEach(async () => {
   network.resetHandlers();
   await reset();
+  // Storage was wiped; the isolate's cached registry and account state describe the previous test.
+  invalidateDeviceAuthority();
 });
 afterAll(() => network.disable());

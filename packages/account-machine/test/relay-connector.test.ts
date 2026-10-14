@@ -26,7 +26,7 @@ class Socket extends EventTarget {
   readyState = 0;
   readonly sent: RelaySocketMessage[] = [];
 
-  constructor(readonly url: URL) {
+  constructor(readonly url: URL, readonly options: { headers: Record<string, string> }) {
     super();
     Socket.instances.push(this);
   }
@@ -215,5 +215,21 @@ describe('MachineRelayConnector transport recovery', () => {
       cause: 'close', code: 1008, reason: 'Machine authorization expired or was revoked', connectionAgeMs: 4_321, abortedRequests: 1,
     });
     expect(new Date(closed.at).toISOString()).toBe(closed.at);
+  });
+
+  it('re-reads the relay clock after an upgrade that never opened and signs later attempts with it', async () => {
+    const skewMs = 5 * 60_000;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const probe = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(null, { headers: { date: new Date(Date.now() + skewMs).toUTCString() } }));
+    const signedAt = (socket: Socket) => Number(/^GitSpace (\d+)\./u.exec(socket.options.headers.authorization ?? '')?.[1]);
+    connector.start();
+    const rejected = Socket.instances[0]!;
+    expect(Math.abs(signedAt(rejected) - Date.now())).toBeLessThan(1_000);
+    rejected.dispatchEvent(new Event('error'));
+    expect(probe).toHaveBeenCalledWith('https://relay.test', expect.objectContaining({ method: 'HEAD' }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    advance(500);
+    expect(Math.abs(signedAt(Socket.instances[1]!) - (Date.now() + skewMs))).toBeLessThan(60_000);
   });
 });

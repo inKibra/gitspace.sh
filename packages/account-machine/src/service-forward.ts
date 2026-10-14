@@ -1,6 +1,7 @@
-import { createRelayAuthorization } from '@gitspace/protocol';
+import { createRelayAuthorization, sendSigned } from '@gitspace/protocol';
 import { SERVICE_FORWARD_ORIGIN_HEADER } from '@gitspace/protocol/service-access';
 import { z } from 'zod';
+import { cloudControlOptions, type SignedCloudRequestOptions } from './cloud-space-authority.js';
 
 export type ServiceForward = { url: string; headers: Record<string, string>; close(): Promise<void> };
 const FORWARD_TOKEN_HEADER = 'x-gitspace-forward-token';
@@ -58,7 +59,8 @@ export async function openServiceForward(options: { hostname: string; fetch(requ
   return { url: `http://127.0.0.1:${server.port}`, headers: { [FORWARD_TOKEN_HEADER]: token }, async close() { for (const upstream of upstreams) upstream.close(); await server.stop(true); } };
 }
 
-export function createServiceAccessClient(options: { baseUrl: string; userId: string; machineId: string; signingPrivateKey: Uint8Array }) {
+export function createServiceAccessClient(input: Omit<SignedCloudRequestOptions, 'fetcher'>) {
+  const options = cloudControlOptions(input);
   async function authenticated(path: string, request?: Request): Promise<Response> {
     const url = new URL(path, options.baseUrl);
     const method = request?.method ?? 'GET';
@@ -67,8 +69,12 @@ export function createServiceAccessClient(options: { baseUrl: string; userId: st
     const applicationAuthorization = headers.get('authorization');
     if (applicationAuthorization) headers.set('x-gitspace-service-authorization', applicationAuthorization);
     headers.set('x-gitspace-machine', options.machineId);
-    headers.set('authorization', createRelayAuthorization(options.signingPrivateKey, `${method}\n${url.pathname}${url.search}`));
-    return fetch(new Request(url, { method, headers, body: request?.body, redirect: 'manual', signal: request?.signal }));
+    const send = (timestamp: number) => {
+      headers.set('authorization', createRelayAuthorization(options.signingPrivateKey, `${method}\n${url.pathname}${url.search}`, timestamp));
+      return fetch(new Request(url, { method, headers, body: request?.body, redirect: 'manual', signal: request?.signal }));
+    };
+    // A streamed body is consumed by the first attempt and cannot be re-signed.
+    return request?.body ? send(options.clock.now()) : sendSigned(options.clock, send);
   }
   return {
     async trust() {
@@ -87,7 +93,7 @@ export function createServiceAccessClient(options: { baseUrl: string; userId: st
         const applicationAuthorization = headers.get('authorization');
         if (applicationAuthorization) headers.set('x-gitspace-service-authorization', applicationAuthorization);
         headers.set('x-gitspace-machine', options.machineId);
-        headers.set('authorization', createRelayAuthorization(options.signingPrivateKey, target));
+        headers.set('authorization', createRelayAuthorization(options.signingPrivateKey, target, options.clock.now()));
         // DOM declarations omit Bun's documented header-bearing constructor overload.
         const socket: unknown = Reflect.construct(WebSocket, [url, { headers: Object.fromEntries(headers) } satisfies Bun.WebSocketOptions]);
         if (!(socket instanceof WebSocket)) throw new Error('Bun WebSocket construction failed');

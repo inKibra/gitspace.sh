@@ -2,6 +2,8 @@ import { machineExecutionAdmissionSchema, type LaunchProgress, type machineProto
 import { z } from 'zod';
 import { collectBytes, streamBytes, WorkspaceDomainError, WorkspaceFailureSchema } from '@gitspace/protocol-workspace';
 import {
+  CONTROL_SOCKET_PROTOCOL,
+  createServerClock,
   createSignedControlRequest,
   type HostedServiceRoute,
   type CloudProjectSummary,
@@ -20,6 +22,7 @@ import {
   type DeviceGrantRecord,
   type ProjectEvent,
   type ProjectMcpGrant,
+  type ServerClock,
   type SignedControlRequest,
   type UserSettings,
 } from '@gitspace/protocol';
@@ -37,22 +40,39 @@ export class CloudSpaceAuthorityError extends Error {
   }
 }
 
-interface SignedCloudRequestOptions {
+export interface SignedCloudRequestOptions {
   baseUrl: string;
   userId: string;
   machineId: string;
   signingPrivateKey: Uint8Array;
   fetcher?: typeof fetch;
+  /** One per machine process, shared by its clients; each client otherwise keeps its own. */
+  clock?: ServerClock;
 }
 
-function signedRequest(options: SignedCloudRequestOptions, operation: ControlOperation, payload: Record<string, unknown>): SignedControlRequest {
+/** A client's options with the clock all of its requests sign with and learn from. */
+export type CloudControlOptions = Omit<SignedCloudRequestOptions, 'clock'> & { clock: ServerClock };
+
+export function cloudControlOptions(options: SignedCloudRequestOptions): CloudControlOptions {
+  return { ...options, clock: options.clock ?? createServerClock() };
+}
+
+function signedRequest(options: CloudControlOptions, operation: ControlOperation, payload: Record<string, unknown>): SignedControlRequest {
   return createSignedControlRequest({
     userId: options.userId,
     machineId: options.machineId,
     operation,
     payload,
     signingPrivateKey: options.signingPrivateKey,
+    timestamp: options.clock.now(),
   });
+}
+
+/** Every account response corrects the clock, so a re-signed expired request carries the account's time. */
+async function cloudFetch(options: CloudControlOptions, input: URL, init: RequestInit): Promise<Response> {
+  const response = await (options.fetcher ?? fetch)(input, init);
+  options.clock.observe(response);
+  return response;
 }
 
 function encodedRequest(request: SignedControlRequest): string {
@@ -142,7 +162,11 @@ async function readControlError(response: Response): Promise<z.infer<typeof cont
 }
 
 export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
-  constructor(private readonly options: SignedCloudRequestOptions) {}
+  private readonly options: CloudControlOptions;
+
+  constructor(options: SignedCloudRequestOptions) {
+    this.options = cloudControlOptions(options);
+  }
 
   async put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`> {
     const hash = hashBytes(bytes);
@@ -165,7 +189,7 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
         const head = signedRequest(this.options, 'data.head', { key, hash });
         const exists = await withCloudRequestDiagnostics(head, async (diagnostics) => {
           const fetchStarted = performance.now();
-          const response = await (this.options.fetcher ?? fetch)(url, {
+          const response = await cloudFetch(this.options, url, {
             method: 'HEAD',
             headers: { 'x-gitspace-control': encodedRequest(head), ...diagnostics.headers },
           });
@@ -197,11 +221,11 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
           return true;
         }, uploadDiagnostics);
         if (exists) return hash;
-        // HEAD and PUT each require a fresh nonce for replay protection.
+        // PUT signs its own operation, hash and size.
         const request = signedRequest(this.options, 'data.put', { key, hash, size: body.byteLength });
         return await withCloudRequestDiagnostics(request, async (diagnostics) => {
           const fetchStarted = performance.now();
-          const response = await (this.options.fetcher ?? fetch)(url, {
+          const response = await cloudFetch(this.options, url, {
             method: 'PUT',
             headers: {
               'content-length': String(body.byteLength),
@@ -244,7 +268,7 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
       const request = signedRequest(this.options, 'data.get', { key, ...(expectedHash ? { hash: expectedHash } : {}) });
       try {
         return await withCloudRequestDiagnostics(request, async (diagnostics) => {
-          const response = await (this.options.fetcher ?? fetch)(objectUrl(this.options.baseUrl, key), {
+          const response = await cloudFetch(this.options, objectUrl(this.options.baseUrl, key), {
             headers: { 'x-gitspace-control': encodedRequest(request), ...diagnostics.headers },
           });
           diagnostics.response = response;
@@ -295,7 +319,11 @@ export interface FleetMachineDefinition {
 
 
 export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthority {
-  constructor(private readonly options: SignedCloudRequestOptions) {}
+  private readonly options: CloudControlOptions;
+
+  constructor(options: SignedCloudRequestOptions) {
+    this.options = cloudControlOptions(options);
+  }
 
   getProject(projectId: string): Promise<CloudProjectSummary | null> {
     return this.call('project.get', { projectId });
@@ -319,6 +347,7 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
   ): Promise<void> {
     let state = initialStreamState<LifecycleState>(`environment:${spaceId}`);
     let retryDelay = 250;
+    let resigned = false;
     while (!signal.aborted) {
       const connection = new AbortController();
       const abort = () => connection.abort(signal.reason);
@@ -330,7 +359,7 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
         const headerDeadline = setTimeout(() => connection.abort(new Error('Environment stream connection timed out')), 30_000);
         try {
           response = await withCloudRequestDiagnostics(request, async (diagnostics) => {
-            const value = await (this.options.fetcher ?? fetch)(new URL('/v1/control', this.options.baseUrl), {
+            const value = await cloudFetch(this.options, new URL('/v1/control', this.options.baseUrl), {
               method: 'POST',
               headers: { 'content-type': 'application/json', accept: 'text/event-stream', ...diagnostics.headers },
               body: JSON.stringify(request),
@@ -346,8 +375,9 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
           const error = await readControlError(response);
           const failure = EnvironmentFailureSchema.safeParse(error);
           if (failure.success) throw new EnvironmentError(failure.data.code, failure.data.message, failure.data.context);
-          throw new CloudSpaceAuthorityError(error?.code ?? 'STREAM_FAILED', error?.message ?? `Environment stream failed with ${response.status}`, { status: response.status });
+          throw new CloudSpaceAuthorityError(error?.code ?? 'STREAM_FAILED', error?.message ?? `Environment stream failed with ${response.status}`, { code: error?.code, status: response.status });
         }
+        resigned = false;
         if (!response.body || response.headers.get('content-type')?.split(';')[0]?.trim() !== 'text/event-stream') {
           throw new CloudSpaceAuthorityError('STREAM_PROTOCOL_INVALID', 'Environment authority did not return an SSE stream', { status: response.status });
         }
@@ -362,6 +392,10 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
         if (!signal.aborted) throw new Error('Environment synchronization connection closed');
       } catch (error) {
         if (signal.aborted) return;
+        if (!resigned && requestExpired(error)) {
+          resigned = true;
+          continue;
+        }
         if (error instanceof EnvironmentError
           || error instanceof CloudSpaceAuthorityError && typeof error.details.status === 'number'
           && error.details.status < 500 && error.details.status !== 408 && error.details.status !== 429) throw error;
@@ -483,8 +517,8 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
       const request = signedRequest(this.options, 'settings.subscribe', {});
       const url = new URL('/v1/settings/events', this.options.baseUrl);
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-      url.searchParams.set('control', encodedRequest(request));
-      socket = new WebSocket(url);
+      // The signed request rides in `Sec-WebSocket-Protocol`; URLs reach logs.
+      socket = new WebSocket(url, [`${CONTROL_SOCKET_PROTOCOL}${encodedRequest(request)}`]);
       socket.addEventListener('open', () => { retryMs = 500; onState('open'); });
       socket.addEventListener('message', (message) => {
         try {
@@ -542,12 +576,25 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
     await this.call('deploy.launchProgress', progress);
   }
 
+  async machineProtocol(input: z.input<typeof machineProtocolInputSchema>): Promise<MachineExecutionAdmission> {
+    return machineExecutionAdmissionSchema.parse(await this.call('deploy.machineProtocol', input));
+  }
+
+  reportMachineApplied(input: { sha: string; target: 'machine'; generation: string; status: 'applied' | 'failed'; error?: string }): Promise<ReleaseRecord> {
+    return this.call<ReleaseRecord>('deploy.machineApplied', input);
+  }
+
+  /** Clear only the target that this healthy machine confirmed running from its channel artifact. */
+  async reportMachineChannelApplied(input: { target: 'machine'; generation: string }): Promise<void> {
+    await this.call('deploy.machineChannelApplied', input);
+  }
+
   private async call<T = unknown>(operation: ControlOperation, payload: Record<string, unknown>): Promise<T> {
     for (let resigned = false; ; resigned = true) {
       const request = signedRequest(this.options, operation, payload);
       try {
         return await withCloudRequestDiagnostics(request, async (diagnostics) => {
-          const response = await (this.options.fetcher ?? fetch)(new URL('/v1/control', this.options.baseUrl), {
+          const response = await cloudFetch(this.options, new URL('/v1/control', this.options.baseUrl), {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...diagnostics.headers },
             body: JSON.stringify(request),

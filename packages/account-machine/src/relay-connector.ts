@@ -6,6 +6,7 @@ import {
   RELAY_PROTOCOL_VERSION,
   TUNNEL_CHUNK_BYTES,
   createRelayAuthorization,
+  createServerClock,
   decodeTunnelChunk,
   encodeTunnelChunk,
   parseMachineRelayMessage,
@@ -62,6 +63,7 @@ export class MachineRelayConnector {
   private reconnectDelayMs = 500;
   private openedAt: number | null = null;
   private stopped = false;
+  private readonly clock = createServerClock();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly forwarding = new Map<string, AbortController>();
   private readonly serviceSockets = new Map<string, WebSocket>();
@@ -87,7 +89,7 @@ export class MachineRelayConnector {
       const url = socketUrl(this.options.relayUrl, this.options.machineId);
       const target = `${url.pathname}${url.search}`;
       const headers = {
-        authorization: createRelayAuthorization(this.options.signingPrivateKey, target),
+        authorization: createRelayAuthorization(this.options.signingPrivateKey, target, this.clock.now()),
         'x-gitspace-machine-grant': encodedGrant(this.options.machineGrant),
       };
       const Socket = WebSocket as unknown as BunWebSocketConstructor;
@@ -133,6 +135,7 @@ export class MachineRelayConnector {
     const discardedRequests = this.pending.size;
     const connectionAgeMs = this.openedAt === null ? null : now - this.openedAt;
     this.socket = null;
+    const opened = this.openedAt !== null;
     this.openedAt = null;
     clearTimeout(this.livenessTimer ?? undefined);
     this.livenessTimer = null;
@@ -151,6 +154,9 @@ export class MachineRelayConnector {
       ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }),
     }));
     if (this.stopped) return;
+    // A WebSocket client cannot see why its upgrade was refused, so a socket that never opened
+    // re-reads the relay's clock from a plain response for the attempts that follow.
+    if (!opened) void fetch(this.options.relayUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) }).then((response) => this.clock.observe(response), () => undefined);
     this.scheduleReconnect();
     if (error) this.options.onError?.(error);
   }

@@ -25,17 +25,16 @@ describe('relay authorization', () => {
     expect(verifyRelayAuthorization({ header, signingPublicKey: publicKey, target: '/ws?role=client&id=browser', now, maxSkewMs: 60_000 }).status).toBe('error');
   });
 
-  it('rejects expired signatures', () => {
+  it('marks only validly signed proofs outside the window as expired', () => {
     const issuedAt = 1_800_000_000_000;
     const target = '/ws?role=machine&id=darktop';
     const header = createRelayAuthorization(privateKey, target, issuedAt, '12345678-1234-4234-8234-123456789abc');
-    expect(verifyRelayAuthorization({
-      header,
-      signingPublicKey: publicKey,
-      target,
-      now: issuedAt + 60_001,
-      maxSkewMs: 60_000,
-    }).status).toBe('error');
+    const late = { signingPublicKey: publicKey, now: issuedAt + 60_001, maxSkewMs: 60_000 };
+    expect(verifyRelayAuthorization({ ...late, header, target, now: issuedAt + 60_000 }).status).toBe('ok');
+    const expired = verifyRelayAuthorization({ ...late, header, target });
+    expect(expired.status === 'error' && expired.error.expired).toBe(true);
+    const forged = verifyRelayAuthorization({ ...late, header, target: '/ws?role=client&id=browser' });
+    expect(forged.status === 'error' && !forged.error.expired).toBe(true);
   });
 });
 

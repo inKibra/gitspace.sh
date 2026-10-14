@@ -384,9 +384,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       attachments: runtime.attachments, code: new ArtifactsCodeStore(this.env.ARTIFACTS), publish: () => runtime.publish(),
       snapshot: () => runtime.cloudFiles.initializeSnapshot(),
       origin: async projectId => (await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getProject())?.repositoryReference ?? null,
+      // The worker authenticated this machine's request; only fleet membership is checked here.
       authorizeMachine: async machineId => {
         const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId);
-        if (!machine || machine.desiredState === 'removed' || !await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).hasRuntimeMachine(machineId)) throw new Error('Attachment target is not an enrolled account machine');
+        if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
       },
     });
   }
@@ -395,7 +396,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const input = RuntimeCacheAttachmentRequestInputSchema.parse(raw);
     const { project, workspace } = await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
     const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
-    if (!machine || machine.desiredState === 'removed' || !await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).hasRuntimeMachine(input.machineId)) throw new Error('Attachment target is not an enrolled account machine');
+    if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
     const runtime = await this.getRuntime(input);
     await runtime.cloudFiles.recover();
     await runtime.cloudFiles.initializeSnapshot();

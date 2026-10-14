@@ -4,7 +4,7 @@ import { closeSync, existsSync, openSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import { createRelayAuthorization, createSignedControlRequest, decodeMachinePairingToken, releaseTargetSchema, signRpcRequest } from '@gitspace/protocol';
+import { createRelayAuthorization, createServerClock, createSignedControlRequest, decodeMachinePairingToken, releaseTargetSchema, sendSigned, signRpcRequest } from '@gitspace/protocol';
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
@@ -74,9 +74,14 @@ async function savePrivateJson(path: string, value: unknown): Promise<void> {
   await chmod(temporary, 0o600);
   await rename(temporary, path);
 }
+/** The account's clock for every request this process signs. */
+const accountClock = createServerClock();
 async function accountArtifactKey(config: MachineConfig): Promise<string> {
-  const request = createSignedControlRequest({ userId: config.userId, machineId: config.machine.id, operation: 'artifacts.key.get', payload: {}, signingPrivateKey: credentialProtocolBase64.decode(config.machine.signingPrivateKey) });
-  const response = await fetch(new URL('/v1/control', config.apiUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request), signal: AbortSignal.timeout(30_000) });
+  const signingPrivateKey = credentialProtocolBase64.decode(config.machine.signingPrivateKey);
+  const response = await sendSigned(accountClock, (timestamp) => {
+    const request = createSignedControlRequest({ userId: config.userId, machineId: config.machine.id, operation: 'artifacts.key.get', payload: {}, signingPrivateKey, timestamp });
+    return fetch(new URL('/v1/control', config.apiUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request), signal: AbortSignal.timeout(30_000) });
+  });
   if (!response.ok) throw new Error(`Account artifact key request failed (HTTP ${response.status})`);
   const result = await response.json() as { status?: string; value?: { key?: string } };
   if (result.status !== 'ok' || !result.value?.key || credentialProtocolBase64.decode(result.value.key).byteLength !== 32) throw new Error('Control plane returned an invalid account artifact key');
@@ -247,7 +252,7 @@ machine.command('setup').description('Link using the pairing command from your a
     const pairingRequest = async <T>(action: 'claim' | 'poll', payload: object): Promise<T> => {
       const url = new URL(`/v1/machine-pairings/${action}`, token.apiUrl);
       const body = new TextEncoder().encode(JSON.stringify(payload));
-      const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-gitspace-device': signRpcRequest({ deviceId: token.pairingId, signingPrivateKey: privateKey, method: 'POST', path: url.pathname, body }) }, body, signal: AbortSignal.timeout(30_000) });
+      const response = await sendSigned(accountClock, timestamp => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-gitspace-device': signRpcRequest({ deviceId: token.pairingId, signingPrivateKey: privateKey, method: 'POST', path: url.pathname, body, timestamp }) }, body, signal: AbortSignal.timeout(30_000) }));
       const result = await response.json() as { status: string; value: T; error?: { message?: string } };
       if (!response.ok || result.status !== 'ok') throw new Error(result.error?.message ?? `Machine pairing failed (HTTP ${response.status})`);
       return result.value;
@@ -312,19 +317,19 @@ machine.command('recover').description('Build and activate selected tenant relea
 machine.command('status').description('Show local runtime and relay status').action(async () => {
   const config = await requireConfig();
   const host = await runningHost();
-  const health = async (url: URL, headers?: HeadersInit): Promise<string> => {
+  const health = async (url: URL, headers?: (timestamp: number) => HeadersInit): Promise<string> => {
     try {
-      const response = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) });
+      const response = await sendSigned(accountClock, timestamp => fetch(url, { headers: headers?.(timestamp), signal: AbortSignal.timeout(5_000) }));
       return response.ok ? 'reachable' : `HTTP ${response.status}`;
     } catch { return 'unreachable'; }
   };
   const tunnelUrl = new URL(`/tunnel/${encodeURIComponent(config.machine.id)}/health`, config.relayUrl);
   const [relay, tunnel] = await Promise.all([
     health(new URL('/health', config.relayUrl)),
-    health(tunnelUrl, {
-      authorization: createRelayAuthorization(credentialProtocolBase64.decode(config.machine.signingPrivateKey), `${tunnelUrl.pathname}${tunnelUrl.search}`),
+    health(tunnelUrl, timestamp => ({
+      authorization: createRelayAuthorization(credentialProtocolBase64.decode(config.machine.signingPrivateKey), `${tunnelUrl.pathname}${tunnelUrl.search}`, timestamp),
       'x-gitspace-machine-grant': Buffer.from(JSON.stringify(config.machine.grant)).toString('base64url'),
-    }),
+    })),
   ]);
   console.log(`Machine: ${config.machine.label}\nDaemon: ${host ? `running (pid ${host.pid}${host.url ? `, rpc ${host.url}` : ''})` : 'stopped'}\nRelay service: ${relay}\nMachine tunnel: ${tunnel}\nAccount: ${config.accountUrl}\nLog: ${LOG_PATH}`);
 });
@@ -332,7 +337,8 @@ machine.command('remove').description('Stop and revoke this computer; retain its
   const config = await requireConfig();
   await stopMachine();
   const path = '/v1/machines/revoke';
-  const response = await fetch(new URL(path, config.apiUrl), { method: 'POST', headers: { authorization: createRelayAuthorization(credentialProtocolBase64.decode(config.machine.signingPrivateKey), path), 'content-type': 'application/json' }, body: JSON.stringify({ userId: config.userId, machineId: config.machine.id }), signal: AbortSignal.timeout(30_000) });
+  const signingPrivateKey = credentialProtocolBase64.decode(config.machine.signingPrivateKey);
+  const response = await sendSigned(accountClock, timestamp => fetch(new URL(path, config.apiUrl), { method: 'POST', headers: { authorization: createRelayAuthorization(signingPrivateKey, path, timestamp), 'content-type': 'application/json' }, body: JSON.stringify({ userId: config.userId, machineId: config.machine.id }), signal: AbortSignal.timeout(30_000) }));
   const result = await response.json() as { status?: string; error?: { message?: string } };
   if (!response.ok || result.status !== 'ok') throw new Error(result.error?.message ?? 'Machine revocation failed; local identity retained');
   await rm(CONFIG_PATH);

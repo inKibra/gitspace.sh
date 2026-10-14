@@ -171,7 +171,7 @@ it('keeps provider-accepted failures durable and explicit Start reuses the same 
   expect((await f.catalog.listMachines()).map(value => value.id)).toEqual([machine.id]);
   expect(await f.catalog.cloudImage(machine.id)).toMatchObject({ currentImage: image, desiredImage: image });
   const proof = createSignedControlRequest({ userId: f.userId, machineId: machine.id, operation: 'catalog.machine.list', payload: {}, signingPrivateKey: credentialProtocolBase64.decode(first.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY!) });
-  expect(await f.vault.authorizeControl(proof, 'space.control')).toMatchObject({ status: 'ok' });
+  expect((await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(proof) })).status).toBe(200);
 });
 
 it('reconciles a lost create response once without allocating or reenrolling another machine', async () => {
@@ -224,7 +224,7 @@ it.each(['prepare', 'enroll'] as const)('destroys pending %s work without late r
   try {
     expect(await controlFleetMachine(env, f.userId, machine.id, 'destroy')).toEqual({ machineId: machine.id, removed: true });
     expect(await f.catalog.hasPendingSandbox(machine.id)).toBe(false);
-    expect(await f.vault.authorizeControl(proof, 'space.control')).toMatchObject({ status: 'error' });
+    expect((await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(proof) })).status).toBe(401);
   } finally { gate.resolve(); }
   await runInDurableObject(f.catalog, async (instance: FleetCatalogDO) => {
     // Test-only access drains background work; no production state is mutated.
@@ -381,7 +381,7 @@ it('retries interrupted provisioning on its lease, then destroys the sandbox and
     expect(f.calls).toContain(`/v1/sandboxes/${machine.id}/destroy`);
     expect(await f.catalog.getMachine(machine.id)).toMatchObject({ state: 'error', desiredState: 'offline', operationId: null, error: expect.stringContaining('cannot keep billing') });
     expect(await f.catalog.hasPendingSandbox(machine.id)).toBe(false);
-    expect(await f.vault.authorizeControl(proof, 'space.control')).toMatchObject({ status: 'error' });
+    expect((await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(proof) })).status).toBe(401);
     await expect(controlFleetMachine(env, f.userId, machine.id, 'resume')).rejects.toThrow('cannot keep billing');
     // The fenced attempts finishing late cannot resurrect it.
     interrupted.resolve();

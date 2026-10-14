@@ -12,6 +12,7 @@ import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
 import { requireRuntimeIdentity } from './runtime-access.js';
+import { DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority } from './device-authority.js';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const MAX_EVENT_CHARACTERS = 8 * 1024 * 1024;
@@ -21,8 +22,9 @@ export async function requireRuntimeAccess(
   env: Env, userId: string, deviceId: string,
   input: z.infer<typeof RuntimeIdentitySchema>, capability: DeviceCapability,
 ) {
-  const vault = env.CREDENTIALS.getByName(userId);
-  const device = await vault.currentDeviceGrant(deviceId);
+  const view = await deviceAuthority(env).current();
+  if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
+  const device = view.device(deviceId, Date.now());
   if (!device || !device.capabilities.includes(capability)) throw new Error('Runtime authorization has expired or lacks permission');
   const access = await requireRuntimeIdentity(env, userId, input, capability !== 'rpc.read');
   if (device.scope.kind === 'project' && device.scope.projectId !== input.projectId) throw new Error('Workspace is outside the device project scope');
@@ -73,7 +75,9 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
   });
   const browserTrust = server.implement(runtimeBrowserTrustContract).handler(async ({ errors }) => {
     try {
-      const device = await env.CREDENTIALS.getByName(userId).currentDeviceGrant(deviceId);
+      const view = await deviceAuthority(env).current();
+      if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
+      const device = view.device(deviceId, Date.now());
       if (!device || device.kind !== 'browser' || !deviceCanAdminister(device, 'account.admin')) throw new Error('Browser pairing requires a browser administrator');
       return ok(await env.ACCOUNT_STATE.getByName(userId).browserTrust());
     } catch (error) { return err(errors.OperationFailed({ operation: 'read browser trust root', message: message(error) })); }

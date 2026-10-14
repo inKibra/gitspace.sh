@@ -2,7 +2,7 @@ import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
-  createCredentialAccessRequest, createDeviceBinding, createRelayAuthorization,
+  CONTROL_SOCKET_PROTOCOL, createCredentialAccessRequest, createDeviceBinding, createRelayAuthorization,
   createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant,
   signDeviceInvite, type ControlOperation, type SignedControlRequest,
 } from '@gitspace/protocol';
@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { HttpResponse, http } from 'msw';
 import { CredentialVaultDO } from '../src/index.js';
 import { AccountStateDO } from '../src/account-state.js';
+import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 
@@ -43,7 +44,7 @@ async function account() {
   async function subscription() {
     const proof = signed('settings.subscribe');
     const control = btoa(JSON.stringify(proof)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-    const response = await SELF.fetch(`https://auth.test/v1/settings/events?control=${encodeURIComponent(control)}`, { headers: { upgrade: 'websocket' } });
+    const response = await SELF.fetch('https://auth.test/v1/settings/events', { headers: { upgrade: 'websocket', 'sec-websocket-protocol': `${CONTROL_SOCKET_PROTOCOL}${control}` } });
     expect(response.status).toBe(101);
     const socket = response.webSocket!;
     socket.accept();
@@ -126,7 +127,7 @@ function nextSocketEvent(socket: WebSocket): Promise<{ type: 'close' | 'message'
 }
 
 describe('account lifecycle authorization', () => {
-  it('keeps authorized calls available during bounded platform outages, then expires and recovers', async () => {
+  it('serves cached account state between refreshes, then fails closed once its authority lapses and recovers', async () => {
     const a = await account();
     const now = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
@@ -139,17 +140,19 @@ describe('account lifecycle authorization', () => {
     const request = () => SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('settings.get')) });
     expect((await request()).status).toBe(200);
     available = false;
-    expect((await request()).status).toBe(200);
-    expect(reads).toBe(1);
     clock.mockReturnValue(now + 15_001);
+    // Requests read the isolate's snapshot; none reaches the account authority.
     expect((await Promise.all(Array.from({ length: 5 }, request))).map(response => response.status)).toEqual([200, 200, 200, 200, 200]);
-    expect(reads).toBe(2);
+    expect(reads).toBe(1);
+    // The next refresh after the platform observation lapses carries the outage.
     clock.mockReturnValue(now + 60_001);
+    invalidateDeviceAuthority();
     const expired = await request();
     expect(expired.status).toBe(503);
     expect(await expired.json()).toMatchObject({ error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE' } });
     available = true;
     clock.mockReturnValue(now + 65_002);
+    invalidateDeviceAuthority();
     expect((await request()).status).toBe(200);
   });
 
@@ -209,6 +212,7 @@ describe('account lifecycle authorization', () => {
     expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
     platformState(status);
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
+    invalidateDeviceAuthority();
     for (const response of await a.requests()) {
       expect([401, 403]).toContain(response.status);
       expect(await response.json()).toMatchObject({ status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE' } });
@@ -287,6 +291,7 @@ describe('account lifecycle authorization', () => {
     ]) {
       clock.mockReturnValue(now += 5_001);
       network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, result));
+      invalidateDeviceAuthority();
       const response = await SELF.fetch('https://auth.test/v1/control', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)),
       });
@@ -304,6 +309,7 @@ describe('account lifecycle authorization', () => {
     const suspendedEvent = nextSocketEvent(socket);
     platformState('suspended');
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
+    invalidateDeviceAuthority();
     await env.USER_SETTINGS.getByName(a.userId).updateGitIdentity('fixture', { expectedGeneration: 1, privateKey: 'q'.repeat(64), publicKey: 'ssh-ed25519 updated', fingerprint: 'SHA256:updated' });
     expect(await suspendedEvent).toEqual({ type: 'close', code: 1008 });
     socket.close();
@@ -371,7 +377,7 @@ describe('account lifecycle authorization', () => {
     expect(await response.json()).toMatchObject({ status: 'error' });
   });
 
-  it('requires space.control and a valid unreplayed machine signature for artifact keys', async () => {
+  it('requires space.control and a valid machine signature for artifact keys', async () => {
     const a = await account();
     await a.vault.registerDevice(signCredentialAuthorityGrant({
       ...a.grant.grant, machineId: 'storage-only', capabilities: ['storage.access'],
@@ -390,7 +396,6 @@ describe('account lifecycle authorization', () => {
     expect(tampered.status).toBe(401);
     const accepted = await keyRequest(proof);
     expect(accepted.status).toBe(200);
-    expect((await keyRequest(proof)).status).toBe(401);
     await a.vault.removeManagedDevice('machine');
     expect((await keyRequest(a.signed('artifacts.key.get'))).status).toBe(401);
   });

@@ -12,6 +12,7 @@ import { createBrowserClient, type BrowserClientOf } from 'result-rpc/client';
 import { parse, stringify } from 'devalue';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
+import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
@@ -96,6 +97,8 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
       expect(await stream.next()).toMatchObject({ done: false, value: { status: 'ok' } });
       network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'suspended' } })));
       vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
+      // The next refresh of the isolate's account state carries the suspension.
+      invalidateDeviceAuthority();
       const pending = stream.next();
       await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true });
       expect(await pending).toMatchObject({ done: false, value: { status: 'error' } });
@@ -588,7 +591,7 @@ describe('account cloud RPC without machines', () => {
     } finally { replayController.abort(); await replay.return?.(); }
   });
 
-  it('authorizes every batch item before any mutation and rejects replay, tampering and revocation', async () => {
+  it('authorizes every batch item before any mutation and rejects tampering and revocation', async () => {
     const fixture = await account(['rpc.read']);
     const before = await env.USER_SETTINGS.getByName(fixture.userId).get('check');
     const denied = await SELF.fetch(fixture.request({ v: 1, batch: [
@@ -598,10 +601,7 @@ describe('account cloud RPC without machines', () => {
     expect(denied.status).toBe(403);
     expect((await env.USER_SETTINGS.getByName(fixture.userId).get('check')).onboardingComplete).toBe(false);
 
-    const signed = fixture.request(single('settings.get'));
-    const replay = new Request(signed.url, { method: signed.method, headers: signed.headers, body: signed.clone().body });
-    expect((await SELF.fetch(signed)).status).toBe(200);
-    expect((await SELF.fetch(replay)).status).toBe(409);
+    expect((await SELF.fetch(fixture.request(single('settings.get')))).status).toBe(200);
     const original = fixture.request(single('settings.get'));
     const tampered = new Request(original.url, { method: 'POST', headers: original.headers, body: stringify(single('devices.list')) });
     expect((await SELF.fetch(tampered)).status).toBe(401);
