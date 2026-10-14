@@ -61,14 +61,17 @@ export async function createCloudProject(env: Env, userId: string, input: { name
       projectId, workspaceId: null, kind: repositoryReference ? 'project.import' : 'project.create', targetMachines: [],
       steps: [{ id: 'project', label: repositoryReference ? 'Record repository' : 'Create project' }], createdBy: 'account',
     });
-    await authority.ensureBaseWorkspace({ userId, projectId });
+    const base = await authority.ensureBaseWorkspace({ userId, projectId });
     await index.putWorkspaceLocation(projectId, projectId);
     const finishedAt = new Date().toISOString();
     const operation = await authority.updateOperation({
       id: created.id, expectedRevision: created.revision, state: 'succeeded', error: null,
       steps: created.steps.map(step => ({ ...step, state: 'succeeded', updatedAt: finishedAt })),
     });
-    const project = await index.put(await authority.setProjectLifecycle(provisioning.revision, 'active'));
+    const active = await authority.setProjectLifecycle(provisioning.revision, 'active');
+    // The base workspace object starts from its definition and the active project, never reading its project to seed itself.
+    await env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`).seedWorkspace(base, active);
+    const project = await index.put(active);
     return { project, operation };
   } catch (error) {
     // A project that never became active is deleted, never left half-created in the directory.
@@ -96,8 +99,8 @@ export async function readCloudSpaceView(env: Env, userId: string, projectId: st
   const base = live.find(definition => definition.kind === 'base') ?? await authority.ensureBaseWorkspace({ userId, projectId });
   const worktrees = live.filter(definition => definition.kind === 'worktree');
   const placement = async (definition: CloudWorkspaceDefinition) => {
-    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`);
-    const [record, status] = await Promise.all([space.get(), space.runtimeWorkspaceStatus()]);
+    // One read of stored state per workspace; no runtime opens and no snapshot is re-derived.
+    const { placement: record, status } = await env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).listingState();
     const possessedBy = record?.state === 'open' ? record.machineId : null;
     return {
       closedAt: definition.archivedAt ? new Date(definition.archivedAt) : null,

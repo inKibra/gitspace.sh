@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { strict as assert } from 'node:assert';
 import { searchSnapshotFiles, type SearchArguments } from '../../protocol-runtime/src/search.js';
-import { CodeSearchIndex, type CodeSearchLimits, type CodeSearchSource, type CodeSearchStorage } from '../src/cloud-search-index.js';
+import { CodeSearchIndex, type CodeSearchEvent, type CodeSearchLimits, type CodeSearchSource, type CodeSearchStorage } from '../src/cloud-search-index.js';
 
 type Commit = { worktreeCommit: string; worktreeTree: string };
 
@@ -17,14 +17,23 @@ class Repository {
   readonly treeReads: string[] = [];
   readonly blobReads: string[] = [];
   failTrees = false;
+  /** Tree reads that never answer, as a wedged repository call would. */
+  hangTrees = false;
+  readonly failBlobs = new Set<string>();
+  /** Per-read delay, standing in for the repository service's round trip. */
+  latencyMs = 0;
   readonly source: CodeSearchSource = {
     reader: () => ({
       readTree: async oid => {
+        if (this.latencyMs) await new Promise(resolve => setTimeout(resolve, this.latencyMs));
         if (this.failTrees) throw new Error('Artifacts is unavailable');
+        if (this.hangTrees) return new Promise<never>(() => {});
         this.treeReads.push(oid);
         return this.trees.get(oid) ?? null;
       },
       readBlob: async oid => {
+        if (this.latencyMs) await new Promise(resolve => setTimeout(resolve, this.latencyMs));
+        if (this.failBlobs.has(oid)) throw new Error('MEMORY_LIMIT');
         this.blobReads.push(oid);
         const content = this.blobs.get(oid);
         return content === undefined ? null : new Blob([content]);
@@ -97,10 +106,12 @@ function proofFiles(): Map<string, string> {
 export class CodeSearchProof extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     await this.ctx.storage.deleteAll();
-    return Response.json(new URL(request.url).searchParams.has('benchmark') ? await this.benchmark() : await this.proof());
+    const url = new URL(request.url);
+    const latency = Number(url.searchParams.get('latency') ?? 0);
+    return Response.json(latency ? await this.firstBuild(latency) : url.searchParams.has('benchmark') ? await this.benchmark() : await this.proof());
   }
 
-  private open(repository: Repository, snapshot: { current: Commit | null }, options: { limits?: Partial<CodeSearchLimits>; storage?: CodeSearchStorage; reports?: unknown[] } = {}) {
+  private open(repository: Repository, snapshot: { current: Commit | null }, options: { limits?: Partial<CodeSearchLimits>; storage?: CodeSearchStorage; reports?: unknown[]; events?: CodeSearchEvent[] } = {}) {
     return new CodeSearchIndex({
       storage: options.storage ?? this.ctx.storage, source: repository.source, repository: 'workspace-proof',
       snapshots: {
@@ -111,7 +122,7 @@ export class CodeSearchProof extends DurableObject {
           return from < 0 || to < from ? null : to - from;
         },
       },
-      schedule: async () => {}, report: error => { if (!options.reports) throw error; options.reports.push(error); }, limits: options.limits,
+      schedule: async () => {}, report: error => { if (!options.reports) throw error; options.reports.push(error); }, log: event => { options.events?.push(event); }, limits: options.limits,
     });
   }
 
@@ -126,9 +137,12 @@ export class CodeSearchProof extends DurableObject {
     const limits: Partial<CodeSearchLimits> = { chunkBytes: 64, blobBytes: 4096, stepBlobs: 5, stepBytes: 256, stepTrees: 2 };
     const index = this.open(repository, snapshot, { limits });
     assert.equal(sql.exec("SELECT name FROM sqlite_master WHERE name='runtime_search_trigrams'").toArray().length, 0, 'The hand-rolled trigram table is dropped');
-    await assert.rejects(index.search({ pattern: 'needle', path: '.' }), /still building/u);
-    let steps = 0;
-    while (await index.step()) steps++;
+    await assert.rejects(index.search({ pattern: 'needle', path: '.' }), /building the first index: starting;.*grep on an attached machine/u);
+    let steps = 0, step = await index.step();
+    // While the first build runs, a search says how far it is.
+    for (; step && step.phase !== 'blobs'; step = await index.step()) steps++;
+    await assert.rejects(index.search({ pattern: 'needle', path: '.' }), /building the first index: 5 of \d+ files indexed; retry shortly/u);
+    for (; step; step = await index.step()) steps++;
     assert.ok(steps > 10, `Bounded steps build the index (${steps})`);
     assert.equal(repository.blobReads.length, new Set(files.values()).size, 'Each distinct blob is read once; identical files share it');
     assert.equal(sql.exec<{ refs: number }>('SELECT refs FROM code_search_blob WHERE oid=?', await repository.blobId(files.get('src/a.ts') ?? '')).one().refs, 2);
@@ -232,21 +246,77 @@ export class CodeSearchProof extends DurableObject {
     assert.equal(sql.exec('SELECT rowid FROM code_search_fts WHERE code_search_fts MATCH ?', '"aga" AND "gai"').toArray().length, 0, 'Its FTS rows are deleted');
     assert.equal(sql.exec<{ refs: number }>('SELECT refs FROM code_search_blob WHERE oid=?', await repository.blobId(files.get('src/a.ts') ?? '')).one().refs, 3);
 
-    // A failing build is reported once, retried by later drives, and never hides the served generation.
-    const reports: unknown[] = [];
-    const retried = this.open(repository, snapshot, { limits, reports });
+    // A failing build is logged on every attempt, reported once, shown to searches, and never hides the served generation.
+    const reports: unknown[] = [], events: CodeSearchEvent[] = [];
+    const retried = this.open(repository, snapshot, { limits, reports, events });
     files.set('src/a.ts', 'export const replaced = 1;\n');
     snapshot.current = await repository.commit(files);
     repository.failTrees = true;
     await retried.drive();
     await retried.drive();
     assert.equal(reports.length, 1);
-    assert.equal((await retried.search({ pattern: 'needle', path: 'src' })).indexedCommit, second.worktreeCommit);
+    assert.deepEqual(events.filter(event => event.event === 'code_search_step_failed').map(event => event.message), ['Artifacts is unavailable', 'Artifacts is unavailable']);
+    const failing = await retried.search({ pattern: 'needle', path: 'src' });
+    assert.equal(failing.indexedCommit, second.worktreeCommit);
+    assert.match(failing.notes.join(' '), /1 snapshot\(s\) behind.*last indexing step failed and is retried: Artifacts is unavailable/u);
     repository.failTrees = false;
+    events.length = 0;
     await retried.drive();
+    assert.ok(events.length > 0 && events.every(event => event.event === 'code_search_progress' && typeof event.stepMs === 'number' && event.failure === null), JSON.stringify(events));
+    assert.deepEqual(events.map(event => event.phase).filter((phase, n, all) => phase !== all[n - 1]), ['trees', 'blobs', 'publish', 'collect'], 'The failed drive had begun this build; recovery resumes it');
     const repaired = await retried.search({ pattern: 'replaced', path: 'src' });
-    assert.deepEqual([repaired.indexedCommit, repaired.behind, repaired.matches], [snapshot.current.worktreeCommit, 0, ['src/a.ts:1:export const replaced = 1;']]);
+    assert.deepEqual([repaired.indexedCommit, repaired.behind, repaired.matches, repaired.notes], [snapshot.current.worktreeCommit, 0, ['src/a.ts:1:export const replaced = 1;'], []]);
+
+    // A repository read that never answers fails the step after the read timeout instead of wedging every later drive.
+    const wedged = this.open(repository, snapshot, { limits: { ...limits, readTimeoutMs: 20 }, reports, events });
+    files.set('src/wedged.ts', 'wedged\n');
+    snapshot.current = await repository.commit(files);
+    repository.hangTrees = true;
+    events.length = 0;
+    await wedged.drive();
+    assert.match(String(events.at(-1)?.message), /did not answer within 0.02 s/u);
+    repository.hangTrees = false;
+
+    // Two drives racing over one build index each blob and reference once; an object the repository cannot serve is
+    // skipped after its attempts instead of blocking the build.
+    const racing = Array.from({ length: 12 }, (_, n) => `race/file${n}.ts`);
+    for (const path of racing) files.set(path, `race ${path}\n`);
+    snapshot.current = await repository.commit(files);
+    repository.failBlobs.add(await repository.blobId(files.get('race/file3.ts') ?? ''));
+    events.length = 0;
+    const racers = [this.open(repository, snapshot, { limits: { ...limits, stepWindowMs: 60_000 }, reports, events }), this.open(repository, snapshot, { limits: { ...limits, stepWindowMs: 60_000 }, reports, events })];
+    for (let round = 0; round < 4; round++) await Promise.all(racers.map(racer => racer.drive()));
+    assert.equal(events.filter(event => event.event === 'code_search_blob_skipped').length, 1, JSON.stringify(events.filter(event => event.event !== 'code_search_progress')));
+    const raced = await racers[0]!.search({ pattern: 'race', path: 'race' });
+    assert.equal(raced.indexedCommit, snapshot.current.worktreeCommit);
+    assert.equal(raced.matches.length, 11);
+    assert.equal(raced.skippedFiles, 1);
+    assert.equal(sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM code_search_blob b WHERE refs != (SELECT COUNT(*) FROM code_search_file f WHERE f.blob_id=b.id)').one().count, 0, 'References match file rows');
+    assert.deepEqual(sql.exec('SELECT build_queued, build_indexed FROM code_search_state').one(), { build_queued: 12, build_indexed: 12 }, 'Counters track the build in progress, each blob once');
+    repository.failBlobs.clear();
+    // The skipped object leaves the index with its file; everything else still matches the reference.
+    files.delete('race/file3.ts');
+    snapshot.current = await repository.commit(files);
+    await racers[0]!.drive();
+    await parity(files);
     return { passed: true, steps };
+  }
+
+  /** Wall time of a first build shaped like the GitSpace repository (1,283 files in 175 directories) when every
+   * repository read takes `latency` ms, driven as alarms drive it. */
+  private async firstBuild(latency: number) {
+    const repository = new Repository();
+    const files = new Map<string, string>();
+    for (let n = 0; n < 1283; n++) files.set(`packages/pkg${String(n % 25).padStart(2, '0')}/dir${String(n % 7)}/file${String(n).padStart(4, '0')}.ts`, `export const item${n} = ${n};\n${'// line\n'.repeat(200)}`);
+    const snapshot: { current: Commit | null } = { current: await repository.commit(files) };
+    repository.latencyMs = latency;
+    const index = this.open(repository, snapshot);
+    const start = performance.now();
+    let drives = 0;
+    for (; drives < 1000 && (await index.drive(), (await index.search({ pattern: 'item42 ', path: '.' }).catch(() => null)) === null); drives++);
+    const result = await index.search({ pattern: 'item42 ', path: '.' });
+    assert.deepEqual(result.matches, ['packages/pkg17/dir0/file0042.ts:1:export const item42 = 42;']);
+    return { passed: true, measurement: { files: files.size, trees: repository.trees.size, latencyMs: latency, drives: drives + 1, buildMs: performance.now() - start, treeReads: repository.treeReads.length, blobReads: repository.blobReads.length } };
   }
 
   /** Rows read/written, as Durable Objects bill them, and timings for a 10,000-file build, a one-file update and searches. */

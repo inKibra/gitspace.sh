@@ -2,7 +2,6 @@ import { machineExecutionAdmissionSchema, type LaunchProgress, type machineProto
 import { z } from 'zod';
 import { collectBytes, streamBytes, WorkspaceDomainError, WorkspaceFailureSchema } from '@gitspace/protocol-workspace';
 import {
-  CONTROL_SOCKET_PROTOCOL,
   createServerClock,
   createSignedControlRequest,
   type HostedServiceRoute,
@@ -320,6 +319,8 @@ export interface FleetMachineDefinition {
 
 export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthority {
   private readonly options: CloudControlOptions;
+  /** Lifecycle streams waiting out a reconnect delay, by workspace. */
+  private readonly lifecycleWaits = new Map<string, Set<() => void>>();
 
   constructor(options: SignedCloudRequestOptions) {
     this.options = cloudControlOptions(options);
@@ -406,17 +407,31 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
         await response?.body?.cancel().catch(() => undefined);
       }
       if (signal.aborted) return;
-      await new Promise<void>((resolve) => {
-        const finish = () => {
+      const woken = await new Promise<boolean>((resolve) => {
+        const waits = this.lifecycleWaits.get(spaceId) ?? new Set<() => void>();
+        this.lifecycleWaits.set(spaceId, waits);
+        const finish = (wake: boolean) => {
           clearTimeout(timer);
-          signal.removeEventListener('abort', finish);
-          resolve();
+          signal.removeEventListener('abort', waited);
+          waits.delete(woke);
+          if (!waits.size && this.lifecycleWaits.get(spaceId) === waits) this.lifecycleWaits.delete(spaceId);
+          resolve(wake);
         };
-        const timer = setTimeout(finish, retryDelay);
-        signal.addEventListener('abort', finish, { once: true });
-        if (signal.aborted) finish();
+        const woke = () => finish(true);
+        const waited = () => finish(false);
+        const timer = setTimeout(waited, retryDelay);
+        waits.add(woke);
+        signal.addEventListener('abort', waited, { once: true });
+        if (signal.aborted) waited();
       });
-      retryDelay = Math.min(10_000, retryDelay * 2);
+      retryDelay = woken ? 250 : Math.min(10_000, retryDelay * 2);
+    }
+  }
+
+  /** An `environment` notice: lifecycle streams of the workspace (every workspace when null) waiting to reconnect do so now. */
+  wakeLifecycleWatches(spaceId: string | null): void {
+    for (const [space, waits] of this.lifecycleWaits) {
+      if (spaceId === null || space === spaceId) for (const wake of [...waits]) wake();
     }
   }
 
@@ -450,10 +465,6 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
 
   releaseHostedRoute(projectId: string, hostname: string, generation: number): Promise<boolean> {
     return this.call('project.routes.release', { projectId, hostname, generation });
-  }
-
-  putMachineDefinition(definition: FleetMachineDefinition): Promise<FleetMachineDefinition> {
-    return this.call('catalog.machine.put', { ...definition });
   }
 
   listMachineDefinitions(): Promise<FleetMachineDefinition[]> {
@@ -501,50 +512,6 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
 
   appendMcpAudit(event: Omit<McpAuditEvent, 'id' | 'principalId' | 'machineId' | 'createdAt'>): Promise<McpAuditEvent> {
     return this.call('mcp.audit.append', event);
-  }
-
-  subscribeSettings(
-    onChange: (event: { userRevision: number; runtimeGeneration: number }) => void,
-    onState: (state: 'connecting' | 'open' | 'offline') => void,
-  ): () => void {
-    let stopped = false;
-    let socket: WebSocket | null = null;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let retryMs = 500;
-    const connect = (): void => {
-      if (stopped) return;
-      onState('connecting');
-      const request = signedRequest(this.options, 'settings.subscribe', {});
-      const url = new URL('/v1/settings/events', this.options.baseUrl);
-      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-      // The signed request rides in `Sec-WebSocket-Protocol`; URLs reach logs.
-      socket = new WebSocket(url, [`${CONTROL_SOCKET_PROTOCOL}${encodedRequest(request)}`]);
-      socket.addEventListener('open', () => { retryMs = 500; onState('open'); });
-      socket.addEventListener('message', (message) => {
-        try {
-          const event = JSON.parse(String(message.data)) as { type?: unknown; userRevision?: unknown; runtimeGeneration?: unknown };
-          if (event.type === 'settings.changed' && typeof event.userRevision === 'number' && typeof event.runtimeGeneration === 'number') {
-            onChange({ userRevision: event.userRevision, runtimeGeneration: event.runtimeGeneration });
-          }
-        } catch {
-          // Ignore malformed control-plane events; the next valid event remains usable.
-        }
-      });
-      socket.addEventListener('close', () => {
-        socket = null;
-        if (stopped) return;
-        onState('offline');
-        retryTimer = setTimeout(connect, retryMs);
-        retryMs = Math.min(retryMs * 2, 10_000);
-      });
-      socket.addEventListener('error', () => socket?.close());
-    };
-    connect();
-    return () => {
-      stopped = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      socket?.close(1000, 'Settings subscription stopped');
-    };
   }
 
   stageRelease(input: StageReleaseInput): Promise<ReleaseRecord> {

@@ -667,9 +667,9 @@ describe('account routing of machine work', () => {
     const { fixture, held, reached } = await fleet(true);
     const ready = RuntimeAttachmentSchema.parse({
       projectId: held.projectId, workspaceId: held.spaceId, attachmentId: 'cache-c', machineId: 'machine-c', generation: 1, role: 'cache', state: 'ready',
-      checkout: { kind: 'shared', branch: 'review' }, capabilities: [], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+      checkout: { kind: 'shared', branch: 'review' }, capabilities: [], updatedAt: new Date().toISOString(), online: true,
     });
-    const stale = { ...ready, attachmentId: 'cache-a', machineId: 'machine-a', heartbeatAt: new Date(Date.now() - 60_000).toISOString() };
+    const stale = { ...ready, attachmentId: 'cache-a', machineId: 'machine-a', online: false };
     await runInDurableObject(held.placement, (_instance, state) => {
       for (const attachment of [ready, stale]) {
         state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
@@ -696,9 +696,9 @@ describe('account routing of machine work', () => {
     expect(await client.environment.runChecks({ spaceId: held.spaceId, machineId: 'machine-a', runId: 'checks-unattached' })).toMatchObject(notAttached('machine-a'));
     const ready = RuntimeAttachmentSchema.parse({
       projectId: held.projectId, workspaceId: held.spaceId, attachmentId: 'cache-c', machineId: 'machine-c', generation: 1, role: 'cache', state: 'ready',
-      checkout: { kind: 'shared', branch: 'review' }, capabilities: [], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+      checkout: { kind: 'shared', branch: 'review' }, capabilities: [], updatedAt: new Date().toISOString(), online: true,
     });
-    const stale = { ...ready, attachmentId: 'cache-a', machineId: 'machine-a', heartbeatAt: new Date(Date.now() - 10 * 60_000).toISOString() };
+    const stale = { ...ready, attachmentId: 'cache-a', machineId: 'machine-a', online: false };
     const dispatched: RuntimeToolDispatch[] = [];
     await runInDurableObject(held.placement, async (instance, state) => {
       for (const attachment of [ready, stale]) {

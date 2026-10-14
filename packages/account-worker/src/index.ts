@@ -3,9 +3,14 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, dev
 import { machineProtocolInputSchema } from '@gitspace/protocol/deployment';
 import { DurableObject } from 'cloudflare:workers';
 import {
+  RELAY_ECHO_HEARTBEAT_MODE,
   RELAY_HEARTBEAT_LEASE_MS,
   RELAY_HEARTBEAT_MODE,
+  RELAY_NOTICE_MODE,
+  RELAY_PING_MESSAGE,
+  RELAY_PONG_MESSAGE,
   RELAY_PROTOCOL_VERSION,
+  relayNoticeSchema,
   TUNNEL_CHUNK_BYTES,
   decodeTunnelChunk,
   encodeTunnelChunk,
@@ -17,8 +22,11 @@ import {
   SIGNED_REQUEST_EXPIRED_CODE,
   SIGNED_REQUEST_EXPIRED_MESSAGE,
   SIGNED_REQUEST_MAX_AGE_MS,
+  type RelayNotice,
+  type RelayNoticeMessage,
   type SocketAttachment,
   type TunnelRequestMessage,
+  type TunnelResponseMessage,
 } from '@gitspace/protocol';
 import {
   credentialProtocolBase64,
@@ -77,7 +85,6 @@ const HOP_BY_HOP_HEADERS: Record<string, true> = {
 
 interface PendingTunnel {
   socket: WebSocket;
-  serviceSocket?: WebSocket;
   session?: ServiceSession;
   method: string;
   origin: string | null;
@@ -94,7 +101,39 @@ interface RelaySocketAttachment extends SocketAttachment {
   machineGrant?: SignedCredentialAuthorityGrant;
   authorizedUntil?: number;
   heartbeatExpiresAt?: number;
+  /** The machine understands `notice` messages. */
+  notices?: boolean;
+  /** One machine connection; the service WebSockets it carries are bound to it, not to a later connection. */
+  connectionId?: string;
 }
+
+/** Machine and client endpoint sockets. */
+const ENDPOINT_SOCKET_TAG = 'endpoint';
+/** A browser's service WebSocket, tunnelled to a machine. Everything about it lives in its attachment, so the relay
+ * hibernates while it is open. */
+const SERVICE_SOCKET_TAG = 'service';
+const ServiceSocketAttachmentSchema = z.object({
+  role: z.literal('service'),
+  requestId: z.string(),
+  machineId: z.string(),
+  connectionId: z.string(),
+  session: ServiceSessionSchema.optional(),
+});
+type ServiceSocketAttachment = z.infer<typeof ServiceSocketAttachmentSchema>;
+
+function serviceSocketAttachment(socket: WebSocket): ServiceSocketAttachment | null {
+  const parsed = ServiceSocketAttachmentSchema.safeParse(socket.deserializeAttachment());
+  return parsed.success ? parsed.data : null;
+}
+
+/** Closes a socket the relay still holds open; one already closing is left to finish. */
+function closeOpenSocket(socket: WebSocket, code: number, reason: string): void {
+  if (socket.readyState === 1) socket.close(code, reason);
+}
+
+/** A presence write that failed is retried this long after. */
+const PRESENCE_RETRY_MS = 5_000;
+const PRESENCE_SEEDED = 'presence-seeded';
 
 function machineAuthorizationDeadline(grant: SignedCredentialAuthorityGrant): number {
   let deadline = Math.min(Date.now() + MACHINE_LEASE_MS, grant.grant.expiresAt ?? Infinity);
@@ -302,18 +341,64 @@ export class UserRelayDO extends DurableObject<Env> {
     const revoked = new Set(sessionIds);
     for (const [requestId, pending] of this.pendingTunnels) {
       if (pending.session && revoked.has(pending.session.sessionId)) {
-        pending.serviceSocket?.close(1008, 'Service authorization expired');
         await this.failTunnel(requestId, new Error('Service authorization expired'), 401, 'SERVICE_SESSION_EXPIRED');
       }
+    }
+    for (const socket of this.ctx.getWebSockets(SERVICE_SOCKET_TAG)) {
+      const service = serviceSocketAttachment(socket);
+      if (service?.session && revoked.has(service.session.sessionId)) closeOpenSocket(socket, 1008, 'Service authorization expired');
     }
   }
   private async serviceTunnelAuthorized(requestId: string, pending: PendingTunnel): Promise<boolean> {
     if (!pending.session) return true;
     const session = await this.serviceSessions.validate(pending.session.sessionId, pending.session.hostname).catch(() => null);
     if (session && session.deviceId === pending.session.deviceId) return true;
-    pending.serviceSocket?.close(1008, 'Service authorization expired');
     await this.failTunnel(requestId, new Error('Service authorization expired'), 401, 'SERVICE_SESSION_EXPIRED');
     return false;
+  }
+  private async serviceSocketAuthorized(socket: WebSocket, service: ServiceSocketAttachment): Promise<boolean> {
+    if (!service.session) return true;
+    const session = await this.serviceSessions.validate(service.session.sessionId, service.session.hostname).catch(() => null);
+    if (session && session.deviceId === service.session.deviceId) return true;
+    closeOpenSocket(socket, 1008, 'Service authorization expired');
+    return false;
+  }
+  /** The machine connection a service WebSocket was opened on. */
+  private tunnelMachine(service: ServiceSocketAttachment): WebSocket | undefined {
+    return this.ctx.getWebSockets(`endpoint:machine:${service.machineId}`).find(socket => this.socketAttachment(socket)?.connectionId === service.connectionId);
+  }
+  /** The service WebSocket a machine connection carries for `requestId`. */
+  private tunnelService(requestId: string, machine: RelaySocketAttachment): { socket: WebSocket; service: ServiceSocketAttachment } | null {
+    for (const socket of this.ctx.getWebSockets(`tunnel:${requestId}`)) {
+      const service = serviceSocketAttachment(socket);
+      if (service && service.connectionId === machine.connectionId) return { socket, service };
+    }
+    return null;
+  }
+  /** Browser → machine. */
+  private async serviceSocketMessage(socket: WebSocket, input: string | ArrayBuffer): Promise<void> {
+    const service = serviceSocketAttachment(socket);
+    if (!service) return closeOpenSocket(socket, 1011, 'Missing socket identity');
+    if (!await this.serviceSocketAuthorized(socket, service)) return;
+    const machine = this.tunnelMachine(service);
+    if (!machine || !await this.authorizeSocket(machine)) return closeOpenSocket(socket, 1011, 'Service tunnel disconnected');
+    machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.data', requestId: service.requestId, binary: typeof input !== 'string', data: typeof input === 'string' ? input : encodeTunnelChunk(new Uint8Array(input)) } satisfies TunnelRequestMessage));
+  }
+  /** Machine → browser. */
+  private async machineServiceMessage(socket: WebSocket, service: ServiceSocketAttachment, message: TunnelResponseMessage): Promise<void> {
+    if (message.type === 'tunnel.websocket.data') {
+      if (await this.serviceSocketAuthorized(socket, service)) socket.send(message.binary ? decodeTunnelChunk(message.data) : message.data);
+      return;
+    }
+    if (message.type === 'tunnel.websocket.close') return closeOpenSocket(socket, 1000, message.reason);
+    closeOpenSocket(socket, 1011, message.type === 'tunnel.response.error' ? 'Service WebSocket failed' : 'Service tunnel disconnected');
+  }
+  /** A closed service WebSocket closes the machine's end. */
+  private serviceSocketGone(socket: WebSocket): void {
+    const service = serviceSocketAttachment(socket);
+    const machine = service ? this.tunnelMachine(service) : undefined;
+    if (!service || machine?.readyState !== 1) return;
+    machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.close', requestId: service.requestId, code: 1000, reason: '' } satisfies TunnelRequestMessage));
   }
   browserRelayFetch(request: Request) { return this.browserRelay.fetch(request); }
   browserRelayPair(trust: RuntimeBrowserTrust, endpoint: string) { return this.browserRelay.pair(trust, endpoint); }
@@ -325,12 +410,95 @@ export class UserRelayDO extends DurableObject<Env> {
   browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
   browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.execute(authorization); }
 
+  private presenceLine: Promise<void> = Promise.resolve();
+  /** When machine presence is next reconciled against the live sockets. */
+  private presenceCheckAt: number | null = null;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // Ping-mode machines are answered without waking the relay; the answer's time extends their heartbeat lease.
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(RELAY_PING_MESSAGE, RELAY_PONG_MESSAGE));
     ctx.blockConcurrencyWhile(async () => {
       // Relay authorizations are bounded by the 60-second clock window, not single-use nonces.
       ctx.storage.sql.exec('DROP TABLE IF EXISTS auth_nonces');
+      // The machines this relay last reported connected.
+      ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS machine_presence(machine_id TEXT PRIMARY KEY)');
+      // Sockets may outlive a relay restart (hibernation). A reported machine that has not reconnected within one heartbeat
+      // lease is reported gone, and every machine still holding a socket is re-asserted to its workspaces. Until
+      // presence is first seeded, the fleet's online machines count as reported.
+      if (ctx.storage.sql.exec('SELECT 1 FROM machine_presence LIMIT 1').toArray().length || await ctx.storage.get(PRESENCE_SEEDED) !== true || ctx.getWebSockets().length) {
+        this.presenceCheckAt = Date.now() + RELAY_HEARTBEAT_LEASE_MS;
+        await this.scheduleMachineCheck();
+      }
     });
+  }
+
+  /** One notice to each named machine's notice-capable sockets. It carries no state, so a machine that misses one
+   * loses nothing: it fetches every topic whenever its connection opens. */
+  notifyMachines(machineIds: readonly string[] | 'all', notice: RelayNotice): void {
+    const message = JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'notice', ...relayNoticeSchema.parse(notice) } satisfies RelayNoticeMessage);
+    const sockets = machineIds === 'all' ? this.ctx.getWebSockets() : machineIds.flatMap(machineId => this.ctx.getWebSockets(`endpoint:machine:${machineId}`));
+    for (const socket of sockets) {
+      if (socket.readyState !== 1 || this.socketAttachment(socket)?.notices !== true) continue;
+      try { socket.send(message); } catch { /* A socket closing now reconnects and catches up. */ }
+    }
+  }
+
+  /** A machine is connected while one of its sockets is open and inside its heartbeat lease. */
+  private machineConnected(machineId: string): boolean {
+    return this.ctx.getWebSockets(`endpoint:machine:${machineId}`).some(socket => {
+      const attachment = this.socketAttachment(socket);
+      const expiresAt = attachment ? this.heartbeatExpiresAt(socket, attachment) : undefined;
+      return socket.readyState === 1 && (expiresAt === undefined || expiresAt > Date.now());
+    });
+  }
+
+  /** Presence is written only when it changes: to the fleet, then to each workspace attaching the machine. Passes are
+  * serialized and each reads the live sockets, so interleaved opens and closes converge on the final state. An accepted
+  * socket always tells the workspaces (they write only on change), so a workspace that missed a report catches up on
+  * the machine's next connection; a workspace that cannot be told keeps the state unreported and is retried. */
+  private reconcilePresence(machineId: string, accepted = false): Promise<void> {
+    const run = this.presenceLine.then(async () => {
+      const connected = this.machineConnected(machineId);
+      const reported = this.ctx.storage.sql.exec('SELECT 1 FROM machine_presence WHERE machine_id=?', machineId).toArray().length > 0;
+      if (reported === connected && !(accepted && connected)) return;
+      try {
+        const workspaces = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).machinePresence(machineId, connected);
+        const failed = (await Promise.all(workspaces.map(workspace => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`).runtimeMachinePresence(machineId, connected).then(() => false, (error: unknown) => {
+          console.error(JSON.stringify({ event: 'relay_presence_workspace_failed', machineId, workspaceId: workspace.workspaceId, message: error instanceof Error ? error.message : String(error) }));
+          return true;
+        })))).some(Boolean);
+        if (failed) throw new Error('A workspace did not record the machine presence');
+        if (connected) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_presence(machine_id) VALUES(?)', machineId);
+        else this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
+      } catch (error) {
+        console.error(JSON.stringify({ event: 'relay_presence_failed', machineId, connected, message: error instanceof Error ? error.message : String(error) }));
+        // Unreported, a connected machine is pushed again by the retry sweep.
+        if (connected) this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
+        this.presenceCheckAt = Math.min(this.presenceCheckAt ?? Infinity, Date.now() + PRESENCE_RETRY_MS);
+        await this.scheduleMachineCheck();
+      }
+    });
+    this.presenceLine = run.catch(() => {});
+    return run;
+  }
+
+  /** Reconciles every machine reported connected or holding a socket; a socket holder is re-asserted to its workspaces. */
+  private async sweepPresence(): Promise<void> {
+    if (await this.ctx.storage.get(PRESENCE_SEEDED) !== true) {
+      // Machines marked online before the relay owned presence are reported connected, so a gone one goes offline.
+      for (const machine of await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).listMachines()) {
+        if (machine.state === 'online') this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_presence(machine_id) VALUES(?)', machine.id);
+      }
+      await this.ctx.storage.put(PRESENCE_SEEDED, true);
+    }
+    const holders = new Set<string>();
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(socket);
+      if (attachment?.role === 'machine') holders.add(attachment.id);
+    }
+    const machines = new Set([...this.ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM machine_presence').toArray().map(row => row.machine_id), ...holders]);
+    for (const machineId of machines) await this.reconcilePresence(machineId, holders.has(machineId));
   }
   async fetch(request: Request): Promise<Response> {
 
@@ -341,6 +509,8 @@ export class UserRelayDO extends DurableObject<Env> {
   }
 
   async webSocketMessage(socket: WebSocket, input: string | ArrayBuffer): Promise<void> {
+    if (this.ctx.getTags(socket).includes(SERVICE_SOCKET_TAG)) return this.serviceSocketMessage(socket, input);
+    if (this.browserRelay.owns(socket)) return this.browserRelay.webSocketMessage(socket, input);
     if (typeof input !== 'string') {
       socket.close(1003, 'Text protocol required');
       return;
@@ -371,6 +541,8 @@ export class UserRelayDO extends DurableObject<Env> {
       socket.close(1008, 'Only machines may answer tunnel requests');
       return;
     }
+    const service = this.tunnelService(message.requestId, attachment);
+    if (service) return this.machineServiceMessage(service.socket, service.service, message);
     const pending = this.pendingTunnels.get(message.requestId);
     if (!pending || pending.socket !== socket) return;
 
@@ -378,35 +550,21 @@ export class UserRelayDO extends DurableObject<Env> {
       switch (message.type) {
         case 'tunnel.websocket.open': {
           if (pending.responseStarted) throw new Error('Duplicate service WebSocket');
+          const connectionId = attachment.connectionId;
+          if (!connectionId) throw new Error('Machine connection has no identity');
           if (!await this.serviceTunnelAuthorized(message.requestId, pending)) return;
-          const pair = new WebSocketPair();
-          const [client, server] = Object.values(pair);
-          server.accept();
-          pending.serviceSocket = server;
+          const [client, server] = Object.values(new WebSocketPair());
+          server.serializeAttachment({ role: 'service', requestId: message.requestId, machineId: attachment.id, connectionId, ...(pending.session ? { session: pending.session } : {}) } satisfies ServiceSocketAttachment);
+          this.ctx.acceptWebSocket(server, [SERVICE_SOCKET_TAG, `tunnel:${message.requestId}`, `tunnel-connection:${connectionId}`]);
           pending.responseStarted = true;
-          clearTimeout(pending.timeout);
-          server.addEventListener('message', event => {
-            this.ctx.waitUntil((async () => {
-              if (!await this.serviceTunnelAuthorized(message.requestId, pending)) return;
-              if (!await this.authorizeSocket(socket)) return server.close(1008, 'Machine authorization expired');
-              socket.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.data', requestId: message.requestId, binary: typeof event.data !== 'string', data: typeof event.data === 'string' ? event.data : encodeTunnelChunk(new Uint8Array(event.data)) } satisfies TunnelRequestMessage));
-            })().catch(() => server.close(1008, 'Service authorization unavailable')));
-          });
-          server.addEventListener('close', () => {
-            if (socket.readyState === 1) socket.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.close', requestId: message.requestId, code: 1000, reason: '' } satisfies TunnelRequestMessage));
-            void this.finishTunnel(message.requestId);
-          });
           pending.resolve(new Response(null, { status: 101, webSocket: client }));
+          // The request is answered; from here the socket's attachment carries the tunnel.
+          await this.finishTunnel(message.requestId);
           return;
         }
         case 'tunnel.websocket.data':
-          if (!await this.serviceTunnelAuthorized(message.requestId, pending)) return;
-          pending.serviceSocket?.send(message.binary ? decodeTunnelChunk(message.data) : message.data);
-          return;
         case 'tunnel.websocket.close':
-          pending.serviceSocket?.close(1000, message.reason);
-          await this.finishTunnel(message.requestId);
-          return;
+          throw new Error('Service WebSocket is not open');
         case 'tunnel.response.start': {
           if (pending.responseStarted) throw new Error('Duplicate tunnel response headers');
           const hasBody = pending.method !== 'HEAD' && ![204, 205, 304].includes(message.status);
@@ -443,14 +601,34 @@ export class UserRelayDO extends DurableObject<Env> {
   }
 
   async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
+    if (this.ctx.getTags(socket).includes(SERVICE_SOCKET_TAG)) {
+      this.serviceSocketGone(socket);
+      socket.close();
+      return;
+    }
+    if (this.browserRelay.owns(socket)) return this.browserRelay.webSocketClose(socket);
     this.failSocketTunnels(socket, new Error(`Machine disconnected (${code}: ${reason || 'no reason'})`));
     // Transport-only codes such as 1006 cannot be sent in a close frame.
     socket.close();
+    await this.socketGone(socket);
   }
 
   async webSocketError(socket: WebSocket): Promise<void> {
+    if (this.ctx.getTags(socket).includes(SERVICE_SOCKET_TAG)) {
+      this.serviceSocketGone(socket);
+      closeOpenSocket(socket, 1011, 'Service WebSocket failed');
+      return;
+    }
+    if (this.browserRelay.owns(socket)) return this.browserRelay.webSocketError(socket);
     this.failSocketTunnels(socket, new Error('Machine socket failed'));
     socket.close(1011, 'Machine socket failed');
+    await this.socketGone(socket);
+  }
+
+  /** A closed machine socket leaves its machine offline unless a replacement socket remains. */
+  private socketGone(socket: WebSocket): Promise<void> {
+    const attachment = this.socketAttachment(socket);
+    return attachment?.role === 'machine' ? this.reconcilePresence(attachment.id) : Promise.resolve();
   }
 
   private async acceptSocket(request: Request): Promise<Response> {
@@ -486,16 +664,23 @@ export class UserRelayDO extends DurableObject<Env> {
     }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
+    const query = new URL(request.url).searchParams;
+    const heartbeat = query.get('heartbeat');
     const attachment: RelaySocketAttachment = {
       ...parsed.data,
       ...(machineGrant ? { machineGrant, authorizedUntil } : {}),
-      ...(machineGrant && new URL(request.url).searchParams.get('heartbeat') === RELAY_HEARTBEAT_MODE
+      ...(machineGrant && (heartbeat === RELAY_HEARTBEAT_MODE || heartbeat === RELAY_ECHO_HEARTBEAT_MODE)
         ? { heartbeatExpiresAt: Date.now() + RELAY_HEARTBEAT_LEASE_MS }
         : {}),
+      ...(machineGrant && query.get('notices') === RELAY_NOTICE_MODE ? { notices: true } : {}),
+      ...(machineGrant ? { connectionId: crypto.randomUUID() } : {}),
     };
     server.serializeAttachment(attachment);
-    this.ctx.acceptWebSocket(server, [tag]);
-    if (machineGrant) await this.scheduleMachineCheck();
+    this.ctx.acceptWebSocket(server, [ENDPOINT_SOCKET_TAG, tag]);
+    if (machineGrant) {
+      await this.scheduleMachineCheck();
+      this.ctx.waitUntil(this.reconcilePresence(parsed.data.id, true));
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -640,7 +825,6 @@ export class UserRelayDO extends DurableObject<Env> {
       }
     }
     if (pending.writer) void pending.writer.abort(error).catch(() => {});
-    pending.serviceSocket?.close(1011, 'Service tunnel disconnected');
     if (!pending.responseStarted) {
       const message = pending.dispatched
         ? `${error.message}. The remote outcome may be unknown; refresh workspace state before retrying.`
@@ -653,6 +837,8 @@ export class UserRelayDO extends DurableObject<Env> {
     for (const [requestId, pending] of this.pendingTunnels) {
       if (pending.socket === socket) this.failTunnel(requestId, error);
     }
+    const connectionId = this.socketAttachment(socket)?.connectionId;
+    if (connectionId) for (const service of this.ctx.getWebSockets(`tunnel-connection:${connectionId}`)) closeOpenSocket(service, 1011, 'Service tunnel disconnected');
   }
 
   private tunnelCors(response: Response, origin: string | null): Response {
@@ -665,9 +851,17 @@ export class UserRelayDO extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    await Promise.all(this.ctx.getWebSockets().map((socket) => this.authorizeSocket(socket)));
+    await Promise.all(this.ctx.getWebSockets(ENDPOINT_SOCKET_TAG).map((socket) => this.authorizeSocket(socket)));
     await this.closeServiceSessions(await this.serviceSessions.sweep());
     for (const [requestId, pending] of this.pendingTunnels) if (pending.session) await this.serviceTunnelAuthorized(requestId, pending);
+    for (const socket of this.ctx.getWebSockets(SERVICE_SOCKET_TAG)) {
+      const service = serviceSocketAttachment(socket);
+      if (service) await this.serviceSocketAuthorized(socket, service);
+    }
+    if (this.presenceCheckAt !== null && this.presenceCheckAt <= Date.now()) {
+      this.presenceCheckAt = null;
+      await this.sweepPresence();
+    }
     await this.scheduleMachineCheck();
   }
 
@@ -677,9 +871,10 @@ export class UserRelayDO extends DurableObject<Env> {
       const attachment = this.socketAttachment(socket);
       if (socket.readyState === 1 && attachment?.role === 'machine') {
         next = Math.min(next, attachment.authorizedUntil ?? Date.now());
-        next = Math.min(next, attachment.heartbeatExpiresAt ?? Infinity);
+        next = Math.min(next, this.heartbeatExpiresAt(socket, attachment) ?? Infinity);
       }
     }
+    next = Math.min(next, this.presenceCheckAt ?? Infinity);
     if (Number.isFinite(next)) {
       const current = await this.ctx.storage.getAlarm();
       if (current === null || current <= Date.now() || current > next) {
@@ -693,10 +888,12 @@ export class UserRelayDO extends DurableObject<Env> {
     if (socket.readyState !== 1) return false;
     const attachment = this.socketAttachment(socket);
     if (attachment?.role === 'client') return true;
-    if (attachment?.heartbeatExpiresAt !== undefined && attachment.heartbeatExpiresAt <= Date.now()) {
+    const heartbeatExpiresAt = attachment ? this.heartbeatExpiresAt(socket, attachment) : undefined;
+    if (heartbeatExpiresAt !== undefined && heartbeatExpiresAt <= Date.now()) {
       this.logMachineSocketClose(socket, 1011, { check: 'heartbeat-expired' });
       this.failSocketTunnels(socket, new Error('Machine relay heartbeat expired; the host is reconnecting'));
       socket.close(1011, 'Machine relay heartbeat expired');
+      this.ctx.waitUntil(this.socketGone(socket));
       return false;
     }
     if (!attachment?.machineGrant || attachment.machineGrant.grant.machineId !== attachment.id) {
@@ -720,6 +917,15 @@ export class UserRelayDO extends DurableObject<Env> {
     this.logMachineSocketClose(socket, 1008, detail);
     this.failSocketTunnels(socket, new Error('Machine authorization expired or was revoked'));
     socket.close(1008, 'Machine authorization expired or was revoked');
+    this.ctx.waitUntil(this.socketGone(socket));
+  }
+
+  /** Echo-mode machines renew `heartbeatExpiresAt` with each message they send; ping-mode machines are answered by the
+   * auto-response, whose last time extends the same lease. Undefined for pre-heartbeat hosts. */
+  private heartbeatExpiresAt(socket: WebSocket, attachment: RelaySocketAttachment): number | undefined {
+    if (attachment.heartbeatExpiresAt === undefined) return undefined;
+    const answered = this.ctx.getWebSocketAutoResponseTimestamp(socket);
+    return Math.max(attachment.heartbeatExpiresAt, answered === null ? 0 : answered.getTime() + RELAY_HEARTBEAT_LEASE_MS);
   }
 
   /** One line per relay-initiated machine close; grants and keys are never logged, only their deadlines. */
@@ -751,6 +957,8 @@ export class UserRelayDO extends DurableObject<Env> {
       ...(grant.success ? { machineGrant: grant.data } : {}),
       ...(typeof raw?.authorizedUntil === 'number' ? { authorizedUntil: raw.authorizedUntil } : {}),
       ...(typeof raw?.heartbeatExpiresAt === 'number' ? { heartbeatExpiresAt: raw.heartbeatExpiresAt } : {}),
+      ...(raw?.notices === true ? { notices: true } : {}),
+      ...(typeof raw?.connectionId === 'string' ? { connectionId: raw.connectionId } : {}),
     };
   }
 }

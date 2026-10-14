@@ -15,6 +15,7 @@ import { environmentLaunchResponseSchema, environmentStatusSchema, type Environm
 import { readJson, requestMachineUpdate } from './machine-update.js';
 import type { MachineSelection } from './machine-update.js';
 import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, frontendManifestSchema, releaseObjectKeys } from './release-objects.js';
+import { coalesced } from './coalesced.js';
 
 /**
  * Convergence on the tenant's desired release. Executables are authenticated
@@ -45,7 +46,6 @@ export interface ReleaseFollowerOptions {
   runningMachineSha: string | null;
   /** `GITSPACE_GENERATION_HASH`. */
   generation: string | null;
-  intervalMs?: number;
   onError?: (error: unknown) => void;
 }
 
@@ -56,35 +56,27 @@ function containedPath(root: string, relativePath: string): string {
 }
 
 export class ReleaseFollower {
-  private timer: Timer | undefined;
-  private active: Promise<void> | null = null;
   private stopped = false;
   private readonly reportedFailures = new Set<string>();
   private reportedMachine = false;
+  private readonly pass = coalesced(() => this.converge().catch((error: unknown) => this.options.onError?.(error)));
 
   constructor(private readonly options: ReleaseFollowerOptions) {}
 
-  /** Report only committed machine generations. */
+  /** Report only committed machine generations. Nothing polls: startup, every relay connection and every release
+   * notice nudge one pass. */
   async start(): Promise<void> {
-    if (this.timer) return;
     this.stopped = false;
-    this.timer = setInterval(() => { void this.nudge(); }, this.options.intervalMs ?? 20_000);
     await this.nudge();
   }
 
   stop(): void {
     this.stopped = true;
-    clearInterval(this.timer);
-    this.timer = undefined;
   }
 
-  /** One convergence pass now; a pass already in flight is awaited instead of doubled. */
+  /** One convergence pass now, or one more after the pass in flight, which may have read an older status. */
   nudge(): Promise<void> {
-    if (this.active) return this.active;
-    this.active = this.converge()
-      .catch((error) => this.options.onError?.(error))
-      .finally(() => { this.active = null; });
-    return this.active;
+    return this.pass();
   }
 
   private async converge(): Promise<void> {

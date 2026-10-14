@@ -4,8 +4,14 @@ import { z } from 'zod';
 import { SIGNED_REQUEST_EXPIRED_MESSAGE } from './server-clock.js';
 
 export const RELAY_PROTOCOL_VERSION = 1 as const;
-// Echo uses the existing v1 opaque frame route, including on older relays.
-export const RELAY_HEARTBEAT_MODE = 'echo-v1';
+/** Liveness rides the relay's WebSocket auto-response: the fixed ping is answered without waking the relay. */
+export const RELAY_HEARTBEAT_MODE = 'ping-v1';
+/** Machines on the previous release echo an opaque v1 frame to themselves instead. */
+export const RELAY_ECHO_HEARTBEAT_MODE = 'echo-v1';
+export const RELAY_PING_MESSAGE = '{"version":1,"type":"ping"}';
+export const RELAY_PONG_MESSAGE = '{"version":1,"type":"pong"}';
+/** A machine sending `notices=notice-v1` understands `notice` messages; older machines never receive one. */
+export const RELAY_NOTICE_MODE = 'notice-v1';
 export const RELAY_HEARTBEAT_INTERVAL_MS = 15_000;
 export const RELAY_HEARTBEAT_TIMEOUT_MS = 10_000;
 export const RELAY_HEARTBEAT_LEASE_MS = 35_000;
@@ -30,6 +36,18 @@ const relayFrameMessageSchema = z.object({
   to: endpoint,
   payload: z.string().max(MAX_ROUTED_PAYLOAD_CHARS),
 });
+
+/** What changed in the cloud, never the changed state: the machine fetches the authoritative state over HTTP. */
+export const RELAY_NOTICE_TOPICS = ['assignments', 'workspace.snapshot', 'release', 'devices', 'settings', 'environment'] as const;
+export const relayNoticeTopicSchema = z.enum(RELAY_NOTICE_TOPICS);
+export type RelayNoticeTopic = z.infer<typeof relayNoticeTopicSchema>;
+export const relayNoticeSchema = z.object({
+  topics: z.array(relayNoticeTopicSchema).min(1).max(RELAY_NOTICE_TOPICS.length),
+  workspaceId: z.string().min(1).max(256).optional(),
+});
+export type RelayNotice = z.infer<typeof relayNoticeSchema>;
+const relayNoticeMessageSchema = relayNoticeSchema.extend({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('notice') });
+export type RelayNoticeMessage = z.infer<typeof relayNoticeMessageSchema>;
 
 export const relaySocketMessageSchema = z.discriminatedUnion('type', [
   relayFrameMessageSchema,
@@ -93,7 +111,7 @@ export const tunnelRequestMessageSchema = z.discriminatedUnion('type', [
   }),
 ]);
 export type TunnelRequestMessage = z.infer<typeof tunnelRequestMessageSchema>;
-export const machineRelayMessageSchema = z.union([tunnelRequestMessageSchema, relayFrameMessageSchema]);
+export const machineRelayMessageSchema = z.union([tunnelRequestMessageSchema, relayFrameMessageSchema, relayNoticeMessageSchema]);
 export type MachineRelayMessage = z.infer<typeof machineRelayMessageSchema>;
 
 export class InvalidRelayMessage extends TaggedError('InvalidRelayMessage')<{

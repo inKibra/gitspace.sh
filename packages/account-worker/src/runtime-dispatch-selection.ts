@@ -14,10 +14,10 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
   };
   const save = (id: string, state: DispatchSelectionState) => storage.sql.exec('INSERT INTO runtime_host_selection(id,state) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state', id, JSON.stringify(state));
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
-  async function cache(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
+  /** The ready attachment the selection names, or null when none is ready. */
+  async function find(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment | null> {
     const selection = RuntimeDispatchSelectionSchema.parse(args);
-    const now = Date.now();
-    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => isAttachmentReady(item, now));
+    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => isAttachmentReady(item));
     const selector = selection.on;
     if (typeof selector === 'string') {
       let machineId = candidates.find(item => item.machineId === selector)?.machineId;
@@ -35,17 +35,17 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
         candidates = candidates.filter(item => ['machine/prepare', 'checks'].every(phase => lifecycle.runs.some(run => run.machineId === item.machineId && run.profile === selector.profile && run.phase === phase && run.status === 'succeeded')));
       }
       if (selector.prefer === 'idle') {
-        const idle = (item: RuntimeAttachment) => {
-          const observation = item.executionObservation;
-          const age = observation ? Date.now() - Date.parse(observation.observedAt) : Infinity;
-          return observation && age >= -5000 && age <= 30000 && observation.activeExecutions === 0 ? 1 : 0;
-        };
+        // Machines report their execution count whenever it changes, so the last report is current.
+        const idle = (item: RuntimeAttachment) => item.executionObservation?.activeExecutions === 0 ? 1 : 0;
         candidates.sort((a, b) => idle(b) - idle(a));
       }
     }
-    const selected = candidates[0];
+    return candidates[0] ?? null;
+  }
+  async function cache(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
+    const selected = await find(args, eligible);
     if (!selected) throw new Error('No ready machine: start GitSpace on an attached machine and wait for its checkout to sync, or attach another machine.');
     return selected;
   }
-  return { load, save, cache };
+  return { load, save, find, cache };
 }

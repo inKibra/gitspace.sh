@@ -55,7 +55,7 @@ export class CloudFileStore {
     this.admission = result.then(() => {}, () => {});
     return result;
   }
-  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: () => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
+  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: (source?: string) => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_writer(singleton INTEGER PRIMARY KEY CHECK(singleton=1), fence INTEGER NOT NULL, attempt TEXT)');
     storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_writer(singleton,fence,attempt) VALUES(1,0,NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
@@ -122,15 +122,17 @@ export class CloudFileStore {
     const checkpoint = RuntimeGitCheckpointSchema.parse(source);
     const accepted = this.storage.transactionSync(() => {
       const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
-      if (row) return RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint));
+      if (row) return { checkpoint: RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)), created: false };
       if (this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt) return null;
       this.recordCommit(checkpoint, null);
       this.enqueueRetention(checkpoint, null);
       this.storage.sql.exec('INSERT INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
-      return checkpoint;
+      return { checkpoint, created: true };
     });
+    // The first snapshot is published like every later one: its projection, its indexing and its machines follow it.
+    if (accepted?.created) this.publish();
     await this.flushRetention();
-    return accepted;
+    return accepted?.checkpoint ?? null;
   }
   /** Authorization precedes durable intent; accepted publication recovery is noncancellable. */
   commitMachine(checkpoint: Checkpoint, previous: string | null, machineId: string, authorize?: () => void): Promise<Checkpoint> {
@@ -228,7 +230,8 @@ export class CloudFileStore {
       this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,checkpoint=? WHERE id=?', JSON.stringify(accepted), id);
       this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1');
     });
-    await this.storage.sync(); await this.flushRetention(); this.publish(); return accepted;
+    // The publishing machine installs the accepted snapshot from this answer.
+    await this.storage.sync(); await this.flushRetention(); this.publish(machineId); return accepted;
   }
   /** Resume a crashed lease before attachment admission; a failed provider remains fenced. */
   async recover(): Promise<void> {

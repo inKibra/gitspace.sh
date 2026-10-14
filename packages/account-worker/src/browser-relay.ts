@@ -20,7 +20,26 @@ const Registry = z.object({ pairings: z.array(Pairing) });
 const ProjectSettings = z.object({ revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), approvals: z.array(RuntimeProjectBrowserPreferencesSchema.shape.approvals.element.extend({ generation: z.number().int().nonnegative(), approvalId: z.string().uuid() })) });
 const Proof = z.object({ pairing: z.literal('client'), pairingId: z.string().uuid(), clientNonce: z.string().regex(/^[a-f0-9]{64}$/), publicKey: z.string().max(128), proof: z.string().max(128), code: z.string().max(256).optional() });
 const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional() });
-type Connection = { socket: WebSocket; product?: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string> };
+type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string> };
+/** Every Chrome extension socket. Its attachment holds the socket's whole pairing state, so the relay hibernates between frames. */
+const BROWSER_SOCKET_TAG = 'browser';
+/** An admitted socket must finish pairing, through the extension's hello, within this long. */
+const PAIRING_DEADLINE_MS = 5000;
+const BrowserSocket = z.object({
+  /** The server challenge the pairing proof signs. */
+  nonce: z.string(),
+  budget: z.string(),
+  network: z.string().nullable(),
+  /** The identity an admission proof admitted; the pairing proof must name it. */
+  admittedPairingId: z.string().uuid().nullable(),
+  deadline: z.number(),
+  /** Set once the pairing proof is accepted. */
+  pairingId: z.string().uuid().optional(),
+  /** Set by the extension's hello; until then the socket is a candidate. */
+  product: z.string().optional(),
+});
+type BrowserSocketState = z.infer<typeof BrowserSocket>;
+function closeOpenSocket(socket: WebSocket, code: number, reason: string) { if (socket.readyState === 1) socket.close(code, reason); }
 function equalSecret(left: string, right: string) { const a = new TextEncoder().encode(left), b = new TextEncoder().encode(right); return a.length === b.length && timingSafeEqual(a, b); }
 async function fingerprint(publicKey: string) { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', browserUnbase64(publicKey)))].map(byte => byte.toString(16).padStart(2, '0')).join(''); }
 const AdmissionProof = z.object({ pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), issuedAt: z.number().int(), nonce: z.string().regex(/^[a-f0-9]{64}$/), signature: z.string().max(128) });
@@ -40,17 +59,52 @@ function admissionPrefix(ip: string): { prefix: string; network: string } | null
 }
 /** Account-owned transport. Each independently confirmed Chrome owns its connection. */
 export class AccountBrowserRelay implements AccountBrowserTransport {
+  /** Request state for each ready Chrome, rebuilt from its socket after the relay wakes from hibernation. */
   private readonly connections = new Map<string, Connection>();
-  private readonly candidates = new Map<WebSocket, { budget: string; network: string | null }>();
+  /** Sockets whose single pairing proof is being verified. */
+  private readonly verifying = new WeakSet<WebSocket>();
   private readonly runtime: AccountBrowserRuntime;
   constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string }) { this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this }); }
+  /** Whether the host's socket is a Chrome extension socket. */
+  owns(socket: WebSocket) { return this.ctx.getTags(socket).includes(BROWSER_SOCKET_TAG); }
+  private sockets() {
+    const open: { socket: WebSocket; state: BrowserSocketState }[] = [];
+    for (const socket of this.ctx.getWebSockets(BROWSER_SOCKET_TAG)) {
+      const state = BrowserSocket.safeParse(socket.deserializeAttachment());
+      if (socket.readyState === 1 && state.success) open.push({ socket, state: state.data });
+    }
+    return open;
+  }
+  /** Sockets still pairing. One past its deadline is closed here, so it neither waits on a timer nor holds a budget. */
+  private candidates() {
+    return this.sockets().filter(({ socket, state }) => {
+      if (state.product) return false;
+      if (state.deadline > Date.now()) return true;
+      socket.close(1008, 'Pairing timed out');
+      return false;
+    });
+  }
+  /** The socket bound to a pairing, ready or still saying hello. */
+  private bound(pairingId: string) { return this.sockets().find(({ state }) => state.pairingId === pairingId); }
+  /** The ready Chrome for a pairing. */
+  private connection(pairingId: string): Connection | undefined {
+    const bound = this.bound(pairingId), product = bound?.state.product;
+    if (!bound || !product) return undefined;
+    const cached = this.connections.get(pairingId);
+    if (cached?.socket === bound.socket) { cached.product = product; return cached; }
+    if (cached) this.disconnect(pairingId);
+    // Request ids continue past any reply still in flight from before the relay hibernated.
+    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set() };
+    this.connections.set(pairingId, connection);
+    return connection;
+  }
   private async registry() { return Registry.parse(await this.ctx.storage.get('browser.relay.pairings') ?? { pairings: [] }); }
   private async projectPreferences(projectId: string) { return ProjectSettings.parse(await this.ctx.storage.get(`browser.relay.project:${projectId}`) ?? { revision: 0, defaultPairingId: null, approvals: [] }); }
   async projectSettings(projectId: string) {
     const [preferences, registry] = await Promise.all([this.projectPreferences(projectId), this.registry()]);
     return RuntimeProjectBrowserSettingsSchema.parse({ projectId, revision: preferences.revision, defaultPairingId: preferences.defaultPairingId, browsers: registry.pairings.filter(pairing => pairing.state === 'confirmed').map(pairing => {
       const approval = preferences.approvals.find(item => item.pairingId === pairing.pairingId && item.generation === pairing.generation);
-      return { pairingId: pairing.pairingId, generation: pairing.generation, name: approval?.name ?? `Chrome ${pairing.pairingId.slice(0, 8)}`, note: approval?.note ?? '', connected: !!this.connections.get(pairing.pairingId)?.product, approved: !!approval };
+      return { pairingId: pairing.pairingId, generation: pairing.generation, name: approval?.name ?? `Chrome ${pairing.pairingId.slice(0, 8)}`, note: approval?.note ?? '', connected: !!this.connection(pairing.pairingId), approved: !!approval };
     }) });
   }
   async setProjectSettings(projectId: string, expectedRevision: number, value: RuntimeProjectBrowserPreferences) {
@@ -112,7 +166,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   }
   async status() {
     const registry = await this.registry();
-    return RuntimeAccountBrowserRelayStatusSchema.parse({ pairings: await Promise.all(registry.pairings.map(async pairing => ({ pairingId: pairing.pairingId, generation: pairing.generation, state: pairing.state, expiresAt: pairing.expiresAt, pairedKeyFingerprint: pairing.publicKey ? await fingerprint(pairing.publicKey) : null, connected: !!this.connections.get(pairing.pairingId)?.product, browser: pairing.state === 'confirmed' ? this.connections.get(pairing.pairingId)?.product ?? null : null }))) });
+    return RuntimeAccountBrowserRelayStatusSchema.parse({ pairings: await Promise.all(registry.pairings.map(async pairing => ({ pairingId: pairing.pairingId, generation: pairing.generation, state: pairing.state, expiresAt: pairing.expiresAt, pairedKeyFingerprint: pairing.publicKey ? await fingerprint(pairing.publicKey) : null, connected: !!this.connection(pairing.pairingId), browser: pairing.state === 'confirmed' ? this.connection(pairing.pairingId)?.product ?? null : null }))) });
   }
   async confirm(pairingId: string, expectedFingerprint: string) {
     const confirmed = await this.ctx.blockConcurrencyWhile(async () => {
@@ -132,11 +186,11 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const pairing = (await this.registry()).pairings.find(item => item.pairingId === selected);
     if (!pairing || pairing.state !== 'confirmed') throw new Error('Browser fingerprint confirmation required');
     const approval = await this.approved(projectId, pairing.pairingId, pairing.generation);
-    if (!this.connections.get(pairing.pairingId)?.product) throw new Error('Approved Chrome is unavailable: extension is not connected');
+    if (!this.connection(pairing.pairingId)) throw new Error('Approved Chrome is unavailable: extension is not connected');
     return { kind: 'account-relay' as const, accountId: this.env.ACCOUNT_ID, pairingId: pairing.pairingId, generation: pairing.generation, approvalId: approval.approvalId };
   }
   async unpair(pairingId: string) {
-    await this.ctx.blockConcurrencyWhile(async () => { const registry = await this.registry(); registry.pairings = registry.pairings.filter(item => item.pairingId !== pairingId); await this.ctx.storage.put('browser.relay.pairings', registry); this.connections.get(pairingId)?.socket.close(1008, 'Browser unpaired'); this.disconnect(pairingId); });
+    await this.ctx.blockConcurrencyWhile(async () => { const registry = await this.registry(); registry.pairings = registry.pairings.filter(item => item.pairingId !== pairingId); await this.ctx.storage.put('browser.relay.pairings', registry); this.bound(pairingId)?.socket.close(1008, 'Browser unpaired'); this.disconnect(pairingId); });
     return this.status();
   }
   async fetch(request: Request) {
@@ -167,7 +221,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
           if (!await crypto.subtle.verify('Ed25519', key, browserUnbase64(proof.signature), new TextEncoder().encode(`gitspace-browser-relay-v2:admission:${proof.pairingId}:${proof.generation}:${proof.issuedAt}:${proof.nonce}`))) return { status: 403 } as const;
         } catch { return { status: 403 } as const; }
         let window = windows.identities.find(item => item.pairingId === pairing.pairingId);
-        if (window?.nonces.includes(proof.nonce) || this.connections.has(pairing.pairingId)) return { status: 403 } as const;
+        if (window?.nonces.includes(proof.nonce) || this.bound(pairing.pairingId)) return { status: 403 } as const;
         if (window && window.nonces.length >= 8) return { status: 429 } as const;
         if (!window) { window = { pairingId: pairing.pairingId, start: now, nonces: [] }; windows.identities.push(window); }
         window.nonces.push(proof.nonce);
@@ -182,7 +236,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
           if (!window) {
             if (windows.prefixes.length >= 1024) {
               // Never evict the aggregate history protecting a live candidate network.
-              const active = new Set([...this.candidates.values()].map(candidate => candidate.network));
+              const active = new Set(this.candidates().map(({ state }) => state.network));
               const evict = windows.prefixes.findIndex(window => window.prefix !== network && !active.has(window.prefix));
               windows.prefixes.splice(evict, 1);
             }
@@ -199,65 +253,83 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const budget = admissionProof ? `identity:${admissionProof.pairingId}` : prefix;
     let pending = 0, aggregate = 0;
     const anonymous = new Map<string, WebSocket[]>();
-    for (const [socket, value] of this.candidates) {
-      if (value.budget === budget) pending++;
-      if (value.network === network) aggregate++;
-      if (value.network) { const entries = anonymous.get(value.network) ?? []; entries.push(socket); anonymous.set(value.network, entries); }
+    for (const { socket, state } of this.candidates()) {
+      if (state.budget === budget) pending++;
+      if (state.network === network) aggregate++;
+      if (state.network) { const entries = anonymous.get(state.network) ?? []; entries.push(socket); anonymous.set(state.network, entries); }
     }
     if (pending >= (admissionProof ? 1 : 4) || (!admissionProof && aggregate >= 16)) return new Response('Browser candidate capacity reached', { status: 429 });
     if (!admissionProof && [...anonymous.values()].reduce((total, entries) => total + entries.length, 0) >= 128) {
       // Bounded memory without letting existing anonymous networks exclude a new one.
       let largest: WebSocket[] = [];
       for (const entries of anonymous.values()) if (entries.length > largest.length) largest = entries;
-      const oldest = largest[0];
-      if (oldest) { this.candidates.delete(oldest); oldest.close(1008, 'Browser candidate replaced'); }
+      largest[0]?.close(1008, 'Browser candidate replaced');
     }
-    const pair = new WebSocketPair(), client = pair[0], socket = pair[1];
-    socket.accept(); this.candidates.set(socket, { budget, network: admissionProof ? null : network });
+    const [client, socket] = Object.values(new WebSocketPair());
     const nonce = [...crypto.getRandomValues(new Uint8Array(32))].map(byte => byte.toString(16).padStart(2, '0')).join('');
-    let boundId: string | undefined, verifying = false;
-    const timer = setTimeout(() => { if (!boundId || !this.connections.get(boundId)?.product) { this.candidates.delete(socket); socket.close(1008, 'Pairing timed out'); } }, 5000);
-    socket.addEventListener('message', event => { void (async () => {
-      if (typeof event.data !== 'string' || event.data.length > 2_000_000) throw new Error('Invalid browser frame');
-      const raw: unknown = JSON.parse(event.data);
-      if (!boundId) {
-        if (verifying || !this.candidates.has(socket)) throw new Error('Pairing unavailable'); verifying = true;
-        const proof = Proof.parse(raw);
-        if (admissionProof && proof.pairingId !== admissionProof.pairingId) throw new Error('Admission identity mismatch');
-        const key = await crypto.subtle.importKey('raw', browserUnbase64(proof.publicKey), 'Ed25519', false, ['verify']);
-        if (!await crypto.subtle.verify('Ed25519', key, browserUnbase64(proof.proof), new TextEncoder().encode(`gitspace-browser-relay-v2:client:${nonce}:${proof.clientNonce}`))) throw new Error('Invalid pairing signature');
-        const accepted = await this.ctx.blockConcurrencyWhile(async () => {
-          const registry = await this.registry(), pairing = registry.pairings.find(item => item.pairingId === proof.pairingId);
-          if (!pairing || !this.candidates.has(socket)) return false;
-          if (pairing.state === 'awaiting-key') {
-            if (Date.parse(pairing.expiresAt) <= Date.now() || !proof.code || !equalSecret(pairing.code, proof.code)) return false;
-            registry.pairings = registry.pairings.map(item => item === pairing ? { ...pairing, state: 'pending-confirmation', publicKey: proof.publicKey, code: null, expiresAt: null } : item);
-            await this.ctx.storage.put('browser.relay.pairings', registry);
-          } else if (!equalSecret(pairing.publicKey, proof.publicKey)) return false;
-          if (this.connections.has(pairing.pairingId)) return false;
-          boundId = pairing.pairingId;
-          this.connections.set(boundId, { socket, sequence: 0, pending: new Map(), listeners: new Map(), authorized: new Set() });
-          return true;
-        });
-        if (!accepted) throw new Error('Pairing rejected');
-        socket.send(JSON.stringify({ pairing: 'server' })); return;
-      }
-      const connection = this.connections.get(boundId);
-      if (connection?.socket !== socket) throw new Error('Stale browser connection');
-      const message = Reply.parse(raw);
-      if (message.hello && message.Browser) {
-        connection.product = message.Browser.slice(0, 100); this.candidates.delete(socket); clearTimeout(timer); socket.send(JSON.stringify({ ready: true }));
-        this.ctx.waitUntil(this.retryRevocations(boundId));
-        return;
-      }
-      if (!connection.product) throw new Error('Browser hello required');
-      if (message.id !== undefined) { const pending = connection.pending.get(message.id); if (!pending) return; connection.pending.delete(message.id); pending.cancelTimer(); if (message.error) pending.reject(new Error(message.error.message)); else pending.resolve(message.result); }
-      else if (message.targetId) for (const listener of connection.listeners.get(message.targetId) ?? []) listener(message.fenced ? { method: 'disconnected' } : { method: message.method, params: message.params, sessionId: message.sessionId });
-    })().catch(() => socket.close(1008, 'Invalid browser message')); });
-    socket.addEventListener('close', () => { clearTimeout(timer); this.candidates.delete(socket); if (boundId && this.connections.get(boundId)?.socket === socket) this.disconnect(boundId); });
-    socket.addEventListener('error', () => socket.close(1011, 'Browser transport error'));
+    socket.serializeAttachment({ nonce, budget, network: admissionProof ? null : network, admittedPairingId: admissionProof?.pairingId ?? null, deadline: Date.now() + PAIRING_DEADLINE_MS } satisfies BrowserSocketState);
+    this.ctx.acceptWebSocket(socket, [BROWSER_SOCKET_TAG]);
     socket.send(JSON.stringify({ pairing: 'challenge', serverNonce: nonce }));
     return new Response(null, { status: 101, webSocket: client, ...(protocol ? { headers: { 'sec-websocket-protocol': protocol } } : {}) });
+  }
+  /** The host relay forwards every message on a socket it `owns`. */
+  async webSocketMessage(socket: WebSocket, data: string | ArrayBuffer) {
+    try { await this.receive(socket, data); }
+    catch { closeOpenSocket(socket, 1008, 'Invalid browser message'); }
+  }
+  webSocketClose(socket: WebSocket) {
+    this.release(socket);
+    socket.close();
+  }
+  webSocketError(socket: WebSocket) {
+    this.release(socket);
+    closeOpenSocket(socket, 1011, 'Browser transport error');
+  }
+  private release(socket: WebSocket) {
+    const state = BrowserSocket.safeParse(socket.deserializeAttachment());
+    const pairingId = state.success ? state.data.pairingId : undefined;
+    if (pairingId && this.connections.get(pairingId)?.socket === socket) this.disconnect(pairingId);
+  }
+  private async receive(socket: WebSocket, data: string | ArrayBuffer) {
+    const state = BrowserSocket.parse(socket.deserializeAttachment());
+    if (typeof data !== 'string' || data.length > 2_000_000) throw new Error('Invalid browser frame');
+    if (!state.product && state.deadline <= Date.now()) return socket.close(1008, 'Pairing timed out');
+    const raw: unknown = JSON.parse(data);
+    if (!state.pairingId) {
+      if (this.verifying.has(socket)) throw new Error('Pairing unavailable');
+      this.verifying.add(socket);
+      const proof = Proof.parse(raw);
+      if (state.admittedPairingId && proof.pairingId !== state.admittedPairingId) throw new Error('Admission identity mismatch');
+      const key = await crypto.subtle.importKey('raw', browserUnbase64(proof.publicKey), 'Ed25519', false, ['verify']);
+      if (!await crypto.subtle.verify('Ed25519', key, browserUnbase64(proof.proof), new TextEncoder().encode(`gitspace-browser-relay-v2:client:${state.nonce}:${proof.clientNonce}`))) throw new Error('Invalid pairing signature');
+      const accepted = await this.ctx.blockConcurrencyWhile(async () => {
+        const registry = await this.registry(), pairing = registry.pairings.find(item => item.pairingId === proof.pairingId);
+        if (!pairing || socket.readyState !== 1) return false;
+        if (pairing.state === 'awaiting-key') {
+          if (Date.parse(pairing.expiresAt) <= Date.now() || !proof.code || !equalSecret(pairing.code, proof.code)) return false;
+          registry.pairings = registry.pairings.map(item => item === pairing ? { ...pairing, state: 'pending-confirmation', publicKey: proof.publicKey, code: null, expiresAt: null } : item);
+          await this.ctx.storage.put('browser.relay.pairings', registry);
+        } else if (!equalSecret(pairing.publicKey, proof.publicKey)) return false;
+        if (this.bound(pairing.pairingId)) return false;
+        socket.serializeAttachment({ ...state, pairingId: pairing.pairingId } satisfies BrowserSocketState);
+        return true;
+      });
+      if (!accepted) throw new Error('Pairing rejected');
+      socket.send(JSON.stringify({ pairing: 'server' }));
+      return;
+    }
+    const message = Reply.parse(raw);
+    if (message.hello && message.Browser) {
+      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100) } satisfies BrowserSocketState);
+      socket.send(JSON.stringify({ ready: true }));
+      this.ctx.waitUntil(this.retryRevocations(state.pairingId));
+      return;
+    }
+    if (!state.product) throw new Error('Browser hello required');
+    const connection = this.connection(state.pairingId);
+    if (connection?.socket !== socket) throw new Error('Stale browser connection');
+    if (message.id !== undefined) { const pending = connection.pending.get(message.id); if (!pending) return; connection.pending.delete(message.id); pending.cancelTimer(); if (message.error) pending.reject(new Error(message.error.message)); else pending.resolve(message.result); }
+    else if (message.targetId) for (const listener of connection.listeners.get(message.targetId) ?? []) listener(message.fenced ? { method: 'disconnected' } : { method: message.method, params: message.params, sessionId: message.sessionId });
   }
   private disconnect(pairingId: string) {
     const connection = this.connections.get(pairingId); if (!connection) return; this.connections.delete(pairingId);
@@ -265,8 +337,8 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     for (const listeners of connection.listeners.values()) for (const listener of listeners) listener({ method: 'disconnected' });
   }
   private request(pairingId: string, command: Record<string, unknown>) {
-    const connection = this.connections.get(pairingId);
-    if (!connection?.product) throw new Error('Account Chrome extension is not connected');
+    const connection = this.connection(pairingId);
+    if (!connection) throw new Error('Account Chrome extension is not connected');
     const id = ++connection.sequence, deferred = Promise.withResolvers<unknown>();
     const timer = setTimeout(() => { connection.pending.delete(id); deferred.reject(new Error('Browser relay timeout; effect outcome uncertain')); }, 30_000);
     connection.pending.set(id, { ...deferred, cancelTimer: () => clearTimeout(timer) }); connection.socket.send(JSON.stringify({ ...command, id })); return deferred.promise;
@@ -279,7 +351,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const body = await verifyRuntimeAccountBrowserAuthorization(authorization, pairing.trust);
     if (placement.generation !== pairing.generation) throw new Error('Browser pairing changed');
     const approval = await this.dispatchApproval(authorization);
-    if (!this.connections.get(placement.pairingId)?.product) throw new Error('Approved Chrome is unavailable: extension is not connected');
+    if (!this.connection(placement.pairingId)) throw new Error('Approved Chrome is unavailable: extension is not connected');
     const result = await this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(body.expiresAt) - Date.now())));
     return { ...result, browser: { pairingId: placement.pairingId, name: approval.name } };
   }
@@ -287,7 +359,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     signal.throwIfAborted(); const placement = authorization.body.scope.placement;
     if (placement.kind !== 'account-relay') throw new Error('Account relay placement required');
     await this.dispatchApproval(authorization);
-    const connection = this.connections.get(placement.pairingId);
+    const connection = this.connection(placement.pairingId);
     if (!connection) throw new Error('Account Chrome extension is not connected');
     if (!connection.authorized.has(authorization.body.scope.attemptId)) { await this.request(placement.pairingId, { operation: 'authorize', authorization }); connection.authorized.add(authorization.body.scope.attemptId); }
     return { pairingId: placement.pairingId, connection };
@@ -301,19 +373,19 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (command.args.action !== 'tabs' && command.args.targetId && opened.targetId !== command.args.targetId) throw new Error('Browser target mismatch');
     let listeners = connection.listeners.get(opened.targetId); if (!listeners) { listeners = new Set(); connection.listeners.set(opened.targetId, listeners); }
     const registered = listeners;
-    const channel: BrowserChannel = { send: async (method, params = {}, sessionId) => { if (Date.parse(command.grant.body.expiresAt) <= Date.now() || sessionId && sessionId !== opened.sessionId || this.connections.get(pairingId) !== connection) throw new Error('Browser channel expired or outside session'); await this.dispatchApproval(authorization); return this.request(pairingId, { operation: 'command', targetId: opened.targetId, sessionId: opened.sessionId, method, params }); }, subscribe: listener => { registered.add(listener); return () => { registered.delete(listener); }; }, close: async () => { registered.clear(); } };
+    const channel: BrowserChannel = { send: async (method, params = {}, sessionId) => { if (Date.parse(command.grant.body.expiresAt) <= Date.now() || sessionId && sessionId !== opened.sessionId || this.connection(pairingId) !== connection) throw new Error('Browser channel expired or outside session'); await this.dispatchApproval(authorization); return this.request(pairingId, { operation: 'command', targetId: opened.targetId, sessionId: opened.sessionId, method, params }); }, subscribe: listener => { registered.add(listener); return () => { registered.delete(listener); }; }, close: async () => { registered.clear(); } };
     return { targetId: opened.targetId, channel };
   }
   private async retryRevocations(pairingId?: string) {
     const prefix = pairingId ? `browser.relay.revoke:${pairingId}:` : 'browser.relay.revoke:';
     for (const [key, stored] of await this.ctx.storage.list({ prefix })) {
       const intent = RevocationIntent.parse(stored);
-      if (!this.connections.get(intent.pairingId)?.product) continue;
+      if (!this.connection(intent.pairingId)) continue;
       try {
         await this.revoke(intent.groupId, intent.pairingId);
         await this.ctx.storage.delete(key);
       } catch { /* Authority stays revoked; retain the durable closure intent for the next hello. */ }
     }
   }
-  async revoke(groupId: string, pairingId: string) { if (this.connections.has(pairingId)) await this.request(pairingId, { operation: 'revoke', groupId }); }
+  async revoke(groupId: string, pairingId: string) { if (this.connection(pairingId)) await this.request(pairingId, { operation: 'revoke', groupId }); }
 }

@@ -2,14 +2,13 @@ import { TaggedError } from 'better-result';
 import { RuntimeAttachmentSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachInput, type RuntimeAttachment, type RuntimeAttachmentReadyInput, type RuntimeHeartbeatInput, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 
-/** A machine silent for longer than this is offline: never dispatched to. */
-export const ATTACHMENT_ONLINE_MS = 30_000;
-export function isAttachmentOnline(attachment: RuntimeAttachment, now: number): boolean {
-  return attachment.state !== 'detached' && attachment.heartbeatAt !== null && now - Date.parse(attachment.heartbeatAt) <= ATTACHMENT_ONLINE_MS;
+/** Online = the machine holds a live relay connection; an offline machine is never dispatched to. */
+export function isAttachmentOnline(attachment: RuntimeAttachment): boolean {
+  return attachment.state !== 'detached' && attachment.online;
 }
 /** Ready = online, checkout exists and sync is running. Nothing else changes it. */
-export function isAttachmentReady(attachment: RuntimeAttachment, now: number): boolean {
-  return attachment.state === 'ready' && isAttachmentOnline(attachment, now);
+export function isAttachmentReady(attachment: RuntimeAttachment): boolean {
+  return attachment.state === 'ready' && isAttachmentOnline(attachment);
 }
 export type GrantScope = Pick<RuntimeAttachment, 'projectId' | 'workspaceId' | 'attachmentId' | 'generation'>;
 export type AttachmentServices = {
@@ -68,21 +67,21 @@ export class AttachmentStore {
     if (!row) throw new Error('Attachment grant missing');
     return { attachment, executionSecret: await this.services.open(row.secret, attachment) };
   }
-  /** Attaching an already attached machine returns its current attachment. */
-  async attach(input: RuntimeAttachInput) {
+  /** Attaching an already attached machine returns its current attachment. `online` is the machine's relay presence now. */
+  async attach(input: RuntimeAttachInput, online: boolean) {
     const live = this.list().find(item => item.machineId === input.machineId && item.state !== 'detached');
     if (live) return this.grant(live);
     if (this.list().some(item => item.machineId === input.machineId && item.generation >= input.generation)) throw new Error('Attachment generation is stale');
     const now = new Date().toISOString();
-    const attachment = RuntimeAttachmentSchema.parse({ ...input, attachmentId: crypto.randomUUID(), state: 'attaching', updatedAt: now, heartbeatAt: null, cache: { state: 'setup', platform: null, lastSyncAt: null, setup: [], unsent: null, syncProblem: null } });
+    const attachment = RuntimeAttachmentSchema.parse({ ...input, attachmentId: crypto.randomUUID(), state: 'attaching', updatedAt: now, online, cache: { state: 'setup', platform: null, lastSyncAt: null, setup: [], unsent: null, syncProblem: null } });
     const executionSecret = encode(crypto.getRandomValues(new Uint8Array(32)));
     const ciphertext = await this.services.seal(executionSecret, attachment);
     this.storage.sql.exec('INSERT INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), ciphertext);
     return { attachment, executionSecret };
   }
-  async requestCache(input: Omit<RuntimeAttachInput, 'generation'>) {
+  async requestCache(input: Omit<RuntimeAttachInput, 'generation'>, online: boolean) {
     const generation = Math.max(-1, ...this.list().map(attachment => attachment.generation)) + 1;
-    const { attachment } = await this.attach({ ...input, generation });
+    const { attachment } = await this.attach({ ...input, generation }, online);
     return { attachment };
   }
   async assignments(machineId: RuntimeAttachment['machineId'], capabilities?: readonly string[]) {
@@ -105,16 +104,17 @@ export class AttachmentStore {
     const attachment = this.find(input);
     if (attachment.state === 'detached') throw new Error(`Machine ${input.machineId} was detached from this workspace; reattach it`);
     const now = new Date().toISOString();
-    const next: RuntimeAttachment = { ...attachment, state: 'ready', failure: null, heartbeatAt: now, updatedAt: now, cache: { ...(attachment.cache ?? { platform: null, setup: [], unsent: null, syncProblem: null }), state: 'live', lastSyncAt: now }, ...(input.lfsRestored ? { lfsRestored: input.lfsRestored } : {}) };
+    const next: RuntimeAttachment = { ...attachment, state: 'ready', failure: null, updatedAt: now, cache: { ...(attachment.cache ?? { platform: null, setup: [], unsent: null, syncProblem: null }), state: 'live', lastSyncAt: now }, ...(input.lfsRestored ? { lfsRestored: input.lfsRestored } : {}) };
     this.save(next);
     return { attachment: next };
   }
-  heartbeat(input: RuntimeHeartbeatInput): RuntimeAttachment {
+  /** A machine's observation report (`runtime.heartbeat`). It records what the machine sees; liveness is relay presence. */
+  observe(input: RuntimeHeartbeatInput): RuntimeAttachment {
     const attachment = this.find(input);
     if (attachment.state === 'detached') throw new Error(`Machine ${input.machineId} was detached from this workspace; reattach it`);
     const now = Date.now();
     const observedAt = Date.parse(input.executionObservation.observedAt);
-    // An out-of-order observation is dropped; the heartbeat itself still counts.
+    // An out-of-order execution observation is dropped; the rest of the report still counts.
     const fresh = observedAt <= now + 5_000 && (!attachment.executionObservation || observedAt >= Date.parse(attachment.executionObservation.observedAt));
     const next: RuntimeAttachment = {
       ...attachment,
@@ -122,7 +122,7 @@ export class AttachmentStore {
       ...(input.browserCapabilities ? { capabilities: [...attachment.capabilities.filter(capability => !isBrowserCapability(capability)), ...input.browserCapabilities] } : {}),
       executionObservation: fresh ? input.executionObservation : attachment.executionObservation,
       failure: input.failure === undefined ? attachment.failure : input.failure,
-      heartbeatAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
     };
     this.save(next);
     return next;
@@ -134,6 +134,12 @@ export class AttachmentStore {
     this.save(next);
     return next;
   }
+  /** Relay presence of a machine changed; true when an attachment's `online` moved. */
+  presence(machineId: RuntimeAttachment['machineId'], online: boolean): boolean {
+    const changed = this.list().filter(item => item.machineId === machineId && item.state !== 'detached' && item.online !== online);
+    for (const item of changed) this.save({ ...item, online });
+    return changed.length > 0;
+  }
   /** A removed machine is detached from every workspace. */
   remove(machineId: RuntimeAttachment['machineId']): RuntimeAttachment[] {
     return this.list().filter(item => item.machineId === machineId && item.state !== 'detached').map(item => this.detach(item));
@@ -143,7 +149,7 @@ export class AttachmentStore {
     const dispatch = RuntimeToolDispatchSchema.parse(candidate);
     const attachment = this.list().find(item => item.attachmentId === dispatch.attachmentId);
     if (!attachment || attachment.generation !== dispatch.generation || attachment.machineId !== dispatch.machineId || attachment.projectId !== dispatch.projectId || attachment.workspaceId !== dispatch.workspaceId || attachment.state === 'detached') return failed(dispatch, `Machine ${dispatch.machineId} is no longer attached to this workspace; attach it again or use another machine`);
-    if (!isAttachmentOnline(attachment, Date.now())) return failed(dispatch, `Machine ${dispatch.machineId} is offline${attachment.heartbeatAt ? ` since ${attachment.heartbeatAt}` : ''}; start GitSpace on it or attach another machine`);
+    if (!isAttachmentOnline(attachment)) return failed(dispatch, `Machine ${dispatch.machineId} is offline; start GitSpace on it or attach another machine`);
     if (attachment.state !== 'ready') return failed(dispatch, `Machine ${dispatch.machineId} is still setting up this workspace's checkout; wait for it to become ready`);
     const { executionSecret } = await this.grant(attachment);
     const body = JSON.stringify(dispatch);

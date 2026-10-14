@@ -270,6 +270,8 @@ export const FleetMachineViewCodec = wire.object({
   lifecycleRevision: wire.number,
   operationId: wire.nullable(wire.string),
   error: wire.nullable(wire.string),
+  /** Agents may attach this machine to a workspace on their own; absent means allowed. */
+  agentsMayAttach: wire.optional(wire.boolean),
 });
 export const FleetMachineEventCodec = wire.union([
   wire.object({ type: wire.literal('ready') }),
@@ -764,6 +766,13 @@ export const inferenceEventsContract = gitspaceRpc.procedure()
 export const updateMachineNotesContract = gitspaceRpc
   .procedure()
   .input(wire.object({ machineId: wire.string, notes: wire.string }))
+  .output(FleetMachineViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const updateMachineAgentAttachContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ machineId: wire.string, agentsMayAttach: wire.boolean }))
   .output(FleetMachineViewCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
@@ -2019,6 +2028,7 @@ export const gitspaceContract = gitspaceRpc.contract({
   machine: {
     events: machineLifecycleEventsContract,
     updateNotes: updateMachineNotesContract,
+    updateAgentAttach: updateMachineAgentAttachContract,
     createSandbox: createSandboxMachineContract,
     sleep: sleepMachineContract,
     resume: resumeMachineContract,

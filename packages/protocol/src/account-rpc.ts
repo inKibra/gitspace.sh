@@ -27,6 +27,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'machines': 'cloud',
   'machine.events': 'cloud',
   'machine.updateNotes': 'cloud',
+  'machine.updateAgentAttach': 'cloud',
   'machine.createSandbox': 'cloud',
   'machine.sleep': 'cloud',
   'machine.resume': 'cloud',

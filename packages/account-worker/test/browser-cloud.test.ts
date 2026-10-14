@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
 import { RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
@@ -51,5 +51,39 @@ test.each(['Fetch', 'Image', 'Document', 'Redirect', 'Unknown'])('cloud permits 
     expect(serviceRequests).toHaveLength(1);
     expect(calls).toEqual([{ url: 'https://browser.internal/v1/devtools/browser?keep_alive=600000', method: 'POST' }, { url: 'https://browser.internal/v1/devtools/browser/binding-session', method: 'GET' }]);
     await expect(runtime.execute(authorization, AbortSignal.timeout(5000))).rejects.toThrow('already consumed');
+  } finally { pair[1].close(); }
+});
+
+afterEach(() => { vi.restoreAllMocks(); });
+
+test('an expired cloud tab and its browser close before the next operation', async () => {
+  const store = new Map<string, unknown>();
+  const storage = { async get(key: string) { return store.get(key); }, async put(key: string, value: unknown) { store.set(key, value); }, async delete(key: string) { return store.delete(key); } };
+  const methods: string[] = [];
+  const released = Promise.withResolvers<number>();
+  const pair = new WebSocketPair(); pair[1].accept();
+  pair[1].addEventListener('close', event => released.resolve(event.code));
+  pair[1].addEventListener('message', event => {
+    const command = RequestFrame.parse(JSON.parse(String(event.data)));
+    methods.push(command.method);
+    const result = command.method === 'Target.createTarget' ? { targetId: 'cloud-target' } : command.method === 'Target.attachToTarget' ? { sessionId: 'cloud-session' } : {};
+    pair[1].send(JSON.stringify({ id: command.id, result }));
+  });
+  const binding = { async fetch(input: RequestInfo | URL, init?: RequestInit) {
+    return new Request(input, init).method === 'POST' ? Response.json({ sessionId: 'binding-session' }) : new Response(null, { status: 101, webSocket: pair[0] });
+  } };
+  const runtime = new AccountBrowserRuntime({ storage, binding });
+  const now = Date.now(), groupExpiresAt = new Date(now + 60_000).toISOString(), laterExpiresAt = new Date(now + 600_000).toISOString();
+  const placement = { kind: 'cloud', accountId: 'account' };
+  const authority = { body: { accountId: 'account', projectId: 'project', workspaceId: 'workspace', publicKey: 'AA==', issuedAt: new Date(now).toISOString(), expiresAt: laterExpiresAt }, signature: 'AA==' };
+  const authorization = (attemptId: string, expiresAt: string, command: unknown) => RuntimeAccountBrowserAuthorizationSchema.parse({ body: { scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind: 'subagent', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt: new Date(now).toISOString(), expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command }, signature: 'AA==', authority });
+  const grant = { body: { projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'headless', origins: [], expiresAt: groupExpiresAt }, signature: 'AA==', authority };
+  try {
+    await runtime.execute(authorization('open', groupExpiresAt, { type: 'execute', args: { action: 'open', source: 'headless' }, grant }), AbortSignal.timeout(5000));
+    expect(methods).not.toContain('Target.closeTarget');
+    vi.spyOn(Date, 'now').mockReturnValue(now + 120_000);
+    await runtime.execute(authorization('status', laterExpiresAt, { type: 'manage', action: 'status' }), AbortSignal.timeout(5000));
+    expect(methods.slice(-2)).toEqual(['Target.closeTarget', 'Browser.close']);
+    expect(await released.promise).toBe(1000);
   } finally { pair[1].close(); }
 });

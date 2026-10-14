@@ -14,7 +14,7 @@ import {
 import {
   gitspaceContract, getUserSettingsContract, updateUserSettingsContract, reserveUserHandleContract,
   getGitIdentityContract, getRuntimeSettingsContract, setRuntimeSettingContract, settingsEventsContract, listMachinesContract,
-  machineLifecycleEventsContract, createSandboxMachineContract, updateMachineNotesContract,
+  machineLifecycleEventsContract, createSandboxMachineContract, updateMachineNotesContract, updateMachineAgentAttachContract,
   sleepMachineContract, resumeMachineContract, destroyMachineContract,
   listCloudImagesContract, cloudImageEventsContract, getCloudImageDefaultContract, setCloudImageDefaultContract,
   setCloudImageContract, retryCloudImageContract, cancelCloudImageContract, recoverCloudImageContract,
@@ -266,6 +266,13 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return ok(await catalog.putMachine({ ...machine, notes: input.notes }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'update machine notes', message: message(error) })); }
   });
+  const updateAgentAttach = server.implement(updateMachineAgentAttachContract).handler(async ({ input, errors }) => {
+    try {
+      const machine = await catalog.getMachine(input.machineId);
+      if (!machine) throw new Error('Machine does not exist');
+      return ok(await catalog.putMachine({ ...machine, agentsMayAttach: input.agentsMayAttach }));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'update machine agent attach', message: message(error) })); }
+  });
   const projects = server.implement(listProjectsContract).handler(async ({ input, errors }) => {
     try {
       await ensureAccountGitSpaceProject(env, userId);
@@ -484,7 +491,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign, events: inferenceEvents },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, events: settingsEvents },
-    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, events: projectEvents, directoryEvents, ...lifecycle.project },
+    machines, machine: { events: machineEvents, createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, events: projectEvents, directoryEvents, ...lifecycle.project },
     space: { events: spaceEvents, view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, deployment: { status: deploymentStatus, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },

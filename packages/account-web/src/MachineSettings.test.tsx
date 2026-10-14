@@ -11,7 +11,7 @@ import { MachineSettings } from './SettingsPage.js';
 const settings: UserSettings = { version: 1, revision: 2, onboardingComplete: true, profile: { displayName: 'Brad', handle: 'brad' }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, updatedAt: '2026-10-03T00:00:00.000Z', updatedBy: 'browser' };
 const noop = async () => {};
 function render(overrides: Partial<ComponentProps<typeof MachineSettings>> = {}) {
-  return act(() => root.render(<MachineSettings settings={settings} onChange={vi.fn()} machines={[]} onUpdateMachine={noop} onCreateSandbox={noop} onControlMachine={noop} onDestroyMachine={noop} cloudImages={[]} cloudImageDefault={null} cloudImageError={null} onChangeCloudImage={noop} onRecoverCloudImage={noop} onSetCloudImageDefault={noop} {...overrides} />));
+  return act(() => root.render(<MachineSettings settings={settings} onChange={vi.fn()} machines={[]} onUpdateMachine={noop} onSetMachineAgentAttach={noop} onCreateSandbox={noop} onControlMachine={noop} onDestroyMachine={noop} cloudImages={[]} cloudImageDefault={null} cloudImageError={null} onChangeCloudImage={noop} onRecoverCloudImage={noop} onSetCloudImageDefault={noop} {...overrides} />));
 }
 
 let container: HTMLDivElement;

@@ -3,6 +3,10 @@ import {
   RELAY_HEARTBEAT_INTERVAL_MS,
   RELAY_HEARTBEAT_MODE,
   RELAY_HEARTBEAT_TIMEOUT_MS,
+  RELAY_NOTICE_MODE,
+  RELAY_NOTICE_TOPICS,
+  RELAY_PING_MESSAGE,
+  RELAY_PONG_MESSAGE,
   RELAY_PROTOCOL_VERSION,
   TUNNEL_CHUNK_BYTES,
   createRelayAuthorization,
@@ -10,8 +14,11 @@ import {
   decodeTunnelChunk,
   encodeTunnelChunk,
   parseMachineRelayMessage,
+  type RelayNotice,
+  type RelayNoticeTopic,
   type RelaySocketMessage,
 } from '@gitspace/protocol';
+import { coalesced } from './coalesced.js';
 import { signedCredentialAuthorityGrantSchema, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { SERVICE_ASSERTION_HEADER, stripGitSpaceCredentials } from '@gitspace/protocol/service-access';
 
@@ -28,6 +35,9 @@ export interface MachineRelayConnectorOptions {
   machineGrant: SignedCredentialAuthorityGrant;
   signingPrivateKey: Uint8Array;
   localOrigin: string;
+  /** Receives coalesced notices; the next batch waits for this one. Every opened connection first delivers all topics,
+   * the catch-up for anything missed while disconnected. */
+  onNotice?: (notices: RelayNotice[]) => Promise<void>;
   onError?: (error: unknown) => void;
 }
 
@@ -51,7 +61,7 @@ function socketUrl(relayUrl: string, machineId: string): URL {
   const url = new URL(relayUrl);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = `${url.pathname.replace(/\/+$/u, '')}/ws`;
-  url.search = new URLSearchParams({ role: 'machine', id: machineId, heartbeat: RELAY_HEARTBEAT_MODE, machineProtocol: String(MACHINE_EXECUTION_PROTOCOL_VERSION), machinePlatform: machineNativePlatformSchema.parse(`${process.platform}-${process.arch}`) }).toString();
+  url.search = new URLSearchParams({ role: 'machine', id: machineId, heartbeat: RELAY_HEARTBEAT_MODE, notices: RELAY_NOTICE_MODE, machineProtocol: String(MACHINE_EXECUTION_PROTOCOL_VERSION), machinePlatform: machineNativePlatformSchema.parse(`${process.platform}-${process.arch}`) }).toString();
   return url;
 }
 
@@ -59,7 +69,7 @@ export class MachineRelayConnector {
   private socket: BunWebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private livenessTimer: ReturnType<typeof setTimeout> | null = null;
-  private heartbeatNonce: string | null = null;
+  private awaitingPong = false;
   private reconnectDelayMs = 500;
   private openedAt: number | null = null;
   private stopped = false;
@@ -67,6 +77,16 @@ export class MachineRelayConnector {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly forwarding = new Map<string, AbortController>();
   private readonly serviceSockets = new Map<string, WebSocket>();
+  /** Notices not yet delivered, one per topic and workspace. */
+  private readonly notices = new Map<string, { topic: RelayNoticeTopic; workspaceId: string | undefined }>();
+  private readonly deliver = coalesced(async () => {
+    const pending = [...this.notices.values()];
+    this.notices.clear();
+    const byWorkspace = new Map<string | undefined, RelayNoticeTopic[]>();
+    for (const { topic, workspaceId } of pending) byWorkspace.set(workspaceId, [...byWorkspace.get(workspaceId) ?? [], topic]);
+    const batch = [...byWorkspace].map(([workspaceId, topics]): RelayNotice => ({ topics, ...(workspaceId === undefined ? {} : { workspaceId }) }));
+    if (batch.length) await this.options.onNotice?.(batch);
+  });
 
   constructor(private readonly options: MachineRelayConnectorOptions) {}
 
@@ -103,6 +123,7 @@ export class MachineRelayConnector {
         this.openedAt = Date.now();
         console.log(JSON.stringify({ event: 'relay_connected', at: new Date(this.openedAt).toISOString(), origin: url.origin }));
         this.heartbeat(socket);
+        this.notice({ topics: [...RELAY_NOTICE_TOPICS] });
       });
       socket.addEventListener('message', (event) => {
         if (this.socket !== socket) return;
@@ -139,7 +160,7 @@ export class MachineRelayConnector {
     this.openedAt = null;
     clearTimeout(this.livenessTimer ?? undefined);
     this.livenessTimer = null;
-    this.heartbeatNonce = null;
+    this.awaitingPong = false;
     this.pending.clear();
     for (const controller of this.forwarding.values()) controller.abort();
     this.forwarding.clear();
@@ -172,36 +193,41 @@ export class MachineRelayConnector {
     }, delay);
   }
 
+  /** The relay answers the fixed ping itself (WebSocket auto-response), without waking. */
   private heartbeat(socket: BunWebSocket): void {
     if (this.socket !== socket) return;
     clearTimeout(this.livenessTimer ?? undefined);
-    this.heartbeatNonce = crypto.randomUUID();
+    this.awaitingPong = true;
     this.livenessTimer = setTimeout(() => {
       this.reconnect(socket, { cause: 'heartbeat-timeout', error: new Error('Machine relay heartbeat timed out; reconnecting (in-flight request outcomes may be unknown)') });
     }, RELAY_HEARTBEAT_TIMEOUT_MS);
     try {
-      this.send(socket, {
-        version: RELAY_PROTOCOL_VERSION,
-        type: 'frame',
-        to: `machine:${this.options.machineId}`,
-        payload: this.heartbeatNonce,
-      });
-    } catch (error) {
-      this.reconnect(socket, { cause: 'send', error });
-    }
+      if (socket.readyState !== WebSocket.OPEN) throw new Error('Machine relay is disconnected');
+      socket.send(RELAY_PING_MESSAGE);
+    } catch (error) { this.reconnect(socket, { cause: 'send', error }); }
+  }
+
+  /** Queues one notice per topic and workspace; one already pending absorbs a repeat. */
+  private notice(notice: RelayNotice): void {
+    for (const topic of notice.topics) this.notices.set(`${topic}\n${notice.workspaceId ?? ''}`, { topic, workspaceId: notice.workspaceId });
+    void this.deliver().catch((error: unknown) => this.options.onError?.(error));
   }
 
   private async handleMessage(socket: BunWebSocket, input: string): Promise<void> {
+    if (input === RELAY_PONG_MESSAGE) {
+      if (!this.awaitingPong) return;
+      this.awaitingPong = false;
+      this.reconnectDelayMs = 500;
+      clearTimeout(this.livenessTimer ?? undefined);
+      this.livenessTimer = setTimeout(() => this.heartbeat(socket), RELAY_HEARTBEAT_INTERVAL_MS);
+      return;
+    }
     const parsed = parseMachineRelayMessage(input);
     if (parsed.status === 'error') throw new Error(parsed.error.message);
     const message = parsed.value;
-    if (message.type === 'frame') {
-      if (message.to === `machine:${this.options.machineId}` && message.payload === this.heartbeatNonce) {
-        this.heartbeatNonce = null;
-        this.reconnectDelayMs = 500;
-        clearTimeout(this.livenessTimer ?? undefined);
-        this.livenessTimer = setTimeout(() => this.heartbeat(socket), RELAY_HEARTBEAT_INTERVAL_MS);
-      }
+    if (message.type === 'frame') return;
+    if (message.type === 'notice') {
+      this.notice(message);
       return;
     }
     if (message.type === 'tunnel.websocket.data') {

@@ -23,7 +23,7 @@ import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifac
 import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat } from './transcript.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void> };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 /** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. */
 const MANAGEMENT_TIMEOUT_MS: Readonly<Record<'mcp_discover' | 'lifecycle', number>> = { mcp_discover: 30_000, lifecycle: 240_000 };
@@ -48,6 +48,8 @@ export type WorkspaceRuntime = {
   status(): Promise<RuntimeWorkspaceStatus>;
   waitForSnapshot(commit: string): Promise<void>;
   cacheReady(attachmentId: string, generation: number): Promise<void>;
+  /** An agent asked for this attachment: once the machine reports it ready, the conversation is told so it can retry. */
+  noticeWhenReady(input: { attachmentId: string; generation: number; conversationId: string; label: string }): void;
   invokeConversationTool: ToolServices['invoke'];
   /** A human request run once per request id as a tool call of the main conversation: MCP discovery, or an
    * environment run dispatched to the cache machine its arguments name. */
@@ -81,8 +83,12 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     snapshots: { current: () => cloudFiles.snapshot(), distance: (ancestor, descendant, limit) => cloudFiles.snapshotDistance(ancestor, descendant, limit) },
     schedule: options.schedule, report: options.onReport,
   });
-  /** Every canonical snapshot change republishes the projection and queues indexing for the next alarm. */
-  function codeChanged() { publish(); options.waitUntil(codeSearch.changed()); }
+  /** Every canonical snapshot change republishes the projection, queues indexing for the next alarm and tells every
+   * attached machine except the one whose publication made it. */
+  function codeChanged(source?: string) {
+    publish(); options.waitUntil(codeSearch.changed());
+    options.snapshotChanged?.(attachments.list().filter(item => item.state !== 'detached' && item.machineId !== source).map(item => item.machineId));
+  }
   async function recoverCloudFiles() {
     try { await cloudFiles.recover(); }
     catch (error) { options.onReport(error); await options.schedule(Date.now() + 5_000); }
@@ -114,6 +120,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   });
   await drafts.initialize();
   options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_management(request_id TEXT PRIMARY KEY, input TEXT NOT NULL, result TEXT)');
+  options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attach_notices(attachment_id TEXT NOT NULL, generation INTEGER NOT NULL, conversation_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY(attachment_id, generation, conversation_id))');
   const listeners = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const snapshotWaiters = new Set<() => void>();
   const encoder = new TextEncoder();
@@ -215,7 +222,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   }
   /** The one status summary of the workspace: every surface reads this, nothing else derives status. */
   function workspaceStatus(code: RuntimeGitCheckpoint | null): RuntimeWorkspaceStatus {
-    const now = Date.now();
     const conflicts = code?.conflicts ?? [];
     return {
       cloud: { version: code?.worktreeCommit ?? null, conflicts },
@@ -223,7 +229,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         const materialized = item.executionObservation?.materializedCommit ?? null;
         return {
           machineId: item.machineId, attachmentId: item.attachmentId, generation: item.generation,
-          online: isAttachmentOnline(item, now), ready: isAttachmentReady(item, now),
+          online: isAttachmentOnline(item), ready: isAttachmentReady(item),
           setup: item.cache?.setup ?? [],
           sync: { lastSyncAt: item.cache?.lastSyncAt ?? null, unsent: item.cache?.unsent ?? null, unapplied: code !== null && materialized !== null && materialized !== code.worktreeCommit, problem: item.cache?.syncProblem ?? item.failure?.message ?? null, conflicts },
         };
@@ -256,6 +262,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
+    options.published?.(next);
     snapshot = next;
     for (const notify of snapshotWaiters) notify();
     const bytes = encoder.encode(encodedEvent + '\n');
@@ -356,9 +363,19 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       if (wakesTasks) { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); }
       return result;
     },
+    noticeWhenReady(input) {
+      options.storage.sql.exec('INSERT OR IGNORE INTO runtime_attach_notices(attachment_id,generation,conversation_id,label) VALUES(?,?,?,?)', input.attachmentId, input.generation, input.conversationId, input.label);
+    },
     async cacheReady(attachmentId, generation) {
       const attachment = attachments.list().find(item => item.attachmentId === attachmentId && item.generation === generation && item.state === 'ready');
-      if (!attachment?.lfsRestored?.length) return;
+      if (!attachment) return;
+      const waiting = options.storage.sql.exec<{ conversation_id: string; label: string }>('SELECT conversation_id,label FROM runtime_attach_notices WHERE attachment_id=? AND generation=?', attachmentId, generation).toArray();
+      options.storage.sql.exec('DELETE FROM runtime_attach_notices WHERE attachment_id=? AND generation=?', attachmentId, generation);
+      for (const row of waiting) {
+        try { await runtime.lifecycle.deliver({ conversationId: row.conversation_id, requestId: `machine-ready:${attachmentId}:${generation}`, kind: 'machine-ready', text: `Machine ${row.label} is attached and ready. Retry the calls that were waiting for it.` }); }
+        catch (error) { options.onReport(error); }
+      }
+      if (!attachment.lfsRestored?.length) return;
       await harness.commit(async tx => {
         const seen = await tx.doc(CacheNoticesDoc);
         const key = `${attachmentId}:${generation}`;
@@ -452,7 +469,12 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       }, cancel() { listeners.delete(controller); } }, { highWaterMark: 257 });
       return new Response(stream, { headers: { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' } });
     },
-    async wake() { await recoverCloudFiles(); await runtime.lifecycle.recover(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); await codeSearch.drive(); },
+    async wake() {
+      // Indexing runs beside recovery: a failing recovery step must not keep code_search from being built.
+      const indexing = codeSearch.drive();
+      try { await recoverCloudFiles(); await runtime.lifecycle.recover(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); }
+      finally { await indexing; }
+    },
     publish,
   };
 }

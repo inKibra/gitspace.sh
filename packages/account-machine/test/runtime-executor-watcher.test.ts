@@ -55,11 +55,6 @@ async function watcherProof(run: (proof: {
     class LocalCloud extends CloudRuntimeClient {
       override async call<S extends z.ZodType>(operation: ControlOperation, payload: Record<string, unknown>, schema: S, signal?: AbortSignal): Promise<z.output<S>> {
         if (operation === 'runtime.assignments') {
-          if (payload.afterSnapshot) await new Promise<void>((resolve, reject) => {
-            const abort = () => reject(new Error('Subscription canceled'));
-            signal?.addEventListener('abort', abort, { once: true });
-            if (signal?.aborted) abort();
-          });
           return schema.parse({ assignments: [{ grant: { attachment, executionSecret: 'proof-secret' }, source: null, checkpoint }] });
         }
         if (operation === 'runtime.attachment.cache.request') {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { ApplyPatchArgumentsSchema, RuntimeBashCommandArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeWriteArgumentsSchema, type RuntimeMachineSelector, type RuntimeQuestionTool } from '@gitspace/protocol-runtime';
+import { ApplyPatchArgumentsSchema, RuntimeBashCommandArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeWriteArgumentsSchema, type RuntimeMachineSelector, type RuntimeQuestionTool } from '@gitspace/protocol-runtime';
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { ChevronRight } from '@untitledui/icons';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
@@ -67,6 +67,10 @@ function approvalView({ name, args }: RuntimeQuestionTool, machines: readonly Ma
       facts: [['Directory', bash.data.cwd ?? 'Repository root'], ['Machine', machineText(bash.data.on, machines)], ...(bash.data.background ? [['Mode', 'Background job'] satisfies [string, string]] : [])],
       body: <GitSpaceMarkdown>{fenced(bash.data.command, 'sh')}</GitSpaceMarkdown>,
     };
+  }
+  if (name === 'machines') {
+    const machine = RuntimeMachinesArgumentsSchema.safeParse(args);
+    if (machine.success && machine.data.op === 'attach') return { verb: 'Attach machine', subject: machineText(machine.data.machine, machines), description: 'Agents may not attach this machine on their own; approving attaches it to this workspace.', facts: [], body: null };
   }
   return { verb: 'Use', subject: name, description: null, facts: [], body: <Collapsed summary="Arguments">{fenced(JSON.stringify(args, null, 2), 'json')}</Collapsed> };
 }

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID } from '@gitspace/protocol';
 import { ensureAccountGitSpaceProject } from '../src/gitspace-project.js';
-import { requireRuntimeIdentity } from '../src/runtime-access.js';
+import { requireWorkspaceAccess } from '../src/runtime-access.js';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { tenantRootPrivateKey } from './setup.js';
 
@@ -49,7 +49,7 @@ describe('account GitSpace source provenance', () => {
     const project = await ensureAccountGitSpaceProject(cloudEnv, userId);
     expect(project.lifecycle).toBe('cloud-only');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
-    await expect(requireRuntimeIdentity(env, userId, identity, true)).resolves.toMatchObject({ project: { id: project.id } });
+    await expect(requireWorkspaceAccess(env, userId, identity, true)).resolves.toMatchObject({ workspace: { projectId: project.id, kind: 'base', projectLifecycle: 'cloud-only' } });
   });
 
   it('pins the selected account frontend and its source branch instead of the channel build', async () => {

@@ -221,7 +221,6 @@ describe('release follower', () => {
       controlToken: host.token,
       runningMachineSha: null,
       generation: 'sha256:' + 'a'.repeat(64),
-      intervalMs: 60_000,
       onError: (error) => { throw error; },
     });
     await follower.nudge();
@@ -252,7 +251,6 @@ describe('release follower', () => {
       controlToken: host.token,
       runningMachineSha: sha,
       generation: manifest.treeHash,
-      intervalMs: 60_000,
       onError: (error) => { throw error; },
     });
     await successor.start();
@@ -419,7 +417,6 @@ describe('release follower', () => {
       controlToken: host.token,
       runningMachineSha: null,
       generation: 'sha256:' + 'a'.repeat(64),
-      intervalMs: 60_000,
       onError: (error) => { throw error; },
     });
     await follower.nudge();
@@ -467,7 +464,6 @@ describe('release follower', () => {
       controlToken: host.token,
       runningMachineSha: null,
       generation: null,
-      intervalMs: 60_000,
       onError: (error) => { throw error; },
     });
     await follower.nudge();

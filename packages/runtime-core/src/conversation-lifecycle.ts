@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
 import { QuestionsDoc } from './documents.js';
 
-export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
+export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
 type StoredEvent = { event: ConversationEvent; delivered: boolean; consumed: boolean };
 export const ConversationLifecycleDoc = defineDoc<{ stopped: boolean; events: StoredEvent[] }>({ kind: 'gitspace.conversation-lifecycle', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ stopped: false, events: [] }) });

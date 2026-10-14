@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { credentialProtocolBase64, signCredentialAuthorityGrant, parseRelaySocketMessage, verifyRelayAuthorization } from '@gitspace/protocol';
+import { credentialProtocolBase64, signCredentialAuthorityGrant, parseRelaySocketMessage, verifyRelayAuthorization, RELAY_PING_MESSAGE, RELAY_PONG_MESSAGE } from '@gitspace/protocol';
 import { SERVICE_ASSERTION_HEADER, signServiceAssertion } from '@gitspace/protocol/service-access';
 import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import { MachineRelayConnector } from '../src/relay-connector.js';
@@ -27,6 +27,11 @@ test('real machine connector authenticates service ingress before bridging a loc
   const relay = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request, server) { if (server.upgrade(request)) return; return new Response(null, { status: 400 }); }, websocket: {
     open(socket) { connected.resolve(socket); },
     message(socket, data) {
+      // The relay's WebSocket auto-response answers liveness pings.
+      if (String(data) === RELAY_PING_MESSAGE) {
+        socket.send(RELAY_PONG_MESSAGE);
+        return;
+      }
       const parsed = parseRelaySocketMessage(String(data));
       if (parsed.status === 'error') return echoed.reject(parsed.error);
       const message = parsed.value;

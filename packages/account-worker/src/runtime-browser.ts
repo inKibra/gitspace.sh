@@ -52,7 +52,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
   const { storage, env, identity } = options;
   async function eligible(machineId: string) {
     for (const attachment of options.runtime().attachments.list()) {
-      if (attachment.machineId !== machineId || attachment.state !== 'ready' || !attachment.heartbeatAt || Date.now() - Date.parse(attachment.heartbeatAt) > 30_000) continue;
+      if (attachment.machineId !== machineId || !isAttachmentReady(attachment)) continue;
       const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(attachment.machineId);
       if (!machine || machine.desiredState === 'removed') continue;
       return attachment;
@@ -62,7 +62,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
   async function execution(args: RuntimeBrowserArguments) {
     const candidates: RuntimeAttachment[] = [];
     for (const attachment of options.runtime().attachments.list()) {
-      if (!isAttachmentReady(attachment, Date.now()) || !attachment.capabilities.includes(`browser.${args.source}`)) continue;
+      if (!isAttachmentReady(attachment) || !attachment.capabilities.includes(`browser.${args.source}`)) continue;
       const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(attachment.machineId);
       if (!machine || machine.desiredState === 'removed' || args.source === 'relay' && machine.kind !== 'physical') continue;
       candidates.push(attachment);

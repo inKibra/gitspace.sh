@@ -92,8 +92,8 @@ Every Pi package is pinned to an exact version. GitSpace code imports Pi only th
 
 | Component | Where | Owns |
 |---|---|---|
-| **Workspace DO** (evolves the existing per-space `SpaceAuthorityDO`) | Tenant Worker, one per workspace | The workspace's pi-durable Session: root conversation, subagent conversations, operational tasks, documents. Placement and lifecycle authority it already owns stay in the same actor, so one single writer covers both. Scheduler for dispatching work to machines. |
-| **Project DOs** (existing `ProjectAuthorityDO`, `ProjectSecretsDO`, `ProjectCronsDO`) | Tenant Worker | Project-scoped state: environment ledger and values, secrets and grants, cron definitions, and the new QA queue. |
+| **Workspace DO** (evolves the existing per-space `SpaceAuthorityDO`) | Tenant Worker, one per workspace | The workspace's pi-durable Session: root conversation, subagent conversations, operational tasks, documents. Placement and lifecycle authority it already owns stay in the same actor, so one single writer covers both. It holds its own metadata (identity, kind, lifecycle, branch, phase, and the project lifecycle its write policy needs), seeded at creation or by one project read, and authorizes every runtime request from it without reading the project. Archive, restore, delete and phase changes start here: the workspace fences or erases its runtime and persists first, then the project authority records the change with a revision check; project archive and restore reach each workspace through the Worker. It stores the status summary its runtime publishes, which project listings read without opening the runtime. Scheduler for dispatching work to machines. |
+| **Project DOs** (existing `ProjectAuthorityDO`, `ProjectSecretsDO`, `ProjectCronsDO`) | Tenant Worker | Project-scoped state: environment ledger and values, secrets and grants, cron definitions, and the new QA queue. Workspace definitions here are the project's record of what each workspace applied, for listings and the directory. |
 | **Credential vault DO** (existing) | Tenant Worker | Sealed provider credentials, refresh leases, profiles, assignments. |
 | **Artifacts namespace** | Cloudflare Artifacts, one per tenant | One repo per project (imported) and one fork per workspace. |
 | **R2 bucket** (existing, one per tenant: `gsp-relay-<accountId>`) | Cloudflare | Blobs: `local://` artifacts, uploads, large tool outputs. |
@@ -208,7 +208,7 @@ packages/
 Each tool is declared **cloud** or **machine**:
 
 - **Cloud:** repository `read`, `write`, `edit`, `apply_patch`, and `find` always use the DO's Artifacts working-copy snapshot, whether machines are attached or not. `find` reads a commit-keyed path index and accepts `pattern` and `path`; it rejects the unsupported `glob` option. `code_search` answers from the DO's FTS5 trigram index of the last fully indexed snapshot (alarm-built, keyed by blob), reports `partial` when its verification budget runs out and `behind` while newer snapshots are being indexed. History, workspace reads, web search, judging, and cloud MCP also run here.
-- **Machine:** `bash`, jobs, processes, environment runs, AST matching, and `grep` execute on the chosen cache; `grep` is exact pinned ripgrep over the canonical snapshot and fails without a machine, pointing at `code_search`. Cloud codemode sends nested calls through the normal tool authority.
+- **Machine:** `bash`, jobs, processes, environment runs, AST matching, and `grep` execute on the chosen cache; `grep` is exact pinned ripgrep over the canonical snapshot and, without a ready machine, attaches one (§7.3) and points at `code_search` meanwhile. Cloud codemode sends nested calls through the normal tool authority.
 
 The workspace has one main conversation. Only it and human edits to local caches can change the shared cloud working copy. Main-agent mutations serialize within a turn; independent reads can run in parallel. No conversation carries machine placement. Each admitted machine command carries the latest cloud snapshot as its minimum input.
 
@@ -216,16 +216,16 @@ The workspace has one main conversation. Only it and human edits to local caches
 
 File tools have no machine selector. Program execution uses the workspace default or an explicit per-call override:
 
-- `machines`: list attachments and use `setDefault` to choose a ready cache. `machineId: null` restores automatic first-ready selection. A configured but unavailable default fails rather than silently selecting a different machine.
+- `machines`: `list` the online attachments, `detach` one exact attachment and generation, or `attach` a machine. `attach` takes an optional `machine` (ID or label) and optional `needs`; omitted, it picks the account default machine (`settings.defaults.machineId`) when online and permitted, else any online permitted machine offering `needs`. It requests the attachment through the same path a person's cache request takes, and returns at once with `state: "attaching"`; the machine learns of it from a relay notice. Each machine has an "Agents may attach" setting (Settings → Machines, default on); for a machine with it off, `attach` creates an approval question instead, and approving it attaches the machine.
 - Applicable machine tools accept `on` to override the workspace default.
-- `on` is a machine ID, unambiguous label, or selector such as `{ needs: ["macos"], profile: "ios", prefer: "idle" }`. No ready match fails immediately.
+- `on` is a machine ID, unambiguous label, or selector such as `{ needs: ["macos"], profile: "ios", prefer: "idle" }`. No ready match attaches a machine (§7.3) instead of waiting.
 - `at` selects a separate snapshot-pinned runner on a machine with a ready cache attachment. `"current"` pins the current cloud snapshot; a commit or ref pins that exact source. Existing runners and delegates cannot substitute for a missing execution cache. It does not move a conversation or change the shared copy.
 - Policy: per-project allowed machines and labels set by the user; approval before running on a machine the user does not own; secrets restricted by machine trust (§10.6).
 
 ### 7.3 Failure semantics
 
 - **Machine loss during a tool call:** the tool task becomes `interrupted` with output so far (pi-durable default for non-replay-safe tools). The agent sees it as a tool result.
-- **No machine attached:** cloud file tools and conversation operations continue. Machine tools fail immediately with an actionable error. They do not wait for a machine, launch one, or fall back to machine-side inference.
+- **No machine attached:** cloud file tools and conversation operations continue. A machine tool with no ready match (checked before approval) attaches the machine `on` names, else one the way `machines attach` picks it, and fails at once saying it is attaching and to retry when setup finishes; when the machine reports ready, the asking conversation receives a `machine-ready` event. With nothing online it fails with "No machine is online. Start GitSpace on <machine> or attach a machine." It never waits for a machine or falls back to machine-side inference.
 - **DO restart:** pi-durable resumes tasks from their last checkpoint; partial model output is lost for at most ~100 ms (README "Watching a Conversation").
 
 ### 7.4 Codemode

@@ -30,6 +30,12 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
+  "machine.updateAgentAttach": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
   "machine.createSandbox": {
     "readOnlyHint": false,
     "destructiveHint": false,

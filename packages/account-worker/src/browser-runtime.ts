@@ -6,7 +6,7 @@ import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServic
 import { launchCloudBrowser, type BrowserChannel, type BrowserRenderingBinding } from './browser-cdp.js';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 
-type Tab = BrowserSemanticTab & { grant: RuntimeAccountBrowserGrant; channel: BrowserChannel; sessionId: string; stale: boolean; servicePolicy?: BrowserServicePolicy; unsubscribeServices?: () => void; cancelTimer(): void; unsubscribe(): void };
+type Tab = BrowserSemanticTab & { grant: RuntimeAccountBrowserGrant; channel: BrowserChannel; sessionId: string; stale: boolean; servicePolicy?: BrowserServicePolicy; unsubscribeServices?: () => void; unsubscribe(): void };
 export type AccountBrowserTransport = {
   open(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<{ channel: BrowserChannel; targetId: string }>;
   tabs(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<unknown>;
@@ -30,6 +30,10 @@ export class AccountBrowserRuntime {
   private async perform(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization, { command, scope } = body;
     signal.throwIfAborted();
+    // Tabs whose group expired close before the next operation; no timer keeps the host object awake for them.
+    for (const tab of [...this.tabs.values()]) {
+      if (Date.parse(tab.grant.expiresAt) <= Date.now()) await this.closeTab(tab).catch(() => { tab.unsubscribe(); this.tabs.delete(tab.targetId); });
+    }
     if (Date.parse(body.expiresAt) <= Date.now()) throw new Error('Browser authorization expired');
     if (scope.placement.kind === 'account-relay' && scope.conversationKind !== 'main') throw new Error('Logged-in Chrome relay is main-agent-only');
     const claim = `browser.account.claim:${scope.projectId}:${scope.workspaceId}:${scope.attemptId}`;
@@ -97,8 +101,7 @@ export class AccountBrowserRuntime {
         targetId = z.object({ targetId: z.string() }).parse(await channel.send('Target.createTarget', { url: 'about:blank', background: true })).targetId;
       }
       const { sessionId } = z.object({ sessionId: z.string() }).parse(await channel.send('Target.attachToTarget', { targetId, flatten: true }));
-      const opened: Tab = { grant, channel, targetId, sessionId, refs: new Map(), document: 0, stale: false, cancelTimer: () => clearTimeout(expiry), unsubscribe: () => {} };
-      const expiry = setTimeout(() => { void this.closeTab(opened).catch(() => { opened.stale = true; }); }, Math.max(1, Date.parse(grant.expiresAt) - Date.now()));
+      const opened: Tab = { grant, channel, targetId, sessionId, refs: new Map(), document: 0, stale: false, unsubscribe: () => {} };
       opened.unsubscribe = channel.subscribe(event => {
         if (event.method === 'disconnected') opened.stale = true;
         if (event.sessionId !== opened.sessionId) return;
@@ -129,7 +132,7 @@ export class AccountBrowserRuntime {
     } catch (error) { if (effect) { active.stale = true; active.refs.clear(); } throw error; }
   }
   private async closeTab(tab: Tab) {
-    tab.cancelTimer(); tab.stale = true; tab.refs.clear();
+    tab.stale = true; tab.refs.clear();
     tab.unsubscribeServices?.();
     await tab.channel.send('Target.closeTarget', { targetId: tab.targetId });
     tab.unsubscribe(); this.tabs.delete(tab.targetId);

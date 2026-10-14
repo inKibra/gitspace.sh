@@ -33,7 +33,7 @@ async function attach(machineId: string, generation: number) {
   const authority = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`);
   await authority.runtimeAttachments({ projectId, workspaceId });
   await runInDurableObject(authority, async (_instance, state) => {
-    await new AttachmentStore(state.storage, services).attach(RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId, generation, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }));
+    await new AttachmentStore(state.storage, services).attach(RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId, generation, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }), true);
   });
 }
 
@@ -98,9 +98,13 @@ describe('signed repository credential authority', () => {
     const f = await fixture(['storage.access']);
     const writable = await f.request({ scope: 'write' });
     expect({ status: writable.status, body: await writable.json() }).toMatchObject({ status: 200, body: { status: 'ok' } });
-    await f.project.putWorkspace({ ...f.workspace, lifecycle: 'archived', expectedRevision: 1 });
-    expect((await f.request()).status).toBe(200);
-    expect((await f.request({ scope: 'write' })).status).toBe(400);
+    const definition = await f.project.getWorkspace(workspaceId);
+    if (!definition) throw new Error('Workspace definition is missing');
+    await f.authority.archiveWorkspace(definition);
+    // Archiving detached the cache; a checkout attached afterwards may still read the archived repository, never publish.
+    await attach('assigned', 2);
+    expect((await f.request({ generation: 2 })).status).toBe(200);
+    expect((await f.request({ scope: 'write', generation: 2 })).status).toBe(400);
   });
 
   it('leases the cloud workspace repository only to a machine with a live checkout', async () => {

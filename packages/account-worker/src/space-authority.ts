@@ -16,10 +16,11 @@ import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshot
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
-import { requireRuntimeIdentity } from './runtime-access.js';
+import { notifyMachines } from './machine-notices.js';
+import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceStatus, storeWorkspaceStatus, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
 import { z } from 'zod';
-import { normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
-import { deriveWorkspaceStatusSummary, type GitLfsConfirmedObject, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { normalizeRemoteRepositoryUrl, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle, type WorkspaceLifecycle } from '@gitspace/protocol';
+import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { LifecycleRunRequestSchema, LifecycleRunSchema, type EnvironmentFailure, type LifecycleRun } from '@gitspace/protocol-environment';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
@@ -28,6 +29,7 @@ const BaseBranchChangeSchema = z.object({
   previous: RuntimeGitCheckpointSchema, checkpoint: RuntimeGitCheckpointSchema,
   previousBranchTip: z.string().nullable(),
 });
+type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private changes: DurableChangeLog;
@@ -37,6 +39,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   private cloudRuntime: z.infer<typeof RuntimeIdentitySchema> | null = null;
   private cloudRuntimePublished = false;
   private alarmLine: Promise<void> = Promise.resolve();
+  private seeding: Promise<WorkspaceMetadata> | undefined;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
@@ -67,6 +70,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     )`);
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_recovery_receipts(operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)');
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS portable_lfs_outbox(snapshot_id TEXT PRIMARY KEY,inventory TEXT NOT NULL)');
+    createWorkspaceMetadataTables(this.ctx.storage);
   }
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'space' }> | null {
@@ -86,7 +90,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   private scheduleAlarm(owner: string, timestamp: number | null): Promise<void> {
     if (timestamp === null) this.ctx.storage.sql.exec('DELETE FROM runtime_alarms WHERE owner=?', owner);
-    else this.ctx.storage.sql.exec('INSERT INTO runtime_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp', owner, timestamp);
+    // Runtime wakes from several sources (task wake, retention retry, code_search retry): a later request never postpones an earlier one.
+    else this.ctx.storage.sql.exec("INSERT INTO runtime_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=CASE WHEN owner='runtime' THEN MIN(timestamp,excluded.timestamp) ELSE excluded.timestamp END", owner, timestamp);
     const operation = this.alarmLine.then(async () => {
       const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>('SELECT MIN(timestamp) AS timestamp FROM runtime_alarms').toArray()[0]?.timestamp;
       if (next === null || next === undefined) await this.ctx.storage.deleteAlarm();
@@ -115,30 +120,92 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments').toArray().map(row => RuntimeAttachmentSchema.parse(JSON.parse(row.record)));
   }
 
-  /** Agent status of this cloud workspace from its last published runtime snapshot, without opening the runtime;
-   * null when the workspace has no cloud runtime state yet. */
-  async runtimeWorkspaceStatus(): Promise<WorkspaceStatusSummary | null> {
-    if (await this.ctx.storage.get('runtime.identity') === undefined) return null;
+  /** The sidebar status of this workspace as its runtime last published it, read without opening the runtime;
+   * null before its first publication. */
+  runtimeWorkspaceStatus(): WorkspaceStatusSummary | null {
+    const stored = readWorkspaceStatus(this.ctx.storage);
+    if (stored) return stored;
+    // A runtime that published before summaries were stored has its summary derived once from that publication.
     const snapshot = readRuntimeSnapshot(this.ctx.storage);
-    return deriveWorkspaceStatusSummary({ agents: (snapshot?.conversations ?? []).map(item => ({ state: item.status === 'running' ? 'running' : item.status === 'waiting' ? 'permission-needed' : 'waiting', ...(item.status === 'failed' ? { failure: { code: 'RUNTIME_FAILED', message: item.error ?? 'Conversation failed' } } : {}) })) });
+    return snapshot ? storeWorkspaceStatus(this.ctx.storage, snapshot) : null;
+  }
+
+  /** The project listing's one read of this workspace: its legacy placement and its stored status. */
+  listingState(): { placement: SpaceAuthorityRecord | null; status: WorkspaceStatusSummary | null } {
+    return { placement: this.get(), status: this.runtimeWorkspaceStatus() };
+  }
+
+  /** This workspace's metadata. One that predates workspaces holding their own reads its project once to seed it;
+   * every later decision is local. */
+  private async metadata(identity: RuntimeIdentity): Promise<WorkspaceMetadata> {
+    const stored = readWorkspaceMetadata(this.ctx.storage);
+    if (stored) return stored;
+    this.seeding ??= this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`).workspaceSeed(identity.workspaceId).then(seed => {
+      if (!seed || seed.project.id !== identity.projectId) throw new Error('Runtime project is unavailable');
+      if (!seed.workspace || seed.workspace.projectId !== seed.project.id) throw new Error('Workspace does not belong to the requested project');
+      // A creation seed may have landed while this read was in flight; adoption keeps whichever is newer.
+      return writeWorkspaceMetadata(this.ctx.storage, adoptWorkspaceMetadata(readWorkspaceMetadata(this.ctx.storage), seed.workspace, seed.project));
+    }).finally(() => { this.seeding = undefined; });
+    return this.seeding;
+  }
+
+  /** Takes a definition the project recorded for this workspace when it is newer than the one held. */
+  private adopt(workspace: CloudWorkspaceDefinition): WorkspaceMetadata {
+    const current = readWorkspaceMetadata(this.ctx.storage);
+    if (!current) throw new Error('Workspace metadata is unavailable');
+    return writeWorkspaceMetadata(this.ctx.storage, adoptWorkspaceMetadata(current, workspace, { id: current.projectId, lifecycle: current.projectLifecycle, revision: current.projectRevision }));
+  }
+
+  /** Runtime access decided from this workspace's own metadata, with no project read once seeded. */
+  async runtimeAccess(raw: unknown, write: boolean): Promise<WorkspaceMetadata> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    return authorizeWorkspaceRuntime(await this.metadata(identity), identity, write);
+  }
+
+  /** Creation seeds the workspace with the definition it starts from. Idempotent: an older definition or project
+   * state never replaces a newer one. */
+  seedWorkspace(workspace: CloudWorkspaceDefinition, project: Pick<CloudProjectSummary, 'id' | 'lifecycle' | 'revision'>): WorkspaceMetadata {
+    return writeWorkspaceMetadata(this.ctx.storage, adoptWorkspaceMetadata(readWorkspaceMetadata(this.ctx.storage), workspace, project));
   }
 
   async runtimeMachineAttachments(machineId: string): Promise<RuntimeAttachment[]> {
     return (await this.storedAttachments()).filter(item => item.machineId === machineId);
   }
 
+  /** Machines with a live attachment here, read without starting the runtime; the fleet's machine index is built
+   * once from these. */
+  async runtimeAttachedMachines(): Promise<string[]> {
+    return [...new Set((await this.storedAttachments()).filter(item => item.state !== 'detached').map(item => item.machineId))];
+  }
+
+  /** The relay's view of a machine's connection: its attachments here are online exactly while it is connected. */
+  async runtimeMachinePresence(machineId: string, connected: boolean): Promise<void> {
+    if (!(await this.storedAttachments()).some(item => item.machineId === machineId && item.state !== 'detached' && item.online !== connected)) return;
+    const runtime = await this.getRuntime(await this.ctx.storage.get('runtime.identity'));
+    if (runtime.attachments.presence(RuntimeMachineIdSchema.parse(machineId), connected)) runtime.publish();
+  }
+
   /** Machine removal fan-out: the machine's attachments here are detached before its credentials go. */
   async runtimeRemoveMachine(machineId: string): Promise<RuntimeAttachment[]> {
     if (!(await this.storedAttachments()).some(item => item.machineId === machineId && item.state !== 'detached')) return [];
-    const runtime = await this.getRuntime(await this.ctx.storage.get('runtime.identity'));
+    const identity = RuntimeIdentitySchema.parse(await this.ctx.storage.get('runtime.identity'));
+    const runtime = await this.getRuntime(identity);
     runtime.attachments.remove(RuntimeMachineIdSchema.parse(machineId));
     runtime.publish();
+    await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).detachMachineWorkspace(machineId, identity.workspaceId);
     return runtime.attachments.list().filter(item => item.machineId === machineId);
+  }
+
+  /** Detached machines leave the fleet's machine index and are told to fetch their assignments. */
+  private async releaseMachines(workspaceId: string, machineIds: readonly string[]): Promise<void> {
+    const fleet = this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID);
+    for (const machineId of machineIds) await fleet.detachMachineWorkspace(machineId, workspaceId);
+    await notifyMachines(this.env, machineIds, ['assignments'], workspaceId);
   }
 
   private async getRuntime(raw: unknown): Promise<WorkspaceRuntime> {
     const identity = RuntimeIdentitySchema.parse(raw);
-    await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, identity, false);
+    authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
     if (await this.ctx.storage.get('runtime.baseBranchChange') !== undefined) throw new Error('Base branch change is awaiting recovery; retry project.setBaseBranch with the same branch');
     const authority = this.get();
     if (authority && (authority.projectId !== identity.projectId || authority.spaceId !== identity.workspaceId)) throw new Error('Runtime workspace identity mismatch');
@@ -149,11 +216,16 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     } else await this.ctx.storage.put('runtime.identity', identity);
     this.publishCloudRuntime(identity);
     if (!this.runtime) {
-      const runtime = createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp));
+      const runtime = this.openRuntime(identity);
       this.runtime = runtime;
       runtime.catch(() => { this.runtime = undefined; });
     }
     return this.runtime;
+  }
+
+  /** Agents request attachments through the same path a person's cache request takes. */
+  private openRuntime(identity: RuntimeIdentity): Promise<WorkspaceRuntime> {
+    return createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp), machineId => this.runtimeCacheAttachmentRequest({ ...identity, machineId }));
   }
 
   async runtimeSnapshot(raw: unknown): Promise<Response> { return Response.json(await (await this.getRuntime(raw)).snapshot()); }
@@ -188,8 +260,9 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       if (!change && project.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
       if (!change && project.baseBranch === branch) return this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(project);
       if (project.lifecycle !== 'active') throw new Error('Project must be active to change its base branch');
+      // Recovery bypasses getRuntime's fence, so it seeds this workspace's metadata itself before the runtime opens.
       const runtime = change
-        ? await (this.runtime ??= createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp)).catch(error => { this.runtime = undefined; throw error; }))
+        ? await this.metadata(identity).then(() => this.runtime ??= this.openRuntime(identity).catch(error => { this.runtime = undefined; throw error; }))
         : await this.getRuntime(identity);
       const snapshot = await runtime.snapshot();
       if (snapshot.conversations.some(conversation => conversation.status === 'running' || conversation.status === 'waiting')) throw new Error('Stop the base workspace agent before changing its branch');
@@ -236,6 +309,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         },
       });
       await this.ctx.storage.delete('runtime.baseBranchChange');
+      // The base branch is this workspace's branch: take the definition the project just recorded.
+      const recorded = await authority.workspaceSeed(project.id);
+      if (!recorded?.workspace) throw new Error('Project is unavailable');
+      this.seedWorkspace(recorded.workspace, recorded.project);
       return result;
     }, catch: error => error instanceof Error ? error : new Error(String(error)) }));
     // Expected rejections must not break the Durable Object's input gate.
@@ -257,48 +334,130 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   }
   /** A workspace leaving active use: its working conversations stop and every live attachment is asked to drain and detach.
    * Draining is recorded here; a machine finishes it when it next reports, or its lease expires. Never opens a runtime that has no state. */
-  async runtimeStop(raw: unknown): Promise<void> {
-    const identity = RuntimeIdentitySchema.parse(raw);
+  private async stopRuntime(identity: RuntimeIdentity): Promise<void> {
     if (await this.ctx.storage.get('runtime.identity') === undefined) return;
     const runtime = await this.getRuntime(identity);
     for (const conversation of (await runtime.snapshot()).conversations) {
       if (conversation.status === 'running' || conversation.status === 'waiting') await runtime.cancel({ ...identity, conversationId: conversation.id });
     }
+    const detached: string[] = [];
     for (const attachment of runtime.attachments.list()) {
-      if (attachment.state !== 'detached') runtime.attachments.detach(attachment);
+      if (attachment.state === 'detached') continue;
+      runtime.attachments.detach(attachment);
+      detached.push(attachment.machineId);
     }
     runtime.publish();
+    await this.releaseMachines(identity.workspaceId, detached);
   }
-  /** Permanent deletion of this workspace's runtime, attachments and placement. The caller has already fenced the
-   * workspace out of runtime access, so nothing reopens what this removes. */
-  async runtimeErase(raw: unknown): Promise<void> {
-    const identity = RuntimeIdentitySchema.parse(raw);
-    const stored = await this.ctx.storage.get('runtime.identity');
-    if (stored !== undefined) {
-      const previous = RuntimeIdentitySchema.parse(stored);
-      if (previous.projectId !== identity.projectId || previous.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
-    }
+
+  /** Permanent deletion of this workspace's runtime, attachments and placement. The tombstone is written before and
+   * survives the erase, so nothing reopens what this removes and an interrupted deletion resumes. */
+  private async erase(tombstone: WorkspaceMetadata): Promise<void> {
+    writeWorkspaceMetadata(this.ctx.storage, tombstone);
     // A runtime that never opened has no conversation to stop.
     const loaded = await this.runtime?.catch(() => undefined);
     this.runtime = undefined;
     if (loaded) {
       for (const conversation of (await loaded.snapshot()).conversations) {
-        if (conversation.status === 'running' || conversation.status === 'waiting') await loaded.cancel({ ...identity, conversationId: conversation.id });
+        if (conversation.status === 'running' || conversation.status === 'waiting') await loaded.cancel({ projectId: tombstone.projectId, workspaceId: tombstone.workspaceId, conversationId: conversation.id });
       }
     }
+    // Unindexed while the attachments still exist, so an interrupted erase unindexes them again.
+    const attached = await this.runtimeAttachedMachines();
+    const fleet = this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID);
+    for (const machineId of attached) await fleet.detachMachineWorkspace(machineId, tombstone.workspaceId);
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     this.changes = new DurableChangeLog(this.ctx.storage);
     this.directoryOutbox = this.openDirectoryOutbox();
     this.createTables();
+    writeWorkspaceMetadata(this.ctx.storage, tombstone);
     this.cloudRuntime = null;
     this.cloudRuntimePublished = false;
+    await notifyMachines(this.env, attached, ['assignments'], tombstone.workspaceId);
   }
+
+  /** The worktree a lifecycle change acts on, current with the project definition the caller read: a workspace whose
+   * creation the project finished after this workspace last looked starts from that definition. */
+  private async worktree(definition: CloudWorkspaceDefinition): Promise<WorkspaceMetadata> {
+    await this.metadata(RuntimeIdentitySchema.parse({ projectId: definition.projectId, workspaceId: definition.id }));
+    const current = this.adopt(definition);
+    if (current.kind !== 'worktree') throw new Error('The project base workspace is archived, restored and deleted only with its project');
+    if (current.projectLifecycle === 'archived' || current.projectLifecycle === 'deleting') throw new Error(`Cannot write workspace for ${current.projectLifecycle} project`);
+    return current;
+  }
+
+  /** The project records a lifecycle this workspace has already applied to itself. */
+  private async recordLifecycle(applied: WorkspaceMetadata, lifecycle: WorkspaceLifecycle): Promise<CloudWorkspaceDefinition> {
+    const recorded = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${applied.projectId}`).commitWorkspaceLifecycle(applied.workspaceId, applied.revision, lifecycle);
+    this.adopt(recorded);
+    return recorded;
+  }
+
+  /** Archives this workspace: it turns read-only and stops its runtime before the project records it archived. */
+  async archiveWorkspace(definition: CloudWorkspaceDefinition): Promise<CloudWorkspaceDefinition> {
+    const current = await this.worktree(definition);
+    if (current.lifecycle !== 'active' && current.lifecycle !== 'failed' && current.lifecycle !== 'archived') throw new Error(`Workspace ${definition.name} is ${current.lifecycle}; retry or delete its creation instead`);
+    const archived = writeWorkspaceMetadata(this.ctx.storage, { ...current, lifecycle: 'archived' });
+    await this.stopRuntime({ projectId: archived.projectId, workspaceId: archived.workspaceId });
+    return this.recordLifecycle(archived, 'archived');
+  }
+
+  /** Returns this archived workspace to active use before the project records it; its runtime reopens on first use. */
+  async restoreWorkspace(definition: CloudWorkspaceDefinition): Promise<CloudWorkspaceDefinition> {
+    const current = await this.worktree(definition);
+    if (current.projectLifecycle !== 'active' && current.projectLifecycle !== 'cloud-only') throw new Error(`Project ${current.projectId} is not active`);
+    if (current.lifecycle !== 'archived' && current.lifecycle !== 'active') throw new Error(`Workspace ${definition.name} is ${current.lifecycle}; only an archived workspace can be restored`);
+    return this.recordLifecycle(writeWorkspaceMetadata(this.ctx.storage, { ...current, lifecycle: 'active' }), 'active');
+  }
+
+  /** Permanently deletes this archived or never-finished workspace's runtime, attachments and placement; the project
+   * records it deleting only after. */
+  async deleteWorkspace(definition: CloudWorkspaceDefinition): Promise<CloudWorkspaceDefinition> {
+    const current = await this.worktree(definition);
+    if (current.lifecycle === 'active' || current.lifecycle === 'archiving' || current.lifecycle === 'restoring') throw new Error(`Archive workspace ${definition.name} before deleting it`);
+    const deleting: WorkspaceMetadata = { ...current, lifecycle: 'deleting' };
+    await this.erase(deleting);
+    return this.recordLifecycle(deleting, 'deleting');
+  }
+
+  /** A project archive or restore reaching this workspace: it takes the project lifecycle decided at `revision`, and a
+   * project that no longer accepts writes stops this runtime. A push older than the state held changes nothing. */
+  async applyProjectLifecycle(raw: unknown, project: { lifecycle: ProjectLifecycle; revision: number }): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const current = await this.metadata(identity);
+    if (current.projectId !== identity.projectId || current.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
+    if (project.revision < current.projectRevision) return;
+    writeWorkspaceMetadata(this.ctx.storage, { ...current, projectLifecycle: project.lifecycle, projectRevision: project.revision });
+    if (!projectAcceptsWrites(project.lifecycle)) await this.stopRuntime(identity);
+  }
+
+  /** Project deletion reaching this workspace: it becomes unavailable, then its runtime, attachments and placement are erased. */
+  async runtimeErase(raw: unknown): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const current = await this.metadata(identity);
+    if (current.projectId !== identity.projectId || current.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
+    await this.erase({ ...current, projectLifecycle: 'deleting' });
+  }
+
+  /** Moves this workspace's phase within the ceiling its dependencies set; the project records it after. */
+  async setWorkspacePhase(raw: unknown, phase: WorkspacePhase): Promise<CloudWorkspaceDefinition> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const current = authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
+    if (current.projectLifecycle === 'archived') throw new Error('Cannot write workspace for archived project');
+    const project = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`);
+    assertWorkspacePhase(phase, await project.workspaceDependencies(identity.workspaceId));
+    const applied = writeWorkspaceMetadata(this.ctx.storage, { ...current, phase });
+    const recorded = await project.commitWorkspacePhase(identity.workspaceId, applied.revision, phase);
+    this.adopt(recorded);
+    return recorded;
+  }
+
   /** A human bundle edit lands in the cloud working copy exactly as an agent `write` does: one checkpoint
    * through the same publication queue, from which every environment read re-derives the definition. */
   async runtimeWriteEnvironmentBundle(raw: unknown, content: string): Promise<void> {
     const identity = RuntimeIdentitySchema.parse(raw);
-    await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, identity, true);
+    await this.runtimeAccess(identity, true);
     const runtime = await this.getRuntime(identity);
     const attemptId = `environment-bundle:${crypto.randomUUID()}`;
     try {
@@ -315,8 +474,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeTerminalMachine(machineId: string): Promise<boolean> {
     const identity = await this.ctx.storage.get('runtime.identity');
     if (identity === undefined) return false;
-    const now = Date.now();
-    return (await this.getRuntime(identity)).attachments.list().some(item => item.machineId === machineId && isAttachmentReady(item, now));
+    return (await this.getRuntime(identity)).attachments.list().some(item => item.machineId === machineId && isAttachmentReady(item));
   }
   /** A human environment run, accepted here and dispatched to the cache machine the caller named exactly as an agent's
    * lifecycle run is. A machine that is not a ready or resumable cache of this workspace is refused before dispatch;
@@ -327,8 +485,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const detached: EnvironmentFailure = { code: 'RunnerUnavailable', message: `Machine ${input.machineId} is not a ready cache of this workspace; attach it to run environment phases there`, context };
     if (await this.ctx.storage.get('runtime.identity') === undefined) return { status: 'error', failure: detached };
     const runtime = await this.getRuntime(input);
-    const now = Date.now();
-    if (!runtime.attachments.list().some(item => item.machineId === input.machineId && isAttachmentReady(item, now))) return { status: 'error', failure: detached };
+    if (!runtime.attachments.list().some(item => item.machineId === input.machineId && isAttachmentReady(item))) return { status: 'error', failure: detached };
     // Absent optional fields cross Worker RPC as undefined, which is not JSON.
     const args = RuntimeJsonSchema.parse(Object.fromEntries(Object.entries({ ...input.request, on: input.machineId }).filter(([, value]) => value !== undefined)));
     const result = await runtime.manage({ tool: 'lifecycle', requestId: `environment:${input.request.runId}:${crypto.randomUUID()}`, args });
@@ -341,7 +498,22 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeDraft(raw: unknown, actor: { deviceId: string }) { const input = RuntimeDraftSaveInputSchema.parse(raw); return (await this.getRuntime(input)).saveDraft(input, actor.deviceId); }
   async runtimeSubmit(raw: unknown, actor?: { deviceId: string }) { const input = RuntimeSubmitInputSchema.parse(raw); return (await this.getRuntime(input)).submit(input, actor?.deviceId); }
   async runtimeCancel(raw: unknown) { const input = RuntimeCancelInputSchema.parse(raw); return (await this.getRuntime(input)).cancel(input); }
-  async runtimeAnswer(raw: unknown, actor: { deviceId: string; canApprove: boolean }) { const input = RuntimeAnswerInputSchema.parse(raw); return (await this.getRuntime(input)).answer(input, actor); }
+  /** Approving an agent's machine-attach question attaches that machine; the asking conversation hears when it is ready. */
+  async runtimeAnswer(raw: unknown, actor: { deviceId: string; canApprove: boolean }) {
+    const input = RuntimeAnswerInputSchema.parse(raw);
+    const runtime = await this.getRuntime(input);
+    const result = await runtime.answer(input, actor);
+    if (input.answer !== true || !input.questionId.startsWith('machine-attach:')) return result;
+    const question = (await runtime.snapshot()).questions.find(item => item.id === input.questionId);
+    if (question?.tool?.name !== 'machines') return result;
+    const machineId = z.object({ machine: RuntimeMachineIdSchema }).parse(question.tool.args).machine;
+    const { attachment } = await this.runtimeCacheAttachmentRequest({ projectId: input.projectId, workspaceId: input.workspaceId, machineId });
+    if (!isAttachmentReady(attachment)) {
+      const label = (await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId))?.label ?? machineId;
+      runtime.noticeWhenReady({ attachmentId: attachment.attachmentId, generation: attachment.generation, conversationId: question.conversationId, label });
+    }
+    return result;
+  }
   async runtimeWatch(raw: unknown): Promise<Response> { const input = RuntimeWatchInputSchema.parse(raw); return (await this.getRuntime(input)).watch(input); }
 
   async runtimeSession(raw: unknown, actor: { canApprove: boolean; deviceId?: string }): Promise<Response> {
@@ -394,26 +566,31 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   async runtimeCacheAttachmentRequest(raw: unknown) {
     const input = RuntimeCacheAttachmentRequestInputSchema.parse(raw);
-    const { project, workspace } = await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
-    const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId);
-    if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
+    const workspace = await this.runtimeAccess(input, true);
+    // Indexed before the attachment exists, so a machine-wide assignment read never misses it.
+    const { connected } = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).attachMachineWorkspace(input.machineId, { projectId: input.projectId, workspaceId: input.workspaceId });
     const runtime = await this.getRuntime(input);
     await runtime.cloudFiles.recover();
     await runtime.cloudFiles.initializeSnapshot();
-    const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace?.branch ?? project.baseBranch }, capabilities: executorCapabilities });
+    const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace.branch }, capabilities: executorCapabilities }, connected);
     runtime.publish();
+    await notifyMachines(this.env, [input.machineId], ['assignments'], input.workspaceId);
     return result;
   }
 
+  /** A person detaches a machine; the machine learns it from its next assignment read. */
   async runtimeAttachmentDetachRequest(raw: unknown) {
     const input = RuntimeAttachmentDetachRequestInputSchema.parse(raw);
-    return this.runtimeDetach(input);
+    const result = await this.runtimeDetach(input);
+    await notifyMachines(this.env, [input.machineId], ['assignments'], input.workspaceId);
+    return result;
   }
 
   async runtimeAssignments(raw: unknown) {
     const identity = RuntimeIdentitySchema.parse(raw);
     const input = RuntimeAssignmentsInputSchema.parse(raw);
     if (await this.ctx.storage.get('runtime.identity') === undefined) return { assignments: [] };
+    // Only machines released before 9f5bbae long-poll with `afterSnapshot`; delete this once lightbeam's machines have updated.
     if (input.afterSnapshot !== undefined) {
       const runtime = await this.getRuntime(identity);
       if (!runtime.attachments.list().some(item => item.machineId === input.machineId && item.state !== 'detached')) throw new Error('Snapshot wait requires an active cache');
@@ -436,10 +613,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const runtime = await this.getRuntime(input);
     const machine = input.browserCapabilities ? await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(input.machineId) : undefined;
     if (input.browserCapabilities && (machine?.kind !== 'physical' || machine.desiredState === 'removed')) input.browserCapabilities = [];
-    // A heartbeat that only moves timestamps changes nothing anyone sees: no snapshot rebuild.
+    // A report that only moves timestamps changes nothing anyone sees: no snapshot rebuild.
     const visible = (value: unknown) => JSON.stringify(value, (key, field: unknown) => key.endsWith('At') ? undefined : field);
     const before = visible(runtime.attachments.list().find(item => item.attachmentId === input.attachmentId));
-    const attachment = runtime.attachments.heartbeat(input);
+    const attachment = runtime.attachments.observe(input);
     if (visible(attachment) !== before) runtime.publish();
     return { attachment };
   }
@@ -450,13 +627,14 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents cache detach');
     const attachment = runtime.attachments.detach(input);
     runtime.publish();
+    await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).detachMachineWorkspace(input.machineId, input.workspaceId);
     return { attachment };
   }
 
 
   async runtimeCronSubmit(raw: unknown) {
     const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), text: z.string().min(1), readScopes: z.array(z.string()), writeScopes: z.array(z.string()) }).parse(raw);
-    await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
+    await this.runtimeAccess(input, true);
     return (await this.getRuntime(input)).cronSubmit(input);
   }
 
@@ -488,7 +666,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   async runtimeDiscoverMcp(raw: unknown) {
     const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), args: z.object({ connectionId: z.string().min(1) }) }).parse(raw);
-    await requireRuntimeIdentity(this.env, this.env.ACCOUNT_ID, input, true);
+    await this.runtimeAccess(input, true);
     return (await this.getRuntime(input)).manage({ tool: 'mcp_discover', requestId: input.requestId, args: input.args });
   }
 

@@ -3,7 +3,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization } from '@gitspace/protocol-runtime';
-import { AccountBrowserRelay } from '../src/browser-relay.js';
+import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
 
 const sockets: WebSocket[] = [];
 afterEach(() => { vi.restoreAllMocks(); });
@@ -11,12 +11,12 @@ const origin = `chrome-extension://${'a'.repeat(32)}`;
 const request = (ip = '192.0.2.1', suppliedOrigin = origin) => new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: suppliedOrigin, 'cf-connecting-ip': ip } });
 async function keys() { const key = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']); return { key, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', key.publicKey))) }; }
 function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socket.addEventListener('message', event => resolve(JSON.parse(String(event.data))), { once: true })); }
-async function connect(relay: AccountBrowserRelay, ip?: string) { const response = await relay.fetch(request(ip)); expect(response.status).toBe(101); if (!response.webSocket) throw new Error('Missing Worker WebSocket'); const socket = response.webSocket; const challenge = frame(socket); socket.accept(); sockets.push(socket); return { socket, challenge: z.object({ serverNonce: z.string() }).parse(await challenge) }; }
+async function connect(relay: HostedBrowserRelay, ip?: string) { const response = await relay.fetch(request(ip)); expect(response.status).toBe(101); if (!response.webSocket) throw new Error('Missing Worker WebSocket'); const socket = response.webSocket; const challenge = frame(socket); socket.accept(); sockets.push(socket); return { socket, challenge: z.object({ serverNonce: z.string() }).parse(await challenge) }; }
 type Connection = { socket: WebSocket; challenge: { serverNonce: string } };
 type Identity = { key: CryptoKeyPair; publicKey: string };
 async function prove(connection: Connection, identity: Identity, pairing: { code: string; pairingId: string }, code = pairing.code) { const clientNonce = 'b'.repeat(64); const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${connection.challenge.serverNonce}:${clientNonce}`)))); const reply = frame(connection.socket); connection.socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof, code })); await reply; const ready = frame(connection.socket); connection.socket.send(JSON.stringify({ hello: true, Browser: 'Security fixture Chrome' })); await ready; }
-async function fixture(run: (relay: AccountBrowserRelay) => Promise<void>) { await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (_instance, state) => { const relay = new AccountBrowserRelay(state, { ACCOUNT_ID: 'account' }); try { await run(relay); } finally { for (const socket of sockets.splice(0)) socket.close(); } }); }
-const trust = { algorithm: 'Ed25519' as const, accountId: 'account', publicKey: 'AA==' };
+async function fixture(run: (relay: HostedBrowserRelay, state: DurableObjectState) => Promise<void>) { await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (instance, state) => { try { await run(hostedBrowserRelay(instance), state); } finally { for (const socket of sockets.splice(0)) socket.close(); } }); }
+const trust = { algorithm: 'Ed25519' as const, accountId: env.ACCOUNT_ID, publicKey: 'AA==' };
 
 test('forged browser Origin cannot enter Worker extension channel', () => fixture(async relay => { await relay.pair(trust, 'wss://account.test/api/browser-relay/extension'); expect((await relay.fetch(request(undefined, 'https://evil.test'))).status).toBe(403); }));
 test('unproven candidate does not occupy the account Chrome connection', () => fixture(async relay => { await relay.pair(trust, 'wss://account.test/api/browser-relay/extension'); const first = await connect(relay); const second = await connect(relay, '192.0.2.2'); expect(first.challenge.serverNonce).not.toBe(second.challenge.serverNonce); }));
@@ -29,7 +29,7 @@ test('a different key cannot reclaim a bound pairing', () => fixture(async relay
 test('confirmed Chromes execute independently and rejecting candidates or forgetting one leaves the other usable', () => fixture(async relay => {
   const root = await keys(), workspace = await keys();
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
-  const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: 'account', projectId: 'project', workspaceId: 'workspace', publicKey: workspace.publicKey, issuedAt: new Date().toISOString(), expiresAt }, root.key.privateKey);
+  const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: env.ACCOUNT_ID, projectId: 'project', workspaceId: 'workspace', publicKey: workspace.publicKey, issuedAt: new Date().toISOString(), expiresAt }, root.key.privateKey);
   const browsers = [];
   for (const name of ['Chrome A', 'Chrome B']) {
     const pairing = await relay.pair({ ...trust, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
@@ -69,15 +69,16 @@ test('confirmed Chromes execute independently and rejecting candidates or forget
   expect(first.operations.filter(operation => operation === 'tabs')).toHaveLength(1);
   expect(second.operations.filter(operation => operation === 'tabs')).toHaveLength(3);
 }));
-test('idle preauthentication candidates expire without blocking later admission', () => fixture(async relay => {
+test('a candidate past its pairing deadline is closed and frees its budget on the next admission', () => fixture(async relay => {
   await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');
-  const connection = await connect(relay);
-  const start = Date.now();
-  const closed = new Promise<CloseEvent>(resolve => connection.socket.addEventListener('close', resolve, { once: true }));
-  expect((await closed).code).toBe(1008);
-  expect(Date.now() - start).toBeLessThan(6500);
-  await connect(relay, '192.0.2.50');
-}), 10_000);
+  const idle = [];
+  for (let index = 0; index < 4; index++) idle.push(await connect(relay));
+  expect((await relay.fetch(request())).status).toBe(429);
+  const closed = idle.map(({ socket }) => new Promise<CloseEvent>(resolve => socket.addEventListener('close', resolve, { once: true })));
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 5001);
+  await connect(relay);
+  for (const event of await Promise.all(closed)) expect([event.code, event.reason]).toEqual([1008, 'Pairing timed out']);
+}));
 
 test('rotating IPv6 addresses share a normalized /64 prefix budget', () => fixture(async relay => {
   await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');
@@ -93,20 +94,15 @@ test('pending prefix cap cannot be bypassed by rotating IPv6 addresses', () => f
   await connect(relay, '2001:db8:2:4::1');
 }));
 
-test('expired admission windows are swept without permanent address storage keys', async () => {
-  await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (_instance, state) => {
-    const relay = new AccountBrowserRelay(state, { ACCOUNT_ID: 'account' });
-    try {
-    await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');
-    for (let index = 1; index <= 12; index++) { const connection = await connect(relay, `192.0.2.${index}`); connection.socket.close(); }
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
-    (await connect(relay, '198.51.100.1')).socket.close();
-    const rows = await state.storage.list({ prefix: 'browser.relay.admission' });
-    expect(rows.size).toBeLessThanOrEqual(1);
-    expect(JSON.stringify([...rows.values()])).not.toContain('192.0.2.');
-    } finally { for (const socket of sockets.splice(0)) socket.close(); }
-  });
-});
+test('expired admission windows are swept without permanent address storage keys', () => fixture(async (relay, state) => {
+  await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');
+  for (let index = 1; index <= 12; index++) { const connection = await connect(relay, `192.0.2.${index}`); connection.socket.close(); }
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+  (await connect(relay, '198.51.100.1')).socket.close();
+  const rows = await state.storage.list({ prefix: 'browser.relay.admission' });
+  expect(rows.size).toBeLessThanOrEqual(1);
+  expect(JSON.stringify([...rows.values()])).not.toContain('192.0.2.');
+}));
 
 test('confirmed proof is admitted despite saturated candidates and cannot be replayed', () => fixture(async relay => {
   const pairing = await relay.pair(trust, 'wss://account.test/api/browser-relay/extension'), identity = await keys();

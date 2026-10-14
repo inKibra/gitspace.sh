@@ -14,7 +14,7 @@ try {
   if (status !== 0) throw new Error(`Search fixture bundle failed: ${stdout}${stderr}`);
   const contents = await Bun.file(output).text();
   worker = new Miniflare({ modules: [{ type: 'ESModule', path: output, contents }, await searchWasmModule(directory)], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { PROOF: { className: 'CodeSearchProof', useSQLite: true } }, outboundService: () => { throw new Error('Live provider access forbidden'); } });
-  const response = await worker.dispatchFetch(`http://proof/${process.argv.includes('--benchmark') ? '?benchmark' : ''}`);
+  const response = await worker.dispatchFetch(`http://proof/${process.argv.includes('--benchmark') ? '?benchmark' : process.argv.includes('--latency') ? `?latency=${process.argv[process.argv.indexOf('--latency') + 1]}` : ''}`);
   const result = await response.text();
   if (!response.ok) throw new Error(result);
   console.log(result);

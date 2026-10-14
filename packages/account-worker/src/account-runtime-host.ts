@@ -1,5 +1,5 @@
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
-import type { RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
+import type { RuntimeAttachment, RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
 import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } from './runtime-services.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
@@ -9,6 +9,8 @@ import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
 import { setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
+import { readWorkspaceMetadata, storeWorkspaceStatus } from './workspace-metadata.js';
+import { notifyMachines } from './machine-notices.js';
 
 /** The project repository every workspace forks: a scratch repository with an initial commit, or the imported origin with its history. */
 export async function ensureProjectCodeRepository(code: ArtifactsCodeStore, project: Pick<CloudProjectSummary, 'id' | 'repositoryReference' | 'baseBranch'>) {
@@ -30,8 +32,7 @@ export async function ensureRuntimeCodeRepository(env: Env, userId: string, iden
 
 /** Resolves the workspace branch ref once its code repository exists. A failed preparation
  * is not cached: an import waiting on a machine seed succeeds on a later call. */
-export function runtimeWorkspaceCodeRef(env: Env, identity: RuntimeIdentity): () => Promise<string> {
-  const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+export function runtimeWorkspaceCodeRef(env: Env, identity: RuntimeIdentity, branch: () => string): () => Promise<string> {
   let codeReady: Promise<unknown> | undefined;
   return async () => {
     codeReady ??= ensureRuntimeCodeRepository(env, env.ACCOUNT_ID, identity).catch((error: unknown) => {
@@ -39,27 +40,28 @@ export function runtimeWorkspaceCodeRef(env: Env, identity: RuntimeIdentity): ()
       throw error;
     });
     await codeReady;
-    const workspace = await project.getWorkspace(identity.workspaceId);
-    if (!workspace) throw new Error('Canonical workspace code source is unavailable');
-    return `refs/heads/${workspace.branch}`;
+    return `refs/heads/${branch()}`;
   };
 }
 
-/** The SpaceAuthority actor supplies storage and its coalesced outbox/runtime alarm. */
+/** The SpaceAuthority actor supplies storage, its seeded workspace metadata and its coalesced outbox/runtime alarm. */
 export async function createAccountWorkspaceRuntime(
   ctx: DurableObjectState,
   env: Env,
   identity: RuntimeIdentity,
   schedule: (timestamp: number) => Promise<void>,
+  requestAttachment: (machineId: string) => Promise<{ attachment: RuntimeAttachment }>,
 ): Promise<WorkspaceRuntime> {
   const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
-  const [workspace, canonicalProject] = await Promise.all([project.getWorkspace(identity.workspaceId), project.getProject()]);
-  if (!canonicalProject || canonicalProject.id !== identity.projectId || (identity.workspaceId !== canonicalProject.id && workspace?.projectId !== identity.projectId)) throw new Error('Workspace is not owned by this project');
-  const base = identity.workspaceId === canonicalProject.id;
-  const definition = base
-    ? await project.ensureBaseWorkspace({ userId: env.ACCOUNT_ID, projectId: identity.projectId })
-    : workspace;
-  if (!definition) throw new Error('Canonical workspace definition is unavailable');
+  // The workspace's own metadata, read per use: a base branch change moves the branch this runtime reads code from.
+  const metadata = () => {
+    const current = readWorkspaceMetadata(ctx.storage);
+    if (!current || current.projectId !== identity.projectId || current.workspaceId !== identity.workspaceId) throw new Error('Workspace metadata is unavailable');
+    return current;
+  };
+  const base = metadata().kind === 'base';
+  // A project's base space has no phase; it is never plan-locked.
+  const workspacePhase = base ? 'code' : metadata().phase ?? 'plan';
   const inference = await createCloudRuntimeInference(ctx, env, identity);
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
   const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
@@ -75,20 +77,21 @@ export async function createAccountWorkspaceRuntime(
   };
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   const repository = artifactsWorkspaceRepository(identity.workspaceId);
-  const ref = runtimeWorkspaceCodeRef(env, identity);
+  const ref = runtimeWorkspaceCodeRef(env, identity, () => metadata().branch);
   const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   let runtime: WorkspaceRuntime | undefined;
-  const services = createRuntimeServices({ ctx, env, identity, schedule, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
+  const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
   runtime = await createWorkspaceRuntime({
     ...inference,
-    // A project's base space has no phase; it is never plan-locked.
-    workspacePhase: base ? 'code' : definition.phase ?? 'plan',
+    workspacePhase,
     async setWorkspacePhase(phase) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase); },
+    published: snapshot => { storeWorkspaceStatus(ctx.storage, snapshot); },
+    snapshotChanged: machineIds => { ctx.waitUntil(notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId)); },
     code,
     lfs,
     async retainLfs(checkpoint, publicationId) {

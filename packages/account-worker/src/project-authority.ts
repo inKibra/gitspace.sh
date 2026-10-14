@@ -15,6 +15,7 @@ import type {
   ProjectEvent,
   ProjectMcpGrant,
   ProjectLifecycle,
+  WorkspaceLifecycle,
   ProjectOperationState,
 } from '@gitspace/protocol';
 import { ProjectEnvironmentStore } from './project-environment.js';
@@ -30,11 +31,12 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } fr
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
-import { GitLfsSnapshotSchema, WorkspaceDomainError, WorkspaceRelationsSchema, resolveWorkspaceRelations, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspaceRelations, type WorkspaceRelationsInput } from '@gitspace/protocol-workspace';
+import { GitLfsSnapshotSchema, WorkspaceDomainError, WorkspaceRelationsSchema, resolveWorkspaceRelations, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
 import { z } from 'zod';
+import { notifyLifecycleHolders } from './machine-notices.js';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 
@@ -1089,7 +1091,9 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
 
   mutateLifecycleState(spaceId: string, input: LifecycleMutation, actor: LifecycleActor): { status: 'ok'; state: LifecycleState } | { status: 'error'; failure: EnvironmentFailure } {
     try {
-      return { status: 'ok', state: this.environment.mutate(this.requireLifecycleWorkspace(spaceId).id, spaceId, input, actor) };
+      const state = this.environment.mutate(this.requireLifecycleWorkspace(spaceId).id, spaceId, input, actor);
+      this.ctx.waitUntil(notifyLifecycleHolders(this.env, spaceId, state, actor.machineId));
+      return { status: 'ok', state };
     } catch (error) {
       const failure = environmentFailure(error);
       if (failure) return { status: 'error', failure };
@@ -1270,6 +1274,47 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec('DELETE FROM workspaces WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_relations WHERE workspace_id=?', workspaceId);
     return true;
+    });
+  }
+
+  /** The one read a workspace object seeds its local metadata from. A base workspace's definition is created on first use. */
+  workspaceSeed(workspaceId: string): { project: CloudProjectSummary; workspace: CloudWorkspaceDefinition | null } | null {
+    const project = this.getProject();
+    if (!project || project.lifecycle === 'deleting') return null;
+    return { project, workspace: workspaceId === project.id ? this.ensureBaseWorkspace({ userId: this.env.ACCOUNT_ID, projectId: project.id }) : this.getWorkspace(workspaceId) };
+  }
+
+  /** The phases a workspace's dependencies cap it at, read from its relation row and those definitions only. */
+  workspaceDependencies(workspaceId: string): PhaseCarrier[] {
+    const row = this.ctx.storage.sql.exec<{ relations_json: string }>('SELECT relations_json FROM workspace_relations WHERE workspace_id=?', workspaceId).toArray()[0];
+    const dependsOn = row ? WorkspaceRelationsSchema.parse(JSON.parse(row.relations_json)).dependsOn : [];
+    // A dependency without a phase (one written before phases existed) is at the first phase.
+    return dependsOn.flatMap(id => {
+      const dependency = this.getWorkspace(id);
+      return dependency ? [{ id: dependency.id, name: dependency.name, phase: dependency.phase ?? 'plan' }] : [];
+    });
+  }
+
+  /** Records a lifecycle the workspace object has already applied to itself. Repeating a recorded lifecycle returns it. */
+  commitWorkspaceLifecycle(workspaceId: string, expectedRevision: number, lifecycle: WorkspaceLifecycle): CloudWorkspaceDefinition {
+    return this.commitWorkspaceChange(workspaceId, expectedRevision, { lifecycle });
+  }
+
+  /** Records a phase the workspace object has already applied to itself. Repeating a recorded phase returns it. */
+  commitWorkspacePhase(workspaceId: string, expectedRevision: number, phase: WorkspacePhase): CloudWorkspaceDefinition {
+    return this.commitWorkspaceChange(workspaceId, expectedRevision, { phase });
+  }
+
+  private commitWorkspaceChange(workspaceId: string, expectedRevision: number, change: { lifecycle: WorkspaceLifecycle } | { phase: WorkspacePhase }): CloudWorkspaceDefinition {
+    const current = this.getWorkspace(workspaceId);
+    if (!current) throw new Error(`Workspace ${workspaceId} does not exist`);
+    if ('lifecycle' in change ? current.lifecycle === change.lifecycle : current.phase === change.phase) return current;
+    if (current.revision !== expectedRevision) throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
+    return this.commit('workspace', workspaceId, () => {
+      const now = new Date().toISOString();
+      if ('lifecycle' in change) this.ctx.storage.sql.exec('UPDATE workspaces SET lifecycle=?,archived_at=?,revision=revision+1,updated_at=? WHERE workspace_id=?', change.lifecycle, change.lifecycle === 'archived' ? now : null, now, workspaceId);
+      else this.ctx.storage.sql.exec('UPDATE workspaces SET phase=?,revision=revision+1,updated_at=? WHERE workspace_id=?', change.phase, now, workspaceId);
+      return workspaceDefinition(this.ctx.storage.sql.exec<WorkspaceRow>('SELECT * FROM workspaces WHERE workspace_id=?', workspaceId).one());
     });
   }
 

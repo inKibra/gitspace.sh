@@ -785,6 +785,7 @@ function GitSpaceProduct() {
   const reserveHandle = useResultMutation(rpcClient.settings.reserveHandle);
   const setRuntimeSetting = useResultMutation(rpcClient.settings.runtime.set);
   const updateMachineNotes = useResultMutation(rpcClient.machine.updateNotes);
+  const updateMachineAgentAttach = useResultMutation(rpcClient.machine.updateAgentAttach);
   const ensureStarterProject = useResultMutation(rpcClient.project.ensureGitSpace);
   const createSandboxMachine = useResultMutation(rpcClient.machine.createSandbox);
   const sleepMachine = useResultMutation(rpcClient.machine.sleep);
@@ -931,6 +932,11 @@ function GitSpaceProduct() {
       setSettingsError(rpcErrorMessage(result.error, 'machine.updateNotes'));
       throw result.error;
     }
+    await machinesQuery.refetch();
+  };
+  const setMachineAgentAttach = async (machineId: string, agentsMayAttach: boolean): Promise<void> => {
+    const result = await updateMachineAgentAttach.mutateAsync({ machineId, agentsMayAttach });
+    if (result.status === 'error') throw result.error;
     await machinesQuery.refetch();
   };
   const createSandbox = async (image?: CloudImageSelection): Promise<void> => {
@@ -1167,6 +1173,7 @@ function GitSpaceProduct() {
     onSave={saveSettings}
     onSetRuntimeSetting={updateRuntime}
     onUpdateMachine={saveMachineNotes}
+    onSetMachineAgentAttach={setMachineAgentAttach}
     onCreateSandbox={createSandbox}
     cloudImages={cloudImagesValue ?? []}
     cloudImageDefault={imageDefaultValue ?? null}

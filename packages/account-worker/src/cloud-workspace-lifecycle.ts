@@ -8,8 +8,10 @@ import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from 
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { ensureProjectCodeRepository } from './account-runtime-host.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
+import type { SpaceAuthorityDO } from './space-authority.js';
 
 type ProjectAuthority = DurableObjectStub<ProjectAuthorityDO>;
+type SpaceAuthority = DurableObjectStub<SpaceAuthorityDO>;
 type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 
 /** Creation steps in order. The source resolves before the definition enters the catalog, so progress starts at
@@ -54,8 +56,8 @@ function phaseCarriers(dependencies: readonly CloudWorkspaceDefinition[]) {
 
 const failureMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-/** The definition fields a workspace write carries, with a change applied over its current revision. */
-function revise(definition: CloudWorkspaceDefinition, change: Partial<Pick<CloudWorkspaceDefinition, 'lifecycle' | 'phase' | 'branch' | 'sourceRef' | 'sourceCommit'>>) {
+/** The definition fields a creation write carries, with a change applied over its current revision. */
+function revise(definition: CloudWorkspaceDefinition, change: Partial<Pick<CloudWorkspaceDefinition, 'lifecycle' | 'sourceCommit'>>) {
   const { revision, archivedAt: _archivedAt, createdAt: _createdAt, updatedAt: _updatedAt, ...fields } = definition;
   return { ...fields, ...change, expectedRevision: revision };
 }
@@ -69,7 +71,7 @@ async function requireWorktree(env: Env, userId: string, workspaceId: string): P
   const projectId = await env.USER_PROJECTS.getByName(userId).locateWorkspace(workspaceId);
   if (!projectId) throw new CloudLifecycleTargetMissing('workspace', workspaceId);
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
-  const definition = (await authority.listWorkspaces()).find(workspace => workspace.id === workspaceId);
+  const definition = await authority.getWorkspace(workspaceId);
   if (!definition) throw new CloudLifecycleTargetMissing('workspace', workspaceId);
   if (definition.kind === 'base') throw new Error('The project base workspace is archived, restored and deleted only with its project');
   return { authority, definition };
@@ -189,8 +191,9 @@ function findSourceWorkspace(worktrees: readonly CloudWorkspaceDefinition[], inp
   return source;
 }
 
-/** Runs creation from the repository step: fork, branch at the source commit, activate. */
-async function provisionWorkspace(authority: ProjectAuthority, code: ArtifactsCodeStore, definition: CloudWorkspaceDefinition, sourceRepository: string, created: CloudProjectOperation): Promise<{ workspace: CloudWorkspaceDefinition; operation: CloudProjectOperation }> {
+/** Runs creation from the repository step: fork, branch at the source commit, activate. Activation seeds the workspace
+ * object with its definition, so it never reads its project to learn what it is. */
+async function provisionWorkspace(authority: ProjectAuthority, space: SpaceAuthority, project: CloudProjectSummary, code: ArtifactsCodeStore, definition: CloudWorkspaceDefinition, sourceRepository: string, created: CloudProjectOperation): Promise<{ workspace: CloudWorkspaceDefinition; operation: CloudProjectOperation }> {
   const progress = operationProgress(authority, created);
   try {
     await progress.start(1);
@@ -200,6 +203,7 @@ async function provisionWorkspace(authority: ProjectAuthority, code: ArtifactsCo
     if (definition.sourceCommit !== null) await code.setBranch(artifactsWorkspaceRepository(definition.id), definition.branch, definition.sourceCommit);
     await progress.advance();
     const workspace = await authority.putWorkspace(revise(definition, { lifecycle: 'active' }));
+    await space.seedWorkspace(workspace, project);
     return { workspace, operation: await progress.advance() };
   } catch (error) {
     // Completed steps stay in place; Retry resumes, Delete discards.
@@ -242,7 +246,7 @@ export async function createCloudWorkspace(env: Env, userId: string, input: Clou
     if (related.status === 'error') throw new Error(related.failure.message);
   }
   const operation = await authority.createOperation({ projectId: project.id, workspaceId, kind: 'workspace.create', targetMachines: [], steps: WORKSPACE_CREATE_STEPS, createdBy: 'account' });
-  return provisionWorkspace(authority, code, definition, source.repository, operation);
+  return provisionWorkspace(authority, env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), project, code, definition, source.repository, operation);
 }
 
 /** Resumes a failed or interrupted creation. A recorded source commit is immutable and reused; only a definition
@@ -265,7 +269,7 @@ export async function retryCloudWorkspaceCreation(env: Env, userId: string, work
   }
   const provisioning = await authority.putWorkspace(revise(definition, { lifecycle: 'provisioning', sourceCommit: source.sourceCommit }));
   const operation = await authority.createOperation({ projectId: project.id, workspaceId, kind: 'workspace.create', targetMachines: [], steps: WORKSPACE_CREATE_STEPS, createdBy: 'account' });
-  return provisionWorkspace(authority, code, provisioning, source.repository, operation);
+  return provisionWorkspace(authority, env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), project, code, provisioning, source.repository, operation);
 }
 
 /** A legacy space held open by a machine is the only placement that can fence a cloud workspace lifecycle change. */
@@ -278,46 +282,42 @@ async function requireReleasedPlacement(env: Env, userId: string, workspaceId: s
   return placement?.generation ?? 0;
 }
 
-/** Archives a workspace: its runtime's conversations stop and its caches are asked to detach, all in the cloud. */
+/** Archives a workspace. The workspace object turns read-only and stops its runtime (working conversations stop,
+ * caches are asked to detach) before it tells its project. */
 export async function archiveCloudWorkspace(env: Env, userId: string, input: { projectId: string; spaceId: string; expectedRevision: number; expectedGeneration: number | null }): Promise<CloudWorkspaceDefinition> {
   const authority = await requireProject(env, userId, input.projectId);
-  const definition = (await authority.listWorkspaces()).find(workspace => workspace.id === input.spaceId && workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting');
-  if (!definition) throw new CloudLifecycleTargetMissing('workspace', input.spaceId);
+  const definition = await authority.getWorkspace(input.spaceId);
+  if (!definition || definition.projectId !== input.projectId || definition.kind !== 'worktree' || definition.lifecycle === 'deleting') throw new CloudLifecycleTargetMissing('workspace', input.spaceId);
   if (definition.revision !== input.expectedRevision) throw new Error(`Workspace revision conflict: expected ${input.expectedRevision}, actual ${definition.revision}`);
   if (definition.lifecycle === 'archived') return definition;
   if (definition.lifecycle !== 'active' && definition.lifecycle !== 'failed') throw new Error(`Workspace ${definition.name} is ${definition.lifecycle}; retry or delete its creation instead`);
   await requireReleasedPlacement(env, userId, definition.id, input.expectedGeneration, null);
-  return runOperation(authority, { projectId: input.projectId, workspaceId: definition.id, kind: 'workspace.archive', labels: ['Stop workspace runtime', 'Archive workspace'] }, async advance => {
-    await env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).runtimeStop({ projectId: input.projectId, workspaceId: definition.id });
-    await advance();
-    return authority.putWorkspace(revise(definition, { lifecycle: 'archived' }));
-  });
+  return runOperation(authority, { projectId: input.projectId, workspaceId: definition.id, kind: 'workspace.archive', labels: ['Stop workspace runtime and archive workspace'] },
+    () => env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).archiveWorkspace(definition));
 }
 
-/** Returns an archived workspace to active use; its runtime reopens on first use. */
+/** Returns an archived workspace to active use: the workspace object accepts writes again, then tells its project. Its
+ * runtime reopens on first use. */
 export async function restoreCloudWorkspace(env: Env, userId: string, input: { spaceId: string; expectedGeneration: number }): Promise<{ definition: CloudWorkspaceDefinition; generation: number }> {
   const { authority, definition } = await requireWorktree(env, userId, input.spaceId);
   const generation = await requireReleasedPlacement(env, userId, definition.id, input.expectedGeneration, 0);
   if (definition.lifecycle === 'active') return { definition, generation };
   if (definition.lifecycle !== 'archived') throw new Error(`Workspace ${definition.name} is ${definition.lifecycle}; only an archived workspace can be restored`);
-  await requireActiveProject(authority, definition.projectId);
   const restored = await runOperation(authority, { projectId: definition.projectId, workspaceId: definition.id, kind: 'workspace.restore', labels: ['Restore workspace'] },
-    async () => authority.putWorkspace(revise(definition, { lifecycle: 'active' })));
+    () => env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).restoreWorkspace(definition));
   return { definition: restored, generation };
 }
 
-/** Permanently deletes an archived or never-finished workspace: its definition, runtime state, caches and repository. */
+/** Permanently deletes an archived or never-finished workspace: its runtime state, caches, repository and definition.
+ * The workspace object fences itself out of runtime access and erases its state before its project records it deleting. */
 export async function deleteCloudWorkspace(env: Env, userId: string, workspaceId: string): Promise<boolean> {
   const { authority, definition } = await requireWorktree(env, userId, workspaceId);
   if (definition.lifecycle === 'active' || definition.lifecycle === 'archiving' || definition.lifecycle === 'restoring') {
     throw new Error(`Archive workspace ${definition.name} before deleting it`);
   }
   assertEnvironmentRetired(await authority.getLifecycleState(workspaceId));
-  const identity = { projectId: definition.projectId, workspaceId };
   return runOperation(authority, { projectId: definition.projectId, workspaceId, kind: 'workspace.delete', labels: ['Erase workspace runtime', 'Delete workspace repository', 'Delete workspace authority'] }, async advance => {
-    // Deleting fences the workspace out of runtime access before its state is removed, and lets an interrupted delete resume.
-    const deleting = definition.lifecycle === 'deleting' ? definition : await authority.putWorkspace(revise(definition, { lifecycle: 'deleting' }));
-    await env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`).runtimeErase(identity);
+    const deleting = await env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`).deleteWorkspace(definition);
     await advance();
     await new ArtifactsCodeStore(env.ARTIFACTS).deleteRepository(artifactsWorkspaceRepository(workspaceId));
     await advance();
@@ -327,25 +327,32 @@ export async function deleteCloudWorkspace(env: Env, userId: string, workspaceId
   });
 }
 
-/** Archives a project: every workspace runtime stops and its caches are asked to detach; workspace lifecycles are kept. */
+/** Archives a project: every workspace object turns read-only and stops its runtime, its caches asked to detach; workspace
+ * lifecycles are kept. Each workspace is asked from here, never by the project authority. */
 export async function archiveCloudProject(env: Env, userId: string, projectId: string, expectedRevision: number): Promise<CloudProjectSummary> {
   const authority = await requireProject(env, userId, projectId);
   const workspaces = (await authority.listWorkspaces()).filter(workspace => workspace.lifecycle !== 'deleting');
   return runOperation(authority, { projectId, workspaceId: null, kind: 'project.archive', labels: ['Stop workspace runtimes', 'Archive project'] }, async advance => {
-    // The authority refuses the built-in GitSpace project and a stale revision before any runtime stops.
+    // The authority refuses the built-in GitSpace project and a stale revision before any workspace changes.
     const archiving = await authority.setProjectLifecycle(expectedRevision, 'archiving');
-    for (const workspace of workspaces) await env.SPACE_AUTHORITY.getByName(`${userId}:${workspace.id}`).runtimeStop({ projectId, workspaceId: workspace.id });
+    for (const workspace of workspaces) await env.SPACE_AUTHORITY.getByName(`${userId}:${workspace.id}`).applyProjectLifecycle({ projectId, workspaceId: workspace.id }, { lifecycle: 'archived', revision: archiving.revision });
     await advance();
     return env.USER_PROJECTS.getByName(userId).put(await authority.setProjectLifecycle(archiving.revision, 'archived'));
   });
 }
 
+/** Restores an archived project: every workspace object accepts writes again before the project turns active, so an
+ * interrupted restore stays `restoring` and is retried. */
 export async function restoreCloudProject(env: Env, userId: string, projectId: string, expectedRevision: number): Promise<CloudProjectSummary> {
   const authority = await requireProject(env, userId, projectId);
   const project = await authority.getProject();
   if (project?.lifecycle !== 'archived' && project?.lifecycle !== 'restoring') throw new Error(`Project ${projectId} is ${project?.lifecycle ?? 'unavailable'}; only an archived project can be restored`);
-  return runOperation(authority, { projectId, workspaceId: null, kind: 'project.restore', labels: ['Restore project'] }, async () => {
+  return runOperation(authority, { projectId, workspaceId: null, kind: 'project.restore', labels: ['Restore workspaces', 'Restore project'] }, async advance => {
     const restoring = await authority.setProjectLifecycle(expectedRevision, 'restoring');
+    for (const workspace of await authority.listWorkspaces()) {
+      if (workspace.lifecycle !== 'deleting') await env.SPACE_AUTHORITY.getByName(`${userId}:${workspace.id}`).applyProjectLifecycle({ projectId, workspaceId: workspace.id }, { lifecycle: 'active', revision: restoring.revision });
+    }
+    await advance();
     return env.USER_PROJECTS.getByName(userId).put(await authority.setProjectLifecycle(restoring.revision, 'active'));
   });
 }
@@ -369,7 +376,7 @@ export async function deleteCloudProject(env: Env, userId: string, projectId: st
   const workspaces = await authority.listWorkspaces();
   for (const workspace of workspaces) assertEnvironmentRetired(await authority.getLifecycleState(workspace.id));
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
-  // An archived project's runtimes accept no writes; each is erased before the authority tombstone removes its definition.
+  // Each workspace object marks itself unavailable and erases its runtime before the authority tombstone removes its definition.
   for (const workspace of workspaces) {
     await env.SPACE_AUTHORITY.getByName(`${userId}:${workspace.id}`).runtimeErase({ projectId, workspaceId: workspace.id });
     await code.deleteRepository(artifactsWorkspaceRepository(workspace.id));
@@ -379,16 +386,10 @@ export async function deleteCloudProject(env: Env, userId: string, projectId: st
   await env.USER_PROJECTS.getByName(userId).remove(projectId);
 }
 
-/** Moves a workspace's canonical phase within the ceiling its dependencies set. */
+/** Moves a workspace's phase within the ceiling its dependencies set: the workspace object applies it, then its
+ * project records it. */
 export async function setCloudWorkspacePhase(env: Env, userId: string, identity: RuntimeIdentity, phase: WorkspacePhase): Promise<CloudWorkspaceDefinition> {
-  const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${identity.projectId}`);
-  const [workspaces, relations] = await Promise.all([authority.listWorkspaces(), authority.listWorkspaceRelations()]);
-  const definition = workspaces.find(workspace => workspace.id === identity.workspaceId);
-  if (!definition) throw new Error('Phase changes require a workspace in the current project');
-  const dependencies = (relations[definition.id]?.dependsOn ?? []).flatMap(id => workspaces.filter(workspace => workspace.id === id));
-  assertWorkspacePhase(phase, phaseCarriers(dependencies));
-  if (definition.phase === phase) return definition;
-  return authority.putWorkspace(revise(definition, { phase }));
+  return env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`).setWorkspacePhase(identity, phase);
 }
 
 /** The agent's `space_workspace` changes. `create` adds a workspace to the agent's project with its first instruction

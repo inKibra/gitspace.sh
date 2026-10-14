@@ -2,9 +2,14 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RELAY_HEARTBEAT_INTERVAL_MS,
+  RELAY_HEARTBEAT_MODE,
   RELAY_HEARTBEAT_TIMEOUT_MS,
+  RELAY_NOTICE_MODE,
+  RELAY_NOTICE_TOPICS,
+  RELAY_PING_MESSAGE,
+  RELAY_PONG_MESSAGE,
   RELAY_PROTOCOL_VERSION,
-  type RelaySocketMessage,
+  type RelayNotice,
 } from '@gitspace/protocol';
 import { credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { MachineRelayConnector } from '../src/relay-connector.js';
@@ -24,7 +29,7 @@ class Socket extends EventTarget {
   static readonly OPEN = 1;
   static readonly instances: Socket[] = [];
   readyState = 0;
-  readonly sent: RelaySocketMessage[] = [];
+  readonly sent: string[] = [];
 
   constructor(readonly url: URL, readonly options: { headers: Record<string, string> }) {
     super();
@@ -38,11 +43,16 @@ class Socket extends EventTarget {
 
   send(input: string): void {
     if (this.readyState !== 1) throw new Error('Socket is not open');
-    this.sent.push(JSON.parse(input));
+    this.sent.push(input);
   }
 
   receive(message: unknown): void {
-    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(message) }));
+    this.dispatchEvent(new MessageEvent('message', { data: typeof message === 'string' ? message : JSON.stringify(message) }));
+  }
+
+  /** The relay's auto-response to the fixed ping. */
+  pong(): void {
+    this.receive(RELAY_PONG_MESSAGE);
   }
 
   terminate(): void {
@@ -104,29 +114,40 @@ function request(socket: Socket, requestId: string): void {
 }
 
 describe('MachineRelayConnector transport recovery', () => {
-  it('recovers a silent open socket, rejects unrelated echoes, and ignores late events from the old connection', () => {
+  it('pings for liveness, recovers a silent open socket, and ignores late events from the old connection', () => {
     connector.start();
     const stale = Socket.instances[0]!;
+    expect(stale.url.searchParams.get('heartbeat')).toBe(RELAY_HEARTBEAT_MODE);
     stale.open();
-    const firstHeartbeat = stale.sent[0]!;
-    expect(firstHeartbeat).toMatchObject({ type: 'frame', to: 'machine:machine-test' });
-    stale.receive({ ...firstHeartbeat, payload: 'not-the-outstanding-nonce' });
+    expect(stale.sent).toEqual([RELAY_PING_MESSAGE]);
     advance(RELAY_HEARTBEAT_TIMEOUT_MS);
     expect(stale.readyState).toBe(3);
     advance(500);
     const live = Socket.instances[1]!;
     live.open();
-    live.receive(live.sent[0]);
-    stale.receive(firstHeartbeat);
+    live.pong();
+    stale.pong();
     stale.dispatchEvent(new Event('error'));
     advance(RELAY_HEARTBEAT_INTERVAL_MS);
-    live.receive(live.sent[1]);
+    expect(live.sent).toEqual([RELAY_PING_MESSAGE, RELAY_PING_MESSAGE]);
+    live.pong();
     advance(RELAY_HEARTBEAT_TIMEOUT_MS);
     expect(live.readyState).toBe(1);
     expect(Socket.instances).toHaveLength(2);
     connector.stop();
     advance(60_000);
     expect(Socket.instances).toHaveLength(2);
+  });
+
+  it('a pong with no ping outstanding does not stand in for the next answer', () => {
+    connector.start();
+    const socket = Socket.instances[0]!;
+    socket.open();
+    socket.pong();
+    socket.pong();
+    advance(RELAY_HEARTBEAT_INTERVAL_MS);
+    advance(RELAY_HEARTBEAT_TIMEOUT_MS);
+    expect(socket.readyState).toBe(3);
   });
 
   it('bounds a hung upgrade and reconnects on an error even without close', () => {
@@ -157,7 +178,7 @@ describe('MachineRelayConnector transport recovery', () => {
     connector.start();
     const stale = Socket.instances[0]!;
     stale.open();
-    stale.receive(stale.sent[0]);
+    stale.pong();
     const requestId = crypto.randomUUID();
     request(stale, requestId);
     expect(mutations).toBe(1);
@@ -166,10 +187,10 @@ describe('MachineRelayConnector transport recovery', () => {
     advance(500);
     const live = Socket.instances[1]!;
     live.open();
-    live.receive(live.sent[0]);
+    live.pong();
     request(stale, requestId);
     expect(mutations).toBe(1);
-    expect(live.sent.every((message) => message.type === 'frame')).toBe(true);
+    expect(live.sent.every((message) => message === RELAY_PING_MESSAGE)).toBe(true);
   });
 
   it('cancels a partial request without executing it or tearing down the healthy connection', () => {
@@ -177,14 +198,14 @@ describe('MachineRelayConnector transport recovery', () => {
     connector.start();
     const socket = Socket.instances[0]!;
     socket.open();
-    socket.receive(socket.sent[0]);
+    socket.pong();
     const requestId = crypto.randomUUID();
     socket.receive({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.request.start', requestId, method: 'POST', path: '/rpc', headers: [] });
     socket.receive({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.request.cancel', requestId });
     socket.receive({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.request.end', requestId });
     expect(fetch).not.toHaveBeenCalled();
     advance(RELAY_HEARTBEAT_INTERVAL_MS);
-    socket.receive(socket.sent[1]);
+    socket.pong();
     expect(socket.readyState).toBe(1);
   });
 
@@ -205,7 +226,7 @@ describe('MachineRelayConnector transport recovery', () => {
     connector.start();
     const socket = Socket.instances[0]!;
     socket.open();
-    socket.receive(socket.sent[0]);
+    socket.pong();
     request(socket, crypto.randomUUID());
     advance(4_321);
     socket.dispatchEvent(new CloseEvent('close', { code: 1008, reason: 'Machine authorization expired or was revoked' }));
@@ -231,5 +252,54 @@ describe('MachineRelayConnector transport recovery', () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     advance(500);
     expect(Math.abs(signedAt(Socket.instances[1]!) - (Date.now() + skewMs))).toBeLessThan(60_000);
+  });
+});
+
+describe('MachineRelayConnector notices', () => {
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const keys = (batch: RelayNotice[]) => batch.flatMap((notice) => notice.topics.map((topic) => `${topic}:${notice.workspaceId ?? '*'}`)).sort();
+
+  it('catches up on every topic each time a connection opens and coalesces notices behind a delivery', async () => {
+    const batches: RelayNotice[][] = [];
+    const deliveries: Array<PromiseWithResolvers<void>> = [];
+    connector = new MachineRelayConnector({
+      relayUrl: 'https://relay.test', machineId: 'machine-test', machineGrant, signingPrivateKey: privateKey, localOrigin: 'http://127.0.0.1:8081',
+      onNotice: async (batch) => {
+        batches.push(batch);
+        const delivery = Promise.withResolvers<void>();
+        deliveries.push(delivery);
+        await delivery.promise;
+      },
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    connector.start();
+    const first = Socket.instances[0]!;
+    expect(first.url.searchParams.get('notices')).toBe(RELAY_NOTICE_MODE);
+    first.open();
+    await settle();
+    expect(batches).toEqual([[{ topics: [...RELAY_NOTICE_TOPICS] }]]);
+    // Delivery is in flight: repeats of one topic and workspace collapse into the single next delivery.
+    for (const notice of [
+      { topics: ['assignments'], workspaceId: 'workspace-a' },
+      { topics: ['workspace.snapshot', 'assignments'], workspaceId: 'workspace-a' },
+      { topics: ['release'] },
+      { topics: ['release'] },
+    ]) first.receive({ version: RELAY_PROTOCOL_VERSION, type: 'notice', ...notice });
+    await settle();
+    expect(batches).toHaveLength(1);
+    deliveries[0]!.resolve();
+    await settle();
+    expect(batches).toHaveLength(2);
+    expect(keys(batches[1]!)).toEqual(['assignments:workspace-a', 'release:*', 'workspace.snapshot:workspace-a']);
+    deliveries[1]!.resolve();
+    await settle();
+    first.dispatchEvent(new Event('error'));
+    advance(500);
+    Socket.instances[1]!.open();
+    await settle();
+    expect(batches).toHaveLength(3);
+    expect(batches[2]).toEqual([{ topics: [...RELAY_NOTICE_TOPICS] }]);
+    deliveries[2]!.resolve();
   });
 });

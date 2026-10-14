@@ -132,8 +132,13 @@ export class CheckpointMetadata extends DurableObject {
   getProject() { return { id: identity.projectId, lifecycle: 'active', baseBranch: 'main', repositoryReference: null }; }
   listWorkspaces() { return [{ id: identity.workspaceId, projectId: identity.projectId, branch: 'main', lifecycle: 'active' }]; }
   getWorkspace(workspaceId: string) { return this.listWorkspaces().find(workspace => workspace.id === workspaceId) ?? null; }
+  workspaceSeed(workspaceId: string) {
+    const workspace = this.getWorkspace(workspaceId);
+    return { project: { ...this.getProject(), revision: 1 }, workspace: workspace ? { ...workspace, kind: 'worktree', phase: 'plan', revision: 1 } : null };
+  }
+  attachMachineWorkspace() { return { connected: true }; }
+  detachMachineWorkspace() {}
   getMachine() { return { id: 'machine', desiredState: 'online' }; }
-  hasRuntimeMachine() { return true; }
   async fetch(request: Request) {
     const attachment = RuntimeAttachmentSchema.parse(await request.json());
     await this.ctx.storage.put('attachment', attachment);

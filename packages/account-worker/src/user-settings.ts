@@ -20,6 +20,7 @@ import {
 } from '@gitspace/protocol';
 import { subscriptionIdentity, subscriptionActive } from './account-access.js';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
+import { notifyMachines } from './machine-notices.js';
 
 const EMPTY_SHA256 = 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' as const;
 export class SettingsRevisionConflict extends Error {
@@ -320,7 +321,9 @@ export class UserSettingsDO extends DurableObject<Env> {
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (await subscriptionActive(this.env, socket, 'storage.access') && message === 'ping') socket.send('pong');
   }
+  /** Current machines learn of the change from a relay notice; previous-release machines hold a settings socket here. */
   private async broadcast(event: SettingsChangedEvent): Promise<void> {
+    await notifyMachines(this.env, 'all', ['settings']);
     const encoded = JSON.stringify(event);
     await Promise.all(this.ctx.getWebSockets().map(async (socket) => {
       if (!await subscriptionActive(this.env, socket, 'storage.access')) return;

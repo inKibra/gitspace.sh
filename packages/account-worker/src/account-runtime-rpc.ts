@@ -11,13 +11,14 @@ import { RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-c
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
-import { requireRuntimeIdentity } from './runtime-access.js';
+import { requireWorkspaceAccess } from './runtime-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority } from './device-authority.js';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const MAX_EVENT_CHARACTERS = 8 * 1024 * 1024;
 
-/** The workspace id is resolved canonically; possession of a project id is not authority. */
+/** Device scope is checked first; the workspace object then authorizes from its own metadata. Possession of a project
+ * id is not authority. */
 export async function requireRuntimeAccess(
   env: Env, userId: string, deviceId: string,
   input: z.infer<typeof RuntimeIdentitySchema>, capability: DeviceCapability,
@@ -26,10 +27,9 @@ export async function requireRuntimeAccess(
   if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
   const device = view.device(deviceId, Date.now());
   if (!device || !device.capabilities.includes(capability)) throw new Error('Runtime authorization has expired or lacks permission');
-  const access = await requireRuntimeIdentity(env, userId, input, capability !== 'rpc.read');
   if (device.scope.kind === 'project' && device.scope.projectId !== input.projectId) throw new Error('Workspace is outside the device project scope');
   if (device.scope.kind === 'workspace' && device.scope.workspaceId !== input.workspaceId) throw new Error('Workspace is outside the device workspace scope');
-  return { device, ...access };
+  return { device, ...await requireWorkspaceAccess(env, userId, input, capability !== 'rpc.read') };
 }
 
 async function* watchEvents(response: Response, signal: AbortSignal) {

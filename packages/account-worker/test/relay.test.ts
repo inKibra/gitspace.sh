@@ -3,9 +3,10 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { env, exports } from 'cloudflare:workers';
 import { runInDurableObject, runDurableObjectAlarm } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import {
   RELAY_HEARTBEAT_LEASE_MS,
-  RELAY_HEARTBEAT_MODE,
+  RELAY_ECHO_HEARTBEAT_MODE,
   RELAY_PROTOCOL_VERSION,
   createRelayAuthorization,
   createDeviceBinding,
@@ -23,7 +24,7 @@ import {
   signCredentialAuthorityGrant,
   type SignedCredentialAuthorityGrant,
 } from '@gitspace/protocol/credential-vault';
-import relayWorker, { CredentialVaultDO } from '../src/index.js';
+import relayWorker, { CredentialVaultDO, UserRelayDO } from '../src/index.js';
 import { SERVICE_ASSERTION_HEADER, verifyServiceAssertion } from '@gitspace/protocol/service-access';
 import { fetchInternalService } from '../src/service-access.js';
 
@@ -91,7 +92,7 @@ async function enrollServiceBrowser() {
 async function openSocket(role: 'machine' | 'client', id: string, heartbeat = false): Promise<WebSocket> {
   const request = role === 'machine' ? machineAuthorizedRequest : authorizedRequest;
   const response = await exports.default.fetch(request(
-    `https://relay.test/ws?role=${role}&id=${id}${heartbeat ? `&heartbeat=${RELAY_HEARTBEAT_MODE}` : ''}`,
+    `https://relay.test/ws?role=${role}&id=${id}${heartbeat ? `&heartbeat=${RELAY_ECHO_HEARTBEAT_MODE}` : ''}`,
     { headers: { upgrade: 'websocket' } },
   ));
   expect(response.status).toBe(101);
@@ -269,7 +270,7 @@ describe('portable RelayDO', () => {
     machine.close(1000, 'done');
   });
 
-  it('echoes the existing v1 frame and expires a silent heartbeat-enabled tunnel with a CORS error', async () => {
+  it('echoes the v1 frame previous-release machines use for liveness and expires a silent one with a CORS error', async () => {
     const machine = await openSocket('machine', 'darktop', true);
     const frame = { version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:darktop', payload: crypto.randomUUID() };
     const echoed = nextMessage(machine);
@@ -628,6 +629,52 @@ describe('portable RelayDO', () => {
     }
     expect((await closed).code).toBe(1008);
     expect(await relay.serviceValidate(session.token, hostname)).toBeNull();
+    machine.close();
+  });
+
+  it.each(['the machine closes the service', 'the browser closes', 'the machine disconnects'] as const)('carries a service WebSocket on a hibernatable socket until %s', async ending => {
+    const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'socket', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+    const machine = await openSocket('machine', 'darktop');
+    const forwarded = Promise.withResolvers<TunnelRequestMessage>();
+    const machineClosed = Promise.withResolvers<TunnelRequestMessage>();
+    machine.addEventListener('message', event => {
+      const message = parseTunnelRequest(String(event.data));
+      if (message.type === 'tunnel.request.start') machine.send(JSON.stringify({ version: 1, type: 'tunnel.websocket.open', requestId: message.requestId }));
+      if (message.type === 'tunnel.websocket.data') forwarded.resolve(message);
+      if (message.type === 'tunnel.websocket.close') machineClosed.resolve(message);
+    });
+    const relay = env.RELAY.getByName(env.RELAY_NAME);
+    const state = crypto.randomUUID();
+    const { deviceId: browserId } = await enrollServiceBrowser();
+    const session = await relay.serviceRedeem(await relay.serviceApprove({ hostname, deviceId: browserId, state, returnTo: '/' }), hostname, state);
+    if (!session) throw new Error('Ticket failed');
+    const response = await exports.default.fetch(new Request(`https://${hostname}/socket`, { headers: { origin: `https://${hostname}`, upgrade: 'websocket', cookie: `__Host-gitspace-service=${session.token}` } }));
+    const client = response.webSocket;
+    if (!client) throw new Error('Missing service WebSocket');
+    client.accept();
+    const clientClosed = new Promise<CloseEvent>(resolve => client.addEventListener('close', resolve, { once: true }));
+    const requestId = await runInDurableObject(relay, async (_instance, objectState) => {
+      const [service] = objectState.getWebSockets('service');
+      if (!service) throw new Error('The service WebSocket is not hibernatable');
+      const attachment = z.object({ role: z.literal('service'), requestId: z.string(), machineId: z.string() }).parse(service.deserializeAttachment());
+      expect(attachment.machineId).toBe('darktop');
+      // A relay object with no memory, as after hibernation, still routes the browser's frame to the machine.
+      await new UserRelayDO(objectState, env).webSocketMessage(service, 'after-wake');
+      return attachment.requestId;
+    });
+    expect(await forwarded.promise).toMatchObject({ type: 'tunnel.websocket.data', requestId, data: 'after-wake', binary: false });
+    if (ending === 'the machine closes the service') {
+      machine.send(JSON.stringify({ version: 1, type: 'tunnel.websocket.close', requestId, code: 1000, reason: 'service done' }));
+      expect(await clientClosed).toMatchObject({ code: 1000, reason: 'service done' });
+    } else if (ending === 'the browser closes') {
+      client.close(1000, 'tab closed');
+      expect(await machineClosed.promise).toMatchObject({ type: 'tunnel.websocket.close', requestId });
+    } else {
+      machine.close(1000, 'host stopped');
+      expect((await clientClosed).code).toBe(1011);
+      return;
+    }
     machine.close();
   });
 });

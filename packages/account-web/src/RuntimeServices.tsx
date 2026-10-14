@@ -34,7 +34,7 @@ export function useRuntimeServices(snapshot: RuntimeSnapshot) {
     if (result.status === 'error') { setError(rpcErrorMessage(result.error, 'runtime.services')); return; }
     if (result.value.op === 'list') { setMachines(result.value.machines); setError(null); }
   }, [identity]);
-  const attachmentKey = JSON.stringify(snapshot.attachments.map(item => [item.machineId, item.attachmentId, item.generation, item.state, item.heartbeatAt !== null && Date.now() - Date.parse(item.heartbeatAt) < 30_000]));
+  const attachmentKey = JSON.stringify(snapshot.attachments.map(item => [item.machineId, item.attachmentId, item.generation, item.state, item.online]));
   useEffect(() => { setMachines(null); setLogs(null); void refresh(); return () => { generation.current++; }; }, [refresh, attachmentKey]);
   const act = async (command: Exclude<RuntimeServiceCommand, { op: 'list' }>, machineName: string) => {
     if (command.op === 'logs') setLoadingLogs(true);

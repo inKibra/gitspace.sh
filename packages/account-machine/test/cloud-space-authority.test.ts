@@ -1,7 +1,7 @@
 import { describe, expect, it, spyOn } from 'bun:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createServer } from 'node:http';
-import { CONTROL_SOCKET_PROTOCOL, createServerClock, SIGNED_REQUEST_MAX_AGE_MS, signedControlRequestSchema, verifySignedControlRequest, type DeploymentStatus, type SignedControlRequest } from '@gitspace/protocol';
+import { createServerClock, SIGNED_REQUEST_MAX_AGE_MS, signedControlRequestSchema, verifySignedControlRequest, type DeploymentStatus, type SignedControlRequest } from '@gitspace/protocol';
 import { CloudDataCheckpointBlobStore, CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
 
 it('signs each control operation with the enrolled machine key', async () => {
@@ -624,28 +624,3 @@ describe('account clock', () => {
   });
 });
 
-it('sends the settings subscription proof as a WebSocket subprotocol, never in the URL', async () => {
-  const privateKey = new Uint8Array(32).fill(5);
-  const seen = Promise.withResolvers<{ url: string; protocol: string | null }>();
-  const server = createServer();
-  server.on('upgrade', (request, socket) => {
-    seen.resolve({ url: request.url ?? '', protocol: request.headers['sec-websocket-protocol'] ?? null });
-    socket.destroy();
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('Expected a TCP test server');
-  const authority = new CloudSpaceCheckpointAuthority({ baseUrl: `http://127.0.0.1:${address.port}`, userId: 'user-a', machineId: 'machine-a', signingPrivateKey: privateKey });
-  const stop = authority.subscribeSettings(() => {}, () => {});
-  try {
-    const { url, protocol } = await seen.promise;
-    expect(url).toBe('/v1/settings/events');
-    expect(protocol?.startsWith(CONTROL_SOCKET_PROTOCOL)).toBe(true);
-    const signed = signedControlRequestSchema.parse(JSON.parse(Buffer.from(protocol!.slice(CONTROL_SOCKET_PROTOCOL.length), 'base64url').toString()));
-    expect(signed.operation).toBe('settings.subscribe');
-    expect(verifySignedControlRequest(signed, ed25519.getPublicKey(privateKey))).toBe(true);
-  } finally {
-    stop();
-    server.close();
-  }
-});

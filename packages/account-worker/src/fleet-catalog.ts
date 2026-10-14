@@ -34,6 +34,8 @@ export const CLOUD_MACHINE_IDLE_CHECK_MS = 5 * 60_000;
 export function attachmentKeepsMachineRunning(attachment: RuntimeAttachment): boolean {
   return attachment.state !== 'detached';
 }
+const MACHINE_WORKSPACE_INDEX = 'machine-workspace-index';
+export type MachineWorkspace = { projectId: string; workspaceId: string };
 const SANDBOX_ABANDONED = `Sandbox provisioning failed after ${SANDBOX_PROVISIONING_ATTEMPTS} attempts and its cloud machine was destroyed so it cannot keep billing. Destroy this entry and create a new machine.`;
 
 export interface PortableSpaceDefinition {
@@ -69,6 +71,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
   private alarmLine: Promise<void> = Promise.resolve();
   private imageDefaultRun: Promise<CloudImageChoice> | null = null;
   private imageDefaultInitialization: Promise<CloudImageChoice> | null = null;
+  private workspaceIndexing: Promise<void> | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
@@ -95,6 +98,8 @@ export class FleetCatalogDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS sandbox_provisioning(machine_id TEXT PRIMARY KEY,attempts INTEGER NOT NULL,deadline_at INTEGER NOT NULL,phase TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS forced_discards(machine_id TEXT PRIMARY KEY,token TEXT NOT NULL,workspaces_json TEXT NOT NULL,issued_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS machine_idle(machine_id TEXT PRIMARY KEY,idle_since INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS machine_workspaces(machine_id TEXT NOT NULL,workspace_id TEXT NOT NULL,project_id TEXT NOT NULL,PRIMARY KEY(machine_id,workspace_id));
+        CREATE TABLE IF NOT EXISTS machine_presence(machine_id TEXT PRIMARY KEY,connected INTEGER NOT NULL);
       `);
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS machine_operations(machine_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL,deadline_at INTEGER NOT NULL)');
       // Transitions written before operation leases existed lease from their last write.
@@ -578,6 +583,65 @@ export class FleetCatalogDO extends DurableObject<Env> {
     })));
   }
 
+  /** Records that a workspace attaches this machine, before the attachment is written; the machine's relay presence
+   * seeds the new attachment's `online`. */
+  attachMachineWorkspace(machineId: string, workspace: MachineWorkspace): { connected: boolean } {
+    const machine = this.getMachine(machineId);
+    if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
+    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_workspaces(machine_id,workspace_id,project_id) VALUES(?,?,?)', machineId, workspace.workspaceId, workspace.projectId);
+    return { connected: this.machineConnected(machineId) };
+  }
+
+  detachMachineWorkspace(machineId: string, workspaceId: string): void {
+    this.ctx.storage.sql.exec('DELETE FROM machine_workspaces WHERE machine_id=? AND workspace_id=?', machineId, workspaceId);
+  }
+
+  /** The workspaces holding a non-detached attachment of this machine: machine-wide assignment reads and presence
+   * changes touch only these. */
+  async machineWorkspaces(machineId: string): Promise<MachineWorkspace[]> {
+    await this.indexMachineWorkspaces();
+    return this.ctx.storage.sql.exec<{ project_id: string; workspace_id: string }>('SELECT project_id,workspace_id FROM machine_workspaces WHERE machine_id=? ORDER BY workspace_id', machineId).toArray()
+      .map(row => ({ projectId: row.project_id, workspaceId: row.workspace_id }));
+  }
+
+  /** The relay's view of the machine's connection. A paired computer's fleet state follows it; cloud machine states
+   * stay provider-owned. Returns the workspaces whose attachments must learn it. */
+  async machinePresence(machineId: string, connected: boolean): Promise<MachineWorkspace[]> {
+    validateId(machineId);
+    this.ctx.storage.sql.exec('INSERT INTO machine_presence(machine_id,connected) VALUES(?,?) ON CONFLICT(machine_id) DO UPDATE SET connected=excluded.connected WHERE connected<>excluded.connected', machineId, connected ? 1 : 0);
+    const machine = this.getMachine(machineId);
+    if (machine?.provider === 'physical' && machine.desiredState !== 'removed' && (machine.state === 'online' || machine.state === 'offline')) {
+      this.saveMachine({ ...machine, state: connected ? 'online' : 'offline' });
+    }
+    return this.machineWorkspaces(machineId);
+  }
+
+  private machineConnected(machineId: string): boolean {
+    return this.ctx.storage.sql.exec<{ connected: number }>('SELECT connected FROM machine_presence WHERE machine_id=?', machineId).toArray()[0]?.connected === 1;
+  }
+
+  /** One-time migration: attachments written before the index existed are indexed from every workspace once. A
+   * workspace that cannot be read leaves the index incomplete, so readers fail instead of missing an attachment. */
+  private indexMachineWorkspaces(): Promise<void> {
+    this.workspaceIndexing ??= (async () => {
+      if (await this.ctx.storage.get(MACHINE_WORKSPACE_INDEX) === true) return;
+      let complete = true;
+      for (const space of await this.listSpaces()) {
+        try {
+          for (const machineId of await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${space.spaceId}`).runtimeAttachedMachines()) {
+            this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_workspaces(machine_id,workspace_id,project_id) VALUES(?,?,?)', machineId, space.spaceId, space.projectId);
+          }
+        } catch (error) {
+          complete = false;
+          console.error(JSON.stringify({ event: 'machine_workspace_index_failed', workspaceId: space.spaceId, message: error instanceof Error ? error.message : String(error) }));
+        }
+      }
+      if (!complete) throw new Error('Machine workspace index is incomplete; retry shortly');
+      await this.ctx.storage.put(MACHINE_WORKSPACE_INDEX, true);
+    })().finally(() => { this.workspaceIndexing = null; });
+    return this.workspaceIndexing;
+  }
+
   putMachine(input: FleetMachineDefinition): FleetMachineDefinition {
     const current = this.getMachine(input.id);
     if (this.wasMachineDestroyed(input.id)) throw new Error('Machine has been destroyed');
@@ -599,12 +663,13 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return this.saveMachine(input);
   }
 
-  /** A machine's own report describes what it observes; lifecycle intent, kind and provider stay account-owned. */
+  /** A previous-release machine's startup report. It describes what the machine observes; its state comes from relay
+   * presence, and lifecycle intent, kind and provider stay account-owned. */
   reportMachine(input: FleetMachineDefinition): FleetMachineDefinition {
     const current = this.getMachine(input.id);
     return this.putMachine(current
-      ? { ...current, label: input.label, state: input.state, rpcEndpoint: input.rpcEndpoint, notes: input.notes }
-      : { ...input, kind: 'physical', provider: 'physical', desiredState: 'online', lifecycleRevision: 0, operationId: null, error: null });
+      ? { ...current, label: input.label, rpcEndpoint: input.rpcEndpoint, notes: input.notes }
+      : { ...input, state: this.machineConnected(input.id) ? 'online' : 'offline', kind: 'physical', provider: 'physical', desiredState: 'online', lifecycleRevision: 0, operationId: null, error: null });
   }
 
   /** A cloud-issued destroy confirmation for a cloud machine whose runtime could not checkpoint. It is bound to the
@@ -636,7 +701,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
     if (current && current.label === input.label && current.state === input.state && current.rpcEndpoint === input.rpcEndpoint
       && current.kind === input.kind && current.notes === input.notes && current.provider === input.provider
       && current.desiredState === input.desiredState && current.lifecycleRevision === input.lifecycleRevision
-      && current.operationId === input.operationId && current.error === input.error) return current;
+      && current.operationId === input.operationId && current.error === input.error && (current.agentsMayAttach ?? true) === (input.agentsMayAttach ?? true)) return current;
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(`
         INSERT INTO fleet_machines(machine_id, definition_json, updated_at)
@@ -680,6 +745,8 @@ export class FleetCatalogDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec('DELETE FROM forced_discards WHERE machine_id=?', machineId);
       this.ctx.storage.sql.exec('DELETE FROM machine_idle WHERE machine_id=?', machineId);
       this.ctx.storage.sql.exec('DELETE FROM machine_operations WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec('DELETE FROM machine_workspaces WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
       const removed = this.ctx.storage.sql.exec('DELETE FROM fleet_machines WHERE machine_id = ?', machineId).rowsWritten > 0;
       if (removed) {
         const machines = this.listMachines();

@@ -9,7 +9,8 @@ import { ArtifactsCodeStore, createWorkspaceRuntime, type WorkspaceRuntime, type
 import { z } from 'zod';
 import { createRuntimeServices } from '../src/runtime-services.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
-import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
+import { executorCapabilities } from '../src/runtime-attachments.js';
+import { ConversationLifecycleDoc, QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
 import { SessionControlsDoc } from '@gitspace/runtime-core/session-controls';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
@@ -48,7 +49,12 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
       },
     };
     let runtime: WorkspaceRuntime | undefined;
-    const services = createRuntimeServices({ ctx, env, identity, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, judge: unsupported, instructionLoader: { read: unsupported, loadInstructions: async () => '' } });
+    const attachRequests: string[] = [];
+    const services = createRuntimeServices({ ctx, env, identity, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, judge: unsupported, instructionLoader: { read: unsupported, loadInstructions: async () => '' }, async requestAttachment(machineId) {
+      if (!runtime) throw new Error('Runtime not initialized');
+      attachRequests.push(machineId);
+      return runtime.attachments.requestCache({ ...identity, machineId, checkout: { kind: 'shared', branch: 'main' }, capabilities: [...executorCapabilities] }, true);
+    } });
     services.tools.instructions = async () => 'Local codemode fixture instructions.';
     const models = createModels();
     const calls: ToolCall[] = [];
@@ -66,17 +72,17 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
     const root = await runtime.harness.root(BACKGROUND_CONTEXT);
     const invoke = (tool: string, args: Parameters<typeof services.tools.invoke>[0]['args']) => services.tools.invoke({ tool, args, conversationId: String(root.id), taskId: 'proof', requestId: crypto.randomUUID(), attemptId: crypto.randomUUID(), replay: 'unsafe', signal: AbortSignal.timeout(500) });
     const text = (result: RuntimeToolResult) => result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-    return { runtime, services, root, invoke, text, identity, checkpoint, calls, reports };
+    return { runtime, services, root, invoke, text, identity, checkpoint, calls, reports, attachRequests };
 }
 
-test('the agent machines list and dispatch see only live attachments heard from recently', async () => {
+test('the agent machines list and dispatch see only live attachments whose machine is connected', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`machines-list:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text, identity } = await ownerFixture(ctx);
     const now = new Date().toISOString();
-    const live = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'live', machineId: 'live', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: now, heartbeatAt: now });
-    // Removed while ready: its last heartbeat is fresh.
+    const live = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'live', machineId: 'live', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: now, online: true });
+    // Removed while ready and connected.
     const destroyed = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'destroyed', machineId: 'destroyed', state: 'detached' });
-    const silent = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'silent', machineId: 'silent', heartbeatAt: new Date(Date.now() - 60_000).toISOString() });
+    const silent = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'silent', machineId: 'silent', online: false });
     for (const attachment of [destroyed, silent, live]) ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
     const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: dispatch.machineId }] }));
     try {
@@ -141,10 +147,10 @@ test('grep runs only on an attached machine and points at code_search without on
       expect(unattached.status).toBe('failed');
       expect(text(unattached)).toBe('grep runs on an attached machine; use code_search, or attach a machine');
       // The same refusal comes before any approval question.
-      await expect(services.tools.preflight({ tool: 'grep', args: { pattern: 'cloud' }, conversationId: String(root.id), taskId: 'proof', requestId: 'preflight', attemptId: 'preflight', replay: 'safe' })).rejects.toThrow('grep runs on an attached machine; use code_search, or attach a machine');
+      await expect(services.tools.preflight({ tool: 'grep', args: { pattern: 'cloud' }, conversationId: String(root.id), taskId: 'proof', requestId: 'preflight', attemptId: 'preflight', replay: 'safe' })).rejects.toThrow('Meanwhile, code_search searches the cloud copy without a machine.');
       expect(machine).not.toHaveBeenCalled();
       const now = new Date().toISOString();
-      const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-cache', machineId: 'search-machine', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: now, heartbeatAt: now });
+      const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'search-cache', machineId: 'search-machine', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['grep'], updatedAt: now, online: true });
       ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
       expect(text(await invoke('grep', { pattern: 'cloud' }))).toBe('ripgrep result');
       expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ tool: 'grep', machineId: cache.machineId, snapshot: checkpoint });
@@ -164,7 +170,7 @@ test('code_search answers from the cloud index with no machine and says how far 
     try {
       const building = await invoke('code_search', { pattern: 'cloud' });
       expect(building.status).toBe('failed');
-      expect(text(building)).toContain('still building');
+      expect(text(building)).toMatch(/^code_search is building the first index: .*; retry shortly, or use grep on an attached machine$/u);
       await runtime.codeSearch.drive();
       expect(await search({ pattern: '(?i)CLOUD', path: '.' })).toEqual({ matches: ['hello.txt:1:cloud original'], partial: false, indexedCommit: checkpoint.worktreeCommit, behind: 0 });
       expect((await search({ pattern: 'one|two', path: 'src' })).matches).toEqual(['src/a.ts:1:one', 'src/nested/b.md:1:two']);
@@ -263,5 +269,112 @@ test('machine availability precedes approval for shell, structural reads, and li
         expect((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
       }
     } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+/** Account machines the attach tests choose from, removed afterwards so other tests see an empty fleet. */
+async function withFleet(machines: Array<{ label: string; online?: boolean; agentsMayAttach?: boolean }>, defaultLabel: string | null, run: (ids: Record<string, string>) => Promise<void>) {
+  const catalog = env.FLEET_CATALOG.getByName(env.ACCOUNT_ID);
+  const settings = env.USER_SETTINGS.getByName(env.ACCOUNT_ID);
+  const ids: Record<string, string> = {};
+  const setDefault = async (machineId: string | null) => {
+    const current = await settings.get('test');
+    const result = await settings.update('test', { expectedRevision: current.revision, onboardingComplete: current.onboardingComplete, profile: current.profile, git: current.git, defaults: { ...current.defaults, machineId } });
+    if (result.status !== 'ok') throw new Error('Default machine fixture conflicted');
+  };
+  for (const machine of machines) {
+    const id = `attach-${crypto.randomUUID()}`;
+    ids[machine.label] = id;
+    await catalog.putMachine({ id, label: machine.label, state: machine.online === false ? 'offline' : 'online', rpcEndpoint: null, kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: 0, operationId: null, error: null, ...(machine.agentsMayAttach === undefined ? {} : { agentsMayAttach: machine.agentsMayAttach }) });
+  }
+  try {
+    await setDefault(defaultLabel === null ? null : ids[defaultLabel] ?? null);
+    await run(ids);
+  } finally {
+    await setDefault(null);
+    for (const id of Object.values(ids)) await catalog.removeMachine(id);
+  }
+}
+const machineId = (ids: Record<string, string>, label: string) => { const id = ids[label]; if (!id) throw new Error(`No fixture machine ${label}`); return id; };
+
+/** One agent `machines attach` call in a fresh workspace; `earlier` attachments are this workspace's history. */
+async function attachInFreshWorkspace(args: { machine?: string; needs?: string[] }, earlier: Array<{ machineId: string; capabilities: string[] }> = []) {
+  let outcome: unknown;
+  let error: string | null = null;
+  let requested: string[] = [];
+  let questions: unknown[] = [];
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`machines-attach:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const fixture = await ownerFixture(ctx);
+    try {
+      for (const [index, item] of earlier.entries()) {
+        const record = RuntimeAttachmentSchema.parse({ ...fixture.identity, attachmentId: `earlier-${index}`, machineId: item.machineId, generation: index, state: 'detached', checkout: { kind: 'shared', branch: 'main' }, capabilities: item.capabilities, updatedAt: new Date().toISOString() });
+        ctx.storage.sql.exec('INSERT INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', record.attachmentId, JSON.stringify(record), 'fixture');
+      }
+      const result = await fixture.invoke('machines', { op: 'attach', ...args });
+      if (result.status === 'completed') outcome = JSON.parse(fixture.text(result));
+      else error = fixture.text(result);
+      requested = fixture.attachRequests;
+      // The request goes out and the call returns: the attachment waits for the machine's setup.
+      expect(fixture.runtime.attachments.list().filter(item => item.state === 'attaching').map(item => item.machineId)).toEqual(requested);
+      questions = (await fixture.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
+    } finally { await fixture.runtime.snapshot(); await fixture.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+  return { outcome, error, requested, questions };
+}
+
+test('machines attach picks the named machine, else the default, else an online machine offering what is needed', async () => {
+  await withFleet([{ label: 'Alpha' }, { label: 'Bravo' }, { label: 'Charlie', online: false }], 'Bravo', async ids => {
+    const alpha = machineId(ids, 'Alpha'), bravo = machineId(ids, 'Bravo'), charlie = machineId(ids, 'Charlie');
+    expect(await attachInFreshWorkspace({ machine: 'Alpha' })).toMatchObject({ outcome: { state: 'attaching', machineId: alpha, label: 'Alpha' }, requested: [alpha] });
+    expect(await attachInFreshWorkspace({})).toMatchObject({ outcome: { state: 'attaching', machineId: bravo, label: 'Bravo' }, requested: [bravo] });
+    // The default does not offer a GPU and the machine that did is offline, so the online one that did is chosen.
+    expect(await attachInFreshWorkspace({ needs: ['gpu'] }, [{ machineId: alpha, capabilities: ['bash', 'gpu'] }, { machineId: charlie, capabilities: ['bash', 'gpu'] }])).toMatchObject({ outcome: { state: 'attaching', machineId: alpha }, requested: [alpha] });
+    expect(await attachInFreshWorkspace({ machine: 'Charlie' })).toMatchObject({ error: 'Charlie is offline. Start GitSpace on Charlie or attach another machine.', requested: [] });
+    expect(await attachInFreshWorkspace({ needs: ['tpu'] })).toMatchObject({ error: 'No online machine offers tpu.', requested: [] });
+  });
+});
+
+test('machines attach asks the user instead of attaching a machine agents may not attach', async () => {
+  await withFleet([{ label: 'Private', agentsMayAttach: false }, { label: 'Shared' }], 'Private', async ids => {
+    const privateId = machineId(ids, 'Private');
+    const named = await attachInFreshWorkspace({ machine: 'Private' });
+    expect(named).toMatchObject({ outcome: { state: 'awaiting-approval', machineId: privateId, label: 'Private' }, requested: [] });
+    expect(named.questions).toEqual([expect.objectContaining({ kind: 'approval', answer: null, tool: { name: 'machines', args: { op: 'attach', machine: privateId } } })]);
+    // Unnamed, a permitted machine is preferred over a default agents may not attach.
+    expect(await attachInFreshWorkspace({})).toMatchObject({ outcome: { state: 'attaching', machineId: machineId(ids, 'Shared') }, questions: [] });
+  });
+});
+
+test('a machine tool with no ready machine attaches the default one and says to retry; the conversation hears when it is ready', async () => {
+  await withFleet([{ label: 'Darktop' }], 'Darktop', async ids => {
+    const darktop = machineId(ids, 'Darktop');
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`first-need:${crypto.randomUUID()}`), async (_instance, ctx) => {
+      const { runtime, root, calls, attachRequests } = await ownerFixture(ctx);
+      const machine = vi.spyOn(runtime.attachments, 'execute');
+      await runtime.harness.commit(async tx => {
+        (await tx.doc(WorkspaceDoc)).phase = 'code';
+        (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'always-ask';
+      }, BACKGROUND_CONTEXT);
+      try {
+        calls.push({ type: 'toolCall', id: 'shell', name: 'bash', arguments: { command: 'pwd' } });
+        await root.submit({ type: 'input', requestId: 'shell', content: 'Run the requested tool.' }, BACKGROUND_CONTEXT);
+        await root.waitForIdle(withAbortSignal(AbortSignal.timeout(2000), BACKGROUND_CONTEXT));
+        const result = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'shell');
+        if (!result || result.role !== 'toolResult') throw new Error('Missing tool result');
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain('No machine was ready, so Darktop is being attached to this workspace. Retry this call when its setup finishes');
+        // Attaching happens before, and instead of, an approval question; nothing ran.
+        expect((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
+        expect(machine).not.toHaveBeenCalled();
+        expect(attachRequests).toEqual([darktop]);
+        const attachment = runtime.attachments.list().find(item => item.machineId === darktop);
+        if (!attachment) throw new Error('Darktop was not attached');
+        expect(attachment.state).toBe('attaching');
+        ctx.storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.state','ready') WHERE id=?", attachment.attachmentId);
+        await runtime.cacheReady(attachment.attachmentId, attachment.generation);
+        const events = (await runtime.harness.snapshot(ConversationLifecycleDoc, root.id, BACKGROUND_CONTEXT))?.events ?? [];
+        expect(events.map(item => item.event)).toEqual([expect.objectContaining({ kind: 'machine-ready', requestId: `machine-ready:${attachment.attachmentId}:${attachment.generation}`, text: expect.stringContaining('Machine Darktop is attached and ready') })]);
+      } finally { machine.mockRestore(); await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
   });
 });

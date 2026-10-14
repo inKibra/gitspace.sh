@@ -105,7 +105,7 @@ describe('runtime workspace code ref', () => {
       .mockRejectedValueOnce(new ProjectImportRequiresMachineError(reason))
       .mockResolvedValue(info);
     const forkWorkspace = vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(info);
-    const ref = runtimeWorkspaceCodeRef(env, RuntimeIdentitySchema.parse({ projectId, workspaceId: 'imported-feature' }));
+    const ref = runtimeWorkspaceCodeRef(env, RuntimeIdentitySchema.parse({ projectId, workspaceId: 'imported-feature' }), () => 'feature');
     await expect(ref()).rejects.toMatchObject({ reason });
     expect(forkWorkspace).not.toHaveBeenCalled();
     await expect(ref()).resolves.toBe('refs/heads/feature');

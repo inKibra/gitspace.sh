@@ -5,8 +5,6 @@ import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID } from '@gitspac
 import { ProjectAuthorityDO, UserProjectIndexDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
-import { requireRuntimeIdentity } from '../src/runtime-access.js';
-import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 
 const projectEnv = env as typeof env & {
   PROJECT_AUTHORITY: DurableObjectNamespace<ProjectAuthorityDO>;
@@ -267,36 +265,6 @@ describe('ProjectAuthorityDO', () => {
     })).json());
     expect(retried).toEqual(second);
     expect(await (await stub.listEvents(second.offset)).json()).toEqual([]);
-  });
-
-  it.each(['cloud-only', 'provisioning', 'active', 'archiving', 'archived', 'restoring', 'failed', 'deleting'] as const)(
-    'bounds runtime writes by project lifecycle %s', async lifecycle => {
-      const projectId = `runtime-project-${lifecycle}`;
-      const stub = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
-      const project = await stub.bootstrap({ id: projectId, name: 'Runtime access', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-      await stub.setProjectLifecycle(project.revision, lifecycle);
-      const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId });
-      if (['cloud-only', 'provisioning', 'active'].includes(lifecycle)) {
-        expect((await requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, true)).project.lifecycle).toBe(lifecycle);
-      } else {
-        await expect(requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, true)).rejects.toThrow();
-      }
-      if (lifecycle === 'deleting') await expect(requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, false)).rejects.toThrow();
-      else expect((await requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, false)).project.lifecycle).toBe(lifecycle);
-    },
-  );
-
-  it.each(['archiving', 'archived', 'deleting'] as const)('keeps %s workspace runtime writes disabled', async lifecycle => {
-    const projectId = `runtime-workspace-${lifecycle}`;
-    const stub = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
-    const project = await stub.bootstrap({ id: projectId, name: 'Runtime workspace', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-    await stub.setProjectLifecycle(project.revision, 'active');
-    const workspaceId = `${projectId}-branch`;
-    await stub.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: workspaceId, branch: 'feature', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle, goalId: null, expectedRevision: 0 });
-    const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId });
-    await expect(requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, true)).rejects.toThrow();
-    if (lifecycle === 'deleting') await expect(requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, false)).rejects.toThrow();
-    else expect((await requireRuntimeIdentity(env, env.ACCOUNT_ID, identity, false)).workspace?.lifecycle).toBe(lifecycle);
   });
 
   it('advances canonical artifact manifests without accepting stale writers', async () => {

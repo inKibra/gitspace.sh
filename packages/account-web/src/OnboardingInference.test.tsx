@@ -31,7 +31,7 @@ function Onboarding({ providers, models, modelsReady, defaultModel }: Scenario) 
     mode="onboarding" settings={settings} machines={[]} runtimeSettings={[]} runtimeGeneration={1}
     inferenceSetup={<InferencePage onboarding initialTab="Providers" inference={inference} selectedProfileId={DEFAULT_INFERENCE_PROFILE_ID} onSelectProfile={() => undefined} projects={[]} schema={schema} schemaLoading={false} schemaError={null} onRefreshSchema={() => undefined} models={models} modelsReady={modelsReady} modelsLoading={!modelsReady} modelsError={null} providers={section} />}
     inferenceReady={gate === 'ready'}
-    gitIdentity={null} onChange={() => undefined} onSave={noop} onSetRuntimeSetting={noop} onUpdateMachine={noop} onCreateSandbox={noop}
+    gitIdentity={null} onChange={() => undefined} onSave={noop} onSetRuntimeSetting={noop} onUpdateMachine={noop} onSetMachineAgentAttach={noop} onCreateSandbox={noop}
     cloudImages={[]} cloudImageDefault={null} cloudImageError={null} onChangeCloudImage={noop} onRecoverCloudImage={noop} onSetCloudImageDefault={noop}
     onControlMachine={noop} onDestroyMachine={noop} devices={[]} onRevokeDevice={noop} onSignOut={noop} onCreateApiClient={async () => 'gsk_test'}
     composioSetup={null} onPutComposioSetup={noop} onDeleteComposioSetup={noop} browserRelay={null} onSetupBrowserRelay={noop} onStartBrowserRelay={noop} onUnpairBrowserRelay={noop} onTestBrowserRelay={noop}

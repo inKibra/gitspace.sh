@@ -173,7 +173,7 @@ export class CloudFilesProof extends DurableObject {
     assert.deepEqual((await Promise.all([concurrent, secondConcurrent])).map(result => result.status), ['completed', 'completed']);
     assert.equal(files.get('concurrent.txt'), 'first');
     assert.equal(files.get('concurrent-other.txt'), 'second');
-    const attached = (await attachments.attach(admission)).attachment;
+    const attached = (await attachments.attach(admission, true)).attachment;
     const ready = { projectId: attached.projectId, workspaceId: attached.workspaceId, machineId: attached.machineId, attachmentId: attached.attachmentId, generation: attached.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true as const, capabilities: attached.capabilities };
     attachments.ready(ready);
     caches = attachments.list();
@@ -186,7 +186,7 @@ export class CloudFilesProof extends DurableObject {
     const afterDetach = await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach');
     assert.equal(afterDetach.status, 'completed');
     assert.deepEqual((await invoke('read', { path: 'after-detach.txt' })).content, [{ type: 'text', text: 'resumed' }]);
-    const nextCache = (await attachments.attach(RuntimeAttachInputSchema.parse({ ...admission, machineId: 'machine-b' }))).attachment;
+    const nextCache = (await attachments.attach(RuntimeAttachInputSchema.parse({ ...admission, machineId: 'machine-b' }), true)).attachment;
     const cloudCheckpoint = await store.snapshot(); assert(cloudCheckpoint);
     attachments.ready({ ...ready, machineId: nextCache.machineId, attachmentId: nextCache.attachmentId, generation: nextCache.generation, commit: cloudCheckpoint.worktreeCommit });
     caches = attachments.list();
@@ -194,7 +194,7 @@ export class CloudFilesProof extends DurableObject {
     assert.deepEqual(await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach'), afterDetach);
     assert.equal(pushes, handoffPushes);
     assert.equal((await invoke('write', { path: 'after-b.txt', content: 'with replacement cache' })).status, 'completed');
-    await assert.rejects(attachments.attach(admission), /stale/);
+    await assert.rejects(attachments.attach(admission, true), /stale/);
     caches = [RuntimeAttachmentSchema.parse({ ...attached, state: 'attaching' })];
     assert.equal((await invoke('write', { path: 'attaching.txt', content: 'with attaching cache' })).status, 'completed');
     caches = [];

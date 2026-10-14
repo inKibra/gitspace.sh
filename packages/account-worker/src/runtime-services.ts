@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalJson, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { canonicalJson, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { profileApprovalMode } from '@gitspace/protocol/inference';
@@ -25,6 +25,10 @@ import { RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@g
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
+import { executorCapabilities } from './runtime-attachments.js';
+import type { FleetMachineDefinition } from './fleet-catalog.js';
+import { QuestionsDoc } from '@gitspace/runtime-core';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
 export type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
@@ -40,7 +44,13 @@ type ServicesOptions = {
   judge: RetainedRuleServices['judge'];
   model: RuntimeModelHelper;
   instructionLoader: RuntimeInstructionLoader;
+  /** Requests a workspace attachment of the machine through the human cache-request path; returns before setup. */
+  requestAttachment(machineId: string): Promise<{ attachment: RuntimeAttachment }>;
 };
+/** What `machines attach` did: requested (or found) an attachment, or asked the user to approve one. */
+type MachineAttachOutcome =
+  | { state: 'attaching' | 'ready'; machineId: string; label: string; attachmentId: string; generation: number }
+  | { state: 'awaiting-approval'; machineId: string; label: string; questionId: string };
 const object = z.record(z.string(), RuntimeJsonSchema);
 const methodSchema = z.object({ method: z.string().min(1) });
 const idSchema = z.string().min(1);
@@ -218,7 +228,70 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   /** Replays follow the admitted dispatch; a new grep needs a ready machine. */
   function requireGrepMachine(attemptId: string): void {
     if (savedDispatch(attemptId) || selections.load(attemptId)) return;
-    if (!options.runtime().attachments.list().some(item => isAttachmentReady(item, Date.now()))) throw new Error(GREP_REQUIRES_MACHINE);
+    if (!options.runtime().attachments.list().some(item => isAttachmentReady(item))) throw new Error(GREP_REQUIRES_MACHINE);
+  }
+  /** The named machine; else the account default machine when online and permitted; else any online permitted machine
+   * offering `needs`. Its attachment is requested without waiting for setup, and the conversation hears when it is
+   * ready. A machine agents may not attach becomes a question to the user instead. */
+  async function attachMachine(conversationId: string, request: { machine?: string; needs?: readonly string[] }): Promise<MachineAttachOutcome> {
+    const runtime = options.runtime();
+    const attachments = runtime.attachments.list();
+    const fleet = (await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).listMachines()).filter(machine => machine.desiredState !== 'removed');
+    // A machine never attached here offers what every executor offers.
+    const offers = (machineId: string) => {
+      const known = attachments.filter(item => item.machineId === machineId).sort((left, right) => right.generation - left.generation)[0];
+      return (request.needs ?? []).every(need => (known?.capabilities ?? executorCapabilities).includes(need));
+    };
+    let chosen: FleetMachineDefinition | undefined;
+    if (request.machine !== undefined) {
+      const named = fleet.filter(machine => machine.id === request.machine || machine.label === request.machine);
+      if (named.length > 1) throw new Error('Machine label is ambiguous; use its id');
+      chosen = named[0];
+      if (!chosen) throw new Error(`No machine is named ${request.machine}.`);
+      if (chosen.state !== 'online') throw new Error(`${chosen.label} is offline. Start GitSpace on ${chosen.label} or attach another machine.`);
+    } else {
+      // A machine already setting up for this workspace is the one to wait for.
+      const settingUp = attachments.find(item => isAttachmentOnline(item) && item.state === 'attaching' && offers(item.machineId));
+      if (settingUp) return { state: 'attaching', machineId: settingUp.machineId, label: fleet.find(machine => machine.id === settingUp.machineId)?.label ?? settingUp.machineId, attachmentId: settingUp.attachmentId, generation: settingUp.generation };
+      const defaultId = (await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).get('runtime')).defaults.machineId;
+      const online = fleet.filter(machine => machine.state === 'online' && offers(machine.id)).sort((left, right) => Number(right.id === defaultId) - Number(left.id === defaultId));
+      chosen = online.find(machine => machine.agentsMayAttach !== false) ?? online[0];
+      if (!chosen) {
+        if (request.needs?.length && fleet.some(machine => machine.state === 'online')) throw new Error(`No online machine offers ${request.needs.join(', ')}.`);
+        const known = fleet.find(machine => machine.id === defaultId) ?? fleet.find(machine => machine.kind === 'physical') ?? fleet[0];
+        throw new Error(known ? `No machine is online. Start GitSpace on ${known.label} or attach a machine.` : 'No machine is online. Add a machine in Settings → Machines.');
+      }
+    }
+    const machine = chosen;
+    if (machine.agentsMayAttach === false) {
+      const questionId = await runtime.harness.commit(async tx => {
+        const questions = await tx.doc(QuestionsDoc);
+        const pending = questions.items.find(item => item.conversationId === conversationId && item.answer === null && item.id.startsWith(`machine-attach:${machine.id}:`));
+        if (pending) return pending.id;
+        const id = `machine-attach:${machine.id}:${crypto.randomUUID()}`;
+        questions.items.push({ id, conversationId, kind: 'approval', prompt: `Attach ${machine.label} to this workspace? Agents may not attach it on their own.`, choices: ['Approve', 'Reject'], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: machine.id } } });
+        return id;
+      }, BACKGROUND_CONTEXT);
+      return { state: 'awaiting-approval', machineId: machine.id, label: machine.label, questionId };
+    }
+    const attachment = attachments.find(item => item.machineId === machine.id && item.state !== 'detached') ?? (await options.requestAttachment(machine.id)).attachment;
+    const ready = isAttachmentReady(attachment);
+    if (!ready) runtime.noticeWhenReady({ attachmentId: attachment.attachmentId, generation: attachment.generation, conversationId, label: machine.label });
+    return { state: ready ? 'ready' : 'attaching', machineId: machine.id, label: machine.label, attachmentId: attachment.attachmentId, generation: attachment.generation };
+  }
+  /** A machine tool called with no ready machine attaches one the way `machines attach` does and fails at once,
+   * saying so; the agent retries the call once the machine is ready. */
+  async function requireMachine(input: Pick<Invocation, 'conversationId' | 'tool'>, args: unknown): Promise<void> {
+    if (await selections.find(args)) return;
+    const selector = RuntimeDispatchSelectionSchema.parse(args).on;
+    const hint = input.tool === 'grep' ? ' Meanwhile, code_search searches the cloud copy without a machine.' : '';
+    let outcome: MachineAttachOutcome;
+    try { outcome = await attachMachine(input.conversationId, typeof selector === 'string' ? { machine: selector } : { needs: selector?.needs }); }
+    catch (error) { throw new Error(`${message(error)}${hint}`); }
+    if (outcome.state === 'awaiting-approval') throw new Error(`No machine is attached. Attaching ${outcome.label} needs the user's approval; they have been asked. Retry this call once it is attached and ready.${hint}`);
+    if (outcome.state === 'attaching') throw new Error(`No machine was ready, so ${outcome.label} is being attached to this workspace. Retry this call when its setup finishes; a notice will arrive.${hint}`);
+    // Attached and ready, yet not what the call selects (a profile it has not prepared): the selection explains.
+    await selections.cache(args);
   }
   const selecting = new Map<string, { fingerprint: string; promise: Promise<RuntimeToolResult> }>();
   async function executeMachine(input: Invocation, deadlineAt?: string): Promise<RuntimeToolResult> {
@@ -491,6 +564,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if (input.tool === 'machines') {
         const args = RuntimeMachinesArgumentsSchema.parse(input.args);
+        if (args.op === 'attach') return completed(input, await attachMachine(input.conversationId, args));
         if (args.op === 'detach') {
           const request = args;
           const attachment = options.runtime().attachments.list().find(item => item.attachmentId === request.attachmentId && item.generation === request.generation);
@@ -500,8 +574,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           return completed(input, detached);
         }
         // Offline attachments are not machines an agent can use.
-        const now = Date.now();
-        return completed(input, options.runtime().attachments.list().filter(item => isAttachmentOnline(item, now)));
+        return completed(input, options.runtime().attachments.list().filter(item => isAttachmentOnline(item)));
       }
       if (input.tool === 'workspace_status') return completed(input, await options.runtime().status());
       if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind') return options.runtime().invokeConversationTool(input);
@@ -632,7 +705,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     let admission = savedDispatch(input.attemptId);
     if (admission && (admission.tool !== 'proc' || admission.machineId !== origin.machineId || admission.projectId !== origin.projectId || admission.workspaceId !== origin.workspaceId || admission.parentAttemptId !== input.originAttemptId || admission.conversationId !== input.conversationId || admission.taskId !== input.taskId || admission.requestId !== input.requestId || admission.replay !== replay || canonicalJson(admission.args) !== canonicalJson(input.args))) throw new Error('Process control identity changed');
     const selected = options.runtime().attachments.list()
-      .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && isAttachmentReady(attachment, Date.now()))
+      .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && isAttachmentReady(attachment))
       .sort((left, right) => right.generation - left.generation)[0];
     if (!selected) throw new Error('Original process machine is unreachable: no READY execution cache');
     if (!admission) {
@@ -652,18 +725,15 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   return {
     browser: browser.manage,
     tools: { invoke, prepareBrowser: browser.prepare, authorizeCronTool, approvalDefault,
-      // A machine tool with no cache to run on fails here, before the user is asked to approve it.
+      // A machine tool with no ready machine attaches one and fails here, before the user is asked to approve it.
       async preflight(input) {
         // Replay/reconciliation follows the admitted identity, not today's cache availability.
         if (savedDispatch(input.attemptId) || selections.load(input.attemptId)?.result) return;
-        if (machineTools[input.tool] && input.tool !== 'browser') {
-          await selections.cache(input.args);
-        } else if (input.tool === 'grep') {
-          requireGrepMachine(input.attemptId);
-          await selections.cache(input.args);
+        if ((machineTools[input.tool] && input.tool !== 'browser') || input.tool === 'grep') {
+          await requireMachine(input, input.args);
         } else if (input.tool === 'environment') {
           const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);
-          if (args.method === 'runChecks' || args.method === 'runPhase') await selections.cache(args);
+          if (args.method === 'runChecks' || args.method === 'runPhase') await requireMachine(input, args);
         } else if (input.tool === 'sync') {
           const args = RuntimeSyncArgumentsSchema.parse(input.args);
           if (args.method !== 'backups' && args.method !== 'resolve') await selections.cache(args);

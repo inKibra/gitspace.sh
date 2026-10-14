@@ -16,7 +16,8 @@ import { installDefaultGitSpaceSkills } from './default-skills.js';
 import { WorkspaceServiceManager } from './workspace-services.js';
 import { createServiceAccessClient } from './service-forward.js';
 import { WorkspaceEnvironmentManager } from './workspace-environment.js';
-import { createServerClock, credentialProtocolBase64 } from '@gitspace/protocol';
+import { createServerClock, credentialProtocolBase64, relayNoticeSchema, type RelayNoticeTopic } from '@gitspace/protocol';
+import { receiveMachineNotices, type MachineNoticeTargets } from './machine-notices.js';
 import { appendFileSync, existsSync } from 'node:fs';
 import { DeviceRegistry } from './device-registry.js';
 import { createSignedRpcHandler } from './signed-rpc.js';
@@ -181,6 +182,25 @@ export async function startMachineRuntime() {
     rootSigningPublicKey: credentialProtocolBase64.decode(requiredEnvironment('GITSPACE_ROOT_PUBLIC_KEY')),
     onError: (error) => console.error('[gitspace-devices]', error),
   });
+  // A read a notice asked for that fails is asked for again with backoff until it succeeds; a healthy machine reads only
+  // when notified. A failed workspace read retries as an assignments read, which applies every ready checkout's version.
+  const noticeFailures = new Map<RelayNoticeTopic, number>();
+  const settled = async (topic: RelayNoticeTopic, read: Promise<void>) => { await read; noticeFailures.delete(topic); };
+  const noticeTargets: MachineNoticeTargets = {
+    assignments: () => settled('assignments', (async () => { await executorRuntime?.sync(); })()),
+    snapshot: async (workspaceId) => { await executorRuntime?.refreshWorkspace(workspaceId); },
+    release: () => settled('release', releases.nudge()),
+    devices: () => devices.invalidate(),
+    settings: () => settled('settings', settings.refresh()),
+    environment: (workspaceId) => authority.wakeLifecycleWatches(workspaceId),
+    failed: (topic, error) => {
+      console.error('[gitspace-notice]', topic, error);
+      const retry = topic === 'workspace.snapshot' ? 'assignments' : topic;
+      const attempt = (noticeFailures.get(retry) ?? 0) + 1;
+      noticeFailures.set(retry, attempt);
+      setTimeout(() => receiveMachineNotices([{ topics: [retry] }], noticeTargets), Math.min(60_000, 1000 * 2 ** attempt));
+    },
+  };
   // Account-owned releases build from this executor's ready canonical cache.
   const launcher = new DeploymentLauncher({
     attachments: () => executorRuntime?.journal.attachments() ?? [],
@@ -256,6 +276,11 @@ export async function startMachineRuntime() {
         }
       }
       if (preparingReplacement) return Response.json({ error: 'Provider replacement preparation is active' }, { status: 409 });
+      if (url.pathname === '/__control/notice') {
+        const { notices } = z.object({ notices: z.array(relayNoticeSchema).max(256) }).parse(await request.json());
+        receiveMachineNotices(notices, noticeTargets);
+        return Response.json({ received: true });
+      }
       if (url.pathname !== '/__control/code-version') return null;
       const input = z.object({ hash: z.string().optional() }).parse(await request.json());
       const hash = input.hash ?? 'unknown';
@@ -292,19 +317,6 @@ export async function startMachineRuntime() {
     },
   });
 
-  await authority.putMachineDefinition({
-    id: machineId,
-    label: process.env.GITSPACE_MACHINE_LABEL ?? machineId,
-    state: 'online',
-    rpcEndpoint: process.env.GITSPACE_PUBLIC_RPC_URL ?? `${http.url}/rpc`,
-    kind: existingMachine?.kind ?? 'physical',
-    provider: existingMachine?.provider ?? 'physical',
-    notes: existingMachine?.notes ?? '',
-    desiredState: existingMachine?.desiredState ?? 'online',
-    lifecycleRevision: existingMachine?.lifecycleRevision ?? 0,
-    operationId: existingMachine?.operationId ?? null,
-    error: existingMachine?.error ?? null,
-  });
   let stopping = false;
   const stop = async (): Promise<void> => {
     if (stopping) return;
@@ -322,7 +334,6 @@ export async function startMachineRuntime() {
     }
     releases.stop();
     await serviceManager.dispose();
-    await settings.stop();
     await executorRuntime?.close();
     await http.stop();
   };

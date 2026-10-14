@@ -17,6 +17,7 @@ import { createArtifactsCredentialHelper } from './artifacts-credential-helper.j
 import { daemonClientForProject } from '@gitspace/supervisor';
 import { checkoutGitLfs, gitLfsRestoreReceipt, hydrateGitLfs, type MachineGitLfsAccess } from './git-lfs.js';
 import { gitWorktreeClock, gitWorktreeEvents, watchGitWorktree, type GitWorktreeClock, type GitWorktreeEvents } from './git-worktree-watch.js';
+import { coalesced } from './coalesced.js';
 
 type RuntimeAssignment = z.infer<typeof RuntimeAssignmentSchema>;
 const PendingSnapshotSchema = z.object({ checkpoint: RuntimeGitCheckpointSchema, base: z.string().nullable() });
@@ -31,8 +32,12 @@ const failedDuring = (operation: RuntimeAttachmentFailure['operation']) => (erro
   throw error instanceof AttachmentOperationFailure ? error : new AttachmentOperationFailure(operation, error);
 };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+/** An observation change waits this long, so a burst of commands or setup steps costs one report. */
+const OBSERVATION_SETTLE_MS = 1_000;
 
-export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(workspaceId?: string): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; useWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
+/** Nothing here polls the cloud: `sync` reads the machine's assignments (startup, every relay connection, every
+ * `assignments` notice) and `refreshWorkspace` reads one workspace's cloud version (every `workspace.snapshot` notice). */
+export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(workspaceId?: string): Promise<void>; refreshWorkspace(workspaceId: string): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; useWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
 export async function createMachineExecutor(options: {
   environmentRoot: string; machineId: string; cloud: CloudRuntimeClient;
   managedSpaceRoot?: string;
@@ -87,21 +92,18 @@ export async function createMachineExecutor(options: {
   const clock = options.checkpointClock ?? gitWorktreeClock;
   const lfs = options.lfs;
   const watchers = new Map<string, { close(): void }>();
-  const subscriptions = new Map<string, { controller: AbortController; settled: Promise<void> }>();
   const cacheFor = (local: LocalAttachment): RuntimeCacheObservation => local.attachment.cache ?? RuntimeCacheObservationSchema.parse({ state: 'live', platform: process.platform, lastSyncAt: null, setup: [] });
   const saveCache = (local: LocalAttachment, cache: RuntimeCacheObservation): LocalAttachment => {
     const current = journal.attachment(local.attachment.attachmentId) ?? local;
     const updated = { ...current, attachment: { ...current.attachment, cache } };
     journal.installAttachment(updated);
+    observe(updated);
     return updated;
   };
   const synced = (local: LocalAttachment) => saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), lastSyncAt: new Date().toISOString(), unsent: 0 });
-  const stopFollowing = async (local: LocalAttachment) => {
+  const stopFollowing = (local: LocalAttachment) => {
     watchers.get(local.rootPath)?.close();
     watchers.delete(local.rootPath);
-    const subscription = subscriptions.get(keyOf(local.attachment));
-    subscription?.controller.abort();
-    await subscription?.settled;
   };
   const install = async (local: LocalAttachment, previous: GitIntermediateCheckpoint, checkpoint: GitIntermediateCheckpoint, incoming = false) => {
     await options.gitRemote.fetchCheckpoint({ binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` }, repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit });
@@ -169,10 +171,10 @@ export async function createMachineExecutor(options: {
     }
     try {
       const checkpoint = await stream.capture({ retryRejected: retryRejected.delete(key) });
-      if (journal.attachment(local.attachment.attachmentId)?.attachment.failure?.operation === 'publish') await clearFailure(local.attachment);
+      if (journal.attachment(local.attachment.attachmentId)?.attachment.failure?.operation === 'publish') clearFailure(local.attachment);
       return checkpoint;
     } catch (error) {
-      if (artifactsPublicationRejection(error)) await recordFailure(journal.attachment(local.attachment.attachmentId) ?? local, new AttachmentOperationFailure('publish', error));
+      if (artifactsPublicationRejection(error)) recordFailure(journal.attachment(local.attachment.attachmentId) ?? local, new AttachmentOperationFailure('publish', error));
       throw error;
     }
   };
@@ -198,44 +200,6 @@ export async function createMachineExecutor(options: {
     reconciling.set(local.rootPath, run);
     return run.finally(() => { if (reconciling.get(local.rootPath) === run) reconciling.delete(local.rootPath); });
   };
-  /** Waits for the cloud's next version after the applied one and applies it. */
-  const subscribe = (local: LocalAttachment) => {
-    const { attachment } = local;
-    const key = keyOf(attachment);
-    if (subscriptions.has(key)) return;
-    const controller = new AbortController();
-    const signal = AbortSignal.any([stopping.signal, controller.signal]);
-    const settled = (async () => {
-      while (!signal.aborted) {
-        const current = journal.attachment(attachment.attachmentId);
-        if (current?.attachment.generation !== attachment.generation || current.attachment.state !== 'ready') return;
-        const checkpoint = committedOf(key);
-        if (!checkpoint) return;
-        try {
-          const result = await options.cloud.call('runtime.assignments', {
-            machineId: options.machineId,
-            workspace: { projectId: attachment.projectId, workspaceId: attachment.workspaceId },
-            afterSnapshot: checkpoint.worktreeCommit,
-          }, RuntimeAssignmentsResultSchema, signal);
-          const assignment = result.assignments.find(item => item.grant.attachment.attachmentId === attachment.attachmentId && item.grant.attachment.generation === attachment.generation);
-          if (!assignment || assignment.grant.attachment.state !== 'ready') return;
-          const latest = journal.attachment(attachment.attachmentId);
-          if (latest?.attachment.generation === attachment.generation && latest.attachment.state === 'ready') await reconcile(latest, assignment.checkpoint);
-        } catch (error) {
-          if (signal.aborted) return;
-          if (artifactsPublicationRejection(error)) return;
-          console.error('[runtime-cache-follow]', message(error));
-          await new Promise<void>(resolve => {
-            const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); };
-            const timer = setTimeout(finish, 1000);
-            signal.addEventListener('abort', finish, { once: true });
-            if (signal.aborted) finish();
-          });
-        }
-      }
-    })().finally(() => { if (subscriptions.get(key)?.controller === controller) subscriptions.delete(key); });
-    subscriptions.set(key, { controller, settled });
-  };
   /** Publishes local edits shortly after the checkout changes. */
   const follow = async (local: LocalAttachment) => {
     if (watchers.has(local.rootPath)) return;
@@ -258,12 +222,34 @@ export async function createMachineExecutor(options: {
     watchers.set(local.rootPath, { close() { cancel?.(); watcher.close(); } });
   };
   /** Sync runs while the attachment is ready: the watcher sends local edits as they happen, each sync pass captures
-   * what the watcher cannot see (such as ignore-rule changes outside the checkout), and the subscription brings cloud changes. */
+   * what the watcher cannot see (such as ignore-rule changes outside the checkout), and `workspace.snapshot` notices
+   * bring cloud changes. */
   const keepSyncing = async (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null) => {
     await follow(local);
     const applied = committedOf(keyOf(local.attachment));
     await reconcile(local, incoming && applied && applied.worktreeCommit !== incoming.worktreeCommit ? incoming : undefined);
-    subscribe(local);
+  };
+  /** One read per workspace in flight; a notice during it costs one more read. */
+  const snapshotReads = new Map<string, () => Promise<void>>();
+  /** Each ready checkout of the workspace reads its assignment and applies a newer cloud version. */
+  const refreshWorkspace = (workspaceId: string): Promise<void> => {
+    let read = snapshotReads.get(workspaceId);
+    if (!read) {
+      read = coalesced(async () => {
+        for (const local of journal.attachments()) {
+          const { attachment } = local;
+          if (attachment.workspaceId !== workspaceId || attachment.state !== 'ready' || !committedOf(keyOf(attachment))) continue;
+          const result = await options.cloud.call('runtime.assignments', {
+            machineId: options.machineId, workspace: { projectId: attachment.projectId, workspaceId },
+          }, RuntimeAssignmentsResultSchema, stopping.signal);
+          const assignment = result.assignments.find(item => item.grant.attachment.attachmentId === attachment.attachmentId && item.grant.attachment.generation === attachment.generation);
+          const latest = journal.attachment(attachment.attachmentId);
+          if (assignment?.grant.attachment.state === 'ready' && latest?.attachment.generation === attachment.generation && latest.attachment.state === 'ready') await keepSyncing(latest, assignment.checkpoint);
+        }
+      });
+      snapshotReads.set(workspaceId, read);
+    }
+    return read();
   };
   const trustedBrowserKeys = new Map<string, Promise<CryptoKey>>();
   const browserDirectory = join(homedir(), '.gitspace-browser-profiles', createHash('sha256').update(options.machineId).digest('hex'));
@@ -312,7 +298,7 @@ export async function createMachineExecutor(options: {
     }
     const base = committedOf(key);
     if (args.op === 'restore') {
-      await stopFollowing(local);
+      stopFollowing(local);
       abandonCapture(key);
       try {
         await options.gitRemote.fetchCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef: args.checkpointRef, commit: args.commit });
@@ -325,7 +311,7 @@ export async function createMachineExecutor(options: {
     }
     // Discard: back the changes up to the cloud store, then reset the checkout to its base.
     if (!base) throw new Error('Nothing has synced on this machine yet, so there is no base to reset to');
-    await stopFollowing(local);
+    stopFollowing(local);
     abandonCapture(key);
     const checkpointRef = `refs/gitspace/backups/${options.machineId}/${Date.now()}`;
     const publication = await lfs?.publish(local.attachment.projectId, checkpointRef);
@@ -363,6 +349,10 @@ export async function createMachineExecutor(options: {
   };
   const executor = new MachineExecutor({
     machineId: options.machineId, journal, runCommand: runSupervisorCommand,
+    activeChanged: attachmentId => {
+      const local = journal.attachment(attachmentId);
+      if (local) observe(local);
+    },
     operations: {
       ...options.operations,
       sync_machine: (dispatch, local) => syncMachine(dispatch, local),
@@ -378,29 +368,62 @@ export async function createMachineExecutor(options: {
   const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'checkpoint', 'sync_machine', ...Object.keys(options.operations ?? {})];
   const browserCapabilities = (): string[] => options.browser?.enabled === true ? ['browser', 'browser_control', 'browser.headless'] : [];
   let stopped = false;
-  let syncing: Promise<Array<{ workspaceId: string; idle: Promise<void> }>> | null = null;
-  const sendHeartbeat = async (local: LocalAttachment, report: { clearFailure?: boolean } = {}) => {
+  /** Per attachment: the observation last accepted by the cloud, the settle timer of a pending change, and the one
+   * report in flight (a change during it costs one more report). */
+  const observations = new Map<string, { local: LocalAttachment; sent: string | null; settling: (() => void) | null; report: () => Promise<void> }>();
+  const reports = new Set<Promise<void>>();
+  /** Reports the attachment's observation (`runtime.heartbeat`) when it differs from the last one the cloud accepted. */
+  const report = async (attachmentId: string) => {
+    const entry = observations.get(attachmentId);
+    const stored = journal.attachment(attachmentId);
+    const local = stored?.attachment.generation === entry?.local.attachment.generation ? stored : entry?.local;
+    if (!entry || !local || stopped || local.attachment.state === 'detached') return;
     const key = keyOf(local.attachment);
     const row = snapshotRow(key);
     const materializedCommit = row?.committed && !row.pending && !rejectedSnapshot(key) ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)).worktreeCommit : null;
-    const failure = local.attachment.failure;
-    const observed = await options.cloud.call('runtime.heartbeat', RuntimeHeartbeatInputSchema.parse({
+    const failure = local.attachment.failure ?? null;
+    const observation = {
       projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
-      machineId: options.machineId, attachmentId: local.attachment.attachmentId, generation: local.attachment.generation,
-      executionObservation: { activeExecutions: executor.active(local.attachment.attachmentId).length, observedAt: new Date().toISOString(), materializedCommit },
+      machineId: options.machineId, attachmentId, generation: local.attachment.generation,
+      activeExecutions: executor.active(attachmentId).length, materializedCommit,
       browserCapabilities: browserCapabilities(),
       cache: { ...cacheFor(local), platform: process.platform, syncProblem: failure && (failure.operation === 'sync' || failure.operation === 'publish') ? failure.message : null },
       // A recorded failure stays reported until its operation succeeds and clears it.
-      ...(failure ? { failure } : report.clearFailure ? { failure: null } : {}),
+      failure,
+    };
+    const fingerprint = JSON.stringify(observation);
+    if (entry.sent === fingerprint) return;
+    const { activeExecutions, materializedCommit: _materialized, ...fields } = observation;
+    const observed = await options.cloud.call('runtime.heartbeat', RuntimeHeartbeatInputSchema.parse({
+      ...fields, executionObservation: { activeExecutions, observedAt: new Date().toISOString(), materializedCommit },
     }), RuntimeAttachmentReadyResultSchema, AbortSignal.any([stopping.signal, AbortSignal.timeout(15_000)]));
-    const current = journal.attachment(local.attachment.attachmentId);
+    entry.sent = fingerprint;
+    const current = journal.attachment(attachmentId);
     if (current?.attachment.generation !== local.attachment.generation) return;
     const remote = observed.attachment;
-    if (remote.attachmentId !== current.attachment.attachmentId || remote.generation !== current.attachment.generation || remote.machineId !== options.machineId) throw new Error('Heartbeat returned a different attachment');
-    if (current.attachment.state !== remote.state || current.attachment.heartbeatAt !== remote.heartbeatAt) journal.installAttachment({ ...current, attachment: { ...current.attachment, state: remote.state, heartbeatAt: remote.heartbeatAt } });
+    if (remote.attachmentId !== current.attachment.attachmentId || remote.generation !== current.attachment.generation || remote.machineId !== options.machineId) throw new Error('Observation report returned a different attachment');
+    if (current.attachment.state !== remote.state) journal.installAttachment({ ...current, attachment: { ...current.attachment, state: remote.state } });
   };
-  /** A failure is recorded on the attachment it affected and reported with its heartbeat; it never blocks anything. */
-  const recordFailure = async (assigned: LocalAttachment, error: unknown) => {
+  /** The attachment's observation may have changed: report it once it settles. */
+  const observe = (local: LocalAttachment) => {
+    const { attachmentId } = local.attachment;
+    let entry = observations.get(attachmentId);
+    if (!entry || entry.local.attachment.generation !== local.attachment.generation) {
+      entry?.settling?.();
+      entry = { local, sent: null, settling: null, report: coalesced(() => report(attachmentId)) };
+      observations.set(attachmentId, entry);
+    }
+    entry.local = local;
+    if (entry.settling || stopped) return;
+    const pending = entry;
+    pending.settling = clock.schedule(OBSERVATION_SETTLE_MS, () => {
+      pending.settling = null;
+      const sent = pending.report().catch((error: unknown) => console.error('[runtime-observation]', attachmentId, message(error))).finally(() => reports.delete(sent));
+      reports.add(sent);
+    });
+  };
+  /** A failure is recorded on the attachment it affected and reported with its observation; it never blocks anything. */
+  const recordFailure = (assigned: LocalAttachment, error: unknown) => {
     const { attachmentId, generation } = assigned.attachment;
     const stored = journal.attachment(attachmentId);
     const local = stored?.attachment.generation === generation ? stored : null;
@@ -409,16 +432,14 @@ export async function createMachineExecutor(options: {
     console.error('[runtime-attachments]', attachmentId, operation, failure.message);
     const failed = { ...(local ?? assigned), attachment: { ...(local ?? assigned).attachment, failure } };
     if (local) journal.installAttachment(failed);
-    if (stopped || failed.attachment.state === 'detached') return;
-    await sendHeartbeat(failed).catch((reportError: unknown) => console.error('[runtime-attachment-failure]', attachmentId, message(reportError)));
+    observe(failed);
   };
-  const clearFailure = async (attachment: RuntimeAttachment) => {
+  const clearFailure = (attachment: RuntimeAttachment) => {
     const local = journal.attachment(attachment.attachmentId);
     if (local?.attachment.generation !== attachment.generation || !local.attachment.failure) return;
     const cleared = { ...local, attachment: { ...local.attachment, failure: null } };
     journal.installAttachment(cleared);
-    if (stopped || cleared.attachment.state === 'detached') return;
-    await sendHeartbeat(cleared, { clearFailure: true }).catch((reportError: unknown) => console.error('[runtime-attachment-failure]', attachment.attachmentId, message(reportError)));
+    observe(cleared);
   };
   // A rejected snapshot is a standing publish failure until its input changes.
   for (const local of journal.attachments()) {
@@ -429,7 +450,7 @@ export async function createMachineExecutor(options: {
   }
   /** Stops sync and commands for an attachment the cloud released. The checkout stays on disk. */
   const release = async (local: LocalAttachment) => {
-    await stopFollowing(local);
+    stopFollowing(local);
     const key = keyOf(local.attachment);
     await captures.get(key)?.settle().catch(() => {});
     captures.delete(key);
@@ -446,8 +467,9 @@ export async function createMachineExecutor(options: {
       commit, prerequisitesComplete: true, capabilities: [...baseCapabilities, ...browserCapabilities()], lfsRestored: await gitLfsRestoreReceipt(local.rootPath, 'read'),
     }, RuntimeAttachmentReadyResultSchema, signal);
     const current = journal.attachment(attachment.attachmentId) ?? local;
-    const updated = { ...current, attachment: { ...current.attachment, state: ready.attachment.state, heartbeatAt: ready.attachment.heartbeatAt, capabilities: ready.attachment.capabilities } };
+    const updated = { ...current, attachment: { ...current.attachment, state: ready.attachment.state, capabilities: ready.attachment.capabilities } };
     journal.installAttachment(updated);
+    observe(updated);
     await gitLfsRestoreReceipt(local.rootPath, 'clear');
     return updated;
   };
@@ -463,6 +485,8 @@ export async function createMachineExecutor(options: {
     if (prior?.prerequisitesComplete && prior.attachment.generation === attachment.generation) {
       let local: LocalAttachment = { ...prior, executionSecret: assignment.grant.executionSecret, attachment: { ...attachment, failure: prior.attachment.failure, cache: cacheFor(prior) } };
       journal.installAttachment(local);
+      // The cloud's view may predate this process; an unchanged observation is not sent again.
+      observe(local);
       if (attachment.state === 'attaching') {
         const commit = committedOf(key)?.worktreeCommit ?? assignment.source?.commit;
         if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no synced version to report'));
@@ -531,8 +555,7 @@ export async function createMachineExecutor(options: {
         await options.prepareAttachment(prepared, prepareSignal, async step => {
           const current = journal.attachment(attachment.attachmentId) ?? prepared;
           const cache = cacheFor(current);
-          const updated = saveCache(current, { ...cache, state: 'setup', setup: [...cache.setup.filter(item => item.phase !== step.phase), step] });
-          await sendHeartbeat(updated).catch((error: unknown) => console.error('[runtime-setup-progress]', attachment.attachmentId, message(error)));
+          saveCache(current, { ...cache, state: 'setup', setup: [...cache.setup.filter(item => item.phase !== step.phase), step] });
         }).catch((error: unknown) => { setupFailure = error; });
       },
     }).catch(failedDuring('materialize'));
@@ -540,7 +563,7 @@ export async function createMachineExecutor(options: {
     if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no version to report'));
     const live = saveCache(local, { ...cacheFor(journal.attachment(attachment.attachmentId) ?? local), state: 'live' });
     const ready = await announceReady(live, commit, signal);
-    if (setupFailure !== null) await recordFailure(ready, new AttachmentOperationFailure('setup', setupFailure));
+    if (setupFailure !== null) recordFailure(ready, new AttachmentOperationFailure('setup', setupFailure));
     if (ready.attachment.state === 'ready') await keepSyncing(ready).catch(failedDuring('sync'));
   };
   /** Each assignment fails alone: its failure is recorded on its attachment and later assignments still run. */
@@ -550,10 +573,10 @@ export async function createMachineExecutor(options: {
       if (attachment.machineId !== options.machineId) throw new Error('Invalid remote attachment assignment');
       await processAssignment(assignment);
     } catch (error) {
-      await recordFailure({ ...assignment.grant, rootPath: canonicalPathOf(attachment), prerequisitesComplete: false }, error);
+      recordFailure({ ...assignment.grant, rootPath: canonicalPathOf(attachment), prerequisitesComplete: false }, error);
       return;
     }
-    if (journal.attachment(attachment.attachmentId)?.attachment.failure?.operation !== 'setup') await clearFailure(attachment);
+    if (journal.attachment(attachment.attachmentId)?.attachment.failure?.operation !== 'setup') clearFailure(attachment);
   };
   /** Work on one checkout stays serialized while different checkouts proceed independently. A lane busy with
    * earlier work keeps only the newest assignment per attachment and runs it next. */
@@ -578,44 +601,35 @@ export async function createMachineExecutor(options: {
     })();
     return lane.idle;
   };
+  /** One machine-wide read in flight; notices during it cost exactly one more read, which sees what they announced. */
+  const readAssignments = coalesced(async () => {
+    const { assignments, unavailable } = await options.cloud.call('runtime.assignments', { machineId: options.machineId }, RuntimeAssignmentsResultSchema, stopping.signal);
+    // The machine-wide list omits detached attachments; a local one missing from it was released by the cloud,
+    // unless its workspace could not be read.
+    const listed = new Set(assignments.map(item => item.grant.attachment.attachmentId));
+    const unread = new Set(unavailable);
+    const vanished = journal.attachments()
+      .filter(local => !listed.has(local.attachment.attachmentId) && local.attachment.state !== 'detached' && !unread.has(local.attachment.workspaceId))
+      .map(local => RuntimeAssignmentSchema.parse({ grant: { attachment: { ...local.attachment, state: 'detached' }, executionSecret: local.executionSecret }, source: null }));
+    return [...assignments, ...vanished].map(assignment => ({ workspaceId: String(assignment.grant.attachment.workspaceId), idle: enqueue(assignment) }));
+  });
+  let reading: Promise<unknown> = Promise.resolve();
   /** Dispatches every assignment; a workspace operation awaits only that workspace's lanes. */
-  const sync = (workspaceId?: string): Promise<void> => {
-    syncing ??= (async () => {
-      const { assignments } = await options.cloud.call('runtime.assignments', { machineId: options.machineId }, RuntimeAssignmentsResultSchema, stopping.signal);
-      for (const [key, subscription] of subscriptions) {
-        if (!assignments.some(item => keyOf(item.grant.attachment) === key && item.grant.attachment.state === 'ready')) subscription.controller.abort();
-      }
-      // The machine-wide list omits detached attachments; a local one missing from it was released by the cloud.
-      const listed = new Set(assignments.map(item => item.grant.attachment.attachmentId));
-      const vanished = journal.attachments()
-        .filter(local => !listed.has(local.attachment.attachmentId) && local.attachment.state !== 'detached')
-        .map(local => RuntimeAssignmentSchema.parse({ grant: { attachment: { ...local.attachment, state: 'detached' }, executionSecret: local.executionSecret }, source: null }));
-      return [...assignments, ...vanished].map(assignment => ({ workspaceId: String(assignment.grant.attachment.workspaceId), idle: enqueue(assignment) }));
-    })().finally(() => { syncing = null; });
-    return syncing.then(async work => { await Promise.all(work.filter(item => workspaceId === undefined || item.workspaceId === workspaceId).map(item => item.idle)); });
+  const sync = async (workspaceId?: string): Promise<void> => {
+    const read = readAssignments();
+    reading = read;
+    const work = await read;
+    await Promise.all(work.filter(item => workspaceId === undefined || item.workspaceId === workspaceId).map(item => item.idle));
   };
   /** Waits for in-flight work on one workspace's checkout, never for another workspace's long setup. */
   const settled = async (workspaceId: string) => {
-    await syncing;
+    await reading.catch(() => undefined);
     const roots = new Set(journal.attachments().filter(item => item.attachment.workspaceId === workspaceId).map(item => item.rootPath));
     await Promise.all([...roots].map(root => lanes.get(root)?.idle));
   };
-  let heartbeating: Promise<void> | null = null;
-  const heartbeat = (): Promise<void> => {
-    heartbeating ??= (async () => {
-      for (const local of journal.attachments()) {
-        if (stopped) return;
-        if (local.attachment.state === 'detached') continue;
-        try { await sendHeartbeat(local); }
-        catch (error) { console.error('[runtime-heartbeat]', local.attachment.attachmentId, message(error)); }
-      }
-    })().finally(() => { heartbeating = null; });
-    return heartbeating;
-  };
-  const heartbeatTimer = setInterval(() => { void heartbeat(); }, 10_000);
+  // The startup catch-up: assignments, and through them every ready checkout's cloud version.
   void sync().catch(error => console.error('[runtime-attachments]', message(error)));
-  const timer = setInterval(() => { void sync().catch(error => console.error('[runtime-attachments]', message(error))); }, 10_000);
-  return { executor, journal, sync,
+  return { executor, journal, sync, refreshWorkspace,
     useWorkspace: async workspaceId => {
       await settled(workspaceId);
       const local = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.state !== 'detached');
@@ -643,11 +657,10 @@ export async function createMachineExecutor(options: {
     close: async () => {
       stopped = true;
       stopping.abort();
-      clearInterval(timer);
-      clearInterval(heartbeatTimer);
       for (const entry of watchers.values()) entry.close();
+      for (const entry of observations.values()) entry.settling?.();
       try {
-        await Promise.allSettled([syncing, heartbeating, ...[...lanes.values()].map(lane => lane.idle), ...reconciling.values(), ...[...subscriptions.values()].map(subscription => subscription.settled), ...[...captures.values()].map(capture => capture.settle())]);
+        await Promise.allSettled([reading, ...reports, ...[...lanes.values()].map(lane => lane.idle), ...reconciling.values(), ...[...captures.values()].map(capture => capture.settle())]);
         await browser.close();
       } finally {
         await credentialHelper.close();

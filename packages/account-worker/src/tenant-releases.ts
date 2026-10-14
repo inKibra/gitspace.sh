@@ -23,6 +23,7 @@ import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { CredentialVaultDO } from './application.js';
 import { defaultMachineReleaseSchema } from '@gitspace/protocol/default-release';
 import { tenantPlatformJson } from './tenant-platform.js';
+import { notifyMachines } from './machine-notices.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
 
@@ -364,7 +365,10 @@ export class TenantReleasesDO extends DurableObject<Env> {
     return tenantDesiredSchema.parse({ worker: row.worker_sha, machine: row.machine_sha, frontend: row.frontend_sha, updatedAt: row.updated_at });
   }
 
+  /** Machines follow the machine and frontend selections; a change to either tells every machine to read its status. */
   private saveDesired(desired: TenantDesired): void {
+    const previous = this.desired();
+    if (previous.machine !== desired.machine || previous.frontend !== desired.frontend) this.ctx.waitUntil(notifyMachines(this.env, 'all', ['release']));
     this.ctx.storage.sql.exec(
       'INSERT INTO release_selection(id, worker_sha, machine_sha, frontend_sha, updated_at) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET worker_sha = excluded.worker_sha, machine_sha = excluded.machine_sha, frontend_sha = excluded.frontend_sha, updated_at = excluded.updated_at',
       desired.worker, desired.machine, desired.frontend, desired.updatedAt,

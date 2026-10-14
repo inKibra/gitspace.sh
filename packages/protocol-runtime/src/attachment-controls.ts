@@ -15,7 +15,8 @@ export const RuntimeAssignmentSchema = z.object({
   source: RuntimeAttachmentSourceSchema.extend({ remote: z.url().optional(), origin: z.string().nullable() }).nullable(),
   checkpoint: RuntimeGitCheckpointSchema.nullable().default(null),
 });
-export const RuntimeAssignmentsResultSchema = z.object({ assignments: z.array(RuntimeAssignmentSchema) });
+/** `unavailable` names workspaces whose assignments could not be read; a machine keeps its local attachments there. */
+export const RuntimeAssignmentsResultSchema = z.object({ assignments: z.array(RuntimeAssignmentSchema), unavailable: z.array(z.string()).default([]) });
 export const RuntimeAttachmentReadyInputSchema = RuntimeIdentitySchema.extend({
   machineId: RuntimeMachineIdSchema, attachmentId: z.string().min(1), generation: z.number().int().nonnegative(),
   commit, prerequisitesComplete: z.literal(true), capabilities: z.array(z.string()),

@@ -3,7 +3,8 @@ import { RuntimeToolDispatchSchema, isSubagentToolCallAllowed, type RuntimeToolD
 import type { ExecutorJournal, LocalAttachment } from './journal.js';
 import { executeMachineTool, type MachineToolOptions } from './tools.js';
 
-export type MachineExecutorOptions = MachineToolOptions & { machineId: string; journal: ExecutorJournal; onExecute?: (local: LocalAttachment, dispatch: RuntimeToolDispatch) => void };
+/** `activeChanged` fires when a command starts or ends on an attachment, so its observation can be reported. */
+export type MachineExecutorOptions = MachineToolOptions & { machineId: string; journal: ExecutorJournal; activeChanged?: (attachmentId: string) => void };
 type Run = { attachmentId: string; tool: string; controller: AbortController; done: Promise<RuntimeToolResult> };
 
 /** Runs a signed dispatch on its attachment's checkout and returns the result. Nothing is journaled: a machine restart
@@ -61,7 +62,6 @@ export class MachineExecutor {
     catch (error) { return { ...identity, status: 'failed', content: [], error: { code: 'rejected', message: error instanceof Error ? error.message : String(error) } }; }
     const remaining = Date.parse(dispatch.deadlineAt) - Date.now();
     if (remaining <= 0) return { ...identity, status: 'failed', content: [], error: { code: 'deadline', message: 'Execution deadline expired' } };
-    this.options.onExecute?.(local, dispatch);
     const controller = new AbortController();
     const aborted = AbortSignal.any([controller.signal, AbortSignal.timeout(Math.min(remaining, 2_147_483_647)), ...(signal ? [signal] : [])]);
     const done = executeMachineTool(dispatch, local, aborted, this.options).then(
@@ -72,6 +72,10 @@ export class MachineExecutor {
       });
     const key = Symbol(dispatch.attemptId);
     this.running.set(key, { attachmentId: local.attachment.attachmentId, tool: dispatch.tool, controller, done });
-    try { return await done; } finally { this.running.delete(key); }
+    this.options.activeChanged?.(local.attachment.attachmentId);
+    try { return await done; } finally {
+      this.running.delete(key);
+      this.options.activeChanged?.(local.attachment.attachmentId);
+    }
   }
 }

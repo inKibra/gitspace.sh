@@ -22,5 +22,8 @@ export class BrowserRelayFixture extends DurableObject<FixtureEnv> {
     }
     return new Response('Not found', { status: 404 });
   }
+  webSocketMessage(socket: WebSocket, data: string | ArrayBuffer) { return this.browser.webSocketMessage(socket, data); }
+  webSocketClose(socket: WebSocket) { this.browser.webSocketClose(socket); }
+  webSocketError(socket: WebSocket) { this.browser.webSocketError(socket); }
 }
 export default { fetch(request: Request, env: FixtureEnv) { return env.RELAY.get(env.RELAY.idFromName('account')).fetch(request); } };

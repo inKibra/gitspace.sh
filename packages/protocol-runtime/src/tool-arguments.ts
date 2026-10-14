@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { RuntimeContentSchema, RuntimeJsonSchema } from './base.js';
 import { RuntimeJobHandleSchema } from './execution-contracts.js';
-import { RuntimeDispatchSelectionSchema } from './scheduling.js';
+import { RuntimeDispatchSelectionSchema, RuntimeMachineNeedsSchema } from './scheduling.js';
 import { LifecycleRunRequestSchema, LifecycleMutationSchema } from '@gitspace/protocol-environment';
 import { DaemonStartSpecSchema } from '@gitspace/supervisor/protocol';
 
@@ -69,7 +69,12 @@ export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof Ru
   return false;
 }
 export const RuntimeWorkspaceStatusArgumentsSchema = z.object({}).strict();
-export const RuntimeMachinesArgumentsSchema = z.union([z.object({ op: z.literal('list').default('list') }), z.object({ op: z.literal('detach'), attachmentId: path, generation: z.number().int().nonnegative() })]);
+export const RuntimeMachinesArgumentsSchema = z.union([
+  z.object({ op: z.literal('list').default('list') }),
+  z.object({ op: z.literal('detach'), attachmentId: path, generation: z.number().int().nonnegative() }),
+  /** `machine` is an id or label; omitted, the account default machine, else any online machine offering `needs`. */
+  z.object({ op: z.literal('attach'), machine: z.string().min(1).optional(), needs: RuntimeMachineNeedsSchema.optional() }).strict(),
+]);
 /** Agent-facing sync control. `on` selects the machine; omitted, the single ready machine is used. */
 export const RuntimeSyncArgumentsSchema = z.discriminatedUnion('method', [
   RuntimeDispatchSelectionSchema.pick({ on: true }).extend({ method: z.literal('status') }),

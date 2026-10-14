@@ -4,17 +4,20 @@ import { expect, test } from 'vitest';
 import { z } from 'zod';
 import { browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization } from '@gitspace/protocol-runtime';
 import { AccountBrowserRelay } from '../src/browser-relay.js';
+import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
 
 type Identity = { key: CryptoKeyPair; publicKey: string };
 type Chrome = { pairingId: string; generation: number; socket: WebSocket; operations: string[]; revoked: string[]; failRevoke: boolean; reconnect(): Promise<void>; pauseAuthorization(): { reached: Promise<void>; release(): void } };
 async function keys() { const key = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']); return { key, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', key.publicKey))) }; }
 function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socket.addEventListener('message', event => resolve(JSON.parse(String(event.data))), { once: true })); }
-async function fixture(run: (relay: AccountBrowserRelay, chrome: (name: string) => Promise<Chrome>, root: Identity, restart: () => AccountBrowserRelay) => Promise<void>) {
-  await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (_instance, state) => {
-    let relay = new AccountBrowserRelay(state, { ACCOUNT_ID: 'account' });
+/** `restart` swaps in a relay object with no memory over the same storage and sockets; the live relay keeps serving
+ * the extension sockets, as a relay woken from hibernation would. */
+async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string) => Promise<Chrome>, root: Identity, restart: () => HostedBrowserRelay) => Promise<void>) {
+  await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (instance, state) => {
+    let relay: HostedBrowserRelay = hostedBrowserRelay(instance);
     const root = await keys(), sockets: WebSocket[] = [];
     async function chrome(name: string) {
-      const pairing = await relay.pair({ algorithm: 'Ed25519', accountId: 'account', publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+      const pairing = await relay.pair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
       const response = await relay.fetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': `192.0.2.${sockets.length + 1}` } }));
       if (!response.webSocket) throw new Error('Missing socket');
       const socket = response.webSocket, challenge = frame(socket); sockets.push(socket); socket.accept();
@@ -53,13 +56,13 @@ async function fixture(run: (relay: AccountBrowserRelay, chrome: (name: string) 
       listen(socket);
       return browser;
     }
-    try { await run(relay, chrome, root, () => { relay = new AccountBrowserRelay(state, { ACCOUNT_ID: 'account' }); return relay; }); } finally { for (const socket of sockets) socket.close(); }
+    try { await run(relay, chrome, root, () => { relay = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID }); return relay; }); } finally { for (const socket of sockets) socket.close(); }
   });
 }
 async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project') {
   const workspace = await keys(), expiresAt = new Date(Date.now() + 60_000).toISOString(), issuedAt = new Date().toISOString();
-  const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: 'account', projectId, workspaceId, publicKey: workspace.publicKey, issuedAt, expiresAt }, root.key.privateKey);
-  const placement = { kind: 'account-relay' as const, accountId: 'account', pairingId: pairing.pairingId, generation: pairing.generation, ...(pairing.approvalId ? { approvalId: pairing.approvalId } : {}) };
+  const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: env.ACCOUNT_ID, projectId, workspaceId, publicKey: workspace.publicKey, issuedAt, expiresAt }, root.key.privateKey);
+  const placement = { kind: 'account-relay' as const, accountId: env.ACCOUNT_ID, pairingId: pairing.pairingId, generation: pairing.generation, ...(pairing.approvalId ? { approvalId: pairing.approvalId } : {}) };
   const grant = await signRuntimeAccountBrowserGrant({ projectId, workspaceId, placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'relay', origins: ['example.com'], expiresAt }, workspace.key.privateKey, authority);
   const attemptId = crypto.randomUUID();
   return signRuntimeAccountBrowserAuthorization({ scope: { projectId, workspaceId, placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt, expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }, grant } }, workspace.key.privateKey, authority);

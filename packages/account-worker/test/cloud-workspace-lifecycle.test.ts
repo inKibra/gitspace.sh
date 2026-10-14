@@ -1,4 +1,4 @@
-import { env, runInDurableObject, SELF } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, signDeviceInvite, type DeviceCapability } from '@gitspace/protocol';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
@@ -7,14 +7,17 @@ import { RuntimeAttachmentSchema, RuntimeIdentitySchema } from '@gitspace/protoc
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { createBrowserClient } from 'result-rpc/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Result } from 'better-result';
 import { tenantRootPrivateKey } from './setup.js';
 import { createAccountWorkspaceRuntime } from '../src/account-runtime-host.js';
+import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { PlanDoc, QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
 
 afterEach(() => vi.restoreAllMocks());
 
 const commit = (digit: string) => digit.repeat(40);
+const noAttach = async (): Promise<never> => { throw new Error('Unexpected machine attach'); };
 
 /** Artifacts is the only service outside the account: refs per repository, forks, branch writes and deletions. */
 function cloudArtifacts() {
@@ -103,7 +106,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'ok', value: { ...identity, documents: { 'gitspace.workspace': { phase: 'plan' } } } });
     expect(await env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`).runtimeRepositoryCheckpoint(identity)).toMatchObject({ headCommit: commit('1'), branch: 'feature/cloud' });
     await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), async (_instance, state) => {
-      const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {});
+      const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach);
       expect((await reopened.snapshot()).documents['gitspace.workspace']).toMatchObject({ phase: 'plan' });
       await reopened.wake();
       await reopened.harness.close(BACKGROUND_CONTEXT);
@@ -118,6 +121,43 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(artifacts.forks).toContainEqual({ workspaceId: stacked.value.workspace.id, source: `workspace-${workspaceId}` });
     expect(artifacts.setBranch).toHaveBeenCalledWith(`workspace-${stacked.value.workspace.id}`, 'stacked', commit('1'));
     expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree').map(workspace => workspace.name).sort()).toEqual(['Cloud feature', 'Stacked']);
+  });
+
+  it('indexes an existing snapshot for code_search from the runtime alarm, with no request searching first', async () => {
+    const { userId, client, project } = await cloudProject('Indexed in cloud');
+    const created = await client.workspace.create({ projectId: project.id, name: 'Indexed', branch: 'indexed', phase: 'plan', sourceKind: 'base', sourceRef: '' });
+    if (created.status === 'error') throw created.error;
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.value.workspace.id });
+    const trees = new Map<string, ArtifactsTreeEntry[]>([
+      [commit('9'), [{ name: 'README.md', type: 'blob', mode: '100644', hash: commit('a') }, { name: 'src', type: 'tree', mode: '40000', hash: commit('b') }]],
+      [commit('b'), [{ name: 'main.ts', type: 'blob', mode: '100644', hash: commit('c') }]],
+    ]);
+    const blobs = new Map([[commit('a'), 'GitSpace readme\n'], [commit('c'), 'export const needle = 1;\n']]);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'reader').mockImplementation(() => ({ readTree: async oid => trees.get(oid) ?? null, readBlob: async oid => { const text = blobs.get(oid); return text === undefined ? null : new Blob([text]); }, readCommit: async () => null, log: async () => [], close: async () => {} }));
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`);
+    // Runtime alarms run until the index serves `tree`; nothing searches meanwhile.
+    const indexed = async (tree: string) => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await runDurableObjectAlarm(space);
+        if (await runInDurableObject(space, (_instance, state) => state.storage.sql.exec<{ served_tree: string | null }>('SELECT served_tree FROM code_search_state').one().served_tree) === tree) return;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      throw new Error(`The index never served ${tree}`);
+    };
+    // Opening the runtime and initializing its source snapshot is all a workspace does before an agent searches.
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ worktreeTree: commit('9') });
+    await indexed(commit('9'));
+    // A cloud write publishes a snapshot; the next alarm indexes only what changed.
+    trees.set(commit('8'), [...trees.get(commit('9')) ?? [], { name: 'NEW.md', type: 'blob', mode: '100644', hash: commit('d') }]);
+    blobs.set(commit('d'), 'new file\n');
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readFile').mockResolvedValue(null);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotPaths').mockResolvedValue(['README.md', 'src/main.ts']);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'writeSnapshot').mockImplementation(async input => Result.ok({ ...input.previous, worktreeCommit: commit('7'), trackedWorktreeCommit: commit('7'), worktreeTree: commit('8') }));
+    await space.runtimeWriteEnvironmentBundle(identity, JSON.stringify({ version: 1, defaultProfile: 'base', profiles: { base: {} } }));
+    await indexed(commit('8'));
+    await runInDurableObject(space, (_instance, state) => {
+      expect(state.storage.sql.exec('SELECT path FROM code_search_file WHERE until IS NULL ORDER BY path').toArray()).toEqual([{ path: 'NEW.md' }, { path: 'README.md' }, { path: 'src/main.ts' }]);
+    });
   });
 
   it('refuses invalid branches and unresolvable sources before anything enters the catalog', async () => {
@@ -224,7 +264,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
     await space.runtimeAttachments(identity);
     const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'cache-a', machineId: 'gone-machine', generation: 1, role: 'cache', state: 'ready',
-      checkout: { kind: 'shared', branch: 'archived' }, capabilities: [], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
+      checkout: { kind: 'shared', branch: 'archived' }, capabilities: [], updatedAt: new Date().toISOString(), online: true });
     await runInDurableObject(space, (_instance, state) => {
       state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
     });
@@ -255,6 +295,64 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
   });
 
+  it('archives and deletes workspace first: the workspace is fenced before its project records the change', async () => {
+    const { userId, client, project, authority } = await cloudProject('Workspace first');
+    const created = await client.workspace.create({ projectId: project.id, name: 'Fenced', branch: 'fenced', sourceKind: 'base', sourceRef: '' });
+    if (created.status === 'error') throw created.error;
+    const workspaceId = created.value.workspace.id;
+    const identity = { projectId: project.id, workspaceId };
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
+    await space.runtimeAttachments(identity);
+    const definition = async () => {
+      const current = await authority.getWorkspace(workspaceId);
+      if (!current) throw new Error('Workspace definition is missing');
+      return current;
+    };
+    // A project-side write the workspace never saw makes the project refuse the workspace's record, so the change
+    // fails at its last step, after the workspace applied it.
+    const bypass = async () => {
+      const { revision, archivedAt: _archivedAt, createdAt: _createdAt, updatedAt: _updatedAt, ...fields } = await definition();
+      await authority.putWorkspace({ ...fields, name: `${fields.name}!`, expectedRevision: revision });
+    };
+
+    const active = await definition();
+    await bypass();
+    await expect(runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.archiveWorkspace(active))).rejects.toThrow('revision conflict');
+    await expect(runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.runtimeAccess(identity, true))).rejects.toThrow('Archived runtime state is read-only');
+    expect(await definition()).toMatchObject({ lifecycle: 'active' });
+    expect(await client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedRevision: (await definition()).revision, expectedGeneration: null })).toMatchObject({ status: 'ok', value: { lifecycle: 'archived' } });
+
+    const archived = await definition();
+    await bypass();
+    expect(await space.hasCloudRuntime()).toBe(true);
+    await expect(runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.deleteWorkspace(archived))).rejects.toThrow('revision conflict');
+    await expect(runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.runtimeAccess(identity, false))).rejects.toThrow('Runtime workspace is unavailable');
+    expect(await space.hasCloudRuntime()).toBe(false);
+    expect(await definition()).toMatchObject({ lifecycle: 'archived' });
+    expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'ok', value: { workspaceId, deleted: true } });
+    expect(await authority.getWorkspace(workspaceId)).toBeNull();
+  });
+
+  it('stores the status its runtime publishes and serves it without opening the runtime or reading the project', async () => {
+    const { userId, client, project } = await cloudProject('Stored status');
+    const created = await client.workspace.create({ projectId: project.id, name: 'Status', branch: 'status', sourceKind: 'base', sourceRef: '' });
+    if (created.status === 'error') throw created.error;
+    const workspaceId = created.value.workspace.id;
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
+    expect(await space.runtimeWorkspaceStatus()).toBeNull();
+    expect(await client.runtime.snapshot(RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId }))).toMatchObject({ status: 'ok' });
+    const published = await space.runtimeWorkspaceStatus();
+    if (!published) throw new Error('Opening the runtime publishes its status');
+    expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, status: published }] } });
+    await runInDurableObject(space, async (_instance, state) => {
+      // The published snapshot is gone; only the stored summary remains, and the project is unreachable.
+      state.storage.sql.exec("DELETE FROM runtime_replica WHERE kind='snapshot'");
+      const local = new SpaceAuthorityDO(state, { ...env, PROJECT_AUTHORITY: new Proxy(env.PROJECT_AUTHORITY, { get() { throw new Error('ProjectAuthority was consulted'); } }) });
+      await state.blockConcurrencyWhile(async () => {});
+      expect(local.runtimeWorkspaceStatus()).toEqual(published);
+    });
+  });
+
   it('switches an opened clean base checkout and keeps the new branch after reopening', async () => {
     const { userId, client, project, artifacts, authority } = await cloudProject('Opened base');
     // A branch introduced after the base fork must bring its objects into that existing repository.
@@ -269,7 +367,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'develop', sourceRef: 'develop', sourceCommit: commit('2') });
     expect(artifacts.refs.get(`workspace-${project.id} refs/heads/develop`)).toBe(commit('2'));
     await runInDurableObject(space, async (_instance, state) => {
-      const reopened = await createAccountWorkspaceRuntime(state, env, RuntimeIdentitySchema.parse(identity), async () => {});
+      const reopened = await createAccountWorkspaceRuntime(state, env, RuntimeIdentitySchema.parse(identity), async () => {}, noAttach);
       expect(await reopened.cloudFiles.initializeSnapshot()).toMatchObject({ branch: 'develop', headCommit: commit('2') });
       await reopened.wake();
       await reopened.harness.close(BACKGROUND_CONTEXT);
@@ -338,7 +436,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`);
     await runInDurableObject(space, async (_instance, state) => {
       const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`);
-      const runtime = await createAccountWorkspaceRuntime(state, env, identity, async () => {});
+      const runtime = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach);
       expect((await runtime.harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT))?.phase).toBe('review');
       await runtime.session(undefined, { type: 'setWorkspacePhase', phase: 'plan' }, true);
       expect((await authority.listWorkspaces()).find(workspace => workspace.id === identity.workspaceId)?.phase).toBe('plan');
@@ -353,7 +451,7 @@ describe('cloud workspace lifecycle with no machines', () => {
       expect((await authority.listWorkspaces()).find(workspace => workspace.id === identity.workspaceId)?.phase).toBe('code');
       await runtime.wake();
       await runtime.harness.close(BACKGROUND_CONTEXT);
-      const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {});
+      const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach);
       expect((await reopened.harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT))?.phase).toBe('code');
       await reopened.wake();
       await reopened.harness.close(BACKGROUND_CONTEXT);
@@ -361,11 +459,13 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('archives, restores, rebases and deletes a project in the cloud; the GitSpace project refuses archive and delete', async () => {
-    const { client, project, artifacts, authority, index } = await cloudProject('Project lifecycle');
+    const { userId, client, project, artifacts, authority, index } = await cloudProject('Project lifecycle');
     artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
     const created = await client.workspace.create({ projectId: project.id, name: 'Child', branch: 'child', sourceKind: 'base', sourceRef: '' });
     if (created.status === 'error') throw created.error;
     const revision = async () => (await authority.getProject())?.revision ?? -1;
+    const child = env.SPACE_AUTHORITY.getByName(`${userId}:${created.value.workspace.id}`);
+    const childIdentity = { projectId: project.id, workspaceId: created.value.workspace.id };
 
     expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: await revision(), baseBranch: 'bad..branch' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('not a valid branch name') } } });
     expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: await revision(), baseBranch: 'missing' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Branch missing does not exist') } } });
@@ -377,8 +477,11 @@ describe('cloud workspace lifecycle with no machines', () => {
 
     expect(await client.project.delete({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Archive') } } });
     expect(await client.project.archive({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok', value: { lifecycle: 'archived', archivedAt: expect.any(Date) } });
+    // Each workspace object learned the archive from the worker and refuses writes on its own.
+    await expect(runInDurableObject(child, (instance: SpaceAuthorityDO) => instance.runtimeAccess(childIdentity, true))).rejects.toThrow('Archived runtime state is read-only');
     expect((await index.list('archived')).map(entry => entry.id)).toContain(project.id);
     expect(await client.project.restore({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok', value: { lifecycle: 'active', archivedAt: null } });
+    await expect(child.runtimeAccess(childIdentity, true)).resolves.toMatchObject({ projectLifecycle: 'active' });
     expect(await client.project.archive({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok' });
     const workspaces = (await authority.listWorkspaces()).map(workspace => workspace.id);
     expect(await client.project.delete({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok', value: { projectId: project.id, deleted: true } });

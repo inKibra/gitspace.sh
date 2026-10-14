@@ -121,6 +121,16 @@ relay = relayUrl
         Buffer.from(requiredEnvironment('GITSPACE_MACHINE_SIGNING_PRIVATE_KEY'), 'base64'),
       ),
       localOrigin: `http://${environment.options.rpcHost}:${environment.options.rpcPort}`,
+      // The running generation fetches what each notice names; one that misses a notice catches up when it starts.
+      onNotice: async (notices) => {
+        const response = await fetch(`http://${environment.options.rpcHost}:${environment.options.rpcPort}/__control/notice`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${process.env.GITSPACE_CONTROL_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ notices }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) throw new Error(`Machine notice delivery answered ${response.status}`);
+      },
       onError: (error) => console.error('[gitspace-relay]', new Date().toISOString(), error),
     })
   : null;

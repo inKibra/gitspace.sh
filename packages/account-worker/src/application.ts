@@ -118,6 +118,7 @@ import { accountAccessResponse, accountStatus, activeAccount, authorizeControl, 
 import { DEVICE_AUTHORITY_UNAVAILABLE, DeviceVerifier, invalidateDeviceAuthority, withDeviceAuthority, type DeviceRegistrySnapshot, type MachineCredential } from './device-authority.js';
 import { machineProviderFor } from './machine-providers.js';
 import { releaseMachineAttachments } from './runtime-machine-loss.js';
+import { notifyMachines } from './machine-notices.js';
 import {
   McpConnectionNotFoundError,
   McpConnectionRevisionConflictError,
@@ -380,6 +381,11 @@ export class CredentialVaultDO extends DurableObject<Env> {
   private readonly activeLoginAttempts = new Set<string>();
   /** Pi sign-in flows run in this object's memory; a restart abandons them (the row then reports an interruption). */
   private readonly upstreamLogins = new Map<string, UpstreamLogin>();
+  /** A device credential changed: this isolate's registry drops its view, and connected machines refetch their device list. */
+  private deviceCredentialsChanged(): void {
+    invalidateDeviceAuthority();
+    this.ctx.waitUntil(notifyMachines(this.env, 'all', ['devices']));
+  }
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.inferenceChanges = new DurableChangeLog(ctx.storage);
@@ -700,7 +706,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       input.vaultKey,
       new Date().toISOString(),
     );
-    invalidateDeviceAuthority();
+    this.deviceCredentialsChanged();
     return { status: 'ok', value: { userId: input.userId } };
   }
 
@@ -761,7 +767,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         updated_at = excluded.updated_at
     `, grant.machineId, grant.signingPublicKey, grant.exchangePublicKey, JSON.stringify(grant.capabilities), grant.generation, new Date().toISOString());
     this.ctx.storage.sql.exec('UPDATE credential_devices SET grant_json = ? WHERE machine_id = ?', JSON.stringify(input), grant.machineId);
-    invalidateDeviceAuthority();
+    this.deviceCredentialsChanged();
     return { status: 'ok', value: { machineId: grant.machineId, generation: grant.generation } };
   }
   registerManagedDevice(input: {
@@ -792,7 +798,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         generation = excluded.generation, updated_at = excluded.updated_at
     `, input.machineId, input.signingPublicKey, input.exchangePublicKey, JSON.stringify(input.capabilities), generation, new Date().toISOString());
     this.ctx.storage.sql.exec('UPDATE credential_devices SET grant_json = NULL WHERE machine_id = ?', input.machineId);
-    invalidateDeviceAuthority();
+    this.deviceCredentialsChanged();
     return { status: 'ok', value: { machineId: input.machineId, generation } };
   }
   rootPublicKey(): string | null {
@@ -1117,7 +1123,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
   }
   removeManagedDevice(machineId: string): void {
     this.ctx.storage.sql.exec("UPDATE credential_devices SET capabilities_json = '[]', updated_at = ? WHERE machine_id = ?", new Date().toISOString(), machineId);
-    invalidateDeviceAuthority();
+    this.deviceCredentialsChanged();
   }
 
   /**
@@ -1164,7 +1170,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     } catch {
       return publicError('DEVICE_INVITE_USED', 'Device invite was already redeemed');
     }
-    invalidateDeviceAuthority();
+    this.deviceCredentialsChanged();
     return { status: 'ok', value: { deviceId: input.binding.deviceId, expiresAt: deviceGrantExpiresAt(record) } };
   }
   private deviceGrant(deviceId: string): DeviceGrantRecord | null {
@@ -1199,7 +1205,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       'UPDATE device_grants SET revoked_at = ?, generation = generation + 1, updated_at = ? WHERE device_id = ?',
       revokedAt, new Date(revokedAt).toISOString(), deviceId,
     );
-    invalidateDeviceAuthority();
+    this.deviceCredentialsChanged();
     return { status: 'ok', value: { deviceId, revokedAt } };
   }
 

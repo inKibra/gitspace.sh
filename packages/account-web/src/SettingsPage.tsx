@@ -59,7 +59,7 @@ import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBr
 type Section = 'profile' | 'runtime' | 'runtime-providers' | 'git' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
 const SETTINGS_TABS = ['Models', 'Agents', 'Providers', 'Advanced'] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
-export interface SettingsMachineView { id: string; label: string; state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error'; kind: 'physical' | 'sandbox'; provider: 'physical' | 'cloudflare-sandbox'; notes: string; desiredState: 'online' | 'offline' | 'removed'; lifecycleRevision: number; operationId: string | null; error: string | null }
+export interface SettingsMachineView { id: string; label: string; state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error'; kind: 'physical' | 'sandbox'; provider: 'physical' | 'cloudflare-sandbox'; notes: string; desiredState: 'online' | 'offline' | 'removed'; lifecycleRevision: number; operationId: string | null; error: string | null; agentsMayAttach?: boolean }
 export interface RuntimeSettingView {
   path: string;
   tab: string;
@@ -86,6 +86,7 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   onSave: (settings: UserSettings) => Promise<void>;
   onSetRuntimeSetting: (path: string, value: RuntimeSettingValue) => Promise<void>;
   onUpdateMachine: (machineId: string, notes: string) => Promise<void>;
+  onSetMachineAgentAttach: (machineId: string, agentsMayAttach: boolean) => Promise<void>;
   onCreateSandbox: (image?: CloudImageSelection) => Promise<void>;
   cloudImages: readonly CloudImageState[];
   cloudImageDefault: CloudImageChoice | null;
@@ -697,7 +698,7 @@ function CloudImagePicker({ value, onChange }: { value: CloudImageSelection; onC
   </div>;
 }
 
-export function MachineSettings({ settings, onChange, machines, onUpdateMachine, onCreateSandbox, onControlMachine, onDestroyMachine, cloudImages, cloudImageDefault, cloudImageError, onChangeCloudImage, onRecoverCloudImage, onSetCloudImageDefault }: Pick<SettingsPageProps, 'settings' | 'onChange' | 'machines' | 'onUpdateMachine' | 'onCreateSandbox' | 'onControlMachine' | 'onDestroyMachine' | 'cloudImages' | 'cloudImageDefault' | 'cloudImageError' | 'onChangeCloudImage' | 'onRecoverCloudImage' | 'onSetCloudImageDefault'>) {
+export function MachineSettings({ settings, onChange, machines, onUpdateMachine, onSetMachineAgentAttach, onCreateSandbox, onControlMachine, onDestroyMachine, cloudImages, cloudImageDefault, cloudImageError, onChangeCloudImage, onRecoverCloudImage, onSetCloudImageDefault }: Pick<SettingsPageProps, 'settings' | 'onChange' | 'machines' | 'onUpdateMachine' | 'onSetMachineAgentAttach' | 'onCreateSandbox' | 'onControlMachine' | 'onDestroyMachine' | 'cloudImages' | 'cloudImageDefault' | 'cloudImageError' | 'onChangeCloudImage' | 'onRecoverCloudImage' | 'onSetCloudImageDefault'>) {
   const shape = useShape();
   const [setup, setSetup] = useState(false);
   const [sandboxSetup, setSandboxSetup] = useState(false);
@@ -773,6 +774,7 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
           <CardFooter>
             <Badge color={machine.state === 'online' ? 'green' : machine.state === 'error' ? 'amber' : 'gray'}>{machine.state === 'sleeping' ? 'stopping' : machine.state === 'resuming' ? 'starting' : machine.provider !== 'physical' && machine.state === 'offline' && machine.desiredState === 'offline' ? 'stopped' : machine.state}</Badge>
             <Button variant="ghost" onClick={() => { setEditing(machine.id); setNotes(machine.notes); }}>Notes</Button>
+            <Switch label="Agents may attach" checked={machine.agentsMayAttach !== false} disabled={busy} onToggle={() => void run(machine.id, () => onSetMachineAgentAttach(machine.id, machine.agentsMayAttach === false))} />
             {machine.kind === 'sandbox' ? <Button variant="ghost" disabled={active || busy || pending.has('image') || machine.state !== 'online'} onClick={() => { setImageTarget(machine.id); setImageRecovery(null); setSelection({ kind: 'platform-default' }); }}>Change image</Button> : null}
             {machine.provider !== 'physical' && (machine.state === 'online' || machine.state === 'offline' || machine.state === 'error') ? <Button variant="ghost" disabled={active || busy} onClick={() => {
               if (machine.state === 'online' && !window.confirm(`Stop ${machine.label}?\n\nGitSpace saves supported workspace state before stopping. If saving fails, the machine stays online.\n\nStopping discards installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured, including files in the machine's home directory. Start restores saved workspaces in a fresh machine environment, not the old disk.`)) return;
