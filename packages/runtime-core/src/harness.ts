@@ -64,7 +64,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
     const extra = await options.tools.instructions(String(input.conversationId), context);
     return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'This workspace is in plan mode: in general, use it for planning rather than coding.' : '', extra].filter(Boolean).join('\n\n');
-  } }], hooks: [hook(GenerationTask, { async beforeRequest(_input, runtime, context) {
+  } }], hooks: [hook(GenerationTask, { async beforeRequest(input, runtime, context) {
     if ((await runtime.snapshot(ConversationLifecycleDoc, runtime.conversationId, context))?.stopped) throw new Error('Conversation is stopped; only an explicit user message may resume it');
     await bindCronGeneration(harness, runtime, context);
     const live = await runtime.snapshot(LiveDoc, runtime.conversationId, context);
@@ -87,6 +87,10 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
         delivered.delivered.push(notice.requestId);
       }
     }, context);
+    // Anthropic rejects an error tool result with no content; older entries recorded failures as empty or blank text.
+    const empty = (message: (typeof input.messages)[number]) => message.role === 'toolResult' && message.isError && !message.content.some(item => item.type !== 'text' || item.text.trim() !== '');
+    if (!input.messages.some(empty)) return undefined;
+    return { messages: input.messages.map(message => empty(message) ? { ...message, content: [{ type: 'text' as const, text: '(no output)' }] } : message) };
   } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Compaction requires an invocation abort signal');

@@ -9,6 +9,7 @@ import { admitProfileProviders } from './admission.js';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
 import { withPublishedCatalog } from './published-catalog.js';
+import { claudeCodeFetch } from './claude-code-request.js';
 export * from './selection.js';
 export * from './catalog.js';
 export * from './admission.js';
@@ -16,9 +17,6 @@ export * from './models-store.js';
 export * from './run-models.js';
 export * from './helpers.js';
 export * from './published-catalog.js';
-
-/** Never forward an admitted credential across an HTTP redirect. */
-const cloudFetch: typeof fetch = (input, init) => fetch(input, { ...init, redirect: 'manual' });
 
 export type VaultModelsOptions = {
   profileId: string;
@@ -62,6 +60,7 @@ function requestAuth(resolved: ResolvedCredential): ModelAuth {
 
 /** Each dispatch gets its own Models/auth object; concurrent accounts never share a credential slot. */
 export async function createVaultModels(options: VaultModelsOptions): Promise<VaultModels> {
+  const cloudFetch = await claudeCodeFetch(options.profileId);
   const source = options.providers ?? [...builtinProviders().map(provider => withPublishedCatalog(provider)), ...createLegacyCloudProviders()];
   const providers = admitProfileProviders(options.settings ?? {}, source.map(applyProviderCatalog)).map(provider => {
     const pinned = options.pinnedModels?.filter(model => model.provider === provider.id);

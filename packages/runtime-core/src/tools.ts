@@ -203,7 +203,8 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         };
         const result = await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools } : {}) });
         if (name === 'proc') await watchProcessExit(operations, args, result, api, context);
-        return { content: result.content, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
+        const content = result.content.length > 0 || result.status === 'completed' ? result.content : [{ type: 'text' as const, text: result.status === 'failed' ? result.error.message : 'The command was interrupted before it returned output; its outcome is unknown.' }];
+        return { content, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
       };
       return safe || name === 'codemode' ? run() : serialized(String(api.conversationId), run);
     },
