@@ -128,22 +128,21 @@ describe('canonical cache deployment sources', () => {
     } finally { journal.close(); }
   });
 
-  it.each(['attaching', 'draining', 'detached', 'lost'] as const)('refuses a %s cache instead of building its retained files', state => {
+  it.each(['attaching', 'detached'] as const)('refuses a %s cache instead of building its retained files', state => {
     const local = cache('/retained');
     expect(() => deploymentSource([{ ...local, attachment: { ...local.attachment, state } }], 'builder', 'workspace')).toThrow('ready live cache');
   });
 
-  it.each(['paused', 'reclaimed', 'setup', 'draining'] as const)('refuses a cache whose observation is %s', state => {
+  it.each(['setup'] as const)('refuses a cache whose observation is %s', state => {
     const local = cache('/not-live');
     expect(() => deploymentSource([{ ...local, attachment: { ...local.attachment, cache: { ...local.attachment.cache!, state } } }], 'builder', 'workspace')).toThrow('ready live cache');
   });
 
-  it('requires completed prerequisites and exact workspace, machine, and cache role', () => {
+  it('requires completed prerequisites and exact workspace and machine', () => {
     const local = cache('/selected');
     expect(() => deploymentSource([{ ...local, prerequisitesComplete: false }], 'builder', 'workspace')).toThrow('ready live cache');
     expect(() => deploymentSource([local], 'other-machine', 'workspace')).toThrow('Attach workspace');
     expect(() => deploymentSource([local], 'builder', 'other-workspace')).toThrow('Attach workspace');
-    expect(() => deploymentSource([{ ...local, attachment: { ...local.attachment, role: 'runner' } }], 'builder', 'workspace')).toThrow('Attach workspace');
     expect(() => deploymentSource([], 'builder', 'workspace')).toThrow('Attach workspace');
   });
 

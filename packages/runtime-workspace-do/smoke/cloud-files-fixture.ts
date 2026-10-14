@@ -168,7 +168,7 @@ export class CloudFilesProof extends DurableObject {
     await assert.rejects(invoke('write', { path: 'retry.txt', content: 'durable' }, 'retry'));
     assert.equal((await invoke('write', { path: 'other.txt', content: 'blocked' })).status, 'failed');
     const attachments = new AttachmentStore(this.ctx.storage, { seal: async secret => secret, open: async secret => secret, dispatch: async () => { throw new Error('No machine transport in fixture'); } });
-    const admission = RuntimeAttachInputSchema.parse({ projectId: 'p', workspaceId: 'cloud', machineId: 'm', generation: 0, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['read', 'write', 'edit'] });
+    const admission = RuntimeAttachInputSchema.parse({ projectId: 'p', workspaceId: 'cloud', machineId: 'm', generation: 0, checkout: { kind: 'shared', branch: 'main' }, capabilities: ['read', 'write', 'edit'] });
     store = open(); failPush = false; await store.recover();
     assert.equal(files.get('retry.txt'), 'durable');
     assert.equal((await invoke('write', { path: 'retry.txt', content: 'durable' }, 'retry')).status, 'completed');
@@ -221,10 +221,8 @@ export class CloudFilesProof extends DurableObject {
     const replayPushes = pushes;
     assert.deepEqual(await invoke('write', { path: 'new.txt', content: 'written', message: 'Add the new greeting file' }, 'write-once'), written);
     assert.equal(pushes, replayPushes);
-    attachments.lose(attached.attachmentId, attached.generation, 'operator'); caches = attachments.list();
-    assert.equal((await invoke('write', { path: 'lost.txt', content: 'with lost cache' })).status, 'completed');
-    assert.throws(() => attachments.transition(attached.attachmentId, attached.generation, 'draining'), /Invalid attachment transition/);
-    assert.throws(() => attachments.recordCacheFlush(attached.attachmentId, attached.generation), /draining cache/);
+    attachments.detach(attached); caches = attachments.list();
+    assert.equal((await invoke('write', { path: 'detached.txt', content: 'with detached cache' })).status, 'completed');
     const afterDetach = await invoke('write', { path: 'after-detach.txt', content: 'resumed' }, 'after-detach');
     assert.equal(afterDetach.status, 'completed');
     assert.deepEqual((await invoke('read', { path: 'after-detach.txt' })).content, [{ type: 'text', text: 'resumed' }]);

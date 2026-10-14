@@ -23,68 +23,6 @@ async function sha256(bytes: Uint8Array): Promise<`sha256:${string}`> {
 }
 
 describe('signed control transport', () => {
-  it('routes a replay-protected device-signed request to the canonical space authority', async () => {
-    const userId = env.ACCOUNT_ID;
-    const vault = env.CREDENTIALS.getByName(userId);
-    await vault.bootstrap({
-      userId,
-      rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey)),
-      vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(7)),
-    });
-    await vault.registerDevice(signCredentialAuthorityGrant({
-      version: 1,
-      userId,
-      machineId: 'machine-a',
-      signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineSigningPrivateKey)),
-      exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(machineExchangePrivateKey)),
-      capabilities: ['space.control'],
-      generation: 1,
-    }, rootPrivateKey));
-    const project = await env.PROJECT_AUTHORITY.getByName(`${userId}:project-a`).bootstrap({ id: 'project-a', name: 'Project A', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-    await env.USER_PROJECTS.getByName(userId).put(project);
-    await env.PROJECT_AUTHORITY.getByName(`${userId}:project-a`).putWorkspace({
-      id: 'space-a', projectId: 'project-a', kind: 'worktree', name: 'Space A', branch: 'feature',
-      phase: 'code', sourceKind: 'branch', sourceRef: 'feature', sourceCommit: null,
-      lifecycle: 'active', goalId: null, expectedRevision: 0,
-    });
-    const request = createSignedControlRequest({
-      userId,
-      machineId: 'machine-a',
-      operation: 'space.bootstrap',
-      payload: { projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a' },
-      signingPrivateKey: machineSigningPrivateKey,
-    });
-    const response = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(request),
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ status: 'ok', value: { projectId: 'project-a', spaceId: 'space-a', state: 'open', generation: 1 } });
-    const inspector = createSignedControlRequest({
-      userId,
-      machineId: 'machine-a',
-      operation: 'inspector.getOverview',
-      payload: { projectId: 'project-a', spaceId: 'space-a' },
-      signingPrivateKey: machineSigningPrivateKey,
-    });
-    const inspectorResponse = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(inspector),
-    });
-    expect(inspectorResponse.status).toBe(200);
-    expect(await inspectorResponse.json()).toMatchObject({
-      status: 'ok',
-      value: { projectId: 'project-a', spaceId: 'space-a', revision: 0, goal: null },
-    });
-    const replay = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(request),
-    });
-    expect(replay.status).toBe(401);
-  });
   it('stores signed application data in the dedicated R2 binding', async () => {
     const userId = env.ACCOUNT_ID;
     const vault = env.CREDENTIALS.getByName(userId);

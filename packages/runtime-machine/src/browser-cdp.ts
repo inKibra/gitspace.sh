@@ -1,6 +1,8 @@
 import type { Duplex } from 'node:stream';
 import { z } from 'zod';
-import { ExecutorEffectUncertain } from './commands.js';
+export class BrowserEffectUncertain extends Error {
+  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = 'BrowserEffectUncertain'; }
+}
 import type { RuntimeBrowserRelayChannel } from './browser-relay-transport.js';
 
 const Message = z.object({ id: z.number().optional(), method: z.string().optional(), params: z.unknown().optional(), sessionId: z.string().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional() });
@@ -40,7 +42,7 @@ export class BrowserConnection implements RuntimeBrowserRelayChannel {
     if (this.closed) return;
     this.closed = true;
     this.pipe.output.off('data', this.receive);
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new ExecutorEffectUncertain('Browser disconnected after dispatch')); }
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new BrowserEffectUncertain('Browser disconnected after dispatch')); }
     this.pending.clear();
     for (const listener of this.listeners) listener({ method: 'disconnected' });
   };
@@ -48,7 +50,7 @@ export class BrowserConnection implements RuntimeBrowserRelayChannel {
     if (this.closed) return Promise.reject(new Error('Browser connection is stale'));
     const id = ++this.sequence;
     const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-    const timer = setTimeout(() => { this.pending.delete(id); reject(new ExecutorEffectUncertain(`Browser command timed out: ${method}`)); }, 15_000);
+    const timer = setTimeout(() => { this.pending.delete(id); reject(new BrowserEffectUncertain(`Browser command timed out: ${method}`)); }, 15_000);
     this.pending.set(id, { resolve, reject, timer });
     this.pipe.input.write(`${JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })}\0`, error => { if (error) this.disconnected(); });
     return promise;

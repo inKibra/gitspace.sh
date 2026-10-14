@@ -36,17 +36,6 @@ async function cacheFixture() {
   return { userId, projectId, workspaceId, machineId, authority, attachment };
 }
 
-it('delivers a changed account cache setting to an existing workspace cache assignment', async () => {
-  const { userId, projectId, workspaceId, machineId, authority } = await cacheFixture();
-  const policies = async () => (await authority.runtimeAssignments({ projectId, workspaceId, machineId })).assignments.map(assignment => assignment.cachePolicy);
-  expect(await policies()).toEqual([{ idleGraceSeconds: 900, reclaimSeconds: 86400 }]);
-
-  const settings = env.USER_SETTINGS.getByName(userId);
-  const current = await settings.get('browser');
-  expect(await settings.update('browser', { expectedRevision: current.revision, onboardingComplete: current.onboardingComplete, profile: current.profile, git: current.git, defaults: current.defaults, machines: { cacheReclaimSeconds: 3600 } })).toMatchObject({ status: 'ok' });
-  expect(await policies()).toEqual([{ idleGraceSeconds: 900, reclaimSeconds: 3600 }]);
-});
-
 it('lists an existing cache while a failed publication stays fenced against readiness', async () => {
   const { projectId, workspaceId, machineId, authority, attachment } = await cacheFixture();
   const checkpoint = RuntimeGitCheckpointSchema.parse({

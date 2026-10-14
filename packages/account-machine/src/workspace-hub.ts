@@ -1,12 +1,10 @@
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { mkdtemp, open, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, open, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { watch } from 'node:fs';
-import { getDaemonRuntimeDir } from '@gitspace/supervisor';
 import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
 import { TerminalSnapshotJournal, type TerminalSnapshot } from './terminal-stream.js';
 import { PROTECTED_LIFECYCLE_SOCKET, protectedLifecycleLive, protectedLifecycleWrapper, sendProtectedLifecycleInput } from './protected-lifecycle.js';
-import type { GitSpaceDatabase } from '@gitspace/core';
 import { terminalStreamResource, type ProtectedTerminalEvent } from '@gitspace/protocol';
 import { DEFAULT_LIFECYCLE_TIMEOUT_MS, LifecycleLogReader, type LifecycleRun, type LifecycleRunPhase } from '@gitspace/protocol-environment';
 import { checkoutTerminalEnvironment, inheritedCommandEnvironment } from '@gitspace/runtime-machine';
@@ -73,6 +71,18 @@ export class WorkspaceHubTerminalUnavailable extends Error {
   }
 }
 
+/** Checkouts this machine holds, by workspace id (the executor's ready attachments). */
+export interface WorkspaceCheckouts {
+  /** Root of the ready checkout for a workspace, or null when this machine holds none. */
+  path(spaceId: string): string | null;
+  /** Project of a held workspace, or null. */
+  projectId(spaceId: string): string | null;
+  /** Workspace ids with a ready checkout. */
+  list(): string[];
+  use(spaceId: string): Promise<void>;
+  changed(): Promise<void>;
+}
+
 type HubClientFactory = (projectDirectory: string) => Promise<DaemonBrokerClient>;
 
 interface HubScope {
@@ -102,42 +112,14 @@ function displayCommand(spec: DaemonSpec): string {
 }
 
 export class WorkspaceHubTerminalCoordinator {
-  private readonly terminalJournal: TerminalSnapshotJournal;
+  private readonly terminalJournal = new TerminalSnapshotJournal();
   private readonly terminalObservers = new Map<string, TerminalObserver>();
   private readonly protectedSockets = new Map<string, string>();
   constructor(
-    private readonly database: GitSpaceDatabase,
     private readonly machineId: string,
+    private readonly checkouts: WorkspaceCheckouts,
     private readonly clientForProject: HubClientFactory = daemonClientForProject,
-    private readonly cache?: { path(spaceId: string): string | null; use(spaceId: string): Promise<void>; changed(): Promise<void> },
-  ) { this.terminalJournal = new TerminalSnapshotJournal(database); }
-
-  async forgetSpace(spaceId: string): Promise<void> {
-    const prefix = `terminals:${spaceId}:`;
-    for (const [resource, observer] of this.terminalObservers) {
-      if (!resource.startsWith(prefix)) continue;
-      observer.controller.abort();
-      this.terminalObservers.delete(resource);
-      for (const listener of this.terminalJournal.listeners) listener(resource);
-    }
-    this.terminalJournal.forgetSpace(spaceId);
-    const receipt = this.database.listSpaceCleanupJobs().find((job) => job.spaceId === spaceId);
-    if (!receipt || receipt.state !== 'committed') return;
-    const runtimeDir = getDaemonRuntimeDir(receipt.rootPath);
-    const daemonsDir = join(runtimeDir, 'daemons');
-    const entries = await readdir(daemonsDir).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error));
-    if (!entries.length) return;
-    const client = await this.clientForProject(receipt.rootPath);
-    const listed = await client.request({ op: 'list' });
-    if (listed.op !== 'list') throw new Error('Supervisor returned an invalid list response');
-    if (listed.daemons.some((daemon) => !daemon.owner?.startsWith(`gitspace:${spaceId}:`))) return;
-    if (listed.daemons.some((daemon) => daemon.state !== 'exited' && daemon.state !== 'failed')) {
-      throw new Error(`Space ${spaceId} still has active terminal processes`);
-    }
-    const shutdown = await client.request({ op: 'shutdown' });
-    if (shutdown.op !== 'shutdown') throw new Error('Supervisor did not confirm shutdown');
-    await rm(daemonsDir, { recursive: true, force: true });
-  }
+  ) {}
 
   async list(spaceId: string): Promise<WorkspaceTerminalView[]> {
     const scope = await this.scope(spaceId);
@@ -259,10 +241,10 @@ export class WorkspaceHubTerminalCoordinator {
     }
   }
 
-  /** A user shell in the space's checkout on this machine (its ready cache, else a legacy held placement),
+  /** A user shell in the space's ready checkout on this machine,
    * with the checkout's `.gitspace/bundle.json` terminal PATH and variables applied. */
   async createShell(spaceId: string): Promise<WorkspaceTerminalView> {
-    await this.cache?.use(spaceId);
+    await this.checkouts.use(spaceId);
     const scope = await this.scope(spaceId);
     const shell = process.env.SHELL || (process.platform === 'win32' ? process.env.COMSPEC : undefined) || '/bin/bash';
     const spec: DaemonStartSpec = {
@@ -278,7 +260,7 @@ export class WorkspaceHubTerminalCoordinator {
     };
     const started = await scope.client.request({ op: 'start', spec, owner: ownerFor(spaceId, 'user') });
     if (started.op !== 'start') throw new Error('Supervisor returned an invalid start response');
-    await this.cache?.changed();
+    await this.checkouts.changed();
     const { env, ...configuration } = spec;
     return this.view(spaceId, started.daemon, { ...configuration, envNames: Object.keys(env) });
   }
@@ -291,7 +273,7 @@ export class WorkspaceHubTerminalCoordinator {
     cwd: string,
     env: Record<string, string>,
   ): Promise<WorkspaceTerminalView> {
-    await this.cache?.use(spaceId);
+    await this.checkouts.use(spaceId);
     const scope = await this.scope(spaceId);
     if (!isInside(scope.space.rootPath, cwd)) throw new WorkspaceHubSpaceUnavailable(spaceId);
     const name = `gitspace-svc-${spaceId.slice(0, 12)}-${serviceName}`;
@@ -314,7 +296,7 @@ export class WorkspaceHubTerminalCoordinator {
     };
     const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'service')}:${serviceName}` });
     if (started.op !== 'start') throw new Error(`Supervisor returned an invalid start response for service ${serviceName}`);
-    await this.cache?.changed();
+    await this.checkouts.changed();
     const { env: bindings, ...configuration } = spec;
     return this.view(spaceId, started.daemon, { ...configuration, envNames: Object.keys(bindings) });
   }
@@ -326,7 +308,7 @@ export class WorkspaceHubTerminalCoordinator {
     env: Record<string, string>,
     options: { interactive?: boolean; runId?: string; deadlineAt?: string; redactNames?: readonly string[]; onStarted?: () => Promise<void>; onOutput?: (output: string) => Promise<void>; directory?: string } = {},
   ): Promise<WorkspaceLifecyclePlanResult> {
-    if (options.interactive && options.directory && options.directory !== this.cache?.path(spaceId)) throw new Error('Interactive lifecycle execution cannot run in a detached recovery checkout');
+    if (options.interactive && options.directory && options.directory !== this.checkouts.path(spaceId)) throw new Error('Interactive lifecycle execution cannot run in a detached recovery checkout');
     if (options.interactive && (!['linux', 'darwin'].includes(process.platform) || steps.some((step) => step.kind !== 'script'))) throw new Error('Protected interactive lifecycle execution requires a POSIX script phase');
     const scope = options.directory
       ? { space: { rootPath: options.directory }, client: await this.clientForProject(options.directory) }
@@ -469,8 +451,8 @@ export class WorkspaceHubTerminalCoordinator {
   }
 
   async cancelLifecycleRun(spaceId: string, terminalName: string, directory?: string): Promise<void> {
-    // Cache and recovery runs name their checkout; only runs in a held legacy space need the local space record.
-    const root = directory ?? this.database.getSpace(spaceId)?.rootPath;
+    // Recovery runs name their checkout; others run in the held checkout.
+    const root = directory ?? this.checkouts.path(spaceId);
     if (!root) throw new WorkspaceHubSpaceUnavailable(spaceId);
     const client = await this.clientForProject(root);
     const listed = await client.request({ op: 'list' });
@@ -493,9 +475,9 @@ export class WorkspaceHubTerminalCoordinator {
   }
 
   async stopOwned(spaceId: string): Promise<void> {
-    const space = this.database.getSpace(spaceId);
-    if (!space) throw new WorkspaceHubSpaceUnavailable(spaceId);
-    const client = await this.clientForProject(space.rootPath);
+    const root = this.checkouts.path(spaceId);
+    if (!root) throw new WorkspaceHubSpaceUnavailable(spaceId);
+    const client = await this.clientForProject(root);
     const listed = await client.request({ op: 'list' });
     if (listed.op !== 'list') throw new Error('Supervisor returned an invalid list response');
     for (const daemon of listed.daemons) {
@@ -567,7 +549,7 @@ export class WorkspaceHubTerminalCoordinator {
     if (terminalKind(spaceId, described.daemon.owner) === 'lifecycle') throw new Error('Lifecycle terminals must be cancelled through their environment run');
     const result = await client.request({ op: 'stop', name, timeoutMs: 5_000 });
     if (result.op !== 'stop') throw new Error(`Supervisor returned an invalid stop response for ${name}`);
-    await this.cache?.changed();
+    await this.checkouts.changed();
     return this.view(spaceId, result.daemon, spec);
   }
 
@@ -586,13 +568,9 @@ export class WorkspaceHubTerminalCoordinator {
   }
 
   private async scope(spaceId: string): Promise<HubScope> {
-    const cachePath = this.cache?.path(spaceId);
-    if (cachePath) return { space: { rootPath: cachePath }, client: await this.clientForProject(cachePath) };
-    const space = this.database.getSpace(spaceId);
-    if (!space || space.placementState === 'closed' || space.holderId !== this.machineId) {
-      throw new WorkspaceHubSpaceUnavailable(spaceId);
-    }
-    return { space, client: await this.clientForProject(space.rootPath) };
+    const root = this.checkouts.path(spaceId);
+    if (!root) throw new WorkspaceHubSpaceUnavailable(spaceId);
+    return { space: { rootPath: root }, client: await this.clientForProject(root) };
   }
 
   private view(spaceId: string, daemon: DaemonSnapshot, spec: DaemonSpec): WorkspaceTerminalView {

@@ -88,13 +88,16 @@ Signed requests with replay protection (indexed), credential vault and secret in
 
 Each phase ships to bradleat and is verified on Golconda and PR 101 in the browser before the next; then lightbeam.
 
-0. **Safety** — commit and push current work; index the nonce table; reproduce and fix the snapshot that deletes 16 Golconda files (rule 1).
-1. **Sync** — base rule and backups (rules 1–2); `sync.*` tools.
-2. **Execution and attachments** — delete proof machinery and attachment lifecycle; one status summary; `workspace_status`; plain errors.
-3. **Transport** — relay push replaces machine polling; live notices replace the 16 `result-rpc` subscriptions; signature checks in the worker; two-object rule; no long locks; Cloudflare usage rules and daily usage report.
-4. **Machine** — delete the old agent stack and `core`; machine CLI.
-5. **UI** — Environment tab per proposal; single status everywhere.
-6. **Cloud legacy** — placements, migration, dead control operations and tests; lightbeam rollout.
+0. **Safety** — commit and push current work; index the nonce table; reproduce and fix the snapshot that deletes 16 Golconda files (rule 1). Done.
+1. **Sync** — base rule and backups (rules 1–2); `sync` tool; plain `git push` to one snapshot ref per workspace. Done.
+2. **History on Pi** — imported OMP history converted once into native Pi entries; transcript and `history_search` read pi-durable's own entries in bounded windows; transcript/history projection tables dropped. Done.
+3. **Execution and attachments** — proof machinery and attachment lifecycle deleted (`attaching|ready|detached`); `POST /runtime/execute` returns the tool result; `gitspace.status` document and `workspace_status` tool. Done.
+4. **Transport** — relay push replaces machine polling; live notices replace the 16 `result-rpc` subscriptions; signature checks in the worker; two-object rule; no long locks; Cloudflare usage rules and daily usage report.
+5. **Machine** — old agent stack and `core` deleted (done); machine CLI.
+6. **UI** — demo code deleted (done); Environment tab per proposal; single status everywhere.
+7. **Cloud legacy** — legacy migration, placement mutators, and dead control operations deleted (done); remaining tests; old snapshot refs (`refs/gitspace/spaces/*/checkpoints/*`) cleanup; lightbeam rollout.
+
+Rows stored by older releases are rewritten when read: machine journal attachments and DO attachment rows map `lost`/`draining` to `detached`, and a stored runtime snapshot that no longer parses is rebuilt at startup from its cursor.
 
 ## Open
 

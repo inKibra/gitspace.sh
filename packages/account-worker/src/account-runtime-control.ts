@@ -9,16 +9,16 @@ import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepos
 import { requireRuntimeIdentity } from './runtime-access.js';
 import { ensureRuntimeCodeRepository } from './account-runtime-host.js';
 
-/** Only the open holder of the project's base space may seed `project-<projectId>`. The repository
+/** Only a machine attached to the project's base workspace may seed `project-<projectId>`. The repository
  * is created empty (no import, no initial commit): the machine publishes the base branch's history. */
 async function projectRepositoryCredentials(env: Env, userId: string, machine: string, input: RuntimeRepositoryCredentialsInput) {
   if (userId !== env.ACCOUNT_ID) throw new Error('Repository lease belongs to a different account');
   const base = RuntimeIdentitySchema.parse({ projectId: input.projectId, workspaceId: input.projectId });
   const access = await requireRuntimeIdentity(env, userId, base, input.scope === 'write');
   if (access.project.repositoryReference === null) throw new Error('Only imported projects are seeded from a machine');
-  const placement = await access.authority.get();
-  if (!placement || placement.machineId !== machine || placement.state !== 'open'
-    || (input.generation !== undefined && placement.generation !== input.generation)) throw new Error('Project repository lease requires the open base space holder');
+  const attachments = await access.authority.runtimeAttachments(base);
+  if (!attachments.some(item => item.machineId === machine && item.state !== 'detached'
+    && (input.generation === undefined || item.generation === input.generation))) throw new Error('Project repository lease requires a checkout of the base workspace on this machine');
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   await code.ensureMachineSeedTarget(access.project.id, access.project.baseBranch);
   return code.credentials(artifactsProjectRepository(access.project.id), input.scope);
@@ -60,31 +60,22 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     if (input.attachmentId !== undefined) {
       const attachments = await access.authority.runtimeAttachments(identity);
       const attachment = attachments.find(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation);
-      if (!attachment || !['attaching', 'ready', 'draining'].includes(attachment.state)) throw new Error('Repository lease requires a current assigned checkout');
-      if (input.scope === 'write' && (attachment.role === 'runner' || !['ready', 'draining'].includes(attachment.state))) throw new Error('This attachment cannot publish repository changes');
+      if (!attachment || attachment.state === 'detached') throw new Error('Repository lease requires a current assigned checkout');
+      if (input.scope === 'write' && attachment.state !== 'ready') throw new Error('This attachment cannot publish repository changes');
     } else {
-      // Machine git remotes bind only the repository. The legacy placement holder qualifies, and so does any machine
-      // with a live cache attachment: cloud workspaces have no holder, and caches publish their baseline before ready.
-      const placement = await access.authority.get();
-      const holder = placement?.machineId === machine && ['open', 'opening', 'closing'].includes(placement.state)
-        && (input.generation === undefined || placement.generation === input.generation);
-      if (!holder) {
-        const attachments = await access.authority.runtimeAttachments(identity);
-        if (!attachments.some(item => item.machineId === machine && item.role === 'cache' && ['attaching', 'ready', 'draining'].includes(item.state)
-          && (input.generation === undefined || item.generation === input.generation))) throw new Error('Repository lease requires current checkout ownership');
-      }
+      // Machine git remotes bind only the repository: any machine with a live checkout qualifies, and checkouts
+      // publish their baseline before ready.
+      const attachments = await access.authority.runtimeAttachments(identity);
+      if (!attachments.some(item => item.machineId === machine && item.state !== 'detached'
+        && (input.generation === undefined || item.generation === input.generation))) throw new Error('Repository lease requires current checkout ownership');
     }
     await ensureRuntimeCodeRepository(env, userId, identity);
     return new ArtifactsCodeStore(env.ARTIFACTS).credentials(repository, input.scope);
   }
   const identity = RuntimeIdentitySchema.parse(payload);
   const access = await requireRuntimeIdentity(env, userId, identity, operation !== 'runtime.snapshot');
-  const placement = await access.authority.get();
-  const workspaceAssigned = placement?.machineId === machine && ['open', 'opening', 'closing'].includes(placement.state);
-  if (!workspaceAssigned) {
-    const attachments = await access.authority.runtimeAttachments(identity);
-    if (!attachments.some(item => item.machineId === machine && ['attaching', 'ready', 'draining'].includes(item.state))) throw new Error('Machine has no active assignment in this workspace');
-  }
+  const attachments = await access.authority.runtimeAttachments(identity);
+  if (!attachments.some(item => item.machineId === machine && item.state !== 'detached')) throw new Error('Machine has no active assignment in this workspace');
   if (operation === 'runtime.browser.authority') {
     const input = RuntimeIdentitySchema.extend({ machineId: z.string(), attachmentId: z.string(), generation: z.number().int().nonnegative() }).parse(payload);
     if (input.machineId !== machine) throw new Error('Browser authority machine mismatch');
@@ -96,7 +87,6 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     case 'runtime.cancel':
     case 'runtime.answer':
     case 'runtime.session': {
-      if (!workspaceAssigned) throw new Error('Detached executors cannot control workspace conversations');
       if (operation === 'runtime.submit') return access.authority.runtimeSubmit(payload);
       if (operation === 'runtime.cancel') return access.authority.runtimeCancel(payload);
       if (operation === 'runtime.answer') return access.authority.runtimeAnswer(payload, { deviceId: machineId, canApprove: false });
@@ -116,8 +106,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     }
     case 'runtime.snapshot.commit': {
       const input = RuntimeSnapshotCommitInputSchema.parse(payload);
-      const attachments = await access.authority.runtimeAttachments(identity);
-      if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation && (item.role === 'cache'))) throw new Error('Checkpoint source is not this machine cache');
+      if (!attachments.some(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation)) throw new Error('Checkpoint source is not this machine cache');
       return access.authority.runtimeSnapshotCommit(input);
     }
     case 'runtime.heartbeat': return access.authority.runtimeHeartbeat({ ...payload, machineId: machine });

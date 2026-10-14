@@ -1,20 +1,9 @@
 import { machineExecutionAdmissionSchema, type LaunchProgress, type machineProtocolInputSchema, type MachineExecutionAdmission } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
-import { MachineDiscardRequired, machineDiscardRequiredSchema } from '@gitspace/protocol/machine-discard';
-import { collectBytes, streamBytes, SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
+import { collectBytes, streamBytes, WorkspaceDomainError, WorkspaceFailureSchema } from '@gitspace/protocol-workspace';
 import {
   createSignedControlRequest,
-  type AppendJournalEntryInput,
-  type AppendReviewMessageInput,
-  type AppendRubricJudgmentInput,
-  type AttachRequirementEvidenceInput,
-  type ChangeGuideView,
-  type CanonicalArtifactPromotion,
-  type CanonicalArtifactScope,
-  type CanonicalSession,
   type HostedServiceRoute,
-  type ComposioMcpMaterialization,
-  type CloudProjectOperation,
   type CloudProjectSummary,
   type CloudWorkspaceDefinition,
   type ControlOperation,
@@ -23,37 +12,18 @@ import {
   type ReleaseTarget,
   type StageReleaseInput,
   type TenantDesired,
-  type CreateReviewThreadInput,
-  type EndJournalPhaseInput,
   type GitIdentityDocument,
   type GitIdentityUpdate,
-  type GoalRecordView,
-  type InspectorIdentity,
-  type InspectorOverview,
-  type JournalEntryView,
-  type MarkGuideSectionReadInput,
   type McpAuditEvent,
   type McpConnection,
   type McpConnectionStatus,
   type DeviceGrantRecord,
   type ProjectEvent,
-  type PutChangeGuideInput,
-  type PutGoalInput,
-  type PutRubricInput,
-  type PutWorkflowInput,
-  type ResolveReviewThreadInput,
-  type ReviewAnchorContext,
-  type ReviewThreadView,
-  type RubricView,
   type ProjectMcpGrant,
-  type SetGuideApprovalInput,
   type SignedControlRequest,
-  type StartJournalPhaseInput,
   type UserSettings,
-  type WaiveWorkflowGateInput,
-  type WorkflowView,
 } from '@gitspace/protocol';
-import type { CheckpointBlobStore, SpaceCheckpointAuthority } from './portable-space-lifecycle.js';
+import type { CheckpointBlobStore } from './checkpoint-blobs.js';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol/rpc-contract';
 import { cloudResponseRay, withCloudRequestDiagnostics } from './cloud-request-diagnostics.js';
 import { EnvironmentError, EnvironmentFailureSchema, LifecycleStateSchema, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
@@ -309,18 +279,6 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
   }
 }
 
-export interface PortableSpaceDefinition {
-  projectId: string;
-  projectName: string;
-  repositoryReference: string | null;
-  baseBranch: string;
-  spaceId: string;
-  kind: 'base' | 'worktree';
-  name: string;
-  branch: string;
-  phase: 'plan' | 'code' | 'review' | 'ship' | null;
-}
-
 export interface FleetMachineDefinition {
   id: string;
   label: string;
@@ -336,43 +294,8 @@ export interface FleetMachineDefinition {
 }
 
 
-export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, EnvironmentLifecycleAuthority {
+export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthority {
   constructor(private readonly options: SignedCloudRequestOptions) {}
-
-  provisionStorage(gitBucketName: string): Promise<unknown> {
-    return this.call('storage.provision', { gitBucketName });
-  }
-
-  async projectRepositoryCredentials(projectId: string, ttlSeconds = 3_600): Promise<{
-    accessKeyId: string;
-    secretAccessKey: string;
-    sessionToken: string;
-    expiresAt: Date;
-  }> {
-    const value = await this.call<{
-      accessKeyId: string;
-      secretAccessKey: string;
-      sessionToken: string;
-      expiresAt: string;
-    }>('storage.credentials', { prefixes: [`projects/${projectId}/repo/`], ttlSeconds });
-    return { ...value, expiresAt: new Date(value.expiresAt) };
-  }
-
-  gitStorageBinding(): Promise<{ bucket: string; endpoint: string; region: string }> {
-    return this.call('storage.binding', {});
-  }
-  listProjects(lifecycle?: 'active' | 'archived'): Promise<CloudProjectSummary[]> {
-    return this.call('projects.list', lifecycle ? { lifecycle } : {});
-  }
-
-  bootstrapProject(input: {
-    projectId: string;
-    name: string;
-    repositoryReference: string | null;
-    baseBranch: string;
-  }): Promise<CloudProjectSummary> {
-    return this.call('project.bootstrap', input);
-  }
 
   getProject(projectId: string): Promise<CloudProjectSummary | null> {
     return this.call('project.get', { projectId });
@@ -466,74 +389,9 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
   getLifecycleRunLog(projectId: string, spaceId: string, runId: string, offset = 0): Promise<LifecycleRunLog> {
     return this.call('project.environment.runLog', { projectId, spaceId, runId, offset });
   }
-  activateSourceProject(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary> {
-    return this.call('project.activateSource', { projectId, expectedRevision, baseBranch });
-  }
-
-  setProjectBaseBranch(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary> {
-    return this.call('project.setBaseBranch', { projectId, expectedRevision, baseBranch });
-  }
 
   listProjectWorkspaces(projectId: string): Promise<CloudWorkspaceDefinition[]> {
     return this.call('project.workspaces.list', { projectId });
-  }
-
-  setProjectLifecycle(
-    projectId: string,
-    expectedRevision: number,
-    lifecycle: CloudProjectSummary['lifecycle'],
-  ): Promise<CloudProjectSummary> {
-    return this.call('project.setLifecycle', { projectId, expectedRevision, lifecycle });
-  }
-
-  putProjectWorkspace(
-    projectId: string,
-    workspace: Omit<CloudWorkspaceDefinition, 'revision' | 'createdAt' | 'updatedAt' | 'archivedAt'> & {
-      expectedRevision: number;
-    },
-  ): Promise<CloudWorkspaceDefinition> {
-    return this.call('project.workspaces.put', { projectId, workspace });
-  }
-
-  removeProjectWorkspace(projectId: string, workspaceId: string, expectedRevision: number): Promise<boolean> {
-    return this.call('project.workspaces.remove', { projectId, workspaceId, expectedRevision });
-  }
-
-  deleteProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary> {
-    return this.call('project.delete', { projectId, expectedRevision });
-  }
-
-  createProjectOperation(
-    projectId: string,
-    operation: {
-      projectId: string;
-      workspaceId: string | null;
-      kind: string;
-      targetMachines: string[];
-      steps: Array<{ id: string; label: string }>;
-      createdBy: string;
-    },
-  ): Promise<CloudProjectOperation> {
-    return this.call('project.operations.create', { projectId, operation });
-  }
-
-  updateProjectOperation(
-    projectId: string,
-    operation: {
-      id: string;
-      expectedRevision: number;
-      state: CloudProjectOperation['state'];
-      steps: CloudProjectOperation['steps'];
-      error: string | null;
-      claimToken?: string | null;
-      leaseExpiresAt?: string | null;
-    },
-  ): Promise<CloudProjectOperation> {
-    return this.call('project.operations.update', { projectId, operation });
-  }
-
-  listProjectOperations(projectId: string): Promise<CloudProjectOperation[]> {
-    return this.call('project.operations.list', { projectId });
   }
 
   appendProjectEvent(input: Omit<ProjectEvent, 'offset' | 'createdAt'> & { projectId: string }): Promise<ProjectEvent> {
@@ -541,79 +399,8 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('project.events.append', { projectId, event });
   }
 
-  listProjectEvents(projectId: string, afterOffset: number): Promise<ProjectEvent[]> {
-    return this.call('project.events.list', { projectId, afterOffset });
-  }
-
-  latestProjectEventOffset(projectId: string): Promise<number> {
-    return this.call('project.events.latest', { projectId });
-  }
-
   listDeviceGrants(): Promise<DeviceGrantRecord[]> {
     return this.call('devices.list', {});
-  }
-
-  getCanonicalSession(projectId: string, sessionId: string): Promise<CanonicalSession | null> {
-    return this.call('project.sessions.get', { projectId, sessionId });
-  }
-
-  listCanonicalSessions(projectId: string): Promise<CanonicalSession[]> {
-    return this.call('project.sessions.list', { projectId });
-  }
-
-  putCanonicalSession(
-    projectId: string,
-    session: Omit<CanonicalSession, 'revision' | 'createdAt' | 'updatedAt'> & { expectedRevision: number },
-  ): Promise<CanonicalSession> {
-    return this.call('project.sessions.put', { projectId, session });
-  }
-
-  getArtifactScope(projectId: string, scopeId: string): Promise<CanonicalArtifactScope | null> {
-    return this.call('project.artifacts.get', { projectId, scopeId });
-  }
-
-  listArtifactScopes(projectId: string): Promise<CanonicalArtifactScope[]> {
-    return this.call('project.artifacts.list', { projectId });
-  }
-
-  putArtifactScope(
-    projectId: string,
-    scope: Omit<CanonicalArtifactScope, 'updatedAt'> & { expectedGeneration: number },
-  ): Promise<CanonicalArtifactScope> {
-    return this.call('project.artifacts.put', { projectId, scope });
-  }
-
-  async synchronizeArtifactScope(
-    projectId: string,
-    scope: { id: string; spaceId: string; generation: number; manifestHash: string | null },
-  ): Promise<CanonicalArtifactScope> {
-    const current = await this.getArtifactScope(projectId, scope.id);
-    if (current && current.generation === scope.generation && current.manifestHash === scope.manifestHash) return current;
-    if (current && current.generation >= scope.generation) {
-      throw new CloudSpaceAuthorityError('ARTIFACT_CONFLICT', 'Canonical artifacts changed; refresh the workspace before publishing.', {
-        scopeId: scope.id,
-        localGeneration: scope.generation,
-        canonicalGeneration: current.generation,
-      });
-    }
-    return this.putArtifactScope(projectId, {
-      id: scope.id,
-      workspaceId: scope.spaceId,
-      generation: scope.generation,
-      manifestHash: scope.manifestHash as CanonicalArtifactScope['manifestHash'],
-      expectedGeneration: current?.generation ?? 0,
-    });
-  }
-
-  listArtifactPromotions(projectId: string): Promise<CanonicalArtifactPromotion[]> {
-    return this.call('project.promotions.list', { projectId });
-  }
-
-  putArtifactPromotion(
-    projectId: string,
-    promotion: Omit<CanonicalArtifactPromotion, 'updatedAt'>,
-  ): Promise<CanonicalArtifactPromotion> {
-    return this.call('project.promotions.put', { projectId, promotion });
   }
 
   listHostedRoutes(projectId: string): Promise<HostedServiceRoute[]> {
@@ -631,85 +418,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('project.routes.release', { projectId, hostname, generation });
   }
 
-  async putSpaceDefinition(definition: PortableSpaceDefinition): Promise<PortableSpaceDefinition> {
-    const project = await this.bootstrapProject({
-      projectId: definition.projectId,
-      name: definition.projectName,
-      repositoryReference: definition.repositoryReference,
-      baseBranch: definition.baseBranch,
-    });
-    const current = (await this.listProjectWorkspaces(definition.projectId))
-      .find((workspace) => workspace.id === definition.spaceId);
-    if (current) {
-      return {
-        ...definition,
-        projectName: project.name,
-        repositoryReference: project.repositoryReference,
-        baseBranch: project.baseBranch,
-        kind: current.kind,
-        name: current.name,
-        branch: current.branch,
-        phase: current.phase,
-      };
-    }
-    await this.putProjectWorkspace(definition.projectId, {
-      id: definition.spaceId,
-      projectId: definition.projectId,
-      kind: definition.kind,
-      name: definition.name,
-      branch: definition.branch,
-      phase: definition.phase,
-      sourceKind: definition.kind === 'base' ? 'base' : 'branch',
-      sourceRef: definition.branch,
-      sourceCommit: null,
-      lifecycle: 'active',
-      goalId: null,
-      expectedRevision: 0,
-    });
-    return definition;
-  }
-
-  async getSpaceDefinition(spaceId: string): Promise<PortableSpaceDefinition | null> {
-    const projectId = await this.call<string | null>('projects.workspaces.locate', { workspaceId: spaceId });
-    if (!projectId) return null;
-    const [project, workspaces] = await Promise.all([
-      this.getProject(projectId),
-      this.listProjectWorkspaces(projectId),
-    ]);
-    const workspace = workspaces.find((candidate) => candidate.id === spaceId);
-    if (!project || !workspace) return null;
-    return {
-      projectId,
-      projectName: project.name,
-      repositoryReference: project.repositoryReference,
-      baseBranch: project.baseBranch,
-      spaceId: workspace.id,
-      kind: workspace.kind,
-      name: workspace.name,
-      branch: workspace.branch,
-      phase: workspace.phase,
-    };
-  }
-
-  async listSpaceDefinitions(): Promise<PortableSpaceDefinition[]> {
-    const projects = await this.listProjects();
-    const workspaces = await Promise.all(projects.map(async (project) => ({
-      project,
-      workspaces: await this.listProjectWorkspaces(project.id),
-    })));
-    return workspaces.flatMap(({ project, workspaces: projectWorkspaces }) => projectWorkspaces.map((workspace) => ({
-      projectId: project.id,
-      projectName: project.name,
-      repositoryReference: project.repositoryReference,
-      baseBranch: project.baseBranch,
-      spaceId: workspace.id,
-      kind: workspace.kind,
-      name: workspace.name,
-      branch: workspace.branch,
-      phase: workspace.phase,
-    })));
-  }
-
   putMachineDefinition(definition: FleetMachineDefinition): Promise<FleetMachineDefinition> {
     return this.call('catalog.machine.put', { ...definition });
   }
@@ -720,37 +428,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
 
   getUserSettings(): Promise<UserSettings> {
     return this.call('settings.get', {});
-  }
-
-  subscribeMachines(onChange: (event: { type: 'upsert' | 'remove'; machineId: string; machine: FleetMachineDefinition | null }) => void): () => void {
-    let stopped = false;
-    let socket: WebSocket | null = null;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let retryMs = 500;
-    const connect = (): void => {
-      if (stopped) return;
-      const request = signedRequest(this.options, 'catalog.machine.subscribe', {});
-      const url = new URL('/v1/fleet/events', this.options.baseUrl);
-      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-      url.searchParams.set('control', encodedRequest(request));
-      socket = new WebSocket(url);
-      socket.addEventListener('open', () => { retryMs = 500; });
-      socket.addEventListener('message', (message) => {
-        try {
-          const event = JSON.parse(String(message.data)) as { type?: unknown; machineId?: unknown; machine?: unknown };
-          if ((event.type === 'upsert' || event.type === 'remove') && typeof event.machineId === 'string') onChange({ type: event.type, machineId: event.machineId, machine: event.machine as FleetMachineDefinition | null });
-        } catch {}
-      });
-      socket.addEventListener('close', () => {
-        socket = null;
-        if (stopped) return;
-        retryTimer = setTimeout(connect, retryMs);
-        retryMs = Math.min(retryMs * 2, 10_000);
-      });
-      socket.addEventListener('error', () => socket?.close());
-    };
-    connect();
-    return () => { stopped = true; if (retryTimer) clearTimeout(retryTimer); socket?.close(1000, 'Fleet subscription stopped'); };
   }
 
   getGitIdentity(): Promise<GitIdentityDocument | null> {
@@ -782,10 +459,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     serverVersion?: string | null;
   }): Promise<McpConnection> {
     return this.call('mcp.connections.status', input);
-  }
-
-  materializeComposioPlugin(projectId: string, workspaceId: string | null, connectionId: string): Promise<ComposioMcpMaterialization> {
-    return this.call('mcp.composio.materialize', { projectId, workspaceId, connectionId });
   }
 
   listProjectMcpGrants(projectId: string): Promise<ProjectMcpGrant[]> {
@@ -840,135 +513,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     };
   }
 
-  bootstrapInspector(identity: InspectorIdentity): Promise<InspectorIdentity> {
-    return this.call('inspector.bootstrap', { ...identity });
-  }
-
-  getInspectorOverview(identity: InspectorIdentity, context?: ReviewAnchorContext): Promise<InspectorOverview> {
-    return this.call('inspector.getOverview', { ...identity, ...(context ? { context } : {}) });
-  }
-
-  getInspectorGoal(identity: InspectorIdentity): Promise<GoalRecordView | null> {
-    return this.call('inspector.getGoal', { ...identity });
-  }
-
-  putInspectorGoal(input: PutGoalInput): Promise<GoalRecordView> {
-    return this.call('inspector.putGoal', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  attachInspectorRequirementEvidence(input: AttachRequirementEvidenceInput): Promise<GoalRecordView> {
-    return this.call('inspector.attachRequirementEvidence', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  getInspectorWorkflow(identity: InspectorIdentity): Promise<WorkflowView | null> {
-    return this.call('inspector.getWorkflow', { ...identity });
-  }
-
-  putInspectorWorkflow(input: PutWorkflowInput): Promise<WorkflowView> {
-    return this.call('inspector.putWorkflow', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  waiveInspectorWorkflowGate(input: WaiveWorkflowGateInput): Promise<WorkflowView> {
-    return this.call('inspector.waiveWorkflowGate', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  getInspectorRubric(identity: InspectorIdentity): Promise<RubricView | null> {
-    return this.call('inspector.getRubric', { ...identity });
-  }
-
-  putInspectorRubric(input: PutRubricInput): Promise<RubricView> {
-    return this.call('inspector.putRubric', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  appendInspectorRubricJudgment(input: AppendRubricJudgmentInput): Promise<RubricView> {
-    return this.call('inspector.appendRubricJudgment', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  listInspectorJournal(identity: InspectorIdentity): Promise<JournalEntryView[]> {
-    return this.call('inspector.listJournal', { ...identity });
-  }
-
-  startInspectorJournalPhase(input: StartJournalPhaseInput): Promise<JournalEntryView> {
-    return this.call('inspector.startJournalPhase', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  endInspectorJournalPhase(input: EndJournalPhaseInput): Promise<JournalEntryView> {
-    return this.call('inspector.endJournalPhase', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  appendInspectorJournalEntry(input: AppendJournalEntryInput): Promise<JournalEntryView> {
-    return this.call('inspector.appendJournalEntry', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  getInspectorChangeGuide(identity: InspectorIdentity): Promise<ChangeGuideView | null> {
-    return this.call('inspector.getChangeGuide', { ...identity });
-  }
-
-  putInspectorChangeGuide(input: PutChangeGuideInput): Promise<ChangeGuideView> {
-    return this.call('inspector.putChangeGuide', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  markInspectorGuideSectionRead(input: MarkGuideSectionReadInput): Promise<ChangeGuideView> {
-    return this.call('inspector.markGuideSectionRead', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  setInspectorGuideApproval(input: SetGuideApprovalInput): Promise<ChangeGuideView> {
-    return this.call('inspector.setGuideApproval', { projectId: input.projectId, spaceId: input.spaceId, input });
-  }
-
-  listInspectorReviewThreads(identity: InspectorIdentity, context?: ReviewAnchorContext): Promise<ReviewThreadView[]> {
-    return this.call('inspector.listReviewThreads', { ...identity, ...(context ? { context } : {}) });
-  }
-
-  createInspectorReviewThread(input: CreateReviewThreadInput, context?: ReviewAnchorContext): Promise<ReviewThreadView> {
-    return this.call('inspector.createReviewThread', { projectId: input.projectId, spaceId: input.spaceId, input, ...(context ? { context } : {}) });
-  }
-
-  appendInspectorReviewMessage(input: AppendReviewMessageInput, context?: ReviewAnchorContext): Promise<ReviewThreadView> {
-    return this.call('inspector.appendReviewMessage', { projectId: input.projectId, spaceId: input.spaceId, input, ...(context ? { context } : {}) });
-  }
-
-  resolveInspectorReviewThread(input: ResolveReviewThreadInput, context?: ReviewAnchorContext): Promise<ReviewThreadView> {
-    return this.call('inspector.resolveReviewThread', { projectId: input.projectId, spaceId: input.spaceId, input, ...(context ? { context } : {}) });
-  }
-
-  bootstrap(input: { projectId: string; spaceId: string }): Promise<unknown> {
-    return this.call('space.bootstrap', { ...input, machineId: this.options.machineId });
-  }
-
-  async releaseUnpublishedSource(input: { projectId: string; spaceId: string; expectedGeneration: number; sourceCommit: string }): Promise<void> {
-    await this.call('space.releaseUnpublishedSource', input);
-  }
-
-  beginClose(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number }) {
-    return this.call<{ revision: number; previousRevision: number | null }>('space.beginClose', input);
-  }
-
-  async commitClosed(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; manifestKey: string; manifestHash: `sha256:${string}`; resumeOnMachineRestart?: boolean }) {
-    await this.call('space.commitClosed', input);
-  }
-
-  async abortClose(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; message: string }) {
-    await this.call('space.abortClose', input);
-  }
-
-  beginOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; resumeOnMachineRestart?: boolean }) {
-    return this.call<{ revision: number; manifestKey: string; manifestHash: `sha256:${string}` }>('space.beginOpen', input);
-  }
-
-  async commitOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number }) {
-    await this.call('space.commitOpen', input);
-  }
-
-  async failOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; message: string }) {
-    await this.call('space.failOpen', input);
-  }
-
-  /** Cloud placement record without opening: who holds the space, its generation, and the closed checkpoint manifest. */
-  async getSpace(projectId: string, spaceId: string): Promise<SpaceAuthorityRecord | null> {
-    return SpaceAuthorityRecordSchema.nullable().parse(await this.call('space.get', { projectId, spaceId }));
-  }
-
   stageRelease(input: StageReleaseInput): Promise<ReleaseRecord> {
     return this.call<ReleaseRecord>('deploy.stage', input);
   }
@@ -994,22 +538,8 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call<DeploymentStatus>('deploy.status', {});
   }
 
-  async machineProtocol(input: z.input<typeof machineProtocolInputSchema>): Promise<MachineExecutionAdmission> {
-    return machineExecutionAdmissionSchema.parse(await this.call('deploy.machineProtocol', input));
-  }
-
   async reportLaunchProgress(progress: LaunchProgress): Promise<void> {
     await this.call('deploy.launchProgress', progress);
-  }
-
-  /** This machine's verdict on a release generation; the machine id comes from the signed request. */
-  reportMachineApplied(input: { sha: string; target: 'machine'; generation: string; status: 'applied' | 'failed'; error?: string }): Promise<ReleaseRecord> {
-    return this.call<ReleaseRecord>('deploy.machineApplied', input);
-  }
-
-  /** Clear only the target that this healthy machine confirmed running from its channel artifact. */
-  async reportMachineChannelApplied(input: { target: 'machine'; generation: string }): Promise<void> {
-    await this.call('deploy.machineChannelApplied', input);
   }
 
   private async call<T = unknown>(operation: ControlOperation, payload: Record<string, unknown>): Promise<T> {
@@ -1027,8 +557,6 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
           const body = await response.json() as { status?: unknown; value?: unknown; error?: { code?: unknown; message?: unknown; [key: string]: unknown } };
           diagnostics.stage = response.ok ? 'application' : 'http';
           if (!response.ok || body.status !== 'ok') {
-            const discard = machineDiscardRequiredSchema.safeParse(body.error);
-            if (discard.success) throw new MachineDiscardRequired(discard.data);
             const environment = EnvironmentFailureSchema.safeParse(body.error);
             if (environment.success) throw new EnvironmentError(environment.data.code, environment.data.message, environment.data.context);
             const domainFailure = WorkspaceFailureSchema.safeParse(body.error);

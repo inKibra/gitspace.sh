@@ -19,7 +19,6 @@
   "include": [
     "src/**/*.ts",
     "smoke/fixture.ts",
-    "smoke/execution-fixture.ts",
     "smoke/cloud-files-fixture.ts",
     "smoke/cloud-search-fixture.ts",
     "smoke/cache-checkpoint-fixture.ts",

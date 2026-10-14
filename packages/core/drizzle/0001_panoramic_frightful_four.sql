@@ -1,1 +1,0 @@
-ALTER TABLE `agent_sessions` ADD `resume_pending` integer DEFAULT false NOT NULL;

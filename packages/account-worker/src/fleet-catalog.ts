@@ -1,5 +1,4 @@
 import { DurableObject } from 'cloudflare:workers';
-import { subscriptionIdentity, subscriptionActive } from './account-access.js';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
@@ -8,7 +7,7 @@ import { cloudImageProviderCall, prepareCloudImage, resolveCloudImage, runCloudI
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from './sandbox-provisioner.js';
 import { controlFleetMachine, ownedWorkspaceScopes, type CredentialVaultDO } from './application.js';
 import { listMachineAttachments } from './runtime-machine-loss.js';
-import type { RuntimeAttachment, RuntimeCacheObservation } from '@gitspace/protocol-runtime';
+import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
@@ -31,23 +30,9 @@ const FORCED_DISCARD_TTL_MS = 15 * 60_000;
 /** A running cloud sandbox with no usable attachment intent this long is stopped (slept, never destroyed). */
 export const CLOUD_MACHINE_IDLE_STOP_MS = 30 * 60_000;
 export const CLOUD_MACHINE_IDLE_CHECK_MS = 5 * 60_000;
-/** Activity a user or agent is relying on; a watcher or the machine's own idle grace is not. */
-const ACTIVITY_KEEPS_MACHINE: Record<RuntimeCacheObservation['activity'][number]['reason'], boolean> = {
-  command: true, service: true, proc: true, terminal: true, 'local-work': true, setup: true, sync: true, watcher: false, grace: false,
-};
-
-/** Usable intent the cloud must never stop: opted-in local work, live activity or executions, setup or reclaim in
- * flight, an unresolved failure, or a reclaim waiting on the user (held-back LFS). Lost and detached hold nothing. */
+/** A machine attached to any workspace keeps running: its checkout, terminals and services are in use. */
 export function attachmentKeepsMachineRunning(attachment: RuntimeAttachment): boolean {
-  if (attachment.state === 'lost' || attachment.state === 'detached') return false;
-  if (attachment.state !== 'ready') return true;
-  const cache = attachment.cache;
-  return attachment.failure != null
-    || attachment.cacheAction?.status === 'requested' || attachment.cacheAction?.status === 'running'
-    || (attachment.executionObservation?.activeExecutions ?? 0) > 0
-    || (cache !== undefined && (cache.localWorkOptIn || cache.reclaimBlocked !== null
-      || cache.setup.some(step => step.state === 'running')
-      || cache.activity.some(item => ACTIVITY_KEEPS_MACHINE[item.reason])));
+  return attachment.state !== 'detached';
 }
 const SANDBOX_ABANDONED = `Sandbox provisioning failed after ${SANDBOX_PROVISIONING_ATTEMPTS} attempts and its cloud machine was destroyed so it cannot keep billing. Destroy this entry and create a new machine.`;
 
@@ -580,25 +565,6 @@ export class FleetCatalogDO extends DurableObject<Env> {
     }
   }
 
-  putSpace(input: PortableSpaceDefinition): PortableSpaceDefinition {
-    validateSpace(input);
-    this.ctx.storage.sql.exec(`
-      INSERT INTO space_definitions(space_id, project_id, definition_json, updated_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(space_id) DO UPDATE SET
-        project_id = excluded.project_id,
-        definition_json = excluded.definition_json,
-        updated_at = excluded.updated_at
-    `, input.spaceId, input.projectId, JSON.stringify(input), new Date().toISOString());
-    return input;
-  }
-
-  getSpace(spaceId: string): PortableSpaceDefinition | null {
-    validateId(spaceId);
-    const row = this.ctx.storage.sql.exec<{ definition_json: string }>('SELECT definition_json FROM space_definitions WHERE space_id = ?', spaceId).toArray()[0];
-    return row ? JSON.parse(row.definition_json) as PortableSpaceDefinition : null;
-  }
-
   async listSpaces(): Promise<PortableSpaceDefinition[]> {
     const projects = await (this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(this.env.ACCOUNT_ID).list();
     const definitions = await Promise.all(projects.map(async project => ({
@@ -687,7 +653,6 @@ export class FleetCatalogDO extends DurableObject<Env> {
     });
     this.directoryOutbox.kick();
     this.changes.wake();
-    this.ctx.waitUntil(this.broadcast({ type: 'upsert', machineId: input.id, machine: input }));
     this.ctx.waitUntil(this.armOperations());
     if (input.provider === 'cloudflare-sandbox' && input.state === 'online' && input.desiredState === 'online'
       && this.ctx.storage.sql.exec("SELECT owner FROM fleet_alarms WHERE owner='idle'").toArray().length === 0) {
@@ -726,27 +691,13 @@ export class FleetCatalogDO extends DurableObject<Env> {
       return removed;
     });
     this.directoryOutbox.kick();
-    if (removed) {
-      this.changes.wake();
-      this.ctx.waitUntil(this.broadcast({ type: 'remove', machineId, machine: null }));
-    }
+    if (removed) this.changes.wake();
     return removed;
   }
 
   wasMachineDestroyed(machineId: string): boolean {
     validateId(machineId);
     return this.ctx.storage.sql.exec('SELECT machine_id FROM destroyed_machines WHERE machine_id=?', machineId).toArray().length > 0;
-  }
-
-  /** Whether workspaces may still hold attachments of machines removed before attachment leases existed. */
-  runtimeLeaseBackfillPending(): boolean {
-    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lease_backfill(singleton INTEGER PRIMARY KEY CHECK(singleton=1), completed_at TEXT NOT NULL)');
-    return this.ctx.storage.sql.exec('SELECT singleton FROM runtime_lease_backfill').toArray().length === 0;
-  }
-
-  completeRuntimeLeaseBackfill(): void {
-    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lease_backfill(singleton INTEGER PRIMARY KEY CHECK(singleton=1), completed_at TEXT NOT NULL)');
-    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO runtime_lease_backfill(singleton,completed_at) VALUES(1,?)', new Date().toISOString());
   }
 
   listMachines(): FleetMachineDefinition[] {
@@ -758,27 +709,6 @@ export class FleetCatalogDO extends DurableObject<Env> {
   }
   watch(after: number | null): DurableStreamSubscription {
     return this.changes.watch('machines', after, () => this.listMachines());
-  }
-  async fetch(request: Request): Promise<Response> {
-    if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
-    const identity = await subscriptionIdentity(this.env, request, 'space.control');
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    this.ctx.acceptWebSocket(server);
-    server.serializeAttachment(identity);
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (await subscriptionActive(this.env, socket, 'space.control') && message === 'ping') socket.send('pong');
-  }
-
-  private async broadcast(event: { type: 'upsert' | 'remove'; machineId: string; machine: FleetMachineDefinition | null }): Promise<void> {
-    const encoded = JSON.stringify(event);
-    await Promise.all(this.ctx.getWebSockets().map(async (socket) => {
-      if (!await subscriptionActive(this.env, socket, 'space.control')) return;
-      try { socket.send(encoded); } catch { socket.close(1011, 'Fleet event delivery failed'); }
-    }));
   }
 }
 
@@ -795,14 +725,6 @@ function normalizeMachine(value: Partial<FleetMachineDefinition> & Pick<FleetMac
     operationId: value.operationId ?? null,
     error: value.error ?? null,
   };
-}
-
-function validateSpace(input: PortableSpaceDefinition): void {
-  validateId(input.projectId);
-  validateId(input.spaceId);
-  if (!input.projectName || !input.baseBranch || !input.name || !input.branch) throw new Error('Space definition is invalid');
-  if (input.kind === 'base' && (input.spaceId !== input.projectId || input.phase !== null)) throw new Error('Base definition is invalid');
-  if (input.kind === 'worktree' && !['plan', 'code', 'review', 'ship'].includes(input.phase ?? '')) throw new Error('Worktree definition is invalid');
 }
 
 function validateId(value: string): void {

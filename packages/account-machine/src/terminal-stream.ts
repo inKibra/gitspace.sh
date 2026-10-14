@@ -1,66 +1,41 @@
-import { z } from 'zod';
-import { DaemonStateSchema } from '@gitspace/supervisor';
-import type { GitSpaceDatabase } from '@gitspace/core';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
-import { sql } from 'drizzle-orm';
 import type { WorkspaceTerminalView, WorkspaceTerminalOutput } from './workspace-hub.js';
 
 export interface TerminalSnapshot { terminals: WorkspaceTerminalView[]; output: WorkspaceTerminalOutput | null }
-interface Row { cursor: number; previous: number; body: string }
+interface Change { cursor: number; previous: number; value: TerminalSnapshot }
+interface Head { cursor: number; body: string; value: TerminalSnapshot }
 const RETAINED_SNAPSHOTS = 16;
 
-/** Durable observations of supervisor output; full values and replay revisions commit together. */
+/** In-process observations of supervisor output; full values and replay revisions commit together.
+ * Revisions restart with the process, so clients resuming from an earlier process resync as cursor-ahead. */
 export class TerminalSnapshotJournal {
   readonly listeners = new Set<(resource: string) => void>();
-  constructor(private readonly database: GitSpaceDatabase) {
-    database.orm.run(sql`CREATE TABLE IF NOT EXISTS terminal_stream_changes(cursor INTEGER PRIMARY KEY AUTOINCREMENT,resource TEXT NOT NULL,previous INTEGER NOT NULL,body TEXT NOT NULL)`);
-    database.orm.run(sql`CREATE INDEX IF NOT EXISTS terminal_stream_resource ON terminal_stream_changes(resource,cursor)`);
-    database.orm.run(sql`CREATE TABLE IF NOT EXISTS terminal_stream_heads(resource TEXT PRIMARY KEY,cursor INTEGER NOT NULL,body TEXT NOT NULL)`);
-  }
-  forgetSpace(spaceId: string): void {
-    const prefix = `terminals:${spaceId}:`;
-    this.database.orm.transaction((tx) => {
-      tx.run(sql`DELETE FROM terminal_stream_changes WHERE substr(resource,1,${prefix.length})=${prefix}`);
-      tx.run(sql`DELETE FROM terminal_stream_heads WHERE substr(resource,1,${prefix.length})=${prefix}`);
-    });
-  }
+  private readonly heads = new Map<string, Head>();
+  private readonly changes = new Map<string, Change[]>();
+  private revision = 0;
   commit(resource: string, value: TerminalSnapshot): void {
     const body = JSON.stringify(value);
-    const changed = this.database.orm.transaction((tx) => {
-      const prior = tx.all<{ cursor: number; body: string }>(sql`SELECT cursor,body FROM terminal_stream_heads WHERE resource=${resource}`)[0];
-      if (prior?.body === body) return false;
-      const row = tx.all<{ cursor: number }>(sql`INSERT INTO terminal_stream_changes(resource,previous,body) VALUES(${resource},${prior?.cursor ?? 0},${body}) RETURNING cursor`)[0];
-      if (!row) throw new Error('Terminal snapshot commit did not allocate a revision');
-      streamCursorSchema.parse(row.cursor);
-      tx.run(sql`INSERT INTO terminal_stream_heads(resource,cursor,body) VALUES(${resource},${row.cursor},${body}) ON CONFLICT(resource) DO UPDATE SET cursor=excluded.cursor,body=excluded.body`);
-      tx.run(sql`DELETE FROM terminal_stream_changes WHERE resource=${resource} AND cursor < COALESCE((SELECT cursor FROM terminal_stream_changes WHERE resource=${resource} ORDER BY cursor DESC LIMIT 1 OFFSET ${RETAINED_SNAPSHOTS - 1}),0)`);
-      return true;
-    });
-    if (changed) for (const listener of this.listeners) listener(resource);
+    const prior = this.heads.get(resource);
+    if (prior?.body === body) return;
+    const cursor = streamCursorSchema.parse(++this.revision);
+    const retained = this.changes.get(resource) ?? [];
+    retained.push({ cursor, previous: prior?.cursor ?? 0, value });
+    if (retained.length > RETAINED_SNAPSHOTS) retained.splice(0, retained.length - RETAINED_SNAPSHOTS);
+    this.changes.set(resource, retained);
+    this.heads.set(resource, { cursor, body, value });
+    for (const listener of this.listeners) listener(resource);
   }
   replay(resource: string, after: number | null, initial: boolean): StreamEvent<TerminalSnapshot>[] {
-    const head = this.database.orm.all<{ cursor: number; body: string }>(sql`SELECT cursor,body FROM terminal_stream_heads WHERE resource=${resource}`)[0];
+    const head = this.heads.get(resource);
     if (!head) return [];
-    const snapshot = (): StreamEvent<TerminalSnapshot> => ({ type: 'snapshot', resource, cursor: head.cursor, revision: head.cursor, previous: null, value: decode(head.body) });
+    const snapshot = (): StreamEvent<TerminalSnapshot> => ({ type: 'snapshot', resource, cursor: head.cursor, revision: head.cursor, previous: null, value: head.value });
     if (after === null) return [snapshot()];
-    const rows = this.database.orm.all<Row>(sql`SELECT cursor,previous,body FROM terminal_stream_changes WHERE resource=${resource} AND cursor>${after} ORDER BY cursor`);
+    const rows = (this.changes.get(resource) ?? []).filter((row) => row.cursor > after);
     if (after > head.cursor || (after < head.cursor && rows[0]?.previous !== after)) return [
       { type: 'resync', resource, cursor: head.cursor, revision: head.cursor, reason: after > head.cursor ? 'cursor-ahead' : 'cursor-expired' }, snapshot(),
     ];
-    if (rows.length) return rows.map((row) => ({ type: 'change', resource, cursor: row.cursor, revision: row.cursor, previous: row.previous, value: decode(row.body) }));
+    if (rows.length) return rows.map((row) => ({ type: 'change', resource, cursor: row.cursor, revision: row.cursor, previous: row.previous, value: row.value }));
     return initial ? [snapshot()] : [];
   }
-}
-const TerminalSnapshotSchema = z.object({
-  terminals: z.array(z.object({
-    spaceId: z.string(), name: z.string(), id: z.string(),
-    kind: z.enum(['user', 'agent', 'lifecycle', 'service']), state: DaemonStateSchema,
-    machineId: z.string(), owner: z.string().nullable(), command: z.string(), cwd: z.string(),
-    createdAt: z.coerce.date(), exitCode: z.number().nullable(), protected: z.boolean().optional(),
-  })),
-  output: z.object({ spaceId: z.string(), name: z.string(), state: DaemonStateSchema, cursor: streamCursorSchema, data: z.string() }).nullable(),
-});
-function decode(body: string): TerminalSnapshot {
-  return TerminalSnapshotSchema.parse(JSON.parse(body));
 }

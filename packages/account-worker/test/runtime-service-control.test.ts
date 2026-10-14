@@ -7,7 +7,7 @@ import { runtimeServiceControl } from '../src/runtime-service-control.js';
 test('service inventory spans caches and actions cannot drift to another machine or generation', async () => {
   const commit = 'a'.repeat(40);
   const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/checkpoint', headCommit: commit, branch: 'main', indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: commit, worktreeTree: commit });
-  const attachments = ['a', 'b', 'offline'].map(machineId => RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: `cache-${machineId}`, machineId, generation: 3, role: 'cache', checkout: { kind: 'snapshot', commit }, state: 'ready', capabilities: ['service'], heartbeatAt: machineId === 'offline' ? null : new Date().toISOString(), updatedAt: new Date().toISOString() }));
+  const attachments = ['a', 'b', 'offline'].map(machineId => RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: `cache-${machineId}`, machineId, generation: 3, checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['service'], heartbeatAt: machineId === 'offline' ? null : new Date().toISOString(), updatedAt: new Date().toISOString() }));
   const dispatches: RuntimeToolDispatch[] = [];
   const runtime: Parameters<typeof runtimeServiceControl>[0] = {
     snapshot: async () => RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId: 'workspace', cursor: 0, conversations: [{ id: 'main', parentId: null, title: 'Main', status: 'idle', messages: [] }], attachments, tasks: [], questions: [], documents: {} }),

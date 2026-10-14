@@ -28,7 +28,7 @@ import { InferenceProvider, useInference } from './InferenceContext.js';
 import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
 import { EnvironmentView } from './environment/EnvironmentView.js';
 import { LifecycleLogDialog } from './environment/LifecycleLogDialog.js';
-import { partitionAttachments } from './environment/cache-presentation.js';
+import { workspaceMachines } from './workspace-status.js';
 import type { EnvironmentViewModel, LifecyclePhase, LifecycleRun, TrustState } from './environment/types.js';
 import { Inspector } from './inspector/index.js';
 import { ACCOUNT_DIRECTORY_CHANGED, PRODUCT_ROUTE_LABELS, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
@@ -190,17 +190,16 @@ function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, works
         {runMachine.machines.map(candidate => <option key={candidate.id} value={candidate.id}>{machineValues?.find(item => item.id === candidate.id)?.label ?? candidate.id} · {candidate.label}</option>)}
       </select></label>
       {!machineId ? <p role="status" className="text-caption text-muted-foreground">{runMachine.machines.length ? 'Choose a machine to run checks or lifecycle phases.' : 'Attach a machine to run checks or lifecycle phases. Records remain available.'}</p>
-        : runMachine.machine?.label === 'Paused' || runMachine.machine?.label === 'Reclaimed' ? <p className="text-caption text-muted-foreground">This cache will resume before the requested run. Choosing it does not execute scripts.</p>
-        : runMachine.machine && !runMachine.machine.ready ? <p role="status" className={`break-words text-caption ${runMachine.machine.errors.length ? 'text-destructive' : 'text-muted-foreground'}`}>{runMachine.machine.status}</p> : null}
+        : runMachine.machine && !runMachine.machine.ready ? <p role="status" className={`break-words text-caption ${runMachine.machine.errors.length ? 'text-destructive' : 'text-muted-foreground'}`}>{[runMachine.machine.label, ...runMachine.machine.errors].join(' · ')}</p> : null}
       {!runtimeContext ? <Button variant="ghost" size="compact" disabled={busy || runtime.fetch === 'fetching'} onClick={() => void runtime.refetch()}>Refresh machines</Button> : null}
     </section>
     <EnvironmentView
       model={model}
-      machinePanel={runtimeContext ? <RuntimeMachines snapshot={runtimeContext.snapshot} onCommitFirst={onAskAgent ? () => onAskAgent('Help me review and commit uncommitted Git LFS changes before reclaiming or detaching this machine cache.') : undefined} profile={remote.selectedProfile}
+      machinePanel={runtimeContext ? <RuntimeMachines snapshot={runtimeContext.snapshot} onCommitFirst={onAskAgent ? () => onAskAgent('Help me review and commit uncommitted Git LFS changes before detaching this machine.') : undefined} profile={remote.selectedProfile}
         onOpenLog={runId => { const run = remote.lifecycle.runs.find(item => item.id === runId); const step = run?.results[0]; if (run) openRunLog(run.id, { id: step?.id ?? run.id, label: step?.id ?? run.phase }); else setActionError('The machine reported this setup run, but its durable log has not arrived. Refresh the environment and try again.'); }}
         renderBlockers={selectedMachineId => {
-          const attachment = partitionAttachments(runtimeContext.snapshot.attachments).live.find(item => item.machineId === selectedMachineId);
-          const waiting = attachment?.cache?.setup.some(step => step.state === 'waiting-for-approval');
+          const machine = workspaceMachines(runtimeContext.snapshot).find(item => item.id === selectedMachineId);
+          const waiting = machine?.status.setup.some(step => step.state === 'waiting-for-approval');
           const executions = remote.executions.filter(item => !remote.lifecycle.approvals.some(approval => approval.executionHash === item.hash && approval.scope === item.approval));
           const origins = remote.lifecycle.browserOrigins.filter(origin => !remote.lifecycle.approvals.some(approval => approval.executionHash === origin.hash));
           return <div className="flex flex-col gap-2">
@@ -924,7 +923,6 @@ function GitSpaceProduct() {
         profile: { displayName: next.profile.displayName, handle: current.profile.handle },
         git: next.git,
         defaults: next.defaults,
-        machines: next.machines,
       });
       if (updated.status === 'error') throw updated.error;
       setDraft({ ...updated.value });

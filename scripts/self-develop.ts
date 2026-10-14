@@ -263,7 +263,6 @@ async function stopChild(process: ReturnType<typeof Bun.spawn>): Promise<void> {
 const watchers: FSWatcher[] = [];
 if (process.env.GITSPACE_DEV_NO_WATCH !== '1') {
   for (const sourceRoot of [
-    join(repositoryRoot, 'packages/core/src'),
     join(repositoryRoot, 'packages/account-machine/src'),
   ]) {
     for (const directory of await sourceDirectories(sourceRoot)) {

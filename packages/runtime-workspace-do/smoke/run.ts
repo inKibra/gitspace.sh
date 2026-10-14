@@ -8,7 +8,6 @@ import { Miniflare } from 'miniflare';
 import { z } from 'zod';
 import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeSessionResultSchema, type RuntimeSessionCommand, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { WorkspaceDraftSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
-import { runExecutionProof } from './execution.js';
 import { searchWasmModule } from './search-wasm.js';
 
 const identity = { projectId: 'smoke-project', workspaceId: 'smoke-workspace' };
@@ -156,7 +155,6 @@ try {
   }
   console.log('PASS cold ask recovery, both answer surfaces, idle watch, approval authority and canonical phase');
   console.log('PASS browser approval binds displayed resolved preparation', await request('/browser-approval-proof'));
-  console.log('PASS workspace execution selection requires a ready cache', await request('/execution-machine-proof'));
   console.log('PASS bounded tasks and full receipts', await request('/burst'));
   const scope = z.object({ root: z.string(), child: z.string(), sibling: z.string(), grandchild: z.string() }).parse(await request('/scoped-stop-seed'));
   await until(snapshot => Object.values(scope).every(id => snapshot.questions.some(question => question.conversationId === id && question.answer === null)));
@@ -189,7 +187,7 @@ try {
   assert(familyUsage.byAgent.some(row => row.agentId === scope.child && row.agent === 'child'), 'Usage lost persisted subagent identity');
 
   const seeded = z.object({ conversationId: z.string(), ids: z.array(z.string()), pivot: z.string(), branches: z.array(z.string()) }).parse(await request('/history-seed'));
-  // Re-open so the index must survive/recover independently of live commit callbacks.
+  // Re-open so history reads come from Pi storage alone, independent of live commit callbacks.
   await worker.dispose();
   worker = new Miniflare(options);
   const control = (await session({ type: 'control' }, seeded.conversationId)).control;
@@ -226,7 +224,7 @@ try {
   assert(children.has(seeded.ids[21]!));
   assert.equal(children.size, seeded.branches.length + 1);
   assert(pages > 1);
-  console.log('PASS bounded recall, 620-entry old-history pagination, 205 sibling branches, cold index recovery');
+  console.log('PASS bounded recall, 620-entry old-history pagination, 205 sibling branches, cold reopen');
   let transcript = (await session({ type: 'transcriptPage', request: { generation: null, before: null, after: null, around: null } }, seeded.conversationId)).transcriptPage!;
   const latestTranscript = transcript;
   const transcriptRows = new Map(transcript.rows.map(row => [row.id, row]));
@@ -289,5 +287,4 @@ try {
 } finally {
   try { await worker?.dispose(); } finally { await rm(directory, { recursive: true, force: true }); }
 }
-await runExecutionProof();
 console.log('PASS runtime smoke; workerd instances and temporary storage disposed');

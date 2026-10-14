@@ -269,83 +269,6 @@ describe('ProjectAuthorityDO', () => {
     expect(await (await stub.listEvents(second.offset)).json()).toEqual([]);
   });
 
-  it('keeps one optimistic canonical session directory per project', async () => {
-    const stub = projectEnv.PROJECT_AUTHORITY.getByName('canonical-sessions');
-    await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.bootstrap({
-      id: 'project-c', name: 'Project C', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a',
-    }));
-    const session = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putCanonicalSession({
-      id: 'session-a',
-      workspaceId: 'workspace-c',
-      ompSessionId: 'omp-session-a',
-      machineId: 'machine-a',
-      state: 'active',
-      sessionObjectKey: 'projects/project-c/sessions/session-a.jsonl',
-      sessionObjectHash: `sha256:${'a'.repeat(64)}`,
-      sessionFormatVersion: 'omp-jsonl-1',
-      activity: { active: true, reasons: [{ kind: 'turn' }] },
-      health: { revision: 0, issues: {} },
-      expectedRevision: 0,
-    }));
-    expect(session).toMatchObject({ revision: 1, state: 'active', activity: { active: true } });
-    await expect(runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putCanonicalSession({
-      ...session,
-      state: 'closed',
-      expectedRevision: 0,
-    }))).rejects.toThrow();
-    expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listCanonicalSessions()))
-      .toMatchObject([{ id: 'session-a', workspaceId: 'workspace-c', revision: 1 }]);
-  });
-
-  it.each([false, true])('scopes canonical conversation 1 to each space across cold starts (legacy=%s)', async legacy => {
-    const projectId = `session-scope-${legacy}`;
-    const stub = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
-    await stub.bootstrap({ id: projectId, name: 'Session scopes', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-    const spaces = [projectId, `${projectId}-a`, `${projectId}-b`];
-    for (const id of spaces.slice(1)) {
-      await stub.putWorkspace({ id, projectId, kind: 'worktree', name: id, branch: id, phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-    }
-    await runInDurableObject(stub, async (authority, state) => {
-      if (legacy) {
-        state.storage.sql.exec(`DROP TABLE canonical_sessions;
-          CREATE TABLE canonical_sessions(
-            session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL UNIQUE, omp_session_id TEXT NOT NULL UNIQUE,
-            machine_id TEXT, state TEXT NOT NULL, session_object_key TEXT, session_object_hash TEXT,
-            session_format_version TEXT, activity_json TEXT NOT NULL, health_json TEXT NOT NULL,
-            revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-          );`);
-      }
-      const initial = await authority.putCanonicalSession({
-        id: `session-${projectId}`, workspaceId: projectId, ompSessionId: '1', machineId: 'machine-a',
-        state: 'active', sessionObjectKey: 'retained/session.jsonl', sessionObjectHash: `sha256:${'b'.repeat(64)}`,
-        sessionFormatVersion: 'omp-jsonl-1', activity: { active: true, reasons: [{ kind: 'turn' }] },
-        health: { revision: 3, issues: {} }, expectedRevision: 0,
-      });
-      const retained = await authority.putCanonicalSession({ ...initial, id: `session-${projectId}-a`, workspaceId: `${projectId}-a`, ompSessionId: '2', machineId: null, state: 'closed', expectedRevision: 0 });
-      await authority.alarm();
-      let reopened = new ProjectAuthorityDO(state, env);
-      await state.blockConcurrencyWhile(async () => {});
-      expect(reopened.getCanonicalSession(initial.id)).toEqual(initial);
-      expect(reopened.getCanonicalSession(retained.id)).toEqual(retained);
-      for (const workspaceId of spaces.slice(1)) {
-        const existing = reopened.getCanonicalSession(`session-${workspaceId}`);
-        await reopened.putCanonicalSession({ ...initial, id: `session-${workspaceId}`, workspaceId, expectedRevision: existing?.revision ?? 0 });
-      }
-      const beforeReopen = reopened.listCanonicalSessions();
-      expect(beforeReopen.map(session => session.workspaceId).sort()).toEqual([...spaces].sort());
-      expect(beforeReopen.map(session => session.ompSessionId)).toEqual(['1', '1', '1']);
-      await expect(reopened.putCanonicalSession({ ...initial, id: 'duplicate-space', ompSessionId: '2', expectedRevision: 0 })).rejects.toThrow();
-      await reopened.alarm();
-      reopened = new ProjectAuthorityDO(state, env);
-      await state.blockConcurrencyWhile(async () => {});
-      expect(reopened.listCanonicalSessions()).toEqual(beforeReopen);
-      const updated = await reopened.putCanonicalSession({ ...initial, state: 'closed', expectedRevision: initial.revision });
-      expect(updated).toEqual({ ...initial, state: 'closed', revision: initial.revision + 1, updatedAt: updated.updatedAt });
-      await expect(reopened.putCanonicalSession({ ...initial, id: 'duplicate-after-reopen', ompSessionId: '3', expectedRevision: 0 })).rejects.toThrow();
-      await reopened.alarm();
-    });
-  });
-
   it.each(['cloud-only', 'provisioning', 'active', 'archiving', 'archived', 'restoring', 'failed', 'deleting'] as const)(
     'bounds runtime writes by project lifecycle %s', async lifecycle => {
       const projectId = `runtime-project-${lifecycle}`;
@@ -394,33 +317,6 @@ describe('ProjectAuthorityDO', () => {
       generation: 2,
       expectedGeneration: 0,
     }))).rejects.toThrow();
-  });
-
-  it('persists canonical artifact promotion outcomes', async () => {
-    const stub = projectEnv.PROJECT_AUTHORITY.getByName('artifact-promotions');
-    await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.bootstrap({
-      id: 'project-promotions', name: 'Promotions', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a',
-    }));
-    const id = crypto.randomUUID();
-    await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putArtifactPromotion({
-      id,
-      sourceWorkspaceId: 'workspace-a',
-      sourceGeneration: 3,
-      expectedBaseGeneration: 2,
-      committedBaseGeneration: null,
-      paths: ['apps/demo'],
-      state: 'planned',
-    }));
-    const committed = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putArtifactPromotion({
-      id,
-      sourceWorkspaceId: 'workspace-a',
-      sourceGeneration: 3,
-      expectedBaseGeneration: 2,
-      committedBaseGeneration: 3,
-      paths: ['apps/demo'],
-      state: 'committed',
-    }));
-    expect(committed).toMatchObject({ id, state: 'committed', committedBaseGeneration: 3 });
   });
 
   it('expires and releases hosted service route leases', async () => {

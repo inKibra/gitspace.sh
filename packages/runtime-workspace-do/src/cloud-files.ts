@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { TaggedError } from 'better-result';
-import { canonicalJson, RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeToolResultSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeFindArgumentsSchema, ApplyPatchArgumentsSchema, prepareV4APatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { canonicalJson, RuntimeGitCheckpointSchema, RuntimeToolResultSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeFindArgumentsSchema, ApplyPatchArgumentsSchema, prepareV4APatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { collectBytes, parseGitLfsPointer, type GitLfsConfirmedObject, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -549,13 +549,6 @@ export function readRuntimeLfsRoots(storage: DurableObjectStorage): Checkpoint[]
     roots.push(pending.checkpoint);
     if (pending.current) roots.push(pending.current);
     if (pending.base) roots.push(pending.base);
-  }
-  if (tables.has('runtime_attachments')) for (const row of storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments')) {
-    const attachment = RuntimeAttachmentSchema.parse(JSON.parse(row.record));
-    if (attachment.state === 'detached' || attachment.state === 'lost' || attachment.checkout.kind === 'shared') continue;
-    const accepted = tables.has('runtime_code_commits') ? storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_commits WHERE commit_id=?', attachment.checkout.commit).toArray() : [];
-    if (accepted.length === 0) throw new Error('Active attachment checkpoint inventory is unavailable');
-    for (const checkpoint of accepted) add(checkpoint.checkpoint);
   }
   return roots;
 }

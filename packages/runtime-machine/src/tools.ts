@@ -17,7 +17,7 @@ import { materializeSearchSnapshot } from './search-snapshot.js';
 export type ExecutorContent = z.infer<typeof RuntimeContentSchema>[];
 export type ExecutorArtifactAccess = { read(uri: string, signal: AbortSignal): Promise<ExecutorContent>; write(uri: string, content: string, signal: AbortSignal): Promise<void> };
 export type ExecutorOperationHandler = (dispatch: RuntimeToolDispatch, local: LocalAttachment, signal: AbortSignal) => Promise<ExecutorContent>;
-export type MachineToolOptions = { journal?: ExecutorJournal; runCommand: RunExecutorCommand; artifacts: (attachment: LocalAttachment) => ExecutorArtifactAccess; operations?: Record<string, ExecutorOperationHandler> };
+export type MachineToolOptions = { journal?: ExecutorJournal; runCommand: RunExecutorCommand; artifacts?: (attachment: LocalAttachment) => ExecutorArtifactAccess; operations?: Record<string, ExecutorOperationHandler> };
 const ProposalSchema = z.object({ changes: z.array(z.object({ path: z.string(), before: z.string(), after: z.string() })) });
 
 export async function checkoutPath(root: string, path: string): Promise<string> {
@@ -66,8 +66,12 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
   const env = new NodeExecutionEnv({ cwd: local.rootPath });
   const context = withAbortSignal(signal, BACKGROUND_CONTEXT);
   let sequence = 0;
-  const command = (application: string, args: string[], cwd = local.rootPath, environment?: Record<string, string>) => options.runCommand({ application, args, cwd, attemptId: dispatch.attemptId, sequence: sequence++, deadlineAt: dispatch.deadlineAt, signal, env: environment });
+  const command = (application: string, args: string[], cwd = local.rootPath, environment?: Record<string, string>) => options.runCommand({ application, args, cwd, project: local.rootPath, attemptId: dispatch.attemptId, sequence: sequence++, deadlineAt: dispatch.deadlineAt, signal, env: environment });
   const text = (value: string): ExecutorContent => [{ type: 'text', text: value }];
+  const artifacts = () => {
+    if (!options.artifacts) throw new Error('Artifact storage unavailable on this machine');
+    return options.artifacts(local);
+  };
   const read = async (path: string) => {
     const result = await env.readTextFile(await checkoutPath(local.rootPath, path), context);
     if (!result.ok) throw result.error;
@@ -83,7 +87,7 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
   switch (dispatch.tool) {
     case 'read': {
       const args = RuntimeReadArgumentsSchema.parse(dispatch.args);
-      if (args.path.startsWith('local://') || args.path.startsWith('artifact://')) return options.artifacts(local).read(args.path, signal);
+      if (args.path.startsWith('local://') || args.path.startsWith('artifact://')) return artifacts().read(args.path, signal);
       const path = await checkoutPath(local.rootPath, args.path);
       const binary = await env.readBinaryFile(path, context);
       if (!binary.ok) throw binary.error;
@@ -97,7 +101,7 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
     }
     case 'write': {
       const args = RuntimeWriteArgumentsSchema.parse(dispatch.args);
-      if (args.path.startsWith('local://') || args.path.startsWith('artifact://')) await options.artifacts(local).write(args.path, args.content, signal);
+      if (args.path.startsWith('local://') || args.path.startsWith('artifact://')) await artifacts().write(args.path, args.content, signal);
       else await write(args.path, args.content);
       return text(`Wrote ${args.path}`);
     }

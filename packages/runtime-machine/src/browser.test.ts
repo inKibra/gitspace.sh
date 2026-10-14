@@ -8,7 +8,7 @@ import { browserTestAuthority, browserInvoker, browserText } from './browser-tes
 import { RuntimeBrowserArgumentsSchema, type RuntimeBrowserArguments, type RuntimeBrowserSignedGrant } from '@gitspace/protocol-runtime';
 import type { RuntimeBrowserRelay, RuntimeBrowserRelayChannel } from './browser-relay-transport.js';
 import type { LocalAttachment } from './journal.js';
-import { ExecutorEffectUncertain } from './commands.js';
+import { BrowserEffectUncertain } from './browser-cdp.js';
 import * as identities from '../../supervisor/src/process-identity.js';
 
 class Relay implements RuntimeBrowserRelay {
@@ -46,7 +46,7 @@ class Relay implements RuntimeBrowserRelay {
         if (method === 'Target.closeTarget') { this.channels.delete(targetId); return { success: true }; }
         if (method === 'GitSpace.validateRef') return { connected: !this.detached };
         if (method === 'DOM.getBoxModel') return { model: { content: [0, 0, 10, 0, 10, 10, 0, 10] } };
-        if (method === 'Input.dispatchMouseEvent' && this.uncertain) throw new ExecutorEffectUncertain('lost acknowledgement');
+        if (method === 'Input.dispatchMouseEvent' && this.uncertain) throw new BrowserEffectUncertain('lost acknowledgement');
         return {};
       },
       subscribe: listener => { current.listener = listener; return () => { current.listener = undefined; }; },
@@ -135,7 +135,7 @@ test('different workspaces progress independently and uncertain effects retain r
     const pending = blocked({ action: 'observe', source: 'relay', targetId: a.targetId });
     const observation = browserText(await free({ action: 'observe', source: 'relay', targetId: b.targetId }));
     relay.uncertain = true;
-    await expect(free({ action: 'act', source: 'relay', targetId: b.targetId, ref: observation.nodes[1].ref, operation: 'click' })).rejects.toBeInstanceOf(ExecutorEffectUncertain);
+    await expect(free({ action: 'act', source: 'relay', targetId: b.targetId, ref: observation.nodes[1].ref, operation: 'click' })).rejects.toBeInstanceOf(BrowserEffectUncertain);
     const status = browserText(await browser.execute(await authority.dispatch({ action: 'status' }, { type: 'manage', action: 'status' }, 'free'), local, AbortSignal.timeout(1000)));
     expect(status.records.some((record: {state:string}) => record.state === 'fenced')).toBe(true);
     gate.resolve(); await pending;

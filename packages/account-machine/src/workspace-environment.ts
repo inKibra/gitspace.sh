@@ -2,18 +2,17 @@ import { mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } 
 import { dirname, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { watch, type FSWatcher } from 'node:fs';
-import type { GitSpaceDatabase } from '@gitspace/core';
 import {
   executionHash, loadEnvironmentBundle, parseEnvironmentBundleJson, parseLifecycleBindingsJson, resolveEnvironmentProfile,
   resolveExecutionApproval, deriveLifecycleExecutions, isInteractiveLifecycleScript, skippedInteractiveScriptLine,
-  effectiveEnvironmentValues, assertEnvironmentExecutionReady, shouldPrepareEnvironment, environmentPreparationPhases,
+  effectiveEnvironmentValues, assertEnvironmentExecutionReady, environmentPreparationPhases,
   EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
   type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleMutation, type LifecycleIncident,
   type EnvironmentLifecycleAuthority, type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from '@gitspace/protocol-environment';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol';
-import type { WorkspaceLifecyclePlanResult, WorkspaceLifecyclePlanStep } from './workspace-hub.js';
-import type { ProjectLifecycleAuthority } from './project-lifecycle.js';
+import type { WorkspaceCheckouts, WorkspaceLifecyclePlanResult, WorkspaceLifecyclePlanStep } from './workspace-hub.js';
+import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 import type { RuntimeCacheObservation } from '@gitspace/protocol-runtime';
 
@@ -71,51 +70,33 @@ export class WorkspaceEnvironmentManager {
   /** Journals written for a claim whose authority response is still pending. */
   private readonly claiming = new Set<string>();
   constructor(
-    private readonly database: GitSpaceDatabase,
+    private readonly checkouts: WorkspaceCheckouts,
     private readonly secrets: EnvironmentSecretMaterializer | undefined,
     private readonly runner: EnvironmentLifecycleRunner | undefined,
-    private readonly authority: EnvironmentLifecycleAuthority & Pick<ProjectLifecycleAuthority, 'listProjectWorkspaces'>,
-    private readonly options: { machineId: string; stateRoot: string; prepareRunner?: (spaceId: string, phase: LifecyclePhase) => Promise<string | undefined> },
+    private readonly authority: EnvironmentLifecycleAuthority & Pick<CloudSpaceCheckpointAuthority, 'listProjectWorkspaces'>,
+    private readonly options: { machineId: string; stateRoot: string },
   ) {}
 
-  async forgetSpace(spaceId: string, projectId: string): Promise<void> {
-    if ([...this.active.values()].some((run) => run.spaceId === spaceId)
-        || [...this.accepting.keys()].some((key) => key.startsWith(`${spaceId}:`))) {
-      throw new EnvironmentError('RecoveryRequired', 'Lifecycle execution must settle before local cleanup', { spaceId });
+  /** The checkout a lifecycle operation reads: the named attachment, else this machine's held checkout. */
+  private space(spaceId: string, attachment?: LocalAttachment): { id: string; projectId: string; rootPath: string; kind: 'base' | 'worktree' } {
+    if (attachment) {
+      const { workspaceId, projectId } = attachment.attachment;
+      return { id: workspaceId, projectId, rootPath: attachment.rootPath, kind: String(workspaceId) === String(projectId) ? 'base' : 'worktree' };
     }
-    const files = await readdir(this.options.stateRoot).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error));
-    for (const file of files.filter((name) => name.endsWith('.json'))) {
-      const journal = join(this.options.stateRoot, file);
-      const pending = JSON.parse(await readFile(journal, 'utf8')) as PendingLifecycleRun;
-      if (pending.spaceId !== spaceId) continue;
-      if (pending.projectId !== projectId) throw new EnvironmentError('RecoveryRequired', 'Lifecycle cleanup identity does not match', { spaceId });
-      const state = await this.authority.getLifecycleState(projectId, spaceId);
-      const run = state.runs.find((entry) => entry.id === pending.runId);
-      if (!run || isLifecycleRunActive(run)) {
-        throw new EnvironmentError('RecoveryRequired', 'Lifecycle outcome must be durable before deleting local scratch', { spaceId, runId: pending.runId });
-      }
-      if (pending.incidents?.length) {
-        await this.authority.mutateLifecycleState(projectId, spaceId, { op: 'incidents', runId: run.id, incidents: pending.incidents });
-      }
-      await rm(pending.directory, { recursive: true, force: true });
-      await rm(`${journal}.incident.tmp`, { force: true });
-      await rm(journal);
-    }
+    const rootPath = this.checkouts.path(spaceId);
+    const projectId = this.checkouts.projectId(spaceId);
+    if (!rootPath || !projectId) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
+    return { id: spaceId, projectId, rootPath, kind: spaceId === projectId ? 'base' : 'worktree' };
   }
 
   async view(spaceId: string, cloudOnly = false, attachment?: LocalAttachment): Promise<WorkspaceEnvironmentView> {
-    const space = attachment ? {
-      id: attachment.attachment.workspaceId, projectId: attachment.attachment.projectId, rootPath: attachment.rootPath,
-      kind: String(attachment.attachment.workspaceId) === String(attachment.attachment.projectId) ? 'base' : 'worktree',
-      holderId: null, placementState: 'open', generation: attachment.attachment.generation,
-    } : this.database.getSpace(spaceId);
-    if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
+    const space = this.space(spaceId, attachment);
     let lifecycle = await this.authority.getLifecycleState(space.projectId, spaceId);
     if (attachment) {
       const copyBindings = lifecycle.runs.filter(run => run.attachment?.attachmentId === attachment.attachment.attachmentId && run.attachment.generation === attachment.attachment.generation).reduce<Record<string, string>>((bindings, run) => ({ ...bindings, ...run.bindings }), {});
       lifecycle = { ...lifecycle, bindings: { ...lifecycle.bindings, ...copyBindings } };
     }
-    const available = (attachment !== undefined || (!cloudOnly && space.placementState !== 'closed' && space.holderId === this.options.machineId))
+    const available = (attachment !== undefined || !cloudOnly)
       && await stat(space.rootPath).then((entry) => entry.isDirectory(), (error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? false : Promise.reject(error));
     const source = available ? await readFile(join(space.rootPath, '.gitspace', 'bundle.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error)) : null;
     const bundle = source !== null ? parseEnvironmentBundleJson(source)
@@ -164,8 +145,7 @@ export class WorkspaceEnvironmentManager {
       assertLifecycleRequestIdentity(request, accepting);
       return accepting.promise;
     }
-    const space = attachment ? { projectId: attachment.attachment.projectId } : this.database.getSpace(spaceId);
-    if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
+    const space = this.space(spaceId, attachment);
     const state = await this.authority.getLifecycleState(space.projectId, spaceId);
     const concurrent = this.accepting.get(key);
     if (concurrent) {
@@ -193,8 +173,7 @@ export class WorkspaceEnvironmentManager {
   }
 
   async cancelRun(spaceId: string, runId: string): Promise<LifecycleRun> {
-    const space = this.database.getSpace(spaceId);
-    if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
+    const space = this.space(spaceId);
     const state = await this.authority.mutateLifecycleState(space.projectId, spaceId, { op: 'cancel', runId });
     const run = state.runs.find((entry) => entry.id === runId);
     if (!run) throw new EnvironmentError('NotFound', 'Lifecycle run does not belong to this workspace', { runId });
@@ -207,38 +186,15 @@ export class WorkspaceEnvironmentManager {
   }
 
   async runPhase(spaceId: string, phase: LifecyclePhase, rerun = false, request?: { runId: string; interactive?: boolean; deadlineAt?: string; accepted: (run: LifecycleRun) => void }): Promise<readonly EnvironmentExecutionResult[]> {
-    const directory = phase.startsWith('cloud/') ? await this.options.prepareRunner?.(spaceId, phase) : undefined;
-    const current = await this.view(spaceId, directory !== undefined);
-    try {
-      if (request?.interactive && directory !== undefined) throw new EnvironmentError('RunnerUnavailable', 'Interactive lifecycle execution requires an open workspace terminal; detached recovery cannot accept input');
-      if (phase === 'cloud/provision') await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'policy', automatic: true });
-      let result: readonly EnvironmentExecutionResult[] = [];
-      for (const next of environmentPreparationPhases(phase, directory !== undefined)) {
-        const operation = request ? { ...request, interactive: next === 'checks' ? false : request.interactive, runId: next === phase ? request.runId : `${request.runId}:${next.replace('/', '-')}`, accepted: next === phase ? request.accepted : () => undefined } : undefined;
-        const completed = await this.runApproved(spaceId, next, next === phase ? rerun : next === 'checks', next.startsWith('workspace/') ? undefined : directory, operation);
-        if (next === phase) result = completed;
-      }
-      return result;
-    } finally {
-      if (directory) {
-        // Preserve isolated recovery context while any shell outcome remains uncertain.
-        const state = await this.authority.getLifecycleState(current.projectId, spaceId).catch(() => null);
-        if (state && !state.runs.some((run) => isLifecycleRunActive(run) && run.machineId === this.options.machineId)) await rm(directory, { recursive: true, force: true });
-      }
+    const current = await this.view(spaceId);
+    if (phase === 'cloud/provision') await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'policy', automatic: true });
+    let result: readonly EnvironmentExecutionResult[] = [];
+    for (const next of environmentPreparationPhases(phase, false)) {
+      const operation = request ? { ...request, interactive: next === 'checks' ? false : request.interactive, runId: next === phase ? request.runId : `${request.runId}:${next.replace('/', '-')}`, accepted: next === phase ? request.accepted : () => undefined } : undefined;
+      const completed = await this.runApproved(spaceId, next, next === phase ? rerun : next === 'checks', undefined, operation);
+      if (next === phase) result = completed;
     }
-  }
-
-  /** Preparation is advisory; never gate checkout, terminal or agent access on it. */
-  async prepare(spaceId: string): Promise<void> {
-    try {
-      const current = await this.view(spaceId);
-      if (!shouldPrepareEnvironment(current.lifecycle)) return;
-      await this.runApproved(spaceId, 'machine/prepare', false);
-      await this.runApproved(spaceId, 'checks', true);
-      await this.runApproved(spaceId, 'workspace/materialize', false);
-    } catch (error) {
-      console.error('[gitspace-lifecycle] local preparation needs attention; workspace remains accessible', spaceId, error instanceof Error ? error.message : String(error));
-    }
+    return result;
   }
 
   /** Runs every setup phase on a machine cache. A failed phase is recorded on its step and the next phase still runs. */
@@ -246,7 +202,7 @@ export class WorkspaceEnvironmentManager {
     const { workspaceId, projectId, attachmentId, generation } = local.attachment;
     for (const phase of ['machine/prepare', 'checks', 'workspace/materialize'] as const) {
       signal.throwIfAborted();
-      const runId = `attachment:${attachmentId}:${generation}:${local.attachment.cacheAction?.action === 'setup' ? `${local.attachment.cacheAction.requestId}:` : ''}${phase}`;
+      const runId = `attachment:${attachmentId}:${generation}:${phase}`;
       await progress?.({ phase, state: 'running', runId, error: null });
       let cancellation: Promise<unknown> | undefined;
       const cancel = () => { cancellation ??= this.authority.mutateLifecycleState(projectId, workspaceId, { op: 'cancel', runId }); void cancellation.catch(() => {}); };
@@ -271,11 +227,6 @@ export class WorkspaceEnvironmentManager {
     }
   }
 
-  async dematerialize(spaceId: string): Promise<void> {
-    const current = await this.view(spaceId);
-    if (current.lifecycle.policy.automatic && !current.lifecycle.destroyedAt) await this.runApproved(spaceId, 'workspace/dematerialize', false);
-  }
-
   /** An interrupted run may be marked failed only after its exact Hub process is confirmed stopped. */
   async recoverInterruptedRuns(): Promise<void> {
     const files = await readdir(this.options.stateRoot).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error));
@@ -295,8 +246,8 @@ export class WorkspaceEnvironmentManager {
    * already ended leaves nothing to recover; an active one is stopped if it started, then finished as interrupted.
    * Returns false while the outcome cannot be confirmed yet; the journal is then retained. */
   private async reconcileJournal(journal: string, pending: PendingLifecycleRun): Promise<boolean> {
-    const space = this.database.getSpace(pending.spaceId);
-    if ((space && space.projectId !== pending.projectId) || (!space && !pending.workingDirectory)) throw new EnvironmentError('NotFound', 'Lifecycle recovery space is unavailable');
+    const projectId = this.checkouts.projectId(pending.spaceId);
+    if ((projectId !== null && projectId !== pending.projectId) || (projectId === null && !pending.workingDirectory)) throw new EnvironmentError('NotFound', 'Lifecycle recovery space is unavailable');
     const state = await this.authority.getLifecycleState(pending.projectId, pending.spaceId);
     const run = state.runs.find((entry) => entry.id === pending.runId);
     if (!run || !isLifecycleRunActive(run)) {
@@ -325,18 +276,12 @@ export class WorkspaceEnvironmentManager {
   }
 
   async runLog(spaceId: string, runId: string, offset = 0) {
-    const space = this.database.getSpace(spaceId);
-    if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
+    const space = this.space(spaceId);
     return this.authority.getLifecycleRunLog(space.projectId, spaceId, runId, offset);
   }
 
   private async runApproved(spaceId: string, phase: LifecycleRunPhase, rerun: boolean, workingDirectory?: string, request?: { runId: string; interactive?: boolean; deadlineAt?: string; accepted: (run: LifecycleRun) => void }, attachment?: LocalAttachment): Promise<readonly EnvironmentExecutionResult[]> {
-    const space = attachment ? {
-      id: attachment.attachment.workspaceId, projectId: attachment.attachment.projectId,
-      kind: String(attachment.attachment.workspaceId) === String(attachment.attachment.projectId) ? 'base' : 'worktree',
-      holderId: null, placementState: 'open', generation: attachment.attachment.generation,
-    } : this.database.getSpace(spaceId);
-    if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });
+    const space = this.space(spaceId, attachment);
     const current = await this.view(spaceId, workingDirectory !== undefined, attachment);
     const phaseExecutions = current.executions.filter((execution) => phase === 'checks' ? execution.kind === 'check' : execution.phase === phase);
     // Without a terminal, interactive scripts are skipped and recorded instead of refusing the whole phase.
@@ -348,7 +293,7 @@ export class WorkspaceEnvironmentManager {
     assertEnvironmentExecutionReady({
       phase, state: current.lifecycle, bundle: current.bundle, effective: current.effective, values: current.values.effective,
       configuredSecrets: current.configuredSecrets, executionCount: planned.length,
-      holder: space.holderId === this.options.machineId && space.placementState !== 'closed',
+      holder: true,
       detached: workingDirectory !== undefined, runnerAvailable: this.runner !== undefined, attachment: attachment !== undefined,
     });
     const secretNames = planned.length > 0 ? [...current.effective.secrets] : [];
@@ -380,7 +325,7 @@ export class WorkspaceEnvironmentManager {
       state = await this.authority.mutateLifecycleState(current.projectId, spaceId, {
         op: 'claim', runId, ownershipToken: token, phase, profile: current.selectedProfile, executionHashes: planned.map((execution) => execution.hash),
         interactive: request?.interactive ?? false,
-        generation: phase.startsWith('cloud/') || workingDirectory ? null : space.generation, rerun, terminalName, ...(request?.deadlineAt ? { deadlineAt: request.deadlineAt } : {}),
+        generation: null, rerun, terminalName, ...(request?.deadlineAt ? { deadlineAt: request.deadlineAt } : {}),
         ...(attachment ? { attachment: { attachmentId: attachment.attachment.attachmentId, generation: attachment.attachment.generation } } : {}),
       });
     } catch (error) {
@@ -473,7 +418,7 @@ export class WorkspaceEnvironmentManager {
         GITSPACE_MACHINE_TOOLS: tools,
         GIT_TERMINAL_PROMPT: '0',
         GITSPACE_PROJECT_ID: current.projectId, GITSPACE_WORKSPACE_ID: spaceId, GITSPACE_MACHINE_ID: this.options.machineId,
-        GITSPACE_WORKSPACE_GENERATION: workingDirectory ? '' : String(space.generation), GITSPACE_ENVIRONMENT_PROFILE: current.selectedProfile,
+        GITSPACE_WORKSPACE_GENERATION: '', GITSPACE_ENVIRONMENT_PROFILE: current.selectedProfile,
         GITSPACE_WORKSPACE_SOURCE_COMMIT: definition?.sourceCommit ?? '',
         GITSPACE_LIFECYCLE_BINDINGS: JSON.stringify(state.bindings), GITSPACE_LIFECYCLE_OUTPUT: join(directory, 'output.json'),
       };

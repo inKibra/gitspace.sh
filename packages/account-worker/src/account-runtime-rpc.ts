@@ -2,8 +2,8 @@ import { deviceCanAdminister, type DeviceCapability, type GitSpaceRpcContext } f
 import {
   runtimeSnapshotContract, runtimeSubmitContract, runtimeCancelContract,
   runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract,
-  runtimeExecutionMachineContract, runtimeQaContract, runtimeAttachmentRequestContract, runtimeCacheAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
-  runtimeBrowserTrustContract, runtimeCacheActionContract, runtimeDraftContract,
+  runtimeQaContract, runtimeCacheAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
+  runtimeBrowserTrustContract, runtimeDraftContract,
   runtimeServicesContract,
 } from '@gitspace/protocol/rpc-contract';
 import { RuntimeIdentitySchema, RuntimeWatchEventSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
@@ -118,24 +118,12 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(await authority.runtimeServices(input));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control workspace services', message: message(error) })); }
   });
-  const executionMachine = server.implement(runtimeExecutionMachineContract).handler(async ({ input, errors }) => {
-    try {
-      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
-      return ok(await authority.runtimeExecutionMachine(input));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'set workspace execution machine', message: message(error) })); }
-  });
   const qa = server.implement(runtimeQaContract).handler(async ({ input, errors }) => {
     try {
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
       if (input.action.kind === 'share' && (device.kind !== 'browser' || !deviceCanAdminister(device, 'account.admin'))) throw new Error('Sharing a QA report requires a browser administrator');
       return ok(await authority.runtimeQa(input, { deviceId, canApprove: input.action.kind !== 'share' || (device.kind === 'browser' && deviceCanAdminister(device, 'account.admin')) }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'review runtime QA report', message: message(error) })); }
-  });
-  const requestAttachment = server.implement(runtimeAttachmentRequestContract).handler(async ({ input, errors }) => {
-    try {
-      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
-      return ok(await authority.runtimeAttachmentRequest(input));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'request executor attachment', message: message(error) })); }
   });
   const requestCacheAttachment = server.implement(runtimeCacheAttachmentRequestContract).handler(async ({ input, errors }) => {
     try {
@@ -149,12 +137,6 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(await authority.runtimeAttachmentDetachRequest(input));
     } catch (error) { return err(errors.OperationFailed({ operation: 'drain executor attachment', message: message(error) })); }
   });
-  const cacheAction = server.implement(runtimeCacheActionContract).handler(async ({ input, errors }) => {
-    try {
-      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
-      return ok(await authority.runtimeCacheAction(input));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'request cache action', message: message(error) })); }
-  });
   const watch = server.implement(runtimeWatchContract).stream(async function* ({ input, signal, errors }) {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.read');
@@ -166,5 +148,5 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'watch cloud runtime', message: message(error) }));
     }
   });
-  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, executionMachine, qa, attachment: { request: requestAttachment, cache: { request: requestCacheAttachment }, action: cacheAction, detach: detachAttachment }, watch };
+  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, qa, attachment: { cache: { request: requestCacheAttachment }, detach: detachAttachment }, watch };
 }

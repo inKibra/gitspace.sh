@@ -420,29 +420,6 @@ async function legacyCheckpointKey(env: Env, userId: string): Promise<Uint8Array
   return credentialProtocolBase64.decode(await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId));
 }
 
-/** Authenticated metadata object read; keys are relative to users/<account>/, never URLs. */
-export async function readLegacyCheckpointObject(env: Env, userId: string, key: string, hash: string): Promise<Uint8Array> {
-  const encryptionKey = await legacyCheckpointKey(env, userId);
-  return decryptArtifactBytes(await readObject(env, userId, key, hash), encryptionKey);
-}
-
-export interface LegacyCheckpointTranscriptSource {
-  sessionId: string;
-  ompSessionId: string;
-  objectKey: string;
-  objectHash: string;
-}
-
-/** Validates the whole immutable tree before exposing its selected branch; does not open a machine. */
-export async function openLegacyCheckpointTranscript(env: Env, userId: string, source: LegacyCheckpointTranscriptSource) {
-  const snapshot = { ...source, kind: 'legacy' as const, key: await legacyCheckpointKey(env, userId) };
-  return openLegacySession(() => readSavedSnapshot(env, userId, snapshot), source.sessionId, source.ompSessionId);
-}
-
-export async function* readLegacyCheckpointTranscript(env: Env, userId: string, source: LegacyCheckpointTranscriptSource): AsyncGenerator<TranscriptEvent> {
-  yield* (await openLegacyCheckpointTranscript(env, userId, source)).events;
-}
-
 export async function readSavedInspectorTranscript(env: Env, userId: string, source: InspectorCloudContext): Promise<AsyncIterable<TranscriptEvent>> {
   const { savedTranscript, snapshot } = await savedInspectorSource(env, userId, source);
   if (savedTranscript.status === 'none') return (async function* () {})();

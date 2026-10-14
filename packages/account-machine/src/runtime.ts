@@ -1,59 +1,37 @@
-import { join, resolve } from 'node:path';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import {
-  GitSpaceDatabase,
-  GitSpaceHandlers,
-  LocalArtifactResolver,
-  artifactScopes,
-  type SpaceCleanupJob,
-} from '@gitspace/core';
+import { join } from 'node:path';
 import {
   CloudDataCheckpointBlobStore,
   CloudSpaceCheckpointAuthority,
   BrowserRelaySupervisor,
   CanonicalSettingsCoordinator,
-  EncryptedCheckpointBlobStore,
-  MachinePortableSpaceController,
-  MachineSessionCoordinator,
   MachineMcpCoordinator,
   SharedGitIdentityCoordinator,
-  PortableSpaceLifecycle,
   ArtifactsGitRemote,
   WorkspaceHubTerminalCoordinator,
   createGitSpaceRpcHandler,
   startGitSpaceRpcHttpServer,
-  type ArtifactsRepositoryBinding,
+  type WorkspaceCheckouts,
 } from './index.js';
 import { installDefaultGitSpaceSkills } from './default-skills.js';
 import { WorkspaceServiceManager } from './workspace-services.js';
 import { createServiceAccessClient } from './service-forward.js';
 import { WorkspaceEnvironmentManager } from './workspace-environment.js';
-import { credentialProtocolBase64, type CloudProjectSummary, type CloudWorkspaceDefinition } from '@gitspace/protocol';
-import { parseWorkspaceCheckpoint, spaceCheckpointManifestKey, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
+import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { appendFileSync, existsSync } from 'node:fs';
-import { CloudProjectEventWriter } from './cloud-project-events.js';
 import { DeviceRegistry } from './device-registry.js';
 import { createSignedRpcHandler } from './signed-rpc.js';
-import { ProjectLifecycleManager } from './project-lifecycle.js';
-import { CanonicalSessionOutbox, CloudCanonicalSessionWriter, type CanonicalPublicationIntent } from './cloud-session-directory.js';
 import { DeploymentLauncher } from './deployment-launcher.js';
-import { ReleaseFollower } from './release-follower.js';
-import { CloudAgentRuntime } from './cloud-agent-runtime.js';
 import { atomicJson } from './machine-update.js';
-import { CloudArtifactObjectStore } from './cloud-artifact-object-store.js';
-import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import { createCloudGitLfsPublisher, createCloudGitLfsStore } from './cloud-lfs-store.js';
-import { recheckGitLfsOrigin, type MachineGitLfsAccess } from './git-lfs.js';
-import { createPublishedSpaceHeadResolver } from './inspector-base.js';
+import type { MachineGitLfsAccess } from './git-lfs.js';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
 import { pinnedGitLfs, pinnedRipgrep } from '../../deployment/src/native-build.js';
 import { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { z } from 'zod';
 import { createMachineExecutor, type MachineExecutorRuntime } from './runtime-executor.js';
 import { machineOperationalTools } from './runtime-operations.js';
-import { RuntimeActionResultSchema, RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
-import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
-import { MachineDiscardGate, localWorkDigest } from './machine-discard.js';
+import { RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
+import type { LocalAttachment } from '@gitspace/runtime-machine';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -73,115 +51,6 @@ function signingKey(): Uint8Array {
   return key;
 }
 
-function projectPort(projectId: string): number {
-  const hash = new Bun.CryptoHasher('sha256').update(`${process.pid}:${projectId}`).digest();
-  return 30_000 + ((hash[0]! << 8 | hash[1]!) % 20_000);
-}
-export function possessBootstrapSpace(
-  database: GitSpaceDatabase,
-  spaceId: string | undefined,
-  machineId: string,
-  newlyCreated: boolean,
-  rootPath?: string,
-): void {
-  if (!spaceId || !newlyCreated) return;
-  const possession = database.possessSpace(spaceId, machineId, rootPath);
-  if (possession.status === 'error' && database.getSpacePlacement(spaceId)?.holderId !== machineId) {
-    throw possession.error;
-  }
-}
-
-export function canBootstrapSpaceProjection(input: {
-  projectLifecycle: CloudProjectSummary['lifecycle'] | null;
-  workspaceLifecycle: CloudWorkspaceDefinition['lifecycle'] | null;
-  placement: SpaceAuthorityRecord | null;
-  cleanupPending: boolean;
-}): boolean {
-  if (input.cleanupPending || input.placement) return false;
-  if (input.projectLifecycle === 'archived' || input.projectLifecycle === 'deleting') return false;
-  // An existing project must already recognize this identity. Enrollment variables
-  // are not an explicit request to recreate a workspace deleted while offline.
-  if (input.projectLifecycle !== null && input.workspaceLifecycle !== 'active') return false;
-  return input.workspaceLifecycle === null || input.workspaceLifecycle === 'active';
-}
-
-export function reconcileOpenSpaceProjection(
-  database: GitSpaceDatabase,
-  spaceId: string,
-  machineId: string,
-  cloud: SpaceAuthorityRecord | null,
-): boolean {
-  const space = database.getSpace(spaceId);
-  if (!space) return false;
-  const locallyOwned = space.holderId === machineId && space.placementState === 'open';
-  const current = cloud?.projectId === space.projectId && cloud.spaceId === space.id
-    && cloud.state === 'open' && cloud.machineId === machineId && cloud.generation === space.generation;
-  const hasCheckout = existsSync(join(space.rootPath, '.git'));
-  if (locallyOwned && (!current || !hasCheckout)) {
-    const fenced = database.invalidateSpacePossession({ spaceId, holderId: machineId, expectedGeneration: space.generation });
-    if (fenced.status === 'error') throw fenced.error;
-    return false;
-  }
-  if (!current || !hasCheckout) return false;
-  if (locallyOwned) return true;
-  if (space.placementState !== 'closed' || space.holderId !== 'unassigned') return false;
-  // A canceled close can leave the intact checkout fenced at the still-current lease.
-  return database.adoptOpenSpaceProjection({
-    spaceId,
-    holderId: machineId,
-    expectedGeneration: cloud.generation,
-    rootPath: space.rootPath,
-  }).status === 'ok';
-}
-
-export function reconcilePreparedSpaceCleanup(
-  database: GitSpaceDatabase,
-  machineId: string,
-  job: SpaceCleanupJob,
-  cloud: SpaceAuthorityRecord | null,
-): 'committed' | 'aborted' | 'fenced' {
-  if (job.state === 'committed') return 'committed';
-  const identityMatches = cloud?.projectId === job.projectId && cloud.spaceId === job.spaceId;
-  if (identityMatches && cloud.generation > job.generation && cloud.machineId !== machineId
-    && job.checkpointRevision !== null && job.manifestKey !== null && job.manifestHash !== null
-    && cloud.publishedRevision === job.checkpointRevision && cloud.publishedRevision > 0
-    && cloud.manifestKey === job.manifestKey && cloud.manifestHash === job.manifestHash
-    && cloud.manifestKey === spaceCheckpointManifestKey(job.projectId, job.spaceId, cloud.publishedRevision)
-    && /^sha256:[a-f0-9]{64}$/u.test(job.manifestHash)) {
-    database.commitSpaceCleanup(job.spaceId);
-    return 'committed';
-  }
-  const local = database.getSpace(job.spaceId);
-  if (identityMatches && cloud.state === 'open' && cloud.machineId === machineId && cloud.generation === job.generation
-    && local?.generation === job.generation && local.rootPath === job.rootPath) {
-    if (local.placementState === 'closing' && local.holderId === machineId) {
-      const aborted = database.abortSpaceClose({ spaceId: job.spaceId, holderId: machineId, expectedGeneration: job.generation });
-      if (aborted.status === 'error') throw aborted.error;
-    }
-    database.finishSpaceCleanup(job.spaceId);
-    return 'aborted';
-  }
-  if (local?.holderId === machineId) {
-    const fenced = database.invalidateSpacePossession({ spaceId: local.id, holderId: machineId, expectedGeneration: local.generation });
-    if (fenced.status === 'error') throw fenced.error;
-  }
-  database.failSpaceCleanup(job.spaceId, 'Cloud authority has not established checkpoint publication and ownership release');
-  return 'fenced';
-}
-
-async function listActiveCloudSpaces(authority: CloudSpaceCheckpointAuthority) {
-  const directory = [];
-  for (const project of await authority.listProjects('active')) {
-    if (project.lifecycle === 'cloud-only' || project.lifecycle === 'archived' || project.lifecycle === 'deleting') continue;
-    for (const workspace of await authority.listProjectWorkspaces(project.id)) {
-      if (workspace.lifecycle !== 'active') continue;
-      directory.push({ project, workspace, placement: await authority.getSpace(project.id, workspace.id) });
-    }
-  }
-  return directory;
-}
-
-
 export async function startMachineRuntime() {
   const nativeRoot = process.env.GITSPACE_MACHINE_RUNTIME_PATH ?? import.meta.dir;
   const packaged = Boolean(process.env.GITSPACE_MACHINE_RUNTIME_PATH) || await Bun.file(join(nativeRoot, 'machine-native.json')).exists();
@@ -195,9 +64,6 @@ export async function startMachineRuntime() {
   Object.assign(process.env, machineToolEnvironment(process.env, native));
   const environmentRoot = requiredEnvironment('GITSPACE_ENVIRONMENT_ROOT');
   const machineId = requiredEnvironment('GITSPACE_MACHINE_ID');
-  const database = new GitSpaceDatabase(join(environmentRoot, 'gitspace.db'), {
-    ...(process.env.GITSPACE_MIGRATIONS_FOLDER ? { migrationsFolder: process.env.GITSPACE_MIGRATIONS_FOLDER } : {}),
-  });
   const encryptionKey = artifactKey();
   const controlOptions = {
     baseUrl: requiredEnvironment('GITSPACE_CONTROL_URL'),
@@ -209,118 +75,28 @@ export async function startMachineRuntime() {
   const authority = new CloudSpaceCheckpointAuthority(controlOptions);
   const checkpointBlobs = new CloudDataCheckpointBlobStore(controlOptions);
   const cloudRuntime = new CloudRuntimeClient(controlOptions);
-  let executorRuntime: MachineExecutorRuntime | null = null;
-  for (const job of database.listSpaceCleanupJobs()) {
-    if (job.state !== 'prepared') continue;
-    reconcilePreparedSpaceCleanup(database, machineId, job, await authority.getSpace(job.projectId, job.spaceId));
-  }
   const bootstrapProjectId = process.env.GITSPACE_BOOTSTRAP_PROJECT_ID;
-  const bootstrapWorkspaceId = process.env.GITSPACE_BOOTSTRAP_WORKSPACE_ID;
-  const bootstrapProject = bootstrapProjectId ? await authority.getProject(bootstrapProjectId) : null;
-  const bootstrapWorkspaces = bootstrapProjectId ? await authority.listProjectWorkspaces(bootstrapProjectId) : [];
-  const mayBootstrap = async (spaceId: string): Promise<boolean> => {
-    if (!bootstrapProjectId) return false;
-    return canBootstrapSpaceProjection({
-      projectLifecycle: bootstrapProject?.lifecycle ?? null,
-      workspaceLifecycle: bootstrapWorkspaces.find((workspace) => workspace.id === spaceId)?.lifecycle ?? null,
-      placement: await authority.getSpace(bootstrapProjectId, spaceId),
-      cleanupPending: database.listSpaceCleanupJobs().some((job) => job.projectId === bootstrapProjectId),
-    });
+  let executorRuntime: MachineExecutorRuntime | null = null;
+  const readyCheckout = (spaceId: string): LocalAttachment | null =>
+    executorRuntime?.journal.attachments().find(local => local.attachment.workspaceId === spaceId && local.attachment.state === 'ready') ?? null;
+  const checkouts: WorkspaceCheckouts = {
+    path: spaceId => readyCheckout(spaceId)?.rootPath ?? null,
+    projectId: spaceId => readyCheckout(spaceId)?.attachment.projectId ?? null,
+    list: () => [...new Set((executorRuntime?.journal.attachments() ?? []).filter(local => local.attachment.state === 'ready').map(local => local.attachment.workspaceId))],
+    use: async spaceId => { if (executorRuntime) await executorRuntime.useWorkspace(spaceId); },
+    changed: async () => { await executorRuntime?.sync(); },
   };
-  let bootstrapProjectCreated = false;
-  if (bootstrapProjectId && !database.getProject(bootstrapProjectId) && await mayBootstrap(bootstrapProjectId)) {
-    const created = database.createProject({
-      id: bootstrapProjectId,
-      name: requiredEnvironment('GITSPACE_BOOTSTRAP_PROJECT_NAME'),
-      repositoryPath: requiredEnvironment('GITSPACE_BOOTSTRAP_REPOSITORY_PATH'),
-      baseBranch: process.env.GITSPACE_BOOTSTRAP_BASE_BRANCH ?? 'main',
-    });
-    if (created.status === 'error') throw created.error;
-    bootstrapProjectCreated = true;
-  }
-  let bootstrapWorkspaceCreated = false;
-  if (bootstrapWorkspaceId && bootstrapProjectId && database.getProject(bootstrapProjectId)
-    && !database.getWorkspace(bootstrapWorkspaceId) && await mayBootstrap(bootstrapWorkspaceId)) {
-    const created = database.createWorkspace({
-      id: bootstrapWorkspaceId,
-      projectId: bootstrapProjectId,
-      name: requiredEnvironment('GITSPACE_BOOTSTRAP_WORKSPACE_NAME'),
-      branch: requiredEnvironment('GITSPACE_BOOTSTRAP_WORKSPACE_BRANCH'),
-      rootPath: requiredEnvironment('GITSPACE_BOOTSTRAP_WORKSPACE_PATH'),
-    });
-    if (created.status === 'error') throw created.error;
-    bootstrapWorkspaceCreated = true;
-  }
-  possessBootstrapSpace(database, bootstrapProjectId, machineId, bootstrapProjectCreated);
-  possessBootstrapSpace(database, bootstrapWorkspaceId, machineId, bootstrapWorkspaceCreated);
-  const canonicalSessionBlobs = new EncryptedCheckpointBlobStore(checkpointBlobs, encryptionKey);
-  const artifacts = new LocalArtifactResolver(
-    database,
-    new CloudArtifactObjectStore(controlOptions.userId, checkpointBlobs),
-    join(environmentRoot, 'cache'),
-    encryptionKey,
-  );
-  const projectEventWriter = new CloudProjectEventWriter(authority, database, (error) => {
-    console.error('[gitspace-project-events]', error);
-  });
-  const canonicalSessionOutbox = new CanonicalSessionOutbox(join(environmentRoot, 'canonical-session-outbox.json'));
-  const canonicalSessionWriter = new CloudCanonicalSessionWriter(authority, canonicalSessionBlobs, (error) => {
-    console.error('[gitspace-canonical-sessions]', error);
-  }, canonicalSessionOutbox);
   const gitIdentity = new SharedGitIdentityCoordinator(
     authority,
     environmentRoot,
-    () => {
-      const repositories: string[] = [];
-      for (const project of database.listProjects()) {
-        for (const space of database.listSpaces(project.id)) {
-          if (space.holderId === machineId && space.placementState === 'open' && space.generation > 0) {
-            repositories.push(space.rootPath);
-          }
-        }
-      }
-      // Cache and runner checkouts commit as the account too (agents run `git commit` there).
-      for (const local of executorRuntime?.journal.attachments() ?? []) {
-        if (local.attachment.state !== 'detached' && local.attachment.state !== 'lost' && local.attachment.cache?.state !== 'reclaimed') repositories.push(local.rootPath);
-      }
-      return repositories;
-    },
+    // Checkouts commit as the account (agents run `git commit` there).
+    () => (executorRuntime?.journal.attachments() ?? []).filter(local => local.attachment.state !== 'detached').map(local => local.rootPath),
   );
   await gitIdentity.start();
-  const agentDir = join(environmentRoot, 'agent');
-  await installDefaultGitSpaceSkills(agentDir);
+  await installDefaultGitSpaceSkills(join(environmentRoot, 'agent'));
   const mcp = new MachineMcpCoordinator(authority, machineId);
-  const agentRuntime = new CloudAgentRuntime(cloudRuntime);
   const machineReleaseSha = process.env.GITSPACE_MACHINE_RELEASE_SHA || null;
-  const releases = new ReleaseFollower({
-    authority,
-    blobs: checkpointBlobs,
-    machineId,
-    environmentRoot,
-    hostUrl: process.env.GITSPACE_HOST_URL ?? null,
-    controlToken: process.env.GITSPACE_CONTROL_TOKEN ?? null,
-    runningMachineSha: machineReleaseSha,
-    generation: process.env.GITSPACE_GENERATION_HASH ?? null,
-    onError: (error) => console.error('[gitspace-deploy]', error),
-  });
   const managedSpaceRoot = requiredEnvironment('GITSPACE_MANAGED_SPACE_ROOT');
-  const sessions = new MachineSessionCoordinator(
-    database,
-    artifacts,
-    agentRuntime,
-    machineId,
-    join(environmentRoot, 'runtime'),
-    projectEventWriter,
-    managedSpaceRoot,
-    canonicalSessionWriter,
-    authority,
-  );
-  // Only a space's current holder may publish its canonical session; a fenced or moved space's record belongs elsewhere.
-  const heldSession = (sessionId: string) => {
-    const session = sessions.get(sessionId);
-    const space = session ? database.getSpace(session.spaceId) : null;
-    return space?.holderId === machineId && space.placementState !== 'closed' ? session : null;
-  };
   const settings = new CanonicalSettingsCoordinator(
     authority,
     (userSettings) => gitIdentity.apply(userSettings),
@@ -334,33 +110,6 @@ export async function startMachineRuntime() {
   if (browserEnabled && !process.env.GITSPACE_UPDATE_OWNER && (await browserRelay.status()).installed) {
     void browserRelay.start().catch((error) => console.error('[gitspace-browser-relay]', error));
   }
-
-  const newlyCreatedSpaces = new Set([
-    ...(bootstrapProjectCreated && bootstrapProjectId ? [bootstrapProjectId] : []),
-    ...(bootstrapWorkspaceCreated && bootstrapWorkspaceId ? [bootstrapWorkspaceId] : []),
-  ]);
-  if (bootstrapProjectId && newlyCreatedSpaces.size > 0) {
-    const project = database.getProject(bootstrapProjectId)!;
-    try {
-      const cloudProject = await authority.bootstrapProject({
-        projectId: project.id, name: project.name, repositoryReference: project.repositoryReference, baseBranch: project.baseBranch,
-      });
-      for (const space of database.listSpaces(project.id)) {
-        if (!newlyCreatedSpaces.has(space.id)) continue;
-        await authority.putSpaceDefinition({
-          projectId: project.id, projectName: project.name, repositoryReference: project.repositoryReference, baseBranch: project.baseBranch,
-          spaceId: space.id, kind: space.kind, name: space.name, branch: space.branch, phase: space.phase,
-        });
-        await authority.bootstrap({ projectId: project.id, spaceId: space.id });
-      }
-      if (cloudProject.lifecycle === 'provisioning') await authority.setProjectLifecycle(project.id, cloudProject.revision, 'active');
-    } catch (error) {
-      const current = await authority.getProject(project.id);
-      if (current?.lifecycle !== 'archived' && current?.lifecycle !== 'deleting') throw error;
-      for (const space of database.listSpaces(project.id)) reconcileOpenSpaceProjection(database, space.id, machineId, null);
-    }
-  }
-  const gitBinding = (projectId: string, workspaceId: string): ArtifactsRepositoryBinding => ({ projectId, repository: `workspace-${workspaceId}` });
   const repositoryCredentialsSchema = z.object({ remote: z.url(), plaintext: z.string().min(1), expiresAt: z.iso.datetime() });
   const gitRemote = new ArtifactsGitRemote({
     credentials: (binding, scope) => cloudRuntime.call('runtime.repository.credentials', { ...binding, scope }, repositoryCredentialsSchema),
@@ -395,59 +144,13 @@ export async function startMachineRuntime() {
       };
     },
   };
-  const encryptedCheckpointBlobs = new EncryptedCheckpointBlobStore(checkpointBlobs, encryptionKey);
-  const lifecycle = new PortableSpaceLifecycle(authority, encryptedCheckpointBlobs, gitRemote, lfs);
-  const terminals = new WorkspaceHubTerminalCoordinator(database, machineId, undefined, {
-    path: spaceId => executorRuntime?.journal.attachments().find(local => local.attachment.workspaceId === spaceId && local.attachment.role === 'cache' && local.attachment.state === 'ready')?.rootPath ?? null,
-    use: async spaceId => { if (executorRuntime) await executorRuntime.useWorkspace(spaceId); },
-    changed: async () => { await executorRuntime?.sync(); },
-  });
-  const environments = new WorkspaceEnvironmentManager(database, authority, terminals, authority, {
+  const terminals = new WorkspaceHubTerminalCoordinator(machineId, checkouts);
+  const environments = new WorkspaceEnvironmentManager(checkouts, authority, terminals, authority, {
     machineId,
     stateRoot: join(environmentRoot, 'lifecycle-runs'),
-    prepareRunner: async (spaceId, phase) => {
-      const definition = await authority.getSpaceDefinition(spaceId);
-      if (!definition) throw new Error(`Space ${spaceId} does not exist`);
-      const placement = await authority.getSpace(definition.projectId, spaceId);
-      const local = database.getSpace(spaceId);
-      if (placement?.state === 'open' && placement.machineId === machineId && local && existsSync(join(local.rootPath, '.git'))) return undefined;
-      if (phase !== 'cloud/destroy') {
-        if (placement?.state !== 'closed') throw new Error('Setup requires the workspace to be available on this runner');
-        await spaces.open(spaceId, placement.generation, { skipPreparation: true });
-        return undefined;
-      }
-      // Retirement must not steal a live placement or run provisioning/materialization.
-      // Restore the complete saved repository: destroy hooks commonly source helper files.
-      if (!placement?.manifestKey || !placement.manifestHash) throw new Error('Retirement requires a durable repository checkpoint; none exists. Recover the original checkout and save a checkpoint first.');
-      const bytes = await encryptedCheckpointBlobs.get(placement.manifestKey, placement.manifestHash as `sha256:${string}`);
-      if (!bytes) throw new Error('Retirement repository checkpoint is unavailable; restore the saved checkpoint before running destruction');
-      const manifest = parseWorkspaceCheckpoint(JSON.parse(new TextDecoder().decode(bytes)), {
-        projectId: definition.projectId, spaceId, revision: placement.publishedRevision,
-      });
-      await spaces.materialize(spaceId);
-      const parent = join(environmentRoot, 'lifecycle-retirement');
-      await mkdir(parent, { recursive: true, mode: 0o700 });
-      const directory = await mkdtemp(join(parent, 'retire-'));
-      try {
-        const initialized = Bun.spawn(['git', 'init', '-b', manifest.repository.branch], { cwd: directory, stdout: 'ignore', stderr: 'pipe' });
-        const [exitCode, error] = await Promise.all([initialized.exited, new Response(initialized.stderr).text()]);
-        if (exitCode !== 0) throw new Error(`Unable to initialize retirement checkout: ${error}`);
-        if (definition.repositoryReference) {
-          const origin = Bun.spawn(['git', 'remote', 'add', 'origin', definition.repositoryReference], { cwd: directory, stdout: 'ignore', stderr: 'pipe' });
-          const [originExit, originError] = await Promise.all([origin.exited, new Response(origin.stderr).text()]);
-          if (originExit !== 0) throw new Error(`Unable to restore canonical origin: ${originError}`);
-        }
-        await gitRemote.fetchCheckpoint({ binding: gitBinding(definition.projectId, spaceId), repositoryPath: directory, checkpointRef: manifest.repository.checkpointRef });
-        await restoreGitIntermediateCheckpoint({ repositoryPath: directory, branch: manifest.repository.branch, checkpoint: manifest.repository, lfs: await lfs.read(definition.projectId) });
-        return directory;
-      } catch (error) {
-        await rm(directory, { recursive: true, force: true });
-        throw error;
-      }
-    },
   });
   const serviceManager = new WorkspaceServiceManager(
-    database,
+    checkouts,
     terminals,
     machineId,
     environmentRoot,
@@ -456,200 +159,14 @@ export async function startMachineRuntime() {
     authority,
     serviceAccess.trust,
   );
-  const spaces = new MachinePortableSpaceController(
-    database,
-    sessions,
-    lifecycle,
-    machineId,
-    gitBinding,
-    (spaceId) => authority.getSpaceDefinition(spaceId),
-    managedSpaceRoot,
-    undefined,
-    {
-      prepare: (spaceId) => environments.prepare(spaceId),
-      dematerialize: (spaceId) => environments.dematerialize(spaceId),
-      drain: async (spaceId) => {
-        await serviceManager.stopOwned(spaceId);
-        await terminals.stopOwned(spaceId);
-        if (!executorRuntime) throw new Error('Executor initialization is incomplete; cannot release workspace writer');
-        await executorRuntime.drainWorkspace(spaceId);
-      },
-    },
-    async (repositoryPath) => gitIdentity.apply(await settings.getUserSettings(), [repositoryPath]),
-    undefined,
-    async (spaceId, projectId) => {
-      await serviceManager.forgetSpace(spaceId);
-      await terminals.forgetSpace(spaceId);
-      await environments.forgetSpace(spaceId, projectId);
-    },
-    async (job) => { reconcilePreparedSpaceCleanup(database, machineId, job, await authority.getSpace(job.projectId, job.spaceId)); },
-  );
   let startupCommitted = !process.env.GITSPACE_UPDATE_OWNER;
-  const recoverMachineWork = async (): Promise<void> => {
-  for (const job of database.listSpaceCleanupJobs()) {
-    if (job.state !== 'committed') continue;
-    try { await spaces.retryCleanup(job.spaceId); }
-    catch (error) { console.error('[gitspace-cleanup] committed cleanup remains pending', job.spaceId, error); }
-  }
-  const recoverableSpaces = new Set<string>();
-  const restoredSpaces = new Set<string>();
-  const cloudSpaces = await listActiveCloudSpaces(authority);
-  const activeSpaceIds = new Set(cloudSpaces.map(({ workspace }) => workspace.id));
-  for (const project of database.listProjects()) {
-    for (const space of database.listSpaces(project.id)) {
-      if (!activeSpaceIds.has(space.id)) reconcileOpenSpaceProjection(database, space.id, machineId, null);
-    }
-  }
-  for (const { workspace, placement: cloud } of cloudSpaces) {
-    if (database.listSpaceCleanupJobs().some((job) => job.spaceId === workspace.id)) continue;
-    const local = database.getSpace(workspace.id);
-    const currentProjection = reconcileOpenSpaceProjection(database, workspace.id, machineId, cloud);
-    if (cloud?.state === 'closed' && cloud.resumeMachineId === machineId) {
-      // A cloud restart intent restores deleted projections. An old checkout without a
-      // committed cleanup receipt is not disposable and must not be overwritten.
-      if (local && existsSync(join(local.rootPath, '.git'))) {
-        console.error('[gitspace-recovery] retained checkout requires checkpoint reconciliation', workspace.id);
-        continue;
-      }
-      try {
-        await spaces.open(workspace.id, cloud.generation, { resumeOnMachineRestart: true, deferAgentStart: true });
-        restoredSpaces.add(workspace.id);
-        recoverableSpaces.add(workspace.id);
-      } catch (error) {
-        console.error('[gitspace-recovery] checkpoint restore failed; space remains unavailable', workspace.id, error);
-      }
-    } else if (currentProjection) {
-      recoverableSpaces.add(workspace.id);
-    } else if (cloud?.machineId === machineId) {
-      console.error(JSON.stringify({
-        event: 'space_projection_unavailable', machineId, operation: 'startup', stage: 'projection-fence',
-        generation: process.env.GITSPACE_GENERATION_HASH ?? null, spaceId: workspace.id,
-        cloudState: cloud.state, cloudGeneration: cloud.generation,
-        localState: local?.placementState, localHolderId: local?.holderId, localGeneration: local?.generation,
-        hasCheckout: local ? existsSync(join(local.rootPath, '.git')) : false,
-        checkpointRevision: cloud.manifestKey ? cloud.checkpointRevision : null,
-        error: 'Current cloud ownership requires an intact local checkout at the same generation.',
-      }));
-    }
-  }
-  await environments.recoverInterruptedRuns();
-  const recoveredPublications: CanonicalPublicationIntent[] = [];
-  const localScopes = new Map(database.orm.select().from(artifactScopes).all().map((scope) => [scope.spaceId, scope]));
-  for (const project of database.listProjects()) {
-    const projectSpaces = database.listSpaces(project.id);
-    if (!projectSpaces.some((space) => recoverableSpaces.has(space.id))) continue;
-    for (const scope of await authority.listArtifactScopes(project.id)) {
-      if (!recoverableSpaces.has(scope.workspaceId) || restoredSpaces.has(scope.workspaceId)) continue;
-      const local = localScopes.get(scope.workspaceId);
-      if (local && (local.dirty || local.generation >= scope.generation)) continue;
-      const restored = await artifacts.restoreScope({
-        id: scope.id, spaceId: scope.workspaceId, generation: scope.generation, manifestHash: scope.manifestHash,
-        dirty: false, createdAt: scope.updatedAt, updatedAt: scope.updatedAt,
-      });
-      if (restored.status === 'error') {
-        recoverableSpaces.delete(scope.workspaceId);
-        const localSpace = database.getSpace(scope.workspaceId);
-        if (localSpace?.holderId === machineId) database.invalidateSpacePossession({ spaceId: localSpace.id, holderId: machineId, expectedGeneration: localSpace.generation });
-        console.error('[gitspace-recovery] durable artifact scope unavailable', scope.workspaceId, restored.error);
-      }
-    }
-    for (const session of await authority.listCanonicalSessions(project.id)) {
-      if (!recoverableSpaces.has(session.workspaceId) || sessions.get(session.id)) continue;
-      try {
-        if (!session.sessionObjectKey || !session.sessionObjectHash) throw new Error('Canonical session has no durable session object');
-        if (session.sessionFormatVersion !== null && session.sessionFormatVersion !== 'omp-jsonl-1' && session.sessionFormatVersion !== 'omp-checkpoint-1') {
-          throw new Error(`Unsupported canonical session format ${session.sessionFormatVersion}`);
-        }
-        const store = session.sessionFormatVersion === 'omp-checkpoint-1' ? canonicalSessionBlobs : checkpointBlobs;
-        const bytes = await store.get(session.sessionObjectKey, session.sessionObjectHash);
-        if (!bytes) throw new Error(`Canonical session object ${session.sessionObjectKey} does not exist`);
-        await sessions.materializeCanonicalSession(session, bytes);
-      } catch (error) {
-        recoverableSpaces.delete(session.workspaceId);
-        const localSpace = database.getSpace(session.workspaceId);
-        if (localSpace?.holderId === machineId) database.invalidateSpacePossession({ spaceId: localSpace.id, holderId: machineId, expectedGeneration: localSpace.generation });
-        console.error('[gitspace-recovery] canonical session unavailable', session.id, error);
-      }
-    }
-    for (const space of projectSpaces) {
-      if (!recoverableSpaces.has(space.id)) continue;
-      const canonicalProject = await authority.getProject(project.id);
-      const canonicalWorkspace = (await authority.listProjectWorkspaces(project.id)).find((workspace) => workspace.id === space.id);
-      const currentPlacement = await authority.getSpace(project.id, space.id);
-      if (!canonicalProject || canonicalProject.lifecycle === 'archived' || canonicalProject.lifecycle === 'deleting'
-        || canonicalWorkspace?.lifecycle !== 'active'
-        || !reconcileOpenSpaceProjection(database, space.id, machineId, currentPlacement)) {
-        reconcileOpenSpaceProjection(database, space.id, machineId, null);
-        recoverableSpaces.delete(space.id);
-        continue;
-      }
-      if (restoredSpaces.has(space.id)) {
-        const opened = await sessions.openSpace(space.id);
-        if (opened.status === 'error') {
-          console.error('[gitspace-recovery] restored canonical agent unavailable', space.id, opened.error);
-          continue;
-        }
-      }
-      const recovered = await sessions.recover(space.id);
-      if (recovered.status === 'error') {
-        console.error('[gitspace-recovery] canonical agent unavailable', space.id, recovered.error);
-        continue;
-      }
-      await authority.bootstrapInspector({ projectId: project.id, spaceId: space.id });
-      for (const session of sessions.list(space.id)) recoveredPublications.push({ projectId: project.id, sessionId: session.id, checkpoint: true });
-    }
-  }
-  // Recovered checkpoints and any a same-machine predecessor handed over publish after admission:
-  // large uploads must not hold recovery, and a failure stays in the outbox for a later drain.
-  await canonicalSessionOutbox.record(recoveredPublications)
-    .catch((error: unknown) => console.error('[gitspace-recovery] canonical publication failed', error));
-  canonicalSessionWriter.replayInBackground(machineId, heldSession);
-  await gitIdentity.apply(await settings.getUserSettings());
-  };
-  if (startupCommitted) {
-    // Canonical inference checks the committed release acknowledgements, not just
-    // the bytes currently running. Publish those before any recovery admission.
-    await releases.start();
-    await recoverMachineWork();
-  }
-  /** Publishes a new workspace's first checkpoint by releasing and reopening it. A retry after the
-   * release committed only reopens from that published checkpoint. */
-  const checkpointSpace = async (spaceId: string): Promise<void> => {
-    const space = database.getSpace(spaceId);
-    const projectId = space?.projectId ?? (await authority.getSpaceDefinition(spaceId))?.projectId;
-    if (!projectId) throw new Error(`Space ${spaceId} is not held here`);
-    let generation: number;
-    if (space?.holderId === machineId && space.placementState === 'open') {
-      await gitIdentity.apply(await settings.getUserSettings(), [space.rootPath]);
-      const opened = await sessions.openSpace(spaceId);
-      if (opened.status === 'error') throw opened.error;
-      await spaces.release(space, space.generation);
-      generation = space.generation + 1;
-    } else {
-      // The committed release removed the local record; the cloud definition names the project.
-      const placement = await authority.getSpace(projectId, spaceId);
-      if (!placement || placement.state !== 'closed' || placement.machineId !== null || placement.publishedRevision === 0) {
-        throw new Error(`Space ${spaceId} is not held here`);
-      }
-      generation = placement.generation;
-    }
-    await spaces.open(spaceId, generation, { resumeOnMachineRestart: true });
-    await canonicalSessionWriter.flush({ projectId, spaceId });
-  };
-  const resolvePublishedHead = createPublishedSpaceHeadResolver({ authority, blobs: encryptedCheckpointBlobs, gitRemote, binding: gitBinding });
-  const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl), resolvePublishedHead, gitRemote);
-
-  const handlers = new GitSpaceHandlers(database, artifacts, projectEventWriter);
-  if (startupCommitted) await serviceManager.rehydrate();
   // Pinned at enrollment, never fetched from the worker: every device grant is
   // verified against this key locally, so the control plane cannot mint callers.
   const devices = new DeviceRegistry({
-    database,
     authority,
     rootSigningPublicKey: credentialProtocolBase64.decode(requiredEnvironment('GITSPACE_ROOT_PUBLIC_KEY')),
     onError: (error) => console.error('[gitspace-devices]', error),
   });
-  await devices.start();
   // Account-owned releases build from this executor's ready canonical cache.
   const launcher = new DeploymentLauncher({
     attachments: () => executorRuntime?.journal.attachments() ?? [],
@@ -670,108 +187,17 @@ export async function startMachineRuntime() {
   let preparingReplacement = !startupCommitted;
   let activeRpcRequests = 0;
   let replacementControl: Promise<unknown> = Promise.resolve();
-  const discardGate = new MachineDiscardGate(machineId);
-  const prepareReplacement = async (action?: 'sleep' | 'destroy', confirmation?: MachineDiscardConfirmation) => {
+  /** Stops local work and pushes the machine's changes; the cloud store then holds everything a successor needs. */
+  const prepareReplacement = async () => {
     preparingReplacement = true;
-    releases.stop();
     while (activeRpcRequests > 0) await Bun.sleep(25);
-    const captureDiscard = async () => {
-      if (!action) throw new Error('Discard is available only for an explicit Stop or Destroy operation');
-      if (database.listSpaceCleanupJobs().some(job => job.state === 'prepared')) throw new Error('Unresolved checkpoint outcomes prevent local discard');
-      const directory = await listActiveCloudSpaces(authority);
-      const workspaces: MachineDiscardScope[] = [];
-      const roots: string[] = [];
-      for (const project of database.listProjects()) for (const space of database.listSpaces(project.id)) {
-        if (!existsSync(join(space.rootPath, '.git'))) continue;
-        if (sessions.list(space.id).length > 0) await sessions.quiesceSpace(space.id, true);
-        await terminals.stopOwned(space.id);
-        roots.push(space.rootPath);
-        const cloud = directory.find(item => item.workspace.id === space.id)?.placement;
-        workspaces.push({ projectId: space.projectId, workspaceId: space.id, generation: cloud?.machineId === machineId ? cloud.generation : space.generation, reason: 'unpublished-local-work' });
-      }
-      await serviceManager.dispose();
-      await canonicalSessionWriter.flush();
-      await projectEventWriter.flush();
-      const digest = await localWorkDigest(roots, directory.map(item => ({ workspace: item.workspace.id, placement: item.placement })));
-      if (confirmation) {
-        discardGate.require(action, digest, workspaces, confirmation);
-        return { prepared: true, machineId, discard: workspaces };
-      }
-      throw discardGate.require(action, digest, workspaces);
-    };
-    if (confirmation) return captureDiscard();
-    try {
-    if (database.listSpaceCleanupJobs().some((job) => job.state === 'prepared')) {
-      throw new Error('Unresolved checkpoint outcomes prevent provider replacement');
-    }
-    for (const project of database.listProjects()) for (const space of database.listSpaces(project.id)) {
-      if (sessions.list(space.id).length > 0) await sessions.quiesceSpace(space.id, true);
-      await terminals.stopOwned(space.id);
-    }
+    for (const spaceId of checkouts.list()) await terminals.stopOwned(spaceId);
     await serviceManager.dispose();
-    for (const project of database.listProjects()) {
-      await projectLifecycle.releasePristineSource(project.id);
-    }
-    const directory = await listActiveCloudSpaces(authority);
-    const placements = new Map(directory.map(({ workspace, placement }) => [workspace.id, placement]));
-    for (const project of database.listProjects()) {
-      for (const space of database.listSpaces(project.id)) {
-        const cloud = placements.get(space.id);
-        if (existsSync(join(space.rootPath, '.git')) && (cloud?.machineId !== machineId || cloud.state !== 'open' || cloud.generation !== space.generation)) {
-          throw new Error(`Space ${space.id} retains local work without current cloud ownership; provider replacement is unsafe`);
-        }
-      }
-    }
-    const held = [];
-    for (const { workspace, placement: cloud } of directory) {
-      if (cloud?.machineId !== machineId) continue;
-      const space = database.getSpace(workspace.id);
-      if (!space || cloud.state !== 'open' || space.holderId !== machineId || space.placementState !== 'open'
-        || space.generation !== cloud.generation || !existsSync(join(space.rootPath, '.git'))) {
-        throw new Error(`Space ${workspace.id} lacks the current local checkout required for provider replacement`);
-      }
-      held.push(space);
-    }
-    for (const space of held) {
-      // The pass above already quiesced every space with an agent; reopening one is refused.
-      await sessions.prepareSpaceHandoff(space.id);
-      await terminals.stopOwned(space.id);
-    }
-    await serviceManager.dispose();
-    for (const space of held) await spaces.release(space, space.generation);
-    await canonicalSessionWriter.flush();
-    await projectEventWriter.flush();
-    const checkpoints = [];
-    for (const { workspace, placement: cloud } of await listActiveCloudSpaces(authority)) {
-      if (cloud?.machineId === machineId) throw new Error(`Space ${workspace.id} was not released`);
-      if (cloud?.resumeMachineId !== machineId) continue;
-      if (cloud.state !== 'closed' || !cloud.manifestKey || !cloud.manifestHash || cloud.publishedRevision < 1) {
-        throw new Error(`Space ${workspace.id} has no complete replacement checkpoint`);
-      }
-      checkpoints.push({ spaceId: workspace.id, generation: cloud.generation, checkpointRevision: cloud.publishedRevision });
-    }
-    return { prepared: true, machineId, spaces: checkpoints };
-    } catch (error) {
-      if (action && !database.listSpaceCleanupJobs().some(job => job.state === 'prepared')) return captureDiscard();
-      throw error;
-    }
+    await executorRuntime?.sync();
+    return { prepared: true, machineId };
   };
   const cancelReplacement = async () => {
-    // Every space the attempt quiesced reopens admission, even if restoring a released workspace below fails.
-    for (const project of database.listProjects()) for (const space of database.listSpaces(project.id)) sessions.resumeSpace(space.id);
-    // Restart checkpoints outlive this process, including a partially failed startup.
-    for (const { workspace, placement: cloud } of await listActiveCloudSpaces(authority)) {
-      if (cloud?.state === 'closed' && cloud.resumeMachineId === machineId) {
-        const local = database.getSpace(workspace.id);
-        // Retained stale work blocks that workspace, not the whole runtime.
-        if (local && existsSync(join(local.rootPath, '.git'))) continue;
-        await spaces.open(workspace.id, cloud.generation, { resumeOnMachineRestart: true });
-      } else if (reconcileOpenSpaceProjection(database, workspace.id, machineId, cloud)) {
-        sessions.resumeSpace(workspace.id);
-      }
-    }
     await serviceManager.rehydrate();
-    await releases.start();
     preparingReplacement = false;
     return { prepared: false, machineId };
   };
@@ -779,19 +205,11 @@ export async function startMachineRuntime() {
     handler: rpc.handler,
     lookupDevice: (deviceId) => devices.lookup(deviceId),
     procedureKind: rpc.procedureKind,
-    workspaceProject: (workspaceId) => database.getSpace(workspaceId)?.projectId ?? null,
-    sessionTarget: (sessionId) => {
-      const session = sessions.get(sessionId);
-      const space = session ? database.getSpace(session.spaceId) : null;
-      return space ? { projectId: space.projectId, workspaceId: space.id } : null;
-    },
+    workspaceProject: (workspaceId) => checkouts.projectId(workspaceId),
   });
-  // A bare stop checkpoints and removes local state; the next start restores cloud restart intent.
-  // a replacement successor retires this generation first so possession carries over untouched.
-  let stopMode: 'release' | 'replace' = startupCommitted ? 'release' : 'replace';
   const http = startGitSpaceRpcHttpServer({
     handler: async (request) => {
-      if (preparingReplacement) return Response.json({ error: 'Machine is checkpointed for provider replacement' }, { status: 503 });
+      if (preparingReplacement) return Response.json({ error: 'Machine is prepared for provider replacement' }, { status: 503 });
       activeRpcRequests += 1;
       try { return await rpcHandler(request); }
       finally { activeRpcRequests -= 1; }
@@ -801,7 +219,7 @@ export async function startMachineRuntime() {
     port: Number(process.env.GITSPACE_RPC_PORT ?? 0),
     additionalFetch: async (request) => {
       const service = preparingReplacement ? null : await serviceManager.proxy(request);
-      if (['/runtime/execute', '/runtime/receipt'].includes(new URL(request.url).pathname)) {
+      if (new URL(request.url).pathname === '/runtime/execute') {
         if (preparingReplacement || !executorRuntime) return Response.json({ error: 'Executor unavailable' }, { status: 503 });
         return executorRuntime.executor.fetch(request);
       }
@@ -812,47 +230,34 @@ export async function startMachineRuntime() {
       if (!token || request.headers.get('authorization') !== `Bearer ${token}`) {
         return Response.json({ error: 'unauthorized' }, { status: 401 });
       }
-      if (!startupCommitted && url.pathname === '/__control/retire') {
-        stopMode = 'replace';
-        return Response.json({ stopMode });
-      }
+      // A successor retires this generation; stopping holds no workspace state to hand over.
+      if (url.pathname === '/__control/retire') return Response.json({ stopMode: 'replace' });
       if (url.pathname === '/__control/prepare-replacement' || url.pathname === '/__control/cancel-replacement') {
-        const controlSchema = z.object({ action: z.enum(['sleep', 'destroy']).optional(), discardConfirmation: machineDiscardConfirmationSchema.optional() });
-        const payload = controlSchema.parse(url.pathname === '/__control/prepare-replacement' ? await request.json().catch(() => ({})) : {});
-        const operation = replacementControl.then(async () => url.pathname === '/__control/prepare-replacement' ? prepareReplacement(payload.action, payload.discardConfirmation) : cancelReplacement());
+        const operation = replacementControl.then(() => url.pathname === '/__control/prepare-replacement' ? prepareReplacement() : cancelReplacement());
         replacementControl = operation.catch(() => undefined);
         try { return Response.json(await operation); }
         catch (error) {
-          // A failed prepare is not a durable admission barrier. Provider cancellation
-          // remains idempotent and can retry partially completed checkpoint recovery.
-          try { await cancelReplacement(); } catch { /* Keep uncertain recovery fenced. */ }
-          return Response.json({ error: error instanceof MachineDiscardRequired
-            ? { _tag: error._tag, message: error.message, confirmation: error.confirmation, workspaces: error.workspaces }
-            : error instanceof Error ? error.message : String(error) }, { status: 409 });
+          try { await cancelReplacement(); } catch { /* The provider retries cancellation. */ }
+          return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 });
         }
       }
       if (preparingReplacement) return Response.json({ error: 'Provider replacement preparation is active' }, { status: 409 });
-      if (url.pathname === '/__control/retire') {
-        stopMode = 'replace';
-        return Response.json({ stopMode });
-      }
       if (url.pathname !== '/__control/code-version') return null;
-      const input = await request.json() as { hash?: unknown };
-      const hash = typeof input.hash === 'string' ? input.hash : 'unknown';
+      const input = z.object({ hash: z.string().optional() }).parse(await request.json());
+      const hash = input.hash ?? 'unknown';
       if (!bootstrapProjectId) return Response.json({ offset: null });
       const event = await authority.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: bootstrapProjectId,
-      scope: 'code',
-      entity: 'frontend-generation',
-      entityId: hash,
-      revision: Date.now(),
-      operation: 'code-version',
-      payload: { hash, replacing: false }, });
+        scope: 'code',
+        entity: 'frontend-generation',
+        entityId: hash,
+        revision: Date.now(),
+        operation: 'code-version',
+        payload: { hash, replacing: false } });
       return Response.json({ offset: event.offset });
     },
   });
   executorRuntime = await createMachineExecutor({
-    environmentRoot, managedSpaceRoot, machineId, database, artifacts, cloud: cloudRuntime, gitRemote, lfs,
-    provider: existingMachine?.provider ?? 'physical',
+    environmentRoot, managedSpaceRoot, machineId, cloud: cloudRuntime, gitRemote, lfs,
     browser: { enabled: true, services: {
       serviceHostname: hostname => hostname.endsWith(`--${process.env.GITSPACE_SERVICE_NAMESPACE}-srv.${process.env.GITSPACE_SERVICE_DOMAIN}`),
       workspaceServiceHostname: async (hostname, scope) => (await authority.listHostedRoutes(scope.projectId)).some(route => route.workspaceId === scope.workspaceId && route.hostname === hostname),
@@ -862,51 +267,16 @@ export async function startMachineRuntime() {
       await gitIdentity.apply(await settings.getUserSettings(), [local.rootPath]);
       await environments.prepareAttachment(local, signal, progress);
     },
-    originGitEnvironment: async (origin) => gitIdentity.gitEnvironment(origin),
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
-    operations: machineOperationalTools({ environments, services: serviceManager, authority, artifacts, mcp, journal: () => {
-      if (!executorRuntime) throw new Error('Executor initialization is incomplete');
-      return executorRuntime.journal;
-    } }),
-    restoredBase: async (projectId, workspaceId) => {
-      const local = database.getSpace(workspaceId);
-      const placement = await authority.getSpace(projectId, workspaceId);
-      if (!local || placement?.state !== 'open' || placement.machineId !== machineId || placement.generation !== local.generation || !placement.manifestKey || !placement.manifestHash || placement.publishedRevision < 1) return null;
-      const bytes = await encryptedCheckpointBlobs.get(placement.manifestKey, placement.manifestHash);
-      if (!bytes) throw new Error('Restored workspace checkpoint manifest is unavailable');
-      return parseWorkspaceCheckpoint(JSON.parse(new TextDecoder().decode(bytes)), { projectId, spaceId: workspaceId, revision: placement.publishedRevision }).repository;
-    },
-    commitSnapshot: async (local, checkpoint, previousWorktreeCommit, final = false) => {
+    operations: machineOperationalTools({ environments, services: serviceManager, authority, mcp }),
+    commitSnapshot: async (local, checkpoint, previousWorktreeCommit) => {
       const accepted = await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
         projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
-        attachmentId: local.attachment.attachmentId, generation: local.attachment.generation, checkpoint, previousWorktreeCommit, final,
+        attachmentId: local.attachment.attachmentId, generation: local.attachment.generation, checkpoint, previousWorktreeCommit,
       }), RuntimeSnapshotCommitResultSchema);
       return accepted.checkpoint;
     },
   });
-
-  let lfsRecheck: Promise<void> | undefined;
-  let lfsRecheckAfter = Date.now() + 60_000;
-  let lfsRecheckCursor = '';
-  const publicationReplayTimer = setInterval(() => {
-    if (!startupCommitted || preparingReplacement) return;
-    canonicalSessionWriter.replayInBackground(machineId, heldSession);
-    if (lfsRecheck || Date.now() < lfsRecheckAfter) return;
-    lfsRecheckAfter = Date.now() + 60_000;
-    const candidates = database.listProjects().flatMap(project => database.listSpaces(project.id))
-      .filter(space => space.holderId === machineId && space.placementState === 'open')
-      .sort((left, right) => left.id.localeCompare(right.id));
-    const space = candidates.find(space => space.id > lfsRecheckCursor) ?? candidates[0];
-    if (!space) return;
-    lfsRecheckCursor = space.id;
-    lfsRecheck = (async () => {
-      const placement = await authority.getSpace(space.projectId, space.id);
-      if (placement?.state !== 'open' || placement.machineId !== machineId || placement.generation !== space.generation) return;
-      await recheckGitLfsOrigin(space.rootPath, await lfs.read(space.projectId));
-    })().catch(() => {
-      console.warn('[gitspace-lfs] Origin recheck failed; retry remains scheduled', space.id);
-    }).finally(() => { lfsRecheck = undefined; });
-  }, 5_000);
 
   await authority.putMachineDefinition({
     id: machineId,
@@ -926,56 +296,20 @@ export async function startMachineRuntime() {
     if (stopping) return;
     stopping = true;
     preparingReplacement = true;
-    clearInterval(publicationReplayTimer);
-    await lfsRecheck;
     if (bootstrapProjectId) {
       await authority.appendProjectEvent({ eventId: crypto.randomUUID(), projectId: bootstrapProjectId,
-      scope: 'code',
-      entity: 'machine-generation',
-      entityId: process.env.GITSPACE_GENERATION_HASH ?? 'unknown',
-      revision: Date.now(),
-      operation: 'code-version',
-      payload: { replacing: true }, });
+        scope: 'code',
+        entity: 'machine-generation',
+        entityId: process.env.GITSPACE_GENERATION_HASH ?? 'unknown',
+        revision: Date.now(),
+        operation: 'code-version',
+        payload: { replacing: true } });
       await Bun.sleep(150);
     }
-    devices.stop();
-    releases.stop();
     await serviceManager.dispose();
-    const stopLog = (line: string): void => {
-      console.log(line);
-      try { appendFileSync(join(environmentRoot, 'stop.log'), `${new Date().toISOString()} ${line}\n`); } catch { /* diagnostics only */ }
-    };
-    stopLog(`[gitspace-stop] mode=${stopMode}`);
-    if (stopMode === 'release') {
-      // Durable preparation is the supported disk-replacement boundary. Bare shutdown also
-      // checkpoints dormant/absent agents, but cannot acknowledge success to an external killer.
-      for (const { workspace, placement: cloud } of await listActiveCloudSpaces(authority)) {
-        if (cloud?.machineId !== machineId) continue;
-        const startedAt = Date.now();
-        try {
-          const space = database.getSpace(workspace.id);
-          if (!space || !reconcileOpenSpaceProjection(database, workspace.id, machineId, cloud)) {
-            throw new Error('Cloud-owned workspace has no intact current local projection');
-          }
-          const opened = await sessions.openSpace(space.id);
-          if (opened.status === 'error') throw opened.error;
-          await sessions.quiesceSpace(space.id);
-          await terminals.stopOwned(space.id);
-          await spaces.release(space, space.generation);
-          stopLog(`[gitspace-release] ${space.id} released in ${Date.now() - startedAt}ms`);
-        } catch (error) {
-          stopLog(`[gitspace-release] ${workspace.id} failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-        }
-      }
-    }
-    await sessions.stopForRestart();
     await settings.stop();
     await executorRuntime?.close();
     await http.stop();
-    await canonicalSessionWriter.settle(stopMode);
-    // Stop event producers before waiting for the durable outbox to empty.
-    await projectEventWriter.flush();
-    database.close();
   };
   const shutdown = (): void => {
     void stop()
@@ -992,25 +326,26 @@ export async function startMachineRuntime() {
     url: http.url, hash: process.env.GITSPACE_GENERATION_HASH,
   });
   console.log(`GitSpace RPC ready at ${http.url}/rpc generation=${process.env.GITSPACE_GENERATION_HASH ?? 'unknown'} machine=${machineReleaseSha ?? 'local'} runtime=cloud`);
-  if (!startupCommitted) {
-    // Health is available to the updater, but no agent, service, cron, or user
-    // RPC may run until the whole host's durable transaction has finished.
+  if (startupCommitted) {
+    await environments.recoverInterruptedRuns();
+    await serviceManager.rehydrate();
+  } else {
+    // Health is available to the updater, but no service or user RPC may run
+    // until the whole host's durable transaction has finished.
     while (existsSync(join(environmentRoot, 'machine-update.json'))) {
-      if (stopping) return { environmentRoot, database, artifacts, sessions, settings, handlers, http, stop };
+      if (stopping) return { environmentRoot, settings, http, stop };
       await Bun.sleep(100);
     }
-    if (stopping) return { environmentRoot, database, artifacts, sessions, settings, handlers, http, stop };
-    await releases.start();
-    await recoverMachineWork();
+    if (stopping) return { environmentRoot, settings, http, stop };
+    await environments.recoverInterruptedRuns();
     await serviceManager.rehydrate();
     if ((await browserRelay.status()).installed) {
       void browserRelay.start().catch((error) => console.error('[gitspace-browser-relay]', error));
     }
     startupCommitted = true;
-    stopMode = 'release';
     preparingReplacement = false;
   }
-  return { environmentRoot, database, artifacts, sessions, settings, handlers, http, stop };
+  return { environmentRoot, settings, http, stop };
 }
 
 if (import.meta.main) await startMachineRuntime();

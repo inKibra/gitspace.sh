@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, collectBytes, GitLfsObjectSchema, type GitLfsObject, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { createCloudGitLfsPublisher, createCloudGitLfsStore } from '../src/cloud-lfs-store.js';
-import { FileCheckpointBlobStore } from '../src/portable-space-lifecycle.js';
+import { FileCheckpointBlobStore } from '../src/checkpoint-blobs.js';
 import { deriveArtifactScopeKey, encryptArtifactBytes } from '@gitspace/protocol';
 import { CloudDataCheckpointBlobStore } from '../src/cloud-space-authority.js';
 

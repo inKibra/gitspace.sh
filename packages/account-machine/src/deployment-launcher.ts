@@ -6,7 +6,7 @@ import { executableManifestPath, readExecutableFile, sha256, validateExecutableA
 import { hashArtifactPath, workspaceSha } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
 import { releaseTargetSchema, workerReleaseMetadataSchema, type LaunchProgress, type ReleaseArtifact, type ReleaseRecord, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
-import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-follower.js';
+import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-objects.js';
 import { z } from 'zod';
 
 const targetPackages: Record<ReleaseTarget, string> = {
@@ -76,7 +76,7 @@ export function deploymentSource(attachments: readonly LocalAttachment[], machin
   let attached = false;
   for (const local of attachments) {
     const { attachment } = local;
-    if (attachment.workspaceId !== workspaceId || attachment.machineId !== machineId || attachment.role !== 'cache') continue;
+    if (attachment.workspaceId !== workspaceId || attachment.machineId !== machineId) continue;
     attached = true;
     if (attachment.state !== 'ready' || attachment.cache?.state !== 'live' || !local.prerequisitesComplete) continue;
     return { workspaceId: attachment.workspaceId, projectId: attachment.projectId, rootPath: local.rootPath, name: attachment.checkout.kind === 'shared' ? attachment.checkout.branch : attachment.workspaceId };

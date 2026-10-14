@@ -2,8 +2,7 @@ import { useMemo, useRef, useState, type ReactNode } from 'react';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
 import type { InspectorView } from '@gitspace/protocol';
-import { RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
@@ -15,8 +14,7 @@ import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
-import { attachedMachines, environmentCacheSummary } from './environment/cache-presentation.js';
-import { useCacheFreshnessClock } from './environment/useCacheFreshnessClock.js';
+import { workspaceMachines, workspaceMachinesSummary, workspaceStatus } from './workspace-status.js';
 import { BrowserApprovalCard } from './RuntimeBrowser.js';
 import { ToolApprovalCard } from './ToolApprovalCard.js';
 import { RELEASE_TARGETS } from './release.js';
@@ -145,29 +143,17 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       await Promise.all([relationQuery.refetch(), refreshInspection()]);
     }
   };
-  // A new workspace reports its code document as null until the first checkpoint is written.
-  const codeDocument = snapshot.documents['gitspace.code'];
-  const checkpoint = codeDocument === undefined || codeDocument === null ? null : RuntimeGitCheckpointSchema.parse(codeDocument);
   const spaceId = snapshot.workspaceId;
-  const now = useCacheFreshnessClock();
-  const environment = environmentCacheSummary(snapshot, now);
-  // Terminals open only on a cache the user picked for this workspace: never a default machine or a placement holder.
-  // A cache paused while idle stays listed; picking it wakes it, and its terminals open once it is live again.
-  const terminalMachines = attachedMachines(snapshot.attachments, now).flatMap((machine): WorkspaceTerminalMachine[] => {
-    const state = machine.ready ? 'live' : machine.label === 'Paused' ? 'paused' : null;
-    return state ? [{ id: machine.id, label: inspection.machines.find(candidate => candidate.id === machine.id)?.label ?? machine.id, state }] : [];
-  });
-  const selectTerminalMachine = (machineId: string) => {
-    setTerminalChoice({ spaceId, machineId });
-    if (terminalMachines.some(machine => machine.id === machineId && machine.state === 'paused')) void perform(async () => {
-      const result = await rpcClient.runtime.attachment.cache.request({ ...identity, machineId: RuntimeMachineIdSchema.parse(machineId), requestId: crypto.randomUUID() });
-      if (result.status === 'error') throw result.error;
-    });
-  };
+  const status = workspaceStatus(snapshot);
+  const machines = workspaceMachines(snapshot);
+  const environment = workspaceMachinesSummary(machines);
+  // Terminals open only on a ready machine the user picked for this workspace: never a default machine.
+  const terminalMachines = machines.flatMap((machine): WorkspaceTerminalMachine[] => machine.ready ? [{ id: machine.id, label: inspection.machines.find(candidate => candidate.id === machine.id)?.label ?? machine.id }] : []);
+  const selectTerminalMachine = (machineId: string) => setTerminalChoice({ spaceId, machineId });
   return <>
     {props.creation}
     {actionError ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
-    {checkpoint?.conflicts?.length ? <section role="alert" aria-label="Workspace merge conflicts" className="shrink-0 bg-surface-2 px-4 py-3 text-caption shadow-surface-1"><h2 className="font-medium text-destructive">Workspace merge conflicts</h2><p className="mt-1 text-muted-foreground">Machine changes reached the cloud working copy with conflicts. Resolve these files before continuing.</p><ul className="mt-2 list-inside list-disc break-all font-mono">{checkpoint.conflicts.map(path => <li key={path}>{path}</li>)}</ul></section> : null}
+    {status.cloud.conflicts.length ? <section role="alert" aria-label="Workspace merge conflicts" className="shrink-0 bg-surface-2 px-4 py-3 text-caption shadow-surface-1"><h2 className="font-medium text-destructive">Workspace merge conflicts</h2><p className="mt-1 text-muted-foreground">Machine changes reached the cloud working copy with conflicts. Resolve these files before continuing.</p><ul className="mt-2 list-inside list-disc break-all font-mono">{status.cloud.conflicts.map(path => <li key={path}>{path}</li>)}</ul></section> : null}
     {deployment.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(deployment.error, 'Read deployment status')}<Button variant="ghost" onClick={() => void deployment.refetch()}>Retry deployment status</Button></div> : null}
     {launch.launch && !launch.open ? <Button variant="ghost" size="compact" onClick={() => launch.setOpen(true)}>Show launch progress</Button> : null}
     {relationQuery.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(relationQuery.error, 'Read workspace relations')}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry relations</Button></div> : null}

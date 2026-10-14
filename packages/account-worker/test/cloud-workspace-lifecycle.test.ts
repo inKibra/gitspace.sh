@@ -234,7 +234,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const archive = async () => client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedRevision: (await current()).revision, expectedGeneration: null });
     expect(await client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedRevision: 0, expectedGeneration: null })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('revision conflict') } } });
     expect(await archive()).toMatchObject({ status: 'ok', value: { id: workspaceId, lifecycle: 'archived' } });
-    expect(await space.runtimeAttachments(identity)).toMatchObject([{ attachmentId: 'cache-a', state: 'draining' }]);
+    expect(await space.runtimeAttachments(identity)).toMatchObject([{ attachmentId: 'cache-a', state: 'detached' }]);
     expect((await authority.listOperations()).find(operation => operation.kind === 'workspace.archive' && operation.workspaceId === workspaceId)).toMatchObject({ state: 'succeeded', targetMachines: [] });
     expect(await client.space.view({ projectId: project.id, workspaceId })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, closedAt: expect.any(Date) }] } });
 
@@ -326,27 +326,6 @@ describe('cloud workspace lifecycle with no machines', () => {
     const workspaces = await authority.listWorkspaces();
     expect(workspaces.find(workspace => workspace.name === 'Tag')).toMatchObject({ sourceKind: 'tag', sourceRef: 'v1', sourceCommit: commit('3') });
     expect(workspaces.find(workspace => workspace.name === 'PR')).toMatchObject({ sourceKind: 'pull-request', sourceRef: '12', sourceCommit: commit('4') });
-  });
-
-  it('rejects a legacy machine-held checkout before creating or publishing cloud runtime state', async () => {
-    const { userId, client, project, artifacts, authority } = await cloudProject('Legacy held');
-    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
-    const placement = await space.bootstrap({ projectId: project.id, spaceId: project.id, machineId: 'legacy-machine' });
-    if (placement.status === 'error') throw new Error(placement.failure.message);
-    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
-    expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'error' });
-    artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
-    const current = await authority.getProject();
-    if (!current) throw new Error('Missing project');
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'error' });
-    expect(await space.hasCloudRuntime()).toBe(false);
-    expect(await space.get()).toEqual(placement.value);
-    expect(await authority.getProject()).toEqual(current);
-    expect(artifacts.forks).toEqual([]);
-    await runInDurableObject(space, async (_instance, state) => {
-      expect(await state.storage.get('runtime.identity')).toBeUndefined();
-      expect(await state.storage.get('directory.runtimePublished')).toBeUndefined();
-    });
   });
 
   it('preserves explicit phases and approved plan transitions across runtime reopening', async () => {

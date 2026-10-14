@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GitSpaceDatabase } from '@gitspace/core';
-import type { WorkspaceTerminalView } from '../src/workspace-hub.js';
+import type { WorkspaceCheckouts, WorkspaceTerminalView } from '../src/workspace-hub.js';
 import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { SERVICE_ASSERTION_HEADER, signServiceAssertion } from '@gitspace/protocol/service-access';
@@ -23,6 +22,17 @@ function terminal(spaceId: string, name: string, state: WorkspaceTerminalView['s
   return { spaceId, name, id: name, kind: 'service', state, machineId: 'machine-a', owner, command: 'bun service.ts', cwd: '/', createdAt: new Date('2026-08-31T00:00:00.000Z'), exitCode: null };
 }
 
+/** The ready checkout of space-a in project-a. */
+function checkouts(rootPath: string): WorkspaceCheckouts {
+  return {
+    path: (spaceId) => spaceId === 'space-a' ? rootPath : null,
+    projectId: (spaceId) => spaceId === 'space-a' ? 'project-a' : null,
+    list: () => ['space-a'],
+    use: async () => {},
+    changed: async () => {},
+  };
+}
+
 describe('WorkspaceServiceManager', () => {
   it('strictly loads services, preserves the local port, and proxies the workspace-service hostname', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-service-'));
@@ -30,13 +40,6 @@ describe('WorkspaceServiceManager', () => {
     const workspace = join(root, 'workspace');
     mkdirSync(join(workspace, '.gitspace'), { recursive: true });
     writeFileSync(join(workspace, '.gitspace', 'services.json'), JSON.stringify({ services: [{ name: 'web', command: 'bun', args: ['service.ts'], cwd: '.', env: {}, ports: [{ name: 'web', protocol: 'http' }] }] }));
-    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
-    const project = database.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(root, 'repo') });
-    if (project.status === 'error') throw project.error;
-    const created = database.createWorkspace({ id: 'space-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: workspace });
-    if (created.status === 'error') throw created.error;
-    const possessed = database.possessSpace('space-a', 'machine-a');
-    if (possessed.status === 'error') throw possessed.error;
     let active: WorkspaceTerminalView | null = null;
     let observedPort = 0;
     const terminals = {
@@ -56,7 +59,7 @@ describe('WorkspaceServiceManager', () => {
     };
     const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
     const trust = { accountId: 'user-a', publicKey: credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey))) };
-    const manager = new WorkspaceServiceManager(database, terminals, 'machine-a', join(root, 'runtime'), 'gssh.dev', 'brad', undefined, async () => trust);
+    const manager = new WorkspaceServiceManager(checkouts(workspace), terminals, 'machine-a', join(root, 'runtime'), 'gssh.dev', 'brad', undefined, async () => trust);
     async function signed(request: Request, accountId = 'user-a') {
       const url = new URL(request.url);
       const headers = new Headers(request.headers);
@@ -93,16 +96,6 @@ describe('WorkspaceServiceManager', () => {
     expect(restarted.port).toBe(observedPort);
     await manager.stopOwned('space-a');
     expect(await manager.proxy(new Request('http://web--space-a--brad-srv.gssh.dev/healthz'))).toBeNull();
-    const allocationsPath = join(root, 'runtime', 'services', 'ports.json');
-    const allocations = JSON.parse(readFileSync(allocationsPath, 'utf8'));
-    allocations.allocations['machine-a:space-b:web:web'] = observedPort + 1;
-    writeFileSync(allocationsPath, JSON.stringify(allocations));
-    database.deleteWorkspace('space-a');
-    await manager.forgetSpace('space-a');
-    expect(JSON.parse(readFileSync(allocationsPath, 'utf8')).allocations).toEqual({ 'machine-a:space-b:web:web': observedPort + 1 });
-    await manager.forgetSpace('space-b');
-    expect(existsSync(allocationsPath)).toBe(false);
-    database.close();
   });
 
   it('starts services with the bundle terminal PATH and env beneath service env and port variables', async () => {
@@ -114,14 +107,7 @@ describe('WorkspaceServiceManager', () => {
     writeFileSync(join(workspace, 'node_modules', '.bin', 'bundle-web'), '#!/bin/sh\necho "mode=$BUNDLE_MODE region=$REGION"\n', { mode: 0o755 });
     writeFileSync(join(workspace, '.gitspace', 'services.json'), JSON.stringify({ services: [{ name: 'web', command: 'bundle-web', env: { REGION: 'service' }, ports: [{ name: 'web', protocol: 'http' }] }] }));
     writeFileSync(join(workspace, '.gitspace', 'bundle.json'), JSON.stringify({ version: 1, profiles: { base: {} }, terminal: { path: ['node_modules/.bin'], env: { BUNDLE_MODE: 'preview', REGION: 'bundle' } } }));
-    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
-    const project = database.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(root, 'repo') });
-    if (project.status === 'error') throw project.error;
-    const created = database.createWorkspace({ id: 'space-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: workspace });
-    if (created.status === 'error') throw created.error;
     let output = '';
-    const possessed = database.possessSpace('space-a', 'machine-a');
-    if (possessed.status === 'error') throw possessed.error;
     const terminals = {
       list: async () => [],
       startService: async (spaceId: string, serviceName: string, application: string, args: string[], cwd: string, env: Record<string, string>) => {
@@ -132,11 +118,11 @@ describe('WorkspaceServiceManager', () => {
       },
       stop: async () => terminal('space-a', 'gitspace-svc-space-a-web', 'exited', 'gitspace:space-a:service:web'),
     };
-    const manager = new WorkspaceServiceManager(database, terminals, 'machine-a', join(root, 'runtime'), null, null);
+    const manager = new WorkspaceServiceManager(checkouts(workspace), terminals, 'machine-a', join(root, 'runtime'), null, null);
     try {
       await manager.start('space-a', 'web');
       expect(output).toBe('mode=preview region=service\n');
-    } finally { await manager.dispose(); database.close(); }
+    } finally { await manager.dispose(); }
   });
 });
 

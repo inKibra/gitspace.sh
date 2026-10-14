@@ -7,9 +7,6 @@ import fs from 'node:fs';
 import { readAdvertisedRefs, writeArtifactsSnapshot, type ArtifactsFetch, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
 import { ArtifactsCodeStore } from '../src/artifacts.js';
 import { planSnapshotMerge } from '../src/artifacts-merge.js';
-import { RuntimeAttachmentSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
-import { ExecutorJournal } from '../../runtime-machine/src/journal.js';
-import { MachineExecutor } from '../../runtime-machine/src/executor.js';
 
 const text = new TextEncoder();
 const author = { name: 'Fixture', email: 'fixture@example.invalid', timestamp: 1, timezoneOffset: 0 };
@@ -458,7 +455,6 @@ test('machine deltas merge onto cloud files and index with clean text merges, ex
 
 for (const resolution of ['cache', 'cloud'] as const) for (const replacement of ['text', 'delete', 'binary'] as const) test(`${resolution} ${replacement} clean publication clears resolved conflicts while retaining untouched markers`, async () => {
   const f = await fixture();
-  const journal = new ExecutorJournal(join(f.dir, 'executor.sqlite'));
   try {
     const reader = { ...f.repo, readBlob: async (oid: string) => new Blob([Uint8Array.from((await git.readBlob({ fs, dir: f.dir, oid })).blob)]) };
     const snapshot = async (files: Record<string, string>): Promise<RuntimeGitCheckpoint> => {
@@ -473,17 +469,6 @@ for (const resolution of ['cache', 'cloud'] as const) for (const replacement of 
     const conflicted = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: cloud, ...await planSnapshotMerge(reader, base, cloud, machine) }, f.request);
     if (conflicted.isErr()) throw conflicted.error;
     expect(conflicted.value.conflicts).toEqual(['resolved', 'untouched']);
-    let accepted = conflicted.value;
-    const attachment = RuntimeAttachmentSchema.parse({ attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['checkpoint'], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
-    journal.installAttachment({ attachment, rootPath: f.dir, executionSecret: Buffer.alloc(32, 7).toString('base64url'), prerequisitesComplete: true });
-    const executor = new MachineExecutor({ machineId: 'machine', journal, onMutationSettled: async () => accepted, runCommand: async () => { throw new Error('Checkpoint must not launch a command'); }, artifacts: () => ({ read: async () => [], write: async () => {} }) });
-    const agentResult = async (checkpoint: RuntimeGitCheckpoint) => {
-      accepted = checkpoint;
-      return executor.execute(RuntimeToolDispatchSchema.parse({ conversationKind: 'main', version: 1, conversationId: 'conversation', taskId: 'task', attachmentId: 'attachment', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', generation: 1, requestId: checkpoint.worktreeCommit, attemptId: checkpoint.worktreeCommit, tool: 'checkpoint', args: {}, deadlineAt: new Date(Date.now() + 60_000).toISOString(), replay: 'unsafe' }));
-    };
-    const initialNotice = (await agentResult(conflicted.value)).content.slice(1);
-    expect(initialNotice).toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('resolved') })]);
-    expect(initialNotice).toEqual([expect.objectContaining({ text: expect.stringContaining('untouched') })]);
     const read = async (checkpoint: RuntimeGitCheckpoint, path: string) => new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: checkpoint.worktreeCommit, filepath: path })).blob);
     const markers = await read(conflicted.value, 'untouched');
     expect(markers).toContain('<<<<<<< cloud\n');
@@ -505,9 +490,6 @@ for (const resolution of ['cache', 'cloud'] as const) for (const replacement of 
     expect(await read(partial, 'untouched')).toBe(markers);
     expect(partial.conflicts).toEqual(['untouched']);
     expect(partial.headCommit).toBe(base.headCommit);
-    const partialNotice = (await agentResult(partial)).content.slice(1);
-    expect(partialNotice).toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('untouched') })]);
-    expect(partialNotice).toEqual([expect.objectContaining({ text: expect.not.stringContaining('resolved') })]);
     const resolved = await publish(partial, 'untouched');
     const safety = { ...resolved, conflicts: ['HEAD', 'resolved'] };
     const untouched = await planSnapshotMerge(reader, safety, safety, safety);
@@ -518,8 +500,7 @@ for (const resolution of ['cache', 'cloud'] as const) for (const replacement of 
     expect(explicit.value.headCommit).toBe(base.headCommit);
     expect(resolved.conflicts).toEqual([]);
     expect(resolved.headCommit).toBe(base.headCommit);
-    expect((await agentResult(resolved)).content).toEqual([{ type: 'text', text: JSON.stringify({ checkpoint: resolved }) }]);
-  } finally { journal.close(); await f.close(); }
+  } finally { await f.close(); }
 });
 
 for (const publication of ['cloud', 'cache'] as const) test(`${publication} publication introduces conflict flags for marker content and clears them only after resolution`, async () => {

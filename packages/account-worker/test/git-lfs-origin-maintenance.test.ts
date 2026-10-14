@@ -10,7 +10,6 @@ it('bounds and rotates origin retention batches without repeating them on each s
   await project.bootstrap({ id: projectId, name: 'Bounded origin maintenance', repositoryReference: 'https://origin.invalid/repo.git', baseBranch: 'main', createdBy: 'machine' });
   await project.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Retained workspace', branch: 'main', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
   const space = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`);
-  await space.bootstrap({ projectId, spaceId: workspaceId, machineId: 'machine' });
   const objects = Array.from({ length: 150 }, (_, index) => GitLfsObjectSchema.parse({ oid: (index + 1).toString(16).padStart(64, '0'), size: 1 }));
   const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: `refs/gitspace/spaces/${workspaceId}/checkpoints/1`, headCommit: 'a'.repeat(40), branch: 'main', indexCommit: 'a'.repeat(40), trackedWorktreeCommit: 'a'.repeat(40), worktreeCommit: 'a'.repeat(40), indexTree: 'b'.repeat(40), worktreeTree: 'b'.repeat(40), lfs: { objects: objects.map(object => ({ ...object, source: 'r2' })), heldBack: [] } });
   await runInDurableObject(space, (_instance, state) => {

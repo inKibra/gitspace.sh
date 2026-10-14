@@ -1,10 +1,9 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import type { GitSpaceDatabase } from '@gitspace/core';
 import type { ServiceView } from '@gitspace/protocol/inspector-contract';
 import type { HostedServiceRoute } from '@gitspace/protocol';
 import { SERVICE_ASSERTION_HEADER, stripGitSpaceCredentials, verifyServiceAssertion } from '@gitspace/protocol/service-access';
-import type { WorkspaceTerminalView } from './workspace-hub.js';
+import type { WorkspaceCheckouts, WorkspaceTerminalView } from './workspace-hub.js';
 import { checkoutTerminalEnvironment, inheritedCommandEnvironment } from '@gitspace/runtime-machine';
 
 const MIN_SERVICE_PORT = 17_000;
@@ -127,7 +126,7 @@ export class WorkspaceServiceManager {
   private allocationWrites: Promise<unknown> = Promise.resolve();
   private readonly assertionNonces = new Map<string, number>();
   constructor(
-    private readonly database: GitSpaceDatabase,
+    private readonly checkouts: WorkspaceCheckouts,
     private readonly terminals: ServiceTerminalCoordinator,
     private readonly machineId: string,
     private readonly runtimeRoot: string,
@@ -163,9 +162,8 @@ export class WorkspaceServiceManager {
   }
 
   async definitions(spaceId: string): Promise<WorkspaceServiceDefinition[]> {
-    const space = this.database.getSpace(spaceId);
-    if (!space || space.placementState === 'closed' || space.holderId !== this.machineId) throw new Error(`Space ${spaceId} is unavailable on this machine`);
-    const source = await readFile(join(space.rootPath, '.gitspace', 'services.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? '{"services":[]}' : Promise.reject(error));
+    const { rootPath } = this.held(spaceId);
+    const source = await readFile(join(rootPath, '.gitspace', 'services.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? '{"services":[]}' : Promise.reject(error));
     const parsed: unknown = JSON.parse(source);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !('services' in parsed) || !Array.isArray(parsed.services)) throw new Error('.gitspace/services.json must contain a services array');
     const services = parsed.services.map(parseService);
@@ -174,13 +172,7 @@ export class WorkspaceServiceManager {
   }
 
   async rehydrate(): Promise<void> {
-    for (const project of this.database.listProjects()) {
-      const spaces = [this.database.getBaseSpace(project.id), ...this.database.listSpaces(project.id)].filter((space) => space !== null);
-      for (const space of spaces) {
-        if (space.placementState === 'closed' || space.holderId !== this.machineId) continue;
-        await this.list(space.id).catch(() => undefined);
-      }
-    }
+    for (const spaceId of this.checkouts.list()) await this.list(spaceId).catch(() => undefined);
     if (!this.leaseTimer && this.routeAuthority) {
       this.leaseTimer = setInterval(() => {
         void Promise.all([...this.routes.values()].map((route) => this.leaseRoute(route)));
@@ -189,8 +181,7 @@ export class WorkspaceServiceManager {
   }
 
   async list(spaceId: string): Promise<ServiceView[]> {
-    const space = this.database.getSpace(spaceId);
-    if (!space) throw new Error(`Space ${spaceId} does not exist`);
+    const space = this.held(spaceId);
     const [definitions, terminals] = await Promise.all([this.definitions(spaceId), this.terminals.list(spaceId)]);
     const serviceTerminals = terminals.filter((terminal) => terminal.kind === 'service');
     return Promise.all(definitions.map(async (definition) => {
@@ -224,8 +215,7 @@ export class WorkspaceServiceManager {
   }
 
   async start(spaceId: string, serviceName: string): Promise<ServiceView> {
-    const space = this.database.getSpace(spaceId);
-    if (!space) throw new Error(`Space ${spaceId} does not exist`);
+    const space = this.held(spaceId);
     const definition = (await this.definitions(spaceId)).find((service) => service.name === serviceName);
     if (!definition) throw new Error(`Service ${serviceName} is not configured`);
     const cwd = resolve(space.rootPath, definition.cwd);
@@ -274,25 +264,6 @@ export class WorkspaceServiceManager {
       await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname, route.generation);
       this.routes.delete(hostname);
     }
-  }
-
-  async forgetSpace(spaceId: string): Promise<void> {
-    for (const [hostname, route] of this.routes) {
-      if (route.spaceId !== spaceId) continue;
-      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname, route.generation);
-      this.routes.delete(hostname);
-    }
-    const operation = this.allocationWrites.then(async () => {
-      const state = await this.readAllocations();
-      const prefix = `${this.machineId}:${spaceId}:`;
-      for (const key of Object.keys(state.allocations)) {
-        if (key.startsWith(prefix)) delete state.allocations[key];
-      }
-      if (Object.keys(state.allocations).length) await this.writeAllocations(state);
-      else await rm(join(this.runtimeRoot, 'services', 'ports.json'), { force: true });
-    });
-    this.allocationWrites = operation.catch(() => undefined);
-    await operation;
   }
 
   async proxy(request: Request): Promise<Response | null> {
@@ -345,6 +316,14 @@ export class WorkspaceServiceManager {
   private endpoint(spaceId: string, serviceName: string, portName: string, port: number): string {
     if (this.publicDomain && this.publicNamespace) return `https://${serviceHostname(this.publicDomain, this.publicNamespace, spaceId, serviceName)}`;
     return `http://127.0.0.1:${port}`;
+  }
+
+  /** The held checkout of a workspace; its hosted routes are unfenced (generation 0). */
+  private held(spaceId: string): { rootPath: string; projectId: string; generation: number } {
+    const rootPath = this.checkouts.path(spaceId);
+    const projectId = this.checkouts.projectId(spaceId);
+    if (!rootPath || !projectId) throw new Error(`Space ${spaceId} is unavailable on this machine`);
+    return { rootPath, projectId, generation: 0 };
   }
 
   private async allocatedPorts(spaceId: string, definition: WorkspaceServiceDefinition, allocate: boolean): Promise<Array<WorkspaceServicePortDefinition & { port: number }>> {

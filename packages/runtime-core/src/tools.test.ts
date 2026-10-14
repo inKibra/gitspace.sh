@@ -25,7 +25,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   read: { path: 'src/main.ts', offset: 1, limit: 10 }, write: { path: 'src/main.ts', content: 'new content' },
   edit: { path: 'src/main.ts', edits: [{ oldText: 'old', newText: 'new' }] }, apply_patch: { patch: '*** Begin Patch\n*** Add File: new.ts\n+export {};\n*** End Patch' },
   bash: { command: 'pwd' }, grep: { pattern: 'needle', path: 'src' }, find: { pattern: '*.ts', path: 'src' }, codemode: { code: 'return 1;' },
-  agents: { op: 'list' }, proc: { op: 'list' }, machines: { op: 'list' }, environment: { method: 'get' }, sync: { method: 'status' },
+  agents: { op: 'list' }, proc: { op: 'list' }, machines: { op: 'list' }, environment: { method: 'get' }, sync: { method: 'status' }, workspace_status: {},
   space_goal: { method: 'get' }, space_phase: { phase: 'code' }, space_workspace: { method: 'current' }, space_artifacts: { method: 'list' },
   space_workflow: { method: 'get' }, space_rubric: { method: 'get' }, space_journal: { method: 'list' }, space_guide: { method: 'get' }, space_review: { method: 'list' },
   web_search: { query: 'TypeScript documentation' }, generate_image: { prompt: 'A blue square' }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
@@ -125,13 +125,12 @@ test('registered mutations serialize across multi-tool rounds and failure while 
 
 test('machine selectors survive real bash and proc registrations and invalid selectors never dispatch', async () => {
   const routed: Array<Parameters<ToolServices['invoke']>[0]> = [];
-  const bash = { command: 'pwd', on: 'machine-chosen', at: 'commit-selected' };
-  const proc = { op: 'list', on: { needs: ['linux'], prefer: 'idle' }, at: 'branch-selected' };
+  const bash = { command: 'pwd', on: 'machine-chosen' };
+  const proc = { op: 'list', on: { needs: ['linux'], prefer: 'idle' } };
   const { harness, root } = await registered([[
     call('bash', bash, 'selected-bash'), call('proc', proc, 'selected-proc'),
     call('bash', { command: 'pwd', on: '' }, 'invalid-bash'),
     call('proc', { op: 'list', on: { prefer: 'busy' } }, 'invalid-proc'),
-    call('bash', { command: 'pwd', at: 42 }, 'invalid-source'),
   ]], async input => { routed.push(input); return completed(input); });
   try {
     await root.submit({ type: 'input', content: 'Select machines explicitly.' }, BACKGROUND_CONTEXT);
@@ -140,7 +139,7 @@ test('machine selectors survive real bash and proc registrations and invalid sel
     expect(routed.find(input => input.requestId === 'selected-proc')?.args).toEqual(proc);
     expect(routed.map(input => input.requestId).sort()).toEqual(['selected-bash', 'selected-proc']);
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
-    expect(results.filter(result => result.isError).map(result => result.toolCallId).sort()).toEqual(['invalid-bash', 'invalid-proc', 'invalid-source']);
+    expect(results.filter(result => result.isError).map(result => result.toolCallId).sort()).toEqual(['invalid-bash', 'invalid-proc']);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
 
@@ -158,8 +157,8 @@ test('find registration rejects unsupported glob instead of silently dropping a 
 
 test('agent environment registration rejects human lifecycle options before dispatch and accepts supported runs', async () => {
   const supported: ToolCall['arguments'][] = [
-    { method: 'runChecks', runId: 'checks', rerun: true, deadlineAt: '2030-01-01T00:00:00.000Z', on: 'machine', at: 'source' },
-    { method: 'runPhase', runId: 'prepare', phase: 'machine/prepare', rerun: true, deadlineAt: '2030-01-01T00:00:00.000Z', on: { needs: ['linux'], prefer: 'idle' }, at: 'source' },
+    { method: 'runChecks', runId: 'checks', rerun: true, deadlineAt: '2030-01-01T00:00:00.000Z', on: 'machine' },
+    { method: 'runPhase', runId: 'prepare', phase: 'machine/prepare', rerun: true, deadlineAt: '2030-01-01T00:00:00.000Z', on: { needs: ['linux'], prefer: 'idle' } },
   ];
   const forbidden: ToolCall['arguments'][] = [
     { method: 'runChecks', runId: 'interactive-checks', interactive: true },

@@ -5,8 +5,6 @@ import { createRoot } from 'react-dom/client';
 import { LiveApp } from './LiveApp.js';
 import { restoreAppearance } from './appearance.js';
 import { observeAppViewport } from './app-viewport.js';
-import { DesignSystemGallery } from './design-gallery/DesignSystemGallery.js';
-import { EnvironmentGallery } from './environment/EnvironmentGallery.js';
 import { EnvironmentProposalGallery } from './environment/EnvironmentProposalGallery.js';
 import '@gitspace/ui/fluid-theme.css';
 import './styles.css';
@@ -27,13 +25,9 @@ createRoot(root).render(
         <SizeProvider defaultSize="default">
           <IconProvider icons={untitledIcons}>
             <TooltipProvider>
-              {new URL(window.location.href).searchParams.get('gallery') === 'design-system'
-                ? <DesignSystemGallery />
-                : new URL(window.location.href).searchParams.get('gallery') === 'environment'
-                  ? <EnvironmentGallery />
-                  : new URL(window.location.href).searchParams.get('gallery') === 'environment-proposal'
-                    ? <EnvironmentProposalGallery />
-                    : <LiveApp />}
+              {new URL(window.location.href).searchParams.get('gallery') === 'environment-proposal'
+                ? <EnvironmentProposalGallery />
+                : <LiveApp />}
             </TooltipProvider>
           </IconProvider>
         </SizeProvider>

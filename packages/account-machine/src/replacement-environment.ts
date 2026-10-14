@@ -447,7 +447,6 @@ class MachineHost implements MachineReplacementHost {
         GITSPACE_ENVIRONMENT_ROOT: this.options.root,
         GITSPACE_MACHINE_ID: this.options.machineId,
         GITSPACE_ARTIFACT_KEY: Buffer.from(this.options.artifactKey).toString('base64'),
-        GITSPACE_MIGRATIONS_FOLDER: join(pointer.artifactPath, 'drizzle'),
         GITSPACE_GENERATION_HASH: pointer.hash,
         GITSPACE_MACHINE_RUNTIME_PATH: pointer.artifactPath,
         GITSPACE_CONTROL_TOKEN: this.options.controlToken,

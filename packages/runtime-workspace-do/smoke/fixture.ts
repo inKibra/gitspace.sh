@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { createModels, createAssistantMessageEventStream, type Model, type StreamFunction, type AssistantMessage } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createOperationalTasks, type OperationalServices } from '../../runtime-core/src/tasks.js';
-import { RuntimeAnswerInputSchema, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAnswerInputSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { WorkspaceDraftSaveSchema } from '@gitspace/protocol-runtime/draft';
 import { createWorkspaceRuntime } from '../src/runtime.js';
 import { createReplicaStore } from '../src/replica-store.js';
@@ -97,24 +97,6 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         await answer(card.id);
         check((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === questionId)?.answer === true, 'Group creation approval was not committed');
         return Response.json({ missingRejected: true, staleRejected: true, groupApproved: true });
-      }
-      if (url.pathname === '/execution-machine-proof') {
-        const a = RuntimeAttachmentSchema.parse({ ...identity, machineId: 'machine-a', attachmentId: 'cache-a', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: [], updatedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
-        const b = RuntimeAttachmentSchema.parse({ ...a, machineId: 'machine-b', attachmentId: 'cache-b' });
-        const seed = (value: typeof a) => this.ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', value.attachmentId, JSON.stringify(value), 'fixture-only');
-        seed(a); seed(b);
-        await runtime.setExecutionMachine(b.machineId);
-        check(runtime.defaultExecutionMachine() === b.machineId, 'Ready cache selection failed');
-        for (const state of ['attaching', 'lost', 'draining', 'detached'] as const) {
-          seed({ ...a, state });
-          let rejected = false;
-          try { await runtime.setExecutionMachine(a.machineId); } catch { rejected = true; }
-          check(rejected && runtime.defaultExecutionMachine() === b.machineId, 'Unavailable cache replaced the default');
-        }
-        await runtime.setExecutionMachine(null);
-        check(runtime.defaultExecutionMachine() === null, 'Automatic execution selection was not restored');
-        this.ctx.storage.sql.exec('DELETE FROM runtime_attachments WHERE id IN (?,?)', a.attachmentId, b.attachmentId);
-        return Response.json({ readyCacheSelected: true, unavailableRejected: true });
       }
       if (url.pathname === '/scoped-stop-seed') {
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);

@@ -1,4 +1,4 @@
-import { RuntimeAttachmentRequestInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
 import type { AttachmentStore, ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 
@@ -34,40 +34,17 @@ export class RuntimeAttachmentController {
     return false;
   }
 
-  async request(raw: unknown) {
-    const input = RuntimeAttachmentRequestInputSchema.parse(raw);
-    await this.options.authorizeMachine(input.machineId);
-    const repository = `workspace-${input.workspaceId}`;
-    const checkpoint = input.sourceRef.startsWith('refs/gitspace/') ? await this.options.snapshot() : null;
-    if (input.sourceRef.startsWith('refs/gitspace/') && checkpoint?.checkpointRef !== input.sourceRef) throw new Error('Selected checkpoint ref is not canonical');
-    const resolved = await this.options.code.resolveRef(repository, checkpoint?.worktreeCommit ?? input.sourceRef);
-    if (resolved !== input.checkout.commit) throw new Error('Assigned source ref no longer resolves to the selected commit');
-    const requiresFiltersOrSubmodules = await this.requiresFiltersOrSubmodules(repository, resolved);
-    const result = await this.options.attachments.request(input, {
-      ref: input.sourceRef, commit: resolved, requiresFiltersOrSubmodules,
-    }, input.checkout.kind === 'branch' ? [...executorCapabilities, 'delegate_export'] : executorCapabilities);
-    this.options.publish();
-    return result;
-  }
-
   async assignments(raw: unknown) {
     const input = RuntimeAssignmentsInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
     const assigned = await this.options.attachments.assignments(input.machineId, executorCapabilities);
-    const assignments = await Promise.all(assigned.map(async ({ grant, source }) => {
-      if (grant.attachment.role === 'cache') {
-        const checkpoint = await this.options.snapshot();
-        if (!checkpoint) return { grant, source: null, checkpoint };
-        const info = await this.options.code.info(`workspace-${grant.attachment.workspaceId}`);
-        const requiresFiltersOrSubmodules = await this.requiresFiltersOrSubmodules(`workspace-${grant.attachment.workspaceId}`, checkpoint.worktreeCommit);
-        return { grant, source: { ref: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit, requiresFiltersOrSubmodules, remote: info.remote, origin: await this.options.origin(grant.attachment.projectId), checkpoint }, checkpoint };
-      }
-      if (!source) throw new Error('Private attachment source is missing');
-      const checkpoint = null;
-      const sourceCheckpoint = source.checkpoint;
-      if (grant.attachment.state === 'draining' || grant.attachment.state === 'lost') return { grant, source: { ...source, origin: null }, checkpoint, sourceCheckpoint };
-      const info = await this.options.code.info(`workspace-${grant.attachment.workspaceId}`);
-      return { grant, source: { ...source, remote: info.remote, origin: await this.options.origin(grant.attachment.projectId) }, checkpoint, sourceCheckpoint };
+    const assignments = await Promise.all(assigned.map(async ({ grant }) => {
+      const checkpoint = await this.options.snapshot();
+      if (!checkpoint) return { grant, source: null, checkpoint };
+      const repository = `workspace-${grant.attachment.workspaceId}`;
+      const info = await this.options.code.info(repository);
+      const requiresFiltersOrSubmodules = await this.requiresFiltersOrSubmodules(repository, checkpoint.worktreeCommit);
+      return { grant, source: { ref: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit, requiresFiltersOrSubmodules, remote: info.remote, origin: await this.options.origin(grant.attachment.projectId), checkpoint }, checkpoint };
     }));
     return { assignments };
   }

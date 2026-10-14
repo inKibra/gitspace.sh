@@ -6,9 +6,7 @@ export const RuntimeMachineSelectorSchema = z.union([
   z.string().min(1),
   z.object({ needs: z.array(z.string().min(1)).optional(), profile: z.string().min(1).optional(), prefer: z.literal('idle').optional() }).strict(),
 ]);
-/** Strings name current, an exact commit, or a branch in this workspace repository. */
-export const RuntimeSourceSelectorSchema = z.string().min(1);
-export const RuntimeDispatchSelectionSchema = z.object({ on: RuntimeMachineSelectorSchema.optional(), at: RuntimeSourceSelectorSchema.optional() });
+export const RuntimeDispatchSelectionSchema = z.object({ on: RuntimeMachineSelectorSchema.optional() });
 export const RuntimeExecutionObservationSchema = z.object({
   activeExecutions: z.number().int().nonnegative(), observedAt: z.iso.datetime(),
   materializedCommit: RuntimeGitCheckpointSchema.shape.worktreeCommit.nullable().optional(),

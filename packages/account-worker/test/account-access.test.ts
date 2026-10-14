@@ -40,10 +40,10 @@ async function account() {
   function signed(operation: ControlOperation, payload: Record<string, unknown> = {}) {
     return createSignedControlRequest({ userId, machineId: 'machine', operation, payload, signingPrivateKey: signing });
   }
-  async function subscription(kind: 'settings' | 'fleet') {
-    const proof = signed(kind === 'settings' ? 'settings.subscribe' : 'catalog.machine.subscribe');
+  async function subscription() {
+    const proof = signed('settings.subscribe');
     const control = btoa(JSON.stringify(proof)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-    const response = await SELF.fetch(`https://auth.test/v1/${kind}/events?control=${encodeURIComponent(control)}`, { headers: { upgrade: 'websocket' } });
+    const response = await SELF.fetch(`https://auth.test/v1/settings/events?control=${encodeURIComponent(control)}`, { headers: { upgrade: 'websocket' } });
     expect(response.status).toBe(101);
     const socket = response.webSocket!;
     socket.accept();
@@ -204,74 +204,6 @@ describe('account lifecycle authorization', () => {
     expect(await denied.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
   });
 
-  it('fences only the image operation machine and its recovering spaces while retaining control reads', async () => {
-    const a = await account();
-    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:project`);
-    await authority.bootstrap({ id: 'project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
-    for (const spaceId of ['new-space', 'unrelated-space', 'recovering-space']) {
-      await authority.putWorkspace({ id: spaceId, projectId: 'project', kind: 'worktree', name: spaceId, branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-    }
-    const catalog = env.FLEET_CATALOG.getByName(a.userId);
-    const image = `ghcr.io/tenant/image@sha256:${'a'.repeat(64)}`;
-    await catalog.saveCloudImage({ machineId: 'machine', currentImage: image, desiredImage: image, selection: { kind: 'custom', image }, operation: { id: crypto.randomUUID(), phase: 'checkpointing', barrier: true, startedAt: Date.now(), updatedAt: Date.now(), error: null, resumeSpaceIds: ['recovering-space'] } });
-    for (const operation of ['space.bootstrap', 'space.beginOpen'] as const) {
-      const response = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation, { projectId: 'project', spaceId: 'new-space' })) });
-      expect(response.status).toBe(503);
-      expect(await response.json()).toMatchObject({ error: { code: 'CLOUD_IMAGE_IN_PROGRESS' } });
-    }
-    const settings = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('settings.get')) });
-    expect(settings.status).toBe(200);
-    // An unrelated machine's admission is not gated by this machine's image state.
-    const state = (await catalog.cloudImage('machine'))!;
-    await catalog.saveCloudImage({ ...state, machineId: 'sandbox-browser' });
-    await catalog.saveCloudImage({ ...state, operation: { ...state.operation!, phase: 'complete', barrier: false } });
-    const bootstrap = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('space.bootstrap', { projectId: 'project', spaceId: 'unrelated-space' })) });
-    expect(bootstrap.status).toBe(200);
-    const steal = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('space.beginOpen', { projectId: 'project', spaceId: 'recovering-space' })) });
-    expect(steal.status).toBe(503);
-    const rpc = await SELF.fetch(`https://auth.test/__sandbox/${a.userId}/sandbox-browser/rpc`, { method: 'POST', body: '{}' });
-    expect(rpc.status).toBe(503);
-  });
-
-  it('binds space ownership to the signing machine rather than a payload impersonation', async () => {
-    const a = await account();
-    const spaceId = `signed-space-${crypto.randomUUID()}`;
-    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:project`);
-    await authority.bootstrap({ id: 'project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
-    await authority.putWorkspace({ id: spaceId, projectId: 'project', kind: 'worktree', name: spaceId, branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-    const response = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(a.signed('space.bootstrap', { projectId: 'project', spaceId, machineId: 'impersonated-machine' })),
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ status: 'ok', value: { machineId: 'machine' } });
-  });
-
-  it('places and reopens only active or provisioning workspaces', async () => {
-    const a = await account();
-    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:project`);
-    await authority.bootstrap({ id: 'project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
-    for (const lifecycle of ['provisioning', 'failed', 'archived'] as const) {
-      await authority.putWorkspace({ id: lifecycle, projectId: 'project', kind: 'worktree', name: lifecycle, branch: lifecycle, phase: 'plan', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle, goalId: null, expectedRevision: 0 });
-    }
-    const cases = [
-      { operation: 'space.bootstrap', payload: { projectId: 'project', spaceId: 'provisioning' }, admitted: true },
-      // Admitted past the lifecycle guard; the open placement itself then refuses a reopen.
-      { operation: 'space.beginOpen', payload: { projectId: 'project', spaceId: 'provisioning', expectedGeneration: 1 }, admitted: true },
-      { operation: 'space.bootstrap', payload: { projectId: 'project', spaceId: 'failed' }, admitted: false },
-      { operation: 'space.beginOpen', payload: { projectId: 'project', spaceId: 'failed', expectedGeneration: 1 }, admitted: false },
-      { operation: 'space.bootstrap', payload: { projectId: 'project', spaceId: 'archived' }, admitted: false },
-    ] as const;
-    const results = [];
-    for (const { operation, payload } of cases) {
-      const response = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation, payload)) });
-      const body = z.object({ error: z.object({ code: z.string() }).optional() }).parse(await response.json());
-      results.push(body.error?.code !== 'WORKSPACE_UNAVAILABLE');
-    }
-    expect(results).toEqual(cases.map((entry) => entry.admitted));
-    expect(await env.SPACE_AUTHORITY.getByName(`${a.userId}:provisioning`).get()).toMatchObject({ machineId: 'machine', state: 'open', generation: 1 });
-  });
-
   it.each(['suspended', 'quarantined'] as const)('blocks %s tenant access on direct APIs', async status => {
     const a = await account();
     expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
@@ -294,42 +226,6 @@ describe('account lifecycle authorization', () => {
     expect(credential.status).toBe(403);
     expect(await credential.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
     expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
-  });
-
-  it('keeps legacy machines able to create and open workspaces and recover after inference cutover', async () => {
-    const a = await account();
-    await a.vault.ensureInference();
-    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:new-project`);
-    await authority.bootstrap({ id: 'new-project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
-    await authority.putWorkspace({ id: 'new-space', projectId: 'new-project', kind: 'worktree', name: 'Workspace', branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-    const request = (operation: ControlOperation, payload: Record<string, unknown> = {}) => SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation, payload)),
-    });
-    const created = await request('space.bootstrap', { projectId: 'new-project', spaceId: 'new-space' });
-    expect(created.status).toBe(200);
-    expect(await created.json()).toMatchObject({ status: 'ok', value: { machineId: 'machine', state: 'open' } });
-    const placement = env.SPACE_AUTHORITY.getByName(`${a.userId}:new-space`);
-    const identity = { projectId: 'new-project', spaceId: 'new-space', machineId: 'machine', expectedGeneration: 1 };
-    await placement.beginClose(identity);
-    const checkpoint = await persistPortableCheckpoint(identity.projectId, identity.spaceId, 1);
-    await placement.commitClosed({ ...identity, revision: 1, ...checkpoint });
-    const reopened = await request('space.beginOpen', { projectId: 'new-project', spaceId: 'new-space', expectedGeneration: 2 });
-    expect(reopened.status).toBe(200);
-    expect(await reopened.json()).toMatchObject({ status: 'ok', value: { revision: 1 } });
-    const relay = await SELF.fetch('https://auth.test/v1/relay/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant: a.grant, capability: 'space.control' }) });
-    expect(relay.status).toBe(200);
-    expect(await relay.json()).toMatchObject({ status: 'ok' });
-    expect((await request('deploy.status')).status).toBe(200);
-    const key = `objects/sha256/${'b'.repeat(64)}`;
-    const hash = `sha256:${'b'.repeat(64)}`;
-    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/machine-release/blob`, ({ request: download }) => {
-      expect(download.headers.get('authorization')).toBe(`Bearer ${env.PLATFORM_TOKEN}`);
-      expect(new URL(download.url).searchParams.get('key')).toBe(key);
-      return new HttpResponse('verified native chunk', { headers: { 'x-gitspace-sha256': hash } });
-    }));
-    const download = await SELF.fetch(`https://auth.test/v1/data/${key}`, { headers: { 'x-gitspace-control': btoa(JSON.stringify(a.signed('data.get', { key, hash }))) } });
-    expect(download.status).toBe(200);
-    expect(await download.text()).toBe('verified native chunk');
   });
 
   it('resolves an assigned profile credential only for that profile, after the machine is gone', async () => {
@@ -399,31 +295,23 @@ describe('account lifecycle authorization', () => {
     }
   });
 
-  it.each(['settings', 'fleet'] as const)('ends stale %s subscriptions before disclosing another event', async kind => {
+  it('ends stale settings subscriptions before disclosing another event', async () => {
     const a = await account();
-    const socket = await a.subscription(kind);
+    const socket = await a.subscription();
     const activeEvent = nextSocketEvent(socket);
-    if (kind === 'settings') {
-      await env.USER_SETTINGS.getByName(a.userId).updateGitIdentity('fixture', { expectedGeneration: 0, privateKey: 'p'.repeat(64), publicKey: 'ssh-ed25519 public', fingerprint: 'SHA256:fingerprint' });
-    } else {
-      await env.FLEET_CATALOG.getByName(a.userId).putMachine({ id: 'machine', label: 'Machine', state: 'online', rpcEndpoint: 'https://machine.test/rpc', kind: 'physical', notes: '', provider: 'physical', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null });
-    }
-    expect(await activeEvent).toMatchObject({ type: 'message', data: expect.stringContaining(kind === 'settings' ? 'settings.changed' : 'upsert') });
+    await env.USER_SETTINGS.getByName(a.userId).updateGitIdentity('fixture', { expectedGeneration: 0, privateKey: 'p'.repeat(64), publicKey: 'ssh-ed25519 public', fingerprint: 'SHA256:fingerprint' });
+    expect(await activeEvent).toMatchObject({ type: 'message', data: expect.stringContaining('settings.changed') });
     const suspendedEvent = nextSocketEvent(socket);
     platformState('suspended');
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
-    if (kind === 'settings') {
-      await env.USER_SETTINGS.getByName(a.userId).updateGitIdentity('fixture', { expectedGeneration: 1, privateKey: 'q'.repeat(64), publicKey: 'ssh-ed25519 updated', fingerprint: 'SHA256:updated' });
-    } else {
-      await env.FLEET_CATALOG.getByName(a.userId).putMachine({ id: 'machine', label: 'Updated machine', state: 'online', rpcEndpoint: 'https://machine.test/rpc', kind: 'physical', notes: '', provider: 'physical', desiredState: 'online', lifecycleRevision: 2, operationId: null, error: null });
-    }
+    await env.USER_SETTINGS.getByName(a.userId).updateGitIdentity('fixture', { expectedGeneration: 1, privateKey: 'q'.repeat(64), publicKey: 'ssh-ed25519 updated', fingerprint: 'SHA256:updated' });
     expect(await suspendedEvent).toEqual({ type: 'close', code: 1008 });
     socket.close();
   });
 
   it('does not revive an established socket when the same machine key is reenrolled at a new generation', async () => {
     const a = await account();
-    const socket = await a.subscription('settings');
+    const socket = await a.subscription();
     const next = nextSocketEvent(socket);
     await a.vault.removeManagedDevice('machine');
     expect(await a.vault.registerDevice(a.grant)).toMatchObject({ status: 'error', error: { code: 'STALE_DEVICE_GRANT' } });

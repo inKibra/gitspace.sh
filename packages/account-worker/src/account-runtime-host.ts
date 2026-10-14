@@ -1,5 +1,5 @@
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
-import { RuntimeReceiptTransportSchema, type RuntimeReceiptTransport, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
+import type { RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
 import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } from './runtime-services.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
@@ -51,7 +51,6 @@ export async function createAccountWorkspaceRuntime(
   env: Env,
   identity: RuntimeIdentity,
   schedule: (timestamp: number) => Promise<void>,
-  migration?: { initialCheckpoint: RuntimeGitCheckpoint; progress?(step: string): Promise<void> },
 ): Promise<WorkspaceRuntime> {
   const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   const [workspace, canonicalProject] = await Promise.all([project.getWorkspace(identity.workspaceId), project.getProject()]);
@@ -61,7 +60,6 @@ export async function createAccountWorkspaceRuntime(
     ? await project.ensureBaseWorkspace({ userId: env.ACCOUNT_ID, projectId: identity.projectId })
     : workspace;
   if (!definition) throw new Error('Canonical workspace definition is unavailable');
-  await migration?.progress?.('opening the passive runtime: inference');
   const inference = await createCloudRuntimeInference(ctx, env, identity);
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
   const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
@@ -81,13 +79,11 @@ export async function createAccountWorkspaceRuntime(
   const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   let runtime: WorkspaceRuntime | undefined;
-  await migration?.progress?.('opening the passive runtime: services');
   const services = createRuntimeServices({ ctx, env, identity, schedule, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
-  await migration?.progress?.('opening the passive runtime: harness');
   runtime = await createWorkspaceRuntime({
     ...inference,
     // A project's base space has no phase; it is never plan-locked.
@@ -100,7 +96,7 @@ export async function createAccountWorkspaceRuntime(
       if (publicationId) await project.lfsReleasePublication(publicationId);
       else await lfs.releasePublication();
     },
-    initialCheckpoint: migration ? async () => migration.initialCheckpoint : async () => {
+    initialCheckpoint: async () => {
       const branchRef = await ref();
       return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length));
     },
@@ -123,22 +119,19 @@ export async function createAccountWorkspaceRuntime(
     attachments: {
       seal: (secret, scope) => vault.sealRuntimeGrant(secret, scope),
       open: (ciphertext, scope) => vault.openRuntimeGrant(ciphertext, scope),
-      async admitExecution(machineId) {
-        const admission = await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).machineExecutionAdmission(machineId);
-        if (admission.state !== 'ready') throw new Error(admission.error ?? `Updating machine: executor protocol ${admission.required} is required before agent execution.`);
-      },
       dispatch: input => dispatchRuntimeAttachment(env, input),
     },
   });
-  if (!migration) ctx.waitUntil(runtime.wake());
+  ctx.waitUntil(runtime.wake());
   return runtime;
 }
 
 /** Every machine executes through the tenant relay tunnel; a missing tunnel fails at once. */
-export async function dispatchRuntimeAttachment(env: Env, input: Parameters<AttachmentServices['dispatch']>[0]): Promise<RuntimeReceiptTransport> {
+export async function dispatchRuntimeAttachment(env: Env, input: Parameters<AttachmentServices['dispatch']>[0]): Promise<Response> {
   const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(input.machineId);
   if (!machine || machine.state !== 'online' || machine.desiredState !== 'online') throw new Error('Assigned executor is unavailable');
-  const request = new Request(new URL(`/tunnel/${encodeURIComponent(input.machineId)}${input.path}`, env.RELAY_URL), {
+  const path = '/runtime/execute';
+  const request = new Request(new URL(`/tunnel/${encodeURIComponent(input.machineId)}${path}`, env.RELAY_URL), {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-gitspace-execution-signature': input.signature },
     // AttachmentStore signs this exact serialized string; never re-encode the body.
@@ -150,13 +143,12 @@ export async function dispatchRuntimeAttachment(env: Env, input: Parameters<Atta
   const onAbort = () => aborted.reject(input.signal.reason);
   input.signal.addEventListener('abort', onAbort, { once: true });
   try {
-    const response = await Promise.race([forwardTunnelRequest(request, env, { machineId: input.machineId, path: input.path }), aborted.promise]);
+    const response = await Promise.race([forwardTunnelRequest(request, env, { machineId: input.machineId, path }), aborted.promise]);
     if (response.status === 503) {
       // The relay answers MACHINE_OFFLINE only before dispatch: the request provably never left.
-      const body = z.object({ error: z.object({ code: z.string() }) }).safeParse(await Promise.race([response.json().catch(() => null), aborted.promise]));
+      const body = z.object({ error: z.object({ code: z.string() }) }).safeParse(await Promise.race([response.clone().json().catch(() => null), aborted.promise]));
       if (body.success && body.data.error.code === 'MACHINE_OFFLINE') throw new ExecutorNotConnected(input.machineId);
     }
-    if (!response.ok) throw new Error(`Executor transport returned ${response.status}`);
-    return RuntimeReceiptTransportSchema.parse(await Promise.race([response.json(), aborted.promise]));
+    return response;
   } finally { input.signal.removeEventListener('abort', onAbort); }
 }

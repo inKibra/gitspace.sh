@@ -123,24 +123,7 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
     assert.match(JSON.stringify(messages[0]!.payload), /added\.bin: omitted/u);
     assert.match(JSON.stringify(messages[0]!.payload), /remain on the previous machine/u);
     const lease = { ...identity, machineId: result.attachment.machineId, attachmentId: result.attachment.attachmentId, generation: result.attachment.generation };
-    await runtime.attachments.requestCacheAction({ ...lease, requestId: 'reclaim-confirmed', action: { kind: 'reclaim', discardHeldBack: true } });
-    let cache = runtime.attachments.list().find(item => item.attachmentId === lease.attachmentId);
-    assert.equal(cache?.cacheAction?.discardHeldBack, true, 'Explicit reclaim acceptance survives assignment persistence');
-    await assert.rejects(runtime.attachments.requestCacheAction({ ...lease, requestId: 'reclaim-confirmed', action: { kind: 'reclaim' } }), /identity/u);
-    assert(cache?.cache);
-    runtime.attachments.heartbeat({ ...lease, cache: { ...cache.cache, state: 'paused', reclaimBlocked: 'Held-back LFS: private.bin' }, cacheAction: { requestId: 'reclaim-confirmed', status: 'failed', error: 'Held back' }, executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
-    runtime.attachments.detach({ ...lease, state: 'draining' });
-    cache = runtime.attachments.list().find(item => item.attachmentId === lease.attachmentId);
-    assert.deepEqual(cache?.detachRequest, {}, 'Generic detach must not inherit the prior reclaim acceptance');
-    runtime.attachments.detach({ ...lease, state: 'draining', discardHeldBack: true });
-    cache = runtime.attachments.list().find(item => item.attachmentId === lease.attachmentId);
-    assert.equal(cache?.detachRequest?.discardHeldBack, true, 'Explicit detach acceptance survives assignment persistence');
-    assert(cache?.cache);
-    assert.throws(() => runtime.attachments.detach({ ...lease, state: 'detached' }), /final snapshot/u);
-    runtime.attachments.recordCacheFlush(lease.attachmentId, lease.generation);
-    const reclaimed = runtime.attachments.heartbeat({ ...lease, cache: { ...cache.cache, state: 'reclaimed', reclaimBlocked: null }, executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: checkpoint.worktreeCommit } });
-    assert.equal(reclaimed.state, 'draining', 'Explicit detach must not return to resumable attaching state');
-    runtime.attachments.detach({ ...lease, state: 'detached' });
+    runtime.attachments.detach(lease);
     assert.equal((await runtime.attachments.assignments(lease.machineId)).length, 0, 'Detached cache disappears from assignments');
     return Response.json({ passed: true });
   }

@@ -73,5 +73,6 @@ export function createReplicaStore(storage: DurableObjectStorage) {
 export function readRuntimeSnapshot(storage: DurableObjectStorage): RuntimeSnapshot | null {
   if (!storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_replica'").toArray().length) return null;
   const parts = storage.sql.exec<{ payload: string }>("SELECT payload FROM runtime_replica WHERE kind='snapshot' ORDER BY part").toArray();
-  return parts.length ? RuntimeSnapshotSchema.parse(JSON.parse(parts.map(row => row.payload).join(''))) : null;
+  // A snapshot from an older release that no longer parses reads as absent until the runtime rebuilds it.
+  return parts.length ? RuntimeSnapshotSchema.safeParse(JSON.parse(parts.map(row => row.payload).join(''))).data ?? null : null;
 }

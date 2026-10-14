@@ -2,7 +2,6 @@ import { expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { GitSpaceDatabase } from '@gitspace/core';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createBrowserClient, fetchTransport } from 'result-rpc/client';
 import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
@@ -12,32 +11,30 @@ import { createGitSpaceRpcHandler } from '../src/rpc-router.js';
 // Cloud authorities own repository, lifecycle, Inspector, and session regressions.
 // This router only owns explicitly addressed machine tools.
 test('refuses a launch addressed to another machine before running the builder', async () => {
-  const database = new GitSpaceDatabase(':memory:');
   let builds = 0;
   const rpc = createGitSpaceRpcHandler({
-    machineId: 'machine-a', terminals: new WorkspaceHubTerminalCoordinator(database, 'machine-a'),
+    machineId: 'machine-a', terminals: new WorkspaceHubTerminalCoordinator('machine-a', { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} }),
     deployment: { launch: () => { builds++; throw new Error('Build source unavailable'); } },
   });
   const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
     url: 'https://machine.test/rpc', fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => rpc.handler(new Request(input, init)), { preconnect: fetch.preconnect }),
   }) });
-  try {
-    expect(await client.deployment.launch({ workspaceId: 'space', machineId: 'machine-b', targets: ['worker'] })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
-    expect(builds).toBe(0);
-    expect(await client.deployment.launch({ workspaceId: 'space', machineId: 'machine-a', targets: ['worker'] })).toMatchObject({ status: 'error', error: { data: { message: 'Build source unavailable' } } });
-    expect(builds).toBe(1);
-    expect(await client.settings.get({})).toMatchObject({ status: 'error' });
-    expect(builds).toBe(1);
-  } finally { database.close(); }
+  expect(await client.deployment.launch({ workspaceId: 'space', machineId: 'machine-b', targets: ['worker'] })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
+  expect(builds).toBe(0);
+  expect(await client.deployment.launch({ workspaceId: 'space', machineId: 'machine-a', targets: ['worker'] })).toMatchObject({ status: 'error', error: { data: { message: 'Build source unavailable' } } });
+  expect(builds).toBe(1);
+  expect(await client.settings.get({})).toMatchObject({ status: 'error' });
+  expect(builds).toBe(1);
 });
 
 test('runs a shell in an explicit ready cache without a held workspace and fences other machines', async () => {
   const root = mkdtempSync(join(tmpdir(), 'gitspace-rpc-cache-'));
   const checkout = join(root, 'workspace');
   mkdirSync(checkout);
-  const database = new GitSpaceDatabase(join(root, 'state.db'));
-  const terminals = new WorkspaceHubTerminalCoordinator(database, 'machine-a', undefined, {
+  const terminals = new WorkspaceHubTerminalCoordinator('machine-a', {
     path: spaceId => spaceId === 'workspace-a' ? checkout : null,
+    projectId: spaceId => spaceId === 'workspace-a' ? 'project-a' : null,
+    list: () => ['workspace-a'],
     use: async () => {}, changed: async () => {},
   });
   const rpc = createGitSpaceRpcHandler({ machineId: 'machine-a', terminals });
@@ -63,7 +60,6 @@ test('runs a shell in an explicit ready cache without a held workspace and fence
     expect(output).toMatchObject({ status: 'ok', value: { data: expect.stringContaining('rpc-cache-output') } });
     expect(await client.terminals.stop({ ...target, machineId: 'machine-b' })).toMatchObject({ status: 'error' });
     expect(await client.terminals.stop(target)).toMatchObject({ status: 'ok' });
-    expect(database.getSpace('workspace-a')).toBeNull();
     await expect(terminals.runLifecyclePlan('workspace-a', 'workspace/materialize', [], {}, {
       directory: join(root, 'detached-recovery'), interactive: true,
     })).rejects.toThrow('detached recovery checkout');
@@ -92,7 +88,6 @@ test('runs a shell in an explicit ready cache without a held workspace and fence
     const daemon = await daemonClientForProject(checkout);
     await daemon.request({ op: 'shutdown' });
     await closeDaemonClients();
-    database.close();
     rmSync(root, { recursive: true, force: true });
   }
 }, 20_000);

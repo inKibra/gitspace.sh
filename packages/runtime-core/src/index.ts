@@ -6,4 +6,3 @@ export * from './conversation-tools.js';
 export * from './cron.js';
 export * from './subagent-state.js';
 export * from './conversation-lifecycle.js';
-export * from './legacy-history.js';

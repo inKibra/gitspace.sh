@@ -1,67 +1,50 @@
-import { mkdir, chmod, readFile, statfs } from 'node:fs/promises';
+import { mkdir, chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, relative, resolve, isAbsolute, dirname } from 'node:path';
+import { join, relative, resolve, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, cleanupMachineAttachment, type ExecutorArtifactAccess, type MachineBrowserOptions } from '@gitspace/runtime-machine';
-import { RuntimeJsonSchema, RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeAttachmentRequestResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, RuntimeCacheObservationSchema, browserUnbase64, verifyRuntimeBrowserAuthorization, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema, type RuntimeToolDispatch, type RuntimeAttachment, type RuntimeAttachmentFailure, type RuntimeAttachmentProgress, type RuntimeCacheObservation, type RuntimeCachePolicy } from '@gitspace/protocol-runtime';
+import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, type MachineBrowserOptions } from '@gitspace/runtime-machine';
+import { RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, RuntimeCacheObservationSchema, RuntimeJsonSchema, browserUnbase64, verifyRuntimeBrowserAuthorization, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema, type RuntimeToolDispatch, type RuntimeAttachment, type RuntimeAttachmentFailure, type RuntimeCacheObservation } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
-import type { GitSpaceDatabase, LocalArtifactResolver } from '@gitspace/core';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
-import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, completeGitCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase, readGitCheckpointInputStamp, gitCheckpointRejectionError, gitCheckpointRejectionNeedsRevalidation } from './git-checkpoint.js';
+import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase, gitCheckpointRejectionError } from './git-checkpoint.js';
 import type { GitIntermediateCheckpoint, GitCheckpointRejection } from './git-checkpoint.js';
 import { artifactsPublicationRejection, type ArtifactsGitRemote } from './artifacts-git-remote.js';
-import { spaceGitCheckpointRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
+import { spaceGitCheckpointRef } from '@gitspace/protocol-workspace';
 import type { LocalAttachment, ExecutorOperationHandler, ExecutorContent } from '@gitspace/runtime-machine';
 import { createArtifactsCredentialHelper } from './artifacts-credential-helper.js';
 import { daemonClientForProject } from '@gitspace/supervisor';
 import { checkoutGitLfs, gitLfsRestoreReceipt, hydrateGitLfs, type MachineGitLfsAccess } from './git-lfs.js';
 import { gitWorktreeClock, gitWorktreeEvents, watchGitWorktree, type GitWorktreeClock, type GitWorktreeEvents } from './git-worktree-watch.js';
-import { cacheActivity } from './runtime-cache-activity.js';
-import { environmentFailure } from '@gitspace/protocol-environment';
 
 type RuntimeAssignment = z.infer<typeof RuntimeAssignmentSchema>;
 const PendingSnapshotSchema = z.object({ checkpoint: RuntimeGitCheckpointSchema, base: z.string().nullable() });
-/** Setup, materialization and drain renew their attachment lease at this cadence while they run, not only on phase transitions. */
-const LEASE_PROGRESS_INTERVAL_MS = 20_000;
-/** A failed assignment is retried at the sync cadence. */
-const FAILURE_RETRY_MS = 10_000;
 
-/** Names the attachment operation a failure interrupted, so the recorded failure says what is being retried. */
+/** Names the attachment operation a failure interrupted, so the recorded failure says what failed. */
 class AttachmentOperationFailure extends Error {
   constructor(readonly operation: RuntimeAttachmentFailure['operation'], cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
   }
 }
-/** Tags a rejection with its operation; a tag applied closer to the failure wins. */
 const failedDuring = (operation: RuntimeAttachmentFailure['operation']) => (error: unknown): never => {
   throw error instanceof AttachmentOperationFailure ? error : new AttachmentOperationFailure(operation, error);
 };
-/** A publication rejection halts retries until remediated; a halted setup instead waits for a human to request setup again. */
-const awaitsRemediation = (failure: RuntimeAttachmentFailure | null | undefined) => failure?.nextRetryAt === null && failure.operation !== 'setup';
-/** Retries back off only while the cloud keeps assigning the same intent; a new request or state retries at once. */
-const assignmentIntent = (attachment: RuntimeAttachment) => JSON.stringify([attachment.generation, attachment.state, attachment.cacheAction?.requestId ?? null, attachment.detachRequest ?? null]);
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; useWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
+export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(workspaceId?: string): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; useWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
 export async function createMachineExecutor(options: {
-  environmentRoot: string; machineId: string; database: GitSpaceDatabase; artifacts: LocalArtifactResolver; cloud: CloudRuntimeClient;
+  environmentRoot: string; machineId: string; cloud: CloudRuntimeClient;
   managedSpaceRoot?: string;
   gitRemote: ArtifactsGitRemote;
   lfs?: MachineGitLfsAccess;
-  /** Cloud sandboxes are reapable and remove a lost checkout; physical computers retain it as an orphan for their owner. */
-  provider?: 'physical' | 'cloudflare-sandbox';
   operations?: Record<string, ExecutorOperationHandler>;
   browser?: Pick<MachineBrowserOptions, 'enabled' | 'services'>;
-  commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null, final?: boolean): Promise<GitIntermediateCheckpoint>;
-  restoredBase?(projectId: string, workspaceId: string): Promise<SpaceCheckpointManifest['repository'] | null>;
+  commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null): Promise<GitIntermediateCheckpoint>;
   prepareAttachment(local: LocalAttachment, signal: AbortSignal, progress: (step: RuntimeCacheObservation['setup'][number]) => Promise<void>): Promise<void>;
-  originGitEnvironment(origin: string): Promise<Record<string, string>>;
   artifactFsBinary?: string;
   checkpointClock?: GitWorktreeClock;
   checkpointEvents?: GitWorktreeEvents;
-  /** Schedules lease progress renewal; tests inject a manual clock. */
-  leaseClock?: GitWorktreeClock;
 }): Promise<MachineExecutorRuntime> {
   const directory = join(options.environmentRoot, 'executor');
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -71,7 +54,13 @@ export async function createMachineExecutor(options: {
   const stopping = new AbortController();
   const snapshots = new Database(join(directory, 'snapshots.sqlite'));
   snapshots.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS snapshots (attachment TEXT PRIMARY KEY, revision INTEGER NOT NULL, pending TEXT, committed TEXT)');
-  snapshots.exec('CREATE TABLE IF NOT EXISTS snapshot_rejections (attachment TEXT PRIMARY KEY, rejection TEXT NOT NULL); CREATE TABLE IF NOT EXISTS attachment_failures (attachment TEXT PRIMARY KEY, intent TEXT NOT NULL, failure TEXT NOT NULL)');
+  snapshots.exec('CREATE TABLE IF NOT EXISTS snapshot_rejections (attachment TEXT PRIMARY KEY, rejection TEXT NOT NULL); DROP TABLE IF EXISTS attachment_failures');
+  const keyOf = (attachment: RuntimeAttachment) => `${attachment.attachmentId}:${attachment.generation}`;
+  const snapshotRow = (key: string) => snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
+  const committedOf = (key: string) => {
+    const row = snapshotRow(key);
+    return row?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)) : null;
+  };
   const rejectedSnapshot = (key: string): GitCheckpointRejection | null => {
     const row = snapshots.query<{ rejection: string }, [string]>('SELECT rejection FROM snapshot_rejections WHERE attachment=?').get(key);
     return row ? JSON.parse(row.rejection) as GitCheckpointRejection : null;
@@ -96,37 +85,34 @@ export async function createMachineExecutor(options: {
     snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
   };
   const clock = options.checkpointClock ?? gitWorktreeClock;
-  const leaseClock = options.leaseClock ?? gitWorktreeClock;
   const lfs = options.lfs;
   const watchers = new Map<string, { close(): void }>();
   const subscriptions = new Map<string, { controller: AbortController; settled: Promise<void> }>();
-  const policies = new Map<string, RuntimeCachePolicy>();
-  const cacheFor = (local: LocalAttachment): RuntimeCacheObservation => local.attachment.cache ?? RuntimeCacheObservationSchema.parse({ state: 'live', platform: process.platform, activity: [], lastActivityAt: new Date().toISOString(), pausedAt: null, reclaimAt: null, lastSyncAt: null, localWorkOptIn: false, setup: [] });
+  const cacheFor = (local: LocalAttachment): RuntimeCacheObservation => local.attachment.cache ?? RuntimeCacheObservationSchema.parse({ state: 'live', platform: process.platform, lastSyncAt: null, setup: [] });
   const saveCache = (local: LocalAttachment, cache: RuntimeCacheObservation): LocalAttachment => {
     const current = journal.attachment(local.attachment.attachmentId) ?? local;
     const updated = { ...current, attachment: { ...current.attachment, cache } };
     journal.installAttachment(updated);
     return updated;
   };
-  const touch = (local: LocalAttachment) => local.attachment.role === 'cache' ? saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), state: 'live', lastActivityAt: new Date().toISOString(), pausedAt: null, reclaimAt: null, reclaimBlocked: null }) : local;
+  const synced = (local: LocalAttachment) => saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), lastSyncAt: new Date().toISOString(), unsent: 0 });
   const stopFollowing = async (local: LocalAttachment) => {
     watchers.get(local.rootPath)?.close();
     watchers.delete(local.rootPath);
-    const subscription = subscriptions.get(`${local.attachment.attachmentId}:${local.attachment.generation}`);
+    const subscription = subscriptions.get(keyOf(local.attachment));
     subscription?.controller.abort();
     await subscription?.settled;
   };
   const install = async (local: LocalAttachment, previous: GitIntermediateCheckpoint, checkpoint: GitIntermediateCheckpoint, incoming = false) => {
     await options.gitRemote.fetchCheckpoint({ binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` }, repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit });
     if (incoming && await gitCheckpointIncludes(local.rootPath, previous, checkpoint)) return false;
-    // Every canonical cache uses the workspace branch, never a private execution branch.
     await applyGitCacheCheckpoint({ repositoryPath: local.rootPath, previous, checkpoint, lfs: await lfs?.read(local.attachment.projectId) });
     return true;
   };
   const capture = async (local: LocalAttachment): Promise<GitIntermediateCheckpoint | null> => {
-    if (local.attachment.role !== 'cache' || !['attaching', 'ready', 'draining'].includes(local.attachment.state)) return null;
+    if (local.attachment.state === 'detached') return null;
     stopping.signal.throwIfAborted();
-    const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
+    const key = keyOf(local.attachment);
     let stream = captures.get(key);
     if (!stream) {
       snapshots.query('INSERT OR IGNORE INTO snapshots (attachment, revision) VALUES (?, ?)').run(key, Date.now());
@@ -137,9 +123,7 @@ export async function createMachineExecutor(options: {
         spaceId: local.attachment.workspaceId,
         captureId: `cache-${createHash('sha256').update(`${options.machineId}:${key}`).digest('hex')}`,
         lfs: lfs && (publicationId => lfs.publish(local.attachment.projectId, publicationId)),
-        // One full second of stable dirty-path metadata coalesces editor bursts,
-        // including pauses beyond the old 200ms debounce. Longer pauses can be
-        // separate edits; no timestamp policy proves an arbitrary writer done.
+        // One full second of stable dirty-path metadata coalesces editor bursts.
         settleWindowMs: 1000,
         clock: options.checkpointClock,
         signal: AbortSignal.any([stopping.signal, abort.signal]),
@@ -149,7 +133,7 @@ export async function createMachineExecutor(options: {
           return row.revision;
         },
         loadPending: async () => {
-          const row = snapshots.query<{ pending: string | null }, [string]>('SELECT pending FROM snapshots WHERE attachment=?').get(key);
+          const row = snapshotRow(key);
           if (!row?.pending) return null;
           const pending = PendingSnapshotSchema.safeParse(JSON.parse(row.pending));
           if (pending.success) return pending.data;
@@ -157,10 +141,7 @@ export async function createMachineExecutor(options: {
           snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
           return null;
         },
-        loadCommitted: async () => {
-          const row = snapshots.query<{ committed: string | null }, [string]>('SELECT committed FROM snapshots WHERE attachment=?').get(key);
-          return row?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)) : null;
-        },
+        loadCommitted: async () => committedOf(key),
         savePending: async pending => { snapshots.query('UPDATE snapshots SET pending=? WHERE attachment=?').run(JSON.stringify(pending), key); },
         loadRejected: async () => rejectedSnapshot(key),
         saveRejected: async rejection => { saveRejectedSnapshot(key, rejection); },
@@ -173,17 +154,14 @@ export async function createMachineExecutor(options: {
           if (accepted.worktreeCommit !== checkpoint.worktreeCommit) {
             try { await install(local, checkpoint, accepted); }
             catch (error) {
-              // Preserve human edits made during fetch/apply against the actual
-              // uploaded base, not the accepted tree we could not install.
-              // Leave the changed worktree for the same settling/capture boundary
-              // on retry; taking a raw pending snapshot here would bypass it.
+              // Keep human edits made during fetch/apply against the actual uploaded base; the next capture retries.
               snapshots.query('UPDATE snapshots SET pending=NULL, committed=? WHERE attachment=?').run(JSON.stringify(checkpoint), key);
               throw error;
             }
           }
           snapshots.query('UPDATE snapshots SET pending=NULL, committed=? WHERE attachment=?').run(JSON.stringify(accepted), key);
           await saveGitCacheBase(local.rootPath, accepted);
-          saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), lastSyncAt: new Date().toISOString() });
+          synced(local);
           return accepted;
         },
       });
@@ -191,48 +169,48 @@ export async function createMachineExecutor(options: {
     }
     try {
       const checkpoint = await stream.capture({ retryRejected: retryRejected.delete(key) });
-      const current = journal.attachment(local.attachment.attachmentId);
-      if (awaitsRemediation(current?.attachment.failure)) await clearFailure(current!.attachment, await browserCapabilities());
+      if (journal.attachment(local.attachment.attachmentId)?.attachment.failure?.operation === 'publish') await clearFailure(local.attachment);
       return checkpoint;
     } catch (error) {
-      if (artifactsPublicationRejection(error)) {
-        const current = journal.attachment(local.attachment.attachmentId) ?? local;
-        await recordFailure(current, assignmentIntent(current.attachment), new AttachmentOperationFailure('publish', error), await browserCapabilities());
-      }
+      if (artifactsPublicationRejection(error)) await recordFailure(journal.attachment(local.attachment.attachmentId) ?? local, new AttachmentOperationFailure('publish', error));
       throw error;
     }
   };
-  const reconcile = async (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null) => {
-    if (local.attachment.role !== 'cache') return;
-    const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
-    const base = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
-    if (!base?.committed && !base?.pending && incoming) throw new Error('Cache reconciliation requires its durable applied base');
-    const before = base?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(base.committed)) : null;
-    const accepted = await capture(local);
-    // A publication races against the cloud tip inside the cloud merge owner.
-    // Only a no-op capture may use the bounded subscription's incoming tip.
-    if (incoming && accepted && before?.worktreeCommit === accepted.worktreeCommit && incoming.worktreeCommit !== accepted.worktreeCommit) {
-      if (await install(local, accepted, incoming, true)) {
-        snapshots.query('UPDATE snapshots SET committed=? WHERE attachment=?').run(JSON.stringify(incoming), key);
-        await saveGitCacheBase(local.rootPath, incoming);
-        saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), lastSyncAt: new Date().toISOString() });
+  const reconciling = new Map<string, Promise<void>>();
+  /** Publishes local changes, then applies a newer cloud version. One reconciliation per checkout runs at a time. */
+  const reconcile = (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null): Promise<void> => {
+    const prior = reconciling.get(local.rootPath) ?? Promise.resolve();
+    const run = prior.catch(() => {}).then(async () => {
+      const key = keyOf(local.attachment);
+      const base = snapshotRow(key);
+      if (!base?.committed && !base?.pending && incoming) throw new Error('Cache reconciliation requires its durable applied base');
+      const before = committedOf(key);
+      const accepted = await capture(local);
+      // Only a no-op capture may apply the incoming tip; a publication already merged inside the cloud.
+      if (incoming && accepted && before?.worktreeCommit === accepted.worktreeCommit && incoming.worktreeCommit !== accepted.worktreeCommit) {
+        if (await install(local, accepted, incoming, true)) {
+          snapshots.query('UPDATE snapshots SET committed=? WHERE attachment=?').run(JSON.stringify(incoming), key);
+          await saveGitCacheBase(local.rootPath, incoming);
+          synced(local);
+        }
       }
-    }
+    });
+    reconciling.set(local.rootPath, run);
+    return run.finally(() => { if (reconciling.get(local.rootPath) === run) reconciling.delete(local.rootPath); });
   };
+  /** Waits for the cloud's next version after the applied one and applies it. */
   const subscribe = (local: LocalAttachment) => {
     const { attachment } = local;
-    const key = `${attachment.attachmentId}:${attachment.generation}`;
-    if (attachment.role !== 'cache' || subscriptions.has(key)) return;
-    if (journal.attachment(attachment.attachmentId)?.attachment.failure?.nextRetryAt === null) return;
+    const key = keyOf(attachment);
+    if (subscriptions.has(key)) return;
     const controller = new AbortController();
     const signal = AbortSignal.any([stopping.signal, controller.signal]);
     const settled = (async () => {
       while (!signal.aborted) {
         const current = journal.attachment(attachment.attachmentId);
-        if (current?.attachment.generation !== attachment.generation || current.attachment.state !== 'ready' || cacheFor(current).state !== 'live') return;
-        const row = snapshots.query<{ committed: string | null }, [string]>('SELECT committed FROM snapshots WHERE attachment=?').get(key);
-        if (!row?.committed) return;
-        const checkpoint = RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed));
+        if (current?.attachment.generation !== attachment.generation || current.attachment.state !== 'ready') return;
+        const checkpoint = committedOf(key);
+        if (!checkpoint) return;
         try {
           const result = await options.cloud.call('runtime.assignments', {
             machineId: options.machineId,
@@ -241,14 +219,12 @@ export async function createMachineExecutor(options: {
           }, RuntimeAssignmentsResultSchema, signal);
           const assignment = result.assignments.find(item => item.grant.attachment.attachmentId === attachment.attachmentId && item.grant.attachment.generation === attachment.generation);
           if (!assignment || assignment.grant.attachment.state !== 'ready') return;
-          await executor.withCheckout(current, async () => {
-            const latest = journal.attachment(attachment.attachmentId);
-            if (latest?.attachment.generation === attachment.generation && latest.attachment.state === 'ready' && !journal.hasRunningCheckout(latest.rootPath)) await reconcile(latest, assignment.checkpoint);
-          });
+          const latest = journal.attachment(attachment.attachmentId);
+          if (latest?.attachment.generation === attachment.generation && latest.attachment.state === 'ready') await reconcile(latest, assignment.checkpoint);
         } catch (error) {
           if (signal.aborted) return;
           if (artifactsPublicationRejection(error)) return;
-          console.error('[runtime-cache-follow]', error instanceof Error ? error.message : String(error));
+          console.error('[runtime-cache-follow]', message(error));
           await new Promise<void>(resolve => {
             const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); };
             const timer = setTimeout(finish, 1000);
@@ -260,8 +236,9 @@ export async function createMachineExecutor(options: {
     })().finally(() => { if (subscriptions.get(key)?.controller === controller) subscriptions.delete(key); });
     subscriptions.set(key, { controller, settled });
   };
+  /** Publishes local edits shortly after the checkout changes. */
   const follow = async (local: LocalAttachment) => {
-    if (local.attachment.role !== 'cache' || watchers.has(local.rootPath)) return;
+    if (watchers.has(local.rootPath)) return;
     let cancel: (() => void) | undefined;
     const watcher = await watchGitWorktree({
       root: local.rootPath, clock, events: options.checkpointEvents ?? gitWorktreeEvents,
@@ -270,16 +247,23 @@ export async function createMachineExecutor(options: {
         cancel?.();
         cancel = clock.schedule(200, () => {
           cancel = undefined;
-          void executor.withCheckout(local, async () => {
-            const current = journal.attachment(local.attachment.attachmentId);
-            if (!stopping.signal.aborted && current?.attachment.state === 'ready' && !journal.hasRunningCheckout(local.rootPath)) await reconcile(current);
-          }).catch(error => { if (!artifactsPublicationRejection(error)) console.error('[runtime-cache]', error instanceof Error ? error.message : String(error)); });
+          const current = journal.attachment(local.attachment.attachmentId);
+          if (stopping.signal.aborted || current?.attachment.state !== 'ready') return;
+          void reconcile(current).catch(error => { if (!artifactsPublicationRejection(error)) console.error('[runtime-cache]', message(error)); });
         });
       },
       failed: error => console.error('[runtime-cache-watch]', error.message),
     });
     if (stopping.signal.aborted) { watcher.close(); cancel?.(); return; }
     watchers.set(local.rootPath, { close() { cancel?.(); watcher.close(); } });
+  };
+  /** Sync runs while the attachment is ready: the watcher sends local edits as they happen, each sync pass captures
+   * what the watcher cannot see (such as ignore-rule changes outside the checkout), and the subscription brings cloud changes. */
+  const keepSyncing = async (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null) => {
+    await follow(local);
+    const applied = committedOf(keyOf(local.attachment));
+    await reconcile(local, incoming && applied && applied.worktreeCommit !== incoming.worktreeCommit ? incoming : undefined);
+    subscribe(local);
   };
   const trustedBrowserKeys = new Map<string, Promise<CryptoKey>>();
   const browserDirectory = join(homedir(), '.gitspace-browser-profiles', createHash('sha256').update(options.machineId).digest('hex'));
@@ -302,34 +286,31 @@ export async function createMachineExecutor(options: {
       return verifyRuntimeBrowserAuthorization(authorization, dispatch, await trustedKey);
     },
   });
-  void browser.recover().catch(error => console.error('[runtime-browser-recovery]', error instanceof Error ? error.message : String(error)));
-  /** The machine half of `sync`. Reads report an in-flight capture as `pending`; writes wait for it, so none races the snapshot stream. */
+  void browser.recover().catch(error => console.error('[runtime-browser-recovery]', message(error)));
+  /** The machine half of `sync`. Reads report an in-flight capture as `pending`; writes stop following first, so none races the snapshot stream. */
   const syncMachine = async (dispatch: RuntimeToolDispatch, local: LocalAttachment): Promise<ExecutorContent> => {
-    if (local.attachment.role !== 'cache') throw new Error('Sync requires a workspace cache');
     const args = RuntimeSyncMachineArgumentsSchema.parse(dispatch.args);
-    const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
+    const key = keyOf(local.attachment);
     const reply = (value: unknown): ExecutorContent => [{ type: 'text', text: JSON.stringify(value) }];
     const binding = { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` };
     if (args.op === 'capture') {
       const accepted = await capture(local);
       return reply(RuntimeSyncMachineCaptureSchema.parse({ version: accepted?.worktreeCommit ?? null, conflicts: accepted?.conflicts ?? [] }));
     }
-    const committed = () => {
-      const row = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
-      return { base: row?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)) : null, pending: Boolean(row?.pending) };
-    };
     const emptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
     if (args.op === 'status' || args.op === 'diff') {
-      const { base, pending } = committed();
+      const base = committedOf(key);
+      const pending = Boolean(snapshotRow(key)?.pending);
       const current = await readGitWorktreeSnapshot(local.rootPath, local.attachment.workspaceId);
       const { changes, truncated } = await gitTreeChanges(local.rootPath, base?.worktreeTree ?? emptyTree, current.worktreeTree, 500);
       if (args.op === 'diff') {
         const patch = args.path ? await gitTreePatch(local.rootPath, base?.worktreeTree ?? emptyTree, current.worktreeTree, args.path) : null;
         return reply(RuntimeSyncMachineDiffSchema.parse({ base: base?.worktreeCommit ?? null, unsent: changes, unsentTruncated: truncated, patch }));
       }
+      saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), unsent: changes.length });
       return reply(RuntimeSyncMachineStatusSchema.parse({ base: base?.worktreeCommit ?? null, pending, unsent: changes, unsentTruncated: truncated, lastSyncAt: cacheFor(local).lastSyncAt, problem: local.attachment.failure?.message ?? null }));
     }
-    const { base } = committed();
+    const base = committedOf(key);
     if (args.op === 'restore') {
       await stopFollowing(local);
       abandonCapture(key);
@@ -365,7 +346,7 @@ export async function createMachineExecutor(options: {
         await resetGitWorktree({ repositoryPath: local.rootPath, current: snapshot, base, lfs: await lfs?.read(local.attachment.projectId) });
       } catch (error) {
         // The backup exists in the cloud either way; report it so it is recorded.
-        return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: [], backup, machineId: options.machineId, error: error instanceof Error ? error.message : String(error) }));
+        return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: [], backup, machineId: options.machineId, error: message(error) }));
       }
       saveRejectedSnapshot(key, null);
       // A capture that started while the checkout was being reset may hold part of the discarded changes.
@@ -376,574 +357,222 @@ export async function createMachineExecutor(options: {
       resumeFollowing(local);
     }
   };
-  /** updateActivity re-establishes the watcher and cloud subscription that sync operations stop. */
   const resumeFollowing = (local: LocalAttachment) => {
     const current = journal.attachment(local.attachment.attachmentId) ?? local;
-    void updateActivity(current).catch((error: unknown) => console.error('[runtime-sync]', local.attachment.attachmentId, error instanceof Error ? error.message : String(error)));
+    if (current.attachment.state === 'ready') void keepSyncing(current).catch((error: unknown) => console.error('[runtime-sync]', local.attachment.attachmentId, message(error)));
   };
   const executor = new MachineExecutor({
     machineId: options.machineId, journal, runCommand: runSupervisorCommand,
-    onMutationSettled: async local => {
-      touch(local);
-      return capture(local);
-    },
-    onBeforeExecute: async (local, dispatch) => {
-      // Sync operations manage the checkout and its snapshots themselves.
-      if (dispatch.tool === 'sync_machine') return;
-      local = touch(local);
-      // A sync hiccup never blocks the command; it runs on the files the machine has.
-      await reconcile(local, dispatch.snapshot).catch((error: unknown) => { console.error('[runtime-cache-sync]', local.attachment.attachmentId, error instanceof Error ? error.message : String(error)); });
-      if (dispatch.tool === 'grep' && dispatch.snapshot && local.attachment.role === 'cache') {
-        const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
-        const row = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
-        const applied = row?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)) : null;
-        if (row?.pending || applied?.worktreeCommit !== dispatch.snapshot.worktreeCommit) throw new Error('Grep cache has not materialized the canonical snapshot');
-        // Native grep reads an immutable raw-blob tree keyed by this verified applied
-        // commit; local edits, LFS hydration and filesystem races cannot affect it.
-        return;
-      }
-    },
-    operations: { ...options.operations, sync_machine: (dispatch, local) => syncMachine(dispatch, local), browser: (dispatch, local, signal) => browser.execute(dispatch, local, signal), browser_control: (dispatch, local, signal) => browser.execute(dispatch, local, signal) },
-    artifacts: local => {
-      const capability = { kind: 'workspace' as const, projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId };
-      const adapter: ExecutorArtifactAccess = {
-        read: async (uri, signal) => {
-          if (signal.aborted) throw new Error('Artifact read canceled');
-          const result = await options.artifacts.read(capability, uri);
-          if (result.status === 'error') throw result.error;
-          return [{ type: 'text', text: new TextDecoder().decode(result.value) }];
-        },
-        write: async (uri, content, signal) => {
-          if (signal.aborted) throw new Error('Artifact write canceled');
-          const result = await options.artifacts.write(capability, uri, new TextEncoder().encode(content));
-          if (result.status === 'error') throw result.error;
-        },
-      };
-      return adapter;
+    operations: {
+      ...options.operations,
+      sync_machine: (dispatch, local) => syncMachine(dispatch, local),
+      checkpoint: async (_dispatch, local) => {
+        const checkpoint = await capture(local);
+        if (!checkpoint) throw new Error('The workspace checkout is not syncing');
+        return [{ type: 'text', text: JSON.stringify({ checkpoint }) }];
+      },
+      browser: (dispatch, local, signal) => browser.execute(dispatch, local, signal),
+      browser_control: (dispatch, local, signal) => browser.execute(dispatch, local, signal),
     },
   });
   const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'checkpoint', 'sync_machine', ...Object.keys(options.operations ?? {})];
-  const browserCapabilities = async (): Promise<string[]> => {
-    if (options.browser?.enabled !== true) return [];
-    return ['browser', 'browser_control', 'browser.headless'];
-  };
-  const isBrowserCapability = (capability: string) => capability === 'browser' || capability === 'browser_control' || capability.startsWith('browser.');
+  const browserCapabilities = (): string[] => options.browser?.enabled === true ? ['browser', 'browser_control', 'browser.headless'] : [];
   let stopped = false;
   let syncing: Promise<Array<{ workspaceId: string; idle: Promise<void> }>> | null = null;
-  const sendHeartbeat = async (local: LocalAttachment, browserSupport: string[], activeExecutions: number, report: { progress?: RuntimeAttachmentProgress; clearFailure?: boolean } = {}) => {
-    const row = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(`${local.attachment.attachmentId}:${local.attachment.generation}`);
-    const materializedCommit = row?.committed && !row.pending && !rejectedSnapshot(`${local.attachment.attachmentId}:${local.attachment.generation}`) ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)).worktreeCommit : null;
-    const action = local.attachment.cacheAction;
+  const sendHeartbeat = async (local: LocalAttachment, report: { clearFailure?: boolean } = {}) => {
+    const key = keyOf(local.attachment);
+    const row = snapshotRow(key);
+    const materializedCommit = row?.committed && !row.pending && !rejectedSnapshot(key) ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)).worktreeCommit : null;
+    const failure = local.attachment.failure;
     const observed = await options.cloud.call('runtime.heartbeat', RuntimeHeartbeatInputSchema.parse({
       projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
       machineId: options.machineId, attachmentId: local.attachment.attachmentId, generation: local.attachment.generation,
-      executionObservation: { activeExecutions, observedAt: new Date().toISOString(), materializedCommit },
-      browserCapabilities: browserSupport,
-      ...(local.attachment.role === 'cache' ? { cache: { ...cacheFor(local), platform: process.platform } } : {}),
-      ...(action && action.status !== 'requested' ? { cacheAction: { requestId: action.requestId, status: action.status, error: action.error } } : {}),
+      executionObservation: { activeExecutions: executor.active(local.attachment.attachmentId).length, observedAt: new Date().toISOString(), materializedCommit },
+      browserCapabilities: browserCapabilities(),
+      cache: { ...cacheFor(local), platform: process.platform, syncProblem: failure && (failure.operation === 'sync' || failure.operation === 'publish') ? failure.message : null },
       // A recorded failure stays reported until its operation succeeds and clears it.
-      ...(local.attachment.failure ? { failure: local.attachment.failure } : report.clearFailure ? { failure: null } : {}),
-      ...(report.progress ? { progress: report.progress } : {}),
-    }), RuntimeAttachmentRequestResultSchema, AbortSignal.any([stopping.signal, AbortSignal.timeout(15_000)]));
+      ...(failure ? { failure } : report.clearFailure ? { failure: null } : {}),
+    }), RuntimeAttachmentReadyResultSchema, AbortSignal.any([stopping.signal, AbortSignal.timeout(15_000)]));
     const current = journal.attachment(local.attachment.attachmentId);
-    if (current?.attachment.generation === local.attachment.generation) {
-      const remote = observed.attachment;
-      if (remote.attachmentId !== current.attachment.attachmentId || remote.generation !== current.attachment.generation || remote.machineId !== options.machineId) throw new Error('Heartbeat returned a different attachment lease');
-      // A response accepted before a new action or terminal receipt must not
-      // rewind the journal when it arrives after that transition.
-      if (assignmentIntent(current.attachment) !== assignmentIntent(local.attachment)) return;
-      const currentAction = current.attachment.cacheAction;
-      if (currentAction && remote.cacheAction && currentAction.requestId === remote.cacheAction.requestId
-        && (currentAction.status === 'completed' || currentAction.status === 'failed')
-        && remote.cacheAction.status !== 'completed' && remote.cacheAction.status !== 'failed') return;
-      const newSetup = remote.cacheAction?.action === 'setup' && (remote.cacheAction.status === 'requested' || remote.cacheAction.status === 'running') && remote.cacheAction.requestId !== currentAction?.requestId;
-      journal.installAttachment({ ...current, prerequisitesComplete: newSetup ? false : current.prerequisitesComplete, attachment: {
-        ...current.attachment,
-        state: remote.state,
-        heartbeatAt: remote.heartbeatAt, cacheAction: remote.cacheAction,
-        ...(current.attachment.cache && remote.cache ? { cache: { ...current.attachment.cache, localWorkOptIn: remote.cache.localWorkOptIn } } : {}),
-      } });
-    }
+    if (current?.attachment.generation !== local.attachment.generation) return;
+    const remote = observed.attachment;
+    if (remote.attachmentId !== current.attachment.attachmentId || remote.generation !== current.attachment.generation || remote.machineId !== options.machineId) throw new Error('Heartbeat returned a different attachment');
+    if (current.attachment.state !== remote.state || current.attachment.heartbeatAt !== remote.heartbeatAt) journal.installAttachment({ ...current, attachment: { ...current.attachment, state: remote.state, heartbeatAt: remote.heartbeatAt } });
   };
-  /** Renews a lease with progress heartbeats while its work runs; the cloud extends a deadline only on progress. */
-  const renewingLease = async <T>(fallback: LocalAttachment, phase: () => string, browserSupport: string[], work: () => Promise<T>): Promise<T> => {
-    const { attachmentId, generation } = fallback.attachment;
-    let renewing = true;
-    let renewal: Promise<void> | undefined;
-    let cancel = () => {};
-    const renew = () => {
-      cancel = leaseClock.schedule(LEASE_PROGRESS_INTERVAL_MS, () => {
-        const current = journal.attachment(attachmentId);
-        const leased = current?.attachment.generation === generation ? current : fallback;
-        renewal = sendHeartbeat(leased, browserSupport, journal.unresolved(leased.attachment).length, { progress: { phase: phase(), at: new Date().toISOString() } })
-          .catch((error: unknown) => { console.error('[runtime-lease-progress]', attachmentId, error instanceof Error ? error.message : String(error)); })
-          .finally(() => { if (renewing) renew(); });
-      });
-    };
-    renew();
-    try { return await work(); }
-    finally {
-      renewing = false;
-      cancel();
-      await renewal;
-    }
-  };
-  const retries = new Map(snapshots.query<{ attachment: string; intent: string; failure: string }, []>('SELECT attachment,intent,failure FROM attachment_failures').all().map(row => [row.attachment, { intent: row.intent, failure: JSON.parse(row.failure) as RuntimeAttachmentFailure }]));
-  /** A failure is recorded on the attachment it affected and reported with its lease, never only logged. */
-  const recordFailure = async (assigned: LocalAttachment, intent: string, error: unknown, browserSupport: string[]) => {
+  /** A failure is recorded on the attachment it affected and reported with its heartbeat; it never blocks anything. */
+  const recordFailure = async (assigned: LocalAttachment, error: unknown) => {
     const { attachmentId, generation } = assigned.attachment;
-    const key = `${attachmentId}:${generation}`;
     const stored = journal.attachment(attachmentId);
     const local = stored?.attachment.generation === generation ? stored : null;
     const operation = error instanceof AttachmentOperationFailure ? error.operation : 'sync';
-    const previous = retries.get(key);
-    const prior = previous ? previous.intent === intent ? previous.failure : null : local?.attachment.failure ?? null;
-    const permanent = artifactsPublicationRejection(error) !== null;
-    // A failed setup run repeats its failure unattended, so it waits for a human to request setup again.
-    // Approval and claim waits, and transport failures without a lifecycle outcome, keep retrying.
-    const lifecycleFailure = operation === 'setup' ? environmentFailure(error instanceof AttachmentOperationFailure ? error.cause : error) : null;
-    const halted = permanent || (lifecycleFailure !== null && !['ApprovalRequired', 'RunConflict'].includes(lifecycleFailure.code));
-    if (permanent && previous?.intent === intent && prior?.nextRetryAt === null && prior.message === (error instanceof Error ? error.message : String(error)).slice(0, 2000)) return;
-    const attempts = prior?.operation === operation ? prior.attempts + 1 : 1;
-    const message = error instanceof Error ? error.message : String(error);
-    const at = Date.now();
-    const failure: RuntimeAttachmentFailure = { operation, message: message.slice(0, 2000), attempts, nextRetryAt: halted ? null : new Date(at + FAILURE_RETRY_MS).toISOString(), at: new Date(at).toISOString() };
-    retries.set(key, { intent, failure });
-    snapshots.query('INSERT OR REPLACE INTO attachment_failures(attachment,intent,failure) VALUES(?,?,?)').run(key, intent, JSON.stringify(failure));
-    if (permanent) subscriptions.get(key)?.controller.abort();
-    console.error('[runtime-attachments]', attachmentId, operation, message);
-    const failed = { ...(local ?? assigned), attachment: { ...(local ?? assigned).attachment, failure, ...(permanent && assigned.attachment.role === 'cache' ? { cache: { ...cacheFor(local ?? assigned), reclaimBlocked: failure.message } } : {}) } };
+    const failure: RuntimeAttachmentFailure = { operation, message: message(error).slice(0, 2000), at: new Date().toISOString() };
+    console.error('[runtime-attachments]', attachmentId, operation, failure.message);
+    const failed = { ...(local ?? assigned), attachment: { ...(local ?? assigned).attachment, failure } };
     if (local) journal.installAttachment(failed);
-    // Lost and detached leases are terminal; the cloud no longer accepts their reports.
-    if (stopped || failed.attachment.state === 'lost' || failed.attachment.state === 'detached') return;
-    await sendHeartbeat(failed, browserSupport, journal.unresolved(failed.attachment).length).catch((reportError: unknown) => {
-      console.error('[runtime-attachment-failure]', attachmentId, reportError instanceof Error ? reportError.message : String(reportError));
-    });
+    if (stopped || failed.attachment.state === 'detached') return;
+    await sendHeartbeat(failed).catch((reportError: unknown) => console.error('[runtime-attachment-failure]', attachmentId, message(reportError)));
   };
-  const clearFailure = async (attachment: RuntimeAttachment, browserSupport: string[]) => {
-    const retried = retries.delete(`${attachment.attachmentId}:${attachment.generation}`);
-    snapshots.query('DELETE FROM attachment_failures WHERE attachment=?').run(`${attachment.attachmentId}:${attachment.generation}`);
+  const clearFailure = async (attachment: RuntimeAttachment) => {
     const local = journal.attachment(attachment.attachmentId);
-    if (local?.attachment.generation !== attachment.generation || !retried && !local.attachment.failure) return;
-    const cleared = { ...local, attachment: { ...local.attachment, failure: null, ...(local.attachment.cache && local.attachment.cache.reclaimBlocked === local.attachment.failure?.message ? { cache: { ...local.attachment.cache, reclaimBlocked: null } } : {}) } };
+    if (local?.attachment.generation !== attachment.generation || !local.attachment.failure) return;
+    const cleared = { ...local, attachment: { ...local.attachment, failure: null } };
     journal.installAttachment(cleared);
-    if (stopped || cleared.attachment.state === 'lost' || cleared.attachment.state === 'detached') return;
-    await sendHeartbeat(cleared, browserSupport, journal.unresolved(cleared.attachment).length, { clearFailure: true }).catch((reportError: unknown) => {
-      console.error('[runtime-attachment-failure]', attachment.attachmentId, reportError instanceof Error ? reportError.message : String(reportError));
-    });
+    if (stopped || cleared.attachment.state === 'detached') return;
+    await sendHeartbeat(cleared, { clearFailure: true }).catch((reportError: unknown) => console.error('[runtime-attachment-failure]', attachment.attachmentId, message(reportError)));
   };
-  // Reconcile the two journals after a crash between saving a rejection/failure
-  // and installing its attachment presentation. Never retry to reconstruct it.
+  // A rejected snapshot is a standing publish failure until its input changes.
   for (const local of journal.attachments()) {
-    const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
-    const retry = retries.get(key);
-    const rejection = rejectedSnapshot(key);
-    if (rejection && (retry?.failure.nextRetryAt !== null || retry.failure.message !== gitCheckpointRejectionError(rejection).message.slice(0, 2000))) {
-      await recordFailure(local, assignmentIntent(local.attachment), new AttachmentOperationFailure('publish', gitCheckpointRejectionError(rejection)), await browserCapabilities());
-    } else if (retry) {
-      journal.installAttachment({ ...local, attachment: { ...local.attachment, failure: retry.failure } });
+    const rejection = rejectedSnapshot(keyOf(local.attachment));
+    if (rejection && local.attachment.state !== 'detached' && local.attachment.failure?.operation !== 'publish') {
+      journal.installAttachment({ ...local, attachment: { ...local.attachment, failure: { operation: 'publish', message: gitCheckpointRejectionError(rejection).message.slice(0, 2000), at: new Date().toISOString() } } });
     }
   }
-  /** Stops (when asked) and then verifies every supervisor process rooted in these checkouts. */
-  const stopSupervisorEffects = async (roots: readonly string[], stop: boolean) => {
-    for (const root of roots) {
-      // A checkout that no longer exists runs nothing; asking would start a supervisor for it.
-      if (!existsSync(root)) continue;
-      const client = await daemonClientForProject(root);
-      const listed = await client.request({ op: 'list' }, stopping.signal);
-      if (listed.op !== 'list') throw new Error('Cleanup could not enumerate supervisor processes');
-      if (stop) {
-        for (const daemon of listed.daemons) {
-          const halted = await client.request({ op: 'stop', name: daemon.name, timeoutMs: 5000 }, stopping.signal);
-          if (halted.op !== 'stop' || !['exited', 'failed'].includes(halted.daemon.state)) throw new Error('Supervisor process termination is unverified');
-        }
-      }
-      const verified = await client.request({ op: 'list' }, stopping.signal);
-      if (verified.op !== 'list' || verified.daemons.some(daemon => !['exited', 'failed'].includes(daemon.state))) throw new Error('Cleanup retains live supervisor effects');
-    }
-  };
-  const verifyUnmounted = (attachment: RuntimeAttachment, checkoutRoot: string) => async (root: string) => {
-    if (process.platform !== 'linux') return;
-    const mounted = (mounts: string) => mounts.split('\n').some(line => {
-      const path = line.split(' ')[4]?.replace(/\\([0-7]{3})/gu, (_, octal: string) => String.fromCharCode(Number.parseInt(octal, 8)));
-      return path === root || path?.startsWith(`${root}/`);
-    });
-    if (mounted(await readFile('/proc/self/mountinfo', 'utf8'))) {
-      if (attachment.role === 'cache') throw new Error('Cleanup retains mounted canonical checkout');
-      const result = await runSupervisorCommand({ application: 'fusermount3', args: ['-u', '--', root], cwd: checkoutRoot, attemptId: `cleanup-${attachment.attachmentId}-${attachment.generation}`, sequence: 0, deadlineAt: new Date(Date.now() + 30_000).toISOString(), signal: stopping.signal });
-      if (result.exitCode !== 0 || mounted(await readFile('/proc/self/mountinfo', 'utf8'))) throw new Error('ArtifactFS unmount remains unverified; checkout retained');
-    }
-  };
-  /** The final checkpoint publishes under its own durable LFS publication named by its checkpoint ref, exactly as the
-   * incremental stream names each capture; the publication is released once committed or abandoned. A published but
-   * uncommitted checkpoint stays journaled as pending with its publication, and the stream commits it first on retry. */
-  const publishFinal = async (owned: LocalAttachment, attachment: RuntimeAttachment, draining: LocalAttachment, action: RuntimeAttachment['cacheAction']): Promise<void | false> => {
-    const key = `${attachment.attachmentId}:${attachment.generation}`;
-    await captures.get(key)?.settle();
-    const read = () => snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
-    if (read()?.pending || rejectedSnapshot(key)) await capture(owned);
-    const prior = read();
-    const previous = prior?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(prior.committed)) : null;
-    const captureId = `final-${crypto.randomUUID()}`;
-    const revision = Date.now();
-    const publication = await lfs?.publish(attachment.projectId, spaceGitCheckpointRef(captureId, revision));
-    let journaled = false;
-    const capturedStamp = await readGitCheckpointInputStamp(owned.rootPath);
-    try {
-      const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: owned.rootPath, spaceId: attachment.workspaceId, captureId, revision, lfs: publication });
-      const heldBack = checkpoint.lfs?.heldBack ?? [];
-      const discardHeldBack = attachment.detachRequest ? attachment.detachRequest.discardHeldBack === true : action?.discardHeldBack === true;
-      if (heldBack.length && !discardHeldBack) {
-        const reason = `Held-back LFS changes must be committed or explicitly discarded: ${heldBack.map(item => item.path).join(', ')}`;
-        const current = journal.attachment(attachment.attachmentId) ?? draining;
-        journal.installAttachment({ ...current, attachment: { ...current.attachment, state: attachment.detachRequest ? 'draining' : 'attaching', cache: { ...cacheFor(current), state: 'paused', reclaimBlocked: reason }, ...(action ? { cacheAction: { ...action, status: 'failed', error: reason } } : {}) } });
-        return false;
-      }
-      snapshots.query('INSERT INTO snapshots(attachment,revision,pending) VALUES(?,?,?) ON CONFLICT(attachment) DO UPDATE SET pending=excluded.pending').run(key, revision, JSON.stringify({ checkpoint, base: previous?.worktreeCommit ?? null }));
-      journaled = true;
-      try {
-        await options.gitRemote.publishCheckpoint({ binding: { projectId: attachment.projectId, repository: `workspace-${attachment.workspaceId}` }, repositoryPath: owned.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: previous?.headCommit ?? null });
-      } catch (error) {
-        const rejection = artifactsPublicationRejection(error);
-        if (rejection) {
-          saveRejectedSnapshot(key, { stamp: capturedStamp, checkpoint, message: rejection.message, issues: rejection.issues });
-          journaled = false;
-        }
-        throw error;
-      }
-      const accepted = await options.commitSnapshot(owned, checkpoint, previous?.worktreeCommit ?? null, true);
-      snapshots.query('UPDATE snapshots SET pending=NULL, committed=? WHERE attachment=?').run(JSON.stringify(accepted), key);
-      journaled = false;
-    } finally {
-      if (!journaled) await publication?.releasePublication?.();
-    }
-  };
-  const reclaim = (local: LocalAttachment, attachment: LocalAttachment['attachment'], checkoutRoot: string, canonicalPath?: string) => (async () => {
+  /** Stops sync and commands for an attachment the cloud released. The checkout stays on disk. */
+  const release = async (local: LocalAttachment) => {
     await stopFollowing(local);
-    if (attachment.role === 'cache' && !local.ownedCheckout && attachment.cacheAction?.action === 'reclaim') throw new Error('Reclamation cannot delete a checkout not acquired by this cache');
-    const action = attachment.cacheAction?.action === 'reclaim' && ['requested', 'running'].includes(attachment.cacheAction.status) ? attachment.cacheAction : undefined;
-    const draining: LocalAttachment = { ...local, attachment: { ...attachment, state: 'draining', ...(attachment.role === 'cache' ? { cache: { ...cacheFor(local), state: 'draining', reclaimBlocked: null } } : {}), ...(action ? { cacheAction: { ...action, status: 'running', error: null } } : {}) } };
-    journal.installAttachment(draining);
-    const browserSupport = await browserCapabilities();
-    await sendHeartbeat(draining, browserSupport, journal.unresolved(attachment).length);
-    try {
-      const cleaned = await renewingLease(draining, () => 'drain', browserSupport, () => cleanupMachineAttachment(journal, {
-        attachment: draining.attachment, checkoutRoot, canonicalPath, signal: stopping.signal,
-        stopAndVerify: async owned => {
-          await executor.drain(owned);
-          await browser.closeAttachment(owned);
-          await stopSupervisorEffects(attachment.role === 'cache' ? [owned.rootPath] : [owned.rootPath, checkoutRoot], attachment.role !== 'cache');
-          if (attachment.role === 'cache') return executor.withCheckout(owned, () => publishFinal(owned, attachment, draining, action));
-        },
-        verifyUnmounted: verifyUnmounted(attachment, checkoutRoot),
-      }));
-      if (cleaned.attachment.cache?.reclaimBlocked) {
-        await sendHeartbeat(cleaned, browserSupport, journal.unresolved(attachment).length);
-        return;
-      }
-      const completed = { ...cleaned, attachment: { ...cleaned.attachment, ...(action ? { cacheAction: { ...action, status: 'completed' as const, error: null } } : {}) } };
-      journal.installAttachment(completed);
-      await sendHeartbeat(completed, browserSupport, 0);
-      if (attachment.role !== 'cache' || !cleaned.ownedCheckout || attachment.detachRequest) {
-        await options.cloud.call('runtime.detach', { projectId: attachment.projectId, workspaceId: attachment.workspaceId, machineId: options.machineId, attachmentId: attachment.attachmentId, generation: attachment.generation, state: 'detached' }, RuntimeJsonSchema, stopping.signal);
-        const detached = { ...completed.attachment, state: 'detached' as const };
-        delete detached.detachRequest;
-        journal.installAttachment({ ...completed, attachment: detached });
-      }
-    } catch (error) {
-      if (action) {
-        const current = journal.attachment(attachment.attachmentId) ?? draining;
-        journal.installAttachment({ ...current, attachment: { ...current.attachment, cacheAction: { ...action, status: 'failed', error: error instanceof Error ? error.message : String(error) } } });
-        await sendHeartbeat(journal.attachment(attachment.attachmentId) ?? current, await browserCapabilities(), journal.unresolved(attachment).length);
-      }
-      throw error;
-    }
-  })().catch(failedDuring(attachment.role === 'cache' && !attachment.detachRequest ? 'reclaim' : 'detach'));
-  /** `lost` is terminal and the cloud already released its fences: stop every effect of the attachment, then a cloud
-   * sandbox removes the checkout it acquired while a computer retains it as an orphan for its owner. */
-  const abandon = async (local: LocalAttachment, lost: RuntimeAttachment, checkoutRoot: string, canonicalPath: string) => {
-    await stopFollowing(local);
-    const key = `${lost.attachmentId}:${lost.generation}`;
-    // An in-flight capture of a lost attachment can only fail against the cloud; its outcome no longer matters.
+    const key = keyOf(local.attachment);
     await captures.get(key)?.settle().catch(() => {});
     captures.delete(key);
-    policies.delete(lost.attachmentId);
-    await cleanupMachineAttachment(journal, {
-      attachment: lost, checkoutRoot, canonicalPath: lost.role === 'cache' ? canonicalPath : undefined, signal: stopping.signal,
-      retainCheckout: options.provider !== 'cloudflare-sandbox' || awaitsRemediation(local.attachment.failure) || rejectedSnapshot(key) !== null,
-      stopAndVerify: async owned => {
-        await stopSupervisorEffects(lost.role === 'cache' ? [owned.rootPath] : [owned.rootPath, checkoutRoot], true);
-        await executor.drain(owned);
-        await browser.closeAttachment(owned);
-      },
-      verifyUnmounted: verifyUnmounted(lost, checkoutRoot),
-    });
+    await executor.drain(local);
+    await browser.closeAttachment(local);
+    const current = journal.attachment(local.attachment.attachmentId) ?? local;
+    journal.installAttachment({ ...current, attachment: { ...current.attachment, state: 'detached', updatedAt: new Date().toISOString() } });
   };
-  const updating = new Map<string, Promise<void>>();
-  const updateActivity = (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null): Promise<void> => {
-    const id = local.attachment.attachmentId;
-    const previous = updating.get(id);
-    if (previous) return previous;
-    const pending = (async () => {
-      const client = await daemonClientForProject(local.rootPath);
-      const listed = await client.request({ op: 'list' }, stopping.signal);
-      if (listed.op !== 'list') throw new Error('Supervisor returned invalid cache activity observation');
-      const activity: RuntimeCacheObservation['activity'] = [];
-      for (const daemon of listed.daemons) {
-        if (['exited', 'failed'].includes(daemon.state)) continue;
-        const owner = daemon.owner;
-        if (owner === `gitspace:${local.attachment.workspaceId}:user`) activity.push({ reason: 'terminal', name: daemon.name });
-        else if (owner === `workspace:${local.attachment.projectId}:${local.attachment.workspaceId}`) activity.push({ reason: daemon.name.startsWith('gitspace-svc-') ? 'service' : 'proc', name: daemon.name });
-        else if (owner?.startsWith(`gitspace:${local.attachment.workspaceId}:service`)) activity.push({ reason: 'service', name: daemon.name });
-        else if (owner === `runtime:${id}:${local.attachment.generation}`) activity.push({ reason: 'proc', name: daemon.name });
-        else if (owner?.startsWith(`gitspace:${local.attachment.workspaceId}:lifecycle`)) activity.push({ reason: 'setup', name: daemon.name });
-      }
-      for (const attempt of journal.unresolved(local.attachment)) activity.push({ reason: 'command', name: attempt.dispatch.tool });
-      const prior = cacheFor(journal.attachment(id) ?? local);
-      const policy = policies.get(id);
-      if (!policy) throw new Error('Cache assignment has no lifecycle policy');
-      const cache = cacheActivity(prior, activity, policy, Date.now());
-      local = saveCache(local, cache);
-      const humanWatch = cache.localWorkOptIn || activity.some(item => item.reason === 'terminal');
-      if (humanWatch) await follow(local);
-      else { watchers.get(local.rootPath)?.close(); watchers.delete(local.rootPath); }
-      if (local.attachment.failure?.nextRetryAt === null) return;
-      if (cache.state === 'live') {
-        // Capture live effects periodically even while the checkout command queue is held.
-        // IncrementalGitSnapshots serializes capture; this does not enable an idle human watcher.
-        if (activity.length || prior.activity.some(item => !['grace', 'sync'].includes(item.reason))) await capture(local);
-        const applied = snapshots.query<{ committed: string | null }, [string]>('SELECT committed FROM snapshots WHERE attachment=?').get(`${id}:${local.attachment.generation}`);
-        if (incoming && applied?.committed && RuntimeGitCheckpointSchema.parse(JSON.parse(applied.committed)).worktreeCommit !== incoming.worktreeCommit && !journal.hasRunningCheckout(local.rootPath)) await executor.withCheckout(local, () => reconcile(local, incoming));
-        subscribe(local);
-      } else {
-        await stopFollowing(local);
-        const disk = await statfs(local.rootPath);
-        const lowDisk = disk.blocks > 0 && disk.bavail / disk.blocks < 0.05;
-        if ((cache.state === 'draining' || lowDisk) && local.ownedCheckout) {
-          await reclaim(local, { ...local.attachment, state: 'draining' }, dirname(local.rootPath), local.rootPath);
-        }
-      }
-    })().finally(() => { updating.delete(id); });
-    updating.set(id, pending);
-    return pending;
+  const canonicalPathOf = (attachment: RuntimeAttachment) => join(options.managedSpaceRoot ?? join(options.environmentRoot, 'spaces'), attachment.projectId, attachment.workspaceId);
+  const announceReady = async (local: LocalAttachment, commit: string, signal: AbortSignal) => {
+    const { attachment } = local;
+    const ready = await options.cloud.call('runtime.attachment.ready', {
+      projectId: attachment.projectId, workspaceId: attachment.workspaceId, machineId: options.machineId, attachmentId: attachment.attachmentId, generation: attachment.generation,
+      commit, prerequisitesComplete: true, capabilities: [...baseCapabilities, ...browserCapabilities()], lfsRestored: await gitLfsRestoreReceipt(local.rootPath, 'read'),
+    }, RuntimeAttachmentReadyResultSchema, signal);
+    const current = journal.attachment(attachment.attachmentId) ?? local;
+    const updated = { ...current, attachment: { ...current.attachment, state: ready.attachment.state, heartbeatAt: ready.attachment.heartbeatAt, capabilities: ready.attachment.capabilities } };
+    journal.installAttachment(updated);
+    await gitLfsRestoreReceipt(local.rootPath, 'clear');
+    return updated;
   };
-  const checkoutOf = (attachment: RuntimeAttachment) => {
-    const name = Buffer.from(attachment.attachmentId).toString('base64url');
-    const space = options.database.getSpace(attachment.workspaceId);
-    const canonicalPath = space?.rootPath ?? join(options.managedSpaceRoot ?? join(options.environmentRoot, 'spaces'), attachment.projectId, attachment.workspaceId);
-    const checkoutRoot = attachment.role === 'cache' ? dirname(canonicalPath) : join(directory, 'copies', name);
-    return { name, space, canonicalPath, checkoutRoot, rootPath: attachment.role === 'cache' ? canonicalPath : join(checkoutRoot, name) };
-  };
-  const processAssignment = async (assignment: RuntimeAssignment, browserSupport: string[]) => {
-    const capabilities = [...baseCapabilities, ...browserSupport];
+  const processAssignment = async (assignment: RuntimeAssignment) => {
     const { attachment } = assignment.grant;
     const prior = journal.attachment(attachment.attachmentId);
-    const { name, space, canonicalPath, checkoutRoot, rootPath } = checkoutOf(attachment);
-    if (attachment.state === 'lost') {
-      if (prior && !prior.lostCheckout && prior.attachment.state !== 'detached' && prior.attachment.generation <= attachment.generation) {
-        await abandon(prior, { ...prior.attachment, state: 'lost', lossReason: attachment.lossReason }, checkoutRoot, canonicalPath).catch(failedDuring('detach'));
-      }
+    if (attachment.state === 'detached') {
+      if (prior && prior.attachment.state !== 'detached') await release(prior);
       return;
     }
-    if (attachment.state === 'draining' || attachment.cacheAction?.action === 'reclaim' && attachment.cacheAction.status === 'requested') {
-      if (!prior) throw new AttachmentOperationFailure(attachment.role === 'cache' && !attachment.detachRequest ? 'reclaim' : 'detach', new Error('Cache cleanup requires durable local ownership evidence'));
-      await reclaim(prior, attachment.state === 'draining' ? attachment : { ...attachment, state: 'draining' }, checkoutRoot, canonicalPath);
-      return;
-    }
-    const setupRequested = attachment.cacheAction?.action === 'setup' && ['requested', 'running'].includes(attachment.cacheAction.status);
-    // A pause heartbeat may finish after an older ready assignment was fetched.
-    // Only explicit setup or local work may resume that locally paused generation.
-    const locallyPaused = prior?.attachment.generation === attachment.generation && prior.attachment.cache?.state === 'paused';
-    if (attachment.state === 'detached' || !setupRequested && (attachment.cache?.state === 'reclaimed' || (attachment.cache?.state === 'paused' || locallyPaused) && !attachment.cache?.localWorkOptIn)) {
-      if (prior) {
-        await stopFollowing(prior);
-        journal.installAttachment({ ...prior, attachment: { ...attachment, state: locallyPaused && attachment.state === 'ready' ? 'attaching' : attachment.state, cache: prior.attachment.cache ? { ...prior.attachment.cache, localWorkOptIn: attachment.cache?.localWorkOptIn ?? false } : attachment.cache } });
-        const paused = journal.attachment(attachment.attachmentId);
-        if (paused?.attachment.cache?.state === 'paused') await updateActivity(paused);
-      }
-      return;
-    }
-    // Once set up, a checkout stays in use; setup runs again only when a human asks for it.
-    if (prior?.prerequisitesComplete && (attachment.state === 'ready' || attachment.state === 'attaching') && prior.attachment.generation === attachment.generation && !setupRequested) {
-      const local = { ...prior, executionSecret: assignment.grant.executionSecret, attachment: { ...attachment, failure: prior.attachment.failure ?? attachment.failure, cache: attachment.role === 'cache' ? { ...cacheFor(prior), localWorkOptIn: attachment.cache?.localWorkOptIn ?? false } : undefined } };
+    const key = keyOf(attachment);
+    // Once set up, a checkout stays in use; setup runs again only when someone runs it.
+    if (prior?.prerequisitesComplete && prior.attachment.generation === attachment.generation) {
+      let local: LocalAttachment = { ...prior, executionSecret: assignment.grant.executionSecret, attachment: { ...attachment, failure: prior.attachment.failure, cache: cacheFor(prior) } };
       journal.installAttachment(local);
-      if (attachment.role === 'cache') await updateActivity(local, assignment.checkpoint);
+      if (attachment.state === 'attaching') {
+        const commit = committedOf(key)?.worktreeCommit ?? assignment.source?.commit;
+        if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no synced version to report'));
+        local = await announceReady(local, commit, stopping.signal);
+      }
+      if (local.attachment.state === 'ready') await keepSyncing(local, assignment.checkpoint).catch(failedDuring('sync'));
       return;
     }
-    const trustedExisting = attachment.role === 'cache' && space?.holderId === options.machineId && space.placementState === 'open' && space.branch === (attachment.checkout.kind === 'shared' ? attachment.checkout.branch : null);
+    const canonicalPath = canonicalPathOf(attachment);
+    const existed = existsSync(canonicalPath);
     const source = assignment.source;
-    const sourceCheckpoint = assignment.sourceCheckpoint ?? assignment.checkpoint;
-    const grant: LocalAttachment = { ...assignment.grant, rootPath, prerequisitesComplete: false };
+    const sourceCheckpoint = source?.checkpoint ?? assignment.checkpoint;
     const signal = AbortSignal.any([stopping.signal, AbortSignal.timeout(30 * 60_000)]);
     const deadlineAt = new Date(Date.now() + 30 * 60_000).toISOString();
-    if (!trustedExisting && !source?.remote) throw new Error('Attachment preparation requires an authorized canonical source');
+    const grant: LocalAttachment = { ...assignment.grant, rootPath: canonicalPath, prerequisitesComplete: false };
     const env = source?.remote ? credentialHelper.environment(grant, source.remote) : {};
-    if (prior && prior.attachment.cache?.state !== 'reclaimed' && setupRequested && (attachment.cacheAction?.status === 'requested' || prior.attachment.cacheAction?.requestId !== attachment.cacheAction?.requestId)) {
-      await stopFollowing(prior);
-      journal.installAttachment({ ...prior, attachment, prerequisitesComplete: false });
-    }
-    const action = setupRequested ? attachment.cacheAction : undefined;
-    // Preparation holds the attachment lease: each phase transition and a periodic tick while a phase runs renew it.
-    let phase = 'materialize';
-    await sendHeartbeat({ ...grant, attachment: { ...attachment, ...(attachment.role === 'cache' ? { cache: { ...cacheFor(grant), state: 'setup' } } : {}), ...(action?.status === 'requested' ? { cacheAction: { ...action, status: 'running', error: null } } : {}) } }, browserSupport, 0, { progress: { phase, at: new Date().toISOString() } });
-    // Ready is reported as soon as setup has run; publishing local changes is the sync loop's job.
-    const announceReady = async (local: LocalAttachment) => {
-      const committed = snapshots.query<{ committed: string | null }, [string]>('SELECT committed FROM snapshots WHERE attachment=?').get(`${attachment.attachmentId}:${attachment.generation}`)?.committed;
-      const commit = committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(committed)).worktreeCommit : sourceCheckpoint?.worktreeCommit ?? source?.commit;
-      if (!commit) throw new Error('Attachment readiness requires a checkout commit');
-      return options.cloud.call('runtime.attachment.ready', {
-        projectId: attachment.projectId, workspaceId: attachment.workspaceId, machineId: options.machineId, attachmentId: attachment.attachmentId, generation: attachment.generation,
-        commit, prerequisitesComplete: true, capabilities, lfsRestored: await gitLfsRestoreReceipt(local.rootPath, 'read'),
-      }, RuntimeAttachmentReadyResultSchema, signal);
-    };
-    try {
-      let local = await renewingLease(grant, () => phase, browserSupport, () => prepareMachineAttachment(journal, {
-        enrolled: assignment.grant, checkoutRoot, canonicalPath: attachment.role === 'cache' ? canonicalPath : undefined, adoptExisting: trustedExisting, deadlineAt, signal,
-        source: trustedExisting ? { kind: 'local', repository: canonicalPath } : (() => {
-          if (!source?.remote) throw new Error('Missing canonical source');
-          return {
-            kind: 'artifacts' as const, repository: { ...source, remote: source.remote }, requiresFiltersOrSubmodules: source.requiresFiltersOrSubmodules,
-            host: {
-              binary: attachment.role === 'cache' ? undefined : options.artifactFsBinary, root: checkoutRoot, gitEnvironment: async () => env,
-              ensureDaemon: async (spec: { binary: string; args: string[]; env: Record<string, string> }) => {
-                const client = await daemonClientForProject(checkoutRoot);
-                await client.request({ op: 'start', owner: attachment.attachmentId, spec: { name: `artifactfs-${name}`, application: spec.binary, args: spec.args, cwd: checkoutRoot, inheritEnv: true, visibility: 'private', env: spec.env, pty: false, restart: 'on-failure', persist: true, detached: false } });
-              },
-            },
-            hydrateLfs: async (path: string) => {
-              if (source.origin) {
-                const result = await runSupervisorCommand({ application: 'git', args: ['config', 'remote.origin.url', source.origin], cwd: path, env, signal, deadlineAt, attemptId: `origin-${attachment.attachmentId}`, sequence: 0 });
-                if (result.exitCode !== 0) throw new Error(result.output);
-                const refspec = await runSupervisorCommand({ application: 'git', args: ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'], cwd: path, env, signal, deadlineAt, attemptId: `origin-fetch-${attachment.attachmentId}`, sequence: 0 });
-                if (refspec.exitCode !== 0) throw new Error(refspec.output);
-              }
-              await hydrateGitLfs(path, [source.commit], sourceCheckpoint?.lfs, await lfs?.read(attachment.projectId));
-              await checkoutGitLfs(path, source.commit);
-            },
-          };
-        })(),
-        prerequisites: async (prepared, prepareSignal) => {
-          if (attachment.role === 'cache') {
-            if (attachment.checkout.kind !== 'shared') throw new Error('Canonical cache requires a workspace branch');
-            const key = `${attachment.attachmentId}:${attachment.generation}`;
-            const durable = snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
-            if (prior?.attachment.cache?.state === 'reclaimed') {
-              if (!sourceCheckpoint) throw new Error('Rehydration requires a canonical checkpoint');
-              await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: sourceCheckpoint, branch: attachment.checkout.branch, lfs: await lfs?.read(attachment.projectId) });
-              snapshots.query('INSERT OR REPLACE INTO snapshots(attachment,revision,pending,committed) VALUES(?,?,NULL,?)').run(key, Date.now(), JSON.stringify(sourceCheckpoint));
-              captures.delete(key);
-            }
-            if (!durable?.committed && !durable?.pending) {
-              let base = await readGitCacheBase(prepared.rootPath);
-              if (!base && trustedExisting) {
-                const restored = await options.restoredBase?.(attachment.projectId, attachment.workspaceId);
-                if (restored) {
-                  await options.gitRemote.fetchCheckpoint({ binding: { projectId: attachment.projectId, repository: `workspace-${attachment.workspaceId}` }, repositoryPath: prepared.rootPath, checkpointRef: restored.checkpointRef, commit: restored.worktreeCommit });
-                  base = await completeGitCheckpoint(prepared.rootPath, restored);
-                }
-              }
-              if (!base && sourceCheckpoint && !trustedExisting) {
-                await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: sourceCheckpoint, branch: attachment.checkout.branch, lfs: await lfs?.read(attachment.projectId) });
-                base = sourceCheckpoint;
-              }
-              if (!base && assignment.checkpoint) {
-                const captureId = `admission-${createHash('sha256').update(attachment.attachmentId).digest('hex')}`;
-                const revision = Date.now();
-                // Admission only compares trees; its publication pins nothing beyond the comparison.
-                const publication = await lfs?.publish(attachment.projectId, spaceGitCheckpointRef(captureId, revision));
-                const observed = await createGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, spaceId: attachment.workspaceId, captureId, revision, lfs: publication })
-                  .finally(async () => { await publication?.releasePublication?.(); });
-                const cloud = assignment.checkpoint;
-                if (observed.headCommit !== cloud.headCommit || observed.branch !== cloud.branch || observed.indexTree !== cloud.indexTree || observed.worktreeTree !== cloud.worktreeTree) throw new Error('Canonical cache lacks a durable applied base; refusing unbased local edits');
-                base = cloud;
-              }
-              if (base) {
-                await saveGitCacheBase(prepared.rootPath, base);
-                snapshots.query('INSERT OR REPLACE INTO snapshots(attachment,revision,committed) VALUES(?,?,?)').run(key, Date.now(), JSON.stringify(base));
-              }
-            }
-            await executor.withCheckout(prepared, () => reconcile(prepared, assignment.checkpoint));
-          }
-          phase = 'setup';
-          await options.prepareAttachment(prepared, prepareSignal, async step => {
-            phase = step.phase;
-            const current = journal.attachment(attachment.attachmentId) ?? prepared;
-            const cache = cacheFor(current);
-            const setup = [...cache.setup.filter(item => item.phase !== step.phase), step];
-            const updated = saveCache(current, { ...cache, state: 'setup', activity: [{ reason: 'setup', name: step.phase }], setup });
-            await sendHeartbeat(updated, browserSupport, 0, { progress: { phase, at: new Date().toISOString() } });
-          }).catch(failedDuring('setup'));
+    let setupFailure: unknown = null;
+    const local = await prepareMachineAttachment(journal, {
+      enrolled: assignment.grant, canonicalPath, deadlineAt, signal,
+      source: source?.remote ? {
+        repository: { ...source, remote: source.remote }, requiresFiltersOrSubmodules: source.requiresFiltersOrSubmodules,
+        host: {
+          binary: options.artifactFsBinary, root: canonicalPath, gitEnvironment: async () => env,
+          ensureDaemon: async (spec: { binary: string; args: string[]; env: Record<string, string> }) => {
+            const client = await daemonClientForProject(canonicalPath);
+            await client.request({ op: 'start', owner: attachment.attachmentId, spec: { name: `artifactfs-${Buffer.from(attachment.attachmentId).toString('base64url')}`, application: spec.binary, args: spec.args, cwd: canonicalPath, inheritEnv: true, visibility: 'private', env: spec.env, pty: false, restart: 'on-failure', persist: true, detached: false } });
+          },
         },
-      })).catch(failedDuring('materialize'));
-      // A lost ready report is harmless: the next heartbeat with sync running makes the machine ready.
-      const ready = await announceReady(local).catch((error: unknown) => { console.error('[runtime-ready]', attachment.attachmentId, error instanceof Error ? error.message : String(error)); return null; });
-      local = { ...local, attachment: { ...(ready?.attachment ?? local.attachment), cache: attachment.role === 'cache' ? { ...cacheFor(journal.attachment(attachment.attachmentId) ?? local), state: 'live', lastActivityAt: new Date().toISOString() } : undefined, ...(action ? { cacheAction: { ...action, status: 'completed', error: null } } : {}) } };
-      journal.installAttachment(local);
-      await gitLfsRestoreReceipt(local.rootPath, 'clear');
-      if (attachment.role === 'cache') await updateActivity(local);
-    } catch (error) {
-      const local = journal.attachment(attachment.attachmentId);
-      if (local && action) {
-        journal.installAttachment({ ...local, attachment: { ...local.attachment, cacheAction: { ...action, status: 'failed', error: error instanceof Error ? error.message : String(error) } } });
-        await sendHeartbeat(journal.attachment(attachment.attachmentId) ?? local, browserSupport, 0);
-      }
-      throw error;
-    }
+        hydrateLfs: async (path: string) => {
+          if (source.origin) {
+            for (const [name, value] of [['remote.origin.url', source.origin], ['remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']]) {
+              const result = await runSupervisorCommand({ application: 'git', args: ['config', name, value], cwd: path, env, signal, deadlineAt, attemptId: `origin-${attachment.attachmentId}-${name}`, sequence: 0 });
+              if (result.exitCode !== 0) throw new Error(result.output);
+            }
+          }
+          await hydrateGitLfs(path, [source.commit], sourceCheckpoint?.lfs, await lfs?.read(attachment.projectId));
+          await checkoutGitLfs(path, source.commit);
+        },
+      } : null,
+      prerequisites: async (prepared, prepareSignal) => {
+        const durable = snapshotRow(key);
+        if (!durable?.committed && !durable?.pending) {
+          let base = await readGitCacheBase(prepared.rootPath);
+          if (!base && sourceCheckpoint && !existed) {
+            await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: sourceCheckpoint, branch: attachment.checkout.branch, lfs: await lfs?.read(attachment.projectId) });
+            base = sourceCheckpoint;
+          }
+          if (!base && assignment.checkpoint) {
+            const captureId = `admission-${createHash('sha256').update(attachment.attachmentId).digest('hex')}`;
+            const revision = Date.now();
+            // Admission only compares trees; its publication pins nothing beyond the comparison.
+            const publication = await lfs?.publish(attachment.projectId, spaceGitCheckpointRef(captureId, revision));
+            const observed = await createGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, spaceId: attachment.workspaceId, captureId, revision, lfs: publication })
+              .finally(async () => { await publication?.releasePublication?.(); });
+            const cloud = assignment.checkpoint;
+            if (observed.headCommit !== cloud.headCommit || observed.branch !== cloud.branch || observed.indexTree !== cloud.indexTree || observed.worktreeTree !== cloud.worktreeTree) throw new Error(`The checkout at ${prepared.rootPath} has changes that were never synced from this workspace; move it aside to attach`);
+            base = cloud;
+          }
+          if (base) {
+            await saveGitCacheBase(prepared.rootPath, base);
+            snapshots.query('INSERT OR REPLACE INTO snapshots(attachment,revision,committed) VALUES(?,?,?)').run(key, Date.now(), JSON.stringify(base));
+          }
+        }
+        await reconcile(prepared, assignment.checkpoint);
+        // Setup scripts record their own results; a failed script never blocks the checkout.
+        await options.prepareAttachment(prepared, prepareSignal, async step => {
+          const current = journal.attachment(attachment.attachmentId) ?? prepared;
+          const cache = cacheFor(current);
+          const updated = saveCache(current, { ...cache, state: 'setup', setup: [...cache.setup.filter(item => item.phase !== step.phase), step] });
+          await sendHeartbeat(updated).catch((error: unknown) => console.error('[runtime-setup-progress]', attachment.attachmentId, message(error)));
+        }).catch((error: unknown) => { setupFailure = error; });
+      },
+    }).catch(failedDuring('materialize'));
+    const commit = committedOf(key)?.worktreeCommit ?? sourceCheckpoint?.worktreeCommit ?? source?.commit;
+    if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no version to report'));
+    const live = saveCache(local, { ...cacheFor(journal.attachment(attachment.attachmentId) ?? local), state: 'live' });
+    const ready = await announceReady(live, commit, signal);
+    if (setupFailure !== null) await recordFailure(ready, new AttachmentOperationFailure('setup', setupFailure));
+    if (ready.attachment.state === 'ready') await keepSyncing(ready).catch(failedDuring('sync'));
   };
   /** Each assignment fails alone: its failure is recorded on its attachment and later assignments still run. */
-  const runAssignment = async (assignment: RuntimeAssignment, browserSupport: string[]) => {
+  const runAssignment = async (assignment: RuntimeAssignment) => {
     const { attachment } = assignment.grant;
-    const intent = assignmentIntent(attachment);
-    const key = `${attachment.attachmentId}:${attachment.generation}`;
-    const retry = retries.get(key);
     try {
       if (attachment.machineId !== options.machineId) throw new Error('Invalid remote attachment assignment');
-      // Policy is cloud authority, not retried work. Rehydrate it even when a
-      // durable publication failure keeps this assignment inside its backoff.
-      policies.set(attachment.attachmentId, assignment.cachePolicy);
-      const local = journal.attachment(attachment.attachmentId);
-      const localAction = local?.attachment.generation === attachment.generation ? local.attachment.cacheAction : undefined;
-      // A queued assignment can predate the operation's terminal receipt.
-      if (attachment.cacheAction?.action === 'setup' && (attachment.cacheAction.status === 'requested' || attachment.cacheAction.status === 'running')
-        && localAction?.requestId === attachment.cacheAction.requestId
-        && (localAction.status === 'completed' || localAction.status === 'failed')) return;
-      if (retry?.intent === intent) {
-        if (retry.failure.nextRetryAt === null) {
-          const rejection = rejectedSnapshot(key);
-          if (!rejection || !gitCheckpointRejectionNeedsRevalidation(rejection) && rejection.stamp === await readGitCheckpointInputStamp(checkoutOf(attachment).rootPath)) return;
-        } else if (Date.parse(retry.failure.nextRetryAt) > Date.now()) return;
-      } else if (retry) retryRejected.add(key);
-      // Input remediation must be captured even for an otherwise idle cache.
-      if (awaitsRemediation(retry?.failure) && attachment.state !== 'lost' && attachment.state !== 'detached') {
-        const local = journal.attachment(attachment.attachmentId);
-        if (local?.attachment.generation === attachment.generation) await capture(local);
-      }
-      await processAssignment(assignment, browserSupport);
-    }
-    catch (error) {
-      await recordFailure({ ...assignment.grant, rootPath: checkoutOf(attachment).rootPath, prerequisitesComplete: false }, intent, error, browserSupport);
+      await processAssignment(assignment);
+    } catch (error) {
+      await recordFailure({ ...assignment.grant, rootPath: canonicalPathOf(attachment), prerequisitesComplete: false }, error);
       return;
     }
-    await clearFailure(attachment, browserSupport);
+    if (journal.attachment(attachment.attachmentId)?.attachment.failure?.operation !== 'setup') await clearFailure(attachment);
   };
   /** Work on one checkout stays serialized while different checkouts proceed independently. A lane busy with
    * earlier work keeps only the newest assignment per attachment and runs it next. */
-  const lanes = new Map<string, { pending: Map<string, { assignment: RuntimeAssignment; browserSupport: string[] }>; idle: Promise<void> }>();
-  const enqueue = (assignment: RuntimeAssignment, browserSupport: string[]): Promise<void> => {
-    const root = checkoutOf(assignment.grant.attachment).rootPath;
+  const lanes = new Map<string, { pending: Map<string, RuntimeAssignment>; idle: Promise<void> }>();
+  const enqueue = (assignment: RuntimeAssignment): Promise<void> => {
+    const root = canonicalPathOf(assignment.grant.attachment);
     const existing = lanes.get(root);
     if (existing) {
-      existing.pending.set(assignment.grant.attachment.attachmentId, { assignment, browserSupport });
+      existing.pending.set(assignment.grant.attachment.attachmentId, assignment);
       return existing.idle;
     }
-    const lane = { pending: new Map([[assignment.grant.attachment.attachmentId, { assignment, browserSupport }]]), idle: Promise.resolve() };
+    const lane = { pending: new Map([[assignment.grant.attachment.attachmentId, assignment]]), idle: Promise.resolve() };
     lanes.set(root, lane);
     lane.idle = (async () => {
       try {
         while (lane.pending.size && !stopped) {
           const batch = [...lane.pending.values()];
           lane.pending.clear();
-          for (const item of batch) await runAssignment(item.assignment, item.browserSupport);
+          for (const item of batch) await runAssignment(item);
         }
       } finally { lanes.delete(root); }
     })();
@@ -952,90 +581,78 @@ export async function createMachineExecutor(options: {
   /** Dispatches every assignment; a workspace operation awaits only that workspace's lanes. */
   const sync = (workspaceId?: string): Promise<void> => {
     syncing ??= (async () => {
-      const browserSupport = await browserCapabilities();
       const { assignments } = await options.cloud.call('runtime.assignments', { machineId: options.machineId }, RuntimeAssignmentsResultSchema, stopping.signal);
       for (const [key, subscription] of subscriptions) {
-        if (!assignments.some(item => `${item.grant.attachment.attachmentId}:${item.grant.attachment.generation}` === key && item.grant.attachment.state === 'ready')) subscription.controller.abort();
+        if (!assignments.some(item => keyOf(item.grant.attachment) === key && item.grant.attachment.state === 'ready')) subscription.controller.abort();
       }
-      // The machine-wide list omits only detached attachments; a live local lease missing from it was released remotely.
+      // The machine-wide list omits detached attachments; a local one missing from it was released by the cloud.
       const listed = new Set(assignments.map(item => item.grant.attachment.attachmentId));
       const vanished = journal.attachments()
-        .filter(local => !listed.has(local.attachment.attachmentId) && ['attaching', 'ready', 'draining'].includes(local.attachment.state))
-        .map(local => RuntimeAssignmentSchema.parse({ grant: { attachment: { ...local.attachment, state: 'lost' }, executionSecret: local.executionSecret }, source: null }));
-      return [...assignments, ...vanished].map(assignment => ({ workspaceId: String(assignment.grant.attachment.workspaceId), idle: enqueue(assignment, browserSupport) }));
+        .filter(local => !listed.has(local.attachment.attachmentId) && local.attachment.state !== 'detached')
+        .map(local => RuntimeAssignmentSchema.parse({ grant: { attachment: { ...local.attachment, state: 'detached' }, executionSecret: local.executionSecret }, source: null }));
+      return [...assignments, ...vanished].map(assignment => ({ workspaceId: String(assignment.grant.attachment.workspaceId), idle: enqueue(assignment) }));
     })().finally(() => { syncing = null; });
     return syncing.then(async work => { await Promise.all(work.filter(item => workspaceId === undefined || item.workspaceId === workspaceId).map(item => item.idle)); });
   };
-  /** Waits for in-flight work on one workspace's checkouts, never for another workspace's long setup. */
+  /** Waits for in-flight work on one workspace's checkout, never for another workspace's long setup. */
   const settled = async (workspaceId: string) => {
     await syncing;
-    const roots = new Set([...journal.attachments().filter(item => item.attachment.workspaceId === workspaceId).map(item => item.rootPath), options.database.getSpace(workspaceId)?.rootPath]);
-    await Promise.all([...roots].map(root => root === undefined ? undefined : lanes.get(root)?.idle));
+    const roots = new Set(journal.attachments().filter(item => item.attachment.workspaceId === workspaceId).map(item => item.rootPath));
+    await Promise.all([...roots].map(root => lanes.get(root)?.idle));
   };
   let heartbeating: Promise<void> | null = null;
   const heartbeat = (): Promise<void> => {
-    if (heartbeating) return heartbeating;
-    heartbeating = (async () => {
-      const browserSupport = await browserCapabilities();
+    heartbeating ??= (async () => {
       for (const local of journal.attachments()) {
         if (stopped) return;
-        // Terminal leases hold nothing to renew, and the cloud rejects their heartbeats.
-        if (local.attachment.state === 'detached' || local.attachment.state === 'lost') continue;
-        // Liveness never waits on sync: activity and snapshot capture run in the background.
-        if (local.attachment.role === 'cache' && local.attachment.state === 'ready' && policies.has(local.attachment.attachmentId)) {
-          void updateActivity(local).catch((error: unknown) => recordFailure(local, assignmentIntent(local.attachment), error, browserSupport));
-        }
-        const current = journal.attachment(local.attachment.attachmentId) ?? local;
-        try { await sendHeartbeat(current, browserSupport, journal.unresolved(current.attachment).length); }
-        catch (error) { console.error('[runtime-heartbeat]', local.attachment.attachmentId, error instanceof Error ? error.message : String(error)); }
+        if (local.attachment.state === 'detached') continue;
+        try { await sendHeartbeat(local); }
+        catch (error) { console.error('[runtime-heartbeat]', local.attachment.attachmentId, message(error)); }
       }
     })().finally(() => { heartbeating = null; });
     return heartbeating;
   };
-  const heartbeatTimer = setInterval(() => { void heartbeat().catch(error => console.error('[runtime-heartbeat]', error instanceof Error ? error.message : String(error))); }, 10_000);
-  void sync().catch(error => console.error('[runtime-attachments]', error instanceof Error ? error.message : String(error)));
-  const timer = setInterval(() => { void sync().catch(error => console.error('[runtime-attachments]', error instanceof Error ? error.message : String(error))); }, 10_000);
+  const heartbeatTimer = setInterval(() => { void heartbeat(); }, 10_000);
+  void sync().catch(error => console.error('[runtime-attachments]', message(error)));
+  const timer = setInterval(() => { void sync().catch(error => console.error('[runtime-attachments]', message(error))); }, 10_000);
   return { executor, journal, sync,
     useWorkspace: async workspaceId => {
       await settled(workspaceId);
-      const local = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.role === 'cache' && item.attachment.state !== 'detached' && item.attachment.state !== 'lost');
-      if (!local) throw new Error('Workspace has no canonical cache assignment');
-      const key = `${local.attachment.attachmentId}:${local.attachment.generation}`;
-      retryRejected.add(key);
-      retries.delete(key);
-      snapshots.query('DELETE FROM attachment_failures WHERE attachment=?').run(key);
-      if (local.attachment.cache?.state === 'reclaimed' || local.attachment.cache?.state === 'paused' || local.attachment.state === 'attaching') {
-        await options.cloud.call('runtime.attachment.cache.request', { projectId: local.attachment.projectId, workspaceId, machineId: options.machineId, requestId: crypto.randomUUID() }, RuntimeJsonSchema, stopping.signal);
-      } else touch(local);
-      await sync(workspaceId);
+      const local = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.state !== 'detached');
+      if (!local) throw new Error('This machine is not attached to the workspace');
+      retryRejected.add(keyOf(local.attachment));
+      if (local.attachment.state !== 'ready') {
+        await options.cloud.call('runtime.attachment.cache.request', { projectId: local.attachment.projectId, workspaceId, machineId: options.machineId }, RuntimeJsonSchema, stopping.signal);
+        await sync(workspaceId);
+      }
       const ready = journal.attachment(local.attachment.attachmentId);
-      if (!ready || ready.attachment.state !== 'ready') throw new Error(`Canonical cache is not ready${ready?.attachment.failure ? `: ${ready.attachment.failure.message}` : ''}`);
-      await executor.withCheckout(ready, () => reconcile(ready));
+      if (!ready || ready.attachment.state !== 'ready') throw new Error(`The workspace checkout on this machine is not ready${ready?.attachment.failure ? `: ${ready.attachment.failure.message}` : ''}`);
+      await reconcile(ready);
     },
     drainWorkspace: async workspaceId => {
       await settled(workspaceId);
       for (const local of journal.attachments()) {
         const attachment = local.attachment;
-        if (attachment.workspaceId !== workspaceId || attachment.role !== 'cache' || attachment.state === 'detached' || attachment.state === 'lost') continue;
-        await options.cloud.call('runtime.detach', { projectId: attachment.projectId, workspaceId, machineId: options.machineId, attachmentId: attachment.attachmentId, generation: attachment.generation, state: 'draining' }, RuntimeJsonSchema, stopping.signal);
+        if (attachment.workspaceId !== workspaceId || attachment.state === 'detached') continue;
+        // Send what is unsent first; the checkout stays on disk either way.
+        await capture(local).catch((error: unknown) => console.error('[runtime-detach]', attachment.attachmentId, message(error)));
+        await options.cloud.call('runtime.detach', { projectId: attachment.projectId, workspaceId, machineId: options.machineId, attachmentId: attachment.attachmentId, generation: attachment.generation }, RuntimeJsonSchema, stopping.signal);
+        await release(local);
       }
-      await sync(workspaceId);
-      const retained = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.role === 'cache' && item.attachment.state !== 'detached' && item.attachment.state !== 'lost' && item.attachment.cache?.state !== 'reclaimed');
-      if (retained) throw new Error(`Canonical cache is not safely detached${retained.attachment.failure ? `: ${retained.attachment.failure.message}` : ''}`);
     },
     close: async () => {
-    stopped = true;
-    stopping.abort();
-    clearInterval(timer);
-    clearInterval(heartbeatTimer);
-    for (const entry of watchers.values()) entry.close();
-    try {
-      await Promise.allSettled([syncing, heartbeating, ...[...lanes.values()].map(lane => lane.idle), ...updating.values(), ...[...subscriptions.values()].map(subscription => subscription.settled), ...[...captures.values()].map(capture => capture.settle())]);
-      await browser.close();
-    } finally {
-      await credentialHelper.close();
-      snapshots.close();
-      journal.close();
-    }
-  } };
+      stopped = true;
+      stopping.abort();
+      clearInterval(timer);
+      clearInterval(heartbeatTimer);
+      for (const entry of watchers.values()) entry.close();
+      try {
+        await Promise.allSettled([syncing, heartbeating, ...[...lanes.values()].map(lane => lane.idle), ...reconciling.values(), ...[...subscriptions.values()].map(subscription => subscription.settled), ...[...captures.values()].map(capture => capture.settle())]);
+        await browser.close();
+      } finally {
+        await credentialHelper.close();
+        snapshots.close();
+        journal.close();
+      }
+    } };
 }

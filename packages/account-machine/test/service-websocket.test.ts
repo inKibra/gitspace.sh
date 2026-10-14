@@ -3,21 +3,22 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { GitSpaceDatabase } from '@gitspace/core';
 import { credentialProtocolBase64, signCredentialAuthorityGrant, parseRelaySocketMessage, verifyRelayAuthorization } from '@gitspace/protocol';
 import { SERVICE_ASSERTION_HEADER, signServiceAssertion } from '@gitspace/protocol/service-access';
 import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import { MachineRelayConnector } from '../src/relay-connector.js';
 import { createServiceAccessClient } from '../src/service-forward.js';
+import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
+
+const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} };
 
 test('real machine connector authenticates service ingress before bridging a local WebSocket', async () => {
   const root = await mkdtemp(join(tmpdir(), 'service-ws-'));
-  const database = new GitSpaceDatabase(join(root, 'state.db'));
   const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const trust = { accountId: 'user-a', publicKey: credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey))) };
   const backendHeaders = Promise.withResolvers<Headers>();
   const service = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request, server) { backendHeaders.resolve(request.headers); if (server.upgrade(request)) return; return new Response('upgrade required', { status: 400 }); }, websocket: { message(socket, message) { socket.send(`echo:${message}`); } } });
-  const manager = new WorkspaceServiceManager(database, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine-a', root, 'gssh.dev', 'test', undefined, async () => trust);
+  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine-a', root, 'gssh.dev', 'test', undefined, async () => trust);
   const hostname = new URL(await manager.registerProcessRoute({ projectId: 'project', workspaceId: 'workspace', generation: 1, name: 'socket', portName: 'http', port: service.port! })).hostname;
   const ingress = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) { return await manager.proxy(request) ?? new Response(null, { status: 404 }); } });
   const connected = Promise.withResolvers<Bun.ServerWebSocket<undefined>>();
@@ -49,7 +50,7 @@ test('real machine connector authenticates service ingress before bridging a loc
     expect(headers.get('cookie')).toBe('app_session=logged-in');
     expect(headers.get('authorization')).toBe('Bearer app-token');
     expect(headers.get(SERVICE_ASSERTION_HEADER)).toBeNull();
-  } finally { connector.stop(); await manager.dispose(); await relay.stop(true); await ingress.stop(true); await service.stop(true); database.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { connector.stop(); await manager.dispose(); await relay.stop(true); await ingress.stop(true); await service.stop(true); await rm(root, { recursive: true, force: true }); }
 }, 15_000);
 
 test('machine-B loopback WebSocket forwarding signs the relay target and preserves text and binary frames', async () => {

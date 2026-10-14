@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { signedControlRequestSchema, verifySignedControlRequest, type DeploymentStatus, type SignedControlRequest } from '@gitspace/protocol';
 import { CloudDataCheckpointBlobStore, CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
 
-it('signs each space authority operation with the enrolled machine key', async () => {
+it('signs each control operation with the enrolled machine key', async () => {
   const privateKey = new Uint8Array(32).fill(5);
   const requests: unknown[] = [];
   const authority = new CloudSpaceCheckpointAuthority({
@@ -14,51 +14,14 @@ it('signs each space authority operation with the enrolled machine key', async (
     signingPrivateKey: privateKey,
     fetcher: (async (input, init) => {
       requests.push(JSON.parse(String(init?.body)));
-      return Response.json({ status: 'ok', value: { revision: 2, previousRevision: 1 } });
+      return Response.json({ status: 'ok', value: null });
     }) as typeof fetch,
   });
-  expect(await authority.beginClose({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 3 })).toEqual({ revision: 2, previousRevision: 1 });
+  expect(await authority.getProject('project-a')).toBeNull();
   const request = signedControlRequestSchema.parse(requests[0]);
-  expect(request.operation).toBe('space.beginClose');
-  expect(request.payload).toMatchObject({ projectId: 'project-a', spaceId: 'space-a', expectedGeneration: 3 });
+  expect(request.operation).toBe('project.get');
+  expect(request.payload).toMatchObject({ projectId: 'project-a' });
   expect(verifySignedControlRequest(request, ed25519.getPublicKey(privateKey))).toBe(true);
-});
-
-describe('canonical workspace reconciliation', () => {
-  it.each(['active', 'archived'] as const)('preserves the cloud %s workspace and its metadata when the machine reconnects with stale state', async (lifecycle) => {
-    const workspace = {
-      id: 'space-a', projectId: 'project-a', kind: 'worktree', name: 'Cloud name', branch: 'cloud-branch',
-      phase: 'review', sourceKind: 'commit', sourceRef: 'source-ref', sourceCommit: 'a'.repeat(40),
-      lifecycle, goalId: 'goal-a', revision: 4, archivedAt: lifecycle === 'archived' ? '2026-09-01T00:00:00.000Z' : null,
-      createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
-    };
-    const before = structuredClone(workspace);
-    const authority = new CloudSpaceCheckpointAuthority({
-      baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a',
-      signingPrivateKey: new Uint8Array(32).fill(5),
-      fetcher: (async (_input, init) => {
-        const request = signedControlRequestSchema.parse(JSON.parse(String(init?.body)));
-        if (request.operation === 'project.bootstrap') return Response.json({ status: 'ok', value: {
-          id: 'project-a', lifecycle: 'active', name: 'Cloud project', repositoryReference: 'github:owner/repo', baseBranch: 'trunk',
-        } });
-        if (request.operation === 'project.workspaces.list') return Response.json({ status: 'ok', value: [workspace] });
-        if (request.operation === 'project.workspaces.put') {
-          Object.assign(workspace, request.payload.workspace);
-          return Response.json({ status: 'ok', value: workspace });
-        }
-        throw new Error(`Unexpected operation: ${request.operation}`);
-      }) as typeof fetch,
-    });
-    const reconciled = await authority.putSpaceDefinition({
-      projectId: 'project-a', projectName: 'Project', repositoryReference: null, baseBranch: 'main',
-      spaceId: 'space-a', kind: 'worktree', name: 'Stale name', branch: 'stale-branch', phase: 'code',
-    });
-    expect(reconciled).toMatchObject({
-      projectName: 'Cloud project', repositoryReference: 'github:owner/repo', baseBranch: 'trunk',
-      name: 'Cloud name', branch: 'cloud-branch', phase: 'review',
-    });
-    expect(workspace).toEqual(before);
-  });
 });
 
 describe('interrupted release acknowledgement', () => {
@@ -627,12 +590,12 @@ describe('expired signed requests', () => {
         const rejection = rejections[signed.length - 1];
         return rejection
           ? Response.json(rejection, { status: 401 })
-          : Response.json({ status: 'ok', value: { revision: 2, previousRevision: 1 } });
+          : Response.json({ status: 'ok', value: null });
       }) as typeof fetch,
     });
-    const closing = authority.beginClose({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 3 });
-    if (failure) await expect(closing).rejects.toMatchObject({ code: failure });
-    else expect(await closing).toEqual({ revision: 2, previousRevision: 1 });
+    const reading = authority.getProject('project-a');
+    if (failure) await expect(reading).rejects.toMatchObject({ code: failure });
+    else expect(await reading).toBeNull();
     expectFreshSignatures(signed, attempts);
   });
 });

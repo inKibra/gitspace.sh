@@ -6,7 +6,7 @@ import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
-import type { WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { committedSessionApproval, sessionApprovalMode, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 import type { AccountStateDO } from './account-state.js';
@@ -64,7 +64,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
   async function execution(args: RuntimeBrowserArguments) {
     const candidates: RuntimeAttachment[] = [];
     for (const attachment of options.runtime().attachments.list()) {
-      if (attachment.state !== 'ready' || attachment.role !== 'cache' || !attachment.heartbeatAt || Date.now() - Date.parse(attachment.heartbeatAt) > 30_000 || !attachment.capabilities.includes(`browser.${args.source}`)) continue;
+      if (!isAttachmentReady(attachment, Date.now()) || !attachment.capabilities.includes(`browser.${args.source}`)) continue;
       const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(attachment.machineId);
       if (!machine || machine.desiredState === 'removed' || args.source === 'relay' && machine.kind !== 'physical' || !await env.CREDENTIALS.getByName(env.ACCOUNT_ID).hasRuntimeMachine(attachment.machineId)) continue;
       candidates.push(attachment);

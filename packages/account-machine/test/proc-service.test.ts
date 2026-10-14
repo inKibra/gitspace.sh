@@ -2,24 +2,25 @@ import { test, expect } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { GitSpaceDatabase } from '@gitspace/core';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { RuntimeAttachmentSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
 import { signServiceAssertion, SERVICE_ASSERTION_HEADER } from '@gitspace/protocol/service-access';
 import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import { machineProcessOperation } from '../src/runtime-operations.js';
 import { cacheServiceOperation } from '../src/cache-services.js';
+import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
+
+const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} };
 
 test('proc ready.port becomes a private signed route and stop releases its lease', async () => {
   const root = await mkdtemp(join(tmpdir(), 'proc-service-'));
-  const database = new GitSpaceDatabase(join(root, 'db.sqlite'));
   const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const trust = { accountId: 'account', publicKey: credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey))) };
   const leases = new Map<string, string>();
-  const manager = new WorkspaceServiceManager(database, { list: async () => [], startService: async () => { throw new Error('Workspace terminal not allowed'); }, stop: async () => { throw new Error('Workspace terminal not allowed'); } }, 'machine', root, 'gssh.dev', 'test', { leaseHostedRoute: async (projectId, route) => { leases.set(route.hostname, `${projectId}:${route.machineId}:${route.workspaceId}`); return { ...route, updatedAt: new Date().toISOString() }; }, releaseHostedRoute: async (_project, hostname) => leases.delete(hostname) }, async () => trust);
+  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal not allowed'); }, stop: async () => { throw new Error('Workspace terminal not allowed'); } }, 'machine', root, 'gssh.dev', 'test', { leaseHostedRoute: async (projectId, route) => { leases.set(route.hostname, `${projectId}:${route.machineId}:${route.workspaceId}`); return { ...route, updatedAt: new Date().toISOString() }; }, releaseHostedRoute: async (_project, hostname) => leases.delete(hostname) }, async () => trust);
   const [allocated] = await manager.allocateDefinitionPorts('workspace', { name: 'proc-http', command: process.execPath, args: [], cwd: '.', env: {}, ports: [{ name: 'http', protocol: 'http' }] });
   if (!allocated) throw new Error('Missing allocated port');
-  const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'cache', generation: 1, role: 'cache', checkout: { kind: 'snapshot', commit: 'a'.repeat(40) }, state: 'ready', capabilities: ['proc'], updatedAt: new Date().toISOString() });
+  const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'cache', generation: 1, checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['proc'], updatedAt: new Date().toISOString() });
   const local = { attachment, rootPath: root, executionSecret: 'secret', prerequisitesComplete: true };
   const handler = machineProcessOperation({ services: manager });
   const base = { version: 1, projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'cache', generation: 1, conversationId: 'conversation', conversationKind: 'main', taskId: 'task', requestId: 'request', attemptId: 'attempt', tool: 'proc', deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: 'unsafe' };
@@ -43,6 +44,6 @@ test('proc ready.port becomes a private signed route and stop releases its lease
     expect(leases.has(hostname)).toBe(true);
   } finally {
     await handler(RuntimeToolDispatchSchema.parse({ ...base, args: { op: 'stop', name: 'proc-http' } }), local, AbortSignal.timeout(5000)).catch(() => {});
-    await manager.dispose(); database.close(); await rm(root, { recursive: true, force: true });
+    await manager.dispose(); await rm(root, { recursive: true, force: true });
   }
 }, 30_000);

@@ -1003,23 +1003,9 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.requireProject();
   }
 
-  activateSourceProject(expectedRevision: number, baseBranch: string): CloudProjectSummary {
-    return this.commit('project', null, () => {
-    const current = this.requireProject();
-    if (current.role !== GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('Project is not the built-in GitSpace source');
-    if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
-    if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid source branch');
-    this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,source_json=?,lifecycle=?,revision=revision+1,updated_at=?',
-      baseBranch, JSON.stringify({ ...current.source, branch: baseBranch }), 'active', new Date().toISOString());
-    return this.requireProject();
-    });
-  }
-
   setBaseBranch(expectedRevision: number, baseBranch: string, sourceCommit: string): CloudProjectSummary {
     return this.commit('project', null, () => {
       const current = this.requireProject();
-      const migration = this.legacyMigrationArtifacts(current.id);
-      if (migration && !migration.activated) throw new Error('Base branch is fenced for legacy migration');
       if (current.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
       if (current.lifecycle !== 'active') throw new Error(`Project must be active to change its base branch; it is ${current.lifecycle}`);
       if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
@@ -1197,8 +1183,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }): CloudWorkspaceDefinition {
     return this.commit('workspace', input.id, () => {
     const project = this.requireProject();
-    const migration = this.legacyMigrationArtifacts(input.id);
-    if (migration && !migration.activated) throw new Error('Workspace metadata is fenced for legacy migration');
     if (this.ctx.storage.sql.exec('SELECT workspace_id FROM deleted_workspaces WHERE workspace_id=?', input.id).toArray().length > 0) {
       throw new Error('Deleted workspace identity cannot be republished');
     }
@@ -1257,25 +1241,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  private async assertLegacyWorkspaceWriter(workspaceId: string): Promise<void> {
-    await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).assertLegacyWriter();
-    if (this.legacyMigrationArtifacts(workspaceId)) throw new Error('Legacy workspace writer is retired for migration');
-  }
-
-  async putMachineWorkspace(input: Parameters<ProjectAuthorityDO['putWorkspace']>[0]): Promise<CloudWorkspaceDefinition> {
-    await this.assertLegacyWorkspaceWriter(input.id);
-    return this.putWorkspace(input);
-  }
-
-  async removeMachineWorkspace(workspaceId: string, expectedRevision: number): Promise<boolean> {
-    await this.assertLegacyWorkspaceWriter(workspaceId);
-    return this.removeWorkspace(workspaceId, expectedRevision);
-  }
-
   removeWorkspace(workspaceId: string, expectedRevision: number): boolean {
     return this.commit('workspace', workspaceId, () => {
-    const migration = this.legacyMigrationArtifacts(workspaceId);
-    if (migration && !migration.activated) throw new Error('Workspace metadata is fenced for legacy migration');
     const current = this.ctx.storage.sql.exec<WorkspaceRow>(
       'SELECT * FROM workspaces WHERE workspace_id=?',
       workspaceId,
@@ -1428,52 +1395,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).toArray().map(canonicalSession);
   }
 
-  async putCanonicalSession(input: Omit<CanonicalSession, 'revision' | 'createdAt' | 'updatedAt'> & {
-    expectedRevision: number;
-  }): Promise<CanonicalSession> {
-    await this.assertLegacyWorkspaceWriter(input.workspaceId);
-    const current = this.getCanonicalSession(input.id);
-    if (current && current.workspaceId !== input.workspaceId) await this.assertLegacyWorkspaceWriter(current.workspaceId);
-    return this.commit('session', input.id, () => {
-    if (this.legacyMigrationArtifacts(input.workspaceId)) throw new Error('Legacy session writer is retired for migration');
-    const current = this.getCanonicalSession(input.id);
-    if ((current?.revision ?? 0) !== input.expectedRevision) {
-      throw new Error(`Canonical session revision conflict: expected ${input.expectedRevision}, actual ${current?.revision ?? 0}`);
-    }
-    const now = new Date().toISOString();
-    const revision = (current?.revision ?? 0) + 1;
-    this.ctx.storage.sql.exec(
-      `INSERT INTO canonical_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-       ON CONFLICT(session_id) DO UPDATE SET
-         workspace_id=excluded.workspace_id,
-         omp_session_id=excluded.omp_session_id,
-         machine_id=excluded.machine_id,
-         state=excluded.state,
-         session_object_key=excluded.session_object_key,
-         session_object_hash=excluded.session_object_hash,
-         session_format_version=excluded.session_format_version,
-         activity_json=excluded.activity_json,
-         health_json=excluded.health_json,
-         revision=excluded.revision,
-         updated_at=excluded.updated_at`,
-      input.id,
-      input.workspaceId,
-      input.ompSessionId,
-      input.machineId,
-      input.state,
-      input.sessionObjectKey,
-      input.sessionObjectHash,
-      input.sessionFormatVersion,
-      JSON.stringify(input.activity),
-      JSON.stringify(AgentHealthStateSchema.parse(input.health)),
-      revision,
-      current?.createdAt ?? now,
-      now,
-    );
-    return this.getCanonicalSession(input.id)!;
-    });
-  }
-
   getArtifactScope(scopeId: string): CanonicalArtifactScope | null {
     const row = this.ctx.storage.sql.exec<ArtifactScopeRow>(
       'SELECT * FROM artifact_scopes WHERE scope_id=?',
@@ -1488,59 +1409,10 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).toArray().map(artifactScope);
   }
 
-  /** Account-internal source pin and narrow branch alignment. No machine operation can create or release it. */
-  pinLegacyMigrationArtifacts(input: { operationId: string; branch: string; expectedProjectRevision: number; expectedWorkspaceRevision: number; scope: Omit<CanonicalArtifactScope, 'updatedAt'> }): void {
-    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS legacy_migration_artifacts(workspace_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL, scope_json TEXT NOT NULL, activated INTEGER NOT NULL DEFAULT 0)');
-    this.commit('workspace', input.scope.workspaceId, () => {
-      const project = this.requireProject();
-      const workspace = this.listWorkspaces().find(item => item.id === input.scope.workspaceId);
-      if (!workspace || !isSupportedBranchName(input.branch)) throw new Error('Legacy migration workspace or branch is unavailable');
-      const prior = this.ctx.storage.sql.exec<{ operation_id: string; scope_json: string }>('SELECT operation_id,scope_json FROM legacy_migration_artifacts WHERE workspace_id=?', input.scope.workspaceId).toArray()[0];
-      const scope = JSON.stringify(input.scope);
-      if (prior) {
-        if (prior.operation_id !== input.operationId || prior.scope_json !== scope) throw new Error('Legacy artifact migration identity conflict');
-        return;
-      }
-      if (project.revision !== input.expectedProjectRevision || workspace.revision !== input.expectedWorkspaceRevision) throw new Error('Legacy migration project or workspace metadata revision conflict');
-      if (project.lifecycle !== 'active' || (workspace.lifecycle !== 'active' && workspace.lifecycle !== 'archived')) throw new Error('Legacy migration metadata is not available for passive import');
-      const base = workspace.id === project.id;
-      if (base && project.role === GITSPACE_SOURCE_PROJECT_ROLE && project.baseBranch !== input.branch) throw new Error('Managed GitSpace source base branch cannot be changed by migration');
-      const current = this.getArtifactScope(input.scope.id);
-      if (this.listArtifactScopes().some(scope => scope.workspaceId === input.scope.workspaceId && scope.id !== input.scope.id)) throw new Error('Legacy artifact scope identity differs from canonical workspace scope');
-      if (current && (current.workspaceId !== input.scope.workspaceId || current.generation !== input.scope.generation || current.manifestHash !== input.scope.manifestHash)) throw new Error('Legacy artifact scope changed after checkpoint');
-      const now = new Date().toISOString();
-      if (workspace.branch !== input.branch) this.ctx.storage.sql.exec("UPDATE workspaces SET branch=?,source_ref=CASE WHEN kind='base' AND source_kind='base' THEN ? ELSE source_ref END,revision=revision+1,updated_at=? WHERE workspace_id=?", input.branch, input.branch, now, workspace.id);
-      if (base && project.baseBranch !== input.branch) this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,revision=revision+1,updated_at=?', input.branch, now);
-      if (!current) this.putArtifactScope({ ...input.scope, expectedGeneration: 0 });
-      this.ctx.storage.sql.exec('INSERT INTO legacy_migration_artifacts(workspace_id,operation_id,scope_json) VALUES(?,?,?)', input.scope.workspaceId, input.operationId, scope);
-    });
-  }
-
-  legacyMigrationArtifacts(workspaceId: string): { operationId: string; activated: boolean } | null {
-    if (!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='legacy_migration_artifacts'").toArray().length) return null;
-    const row = this.ctx.storage.sql.exec<{ operation_id: string; activated: number }>('SELECT operation_id,activated FROM legacy_migration_artifacts WHERE workspace_id=?', workspaceId).toArray()[0];
-    return row ? { operationId: row.operation_id, activated: row.activated === 1 } : null;
-  }
-
-  activateLegacyMigrationArtifacts(workspaceId: string, operationId: string): void {
-    const pinned = this.legacyMigrationArtifacts(workspaceId);
-    if (!pinned || pinned.operationId !== operationId) throw new Error('Legacy artifact migration identity conflict');
-    this.ctx.storage.sql.exec('UPDATE legacy_migration_artifacts SET activated=1 WHERE workspace_id=?', workspaceId);
-  }
-
-  async putMachineArtifactScope(input: Parameters<ProjectAuthorityDO['putArtifactScope']>[0]): Promise<CanonicalArtifactScope> {
-    await this.assertLegacyWorkspaceWriter(input.workspaceId);
-    const current = this.getArtifactScope(input.id);
-    if (current && current.workspaceId !== input.workspaceId) await this.assertLegacyWorkspaceWriter(current.workspaceId);
-    return this.putArtifactScope(input);
-  }
-
   putArtifactScope(input: Omit<CanonicalArtifactScope, 'updatedAt'> & {
     expectedGeneration: number;
   }): CanonicalArtifactScope {
     return this.commit('artifact', input.workspaceId, () => {
-    const migration = this.legacyMigrationArtifacts(input.workspaceId);
-    if (migration && !migration.activated) throw new Error('Legacy artifact scope is fenced for migration');
     const current = this.getArtifactScope(input.id);
     if ((current?.generation ?? 0) !== input.expectedGeneration) {
       throw new Error(`Artifact scope generation conflict: expected ${input.expectedGeneration}, actual ${current?.generation ?? 0}`);
@@ -1632,28 +1504,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<ArtifactPromotionRow>(
       'SELECT * FROM artifact_promotions ORDER BY updated_at,operation_id',
     ).toArray().map(artifactPromotion);
-  }
-
-  putArtifactPromotion(input: Omit<CanonicalArtifactPromotion, 'updatedAt'>): CanonicalArtifactPromotion {
-    return this.commit('artifact', input.sourceWorkspaceId, () => {
-    const now = new Date().toISOString();
-    this.ctx.storage.sql.exec(
-      `INSERT INTO artifact_promotions VALUES(?,?,?,?,?,?,?,?)
-       ON CONFLICT(operation_id) DO UPDATE SET
-         committed_base_generation=excluded.committed_base_generation,
-         state=excluded.state,
-         updated_at=excluded.updated_at`,
-      input.id,
-      input.sourceWorkspaceId,
-      input.sourceGeneration,
-      input.expectedBaseGeneration,
-      input.committedBaseGeneration,
-      JSON.stringify(input.paths),
-      input.state,
-      now,
-    );
-    return this.getArtifactPromotion(input.id)!;
-    });
   }
 
   listHostedRoutes(now = new Date().toISOString()): HostedServiceRoute[] {

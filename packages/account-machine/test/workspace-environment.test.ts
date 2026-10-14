@@ -2,16 +2,14 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { GitSpaceDatabase } from '@gitspace/core';
 import { cloudWorkspaceDefinitionSchema, type CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { executionHash, transitionLifecycle, type EnvironmentLifecycleAuthority, type LifecycleActor, type LifecycleMutation, type LifecycleState, type LifecycleRunRecord } from '@gitspace/protocol-environment';
 import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
 import { WorkspaceEnvironmentManager, type EnvironmentLifecycleRunner } from '../src/workspace-environment.js';
+import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
 
 const roots: string[] = [];
-const databases: GitSpaceDatabase[] = [];
 afterEach(() => {
-  for (const database of databases.splice(0)) database.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -62,14 +60,13 @@ function fixture(script: string, phase = 'cloud/provision') {
     version: 1, defaultProfile: 'base', profiles: { base: { secrets: ['TOKEN'], values: ['GATE'] }, ios: {} },
     values: { GATE: { default: join(root, 'gate') } },
   }));
-  const database = new GitSpaceDatabase(join(root, 'database.sqlite'));
-  databases.push(database);
-  const project = database.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(root, 'base') });
-  if (project.status === 'error') throw project.error;
-  const workspace = database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'feature', rootPath: checkout });
-  if (workspace.status === 'error') throw workspace.error;
-  const possessed = database.possessWorkspace('workspace-a', 'machine-a');
-  if (possessed.status === 'error') throw possessed.error;
+  const checkouts: WorkspaceCheckouts = {
+    path: (spaceId) => spaceId === 'workspace-a' ? checkout : null,
+    projectId: (spaceId) => spaceId === 'workspace-a' ? 'project-a' : null,
+    list: () => ['workspace-a'],
+    use: async () => {},
+    changed: async () => {},
+  };
   const ledger = new Ledger();
   ledger.workspaces.push(cloudWorkspaceDefinitionSchema.parse({
     id: 'workspace-a', projectId: 'project-a', kind: 'worktree', name: 'Workspace', branch: 'feature', phase: 'code',
@@ -95,12 +92,11 @@ function fixture(script: string, phase = 'cloud/provision') {
       return { terminalName: 'runner', exitCode: 0, output: results.map((result) => result.output).join(''), steps: results };
     },
   };
-  const managerOptions: ConstructorParameters<typeof WorkspaceEnvironmentManager>[4] = { machineId: 'machine-a', stateRoot: join(root, 'runs') };
-  const manager = new WorkspaceEnvironmentManager(database, {
+  const manager = new WorkspaceEnvironmentManager(checkouts, {
     async listEffectiveSecrets() { return [{ projectId: 'project-a', name: 'TOKEN', revision: 1, updatedAt: '2026-09-01T00:00:00.000Z', updatedBy: 'human-browser', source: 'project' }]; },
     async materializeProjectSecrets() { materializations += 1; return { TOKEN: 'private-provider-credential' }; },
-  }, runner, ledger, managerOptions);
-  return { root, checkout, scriptPath, database, ledger, manager, managerOptions, materializations: () => materializations, beforeRun: (callback: () => void) => { beforeRun = callback; } };
+  }, runner, ledger, { machineId: 'machine-a', stateRoot: join(root, 'runs') });
+  return { root, checkout, scriptPath, ledger, manager, materializations: () => materializations, beforeRun: (callback: () => void) => { beforeRun = callback; } };
 }
 
 async function approveActive(manager: WorkspaceEnvironmentManager, ledger: Ledger) {
@@ -110,31 +106,6 @@ async function approveActive(manager: WorkspaceEnvironmentManager, ledger: Ledge
 }
 
 describe('WorkspaceEnvironmentManager', () => {
-  it('cleans only durable lifecycle scratch after operational rows are removed', async () => {
-    const context = fixture('true\n');
-    await approveActive(context.manager, context.ledger);
-    await context.manager.runPhase('workspace-a', 'cloud/provision');
-    const run = context.ledger.state.runs[0]!;
-    const scratch = join(context.root, 'scratch');
-    const otherScratch = join(context.root, 'other-scratch');
-    mkdirSync(scratch);
-    mkdirSync(otherScratch);
-    const journal = join(context.managerOptions.stateRoot, 'pending.json');
-    writeFileSync(journal, JSON.stringify({ projectId: 'project-a', spaceId: 'workspace-a', runId: 'unknown-run', directory: scratch }));
-    const otherJournal = join(context.managerOptions.stateRoot, 'other.json');
-    writeFileSync(otherJournal, JSON.stringify({ projectId: 'project-a', spaceId: 'workspace-b', runId: 'other-run', directory: otherScratch }));
-    context.database.deleteWorkspace('workspace-a');
-    await expect(context.manager.forgetSpace('workspace-a', 'project-a')).rejects.toThrow('durable');
-    expect(existsSync(scratch)).toBe(true);
-    expect(existsSync(journal)).toBe(true);
-    writeFileSync(journal, JSON.stringify({ projectId: 'project-a', spaceId: 'workspace-a', runId: run.id, directory: scratch }));
-    await context.manager.forgetSpace('workspace-a', 'project-a');
-    expect(existsSync(scratch)).toBe(false);
-    expect(existsSync(journal)).toBe(false);
-    expect(existsSync(otherScratch)).toBe(true);
-    expect(existsSync(otherJournal)).toBe(true);
-  });
-
   it.each([false, true])('uses only recorded source provenance despite changed local HEAD and inherited overrides (legacy=%s)', async (legacy) => {
     const context = fixture('printf "%s" "$GITSPACE_WORKSPACE_SOURCE_COMMIT" > source-commit.txt\n', 'workspace/materialize');
     const git = (...args: string[]) => {
@@ -223,20 +194,6 @@ describe('WorkspaceEnvironmentManager', () => {
     expect(context.ledger.state.bindings).toEqual({ resourceId: 'db-123' });
   });
 
-  it('keeps preparation failures advisory, excludes daemon bootstrap credentials, and retains machine tool installs', async () => {
-    const context = fixture('test -z "$GITSPACE_CONTROL_TOKEN" || exit 8\nprintf tool > "$GITSPACE_MACHINE_TOOLS/bin/tool"\necho failed >&2\nexit 7\n', 'machine/prepare');
-    await approveActive(context.manager, context.ledger);
-    context.ledger.state.policy.automatic = true;
-    context.ledger.state.provisioned = { runId: 'previous-provision', profile: 'base', executionHashes: [], machineId: 'machine-b', completedAt: new Date().toISOString() };
-    const previous = process.env.GITSPACE_CONTROL_TOKEN;
-    process.env.GITSPACE_CONTROL_TOKEN = 'ambient-control-secret';
-    try { await context.manager.prepare('workspace-a'); }
-    finally { if (previous === undefined) delete process.env.GITSPACE_CONTROL_TOKEN; else process.env.GITSPACE_CONTROL_TOKEN = previous; }
-    expect(context.database.getSpace('workspace-a')?.placementState).toBe('open');
-    expect(context.ledger.state.runs[0]).toMatchObject({ status: 'failed', exitCode: 7 });
-    expect(readFileSync(join(context.root, 'runs', 'tools', 'bin', 'tool'), 'utf8')).toBe('tool');
-  });
-
   it('uses user tools and home configuration while managed tools and declared inputs take precedence', async () => {
     const context = fixture(`set -eu
 user-only-tool > inherited-tool.txt
@@ -280,38 +237,6 @@ printf '%s' "$GITSPACE_LIFECYCLE_OUTPUT" > run-output-path.txt
     expect(existsSync(readFileSync(join(context.checkout, 'run-output-path.txt'), 'utf8'))).toBeFalse();
   });
 
-
-  it('retires from saved repository context after eviction without reopening or provisioning the workspace', async () => {
-    const context = fixture('. ./saved-helper.sh\nretire_resource\n', 'cloud/destroy');
-    const resource = join(context.root, 'external-resource');
-    const accidentalProvision = join(context.root, 'must-not-provision');
-    writeFileSync(resource, 'external');
-    mkdirSync(join(context.checkout, '.gitspace', 'lifecycle', 'cloud', 'provision'), { recursive: true });
-    writeFileSync(join(context.checkout, '.gitspace', 'lifecycle', 'cloud', 'provision', '01-create.sh'), `touch '${accidentalProvision}'`);
-    await approveActive(context.manager, context.ledger);
-    const saved = join(context.root, 'saved-repository');
-    mkdirSync(saved);
-    writeFileSync(join(saved, 'saved-helper.sh'), `retire_resource() { rm '${resource}'; }\n`);
-    context.managerOptions.prepareRunner = async () => saved;
-    expect(context.database.releaseWorkspacePossession({ workspaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 1 }).status).toBe('ok');
-    rmSync(context.checkout, { recursive: true });
-    await context.manager.runPhase('workspace-a', 'cloud/destroy');
-    expect(existsSync(resource)).toBeFalse();
-    expect(existsSync(accidentalProvision)).toBeFalse();
-    expect(context.database.getSpace('workspace-a')?.placementState).toBe('closed');
-    expect(existsSync(context.checkout)).toBeFalse();
-  });
-
-  it('reports why a cache setup step failed', async () => {
-    const context = fixture("printf 'toolchain missing' >&2; exit 3\n", 'machine/prepare');
-    await approveActive(context.manager, context.ledger);
-    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache', machineId: 'machine-a', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'feature' }, state: 'attaching', capabilities: [], updatedAt: new Date().toISOString() });
-    const steps: Array<{ phase: string; state: string; error: string | null }> = [];
-    const failure = await context.manager.prepareAttachment({ attachment, rootPath: context.checkout, executionSecret: 'secret', prerequisitesComplete: false }, new AbortController().signal, async (step) => { steps.push({ phase: step.phase, state: step.state, error: step.error }); }).then(() => null, (error: unknown) => error);
-    if (!(failure instanceof Error)) throw new Error('Cache setup unexpectedly succeeded');
-    expect(steps.at(-1)).toEqual({ phase: 'machine/prepare', state: 'failed', error: failure.message });
-  });
-
   it('runs cache setup the cloud approved by content hash, without the cache ever configuring the workspace', async () => {
     const script = "printf ready > prepared.txt\n";
     const context = fixture(script, 'machine/prepare');
@@ -322,35 +247,5 @@ printf '%s' "$GITSPACE_LIFECYCLE_OUTPUT" > run-output-path.txt
     expect(readFileSync(join(context.checkout, 'prepared.txt'), 'utf8')).toBe('ready');
     expect(context.ledger.state.bundleJson).toBeNull();
     expect(context.ledger.state.runs.find((run) => run.phase === 'machine/prepare')).toMatchObject({ status: 'succeeded', attachment: { attachmentId: 'cache', generation: 1 } });
-  });
-
-  it('retries cache setup with the same run identity after its claim was refused for approval', async () => {
-    const script = "printf ready > prepared.txt\n";
-    const context = fixture(script, 'machine/prepare');
-    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache', machineId: 'machine-a', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'feature' }, state: 'attaching', capabilities: [], updatedAt: new Date().toISOString() });
-    const local = { attachment, rootPath: context.checkout, executionSecret: 'secret', prerequisitesComplete: false };
-    await expect(context.manager.prepareAttachment(local, new AbortController().signal)).rejects.toThrow('approval');
-    expect(context.ledger.state.runs).toEqual([]);
-    context.ledger.state.approvals = [{ scope: 'workspace', executionHash: await executionHash({ kind: 'script', command: script }), approvedBy: 'human-browser', approvedAt: new Date().toISOString() }];
-    await context.manager.prepareAttachment(local, new AbortController().signal);
-    expect(readFileSync(join(context.checkout, 'prepared.txt'), 'utf8')).toBe('ready');
-  });
-
-  it('retries cache setup after a claim request that never reached the authority', async () => {
-    const script = "printf ready > prepared.txt\n";
-    const context = fixture(script, 'machine/prepare');
-    context.ledger.state.approvals = [{ scope: 'workspace', executionHash: await executionHash({ kind: 'script', command: script }), approvedBy: 'human-browser', approvedAt: new Date().toISOString() }];
-    const mutate = context.ledger.mutateLifecycleState.bind(context.ledger);
-    let delivered = false;
-    context.ledger.mutateLifecycleState = async (projectId, spaceId, input) => {
-      if (input.op === 'claim' && !delivered) { delivered = true; throw new Error('Connection reset before the claim was delivered'); }
-      return mutate(projectId, spaceId, input);
-    };
-    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache', machineId: 'machine-a', generation: 1, role: 'cache', checkout: { kind: 'shared', branch: 'feature' }, state: 'attaching', capabilities: [], updatedAt: new Date().toISOString() });
-    const local = { attachment, rootPath: context.checkout, executionSecret: 'secret', prerequisitesComplete: false };
-    await expect(context.manager.prepareAttachment(local, new AbortController().signal)).rejects.toThrow('Connection reset');
-    await context.manager.prepareAttachment(local, new AbortController().signal);
-    expect(readFileSync(join(context.checkout, 'prepared.txt'), 'utf8')).toBe('ready');
-    expect(context.ledger.state.runs.find((run) => run.phase === 'machine/prepare')?.status).toBe('succeeded');
   });
 });

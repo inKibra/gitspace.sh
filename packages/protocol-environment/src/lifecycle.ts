@@ -59,8 +59,7 @@ export function skippedInteractiveScriptLine(script: string): string {
 
 export function authorizeLifecycleMachineMutation(input: LifecycleMutation, facts: {
   machineId: string; projectId: string; machineOnline: boolean;
-  placement: { projectId: string; machineId: string | null; generation: number; state: string } | null;
-  attachment?: { attachmentId: string; generation: number; machineId: string; projectId: string; workspaceId: string; role: string; state: string } | null;
+  attachment?: { attachmentId: string; generation: number; machineId: string; projectId: string; workspaceId: string; state: string } | null;
 }): void {
   if (input.op === 'approval' || input.op === 'abandon') throw new EnvironmentError('PermissionDenied', 'Execution approval and destruction-confirmed recovery require account lifecycle control');
   if (input.op !== 'claim') return;
@@ -74,8 +73,7 @@ export function authorizeLifecycleMachineMutation(input: LifecycleMutation, fact
   }
   const detachedPreparation = input.generation === null && (input.phase === 'machine/prepare' || input.phase === 'checks');
   if (input.phase.startsWith('cloud/') || detachedPreparation) return;
-  const placement = facts.placement;
-  if (!placement || placement.projectId !== facts.projectId || placement.machineId !== facts.machineId || placement.generation !== input.generation || !['open', 'opening', 'closing'].includes(placement.state)) throw new EnvironmentError('PermissionDenied', 'Lifecycle execution requires the current authorized workspace placement', { machineId: facts.machineId, projectId: facts.projectId });
+  throw new EnvironmentError('PermissionDenied', 'Lifecycle execution requires a checkout attachment on this machine', { machineId: facts.machineId, projectId: facts.projectId });
 }
 export interface LifecycleTransition {
   state: LifecycleState;

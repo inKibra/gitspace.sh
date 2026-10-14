@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { PassThrough } from 'node:stream';
 import { BrowserConnection } from './browser-cdp.js';
-import { ExecutorEffectUncertain } from './commands.js';
+import { BrowserEffectUncertain } from './browser-cdp.js';
 
 test('private CDP pipe decodes fragmented UTF-8 and multiple null-delimited messages', async () => {
   const input = new PassThrough(), output = new PassThrough();
@@ -23,7 +23,7 @@ test('private CDP disconnect fences an in-flight effect rather than reporting a 
   const effect = connection.send('Input.dispatchMouseEvent', { type: 'mousePressed' });
   const rejected = effect.catch(error => error);
   output.emit('end');
-  expect(await rejected).toBeInstanceOf(ExecutorEffectUncertain);
+  expect(await rejected).toBeInstanceOf(BrowserEffectUncertain);
   await expect(connection.send('Input.dispatchMouseEvent')).rejects.toThrow('stale');
   await connection.close(); input.destroy(); output.destroy();
 });

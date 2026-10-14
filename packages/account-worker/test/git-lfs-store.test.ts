@@ -89,48 +89,6 @@ describe('account encrypted LFS ownership', () => {
 
     expect(await readLfs(store, object)).toBeNull();
   });
-  it('recovers portable acceptance and releases the real capture pin without machine cleanup', async () => {
-    const { store, authority, projectId, publicationId } = await fixture();
-    const bytes = new TextEncoder().encode('portable only object');
-    const object = await objectFor(bytes);
-    await store.put(object, lfsBytes(bytes));
-    const identity = { projectId, spaceId: crypto.randomUUID(), machineId: 'portable-machine' };
-    const captureId = `${identity.machineId}:portable:${identity.spaceId}:1`;
-    await authority.lfsPin({ publicationId: captureId, objects: [object] });
-    await authority.lfsReleasePublication(publicationId);
-    const placement = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.spaceId}`);
-    await placement.bootstrap(identity);
-    await placement.beginClose({ ...identity, expectedGeneration: 1 });
-    const manifest = await persistPortableCheckpoint(projectId, identity.spaceId, 1, { objects: [{ ...object, source: 'r2' }], heldBack: [] });
-    const input = { ...identity, expectedGeneration: 1, revision: 1, ...manifest };
-    expect((await placement.commitClosed({ ...input, machineId: 'other-machine' })).status).toBe('error');
-    const retain = vi.spyOn(ProjectAuthorityDO.prototype, 'lfsRetain').mockRejectedValueOnce(new Error('Retain interrupted'));
-    const release = vi.spyOn(ProjectAuthorityDO.prototype, 'lfsReleasePublication').mockRejectedValueOnce(new Error('Release interrupted'));
-    try {
-      await runInDurableObject(placement, async instance => {
-        await expect(instance.commitClosed(input)).rejects.toThrow('Retain interrupted');
-      });
-      expect(await readLfs(store, object)).toEqual(bytes);
-      await runInDurableObject(placement, async instance => {
-        await expect(instance.alarm()).rejects.toThrow('Release interrupted');
-      });
-      await runInDurableObject(authority, (_instance, state) => {
-        const ledger = new GitLfsRetention(state.storage);
-        ledger.reconcile(new Set());
-        expect(ledger.candidates()).toEqual([]);
-      });
-      // A cold authority retries the persisted acceptance; no machine callback or release is made.
-      await runInDurableObject(placement, async (_instance, state) => {
-        const recovered = new SpaceAuthorityDO(state, env);
-        await recovered.alarm();
-      });
-      expect(await readLfs(store, object)).toEqual(bytes);
-      await authority.lfsOriginConfirmed({ origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] });
-      await authority.lfsCollect();
-      expect(await readLfs(store, object)).toBeNull();
-    } finally { retain.mockRestore(); release.mockRestore(); }
-  });
-
   it('fences interrupted collection until deletion is retried, before admitting another publisher', async () => {
     const { store, authority, publicationId } = await fixture();
     const bytes = new TextEncoder().encode('interrupted delete');

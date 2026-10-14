@@ -3,14 +3,12 @@ import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { GitSpaceDatabase, LocalArtifactResolver, MemoryArtifactObjectStore } from '@gitspace/core';
 import type { ControlOperation } from '@gitspace/protocol';
 import { RuntimeAttachmentSchema, type RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
 import { CloudRuntimeClient } from '../src/cloud-runtime-client.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { createMachineExecutor, type MachineExecutorRuntime } from '../src/runtime-executor.js';
 import { ManualWorktreeClock } from './git-worktree-clock.js';
-import { daemonClientForProject } from '@gitspace/supervisor';
 
 async function git(cwd: string, ...args: string[]) {
   const child = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' });
@@ -30,29 +28,22 @@ async function watcherProof(run: (proof: {
   event(path: string): Promise<void>;
   duringCapture(action: () => Promise<void>): void;
   waitForFinal(): Promise<void>;
-}) => Promise<void>, localWorkOptIn = true) {
+}) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-watcher-proof-'));
-  const checkout = join(root, 'checkout');
-  const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+  const checkout = join(root, 'spaces', 'project', 'workspace');
   let runtime: MachineExecutorRuntime | undefined;
   const clock = new ManualWorktreeClock();
   let event: (path: string) => Promise<void> = async () => { throw new Error('Watcher is not installed'); };
   let watchers = 0;
   try {
-    await mkdir(checkout);
+    await mkdir(checkout, { recursive: true });
     await git(checkout, 'init', '-b', 'main');
     await git(checkout, 'config', 'user.name', 'Watcher proof');
     await git(checkout, 'config', 'user.email', 'proof@example.invalid');
     await writeFile(join(checkout, 'tracked.txt'), 'base\n');
     await git(checkout, 'add', '.');
     await git(checkout, 'commit', '-m', 'base');
-    database.createProject({ id: 'project', name: 'Project', repositoryPath: join(root, 'base') }).unwrap();
-    database.createWorkspace({ id: 'workspace', projectId: 'project', name: 'Workspace', rootPath: checkout, branch: 'main' }).unwrap();
-    database.possessSpace('workspace', 'machine').unwrap();
-    const owned = database.getSpace('workspace');
-    if (!owned) throw new Error('Owned workspace missing');
-    let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'watch-cache', generation: 0, ownershipGeneration: owned.generation, role: 'cache', checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
-    attachment.cache = { state: 'live', platform: process.platform, activity: [], lastActivityAt: new Date().toISOString(), pausedAt: null, reclaimAt: null, lastSyncAt: null, localWorkOptIn, reclaimBlocked: null, setup: [] };
+    let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'watch-cache', generation: 0, checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
     let checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null = null;
     let captureAction: (() => Promise<void>) | undefined;
     const uploads: string[][] = [], publications: string[][] = [];
@@ -72,7 +63,7 @@ async function watcherProof(run: (proof: {
           return schema.parse({ assignments: [{ grant: { attachment, executionSecret: 'proof-secret' }, source: null, checkpoint }] });
         }
         if (operation === 'runtime.attachment.cache.request') {
-          attachment = { ...attachment, state: 'attaching', cacheAction: { requestId: z.string().parse(payload.requestId), action: 'setup', status: 'requested', error: null } };
+          attachment = { ...attachment, state: 'attaching' };
           return schema.parse({ attachment });
         }
         if (operation === 'runtime.attachment.ready') { attachment = { ...attachment, state: 'ready' }; return schema.parse({ attachment }); }
@@ -94,10 +85,9 @@ async function watcherProof(run: (proof: {
     runtime = await createMachineExecutor({
       checkpointClock: clock,
       checkpointEvents: (_root, changed) => { watchers++; event = changed; return () => { watchers--; }; },
-      environmentRoot: join(root, 'runtime'), machineId: 'machine', database,
-      artifacts: new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32)),
+      environmentRoot: join(root, 'runtime'), managedSpaceRoot: join(root, 'spaces'), machineId: 'machine',
       cloud: new LocalCloud({ baseUrl: 'https://proof.invalid', userId: 'account', machineId: 'machine', signingPrivateKey: new Uint8Array(32) }),
-      gitRemote: new LocalGitRemote({ credentials: unavailable }), prepareAttachment: async () => {}, originGitEnvironment: unavailable,
+      gitRemote: new LocalGitRemote({ credentials: unavailable }), prepareAttachment: async () => {},
       lfs: { read: lfs, publish: lfs },
       commitSnapshot: async (_local, candidate, previous) => {
         const worktreeCommit = await git(checkout, 'commit-tree', candidate.worktreeTree,
@@ -116,71 +106,8 @@ async function watcherProof(run: (proof: {
     await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, waitForFinal: async () => {
       await clock.until(final.promise);
     } });
-  } finally { await runtime?.close(); database.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await runtime?.close(); await rm(root, { recursive: true, force: true }); }
 }
-
-test('idle canonical cache does not watch or publish unrelated human edits', async () => {
-  await watcherProof(async ({ checkout, runtime, clock, watcherCount, publications }) => {
-    expect(watcherCount()).toBe(0);
-    await writeFile(join(checkout, 'tracked.txt'), 'outside GitSpace\n');
-    await clock.until(runtime.sync());
-    expect(publications).toEqual([]);
-  }, false);
-});
-
-test('GitSpace terminal lifetime enables human watch and closing returns to grace without watch', async () => {
-  await watcherProof(async ({ checkout, runtime, clock, watcherCount }) => {
-    const client = await daemonClientForProject(checkout);
-    await client.request({ op: 'start', owner: 'gitspace:workspace:user', spec: { name: 'cache-terminal-proof', application: '/bin/sh', args: ['-c', 'read value'], env: {}, cwd: checkout, pty: true, restart: 'no', persist: false, detached: false } });
-    try {
-      await clock.until(runtime.sync());
-      expect(watcherCount()).toBe(1);
-      expect(runtime.journal.attachments()[0]?.attachment.cache?.activity).toContainEqual({ reason: 'terminal', name: 'cache-terminal-proof' });
-    } finally { await client.request({ op: 'stop', name: 'cache-terminal-proof', timeoutMs: 5000 }); }
-    await clock.until(runtime.sync());
-    expect(watcherCount()).toBe(0);
-    expect(runtime.journal.attachments()[0]?.attachment.cache?.activity).toEqual([{ reason: 'grace', name: 'Recent GitSpace activity' }]);
-  }, false);
-});
-
-test('live supervised proc edits publish periodically without enabling human watcher', async () => {
-  await watcherProof(async ({ checkout, runtime, clock, watcherCount, publications }) => {
-    const client = await daemonClientForProject(checkout);
-    await client.request({ op: 'start', owner: 'runtime:watch-cache:0', spec: { name: 'cache-proc-proof', application: '/bin/sh', args: ['-c', 'printf process-edit > tracked.txt; read value'], env: {}, cwd: checkout, pty: true, restart: 'no', persist: false, detached: false } });
-    try {
-      await client.request({ op: 'wait', name: 'cache-proc-proof', for: 'ready', timeoutMs: 1000 });
-      await clock.until(runtime.sync());
-      expect(watcherCount()).toBe(0);
-      expect(publications).toContainEqual(['tracked.txt:process-edit']);
-      expect(runtime.journal.attachments()[0]?.attachment.cache?.activity).toContainEqual({ reason: 'proc', name: 'cache-proc-proof' });
-    } finally { await client.request({ op: 'stop', name: 'cache-proc-proof', timeoutMs: 5000 }); }
-  }, false);
-});
-
-test('expired cache grace pauses cloud following while retaining its canonical folder', async () => {
-  await watcherProof(async ({ checkout, runtime, clock, watcherCount, publications }) => {
-    const local = runtime.journal.attachments()[0];
-    if (!local?.attachment.cache) throw new Error('Missing canonical cache');
-    runtime.journal.installAttachment({ ...local, attachment: { ...local.attachment, cache: { ...local.attachment.cache, lastActivityAt: new Date(Date.now() - 901_000).toISOString() } } });
-    await clock.until(runtime.sync());
-    expect(runtime.journal.attachments()[0]?.attachment.cache?.state).toBe('paused');
-    expect(watcherCount()).toBe(0);
-    expect(await Bun.file(join(checkout, 'tracked.txt')).text()).toBe('base\n');
-    expect(publications).toEqual([]);
-    const paused = runtime.journal.attachments()[0];
-    if (!paused) throw new Error('Missing paused cache');
-    // A pause heartbeat can finish while an older ready assignment is still in flight.
-    runtime.journal.installAttachment({ ...paused, attachment: { ...paused.attachment, state: 'attaching' } });
-    await clock.until(runtime.sync());
-    expect(runtime.journal.attachments()[0]?.attachment.cache?.state).toBe('paused');
-    expect(runtime.journal.attachments()[0]?.attachment.state).toBe('attaching');
-    expect(runtime.journal.attachments()[0]?.attachment.cache?.lastActivityAt).toBe(paused.attachment.cache?.lastActivityAt);
-    expect(watcherCount()).toBe(0);
-    await clock.until(runtime.useWorkspace('workspace'));
-    expect(runtime.journal.attachments()[0]?.attachment.state).toBe('ready');
-    expect(runtime.journal.attachments()[0]?.attachment.cache?.state).toBe('live');
-  }, false);
-});
 
 test('manual watcher waits reject missing completion and missing timers within a deadline', async () => {
   const clock = new ManualWorktreeClock();

@@ -398,7 +398,7 @@ export async function changeAgentWorkspace(env: Env, identity: RuntimeIdentity, 
   const userId = env.ACCOUNT_ID;
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${identity.projectId}`);
   if (request.method === 'create') {
-    const { method: _method, workspaceId: _workspaceId, on: _on, at: _at, goal, workflow, rubric, ...workspace } = request;
+    const { method: _method, workspaceId: _workspaceId, on: _on, goal, workflow, rubric, ...workspace } = request;
     const created = await createCloudWorkspace(env, userId, { ...workspace, projectId: identity.projectId });
     const owned = { projectId: identity.projectId, spaceId: created.workspace.id };
     const context = env.SPACE_CONTEXT.getByName(JSON.stringify([userId, owned.projectId, owned.spaceId]));

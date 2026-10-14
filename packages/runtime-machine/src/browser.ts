@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import type { ExecutorContent } from './tools.js';
 import type { LocalAttachment } from './journal.js';
-import { ExecutorEffectUncertain } from './commands.js';
+import { BrowserEffectUncertain } from './browser-cdp.js';
 import { BrowserConnection, CdpEvent } from './browser-cdp.js';
 import type { RuntimeBrowserRelay, RuntimeBrowserRelayChannel } from './browser-relay-transport.js';
 import { BrowserOutputStore, boundedText } from './browser-output.js';
@@ -65,17 +65,17 @@ export class MachineBrowser {
   }
   private async stopManaged(record: ManagedRecord, path: string) {
     const rel = relative(resolve(this.options.directory, 'profiles'), resolve(record.profile));
-    if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new ExecutorEffectUncertain('Managed profile identity invalid');
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new BrowserEffectUncertain('Managed profile identity invalid');
     const client = await this.supervisor();
     const listed = await client.request({ op: 'list' });
-    if (listed.op !== 'list') throw new ExecutorEffectUncertain('Supervisor inventory unavailable');
+    if (listed.op !== 'list') throw new BrowserEffectUncertain('Supervisor inventory unavailable');
     if (!listed.daemons.some(daemon => daemon.name === record.spec.name)) {
-      if (record.identity && await sameProcess(record.identity)) throw new ExecutorEffectUncertain('Unknown supervisor launch still has a live process');
+      if (record.identity && await sameProcess(record.identity)) throw new BrowserEffectUncertain('Unknown supervisor launch still has a live process');
       await rm(path, { force: true });
       return;
     }
     const described = await client.request({ op: 'describe', name: record.spec.name });
-    if (described.op !== 'describe' || described.daemon.owner !== record.owner || canonicalJson(described.spec) !== canonicalJson(DaemonSpecSchema.parse({ ...record.spec, visibility: 'private', envNames: Object.keys(record.spec.env) }))) throw new ExecutorEffectUncertain('Managed browser supervisor identity differs from launch record');
+    if (described.op !== 'describe' || described.daemon.owner !== record.owner || canonicalJson(described.spec) !== canonicalJson(DaemonSpecSchema.parse({ ...record.spec, visibility: 'private', envNames: Object.keys(record.spec.env) }))) throw new BrowserEffectUncertain('Managed browser supervisor identity differs from launch record');
     if (!['exited', 'failed'].includes(described.daemon.state) && record.identity && await sameProcess(record.identity)) {
       // Chrome flushes its profile on Browser.close. Terminating the process
       // directly can lose recently written persistent cookies and preferences.
@@ -91,7 +91,7 @@ export class MachineBrowser {
     }
     const stopped = await client.request({ op: 'stop', name: record.spec.name, timeoutMs: 5000 });
     const confirmed = await client.request({ op: 'describe', name: record.spec.name });
-    if (stopped.op !== 'stop' || confirmed.op !== 'describe' || stopped.daemon.id !== described.daemon.id || confirmed.daemon.id !== described.daemon.id || !['exited', 'failed'].includes(confirmed.daemon.state) || confirmed.daemon.pid !== null) throw new ExecutorEffectUncertain('Managed browser cleanup unconfirmed');
+    if (stopped.op !== 'stop' || confirmed.op !== 'describe' || stopped.daemon.id !== described.daemon.id || confirmed.daemon.id !== described.daemon.id || !['exited', 'failed'].includes(confirmed.daemon.state) || confirmed.daemon.pid !== null) throw new BrowserEffectUncertain('Managed browser cleanup unconfirmed');
     await rm(path, { force: true });
   }
   /** Individual uncertain records remain visible; one broken record never blocks startup. */
@@ -164,9 +164,9 @@ export class MachineBrowser {
     try {
       const supervisor = await this.supervisor();
       const started = await supervisor.startPrivatePipe({ op: 'start', owner: record.owner, spec: record.spec });
-      if (started.op !== 'start' || !started.daemon.pid) throw new ExecutorEffectUncertain('Browser launch identity unavailable');
+      if (started.op !== 'start' || !started.daemon.pid) throw new BrowserEffectUncertain('Browser launch identity unavailable');
       const identity = await processIdentity(started.daemon.pid);
-      if (!identity) throw new ExecutorEffectUncertain('Browser launch process identity unavailable');
+      if (!identity) throw new BrowserEffectUncertain('Browser launch process identity unavailable');
       record.identity = identity;
       await durableWrite(path, record);
       signal.throwIfAborted();
@@ -369,7 +369,7 @@ export class MachineBrowser {
         try {
           if (grant.source === 'relay') await channel.close();
           else { await channel.send('Target.closeTarget', { targetId }); const profile = profileKey && this.profiles.get(profileKey); if (profile) profile.tabs--; }
-        } catch (cleanup) { throw new ExecutorEffectUncertain('Browser attach cleanup unconfirmed', { cause: cleanup }); }
+        } catch (cleanup) { throw new BrowserEffectUncertain('Browser attach cleanup unconfirmed', { cause: cleanup }); }
         throw error;
       }
       const opened: Tab = { grant, scope: this.scope(dispatch), channel, targetId, sessionId: attached.sessionId, refs: new Map(), document: 0, stale: false, profileKey, unsubscribe: () => {}, timer: setTimeout(() => { void this.serial(this.profileKey(dispatch), () => this.expireGroup(grant.groupId, signed.signature)).catch(() => {}); }, Math.max(1, Date.parse(grant.expiresAt) - Date.now())) };
@@ -384,7 +384,7 @@ export class MachineBrowser {
       });
       this.tabs.set(targetId, opened); tab = opened;
       try { await channel.send('Page.enable', {}, opened.sessionId); await channel.send('DOM.enable', {}, opened.sessionId); }
-      catch (error) { try { await this.closeTab(opened, true); } catch (cleanup) { throw new ExecutorEffectUncertain('Browser open cleanup unconfirmed', { cause: cleanup }); } throw error; }
+      catch (error) { try { await this.closeTab(opened, true); } catch (cleanup) { throw new BrowserEffectUncertain('Browser open cleanup unconfirmed', { cause: cleanup }); } throw error; }
       if (grant.source === 'headless' && this.options.services) {
         const services = this.options.services;
         opened.servicePolicy = new BrowserServicePolicy(hostname => services.workspaceServiceHostname(hostname, grant));
@@ -421,7 +421,7 @@ export class MachineBrowser {
         selectAllModifier: process.platform === 'darwin' ? 4 : 2,
       });
     } catch (error) {
-      uncertain = effect && (error instanceof ExecutorEffectUncertain || signal.aborted);
+      uncertain = effect && (error instanceof BrowserEffectUncertain || signal.aborted);
       if (uncertain) { tab.stale = true; tab.reason = 'Browser effect uncertain'; tab.refs.clear(); }
       throw error;
     } finally { if (effect && !uncertain) { await rm(fencePath, { force: true }); this.records.delete(fenceId); } }

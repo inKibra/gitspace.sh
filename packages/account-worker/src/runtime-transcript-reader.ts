@@ -77,8 +77,9 @@ function contentEnd(text: string, offset: number, limit: number, byteBudget: num
 }
 
 /** Pages and content results have a 64 KiB serialized budget. Large events remain
- * completely readable through explicit UTF-16 JSON-text offsets. Each content
- * request still scans the transcript and parses/serializes the entire event. */
+ * completely readable through explicit UTF-16 JSON-text offsets. The caller requests
+ * only the ordinal range it needs (ordinals are `entryId * 1024 + n`), so a content
+ * read streams one Pi entry and a page read starts at its offset. */
 export async function readRuntimeHistory(response: Response, request: RuntimeHistoryReadArguments, workspaceId: string): Promise<RuntimeHistoryReadResult> {
   const items: HistoryPageItem[] = [];
   let bytes = 128; // Reserve the page envelope and either numeric or null cursor.

@@ -4,14 +4,14 @@ import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentStat
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { profileApprovalMode } from '@gitspace/protocol/inference';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, ExecutorNotConnected, isAttachmentOnline, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
 import { createCloudRuntimeMcp } from './runtime-mcp.js';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
-import { RuntimeHistoryIndex } from '@gitspace/runtime-core/history';
+import { searchHistory, type RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { readRuntimeTranscript, readRuntimeHistory } from './runtime-transcript-reader.js';
 import type { RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
 import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
@@ -181,7 +181,12 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     },
   });
   const active = new Map<string, AbortController>();
-  const history = new RuntimeHistoryIndex(ctx.storage.sql);
+  // Reclaim the retired history search copy; history tools read Pi entries directly.
+  ctx.storage.sql.exec('DROP TABLE IF EXISTS gitspace_history_fragments');
+  ctx.storage.sql.exec('DROP TABLE IF EXISTS gitspace_history_payload_parts');
+  ctx.storage.sql.exec('DROP TABLE IF EXISTS gitspace_history_events');
+  ctx.storage.sql.exec('DROP TABLE IF EXISTS gitspace_history_fts');
+  ctx.storage.sql.exec('DROP TABLE IF EXISTS gitspace_history_indexed');
   async function enabledSkills() {
     const skills = await env.USER_SKILLS.getByName(env.ACCOUNT_ID).list();
     const base = identity.workspaceId === baseWorkspaceId;
@@ -223,7 +228,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     const settle = (result: RuntimeToolResult) => { selection!.result = result; selections.save(input.attemptId, selection!); return result; };
     const remaining = Date.parse(deadline) - Date.now();
     if (remaining <= 0) {
-      if (dispatch) throw new Error('Admitted executor effect remains pending after deadline');
+      if (dispatch) return settle(interrupted(input, 'Execution deadline expired; the outcome on the machine is unknown.'));
       return settle(interrupted(input, 'Execution deadline expired before dispatch.'));
     }
     const timeout = setTimeout(() => controller.abort(new Error('Execution deadline expired')), remaining);
@@ -235,30 +240,19 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (!dispatch) {
         const runtime = options.runtime();
         if (!(await runtime.snapshot()).conversations.some(item => item.id === input.conversationId)) throw new Error('Conversation is not owned by this workspace');
-        const selected = selectedSnapshot?.attachment ?? await selections.select(input, selection, controller.signal);
-        if (!selected) throw new Error('No machine attached: the admitted execution cache is unavailable.');
-        const snapshot = selectedSnapshot?.checkpoint ?? (selected.role === 'cache' ? await runtime.cloudFiles.initializeSnapshot() : undefined);
-        if ((selected.role === 'cache') && !snapshot) throw new Error('Cloud working copy is unavailable');
+        const selected = selectedSnapshot?.attachment ?? await selections.cache(input.args);
+        const snapshot = selectedSnapshot?.checkpoint ?? await runtime.cloudFiles.initializeSnapshot();
+        if (!snapshot) throw new Error('Cloud working copy is unavailable');
         const tool = input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool;
-        dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, conversationKind: conversation.root ? 'main' : 'subagent', taskId: input.taskId, machineId: selected.machineId, attachmentId: selected.attachmentId, generation: selected.generation, requestId: input.requestId, attemptId: input.attemptId, ...(snapshot ? { snapshot } : {}), tool, args: input.args, deadlineAt: deadline, replay: input.replay });
+        dispatch = RuntimeToolDispatchSchema.parse({ version: 1, ...identity, conversationId: input.conversationId, conversationKind: conversation.root ? 'main' : 'subagent', taskId: input.taskId, machineId: selected.machineId, attachmentId: selected.attachmentId, generation: selected.generation, requestId: input.requestId, attemptId: input.attemptId, snapshot, tool, args: input.args, deadlineAt: deadline, replay: input.replay });
         ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(dispatch));
       } else if (dispatch.requestId !== input.requestId || dispatch.conversationId !== input.conversationId || dispatch.taskId !== input.taskId || dispatch.replay !== input.replay || dispatch.tool !== (input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool) || canonicalJson(dispatch.args) !== canonicalJson(input.args)) {
         throw new Error('Attempt identity was reused for a different operation');
       }
       return settle(await options.runtime().attachments.execute(dispatch, controller.signal));
     } catch (error) {
-      if (controller.signal.aborted) {
-        const saved = savedDispatch(input.attemptId);
-        if (saved) await controlAttempt(saved.attemptId, 'runtime_cancel').catch(() => null);
-        if (saved) throw error;
-        return settle(interrupted(input, 'Execution cancelled before dispatch.'));
-      }
-      if (error instanceof ExecutorNotConnected) {
-        // The relay proved non-delivery and the store released the attempt: no effect remains to reconcile.
-        ctx.storage.sql.exec('DELETE FROM runtime_host_dispatch WHERE id=?', input.attemptId);
-        return settle(failed(input, error));
-      }
-      if (savedDispatch(input.attemptId)) throw error;
+      // Aborting the request stops the command on the machine.
+      if (controller.signal.aborted) return settle(interrupted(input, savedDispatch(input.attemptId) ? 'Execution cancelled; the machine stopped the command.' : 'Execution cancelled before dispatch.'));
       return settle(failed(input, error));
     } finally {
       clearTimeout(timeout);
@@ -266,13 +260,13 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       active.delete(input.attemptId);
     }
   }
-  async function controlAttempt(attemptId: string, tool: 'runtime_cancel' | 'runtime_reconcile') {
+  /** A dispatched command that is not running and has no recorded result was cut off by a restart: its outcome is unknown. */
+  function attemptOutcome(attemptId: string): RuntimeToolResult | null {
     const original = savedDispatch(attemptId);
-    if (!original) return null;
-    // Its attachment was lost: the attempt already ended interrupted and its machine can no longer be asked.
-    const lost = options.runtime().attachments.lossResult(attemptId);
-    if (lost) return lost;
-    return tool === 'runtime_cancel' ? options.runtime().attachments.cancel(original) : options.runtime().attachments.reconcile(original);
+    if (!original || active.has(attemptId)) return null;
+    const settled = selections.load(attemptId)?.result;
+    if (settled) return RuntimeToolResultSchema.parse(settled);
+    return interrupted(original, `Machine ${original.machineId} did not return a result before GitSpace restarted; the outcome is unknown.`);
   }
   async function cancelLifecycle(dispatch: RuntimeToolDispatch) {
     const request = RuntimeLifecycleDispatchArgumentsSchema.parse(dispatch.args);
@@ -452,7 +446,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       input.signal?.throwIfAborted();
       if (input.tool === 'grep') {
         const args = RuntimeGrepArgumentsSchema.parse(input.args);
-        if (args.on !== undefined || args.at !== undefined) return executeMachine(input);
+        if (args.on !== undefined) return executeMachine(input);
         const runtime = options.runtime();
         if (!runtime.cloudFiles.hasAttempt(input.attemptId)) {
           const cacheResult = await runtime.cloudFiles.withCurrentSnapshot(async checkpoint => {
@@ -496,17 +490,16 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (args.op === 'detach') {
           const request = args;
           const attachment = options.runtime().attachments.list().find(item => item.attachmentId === request.attachmentId && item.generation === request.generation);
-          if (!attachment) throw new Error('Attachment authority does not match cleanup request');
-          return completed(input, options.runtime().attachments.detach({ ...attachment, state: 'draining' }));
+          if (!attachment) throw new Error(`Attachment ${request.attachmentId} generation ${request.generation} is not attached to this workspace`);
+          const detached = options.runtime().attachments.detach(attachment);
+          options.runtime().publish();
+          return completed(input, detached);
         }
-        if (args.op === 'setDefault') {
-          await options.runtime().setExecutionMachine(args.machineId);
-          return completed(input, { defaultMachineId: options.runtime().defaultExecutionMachine() });
-        }
-        // Lost and silent attachments are not machines an agent can use.
+        // Offline attachments are not machines an agent can use.
         const now = Date.now();
         return completed(input, options.runtime().attachments.list().filter(item => isAttachmentOnline(item, now)));
       }
+      if (input.tool === 'workspace_status') return completed(input, await options.runtime().status());
       if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind') return options.runtime().invokeConversationTool(input);
       if (input.tool === 'environment') return environment(input);
       if (input.tool === 'sync') return sync(input);
@@ -551,30 +544,30 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if (input.tool === 'history_search' || input.tool === 'history_read') {
         const args = object.parse(input.args);
+        const transcript = async (workspaceId: string, conversationId: string, range: RuntimeTranscriptRange) => {
+          if (workspaceId === identity.workspaceId) return options.runtime().transcript(conversationId, 'ndjson', range);
+          const response = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`).runtimeTranscript({ ...RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId }), conversationId }, 'ndjson', range);
+          return response;
+        };
         if (input.tool === 'history_read') {
           const request = RuntimeHistoryReadArgumentsSchema.parse(args);
           const workspaceId = request.workspaceId ?? identity.workspaceId;
           if (workspaceId !== identity.workspaceId && workspaceId !== identity.projectId && !await authority.getWorkspace(workspaceId)) throw new Error('History workspace is outside this project');
-          const response = workspaceId === identity.workspaceId
-            ? await options.runtime().transcript(request.conversationId, 'ndjson')
-            : await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`).runtimeTranscript({ ...RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId }), conversationId: request.conversationId }, 'ndjson');
-          return completed(input, await readRuntimeHistory(response, request, workspaceId));
+          // Ordinals are entryId*1024+n: the runtime reads only the requested entries.
+          const range = request.mode === 'content' ? { from: request.ordinal, before: request.ordinal + 1 } : { from: request.offset };
+          return completed(input, await readRuntimeHistory(await transcript(workspaceId, request.conversationId, range), request, workspaceId));
         }
         const request = RuntimeHistorySearchArgumentsSchema.parse(args);
         const workspaceIds = request.scope === 'workspace' ? [identity.workspaceId]
           : [...new Set([identity.projectId, ...(await authority.listWorkspaces()).map(workspace => workspace.id)])];
-        for (const workspaceId of workspaceIds) {
-          const owned = RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId });
-          const remote = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`);
-          const snapshot = workspaceId === identity.workspaceId ? await options.runtime().snapshot() : RuntimeSnapshotSchema.parse(await (await remote.runtimeSnapshot(owned)).json());
-          for (const conversation of snapshot.conversations) {
-            const response = workspaceId === identity.workspaceId ? await options.runtime().transcript(conversation.id, 'ndjson') : await remote.runtimeTranscript({ ...owned, conversationId: conversation.id }, 'ndjson');
-            for await (const event of readRuntimeTranscript(response)) {
-              history.index([{ workspaceId, conversationId: conversation.id, ordinal: event.ordinal, payload: event.payload, createdAt: event.createdAt }]);
-            }
-          }
-        }
-        return completed(input, await history.search(request.query, workspaceIds, (state, questions) => options.judge(input.conversationId, state, questions)));
+        return completed(input, await searchHistory(request.query, {
+          workspaceIds,
+          async conversations(workspaceId) {
+            const snapshot = workspaceId === identity.workspaceId ? await options.runtime().snapshot() : RuntimeSnapshotSchema.parse(await (await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`).runtimeSnapshot(RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId }))).json());
+            return snapshot.conversations.map(conversation => conversation.id);
+          },
+          async *events(workspaceId, conversationId, before) { yield* readRuntimeTranscript(await transcript(workspaceId, conversationId, before === undefined ? { newestFirst: true } : { newestFirst: true, before })); },
+        }, (state, questions) => options.judge(input.conversationId, state, questions), request.cursor));
       }
       if (input.tool === 'web_search') {
         const query = RuntimeWebSearchArgumentsSchema.parse(input.args).query;
@@ -631,7 +624,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     let admission = savedDispatch(input.attemptId);
     if (admission && (admission.tool !== 'proc' || admission.machineId !== origin.machineId || admission.projectId !== origin.projectId || admission.workspaceId !== origin.workspaceId || admission.parentAttemptId !== input.originAttemptId || admission.conversationId !== input.conversationId || admission.taskId !== input.taskId || admission.requestId !== input.requestId || admission.replay !== replay || canonicalJson(admission.args) !== canonicalJson(input.args))) throw new Error('Process control identity changed');
     const selected = options.runtime().attachments.list()
-      .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && attachment.state === 'ready' && attachment.role === 'cache' && attachment.heartbeatAt !== null && Date.now() - Date.parse(attachment.heartbeatAt) <= 30_000)
+      .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && isAttachmentReady(attachment, Date.now()))
       .sort((left, right) => right.generation - left.generation)[0];
     if (!selected) throw new Error('Original process machine is unreachable: no READY execution cache');
     if (!admission) {
@@ -694,8 +687,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       async controlJob(input) {
         const dispatch = savedDispatch(input.attemptId);
         if (!dispatch || dispatch.tool !== 'bash') throw new Error('Background command has no admitted executor');
-        if (input.op === 'cancel') return completed(dispatch, await options.runtime().attachments.cancel(dispatch));
-        const id = `job-log:${dispatch.attemptId}:${crypto.randomUUID()}`;
+        const id = `job-${input.op}:${dispatch.attemptId}:${crypto.randomUUID()}`;
+        if (input.op === 'cancel') return options.runtime().attachments.execute({ ...dispatch, requestId: id, attemptId: id, args: { op: 'cancel', attemptId: dispatch.attemptId }, deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: 'unsafe' }, AbortSignal.timeout(30_000));
         return options.runtime().attachments.execute({ ...dispatch, requestId: id, attemptId: id, args: { op: 'logs', attemptId: dispatch.attemptId, ...(input.lines !== undefined ? { lines: input.lines } : {}), ...(input.head !== undefined ? { head: input.head } : {}), ...(input.cursor !== undefined ? { cursor: input.cursor } : {}) }, deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: 'safe' }, AbortSignal.timeout(30_000));
       },
       observeProcess: input => controlProcess(input, 'safe'),
@@ -706,14 +699,13 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const dispatch = savedDispatch(attemptId);
         if (!dispatch) return null;
         if (dispatch.tool === 'lifecycle') return awaitLifecycle(dispatch);
-        return controlAttempt(attemptId, 'runtime_reconcile');
+        return attemptOutcome(attemptId);
       },
       async cancel(attemptId) {
         codemode.cancel(attemptId);
         active.get(attemptId)?.abort(new Error('Cancelled'));
         const dispatch = savedDispatch(attemptId);
         if (dispatch?.tool === 'lifecycle') await cancelLifecycle(dispatch);
-        await controlAttempt(attemptId, 'runtime_cancel');
       },
       wakeAt: options.schedule,
     },

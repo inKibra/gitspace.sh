@@ -1,22 +1,18 @@
 import { z } from 'zod';
 import { daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor';
-import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, mergeDelegateCommit, runSupervisorCommand, ExecutorEffectUncertain, type ExecutorJournal, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
+import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, runSupervisorCommand, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
 import { cacheServiceOperation } from './cache-services.js';
 import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/services';
 import { createHash } from 'node:crypto';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
-import type { LocalArtifactResolver } from '@gitspace/core';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { MachineMcpCoordinator } from './local-mcp.js';
-import { RuntimeBashCommandArgumentsSchema, RuntimeDelegateExportArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { workspaceProcessVisible } from './workspace-process.js';
 
 
-export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; artifacts: LocalArtifactResolver; mcp: MachineMcpCoordinator; journal: () => ExecutorJournal }): Record<string, ExecutorOperationHandler> {
+export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator }): Record<string, ExecutorOperationHandler> {
   return {
     mcp_discover: async (dispatch, local, signal) => {
       const workspace = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId);
@@ -31,8 +27,7 @@ export function machineOperationalTools(options: { environments: Pick<WorkspaceE
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     lifecycle: async (dispatch, local) => {
-      if (local.attachment.role !== 'cache') throw new Error('Lifecycle requires a canonical cache');
-      const { on: _on, at: _at, ...args } = RuntimeLifecycleDispatchArgumentsSchema.parse(dispatch.args);
+      const { on: _on, ...args } = RuntimeLifecycleDispatchArgumentsSchema.parse(dispatch.args);
       const accepted = await options.environments.acceptRun(dispatch.workspaceId, args, local);
       return [{ type: 'text', text: JSON.stringify(accepted) }];
     },
@@ -50,79 +45,15 @@ export function machineOperationalTools(options: { environments: Pick<WorkspaceE
         const result = await runSupervisorCommand({ application: '/bin/bash', args: ['-c', args.command], cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, env: await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()), attemptId: dispatch.attemptId, sequence: 0, deadlineAt: dispatch.deadlineAt, signal });
         return [{ type: 'text', text: JSON.stringify(result) }];
       }
-      const control = options.journal().jobControl(dispatch);
-      if (!control) throw new Error('Invalid admitted job control');
-      const { job } = control;
-      const cwd = job.cwd ? await checkoutPath(local.rootPath, job.cwd) : local.rootPath;
-      const client = await daemonClientForProject(cwd);
-      const name = `exec-${createHash('sha256').update(`${control.attemptId}:0`).digest('hex').slice(0, 40)}`;
+      const client = await daemonClientForProject(local.rootPath);
+      const name = `exec-${createHash('sha256').update(`${args.attemptId}:0`).digest('hex').slice(0, 40)}`;
       const described = await client.request({ op: 'describe', name }, signal);
-      // Match the same immutable command evidence required by executor recovery.
-      if (described.op !== 'describe' || described.daemon.owner !== control.attemptId || described.daemon.name !== name || described.daemon.restartCount !== 0
-        || described.spec.application !== '/bin/bash' || JSON.stringify(described.spec.args) !== JSON.stringify(['-c', job.command]) || described.spec.cwd !== cwd
-        || described.spec.restart !== 'no' || described.spec.pty || described.spec.inheritEnv !== false || !described.spec.persist || described.spec.detached) throw new Error('Supervisor evidence does not match immutable job admission');
+      if (described.op !== 'describe' || described.daemon.owner !== args.attemptId) throw new Error('No background command with that id in this workspace');
       const result = args.op === 'cancel' ? await client.request({ op: 'stop', name, timeoutMs: 5000 }, signal)
         : await client.request({ op: 'logs', name, lines: args.lines, head: args.head, cursor: args.cursor }, signal);
-      const confirmed = await client.request({ op: 'describe', name }, signal);
-      if (confirmed.op !== 'describe' || confirmed.daemon.id !== described.daemon.id || confirmed.daemon.restartCount !== 0
-        || (result.op !== 'logs' && result.op !== 'stop')
-        || (result.op === 'stop' && result.daemon.id !== described.daemon.id)) throw new Error('Supervisor identity changed during job control');
       return [{ type: 'text', text: JSON.stringify(result) }];
     },
     proc: machineProcessOperation(options),
-    delegate_export: async (dispatch, local, signal) => {
-      if (local.attachment.role !== 'delegate' || local.attachment.checkout.kind !== 'branch') throw new Error('Only delegated branches may export integration commits');
-      const args = RuntimeDelegateExportArgumentsSchema.parse(dispatch.args);
-      const directory = await mkdtemp(join(tmpdir(), 'gitspace-delegate-'));
-      let sequence = 0;
-      const run = async (args: string[]) => {
-        const result = await runSupervisorCommand({ application: 'git', args, cwd: local.rootPath, attemptId: dispatch.attemptId, sequence: sequence++, deadlineAt: dispatch.deadlineAt, signal });
-        if (result.exitCode !== 0) throw new Error(result.output);
-        return result.output.trim();
-      };
-      try {
-        if (await run(['rev-parse', 'HEAD']) !== args.commit) throw new Error('Delegate HEAD changed before export');
-        await run(['merge-base', '--is-ancestor', local.attachment.checkout.commit, args.commit]);
-        const path = join(directory, 'branch.bundle');
-        await run(['bundle', 'create', path, 'HEAD']);
-        const uri = `local://workspace/delegates/${encodeURIComponent(dispatch.attachmentId)}/${args.commit}.bundle`;
-        const result = await options.artifacts.write({ kind: 'workspace', projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, uri, await readFile(path));
-        if (result.status === 'error') throw result.error;
-        return [{ type: 'text', text: JSON.stringify({ bundleUri: uri, commit: args.commit, sourceCommit: local.attachment.checkout.commit }) }];
-      } finally { await rm(directory, { recursive: true, force: true }); }
-    },
-    merge: async (dispatch, local, signal) => {
-      // Keep the admitted dispatch field name so persisted merge attempts replay unchanged.
-      const args = z.object({ delegateAttachmentId: z.string().optional(), bundleUri: z.string().optional(), expectedPrimaryCommit: z.string().regex(/^[a-f0-9]{40,64}$/u), commit: z.string().regex(/^[a-f0-9]{40,64}$/u) }).parse(dispatch.args);
-      if (local.attachment.role !== 'cache') throw new Error('Only a cache may integrate commits');
-      if (args.bundleUri !== undefined) {
-        if (!args.bundleUri.startsWith('local://workspace/delegates/')) throw new Error('Merge bundle must belong to this workspace delegate artifact scope');
-        const artifact = await options.artifacts.read({ kind: 'workspace', projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, args.bundleUri);
-        if (artifact.status === 'error') throw artifact.error;
-        const directory = await mkdtemp(join(tmpdir(), 'gitspace-merge-'));
-        let sequence = 0;
-        const run = async (args: string[]) => {
-          const result = await runSupervisorCommand({ application: 'git', args, cwd: local.rootPath, attemptId: dispatch.attemptId, sequence: sequence++, deadlineAt: dispatch.deadlineAt, signal });
-          if (result.exitCode !== 0) throw new Error(result.output);
-          return result.output.trim();
-        };
-        try {
-          const path = join(directory, 'branch.bundle');
-          await writeFile(path, artifact.value, { mode: 0o600 });
-          await run(['bundle', 'verify', path]);
-          if (await run(['rev-parse', 'HEAD']) !== args.expectedPrimaryCommit || await run(['status', '--porcelain'])) throw new Error('Cache changed or contains uncommitted work');
-          await run(['fetch', '--no-tags', '--', path, 'HEAD']);
-          if (await run(['rev-parse', 'FETCH_HEAD']) !== args.commit) throw new Error('Bundle source commit does not match the authorized merge');
-          await run(['merge', '--no-edit', '--no-ff', args.commit]);
-          return [{ type: 'text', text: JSON.stringify({ commit: await run(['rev-parse', 'HEAD']), sourceCommit: args.commit }) }];
-        } finally { await rm(directory, { recursive: true, force: true }); }
-      }
-      if (!args.delegateAttachmentId) throw new Error('Merge requires a delegate attachment or exported bundle');
-      const delegate = options.journal().attachment(args.delegateAttachmentId);
-      if (!delegate || delegate.attachment.state !== 'ready') throw new Error('Delegate attachment is not ready');
-      const result = await mergeDelegateCommit({ cache: local, delegate, expectedCacheCommit: args.expectedPrimaryCommit, commit: args.commit, attemptId: dispatch.attemptId, deadlineAt: dispatch.deadlineAt, signal });
-      return [{ type: 'text', text: JSON.stringify(result) }];
-    },
   };
 }
 
@@ -133,7 +64,7 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
       const owner = `workspace:${dispatch.projectId}:${dispatch.workspaceId}`;
       const mutate = async (request: DaemonRequest) => {
         try { return await client.request(request, signal); }
-        catch (error) { throw new ExecutorEffectUncertain('Supervisor mutation outcome requires reconciliation', { cause: error }); }
+        catch (error) { throw new Error('Supervisor mutation outcome requires reconciliation', { cause: error }); }
       };
       if (args.op === 'start') {
         const processes = await client.request({ op: 'list' }, signal);
@@ -147,7 +78,7 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
         if (result.op !== 'start') throw new Error('Invalid supervisor start response');
         if (spec.ready) {
           const readiness = await client.request({ op: 'wait', name: spec.name, for: 'ready', timeoutMs: spec.ready.timeoutMs ?? 30_000 }, signal);
-          if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new ExecutorEffectUncertain('Process did not become ready with the admitted identity');
+          if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new Error('Process did not become ready with the admitted identity');
           const url = spec.ready.port ? await options.services.registerProcessRoute({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, generation: dispatch.generation, name: spec.name, portName: 'http', port: spec.ready.port }) : null;
           return [{ type: 'text', text: JSON.stringify({ op: 'start', daemon: readiness.daemon, url }) }];
         }
@@ -169,7 +100,7 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
       if (args.op === 'stop') await options.services.releaseProcessRoutes(dispatch.workspaceId, args.name);
       if (args.op === 'restart' && result.op === 'restart' && existing.spec.ready) {
         const readiness = await client.request({ op: 'wait', name: args.name, for: 'ready', timeoutMs: existing.spec.ready.timeoutMs ?? 30_000 }, signal);
-        if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new ExecutorEffectUncertain('Process did not become ready with the admitted identity');
+        if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new Error('Process did not become ready with the admitted identity');
         const url = existing.spec.ready.port ? await options.services.registerProcessRoute({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, generation: dispatch.generation, name: args.name, portName: 'http', port: existing.spec.ready.port }) : null;
         return [{ type: 'text', text: JSON.stringify({ op: 'restart', daemon: readiness.daemon, url }) }];
       }

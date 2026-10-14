@@ -21,7 +21,6 @@ import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSe
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
 import { serveArtifactShare } from './account-inspector-data.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
-import { setCloudProjectBaseBranch } from './cloud-workspace-lifecycle.js';
 import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
 import { mcpAccessStatusRequestSchema, mcpAccessChangeRequestSchema, mcpAccessEnableRequestSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
 import { GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot } from '@gitspace/protocol-workspace';
@@ -87,7 +86,6 @@ import { ProjectSecretsDO } from './project-secrets.js';
 import {
   InspectorConflictError,
   InspectorStateError,
-  SpaceContextDO,
 } from './space-context.js';
 import {
   ProjectAuthorityDO,
@@ -110,18 +108,16 @@ export * from './hosted-route-registry.js';
 export * from './account-state.js';
 export { TenantReleasesDO } from './tenant-releases.js';
 import type { TenantReleasesDO } from './tenant-releases.js';
-import { LegacySpaceMigrationInputSchema, LegacySpaceMigrationFinalizeInputSchema } from '@gitspace/protocol/legacy-migration';
 import { SpaceAuthorityDO } from './space-authority.js';
 import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
 import { SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
 import { AccountStateDO } from './account-state.js';
-import type { SpaceAuthorityResult } from '@gitspace/protocol-workspace';
 import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
 import { accountAccessResponse, activeAccount, authorizeControl } from './account-access.js';
 import { machineProviderFor } from './machine-providers.js';
-import { backfillRuntimeLeases, releaseMachineAttachments } from './runtime-machine-loss.js';
+import { releaseMachineAttachments } from './runtime-machine-loss.js';
 import {
   McpConnectionNotFoundError,
   McpConnectionRevisionConflictError,
@@ -130,8 +126,6 @@ import {
 } from './local-mcp.js';
 import {
   launchReleaseInputSchema,
-  machineAppliedInputSchema,
-  machineChannelAppliedInputSchema,
   ReleaseNotFoundError,
   WORKER_VERSION,
   type WorkerVersion,
@@ -2165,13 +2159,6 @@ function accountState(env: Env) {
 }
 
 
-
-
-function spaceContext(env: Env, userId: string, projectId: string, spaceId: string) {
-  const namespace = env.SPACE_CONTEXT as DurableObjectNamespace<SpaceContextDO>;
-  return namespace.get(namespace.idFromName(JSON.stringify([userId, projectId, spaceId])));
-}
-
 function userMcpConnections(env: Env, userId: string) {
   const namespace = env.USER_MCP_CONNECTIONS as DurableObjectNamespace<UserMcpConnectionsDO>;
   return namespace.get(namespace.idFromName(userId));
@@ -2599,20 +2586,6 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   return new Response(object.body, { headers });
 }
 
-function catalogSpacePayload(payload: Record<string, unknown>): PortableSpaceDefinition {
-  return {
-    projectId: String(payload.projectId ?? ''),
-    projectName: String(payload.projectName ?? ''),
-    repositoryReference: typeof payload.repositoryReference === 'string' ? payload.repositoryReference : null,
-    baseBranch: String(payload.baseBranch ?? ''),
-    spaceId: String(payload.spaceId ?? ''),
-    kind: payload.kind === 'base' ? 'base' : 'worktree',
-    name: String(payload.name ?? ''),
-    branch: String(payload.branch ?? ''),
-    phase: payload.phase === 'plan' || payload.phase === 'code' || payload.phase === 'review' || payload.phase === 'ship' ? payload.phase : null,
-  };
-}
-
 function catalogMachinePayload(payload: Record<string, unknown>): FleetMachineDefinition {
   return {
     id: String(payload.id ?? ''),
@@ -2741,8 +2714,6 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
   putMachine(machine: FleetMachineDefinition): Promise<FleetMachineDefinition>;
   removeMachine(machineId: string, destroyed?: boolean): Promise<boolean>;
 }): Promise<FleetMachineDefinition[]> {
-  // Fleet reconciliation retries this until every workspace has been swept once.
-  await backfillRuntimeLeases(env, userId).catch(error => console.error('Runtime lease backfill will retry', error));
   for (const current of await catalog.listMachines()) {
     if (current.provider === 'physical') continue;
     const durableCatalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
@@ -3408,18 +3379,6 @@ const worker = {
         return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: error instanceof Error ? error.message : 'Settings subscription is invalid' } }, { status: 400 });
       }
     }
-    if (url.pathname === '/v1/fleet/events') {
-      try {
-        const signed = decodeSignedHeader(url.searchParams.get('control'));
-        if (signed.operation !== 'catalog.machine.subscribe') throw new Error('Signed fleet subscription is invalid');
-        const authorized = await authorizeControl(env, signed, 'space.control');
-        if (authorized.status === 'error') return accountAccessResponse(authorized)!;
-        const namespace = env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>;
-        return namespace.getByName(signed.userId).fetch(request);
-      } catch (error) {
-        return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: error instanceof Error ? error.message : 'Fleet subscription is invalid' } }, { status: 400 });
-      }
-    }
     if (url.pathname === '/v1/devices/enroll') {
       // Browsers enroll cross-origin from the machine-served app; the invite is
       // the credential, so the route is open to any origin.
@@ -3472,12 +3431,10 @@ const worker = {
         if (body.operation === 'catalog.machine.put' && body.payload.id !== body.machineId) {
           return Response.json({ status: 'error', error: { code: 'MACHINE_FLEET_CONTROL_DENIED', message: 'A machine credential may only report its own machine.' } }, { status: 403, headers: { 'cache-control': 'no-store' } });
         }
-        const capability = body.operation === 'secrets.materialize' || body.operation === 'mcp.composio.materialize' ? 'credential.access'
+        const capability = body.operation === 'secrets.materialize' ? 'credential.access'
           : body.operation === 'runtime.repository.credentials' || body.operation.startsWith('settings.') ? 'storage.access'
-          : body.operation.startsWith('space.')
-            || body.operation.startsWith('runtime.')
+          : body.operation.startsWith('runtime.')
             || body.operation.startsWith('catalog.')
-            || body.operation.startsWith('inspector.')
             || body.operation.startsWith('mcp.')
             || body.operation.startsWith('devices.')
             || body.operation.startsWith('deploy.')
@@ -3485,35 +3442,13 @@ const worker = {
             || body.operation.startsWith('lfs.')
             || body.operation.startsWith('project.environment.')
             || body.operation.startsWith('project.mcp.') ? 'space.control'
-          : body.operation === 'storage.provision' ? 'storage.provision'
           : 'storage.access';
         if (diagnostics) diagnostics.stage = 'authorize';
         const authorized = await authorizeControl(env, body, capability);
         if (authorized.status === 'error') return accountAccessResponse(authorized)!;
-        if (body.operation === 'space.migrateLegacy' || body.operation === 'space.stageLegacyMigration' || body.operation === 'space.legacyMigrationStatus') {
-          if (body.userId !== env.ACCOUNT_ID) throw new Error('Migration account identity mismatch');
-          const input = body.operation === 'space.migrateLegacy' ? LegacySpaceMigrationFinalizeInputSchema.parse(body.payload) : LegacySpaceMigrationInputSchema.parse(body.payload);
-          // space.control grants portable ownership transitions, not account administration.
-          // The authority additionally checks canonical workspace membership and the exact closed source.
-          const authority = env.SPACE_AUTHORITY.getByName(`${body.userId}:${input.workspaceId}`);
-          const value = body.operation === 'space.legacyMigrationStatus' ? await authority.legacyMigrationStatus(input)
-            : body.operation === 'space.stageLegacyMigration' ? await authority.stageLegacyMigration(input) : await authority.migrateLegacy(input);
-          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
-        }
         if (body.operation.startsWith('runtime.')) {
           const value = await runtimeMachineControl(env, body);
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
-        }
-        if (diagnostics) diagnostics.stage = 'rollout';
-        if (body.operation === 'space.bootstrap' || body.operation === 'space.beginOpen') {
-          const spaceId = String(body.payload.spaceId ?? '');
-          for (const image of await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).listCloudImages()) {
-            const operation = image.operation;
-            if (!operation?.barrier || (image.machineId !== body.machineId && !operation.resumeSpaceIds.includes(spaceId))) continue;
-            const recovering = image.machineId === body.machineId && ['resuming', 'confirming', 'cancelling'].includes(operation.phase)
-              && body.operation === 'space.beginOpen' && operation.resumeSpaceIds.includes(spaceId);
-            if (!recovering) return Response.json(publicError('CLOUD_IMAGE_IN_PROGRESS', 'This machine or workspace is fenced for cloud image recovery'), { status: 503, headers: { 'cache-control': 'no-store' } });
-          }
         }
         if (diagnostics) diagnostics.stage = 'processing';
         if (body.operation === 'lfs.originConfirmed' || body.operation === 'lfs.sources') {
@@ -3555,9 +3490,6 @@ const worker = {
           const releases = tenantReleases(env, body.userId);
           let value: unknown;
           switch (body.operation) {
-            case 'deploy.machineProtocol':
-              value = await releases.machineProtocol(body.machineId, machineProtocolInputSchema.parse(body.payload));
-              break;
             case 'deploy.stage':
               value = await releases.stage(stageReleaseInputSchema.parse(body.payload), body.machineId);
               break;
@@ -3569,16 +3501,6 @@ const worker = {
               break;
             case 'deploy.launchProgress':
               await releases.recordLaunchProgress(body.machineId, launchProgressSchema.parse(body.payload));
-              value = null;
-              break;
-            case 'deploy.machineApplied': {
-              const input = machineAppliedInputSchema.parse(body.payload);
-              value = await releases.machineApplied(body.machineId, input);
-              if (value === null) throw new ReleaseNotFoundError(input.sha);
-              break;
-            }
-            case 'deploy.machineChannelApplied':
-              await releases.machineChannelApplied(body.machineId, machineChannelAppliedInputSchema.parse(body.payload));
               value = null;
               break;
             default:
@@ -3607,22 +3529,6 @@ const worker = {
                   serverVersion: typeof body.payload.serverVersion === 'string' ? body.payload.serverVersion : null,
                 });
               }
-              break;
-            }
-            case 'mcp.composio.materialize': {
-              const projectId = String(body.payload.projectId ?? '');
-              const workspaceId = await requireSecretContext(env, body.userId, projectId, body.payload.workspaceId);
-              const connectionId = String(body.payload.connectionId ?? '');
-              const grant = await projectAuthority(env, body.userId, projectId).getMcpGrant(connectionId);
-              if (!grant?.enabled || (workspaceId === null ? !grant.projectSpaceEnabled : !grant.workspacesEnabled)) {
-                throw new McpConnectionValidationError('grant', 'Composio plugin is not granted to this project session');
-              }
-              const current = await connections.get(body.userId, connectionId);
-              if (!current) throw new McpConnectionNotFoundError(connectionId);
-              if (!current.enabled || current.status !== 'ready' || current.transport.type !== 'composio') {
-                throw new McpConnectionValidationError('connectionId', 'Composio plugin is not ready');
-              }
-              value = await new ComposioPluginGateway(env, await credentialVault(env, body.userId).getProviderSecret('composio')).materialize(body.userId, current.transport);
               break;
             }
             case 'mcp.audit.append':
@@ -3661,49 +3567,6 @@ const worker = {
           }
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'no-store' } });
         }
-        if (body.operation.startsWith('inspector.')) {
-          const projectId = String(body.payload.projectId ?? '');
-          const spaceId = String(body.payload.spaceId ?? '');
-          if (!projectId || !spaceId) throw new Error('Project and space ids are required');
-          const identity = { projectId, spaceId };
-          const context = spaceContext(env, body.userId, projectId, spaceId);
-          await context.bootstrap(identity);
-          const candidate = body.payload.input;
-          const input = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
-            ? { ...candidate, ...identity }
-            : identity;
-          const reviewContext = body.payload.context && typeof body.payload.context === 'object' && !Array.isArray(body.payload.context)
-            ? body.payload.context
-            : undefined;
-          let value: unknown;
-          switch (body.operation) {
-            case 'inspector.bootstrap': value = identity; break;
-            case 'inspector.getOverview': value = await context.getOverview(identity, reviewContext as Parameters<SpaceContextDO['getOverview']>[1]); break;
-            case 'inspector.getGoal': value = await context.getGoal(identity); break;
-            case 'inspector.putGoal': value = await context.putGoal(input as Parameters<SpaceContextDO['putGoal']>[0]); break;
-            case 'inspector.attachRequirementEvidence': value = await context.attachRequirementEvidence(input as Parameters<SpaceContextDO['attachRequirementEvidence']>[0]); break;
-            case 'inspector.getWorkflow': value = await context.getWorkflow(identity); break;
-            case 'inspector.putWorkflow': value = await context.putWorkflow(input as Parameters<SpaceContextDO['putWorkflow']>[0]); break;
-            case 'inspector.waiveWorkflowGate': value = await context.waiveWorkflowGate(input as Parameters<SpaceContextDO['waiveWorkflowGate']>[0]); break;
-            case 'inspector.getRubric': value = await context.getRubric(identity); break;
-            case 'inspector.putRubric': value = await context.putRubric(input as Parameters<SpaceContextDO['putRubric']>[0]); break;
-            case 'inspector.appendRubricJudgment': value = await context.appendRubricJudgment(input as Parameters<SpaceContextDO['appendRubricJudgment']>[0]); break;
-            case 'inspector.listJournal': value = await context.listJournal(identity); break;
-            case 'inspector.startJournalPhase': value = await context.startJournalPhase(input as Parameters<SpaceContextDO['startJournalPhase']>[0]); break;
-            case 'inspector.endJournalPhase': value = await context.endJournalPhase(input as Parameters<SpaceContextDO['endJournalPhase']>[0]); break;
-            case 'inspector.appendJournalEntry': value = await context.appendJournalEntry(input as Parameters<SpaceContextDO['appendJournalEntry']>[0]); break;
-            case 'inspector.getChangeGuide': value = await context.getChangeGuide(identity); break;
-            case 'inspector.putChangeGuide': value = await context.putChangeGuide(input as Parameters<SpaceContextDO['putChangeGuide']>[0]); break;
-            case 'inspector.markGuideSectionRead': value = await context.markGuideSectionRead(input as Parameters<SpaceContextDO['markGuideSectionRead']>[0]); break;
-            case 'inspector.setGuideApproval': value = await context.setGuideApproval(input as Parameters<SpaceContextDO['setGuideApproval']>[0]); break;
-            case 'inspector.listReviewThreads': value = await context.listReviewThreads(identity, reviewContext as Parameters<SpaceContextDO['listReviewThreads']>[1]); break;
-            case 'inspector.createReviewThread': value = await context.createReviewThread(input as Parameters<SpaceContextDO['createReviewThread']>[0], reviewContext as Parameters<SpaceContextDO['createReviewThread']>[1]); break;
-            case 'inspector.appendReviewMessage': value = await context.appendReviewMessage(input as Parameters<SpaceContextDO['appendReviewMessage']>[0], reviewContext as Parameters<SpaceContextDO['appendReviewMessage']>[1]); break;
-            case 'inspector.resolveReviewThread': value = await context.resolveReviewThread(input as Parameters<SpaceContextDO['resolveReviewThread']>[0], reviewContext as Parameters<SpaceContextDO['resolveReviewThread']>[1]); break;
-            default: throw new Error('Unsupported Inspector operation');
-          }
-          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
-        }
         if (body.operation.startsWith('settings.')) {
           const settingsNamespace = env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>;
           const settings = settingsNamespace.get(settingsNamespace.idFromName(body.userId));
@@ -3723,33 +3586,6 @@ const worker = {
             }
             default:
               throw new Error('Unsupported settings operation');
-          }
-          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
-        }
-        if (body.operation.startsWith('projects.')) {
-          const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-          const projects = namespace.get(namespace.idFromName(body.userId));
-          let value: unknown;
-          switch (body.operation) {
-            case 'projects.list':
-              await ensureAccountGitSpaceProject(env, body.userId);
-              value = await projects.list(
-                body.payload.lifecycle === 'active' || body.payload.lifecycle === 'archived'
-                  ? body.payload.lifecycle
-                  : undefined,
-              );
-              break;
-            case 'projects.put':
-              value = await projects.put(body.payload.project as Parameters<UserProjectIndexDO['put']>[0]);
-              break;
-            case 'projects.remove':
-              value = await projects.remove(String(body.payload.projectId ?? ''));
-              break;
-            case 'projects.workspaces.locate':
-              value = await projects.locateWorkspace(String(body.payload.workspaceId ?? ''));
-              break;
-            default:
-              throw new Error('Unsupported projects operation');
           }
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
         }
@@ -3811,9 +3647,6 @@ const worker = {
                 const machine = input.op === 'claim'
                   ? await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).getMachine(body.machineId)
                   : null;
-                const placement = input.op === 'claim'
-                  ? await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${body.userId}:${spaceId}`).get()
-                  : null;
                 const attachment = input.op === 'claim' && input.attachment
                   ? (await env.SPACE_AUTHORITY.getByName(`${body.userId}:${spaceId}`).runtimeAttachments({ projectId, workspaceId: spaceId })).find(item => item.attachmentId === input.attachment?.attachmentId && item.generation === input.attachment.generation && item.workspaceId === spaceId)
                   : undefined;
@@ -3821,7 +3654,6 @@ const worker = {
                   machineId: body.machineId,
                   projectId,
                   machineOnline: machine?.state === 'online' && machine.desiredState === 'online',
-                  placement,
                   attachment,
                 });
                 if (input.op === 'value' && input.scope === 'global') await projects.setEnvironmentValue(input.name, input.value);
@@ -3835,127 +3667,14 @@ const worker = {
               value = state;
               break;
             }
-            case 'project.bootstrap': {
-              const project = await authority.bootstrap({
-                id: projectId,
-                name: String(body.payload.name ?? ''),
-                repositoryReference: typeof body.payload.repositoryReference === 'string'
-                  ? body.payload.repositoryReference
-                  : null,
-                baseBranch: String(body.payload.baseBranch ?? 'main'),
-                createdBy: body.machineId,
-              });
-              if (project.lifecycle === 'archived' || project.lifecycle === 'deleting') {
-                throw new Error(`Cannot bootstrap ${project.lifecycle} project`);
-              }
-              const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-              value = await namespace.get(namespace.idFromName(body.userId)).put(project);
-              break;
-            }
-            case 'project.delete': {
-              const project = await authority.deleteProject(Number(body.payload.expectedRevision ?? -1));
-              const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-              await namespace.get(namespace.idFromName(body.userId)).remove(projectId);
-              value = project;
-              break;
-            }
             case 'project.get':
               value = await authority.getProject();
               break;
-            case 'project.setLifecycle': {
-              const project = await authority.setProjectLifecycle(
-                Number(body.payload.expectedRevision ?? -1),
-                body.payload.lifecycle as Parameters<ProjectAuthorityDO['setProjectLifecycle']>[1],
-              );
-              const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-              if (project.lifecycle === 'deleting') {
-                await namespace.get(namespace.idFromName(body.userId)).remove(projectId);
-                value = project;
-              } else value = await namespace.get(namespace.idFromName(body.userId)).put(project);
-              break;
-            }
-            case 'project.activateSource': {
-              const project = await authority.activateSourceProject(Number(body.payload.expectedRevision ?? -1), String(body.payload.baseBranch ?? ''));
-              const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-              value = await namespace.get(namespace.idFromName(body.userId)).put(project);
-              break;
-            }
-            case 'project.setBaseBranch': {
-              value = await setCloudProjectBaseBranch(env, body.userId, projectId, Number(body.payload.expectedRevision ?? -1), String(body.payload.baseBranch ?? ''));
-              break;
-            }
             case 'project.workspaces.list':
               value = await authority.listWorkspaces();
               break;
-            case 'project.workspaces.put': {
-              const workspace = await authority.putMachineWorkspace(
-                body.payload.workspace as Parameters<ProjectAuthorityDO['putMachineWorkspace']>[0],
-              );
-              const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-              await namespace.get(namespace.idFromName(body.userId)).putWorkspaceLocation(workspace.id, projectId);
-              value = workspace;
-              break;
-            }
-            case 'project.workspaces.remove': {
-              const workspaceId = String(body.payload.workspaceId ?? '');
-              value = await authority.removeMachineWorkspace(workspaceId, Number(body.payload.expectedRevision ?? -1));
-              if (value) {
-                const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
-                await namespace.get(namespace.idFromName(body.userId)).removeWorkspaceLocation(workspaceId);
-              }
-              break;
-            }
             case 'project.mcp.grants.list':
               value = await authority.listMcpGrants();
-              break;
-            case 'project.operations.create':
-              value = await authority.createOperation(
-                body.payload.operation as Parameters<ProjectAuthorityDO['createOperation']>[0],
-              );
-              break;
-            case 'project.operations.get':
-              value = await authority.getOperation(String(body.payload.operationId ?? ''));
-              break;
-            case 'project.operations.list':
-              value = await authority.listOperations();
-              break;
-            case 'project.operations.update':
-              value = await authority.updateOperation(
-                body.payload.operation as Parameters<ProjectAuthorityDO['updateOperation']>[0],
-              );
-              break;
-            case 'project.sessions.get':
-              value = await authority.getCanonicalSession(String(body.payload.sessionId ?? ''));
-              break;
-            case 'project.sessions.list':
-              value = await authority.listCanonicalSessions();
-              break;
-            case 'project.sessions.put':
-              value = await authority.putCanonicalSession(
-                body.payload.session as Parameters<ProjectAuthorityDO['putCanonicalSession']>[0],
-              );
-              break;
-            case 'project.artifacts.get':
-              value = await authority.getArtifactScope(String(body.payload.scopeId ?? ''));
-              break;
-            case 'project.artifacts.list':
-              value = await authority.listArtifactScopes();
-              break;
-            case 'project.artifacts.put':
-              value = await authority.putMachineArtifactScope(
-                body.payload.scope as Parameters<ProjectAuthorityDO['putMachineArtifactScope']>[0],
-              );
-              break;
-            case 'project.promotions.get':
-              value = await authority.getArtifactPromotion(String(body.payload.promotionId ?? ''));
-              break;
-            case 'project.promotions.list':
-              value = await authority.listArtifactPromotions();
-              break;
-            case 'project.promotions.put':
-              value = await authority.putArtifactPromotion(
-                body.payload.promotion as Parameters<ProjectAuthorityDO['putArtifactPromotion']>[0],
-              );
               break;
             case 'project.routes.list':
               value = await authority.listHostedRoutes();
@@ -3991,12 +3710,6 @@ const worker = {
                 body.payload.event as Parameters<ProjectAuthorityDO['appendEvent']>[0],
               )).json();
               break;
-            case 'project.events.list':
-              value = await (await authority.listEvents(Number(body.payload.afterOffset ?? 0))).json();
-              break;
-            case 'project.events.latest':
-              value = await authority.latestEventOffset();
-              break;
             default:
               throw new Error('Unsupported project operation');
           }
@@ -4007,9 +3720,6 @@ const worker = {
           const catalog = catalogNamespace.get(catalogNamespace.idFromName(body.userId));
           let value: unknown;
           switch (body.operation) {
-            case 'catalog.space.put': value = await catalog.putSpace(catalogSpacePayload(body.payload)); break;
-            case 'catalog.space.get': value = await catalog.getSpace(String(body.payload.spaceId ?? '')); break;
-            case 'catalog.space.list': value = await catalog.listSpaces(); break;
             case 'catalog.machine.put': value = await catalog.reportMachine(catalogMachinePayload(body.payload)); break;
             // Native startup reads this snapshot before readiness; provider reconciliation would wait on startup itself.
             case 'catalog.machine.list': value = await catalog.listMachines(); break;
@@ -4017,76 +3727,7 @@ const worker = {
           }
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'no-store' } });
         }
-        if (!body.operation.startsWith('space.')) {
-          const storage = (env.USER_STORAGE as DurableObjectNamespace<UserStorageDO>).getByName(body.userId);
-          if (body.operation === 'storage.provision') {
-            if (body.payload.gitBucketName !== env.STORAGE_BUCKET) throw new Error('Storage namespace is allocated by the platform');
-            await storage.beginProvisioning({ userId: body.userId, gitBucketName: env.STORAGE_BUCKET });
-            return Response.json({ status: 'ok', value: await storage.markReady({ userId: body.userId, gitBucketName: env.STORAGE_BUCKET }) });
-          }
-          await storage.requireReady(body.userId);
-          if (body.operation === 'storage.binding') return Response.json({ status: 'ok', value: await tenantPlatformJson(env, '/storage') });
-          const prefixes = Array.isArray(body.payload.prefixes) ? body.payload.prefixes.filter((value): value is string => typeof value === 'string') : [];
-          const value = await tenantPlatformJson(env, '/storage/credentials', { method: 'POST', body: JSON.stringify({ prefixes, ttlSeconds: Number(body.payload.ttlSeconds ?? 3600) }) });
-          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'no-store' } });
-        }
-        const spaceId = typeof body.payload.spaceId === 'string' ? body.payload.spaceId : '';
-        if (!spaceId) return Response.json({ status: 'error', error: { code: 'INVALID_SPACE', message: 'Space id is required' } }, { status: 400 });
-        const authorityNamespace = env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>;
-        const authority = authorityNamespace.get(authorityNamespace.idFromName(`${body.userId}:${spaceId}`));
-        const common = { ...body.payload, machineId: body.machineId, projectId: String(body.payload.projectId ?? ''), spaceId };
-        if (body.operation === 'space.releaseUnpublishedSource') {
-          const projectAuthority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${body.userId}:${common.projectId}`);
-          const project = await projectAuthority.getProject();
-          const workspace = (await projectAuthority.listWorkspaces()).find(candidate => candidate.id === spaceId);
-          const sourceCommit = body.payload.sourceCommit;
-          const expectedGeneration = body.payload.expectedGeneration;
-          if (project?.role !== 'gitspace-source' || project.lifecycle !== 'cloud-only'
-            || spaceId !== project.id || typeof sourceCommit !== 'string' || !sourceCommit
-            || project.source?.commit !== sourceCommit || workspace?.sourceCommit !== sourceCommit
-            || typeof expectedGeneration !== 'number' || !Number.isSafeInteger(expectedGeneration)) {
-            throw new Error('Only the unchanged pinned source checkout can release its unpublished first placement');
-          }
-          const released = await authority.releaseUnpublishedSource({ projectId: common.projectId, spaceId, machineId: body.machineId, expectedGeneration });
-          if (released.status === 'error') return Response.json({ status: 'error', error: released.failure }, { status: 409, headers: { 'cache-control': 'no-store' } });
-          return Response.json(released, { headers: { 'cache-control': 'no-store' } });
-        }
-        if (body.operation === 'space.bootstrap' || body.operation === 'space.beginOpen') {
-          const projectAuthority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${body.userId}:${common.projectId}`);
-          const project = await projectAuthority.getProject();
-          const workspace = (await projectAuthority.listWorkspaces()).find((candidate) => candidate.id === spaceId);
-          // Creation records the first placement and reopens from its first checkpoint while provisioning.
-          const admitted = workspace?.lifecycle === 'active' || workspace?.lifecycle === 'provisioning';
-          if (!project || project.lifecycle === 'archived' || project.lifecycle === 'deleting' || !admitted) {
-            return Response.json(publicError('WORKSPACE_UNAVAILABLE', 'Only an active or provisioning workspace can be placed or opened'), { status: 409 });
-          }
-          if (body.operation === 'space.bootstrap' && project.role === 'gitspace-source' && project.lifecycle === 'cloud-only'
-            && spaceId === project.id && project.source?.commit && workspace?.sourceCommit === project.source.commit) {
-            const placement = await authority.get();
-            // A removed machine can never publish or release what it opened; its unpublished source is free.
-            const orphaned = placement?.state === 'open' && placement.publishedRevision === 0 && placement.machineId !== null && placement.machineId !== body.machineId
-              && !await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).getMachine(placement.machineId);
-            if ((placement?.state === 'closed' && placement.publishedRevision === 0) || orphaned) {
-              const opened = await authority.bootstrapUnpublishedSource({ projectId: common.projectId, spaceId, machineId: body.machineId }, orphaned ? placement.machineId ?? undefined : undefined);
-              if (opened.status === 'error') return Response.json({ status: 'error', error: opened.failure }, { status: 409, headers: { 'cache-control': 'no-store' } });
-              return Response.json(opened, { headers: { 'cache-control': 'no-store' } });
-            }
-          }
-        }
-        let result: SpaceAuthorityResult<unknown>;
-        switch (body.operation) {
-          case 'space.bootstrap': result = await authority.bootstrap(common as Parameters<SpaceAuthorityDO['bootstrap']>[0]); break;
-          case 'space.beginClose': result = await authority.beginClose(common as Parameters<SpaceAuthorityDO['beginClose']>[0]); break;
-          case 'space.commitClosed': result = await authority.commitClosed(common as Parameters<SpaceAuthorityDO['commitClosed']>[0]); break;
-          case 'space.abortClose': result = await authority.abortClose(common as Parameters<SpaceAuthorityDO['abortClose']>[0]); break;
-          case 'space.beginOpen': result = await authority.beginOpen(common as Parameters<SpaceAuthorityDO['beginOpen']>[0]); break;
-          case 'space.commitOpen': result = await authority.commitOpen(common as Parameters<SpaceAuthorityDO['commitOpen']>[0]); break;
-          case 'space.failOpen': result = await authority.failOpen(common as Parameters<SpaceAuthorityDO['failOpen']>[0]); break;
-          case 'space.get': return Response.json({ status: 'ok', value: await authority.get() }, { headers: { 'cache-control': 'no-store' } });
-          default: throw new Error('Unsupported control operation');
-        }
-        if (result.status === 'error') return Response.json({ status: 'error', error: result.failure }, { status: 409, headers: { 'cache-control': 'no-store' } });
-        return Response.json({ status: 'ok', value: result.value }, { headers: { 'cache-control': 'no-store' } });
+        throw new Error('Unsupported control operation');
       } catch (error) {
         if (diagnostics) diagnostics.caughtError = true;
         if (error instanceof MachineDiscardRequired) return Response.json({ status: 'error', error: {

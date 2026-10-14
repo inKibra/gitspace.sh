@@ -148,7 +148,6 @@ export async function buildMachineBundle(root: string, outDir: string): Promise<
     });
     if (!result.success) throw new AggregateError(result.logs, 'Machine executable build failed');
   }
-  await cp(join(root, 'packages/core/drizzle'), join(outDir, 'drizzle'), { recursive: true });
   const native = await packageMachineNativeRuntime(root, outDir);
   const envelope = await createExecutableArtifactManifest(outDir, 'machine', native.abi);
   return { path: outDir, hash: envelope.manifest.treeHash, ...envelope };

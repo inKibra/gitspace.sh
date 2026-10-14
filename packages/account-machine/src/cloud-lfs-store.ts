@@ -1,6 +1,6 @@
 import { createSignedControlRequest, deriveArtifactScopeKey } from '@gitspace/protocol';
 import { collectBytes, streamBytes, GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot, type GitLfsObject, type GitLfsOriginConfirmation, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
-import { EncryptedCheckpointBlobStore, type CheckpointBlobStore } from './portable-space-lifecycle.js';
+import { EncryptedCheckpointBlobStore, type CheckpointBlobStore } from './checkpoint-blobs.js';
 import { z } from 'zod';
 
 export type CloudGitLfsStoreOptions = {

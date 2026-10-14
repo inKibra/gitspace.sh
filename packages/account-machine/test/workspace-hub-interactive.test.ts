@@ -2,16 +2,13 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { GitSpaceDatabase } from '@gitspace/core';
 import type { ProtectedTerminalEvent } from '@gitspace/protocol';
 import { closeDaemonClients, daemonClientForProject, getDaemonRuntimeDir } from '@gitspace/supervisor';
-import { sql } from 'drizzle-orm';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 
 interface Fixture {
   root: string;
   workspace: string;
-  database: GitSpaceDatabase;
   coordinator: WorkspaceHubTerminalCoordinator;
 }
 const fixtures: Fixture[] = [];
@@ -19,14 +16,14 @@ function fixture(): Fixture {
   const root = mkdtempSync(join(tmpdir(), 'gitspace-interactive-test-'));
   const workspace = join(root, 'workspace');
   mkdirSync(workspace);
-  const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
-  for (const result of [
-    database.createProject({ id: 'project-a', name: 'Test', repositoryPath: workspace }),
-    database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'interactive', branch: 'test', rootPath: workspace }),
-    database.possessSpace('workspace-a', 'machine-a'),
-  ]) if (result.status === 'error') throw result.error;
-  const coordinator = new WorkspaceHubTerminalCoordinator(database, 'machine-a');
-  const value = { root, workspace, database, coordinator };
+  const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', {
+    path: (spaceId) => spaceId === 'workspace-a' ? workspace : null,
+    projectId: (spaceId) => spaceId === 'workspace-a' ? 'project-a' : null,
+    list: () => ['workspace-a'],
+    use: async () => {},
+    changed: async () => {},
+  });
+  const value = { root, workspace, coordinator };
   fixtures.push(value);
   return value;
 }
@@ -39,7 +36,6 @@ afterEach(async () => {
   }
   await closeDaemonClients();
   for (const item of fixtures.splice(0)) {
-    item.database.close();
     rmSync(item.root, { recursive: true, force: true });
   }
 });
@@ -70,7 +66,7 @@ function alive(pid: number): boolean {
 
 describe('protected interactive lifecycle terminals', () => {
   it('feeds ordinary terminal input without echo, reconnects the same script, and keeps output out of durable storage', async () => {
-    const { coordinator, workspace, database } = fixture();
+    const { coordinator, workspace } = fixture();
     const started = Promise.withResolvers<void>();
     const inputCanary = `input-café-${crypto.randomUUID()}`;
     const outputCanary = new Bun.CryptoHasher('sha256').update(inputCanary).digest('hex');
@@ -139,8 +135,7 @@ describe('protected interactive lifecycle terminals', () => {
     }
     expect(ended).toBe(true);
     const safeRead = await coordinator.read('workspace-a', terminal!.name, null);
-    const journal = database.orm.all(sql`SELECT body FROM terminal_stream_heads UNION ALL SELECT body FROM terminal_stream_changes`);
-    const retained = JSON.stringify({ result, durableOutput, safeRead, journal }) + retainedFiles(getDaemonRuntimeDir(workspace)) + readFileSync(join(workspace, 'runner.log'), 'utf8');
+    const retained = JSON.stringify({ result, durableOutput, safeRead }) + retainedFiles(getDaemonRuntimeDir(workspace)) + readFileSync(join(workspace, 'runner.log'), 'utf8');
     expect(retained).not.toContain(inputCanary);
     expect(retained).not.toContain(outputCanary);
     const hub = await daemonClientForProject(workspace);
@@ -151,7 +146,7 @@ describe('protected interactive lifecycle terminals', () => {
   }, 25_000);
 
   it('delivers fast ordered steps and the final private UTF-8 stderr bytes before one failed completion', async () => {
-    const { coordinator, workspace, database } = fixture();
+    const { coordinator, workspace } = fixture();
     const started = Promise.withResolvers<void>();
     const seed = crypto.randomUUID();
     const canary = new Bun.CryptoHasher('sha256').update(seed).digest('hex');
@@ -192,8 +187,7 @@ describe('protected interactive lifecycle terminals', () => {
     expect(result.steps.map((step) => [step.id, step.exitCode])).toEqual([['10', 0], ['20', 0], ['30', 1]]);
     expect(readdirSync(workspace)).not.toContain('must-not-run');
     const safeRead = await coordinator.read('workspace-a', 'life-protected-fast', null);
-    const journal = database.orm.all(sql`SELECT body FROM terminal_stream_heads UNION ALL SELECT body FROM terminal_stream_changes`);
-    const retained = JSON.stringify({ result, durableOutput, safeRead, journal }) + retainedFiles(getDaemonRuntimeDir(workspace)) + readFileSync(join(workspace, 'runner.log'), 'utf8');
+    const retained = JSON.stringify({ result, durableOutput, safeRead }) + retainedFiles(getDaemonRuntimeDir(workspace)) + readFileSync(join(workspace, 'runner.log'), 'utf8');
     for (const line of lines) expect(retained).not.toContain(line);
   }, 25_000);
 

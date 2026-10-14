@@ -1,67 +1,59 @@
-import { deviceGrants, type GitSpaceDatabase } from '@gitspace/core';
-import {
-  deviceGrantRecordSchema,
-  verifyDeviceGrantRecord,
-  type DeviceGrantRecord,
-  type VerifiedDevice,
-} from '@gitspace/protocol';
-import { eq } from 'drizzle-orm';
+import { deviceGrantRecordSchema, verifyDeviceGrantRecord, type DeviceGrantRecord, type VerifiedDevice } from '@gitspace/protocol';
 
 export interface DeviceGrantAuthority {
   listDeviceGrants(): Promise<DeviceGrantRecord[]>;
 }
 
 export interface DeviceRegistryOptions {
-  database: GitSpaceDatabase;
   authority: DeviceGrantAuthority;
   rootSigningPublicKey: Uint8Array;
-  /** Background poll interval; the vault is authoritative, this is the convergence bound. */
-  pollMs?: number;
+  /** How long a fetched grant listing answers lookups before the next lookup refetches it. */
+  maxAgeMs?: number;
   onError?: (error: unknown) => void;
-}
-
-/** A mirrored grant with its verification outcome. */
-interface MirroredDevice {
-  record: DeviceGrantRecord;
-  verified: VerifiedDevice | null;
 }
 
 const UNKNOWN_DEVICE_REFRESH_MS = 5_000;
 
 /**
- * Machine-local mirror of the user's device grants.
+ * In-memory view of the user's device grants, fetched when a signed request needs it.
  *
- * Every record is re-verified against the pinned root key on read, so the
- * mirror is a cache of signed facts, never a source of trust: a worker that
- * hands us a forged row gains nothing, and a worker that withholds a
- * revocation is bounded by the grant TTL plus the poll interval.
+ * Every record is re-verified against the pinned root key on read, so the view
+ * is a cache of signed facts, never a source of trust: a worker that hands us a
+ * forged row gains nothing, and a withheld revocation is bounded by the grant
+ * TTL plus `maxAgeMs`.
  */
 export class DeviceRegistry {
-  private readonly cache = new Map<string, MirroredDevice>();
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly grants = new Map<string, DeviceGrantRecord>();
+  private fetchedAt = 0;
   private inflight: Promise<void> | null = null;
-  private lastUnknownRefresh = 0;
 
-  constructor(private readonly options: DeviceRegistryOptions) {
-    this.load();
+  constructor(private readonly options: DeviceRegistryOptions) {}
+
+  /** Verified, current grant for a device; refetches a stale listing, or an unknown device (fresh enrollment) at most every 5s. */
+  async lookup(deviceId: string): Promise<VerifiedDevice | null> {
+    const age = Date.now() - this.fetchedAt;
+    if (age >= (this.options.maxAgeMs ?? 30_000) || (!this.grants.has(deviceId) && age >= UNKNOWN_DEVICE_REFRESH_MS)) await this.refresh();
+    const record = this.grants.get(deviceId);
+    return record ? verifyDeviceGrantRecord(record, this.options.rootSigningPublicKey, Date.now(), (issuer) => this.grants.get(issuer) ?? null) : null;
   }
 
-  /** Pull the vault once, then keep polling. Errors leave the last good mirror in place. */
-  async start(): Promise<void> {
-    await this.refresh();
-    this.timer = setInterval(() => void this.refresh(), this.options.pollMs ?? 30_000);
-  }
-
-  stop(): void {
-    clearInterval(this.timer ?? undefined);
-    this.timer = null;
-  }
-
-  refresh(): Promise<void> {
+  /** Concurrent first requests share one fetch; a failed fetch keeps the last good listing. */
+  private refresh(): Promise<void> {
     this.inflight ??= (async () => {
       try {
         const records = await this.options.authority.listDeviceGrants();
-        this.store(records);
+        const next = new Map<string, DeviceGrantRecord>();
+        for (const record of records) {
+          const parsed = deviceGrantRecordSchema.safeParse(record);
+          if (!parsed.success) continue;
+          const deviceId = parsed.data.binding.deviceId;
+          // Generations only move forward; a stale listing can't resurrect a revoked grant.
+          const existing = this.grants.get(deviceId);
+          next.set(deviceId, existing && existing.generation > parsed.data.generation ? existing : parsed.data);
+        }
+        this.grants.clear();
+        for (const [deviceId, record] of next) this.grants.set(deviceId, record);
+        this.fetchedAt = Date.now();
       } catch (error) {
         this.options.onError?.(error);
       } finally {
@@ -69,72 +61,5 @@ export class DeviceRegistry {
       }
     })();
     return this.inflight;
-  }
-
-  /** Verified, current grant for a device, refreshing once when a signed request names an unknown one (fresh enrollment). */
-  async lookup(deviceId: string): Promise<VerifiedDevice | null> {
-    const cached = this.cache.get(deviceId);
-    if (cached) return this.current(cached);
-    const now = Date.now();
-    // A fresh browser fires its first requests concurrently: they all miss the
-    // cache, one refresh runs, and the rest wait for it rather than failing.
-    if (this.inflight) {
-      await this.inflight;
-    } else if (now - this.lastUnknownRefresh >= UNKNOWN_DEVICE_REFRESH_MS) {
-      this.lastUnknownRefresh = now;
-      await this.refresh();
-    }
-    const found = this.cache.get(deviceId);
-    return found ? this.current(found) : null;
-  }
-
-  private current(entry: MirroredDevice): VerifiedDevice | null {
-    // Re-run the full check so a TTL lapsing between polls, or an issuer
-    // revoked since, is honoured without waiting for the next store.
-    return this.verify(entry.record);
-  }
-
-  private verify(record: DeviceGrantRecord): VerifiedDevice | null {
-    return verifyDeviceGrantRecord(record, this.options.rootSigningPublicKey, Date.now(), (deviceId) => this.cache.get(deviceId)?.record ?? null);
-  }
-
-  private load(): void {
-    for (const row of this.options.database.orm.select().from(deviceGrants).all()) {
-      const parsed = deviceGrantRecordSchema.safeParse(JSON.parse(row.recordJson));
-      if (!parsed.success) continue;
-      this.cache.set(row.deviceId, { record: { ...parsed.data, generation: row.generation, revokedAt: row.revokedAt }, verified: null });
-    }
-    // Issuers may load after their delegates; verify once everything is present.
-    for (const entry of this.cache.values()) entry.verified = this.verify(entry.record);
-  }
-
-  private store(records: DeviceGrantRecord[]): void {
-    const now = new Date().toISOString();
-    for (const record of records) {
-      const parsed = deviceGrantRecordSchema.safeParse(record);
-      if (!parsed.success) continue;
-      const deviceId = parsed.data.binding.deviceId;
-      const existing = this.cache.get(deviceId);
-      // Generations only move forward; a stale listing can't resurrect a revoked grant.
-      if (existing && existing.record.generation > parsed.data.generation) continue;
-      this.cache.set(deviceId, { record: parsed.data, verified: null });
-      this.options.database.orm.insert(deviceGrants).values({
-        deviceId,
-        kind: parsed.data.invite.invite.kind,
-        recordJson: JSON.stringify(parsed.data),
-        generation: parsed.data.generation,
-        revokedAt: parsed.data.revokedAt,
-        updatedAt: now,
-      }).onConflictDoUpdate({
-        target: deviceGrants.deviceId,
-        set: { recordJson: JSON.stringify(parsed.data), generation: parsed.data.generation, revokedAt: parsed.data.revokedAt, updatedAt: now },
-      }).run();
-    }
-    for (const deviceId of [...this.cache.keys()]) {
-      if (records.some((record) => record.binding.deviceId === deviceId)) continue;
-      this.cache.delete(deviceId);
-      this.options.database.orm.delete(deviceGrants).where(eq(deviceGrants.deviceId, deviceId)).run();
-    }
-    for (const entry of this.cache.values()) entry.verified = this.verify(entry.record);
   }
 }

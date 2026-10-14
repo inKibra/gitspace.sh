@@ -130,11 +130,15 @@ it('requires an attached machine and never substitutes another cache for a remov
   expect(container.textContent).toContain('Attach a machine');
   expect(checks().disabled).toBe(true);
   const now = new Date().toISOString();
-  snapshot.attachments = ['a', 'b'].map(machineId => RuntimeSnapshotSchema.shape.attachments.element.parse({
-    projectId: 'project', workspaceId: 'workspace', attachmentId: machineId, machineId, generation: 1, role: 'cache', state: 'ready',
-    checkout: { kind: 'shared', branch: 'work' }, capabilities: [], updatedAt: now, heartbeatAt: now,
-    cache: { state: 'live', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: null, reclaimAt: null, lastSyncAt: now, localWorkOptIn: false, setup: [] },
-  }));
+  const attach = (ids: string[]) => {
+    snapshot.attachments = ids.map(machineId => RuntimeSnapshotSchema.shape.attachments.element.parse({
+      projectId: 'project', workspaceId: 'workspace', attachmentId: machineId, machineId, generation: 1, state: 'ready',
+      checkout: { kind: 'shared', branch: 'work' }, capabilities: [], updatedAt: now, heartbeatAt: now,
+      cache: { state: 'live', platform: 'linux', lastSyncAt: now, setup: [] },
+    }));
+    snapshot.documents = { 'gitspace.status': { cloud: { version: null, conflicts: [] }, machines: ids.map(machineId => ({ machineId, attachmentId: machineId, generation: 1, online: true, ready: true, setup: [], sync: { lastSyncAt: now, unsent: 0, unapplied: false, problem: null, conflicts: [] } })) } };
+  };
+  attach(['a', 'b']);
   save();
   await act(() => render({}));
   expect(checks().disabled).toBe(true);
@@ -144,28 +148,12 @@ it('requires an attached machine and never substitutes another cache for a remov
   expect(runs.checks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'b', runId: expect.any(String) });
   await act(() => [...container.querySelectorAll('button')].find(button => button.textContent === 'Prepare machine')!.click());
   expect(runs.phase).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'b', runId: expect.any(String), phase: 'machine/prepare', rerun: null, interactive: undefined });
-  snapshot.attachments = snapshot.attachments.filter(attachment => attachment.machineId === 'a');
+  attach(['a']);
   save();
   await act(() => render({}));
   expect(checks().disabled).toBe(true);
   expect(select.value).toBe('');
   expect(runs.checks).toHaveBeenCalledTimes(1);
-});
-
-it('names the explicit paused default so cloud dispatch can resume that cache before running', async () => {
-  const now = new Date().toISOString();
-  const snapshot = RuntimeSnapshotSchema.parse({
-    version: 1, projectId: 'project', workspaceId: 'workspace', cursor: 0, conversations: [], tasks: [], questions: [], documents: { 'gitspace.execution': { defaultMachineId: 'paused' } },
-    attachments: [{ projectId: 'project', workspaceId: 'workspace', attachmentId: 'paused', machineId: 'paused', generation: 1, role: 'cache', state: 'attaching', checkout: { kind: 'shared', branch: 'work' }, capabilities: [], updatedAt: now, heartbeatAt: now,
-      cache: { state: 'paused', platform: 'linux', activity: [], lastActivityAt: now, pausedAt: now, reclaimAt: null, lastSyncAt: now, localWorkOptIn: false, setup: [] } }],
-  });
-  queries.set('snapshot', { state: 'success', value: snapshot, fetch: 'idle', refetch: async () => {} });
-  queries.set('environment', { state: 'success', value: environment, fetch: 'idle', refetch: async () => {} });
-  await act(() => render({}));
-  expect(container.querySelector<HTMLSelectElement>('select[aria-label="Environment run machine"]')?.value).toBe('paused');
-  expect(container.textContent).toContain('resume before the requested run');
-  await act(() => [...container.querySelectorAll('button')].find(button => button.textContent === 'Run checks')!.click());
-  expect(runs.checks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'paused', runId: expect.any(String) });
 });
 
 it('loads cloud session usage without a cache and retains it when a cache is attached', async () => {

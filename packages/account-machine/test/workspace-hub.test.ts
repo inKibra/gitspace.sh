@@ -2,10 +2,9 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { GitSpaceDatabase } from '@gitspace/core';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
-import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
+import { WorkspaceHubTerminalCoordinator, type WorkspaceCheckouts } from '../src/workspace-hub.js';
 import type { TerminalSnapshot } from '../src/terminal-stream.js';
 
 async function observe(events: AsyncGenerator<StreamEvent<TerminalSnapshot>>, accept: (snapshot: TerminalSnapshot) => boolean): Promise<TerminalSnapshot> {
@@ -14,6 +13,17 @@ async function observe(events: AsyncGenerator<StreamEvent<TerminalSnapshot>>, ac
     if (event.done) throw new Error('Terminal stream ended');
     if (event.value.type !== 'resync' && accept(event.value.value)) return event.value.value;
   }
+}
+
+/** Ready checkouts of project-a by workspace id. */
+function checkouts(held = new Map<string, string>(), use: WorkspaceCheckouts['use'] = async () => {}): WorkspaceCheckouts {
+  return {
+    path: (spaceId) => held.get(spaceId) ?? null,
+    projectId: (spaceId) => held.has(spaceId) ? 'project-a' : null,
+    list: () => [...held.keys()],
+    use,
+    changed: async () => {},
+  };
 }
 
 const roots: string[] = [];
@@ -32,7 +42,7 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     roots.push(root);
     const checkout = join(root, 'workspace');
     mkdirSync(checkout, { recursive: true });
-    const coordinator = new WorkspaceHubTerminalCoordinator(new GitSpaceDatabase(join(root, 'gitspace.db')), 'machine-a');
+    const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', checkouts());
     const result = await coordinator.runLifecyclePlan('cloud-workspace', 'workspace/materialize', [{
       id: 'materialize', kind: 'script', command: '/approved/materialize.sh', content: "printf 'materialized' > marker",
     }], { PATH: process.env.PATH ?? '' }, { directory: checkout });
@@ -45,7 +55,7 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     roots.push(root);
     const checkout = join(root, 'workspace');
     mkdirSync(checkout, { recursive: true });
-    const coordinator = new WorkspaceHubTerminalCoordinator(new GitSpaceDatabase(join(root, 'gitspace.db')), 'machine-a');
+    const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', checkouts());
     const started = Promise.withResolvers<void>();
     const execution = coordinator.runLifecyclePlan('cloud-workspace', 'workspace/materialize', [{
       id: 'wait', kind: 'script', command: '/approved/wait.sh', content: 'sleep 30',
@@ -58,17 +68,10 @@ describe('WorkspaceHubTerminalCoordinator', () => {
   it('creates, attaches, writes, and stops a real GitSpace supervisor PTY', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-'));
     roots.push(root);
-    const repositoryPath = join(root, 'repo');
     const workspacePath = join(root, 'workspace');
-    mkdirSync(repositoryPath, { recursive: true });
     mkdirSync(workspacePath, { recursive: true });
 
-    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
-    expect(database.createProject({ id: 'project-a', name: 'GitSpace', repositoryPath }).status).toBe('ok');
-    expect(database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'agent-blame', branch: 'feature/test', rootPath: workspacePath }).status).toBe('ok');
-    expect(database.possessSpace('workspace-a', 'machine-a').status).toBe('ok');
-
-    const coordinator = new WorkspaceHubTerminalCoordinator(database, 'machine-a');
+    const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', checkouts(new Map([['workspace-a', workspacePath]])));
     const terminal = await coordinator.createShell('workspace-a');
     expect(terminal.kind).toBe('user');
     expect(terminal.cwd).toBe(workspacePath);
@@ -117,10 +120,6 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     expect(verbose.steps.map(({ id, exitCode }) => ({ id, exitCode }))).toEqual([{ id: 'verbose', exitCode: 0 }]);
     expect(verbose.steps[0]!.output.endsWith('complete')).toBe(true);
 
-    const closing = database.beginSpaceClose({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 1 });
-    if (closing.status === 'error') throw closing.error;
-    const closed = database.commitSpaceClosed({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 1 });
-    if (closed.status === 'error') throw closed.error;
     await coordinator.stopOwned('workspace-a');
     const hub = await daemonClientForProject(workspacePath);
     const described = await hub.request({ op: 'describe', name: terminal.name });
@@ -138,14 +137,9 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     mkdirSync(join(cachePath, 'tools', 'bin'), { recursive: true });
     writeFileSync(join(cachePath, '.gitspace', 'bundle.json'), JSON.stringify({ version: 1, profiles: { base: {} }, terminal: { path: ['tools/bin'], env: { HUB_FIXTURE_GREETING: 'bundle-env' } } }));
     writeFileSync(join(cachePath, 'tools', 'bin', 'hub-fixture-tool'), "#!/bin/sh\nprintf 'bundle-tool:%s\\n' \"$HUB_FIXTURE_GREETING\"\n", { mode: 0o755 });
-    // No local placement holds this workspace: only its ready cache checkout can host the shell.
-    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    // Only the workspace's ready cache checkout can host the shell.
     const used: string[] = [];
-    const coordinator = new WorkspaceHubTerminalCoordinator(database, 'machine-a', undefined, {
-      path: (spaceId) => spaceId === 'workspace-a' ? cachePath : null,
-      use: async (spaceId) => { used.push(spaceId); },
-      changed: async () => {},
-    });
+    const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', checkouts(new Map([['workspace-a', cachePath]]), async (spaceId) => { used.push(spaceId); }));
     const terminal = await coordinator.createShell('workspace-a');
     expect(used).toEqual(['workspace-a']);
     expect(terminal).toMatchObject({ kind: 'user', cwd: cachePath, machineId: 'machine-a' });
@@ -155,7 +149,6 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     const exited = await hub.request({ op: 'wait', name: terminal.name, for: 'exit', timeoutMs: 10_000 });
     expect(exited).toMatchObject({ op: 'wait', timedOut: false });
     expect((await coordinator.read('workspace-a', terminal.name, null)).data).toContain('bundle-tool:bundle-env');
-    database.close();
   }, 20_000);
 
   it('streams a cache checkout shell and its output to subscribers that started before the shell', async () => {
@@ -163,12 +156,7 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     roots.push(root);
     const cachePath = join(root, 'workspace');
     mkdirSync(cachePath, { recursive: true });
-    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
-    const coordinator = new WorkspaceHubTerminalCoordinator(database, 'machine-a', undefined, {
-      path: (spaceId) => spaceId === 'workspace-a' ? cachePath : null,
-      use: async () => {},
-      changed: async () => {},
-    });
+    const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', checkouts(new Map([['workspace-a', cachePath]])));
     const controller = new AbortController();
     const inventory = coordinator.events('workspace-a', null, null, controller.signal);
     try {
@@ -192,7 +180,6 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     } finally {
       controller.abort();
       await inventory.return(undefined);
-      database.close();
     }
   }, 20_000);
 });

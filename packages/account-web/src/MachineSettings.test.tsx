@@ -8,7 +8,7 @@ import type { MachineDiscardConfirmation } from '@gitspace/protocol/machine-disc
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { MachineSettings } from './SettingsPage.js';
 
-const settings: UserSettings = { version: 1, revision: 2, onboardingComplete: true, profile: { displayName: 'Brad', handle: 'brad' }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, machines: { cacheReclaimSeconds: 86400 }, updatedAt: '2026-10-03T00:00:00.000Z', updatedBy: 'browser' };
+const settings: UserSettings = { version: 1, revision: 2, onboardingComplete: true, profile: { displayName: 'Brad', handle: 'brad' }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, updatedAt: '2026-10-03T00:00:00.000Z', updatedBy: 'browser' };
 const noop = async () => {};
 function render(overrides: Partial<ComponentProps<typeof MachineSettings>> = {}) {
   return act(() => root.render(<MachineSettings settings={settings} onChange={vi.fn()} machines={[]} onUpdateMachine={noop} onCreateSandbox={noop} onControlMachine={noop} onDestroyMachine={noop} cloudImages={[]} cloudImageDefault={null} cloudImageError={null} onChangeCloudImage={noop} onRecoverCloudImage={noop} onSetCloudImageDefault={noop} {...overrides} />));
@@ -73,18 +73,6 @@ it('cancels refused discard without sending confirmation', async () => {
   await button('Cancel discard');
   expect(invoke).toHaveBeenCalledTimes(1);
   expect(document.body.querySelector('input[aria-label="Confirm machine name"]')).toBeNull();
-});
-it('edits the account-wide paused cache retention through the settings draft', async () => {
-  const onChange = vi.fn();
-  await render({ onChange });
-  const trigger = document.body.querySelector<HTMLElement>('[aria-label="Reclaim paused caches after"]');
-  if (!trigger) throw new Error('Missing reclaim control');
-  expect(trigger.textContent).toContain('24 hours');
-  await act(() => trigger.click());
-  const options = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')];
-  expect(options.map((option) => option.textContent)).toEqual(['1 hour', '6 hours', '24 hours', '72 hours', '168 hours']);
-  await act(() => options.find((option) => option.textContent === '72 hours')?.click());
-  expect(onChange).toHaveBeenCalledWith({ ...settings, machines: { cacheReclaimSeconds: 259200 } });
 });
 it('keeps every other machine and its discard dialog usable while one machine operation hangs', async () => {
   const machine = (id: string, label: string) => ({ id, label, state: 'online' as const, kind: 'sandbox' as const, provider: 'cloudflare-sandbox' as const, notes: '', desiredState: 'online' as const, lifecycleRevision: 1, operationId: null, error: null });

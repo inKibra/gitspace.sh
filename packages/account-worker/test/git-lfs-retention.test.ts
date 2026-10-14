@@ -130,37 +130,4 @@ describe('durable LFS restore roots', () => {
     await expect(canonicalLfsObjects({ get: async () => repo }, ['canonical'], fetcher)).rejects.toThrow('unavailable');
   });
 
-  it('does not retain a stale portable close inventory', async () => {
-    const projectId = crypto.randomUUID(), spaceId = crypto.randomUUID();
-    const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
-    await project.bootstrap({ id: projectId, name: 'Rejected portable', repositoryReference: 'https://origin.invalid/repo.git', baseBranch: 'main', createdBy: 'machine' });
-    const placement = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${spaceId}`);
-    const identity = { projectId, spaceId, machineId: 'machine' };
-    await placement.bootstrap(identity);
-    await placement.beginClose({ ...identity, expectedGeneration: 1 });
-    const manifest = await persistPortableCheckpoint(projectId, spaceId, 1, { objects: [{ ...object, source: 'r2' }], heldBack: [] });
-    await placement.abortClose({ ...identity, expectedGeneration: 1, revision: 1, message: 'cancelled' });
-    const result = await placement.commitClosed({ ...identity, expectedGeneration: 1, revision: 1, ...manifest });
-    expect(result.status).toBe('error');
-    await runInDurableObject(project, (_instance, state) => expect(new GitLfsRetention(state.storage).snapshots()).toEqual([]));
-  });
-
-  it('roots a closed restorable portable revision and releases it when the workspace is archived', async () => {
-    const projectId = crypto.randomUUID(), spaceId = crypto.randomUUID();
-    const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
-    await project.bootstrap({ id: projectId, name: 'Portable roots', repositoryReference: 'https://origin.invalid/repo.git', baseBranch: 'main', createdBy: 'machine' });
-    const definition = { id: spaceId, projectId, kind: 'worktree' as const, name: 'Closed workspace', branch: 'topic', phase: 'code' as const, sourceKind: 'base' as const, sourceRef: 'main', sourceCommit: null, lifecycle: 'active' as const, goalId: null };
-    const workspace = await project.putWorkspace({ ...definition, expectedRevision: 0 });
-    const placement = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${spaceId}`);
-    const identity = { projectId, spaceId, machineId: 'machine' };
-    await placement.bootstrap(identity);
-    await placement.beginClose({ ...identity, expectedGeneration: 1 });
-    const manifest = await persistPortableCheckpoint(projectId, spaceId, 1, { objects: [{ ...object, source: 'r2' }], heldBack: [] });
-    expect((await placement.commitClosed({ ...identity, expectedGeneration: 1, revision: 1, ...manifest })).status).toBe('ok');
-    await project.lfsCollect();
-    await runInDurableObject(project, (_instance, state) => expect(new GitLfsRetention(state.storage).candidates()).toEqual([]));
-    await project.putWorkspace({ ...definition, lifecycle: 'archived', expectedRevision: workspace.revision });
-    await project.lfsCollect();
-    await runInDurableObject(project, (_instance, state) => expect(new GitLfsRetention(state.storage).candidates()).toEqual([object]));
-  });
 });

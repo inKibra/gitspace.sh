@@ -90,37 +90,6 @@ export interface EnvironmentInputValue {
   source: 'account' | 'bundle' | 'project' | 'workspace';
 }
 
-export interface UserSecretView {
-  name: string;
-  updated: string;
-  projects: readonly string[];
-  unused?: boolean;
-}
-
-export interface ProjectSecretView {
-  name: string;
-  updated: string;
-  project: string;
-  requiredBy: readonly string[];
-}
-
-export interface ProjectValueView {
-  name: string;
-  value: string;
-  updated: string;
-  project: string;
-  requiredBy: readonly string[];
-}
-
-export interface SecretsPageViewModel {
-  projects: readonly string[];
-  selectedProject: string;
-  userSecrets: readonly UserSecretView[];
-  projectSecrets: readonly ProjectSecretView[];
-  projectValues: readonly ProjectValueView[];
-  missing: readonly EnvironmentSecret[];
-}
-
 export interface EnvironmentViewModel {
   project: { name: string; repository: string };
   workspace: { name: string; profile: string; machineId: string; generation?: number | null };

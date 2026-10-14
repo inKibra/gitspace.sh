@@ -199,7 +199,7 @@ export async function watchProcessExit(services: JobServices, input: JsonValue, 
   await api.commit(async tx => {
     const watches = await tx.doc(ProcessWatchesDoc, api.conversationId);
     if (watches.tasks[identity]) return;
-    const task = await tx.createTask(createProcessExitTask(services), { originAttemptId: result.attemptId, daemonId: response.daemon.id, restartCount: response.daemon.restartCount, args: { op: 'status', name: response.daemon.name, instanceId: response.daemon.id, restartCount: response.daemon.restartCount, ...(args.on === undefined ? {} : { on: args.on }), ...(args.at === undefined ? {} : { at: args.at }) } }, { ownership: { kind: 'conversation' }, conversationId: api.conversationId, background: true });
+    const task = await tx.createTask(createProcessExitTask(services), { originAttemptId: result.attemptId, daemonId: response.daemon.id, restartCount: response.daemon.restartCount, args: { op: 'status', name: response.daemon.name, instanceId: response.daemon.id, restartCount: response.daemon.restartCount, ...(args.on === undefined ? {} : { on: args.on }) } }, { ownership: { kind: 'conversation' }, conversationId: api.conversationId, background: true });
     watches.tasks[identity] = String(task);
   }, context);
   await services.wakeAt(Date.now());

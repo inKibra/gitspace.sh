@@ -64,7 +64,7 @@ function approvalView({ name, args }: RuntimeQuestionTool, machines: readonly Ma
     const bash = RuntimeBashCommandArgumentsSchema.safeParse(args);
     if (bash.success) return {
       verb: 'Run command', subject: null, description: null,
-      facts: [['Directory', bash.data.cwd ?? 'Repository root'], ['Machine', machineText(bash.data.on, machines)], ...(bash.data.at ? [['Source', bash.data.at] satisfies [string, string]] : []), ...(bash.data.background ? [['Mode', 'Background job'] satisfies [string, string]] : [])],
+      facts: [['Directory', bash.data.cwd ?? 'Repository root'], ['Machine', machineText(bash.data.on, machines)], ...(bash.data.background ? [['Mode', 'Background job'] satisfies [string, string]] : [])],
       body: <GitSpaceMarkdown>{fenced(bash.data.command, 'sh')}</GitSpaceMarkdown>,
     };
   }

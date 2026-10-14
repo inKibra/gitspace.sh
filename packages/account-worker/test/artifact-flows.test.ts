@@ -12,7 +12,6 @@ import { tenantRootPrivateKey } from './setup.js';
 import { createCipheriv, createHash } from 'node:crypto';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION } from '@gitspace/protocol-workspace';
 import { readArtifactObject } from '../src/artifact-object-reader.js';
-import { verifyLegacyMigrationArtifacts } from '../src/legacy-space-migration.js';
 
 async function fixture() {
   const userId = env.ACCOUNT_ID;
@@ -295,65 +294,6 @@ describe('user artifact flows', () => {
     expect((await worker.fetch(new Request(new URL(expired.value.url, origin)), env)).status).toBe(404);
     expect(await client.inspector.artifacts.shares.list({ spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/demo.html' })).toMatchObject({ status: 'ok', value: [] });
   });
-
-  it('authenticates large original envelopes for migration and downloads their exact bytes', async () => {
-    const { client, workspaceId, publishLegacy, origin } = await fixture();
-    const artifact = await publishLegacy();
-    await verifyLegacyMigrationArtifacts(env, artifact.scope);
-    for (const size of [artifact.size - 1, artifact.size + 1]) {
-      await expect(readArtifactObject(env, env.ACCOUNT_ID, artifact.blobHash, artifact.scopeKey, size)).rejects.toThrow('Artifact size mismatch');
-    }
-    const created = await client.inspector.artifacts.shares.create({
-      spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/legacy.pcm', hash: artifact.blobHash, expiresAt: null,
-    });
-    if (created.status === 'error') throw created.error;
-    const response = await worker.fetch(new Request(new URL(created.value.url, origin)), env);
-    expect(response.status).toBe(200);
-    expect(response.headers.get('content-length')).toBe(String(artifact.size));
-    const received = createHash('sha256');
-    let size = 0;
-    const reader = response.body!.getReader();
-    try {
-      while (true) {
-        const next = await reader.read();
-        if (next.done) break;
-        size += next.value.byteLength;
-        received.update(next.value);
-      }
-    } finally { reader.releaseLock(); }
-    expect(size).toBe(artifact.size);
-    expect(received.digest('hex')).toBe(artifact.digest);
-    const withoutSize = createHash('sha256');
-    for await (const bytes of await readArtifactObject(env, env.ACCOUNT_ID, artifact.blobHash, artifact.scopeKey)) withoutSize.update(bytes);
-    expect(withoutSize.digest('hex')).toBe(artifact.digest);
-  }, 30_000);
-
-  it('withholds all large legacy plaintext on content-address or GCM authentication failure', async () => {
-    const { client, workspaceId, publishLegacy, origin } = await fixture();
-    const artifact = await publishLegacy();
-    const request = { spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/legacy.pcm', hash: artifact.blobHash, expiresAt: null };
-    const created = await client.inspector.artifacts.shares.create(request);
-    if (created.status === 'error') throw created.error;
-    const object = await env.DATA.get(artifact.objectKey);
-    const sealed = new Uint8Array(await object!.arrayBuffer());
-    sealed[sealed.byteLength - 1] = sealed[sealed.byteLength - 1]! ^ 1;
-    await env.DATA.put(artifact.objectKey, sealed);
-    await expect(verifyLegacyMigrationArtifacts(env, artifact.scope)).rejects.toThrow('Artifact object failed content verification');
-    expect((await client.inspector.artifacts.shares.create(request)).status).toBe('error');
-    const response = await worker.fetch(new Request(new URL(created.value.url, origin)), env);
-    expect(response.status).toBe(404);
-    expect(response.headers.get('content-disposition')).toBeNull();
-    // A valid content address is not a substitute for AES-GCM authentication.
-    // Rejection before an iterable is returned guarantees that no prefix was emitted.
-    sealed[sealed.byteLength - 1] = sealed[sealed.byteLength - 1]! ^ 1;
-    for (const offset of [sealed.byteLength - 1, 13 + CHECKPOINT_CHUNK_BYTES]) {
-      sealed[offset] = sealed[offset]! ^ 1;
-      const hash = `sha256:${createHash('sha256').update(sealed).digest('hex')}`;
-      await env.DATA.put(`${artifact.objectKey.slice(0, -64)}${hash.slice(7)}`, sealed);
-      await expect(readArtifactObject(env, env.ACCOUNT_ID, hash, artifact.scopeKey, artifact.size)).rejects.toThrow();
-      sealed[offset] = sealed[offset]! ^ 1;
-    }
-  }, 30_000);
 
   it('streams chunked shares completely, keeps preview/copy size limits honest, and rejects corrupt final parts', async () => {
     const { client, workspaceId, publishChunked, origin } = await fixture();

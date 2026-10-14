@@ -3,11 +3,9 @@ import { Rocket02, XClose } from '@untitledui/icons';
 import { StatusDot } from './GitSpaceShell.js';
 import { latestLaunchProgress, launchMessageTarget, RELEASE_TARGET_LABEL, RELEASE_TARGETS, shortSha, type LaunchTrack } from './release.js';
 import { useState } from 'react';
-import { RuntimeIdentitySchema, RuntimeMachineIdSchema } from '@gitspace/protocol-runtime';
 import type { InspectorView } from '@gitspace/protocol';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
 import { useWorkspaceRunMachine } from './useWorkspaceRunMachine.js';
-import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 /** Resolve the selected workspace, not whichever workspace happens to be open behind its menu. */
@@ -35,16 +33,12 @@ export function LaunchMachineDialog({ projectId, workspaceId, machines, onClose,
         <option value="">Choose a machine</option>
         {selection.machines.map(candidate => <option key={candidate.id} value={candidate.id}>{machines.find(item => item.id === candidate.id)?.label ?? candidate.id} · {candidate.label}</option>)}
       </select></label>
-      {!runtime.snapshot ? <p role="status">Loading workspace machines…</p> : !machine ? <p role="status" className="text-caption text-muted-foreground">{selection.machines.length ? 'Choose a machine to build the release.' : 'Attach a machine to this workspace to launch GitSpace.'}</p> : machine.label === 'Paused' || machine.label === 'Reclaimed' ? <p role="status" className="text-caption text-muted-foreground">Resume this cache and wait until it is live before launching. Resuming does not launch a release.</p> : !machine.ready ? <p role="status" className="break-words text-caption text-muted-foreground">{machine.status}. Launching requires a live machine.</p> : null}
+      {!runtime.snapshot ? <p role="status">Loading workspace machines…</p> : !machine ? <p role="status" className="text-caption text-muted-foreground">{selection.machines.length ? 'Choose a machine to build the release.' : 'Attach a machine to this workspace to launch GitSpace.'}</p> : !machine.ready ? <p role="status" className="break-words text-caption text-muted-foreground">{[machine.label, ...machine.errors].join(' · ')}. Launching requires a ready machine.</p> : null}
       {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
       <DialogFooter>
         <Button variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
-        {machine && (machine.label === 'Paused' || machine.label === 'Reclaimed') ? <Button variant="secondary" disabled={busy || !runtime.connected} onClick={() => void perform(async () => {
-          const result = await rpcClient.runtime.attachment.cache.request({ ...RuntimeIdentitySchema.parse({ projectId, workspaceId }), machineId: RuntimeMachineIdSchema.parse(machine.id), requestId: crypto.randomUUID() });
-          if (result.status === 'error') throw result.error;
-        })}>Resume cache</Button> : null}
         <Button variant="primary" disabled={busy || !runtime.connected || !machine?.ready} onClick={() => void perform(async () => {
-          if (!machine?.ready) throw new Error('Attach and choose a live machine to launch GitSpace.');
+          if (!machine?.ready) throw new Error('Attach and choose a ready machine to launch GitSpace.');
           await onLaunch(machine.id);
         })}>Launch</Button>
       </DialogFooter>

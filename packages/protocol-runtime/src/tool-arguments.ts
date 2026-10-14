@@ -58,7 +58,7 @@ export const RuntimeAgentsArgumentsSchema = z.union([
   RuntimeChildAgentsArgumentsSchema,
 ]);
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
-  if (['read', 'grep', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover'].includes(name)) return true;
+  if (['read', 'grep', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
@@ -66,7 +66,8 @@ export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof Ru
   if (name.startsWith('space_') || name === 'environment') return ['get', 'current', 'list', 'operations', 'describe', 'read', 'readCode', 'listScopes', 'listPromotions', 'runLog', 'log'].includes(String(args.method));
   return false;
 }
-export const RuntimeMachinesArgumentsSchema = z.union([z.object({ op: z.literal('list').default('list') }), z.object({ op: z.literal('detach'), attachmentId: path, generation: z.number().int().nonnegative() }), z.object({ op: z.literal('setDefault'), machineId: path.nullable() })]);
+export const RuntimeWorkspaceStatusArgumentsSchema = z.object({}).strict();
+export const RuntimeMachinesArgumentsSchema = z.union([z.object({ op: z.literal('list').default('list') }), z.object({ op: z.literal('detach'), attachmentId: path, generation: z.number().int().nonnegative() })]);
 /** Agent-facing sync control. `on` selects the machine; omitted, the single ready machine is used. */
 export const RuntimeSyncArgumentsSchema = z.discriminatedUnion('method', [
   RuntimeDispatchSelectionSchema.pick({ on: true }).extend({ method: z.literal('status') }),
@@ -102,7 +103,7 @@ export const RuntimeHistoryReadArgumentsSchema = z.union([
   z.object({ mode: z.literal('content'), workspaceId: path.optional(), conversationId: path, ordinal: z.number().int().nonnegative(), contentOffset: z.number().int().nonnegative().default(0), contentLimit: z.number().int().min(1).max(65_536).default(16_384) }),
 ]);
 export type RuntimeHistoryReadArguments = z.infer<typeof RuntimeHistoryReadArgumentsSchema>;
-export const RuntimeHistorySearchArgumentsSchema = z.object({ query: path, scope: z.enum(['workspace', 'project']).default('workspace') });
+export const RuntimeHistorySearchArgumentsSchema = z.object({ query: path, scope: z.enum(['workspace', 'project']).default('workspace'), cursor: z.string().max(512).optional() });
 export const RuntimeWebSearchArgumentsSchema = z.object({ query: z.string().min(1).max(2048) });
 export const RuntimeReportIssueArgumentsSchema = z.object({ message: z.string().min(1).max(16384), tool: z.string().max(160).optional(), model: z.string().max(256).optional(), reference: z.string().max(2048).optional() });
 export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string() });
