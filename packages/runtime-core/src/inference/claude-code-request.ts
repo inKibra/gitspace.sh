@@ -13,7 +13,7 @@ const CCH_PLACEHOLDER = 'cch=00000';
 const CCH_SEED = 0x4d659218e32a3268n;
 const TOOL_PREFIX = '_';
 const BUILTIN_TOOLS: Record<string, true> = { web_search: true, code_execution: true, text_editor: true, computer: true };
-const AGENT_BETAS = ['claude-code-20250219', 'oauth-2025-04-20', 'interleaved-thinking-2025-05-14', 'thinking-token-count-2026-05-13', 'context-management-2025-06-27', 'prompt-caching-scope-2026-01-05', 'mid-conversation-system-2026-04-07', 'fallback-credit-2026-06-01'];
+const AGENT_BETAS = ['claude-code-20250219', 'oauth-2025-04-20', 'interleaved-thinking-2025-05-14', 'thinking-token-count-2026-05-13', 'context-management-2025-06-27', 'prompt-caching-scope-2026-01-05', 'mid-conversation-system-2026-04-07', 'fallback-credit-2026-06-01']; // gitleaks:allow (public Anthropic beta names)
 const EFFORT_BETA = 'effort-2025-11-24';
 const CLAUDE_CODE_HEADERS: Record<string, string> = {
   'anthropic-version': '2023-06-01',

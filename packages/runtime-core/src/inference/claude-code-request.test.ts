@@ -31,7 +31,7 @@ it('sends a Claude subscription request in Claude Code shape', async () => {
   expect(headers.get('user-agent')).toBe('claude-cli/2.1.280 (external, cli)');
   expect(headers.get('x-claude-code-session-id')).toBe('session');
   expect(headers.get('x-stainless-package-version')).toBe('0.112.1');
-  expect(headers.get('anthropic-beta')?.split(',')).toEqual(['claude-code-20250219', 'oauth-2025-04-20', 'interleaved-thinking-2025-05-14', 'thinking-token-count-2026-05-13', 'context-management-2025-06-27', 'prompt-caching-scope-2026-01-05', 'mid-conversation-system-2026-04-07', 'fallback-credit-2026-06-01', 'effort-2025-11-24', 'thinking-binding-controls-2026-08-01']);
+  expect(headers.get('anthropic-beta')?.split(',')).toEqual(['claude-code-20250219', 'oauth-2025-04-20', 'interleaved-thinking-2025-05-14', 'thinking-token-count-2026-05-13', 'context-management-2025-06-27', 'prompt-caching-scope-2026-01-05', 'mid-conversation-system-2026-04-07', 'fallback-credit-2026-06-01', 'effort-2025-11-24', 'thinking-binding-controls-2026-08-01']); // gitleaks:allow (public Anthropic beta names)
   const sent = String(request?.body);
   const parsed = JSON.parse(sent);
   // The fingerprint suffix comes from oh-my-pi's createClaudeBillingHeader for this first user message.
