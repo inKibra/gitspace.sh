@@ -22,13 +22,19 @@ The runtime treats a user's machine as an untrusted cache and wraps every effect
 2. **Nothing is lost without a backup.** Discarding unsent machine changes first commits the machine state to `refs/gitspace/backups/<machine>/<timestamp>` and uploads it to the cloud store; resolving a conflict first keeps the conflicted cloud version at `refs/gitspace/backups/cloud/<timestamp>`. Each backup records its base (`<ref>-base`); restoring re-applies the backup's changes since that base onto the current files as a three-way merge, so later cloud changes are not reverted. No upload, no discard. Agents may discard; no human approval. A machine backup keeps its LFS pin until it is pruned (newest 20 or last 30 days).
 3. **No polling, no long-polls.** The cloud pushes work and sync notices over the relay socket; the UI uses hibernatable sockets. Alarms stop rescheduling when there is nothing to do.
 4. **A request touches at most two Durable Objects**: the worker and the object that owns the data. Signatures are verified in the worker; replay protection does not scan a shared table. Call graph is one-directional (workspace → project, never back).
-5. **No long exclusive locks.** Slow work is a durable step list processed by alarms.
+5. **No long exclusive locks.** Slow work is a Pi durable task in the object that owns it.
 6. **Errors say what to do next** in plain language (e.g. "Darktop is offline since 9:41 and no other machine is ready; start GitSpace on Darktop or attach another machine").
 7. **No checks nobody asked for.** Tests that only pin removed behavior are deleted with it.
 8. **Reads return stored rows.** A read never re-derives, never rebuilds a snapshot, never fans out across objects and never writes.
 9. **Derive once, when the data changes.** The object that owns the data recomputes what changed and stores the result; reads serve that result.
 10. **Live updates are small messages about the one thing that changed.** A lost message is corrected by the next change or by one small read on reconnect. No outboxes, replay streams, cursors or snapshots for anything a screen shows.
 11. **A simplification pass only deletes checks, refusals and locks.** Adding one needs the user's OK first, even inside a fix.
+12. **Workspace state lives in the workspace object as Pi durable documents; multi-step work is a Pi task.** Ordering comes from the object (one event at a time, atomic transactions, output held until writes commit). No hand-built leases, fences, claims, tokens, outboxes, step lists or recovery jobs. Effects outside the object (git store, machine, provider) are made repeatable or report "outcome unknown"; they never fence.
+13. **Failures are reported, not stored as blockers.** A failure reaches the agent or user in plain words when it happens. Stored failure state is for display only; nothing reads it to refuse an action. A new attempt always runs; the newest action replaces an older one.
+14. **Every action does what was asked.** No refusals based on state; at most a warning beside the button. Delete always works.
+15. **Authorization is checked once, at the edge:** the request signature and the user id in the object's name. Nothing re-checks it behind the edge.
+
+Approvals: approval mode, approval cards and the approval queue are removed; agents always run. Kept: `propose_plan`, setup script approval and browser site approval.
 
 ## Relay push (machines)
 
@@ -128,28 +134,40 @@ Search: `grep` is exact ripgrep and needs an attached machine; `code_search` is 
 
 Every item is verified the way the user works, in the browser, before it is reported done.
 
-**Batch 0 — rules and audit.** Rules 8–11 above. Audit every read endpoint (objects touched, derive/fan-out/snapshot, bounded reads) and every check (what it refuses, keep or delete); the user decides which checks stay.
+**Batch 0 — rules and audit.** Done: rules 8–15 above; audit of every read endpoint and check in `local://audit-*.md` (worker checks: 144 keep, 151 delete, 86 decided by rules 12–15).
 
-**Batch 1 — status and live updates.**
+**Batch 1 — unblock: workspace state on Pi, no blocking conditions.**
+1. Delete always works, whatever state the workspace is in. A creation that never finishes fails after a timeout and shows Retry and Delete. Then delete the two stuck PR 101 creations in Deedible Info.
+2. Environment runs become Pi tasks in the workspace object: a new run aborts the old one, Cancel aborts it, a gone process ends it. Run history moves out of the project object once; the claim/token/slot/recovery code is deleted. A running run's row shows "Running in terminal" with Open terminal and Cancel.
+3. Cloud edits: delete the writer lease, its fence and recovery job; edits run in order inside the object; the git compare-and-swap stays.
+4. Base-branch change becomes a Pi task; the fence that refuses every other call while it runs is deleted.
+5. Workspace creation and machine snapshot publication become Pi tasks; "pending" and "abandoned" publication states and the detach refusal are deleted.
+6. Workspace lifecycle lives only in the workspace object; the project lists workspaces and keeps no copy (ends the archive/delete loop).
+7. Stuck states become reported failures: Composio "not ready", uncertain logins, browser fences (the agent is told the action's outcome is unknown), cached checkpoint rejections, the inference activation gate.
+8. State refusals removed: a failed project making workspaces read-only, "lifecycle was destroyed", delete waiting for cloud destroy, provision requiring automatic setup, cron delete while running, journal gates.
+9. Duplicate authorization removed: membership scans, the hostname settings hop, the capability map, repeated subagent/approval/generation checks.
+10. Approval mode, approval cards and the approval queue removed.
+11. Agent commands longer than 5 minutes no longer time out at the relay.
+12. Bugs the audit found: an agent's cron run opens the wrong object; a machine is refused when it asks to be attached; an LFS table that is never read.
+
+**Batch 2 — status and live updates.**
 1. Status as a small message: on change each workspace sends `{ workspaceId, status }`; the socket object keeps one row per workspace and forwards it; the sidebar updates that row; page load reads the rows once. The open workspace's view is unchanged. Done when an agent working, then the user clicking away, leaves the row Working until it stops.
-2. Remove outboxes, replay streams and snapshots (account-directory outbox and stream, `project.events` / `environment.events` cursors) for the same pattern.
+2. Remove outboxes, replay streams and snapshots (account-directory outbox and stream, every `*.events` cursor endpoint) for the same pattern.
 3. "Account directory connection failed": record close codes to tell deploys from network drops; brief reconnects are not shown as errors.
 
-**Batch 2 — drive and documents.**
+**Batch 3 — drive and documents.**
 1. `local://` → `drive://`, hard cutover, no alias: parser, composer, tools, skills, agent instructions, inspector tab "Drive".
 2. Agents read PDFs and documents: Workers AI `toMarkdown` (`[ai]` binding), result cached in drive storage by content hash; large text paged. Test size limits and scanned PDFs first.
 3. Files tab shows binary files (PDF in the viewer, not base64).
 4. Chat: attachments as links; user messages rendered as Markdown.
 5. File names with `:`; abandoned upload chunks cleaned up.
 
-**Batch 3 — environment and reads that rebuild.**
-1. `environment.get`: the workspace object stores its environment, derived when files change; the read returns stored rows (now 3.4 s, five objects).
-2. Environment mutations read only the workspace's runs, not every run of the project.
-3. A run releases its slot when it finishes, is cancelled, passes its deadline or its process is gone.
-4. A run's row shows "Running in terminal" with Open terminal and Cancel.
-5. `space.view` and the rest of the audit's findings.
+**Batch 4 — reads that rebuild** (from the audit).
+1. `environment.get` returns the workspace's stored environment, derived when its files change (now 3.4 s, five objects).
+2. Inspector: drop the 3-object preamble on every request; opening the Inspector no longer starts the agent; `inspector.view`, overview, repository tree and artifacts read stored rows.
+3. `space.view`, `project.list` (writes on every call), `stackStatus` (git merge-base per read), the machines list (runs fleet control), the Providers screen (decrypts every credential, calls every provider).
 
-**Batch 4 — machine and relay.**
+**Batch 5 — machine and relay.**
 1. Delete old-machine paths: `afterSnapshot` long-poll, `runtime.heartbeat`, echo heartbeat.
 2. Relay drops on Darktop (every connection resets together); a finished command is not reported failed.
 3. Machine-wide assignments take ~30 s for 4 workspaces: cache per commit.
@@ -157,14 +175,14 @@ Every item is verified the way the user works, in the browser, before it is repo
 5. Conversation notices: machine offline/online, setup failure, sync conflict.
 6. The release follower logs an old launch failure on every start.
 
-**Batch 5 — inference.**
+**Batch 6 — inference.**
 1. Claude fast mode sends requests without the Claude Code identity.
 2. Provider errors in plain words with the next step, not raw JSON.
 3. OpenAI usage on the Inference page (port omp's ChatGPT usage reader; check the stored provider id).
 
-**Batch 6 — cleanup.** Old snapshot refs (Golconda ~1,108, PR 101 4); `saved-transcript-*` in the worker; the failing LFS and Artifacts tests.
+**Batch 7 — cleanup.** Old snapshot refs (Golconda ~1,108, PR 101 4); `saved-transcript-*` in the worker; the failing LFS and Artifacts tests.
 
-**Batch 7 — small UI bugs.** Golconda's mode switcher; Deedible Info's context meter at 264%; empty `system` messages in Validator and PR 101; ~925 "client disconnected" errors on Validator.
+**Batch 8 — small UI bugs.** Golconda's mode switcher; Deedible Info's context meter at 264%; empty `system` messages in Validator and PR 101; ~925 "client disconnected" errors on Validator.
 
 **Later.** Machine CLI (`gitspace status`, `setup`, `sync`, `env --`).
 
