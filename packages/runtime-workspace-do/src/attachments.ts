@@ -23,7 +23,8 @@ export class ExecutorNotConnected extends TaggedError('ExecutorNotConnected')<{ 
     super({ machineId, message: `Machine ${machineId} is not connected to the relay` });
   }
 }
-const RejectionSchema = z.object({ error: z.string() });
+// The machine rejects with `{ error }`; the relay tunnel fails with `{ error: { code, message } }`.
+const RejectionSchema = z.object({ error: z.union([z.string(), z.object({ message: z.string() }).transform(error => error.message)]) });
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 const isBrowserCapability = (capability: string) => capability === 'browser' || capability === 'browser_control' || capability.startsWith('browser.');
 const failed = (dispatch: RuntimeToolDispatch, message: string): RuntimeToolResult => ({ requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: 'failed', content: [{ type: 'text', text: message }], error: { code: 'machine_unavailable', message } });
