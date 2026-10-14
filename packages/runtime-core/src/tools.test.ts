@@ -9,7 +9,7 @@ import type { SessionControlView } from '@gitspace/protocol-runtime/session-cont
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
 import { createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
-import { DurableJobsDoc, createJobTool, type JobServices } from './jobs.js';
+import { DurableJobsDoc, createJobTask, createJobTool, type JobServices } from './jobs.js';
 import { RuntimeBashArgumentsSchema } from '@gitspace/protocol-runtime/tool-arguments';
 
 const model: Model<Api> = { id: 'tool-contract', name: 'Tool contract', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
@@ -37,7 +37,7 @@ const samples: Record<string, ToolCall['arguments']> = {
 };
 async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = [], approvalDefault: ToolServices['approvalDefault'] = async () => 'yolo') {
   const tools = [...createRuntimeTools({ ...services, invoke, approvalDefault }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
-  const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools }));
+  const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools, tasks: [createJobTask(jobServices)] }));
   let generation = 0;
   const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, context) {
     const providerSchema = z.object({ type: z.literal('object'), properties: z.record(z.string(), z.unknown()), anyOf: z.never().optional(), oneOf: z.never().optional(), allOf: z.never().optional() });
@@ -321,6 +321,32 @@ for (const mode of ['settled', 'timeout', 'cancelled'] as const) test(`bash wait
     expect(result?.content).toEqual([{ type: 'text', text: mode }]);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 4000);
+
+test('a background command settles on its executor result and delivers its completion once', async () => {
+  const delivered: Array<{ requestId: string; payload: unknown }> = [];
+  let finished: string | null = null;
+  let resume = () => {};
+  const { harness, root } = await registered([[call('bash', { command: 'make build', background: true }, 'start')]], completed, {
+    ...operations,
+    // Production wakes the Harness from an alarm; background tasks run on resume.
+    wakeAt: async at => { setTimeout(() => resume(), Math.max(0, at - Date.now())); },
+    async execute(input) { finished = input.attemptId; return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: 'built' }] }; },
+    async reconcile(attemptId) { return finished === attemptId ? { status: 'completed', requestId: attemptId, attemptId, content: [{ type: 'text', text: 'built' }] } : null; },
+    async deliverConversationEvent(input) { delivered.push({ requestId: input.requestId, payload: input.payload }); },
+  });
+  resume = () => harness.resume();
+  try {
+    await root.submit({ type: 'input', content: 'Build in the background.' }, BACKGROUND_CONTEXT);
+    await harness.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    for (let waited = 0; delivered.length === 0 && waited < 3000; waited += 20) await new Promise(resolve => setTimeout(resolve, 20));
+    await harness.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(delivered).toHaveLength(1);
+    const observation = RuntimeJobObservationSchema.parse(delivered[0]!.payload);
+    expect(observation.status === 'terminal' && observation.result.status).toBe('completed');
+    const jobs = Object.values((await harness.snapshot(DurableJobsDoc, root.id, BACKGROUND_CONTEXT))?.records ?? {});
+    expect(jobs.map(job => [job.observation.status, job.delivered])).toEqual([['terminal', true]]);
+  } finally { resume = () => {}; await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
 
 test('bash logs exposes executor failures as tool errors rather than successful text', async () => {
   const logs = call('bash', {}, 'failed-logs');

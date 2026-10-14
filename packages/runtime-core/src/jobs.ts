@@ -1,7 +1,8 @@
 import { defineDoc, defineTask, type TaskId, type TaskRuntime, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { Context, JsonValue } from '@earendil-works/chord';
 import { awaitWithContext } from '@earendil-works/chord/context';
-import { RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, receiptDigest, type RuntimeToolResult, type RuntimeJobAcceptance, type RuntimeJobObservation, type RuntimeExecutorReceipt } from '@gitspace/protocol-runtime';
+import { RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeJobAcceptance, type RuntimeJobObservation } from '@gitspace/protocol-runtime';
+import { z } from 'zod';
 import { DaemonResponseSchema } from '@gitspace/supervisor/protocol';
 import type { OperationalServices } from './tasks.js';
 
@@ -13,6 +14,18 @@ type JobRecord = { acceptance: RuntimeJobAcceptance; observation: RuntimeJobObse
 type JobInput = { key: string; spawningTask: TaskId };
 type JobState = { phase: 'execute'; poll: number };
 export const DurableJobsDoc = defineDoc<{ records: Record<string, JobRecord> }>({ kind: 'gitspace.durable-jobs', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ records: {} }) });
+const OlderObservationSchema = z.object({ status: z.string(), receipt: z.object({ result: RuntimeToolResultSchema }).optional(), completedAt: z.iso.datetime().optional() });
+/** A stored observation, upgraded when it predates tool results replacing executor receipts: a finished job carried
+ * its result in `receipt`, a running one was `executing`, and a prevented launch was `not-started` with `fenced`. */
+function storedObservation(value: unknown, job: RuntimeJobAcceptance['job']): RuntimeJobObservation {
+  const current = RuntimeJobObservationSchema.safeParse(value);
+  if (current.success) return current.data;
+  const older = OlderObservationSchema.safeParse(value);
+  const at = older.data?.completedAt ?? new Date().toISOString();
+  if (older.data?.status === 'terminal' && older.data.receipt) return { status: 'terminal', job, result: older.data.receipt.result, completedAt: at };
+  if (older.data?.status === 'not-started') return { status: 'not-started', job, reason: 'admission-failed', completedAt: at, message: 'The executor prevented the launch' };
+  return { status: 'waiting', job, reason: 'reconciliation', observedAt: at };
+}
 export function createJobTask(services: JobServices) {
   async function drive(key: string, runtime: TaskRuntime<JobInput, JobState, RuntimeJobObservation, {}>, context: Context, aborting: boolean) {
     for (;;) {
@@ -21,32 +34,20 @@ export function createJobTask(services: JobServices) {
       if (!record || record.acceptance.job.taskId !== String(runtime.taskId) || record.acceptance.job.conversationId !== String(runtime.conversationId)) throw new Error('Durable job ownership mismatch');
       const job = record.acceptance.job;
       const now = new Date(runtime.now()).toISOString();
-      const alreadySettled = record.observation.status === 'terminal' || record.observation.status === 'not-started';
-      let observation: RuntimeJobObservation = alreadySettled ? record.observation : { status: 'waiting', job, reason: 'reconciliation', observedAt: now };
-      if (!alreadySettled) try {
+      let observation = storedObservation(record.observation, job);
+      if (observation.status !== 'terminal' && observation.status !== 'not-started') try {
         const spawn = aborting ? null : await runtime.waitForTask(record.spawningTask, context);
-        let receipt = await services.reconcile(record.attemptId);
         const cancel = aborting || record.cancelRequested;
-        if (receipt === null && (cancel || spawn?.state.outcome.status !== 'completed' || Date.parse(record.deadlineAt) <= runtime.now())) {
-          // The service contract reserves null for positive evidence of no admitted dispatch.
-          observation = { status: 'not-started', job, reason: cancel ? 'cancelled' : spawn?.state.outcome.status !== 'completed' ? 'admission-failed' : 'deadline', completedAt: now };
-        } else {
-          if (cancel && receipt !== null) { await services.cancel(record.attemptId); receipt = await services.reconcile(record.attemptId); }
-          if (receipt === null && !cancel) {
-            const result = await services.execute({ kind: 'Job', args: record.args, requestId: job.requestId, attemptId: record.attemptId, conversationId: String(runtime.conversationId), taskId: String(runtime.taskId), deadlineAt: record.deadlineAt, replay: 'unsafe', signal: runtime.signal });
-            receipt = await services.reconcile(record.attemptId);
-            if (receipt === null && result.status !== 'completed') observation = { status: 'not-started', job, reason: result.status === 'failed' ? 'admission-failed' : 'deadline', completedAt: new Date(runtime.now()).toISOString(), ...(result.status === 'failed' ? { message: result.error.message } : {}) };
-          }
-          if (receipt && 'state' in receipt) {
-            const scoped: RuntimeExecutorReceipt = receipt;
-            if (scoped.state === 'terminal') observation = { status: 'terminal', job, receipt: scoped, completedAt: scoped.completedAt };
-            else if (scoped.state === 'fenced-not-started') observation = { status: 'not-started', job, reason: cancel ? 'cancelled' : 'fenced', completedAt: scoped.evidence.recordedAt };
-            else if (scoped.state === 'running' || scoped.state === 'starting') observation = cancel ? { status: 'waiting', job, reason: 'reconciliation', observedAt: now } : { status: 'executing', job, dispatch: scoped.dispatch, observedAt: scoped.observedAt };
-          }
-        }
+        if (cancel) await services.cancel(record.attemptId);
+        const admitted = !cancel && spawn?.state.outcome.status === 'completed';
+        const expired = Date.parse(record.deadlineAt) <= runtime.now();
+        const result = await services.reconcile(record.attemptId)
+          ?? (admitted && !expired ? await services.execute({ kind: 'Job', args: record.args, requestId: job.requestId, attemptId: record.attemptId, conversationId: String(runtime.conversationId), taskId: String(runtime.taskId), deadlineAt: record.deadlineAt, replay: 'unsafe', signal: runtime.signal }) : null);
+        observation = result ? { status: 'terminal', job, result, completedAt: now }
+          : { status: 'not-started', job, reason: cancel ? 'cancelled' : admitted ? 'deadline' : 'admission-failed', completedAt: now };
       } catch (error) {
         if (runtime.signal.aborted) throw error;
-        // Unauthenticated or missing transport evidence is never a terminal job result.
+        // A failed reconciliation or dispatch is retried; it is never a terminal job result.
       }
       observation = RuntimeJobObservationSchema.parse(observation);
       const settled = observation.status === 'terminal' || observation.status === 'not-started';
@@ -71,10 +72,10 @@ export function createJobTask(services: JobServices) {
         if (observation.status === 'not-started') return { status: 'terminal', outcome: observation.reason === 'cancelled'
           ? { status: 'aborted', reason: 'Cancelled before execution', result: observation }
           : { status: 'failed', error: { message: observation.message ?? `Job did not start: ${observation.reason}` }, result: observation } };
-        if (observation.status === 'terminal') return { status: 'terminal', outcome: observation.receipt.result.status === 'completed'
+        if (observation.status === 'terminal') return { status: 'terminal', outcome: observation.result.status === 'completed'
           ? { status: 'completed', result: observation }
-          : observation.receipt.result.status === 'failed'
-            ? { status: 'failed', error: { message: observation.receipt.result.error.message }, result: observation }
+          : observation.result.status === 'failed'
+            ? { status: 'failed', error: { message: observation.result.error.message }, result: observation }
             : { status: 'aborted', reason: 'Executor attempt interrupted', result: observation } };
         return { status: 'running', checkpoint: { phase: 'execute', poll: runtime.now() } };
       }, context);
@@ -233,27 +234,27 @@ export function createJobTool(services: JobServices) {
     const args = RuntimeBashControlArgumentsSchema.parse(input);
     const document = await api.snapshot(DurableJobsDoc, api.conversationId, context);
     const records = Object.values(document?.records ?? {}).filter(record => record.acceptance.job.conversationId === String(api.conversationId));
-    if (args.op === 'list') return records.slice(-100).map(record => RuntimeJobObservationSchema.parse(record.observation));
+    if (args.op === 'list') return records.slice(-100).map(record => storedObservation(record.observation, record.acceptance.job));
     const record = records.find(record => JSON.stringify(record.acceptance.job) === JSON.stringify(args.job));
     if (!record) throw new Error('Job handle does not belong to this conversation');
+    const stored = storedObservation(record.observation, record.acceptance.job);
     if (args.op === 'logs') return services.controlJob({ attemptId: record.attemptId, op: 'logs', lines: args.lines, head: args.head, cursor: args.cursor });
-    if (args.op === 'cancel' && record.observation.status !== 'terminal' && record.observation.status !== 'not-started') {
+    if (args.op === 'cancel' && stored.status !== 'terminal' && stored.status !== 'not-started') {
       const observation = RuntimeJobObservationSchema.parse({ status: 'waiting', job: record.acceptance.job, reason: 'reconciliation', observedAt: new Date().toISOString() });
-      await api.commit(async tx => { const doc = await tx.doc(DurableJobsDoc, api.conversationId); const current = Object.values(doc.records).find(value => value.attemptId === record.attemptId); if (!current) throw new Error('Job missing'); current.cancelRequested = true; if (current.observation.status !== 'terminal' && current.observation.status !== 'not-started') current.observation = observation; }, context);
-      // Durable cancellation intent is retried until exit or a launch barrier is proven.
-      try { await services.cancel(record.attemptId); } catch { /* Unknown is not cancelled. */ }
+      await api.commit(async tx => { const doc = await tx.doc(DurableJobsDoc, api.conversationId); const current = Object.values(doc.records).find(value => value.attemptId === record.attemptId); if (!current) throw new Error('Job missing'); current.cancelRequested = true; const status = storedObservation(current.observation, current.acceptance.job).status; if (status !== 'terminal' && status !== 'not-started') current.observation = observation; }, context);
+      try { await services.cancel(record.attemptId); } catch { /* The job task retries the cancellation. */ }
       await services.wakeAt(Date.now());
       return observation;
     }
-    if (args.op === 'wait' && record.observation.status !== 'terminal' && record.observation.status !== 'not-started') {
+    if (args.op === 'wait' && stored.status !== 'terminal' && stored.status !== 'not-started') {
       const watch = await api.watchDoc(DurableJobsDoc, api.conversationId, context);
       if (!watch) throw new Error('Durable command observation missing');
-      let observation: RuntimeJobObservation = record.observation;
+      let observation: RuntimeJobObservation = stored;
       const settled = Promise.withResolvers<void>();
       const observe = (value: typeof watch.value) => {
         const current = Object.values(value?.records ?? {}).find(item => item.acceptance.job.jobId === record.acceptance.job.jobId);
         if (!current) throw new Error('Durable command disappeared');
-        observation = current.observation;
+        observation = storedObservation(current.observation, current.acceptance.job);
         if (observation.status === 'terminal' || observation.status === 'not-started') settled.resolve();
       };
       const timer = setTimeout(settled.resolve, args.timeoutMs);
@@ -261,9 +262,9 @@ export function createJobTool(services: JobServices) {
         observe(watch.value);
         watch.start(async value => { observe(value); });
         await awaitWithContext(Promise.race([settled.promise, watch.closed.then(end => { if (end.reason === 'listener_error') throw end.error; if (end.reason !== 'stopped') throw new Error(`Command observation ${end.reason}`); })]), context);
-        return RuntimeJobObservationSchema.parse(observation);
+        return observation;
       } finally { clearTimeout(timer); await watch.stop(); }
     }
-    return RuntimeJobObservationSchema.parse(record.observation);
+    return stored;
   };
 }
