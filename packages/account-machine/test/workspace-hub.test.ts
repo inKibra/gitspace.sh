@@ -2,16 +2,45 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { StreamEvent } from '@gitspace/protocol-sync';
+import { terminalStreamResource, type MachineLiveNotice } from '@gitspace/protocol';
 import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
 import { WorkspaceHubTerminalCoordinator, type WorkspaceCheckouts } from '../src/workspace-hub.js';
 import type { TerminalSnapshot } from '../src/terminal-stream.js';
 
-async function observe(events: AsyncGenerator<StreamEvent<TerminalSnapshot>>, accept: (snapshot: TerminalSnapshot) => boolean): Promise<TerminalSnapshot> {
+/** Every live notice a coordinator announces. */
+class NoticeLog {
+  readonly notices: MachineLiveNotice[] = [];
+  private arrived = Promise.withResolvers<void>();
+  readonly notify = (notice: MachineLiveNotice): void => {
+    this.notices.push(notice);
+    this.arrived.resolve();
+    this.arrived = Promise.withResolvers<void>();
+  };
+  cursors(resource: string): number[] {
+    return this.notices.filter((notice) => notice.resource === resource).map((notice) => notice.cursor);
+  }
+  /** The first notice about `resource` newer than `after`, once announced. */
+  async next(resource: string, after: number): Promise<MachineLiveNotice> {
+    for (;;) {
+      const found = this.notices.find((notice) => notice.resource === resource && notice.cursor > after);
+      if (found) return found;
+      await this.arrived.promise;
+    }
+  }
+}
+
+/** Reads as a tab does: after its cursor, and again on each notice, until a snapshot satisfies `accept`. Every read
+ * returns only events newer than the cursor it was given. */
+async function follow(coordinator: WorkspaceHubTerminalCoordinator, log: NoticeLog, name: string | null, after: number | null, accept: (snapshot: TerminalSnapshot) => boolean): Promise<{ cursor: number; snapshot: TerminalSnapshot }> {
+  let cursor = after;
   for (;;) {
-    const event = await events.next();
-    if (event.done) throw new Error('Terminal stream ended');
-    if (event.value.type !== 'resync' && accept(event.value.value)) return event.value.value;
+    for (const event of await coordinator.events('workspace-a', name, cursor)) {
+      if (cursor !== null) expect(event.cursor).toBeGreaterThan(cursor);
+      if (event.type === 'resync') continue;
+      cursor = event.cursor;
+      if (accept(event.value)) return { cursor, snapshot: event.value };
+    }
+    await log.next(terminalStreamResource('workspace-a', 'machine-a', name), cursor ?? 0);
   }
 }
 
@@ -151,35 +180,55 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     expect((await coordinator.read('workspace-a', terminal.name, null)).data).toContain('bundle-tool:bundle-env');
   }, 20_000);
 
-  it('streams a cache checkout shell and its output to subscribers that started before the shell', async () => {
+  it('announces each commit of an observed cache shell and its output, and stops observing what nobody watches', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-workspace-hub-stream-'));
     roots.push(root);
     const cachePath = join(root, 'workspace');
     mkdirSync(cachePath, { recursive: true });
-    const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', checkouts(new Map([['workspace-a', cachePath]])));
-    const controller = new AbortController();
-    const inventory = coordinator.events('workspace-a', null, null, controller.signal);
+    const log = new NoticeLog();
+    const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', checkouts(new Map([['workspace-a', cachePath]])), undefined, log.notify);
+    const inventory = terminalStreamResource('workspace-a', 'machine-a', null);
+    const [initial] = await coordinator.events('workspace-a', null, null);
+    expect(initial).toMatchObject({ type: 'snapshot', value: { terminals: [], output: null } });
+    // The first observation is one commit, announced once; at the head there is nothing newer.
+    expect(log.notices).toEqual([{ workspace: 'workspace-a', resource: inventory, cursor: initial!.cursor }]);
+    expect(await coordinator.events('workspace-a', null, initial!.cursor)).toEqual([]);
+
+    const terminal = await coordinator.createShell('workspace-a');
+    const listed = await follow(coordinator, log, null, initial!.cursor, (snapshot) => snapshot.terminals.length > 0);
+    expect(listed.snapshot.terminals.map((entry) => entry.name)).toEqual([terminal.name]);
+    expect(log.cursors(inventory)).toContain(listed.cursor);
+    expect(new Set(log.cursors(inventory)).size).toBe(log.cursors(inventory).length);
+
+    const selected = terminalStreamResource('workspace-a', 'machine-a', terminal.name);
+    const attached = await follow(coordinator, log, terminal.name, null, (snapshot) => snapshot.output?.name === terminal.name);
+    await coordinator.send('workspace-a', terminal.name, "printf 'stream-%s\\n' delivered\r");
+    const output = await follow(coordinator, log, terminal.name, attached.cursor, (snapshot) => snapshot.output?.data.includes('stream-delivered') === true);
+    expect(output.snapshot.terminals.map((entry) => entry.name)).toEqual([terminal.name]);
     try {
-      expect(await observe(inventory, () => true)).toEqual({ terminals: [], output: null });
-      const terminal = await coordinator.createShell('workspace-a');
-      const listed = await observe(inventory, (snapshot) => snapshot.terminals.length > 0);
-      expect(listed.terminals.map((entry) => entry.name)).toEqual([terminal.name]);
-
-      const selected = coordinator.events('workspace-a', terminal.name, null, controller.signal);
-      try {
-        await observe(selected, (snapshot) => snapshot.output?.name === terminal.name);
-        await coordinator.send('workspace-a', terminal.name, "printf 'stream-%s\\n' delivered\r");
-        const output = await observe(selected, (snapshot) => snapshot.output?.data.includes('stream-delivered') === true);
-        expect(output.terminals.map((entry) => entry.name)).toEqual([terminal.name]);
-
-        await coordinator.send('workspace-a', terminal.name, 'exit\r');
-        await observe(inventory, (snapshot) => snapshot.terminals.length === 0);
-      } finally {
-        await selected.return(undefined);
-      }
+      // Unwatched at a cursor a read has returned: its reader may be subscribing, so the observer keeps announcing.
+      coordinator.unwatched(inventory, listed.cursor);
+      const announced = Math.max(...log.cursors(inventory));
+      const second = await coordinator.createShell('workspace-a');
+      await log.next(inventory, announced);
+      // Unwatched at a change no read has returned: the observer stops, and changes go unannounced.
+      const stoppedAt = Math.max(...log.cursors(inventory));
+      coordinator.unwatched(inventory, stoppedAt);
+      await coordinator.send('workspace-a', second.name, 'exit\r');
+      await follow(coordinator, log, terminal.name, output.cursor, (snapshot) => !snapshot.terminals.some((entry) => entry.name === second.name));
+      // An absent commit has no event to await; give a still-running observer the same supervisor wake time to show itself.
+      await Bun.sleep(200);
+      expect(log.cursors(inventory).filter((cursor) => cursor > stoppedAt)).toEqual([]);
+      // The next read observes again and returns only what changed after its cursor, announcing the change.
+      const resumed = await coordinator.events('workspace-a', null, stoppedAt);
+      expect(resumed.map((event) => event.type)).toEqual(['change']);
+      expect(resumed[0]).toMatchObject({ previous: stoppedAt, value: { terminals: [{ name: terminal.name }] } });
+      expect(log.cursors(inventory).filter((cursor) => cursor > stoppedAt)).toEqual([resumed[0]!.cursor]);
+      await coordinator.send('workspace-a', terminal.name, 'exit\r');
+      await follow(coordinator, log, null, resumed[0]!.cursor, (snapshot) => snapshot.terminals.length === 0);
     } finally {
-      controller.abort();
-      await inventory.return(undefined);
+      coordinator.unwatched(inventory, Number.MAX_SAFE_INTEGER);
+      coordinator.unwatched(selected, Number.MAX_SAFE_INTEGER);
     }
   }, 20_000);
 });

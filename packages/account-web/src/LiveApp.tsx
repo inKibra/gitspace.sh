@@ -4,7 +4,6 @@ import { accountBrowserStatus, downloadAccountBrowserExtension, unpairAccountBro
 import { runtimeLfsHeldBack, useLfsTransition, type ConfirmLfsTransition } from './LfsTransition.js';
 import type { InspectorView, RuntimeSettingValue, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import { DEFAULT_INFERENCE_PROFILE_ID, inferenceSettingMetadata } from '@gitspace/protocol/inference';
-import { EnvironmentBundleSchema, executionHash, projectEnvironmentState, lifecycleExecutionOutcome, isLifecycleRunActive, latestLifecycleRun, latestExecutionRun, type EnvironmentBundle as ProtocolEnvironmentBundle } from '@gitspace/protocol-environment';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
@@ -26,13 +25,10 @@ import { forgetProviderLogin, readProviderLogin, saveProviderLogin, type Recover
 import { SettingsPage } from './SettingsPage.js';
 import { InferenceProvider, useInference } from './InferenceContext.js';
 import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
-import { EnvironmentView } from './environment/EnvironmentView.js';
-import { LifecycleLogDialog } from './environment/LifecycleLogDialog.js';
-import { workspaceMachines } from './workspace-status.js';
-import type { EnvironmentViewModel, LifecyclePhase, LifecycleRun, TrustState } from './environment/types.js';
+import { LiveEnvironment } from './environment/LiveEnvironment.js';
 import { Inspector } from './inspector/index.js';
 import { ACCOUNT_DIRECTORY_CHANGED, PRODUCT_ROUTE_LABELS, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
-import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
+import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
 import { ServiceAccessApproval } from './ServiceAccessApproval.js';
@@ -48,10 +44,10 @@ import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadInspectorContent, loadInspectorResource } from './resource-content.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useSpaceSynchronization } from './SynchronizationProvider.js';
+import { liveTicks } from './live-notices.js';
+import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
-import { RuntimeMachines } from './RuntimeMachines.js';
 import { useRuntimeInspectorState } from './useRuntimeInspectorState.js';
-import { useWorkspaceRunMachine } from './useWorkspaceRunMachine.js';
 import { RuntimeServices } from './RuntimeServices.js';
 import { RuntimeSubagentHistory } from './RuntimeSubagentHistory.js';
 import { CloudCreationProgress } from './CloudCreationProgress.js';
@@ -63,206 +59,6 @@ import { releaseWorkspaceCaches } from './workspace-cache-actions.js';
 function optionalQueryParameter(name: string): string | null {
   if (typeof window === 'undefined') return null;
   return new URL(window.location.href).searchParams.get(name);
-}
-
-const CONFIGURE_ENVIRONMENT_PROMPT = 'Use the workspace-lifecycle skill to help me configure this repository. Inspect the repository and our shared environment ledger, then discuss the local preparation and cloud resources this project needs. Propose the five lifecycle phases and profiles. Do not edit files or run lifecycle scripts until I review the plan; approval to edit is not approval to execute.';
-
-
-function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, workspace, generation, onAskAgent, runtimeContext }: { projectId: string; projectName: string; workspaceName: string; spaceId: string; workspace: boolean; generation: number; onAskAgent?: (text: string) => Promise<void>; runtimeContext?: RuntimeInspectorContext }) {
-  const query = useResultQuery(rpcClient.environment.get, { spaceId });
-  const machines = useAccountMachines();
-  // Keyed by the request: generation or machine changes do not change what environment.get returns.
-  const retained = useRetainedRead(query, spaceId);
-  const synchronized = useEnvironmentSynchronization(spaceId);
-  const read = { ...retained, value: retained.value && synchronized.value ? { ...retained.value, ...projectEnvironmentState(synchronized.value) } : retained.value };
-  const machineValues = useRetainedQueryValue(machines, 'machines');
-  const runtime = useResultQuery(rpcClient.runtime.snapshot, RuntimeIdentitySchema.parse({ projectId, workspaceId: spaceId }), { enabled: !runtimeContext });
-  const savedRuntime = useRetainedQueryValue(runtime, spaceId);
-  const runMachine = useWorkspaceRunMachine(runtimeContext?.snapshot ?? savedRuntime);
-  const machineId = runMachine.machine?.id;
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [readingEvidence, setReadingEvidence] = useState(false);
-  const [evidence, setEvidence] = useState<{ title: string; output: string; approvalHash?: string } | null>(null);
-  const [logSelection, setLogSelection] = useState<{ runId: string; script: { id: string; label: string } } | null>(null);
-  const lfsTransition = useLfsTransition();
-  if (!read.value) return read.error ? <div className="flex flex-col gap-2 p-4"><p role="alert" className="text-caption text-destructive">{rpcErrorMessage(read.error, 'environment.get')}</p><Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry environment</Button></div> : <p className="p-4 text-caption text-muted-foreground" role="status">Loading environment…</p>;
-  const remote = read.value;
-  const bundle = EnvironmentBundleSchema.parse(JSON.parse(remote.bundleJson));
-  const mutate = (operation: () => Promise<unknown>): void => {
-    if (busy) return;
-    setActionError(null); setBusy(true);
-    void operation().then(() => query.refetch()).catch((error: unknown) => setActionError(rpcErrorMessage(error, 'Update environment'))).finally(() => setBusy(false));
-  };
-  const saveBundle = (next: ProtocolEnvironmentBundle): void => mutate(async () => {
-    const result = await rpcClient.environment.putBundle({ spaceId, bundleJson: JSON.stringify(next) });
-    if (result.status === 'error') throw result.error;
-  });
-  const loadEvidence = (operation: () => Promise<void>): void => {
-    if (readingEvidence) return;
-    setReadingEvidence(true); setActionError(null);
-    void operation().catch((error: unknown) => setActionError(rpcErrorMessage(error, 'Read environment evidence'))).finally(() => setReadingEvidence(false));
-  };
-  const openExecution = (targetId: string, approve: boolean): void => loadEvidence(async () => {
-    const origin = remote.lifecycle.browserOrigins.find((entry) => entry.hash === targetId);
-    if (origin) {
-      setEvidence({ title: `Browser origin: ${origin.pattern}`, output: `Allow logged-in Chrome access to ${origin.pattern}.\nOnly tabs in this workspace's browser group are accessible.`, ...(approve ? { approvalHash: origin.hash } : {}) });
-      return;
-    }
-    const execution = remote.executions.find((item) => item.id === targetId);
-    if (!execution) throw new Error('Execution is no longer present. Refresh the environment.');
-    const content = execution.content;
-    if (await executionHash({ kind: execution.kind, command: content }) !== execution.hash) throw new Error('Script content changed. Refresh and review the new content before approval.');
-    setEvidence({ title: execution.label, output: content, ...(approve ? { approvalHash: execution.hash } : {}) });
-  });
-  const openRunLog = (runId: string, script: { id: string; label: string }): void => setLogSelection({ runId, script });
-  const openSecrets = (): void => {
-    navigateProductUrl(setProductRoute(new URL(window.location.href), 'secrets'));
-  };
-  const lastRun = (executionHash: string, executionId: string): LifecycleRun => {
-    const run = latestExecutionRun(remote.lifecycle, executionHash, { profile: remote.selectedProfile, machineId });
-    if (!run) return { status: 'never' };
-    const step = run.results.find((result) => result.id === executionId);
-    const status = lifecycleExecutionOutcome(run, executionId);
-    const relativeTime = new Date(step?.finishedAt ?? step?.startedAt ?? run.startedAt).toLocaleString();
-    if (status === 'not-started' || status === 'running' || status === 'interrupted') return { status, relativeTime, ...(step?.output ? { output: step.output } : {}) };
-    const duration = step?.startedAt && step.finishedAt ? `${Math.max(0, Date.parse(step.finishedAt) - Date.parse(step.startedAt))}ms` : undefined;
-    return { status, relativeTime, ...(duration ? { duration } : {}), output: step?.output ?? '', ...(step?.exitCode != null ? { exitCode: step.exitCode } : {}) };
-  };
-  const checksRun = latestLifecycleRun(remote.lifecycle, 'checks', { machineId, profile: remote.selectedProfile });
-  const latestChecks = checksRun && !isLifecycleRunActive(checksRun) ? checksRun : undefined;
-  const selectedLogRun = logSelection && remote.lifecycle.runs.find((run) => run.id === logSelection.runId);
-  const trustFor = (execution: typeof remote.executions[number] | undefined): TrustState => {
-    const approval = execution && remote.lifecycle.approvals.find((item) => item.executionHash === execution.hash && item.scope === execution.approval);
-    return approval
-      ? { status: 'approved', commandHash: approval.executionHash, approvedBy: approval.approvedBy, approvedAt: new Date(approval.approvedAt).toLocaleString() }
-      : { status: 'pending', commandHash: execution?.hash ?? '' };
-  };
-  const model: EnvironmentViewModel = {
-    project: { name: projectName, repository: projectName },
-    workspace: { name: workspaceName, profile: remote.selectedProfile, machineId: machineId ?? 'unavailable', generation },
-    bundle: {
-      default: bundle.defaultProfile,
-      checks: Object.fromEntries(Object.entries(bundle.checks).map(([id, definition]) => [id, definition.kind === 'built-in'
-        ? { id, label: definition.label ?? definition.check, source: 'catalog' as const, requirement: definition.requirement, probe: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.command, trust: trustFor(remote.executions.find((item) => item.kind === 'check' && item.id === id)) }
-        : { id, label: definition.label, source: 'custom' as const, probe: definition.command, trust: trustFor(remote.executions.find((item) => item.kind === 'check' && item.id === id)) }])),
-      profiles: Object.fromEntries(Object.entries(bundle.profiles).map(([name, profile]) => [name, { checks: profile.checks, secrets: profile.secrets, inputs: profile.values, notes: profile.notes ?? '' }])),
-      inputs: bundle.values,
-    },
-    machines: machineId ? [{
-      id: machineId ?? 'unavailable',
-      label: machineValues?.find(candidate => candidate.id === machineId)?.label ?? machineId,
-      platform: runMachine.machine?.attachment.cache?.platform ?? null,
-      current: true,
-      capabilities: Object.fromEntries(remote.executions.filter((item) => item.kind === 'check').map((item) => {
-        const result = latestChecks?.results.find((candidate) => candidate.id === item.id);
-        return [item.id, result?.exitCode != null ? { status: result.exitCode === 0 ? 'pass' as const : 'fail' as const, output: result.output || `Exited ${result.exitCode}` } : { status: 'unprobed' as const }];
-      })),
-    }] : [],
-    lifecycle: remote.executions.filter((item) => item.kind === 'script').map((item) => ({
-      id: item.id,
-      phase: item.phase!,
-      path: `${item.phase}/${item.fileName}`,
-      command: item.command,
-      interactive: item.interactive,
-      ...(item.fileName?.match(/\.([a-z][a-z0-9-]*)\.sh$/u)?.[1] ? { profiles: [item.fileName.match(/\.([a-z][a-z0-9-]*)\.sh$/u)![1]!] } : {}),
-      trust: trustFor(item),
-      lastRun: lastRun(item.hash, item.id),
-    })),
-    executions: remote.executions,
-    ledger: remote.lifecycle,
-    configured: remote.lifecycle.bundleJson !== null || remote.executions.length > 0,
-    secrets: remote.effective.secrets.map((name) => ({ name, source: remote.secretMetadata.find((secret) => secret.name === name)?.source === 'account' ? 'user' : 'project', granted: remote.configuredSecrets.includes(name), requiredBy: [remote.selectedProfile] })),
-    inputValues: Object.entries(remote.values.effective).map(([name, value]) => ({ name, value, source: name in remote.values.workspace ? 'workspace' : name in remote.values.project ? 'project' : name in remote.values.global ? 'account' : 'bundle' })),
-  };
-  const updateProfile = (transform: (profile: ProtocolEnvironmentBundle['profiles'][string]) => ProtocolEnvironmentBundle['profiles'][string]): ProtocolEnvironmentBundle => ({
-    ...bundle,
-    profiles: { ...bundle.profiles, [remote.selectedProfile]: transform(bundle.profiles[remote.selectedProfile]!) },
-  });
-  return <div className="flex min-h-0 flex-1 flex-col">
-    {read.refreshing ? <p role="status" className="sr-only">Refreshing environment…</p> : null}
-    {read.error ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Environment refresh failed; showing the last accepted state. {rpcErrorMessage(read.error, 'environment.get')}<Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry environment</Button></p> : null}
-    {machines.state === 'failure' ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{rpcErrorMessage(machines.error, 'Load machine directory')}</p> : null}
-    {actionError ? <p role="alert" tabIndex={0} className="max-h-24 shrink-0 overflow-auto whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
-    {!runtimeContext && runtime.state === 'failure' ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{rpcErrorMessage(runtime.error, 'Load workspace machines')}<Button variant="ghost" onClick={() => void runtime.refetch()}>Retry machines</Button></p> : null}
-    <section className="flex flex-col gap-2 px-4 pt-4" aria-label="Environment run machine">
-      <label className="flex flex-col gap-2 text-caption">Run on machine<select aria-label="Environment run machine" className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={machineId ?? ''} onChange={event => runMachine.select(event.target.value)} disabled={busy}>
-        <option value="">Choose a machine</option>
-        {runMachine.machines.map(candidate => <option key={candidate.id} value={candidate.id}>{machineValues?.find(item => item.id === candidate.id)?.label ?? candidate.id} · {candidate.label}</option>)}
-      </select></label>
-      {!machineId ? <p role="status" className="text-caption text-muted-foreground">{runMachine.machines.length ? 'Choose a machine to run checks or lifecycle phases.' : 'Attach a machine to run checks or lifecycle phases. Records remain available.'}</p>
-        : runMachine.machine && !runMachine.machine.ready ? <p role="status" className={`break-words text-caption ${runMachine.machine.errors.length ? 'text-destructive' : 'text-muted-foreground'}`}>{[runMachine.machine.label, ...runMachine.machine.errors].join(' · ')}</p> : null}
-      {!runtimeContext ? <Button variant="ghost" size="compact" disabled={busy || runtime.fetch === 'fetching'} onClick={() => void runtime.refetch()}>Refresh machines</Button> : null}
-    </section>
-    <EnvironmentView
-      model={model}
-      machinePanel={runtimeContext ? <RuntimeMachines snapshot={runtimeContext.snapshot} onCommitFirst={onAskAgent ? () => onAskAgent('Help me review and commit uncommitted Git LFS changes before detaching this machine.') : undefined} profile={remote.selectedProfile}
-        onOpenLog={runId => { const run = remote.lifecycle.runs.find(item => item.id === runId); const step = run?.results[0]; if (run) openRunLog(run.id, { id: step?.id ?? run.id, label: step?.id ?? run.phase }); else setActionError('The machine reported this setup run, but its durable log has not arrived. Refresh the environment and try again.'); }}
-        renderBlockers={selectedMachineId => {
-          const machine = workspaceMachines(runtimeContext.snapshot).find(item => item.id === selectedMachineId);
-          const waiting = machine?.status.setup.some(step => step.state === 'waiting-for-approval');
-          const executions = remote.executions.filter(item => !remote.lifecycle.approvals.some(approval => approval.executionHash === item.hash && approval.scope === item.approval));
-          const origins = remote.lifecycle.browserOrigins.filter(origin => !remote.lifecycle.approvals.some(approval => approval.executionHash === origin.hash));
-          return <div className="flex flex-col gap-2">
-            {waiting ? <p className="text-caption text-warning">Commands are blocked: setup is waiting for approval.</p> : null}
-            {waiting ? executions.map(item => <div key={item.hash} className="flex flex-wrap items-center justify-between gap-2 text-caption"><span>{item.kind === 'check' ? 'Check' : 'Script'} · {item.label} · Waiting approval</span><Button variant="secondary" size="compact" className="min-h-10" disabled={busy} onClick={() => openExecution(item.id, true)}>Review & approve</Button></div>) : null}
-            {origins.map(origin => <div key={origin.hash} className="flex flex-wrap items-center justify-between gap-2 text-caption"><span>Browser origin · {origin.pattern} · Waiting approval</span><Button variant="secondary" size="compact" className="min-h-10" disabled={busy} onClick={() => openExecution(origin.hash, true)}>Review & approve</Button></div>)}
-          </div>;
-        }}
-        renderRuns={selectedMachineId => <div className="flex flex-col gap-1"><h4 className="text-caption font-medium">Recent setup runs</h4>{remote.lifecycle.runs.filter(run => run.machineId === selectedMachineId).slice(0, 5).map(run => <div className="flex flex-col gap-1 text-caption" key={run.id}><span>{run.phase} · {run.status} · {new Date(run.startedAt).toLocaleString()}</span>{run.results.map(step => <Button key={step.id} variant="ghost" size="compact" className="min-h-10 justify-start" onClick={() => openRunLog(run.id, { id: step.id, label: step.id })}>View {step.id} log</Button>)}</div>)}</div>}
-      /> : undefined}
-      busy={busy}
-      runtimeAvailable={!!machineId}
-      cloudRunnerAvailable={!!machineId}
-      onConfigure={onAskAgent ? () => mutate(() => onAskAgent(CONFIGURE_ENVIRONMENT_PROMPT)) : undefined}
-      onRecoverRun={(runId) => mutate(async () => { const result = await rpcClient.environment.recoverRun({ spaceId, runId }); if (result.status === 'error') throw result.error; })}
-      onCancelRun={(runId) => mutate(async () => { const result = await rpcClient.environment.cancelRun({ spaceId, runId }); if (result.status === 'error') throw result.error; })}
-      onOpenRunLog={openRunLog}
-      onProfileChange={(profile) => mutate(async () => { const result = await rpcClient.environment.setProfile({ spaceId, profile }); if (result.status === 'error') throw result.error; })}
-      onApprove={(targetId) => openExecution(targetId, true)}
-      onRevoke={(targetId) => {
-        const origin = remote.lifecycle.browserOrigins.find((entry) => entry.hash === targetId);
-        const execution = remote.executions.find((item) => item.id === targetId);
-        const hash = origin?.hash ?? execution?.hash;
-        const approval = remote.lifecycle.approvals.find((entry) => entry.executionHash === hash && entry.scope === 'project')
-          ?? remote.lifecycle.approvals.find((entry) => entry.executionHash === hash && entry.scope === 'workspace');
-        if (approval) mutate(async () => { const result = await rpcClient.environment.revokeApproval({ spaceId, scope: approval.scope, executionHash: approval.executionHash }); if (result.status === 'error') throw result.error; });
-      }}
-      onGrantSecret={openSecrets}
-      onInputChange={(name, value) => mutate(async () => { const result = await rpcClient.environment.putValue({ spaceId, scope: workspace ? 'workspace' : 'project', name, value }); if (result.status === 'error') throw result.error; })}
-      onFixCheck={onAskAgent ? (checkId) => mutate(() => onAskAgent(`Inspect the failing environment check ${checkId} using the environment tool with method get and its durable run logs. Explain the cause and propose a fix; do not grant yourself execution approval.`)) : undefined}
-      onUpdateCheck={(checkId, patch) => saveBundle({ ...bundle, checks: { ...bundle.checks, [checkId]: bundle.checks[checkId]?.kind === 'command' ? { kind: 'command', label: patch.label ?? bundle.checks[checkId].label, command: patch.probe ?? bundle.checks[checkId].command } : { ...bundle.checks[checkId]!, label: patch.label, requirement: patch.requirement } } })}
-      onDeleteCheck={(checkId) => saveBundle({ ...bundle, checks: Object.fromEntries(Object.entries(bundle.checks).filter(([id]) => id !== checkId)), profiles: Object.fromEntries(Object.entries(bundle.profiles).map(([name, profile]) => [name, { ...profile, checks: profile.checks.filter((id) => id !== checkId) }])) })}
-      onAddCheck={(check) => saveBundle({ ...updateProfile((profile) => ({ ...profile, checks: [...new Set([...profile.checks, check.id])] })), checks: { ...bundle.checks, [check.id]: check.source === 'catalog' ? { kind: 'built-in', check: check.id, label: check.label, requirement: check.requirement } : { kind: 'command', command: check.probe ?? '', label: check.label } } })}
-      onAddValue={(name, defaultValue) => saveBundle({ ...updateProfile((profile) => ({ ...profile, values: [...new Set([...profile.values, name])] })), values: { ...bundle.values, [name]: defaultValue ? { default: defaultValue } : {} } })}
-      onOpenSecrets={openSecrets}
-      onOpenLifecycleFile={(scriptId) => openExecution(scriptId, false)}
-      onRunChecks={() => mutate(async () => { if (!machineId) throw new Error('Attach and choose a machine to run checks.'); const result = await rpcClient.environment.runChecks({ spaceId, machineId, runId: crypto.randomUUID() }); if (result.status === 'error') throw result.error; })}
-      onOpenLifecycleOutput={(scriptId) => { const execution = remote.executions.find((item) => item.id === scriptId); const run = execution && latestExecutionRun(remote.lifecycle, execution.hash, { profile: remote.selectedProfile, machineId }); if (run && execution) openRunLog(run.id, { id: execution.id, label: execution.label }); }}
-      onRunLifecycle={(phase: LifecyclePhase, options) => mutate(async () => {
-        if (!machineId) throw new Error('Attach and choose a machine to run lifecycle phases.');
-        if (phase === 'workspace/dematerialize') {
-          const snapshot = await configurationResult(rpcClient.runtime.snapshot(RuntimeIdentitySchema.parse({ projectId, workspaceId: spaceId })));
-          if (!await lfsTransition.confirm(runtimeLfsHeldBack(snapshot), () => onAskAgent ? onAskAgent('Help me review and commit the uncommitted Git LFS changes before removing this checkout.') : selectInspection(projectId, workspace ? spaceId : null))) return;
-        }
-        if (phase === 'cloud/destroy' && !options?.retire) throw new Error('Explicit human retirement confirmation is required.');
-        const result = await rpcClient.environment.runPhase({ spaceId, machineId, runId: crypto.randomUUID(), phase, rerun: options?.rerun ?? null, interactive: options?.interactive });
-        if (result.status === 'error') throw result.error;
-        // The prompts are in the run's terminal on that machine; show it so they can be answered.
-        if (options?.interactive && result.value.terminalName) runtimeContext?.onOpenTerminal(result.value.machineId, result.value.terminalName);
-      })}
-    />
-    {lfsTransition.dialog}
-    {selectedLogRun && logSelection ? <LifecycleLogDialog key={`${spaceId}:${selectedLogRun.id}:${logSelection.script.id}`} run={selectedLogRun} script={logSelection.script} revision={remote.lifecycle.revision} loadPage={async (runId, offset, signal) => { const result = await rpcClient.environment.runLog({ spaceId, runId, offset }, { signal }); if (result.status === 'error') throw result.error; return result.value; }} onClose={() => setLogSelection(null)} /> : null}
-    <Dialog open={evidence !== null} onOpenChange={(open) => { if (!open) setEvidence(null); }}>
-      <DialogContent size="sm"><DialogHeader><DialogTitle>{evidence?.approvalHash ? 'Review environment permission' : evidence?.title}</DialogTitle><DialogDescription>{evidence?.approvalHash ? 'Approves only this exact item. Changed content requires a new approval. This does not execute commands or authorize retirement.' : 'Saved lifecycle evidence. Logs remain available after a checkout is removed.'}</DialogDescription></DialogHeader>
-        {evidence?.approvalHash ? <code className="break-all font-mono text-caption text-muted-foreground">{evidence.approvalHash}</code> : null}
-        <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{evidence?.output || 'No output recorded.'}</pre>
-        {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
-        <DialogFooter><Button variant="secondary" onClick={() => setEvidence(null)}>Close</Button>{evidence?.approvalHash ? <Button variant="primary" disabled={busy} onClick={() => mutate(async () => { const result = await rpcClient.environment.approve({ spaceId, scope: workspace ? 'workspace' : 'project', executionHash: evidence.approvalHash! }); if (result.status === 'error') throw result.error; setEvidence(null); })}>Approve this content</Button> : null}</DialogFooter>
-      </DialogContent>
-    </Dialog>
-  </div>;
 }
 
 export function LiveInspector({
@@ -428,7 +224,7 @@ export function LiveInspector({
     }, { spaceId, projectId, generation, sessionId, runtimeAvailable }, uri, signal)}
     scope={scope}
     workspaces={workspaces}
-    environment={<LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} generation={generation} onAskAgent={onAskAgent} runtimeContext={runtimeContext} />}
+    environment={openAgentSetup => <LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} onAskAgent={onAskAgent} onOpenAgent={() => selectInspection(projectId, spaceId !== projectId ? spaceId : null)} onOpenAgentSetup={openAgentSetup} runtimeContext={runtimeContext} />}
     onSelectWorkspace={onSelectWorkspace}
     onSetRelations={onSetRelations}
     stackStatus={stackValue ?? null}
@@ -679,7 +475,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         {children}
         {lfsTransition.dialog}
       </SidebarInset>
-      <CreateWorkspaceDialog key={newWorkspaceProject ?? 'closed'} projectId={newWorkspaceProject} workspaces={sidebarProjects.flatMap((project) => project.workspaces.map((workspace) => ({ ...workspace, phase: workspace.definition?.phase ?? workspace.runtime?.phase ?? null })))} pending={createPending} error={createError} onOpenChange={(open) => { if (!open && !createPendingRef.current) { setNewWorkspaceProject(null); setCreateError(null); } }} onSubmit={async (input) => {
+      <CreateWorkspaceDialog key={newWorkspaceProject ?? 'closed'} projectId={newWorkspaceProject} workspaces={sidebarProjects.flatMap((project) => project.workspaces.map((workspace) => ({ ...workspace, ...(sidebarWorkspaceSummary(workspace) ?? { holder: { kind: 'unknown' as const } }), phase: workspace.definition?.phase ?? workspace.runtime?.phase ?? null })))} pending={createPending} error={createError} onOpenChange={(open) => { if (!open && !createPendingRef.current) { setNewWorkspaceProject(null); setCreateError(null); } }} onSubmit={async (input) => {
         if (createPendingRef.current) return;
         createPendingRef.current = true; setCreatePending(true); setCreateError(null);
         try { await actions.onCreateWorkspace(input); setNewWorkspaceProject(null); }
@@ -1026,17 +822,21 @@ function GitSpaceProduct() {
     setLoginFlow({ ...flow, events: [], done: false });
     void (async () => {
       try {
-        for await (const event of rpcClient.providers.login.events({ profileId: flow.profileId, flowId: flow.flowId }, { signal: controller.signal })) {
+        let after = 0;
+        for await (const _tick of liveTicks([accountLiveKey(`provider-login:${flow.flowId}`)], controller.signal)) {
+          const page = await rpcClient.providers.login.events({ profileId: flow.profileId, flowId: flow.flowId, after }, { signal: controller.signal });
           if (controller.signal.aborted) return;
-          if (event.status === 'error') throw event.error;
-          setLoginFlow((current) => current?.flowId === flow.flowId ? { ...current, events: [...current.events, event.value], done: event.value.type === 'done' } : current);
-          if (event.value.type === 'done') {
+          if (page.status === 'error') throw page.error;
+          const events = page.value.events;
+          after += events.length;
+          if (events.length > 0) setLoginFlow((current) => current?.flowId === flow.flowId ? { ...current, events: [...current.events, ...events], done: page.value.done } : current);
+          const done = events.find((event) => event.type === 'done');
+          if (done?.type === 'done') {
             forgetProviderLogin(flow.profileId);
-            if (event.value.ok && providerScope.current === flow.profileId) await refreshProviders();
+            if (done.ok && providerScope.current === flow.profileId) await refreshProviders();
             return;
           }
         }
-        if (!controller.signal.aborted) throw new Error('Sign-in updates disconnected. The cloud flow has not been canceled.');
       } catch (cause) {
         if (!controller.signal.aborted) setLoginFlow((current) => current?.flowId === flow.flowId ? { ...current, connectionError: rpcErrorMessage(cause, 'Read cloud sign-in') } : current);
       }

@@ -16,7 +16,8 @@ import { installDefaultGitSpaceSkills } from './default-skills.js';
 import { WorkspaceServiceManager } from './workspace-services.js';
 import { createServiceAccessClient } from './service-forward.js';
 import { WorkspaceEnvironmentManager } from './workspace-environment.js';
-import { createServerClock, credentialProtocolBase64, relayNoticeSchema, type RelayNoticeTopic } from '@gitspace/protocol';
+import { createServerClock, credentialProtocolBase64, machineLiveNoticeSchema, machineLiveResource, relayNoticeSchema, type MachineLiveNotice, type RelayNoticeTopic } from '@gitspace/protocol';
+import { coalesced } from './coalesced.js';
 import { receiveMachineNotices, type MachineNoticeTargets } from './machine-notices.js';
 import { appendFileSync, existsSync } from 'node:fs';
 import { DeviceRegistry } from './device-registry.js';
@@ -159,7 +160,29 @@ export async function startMachineRuntime() {
       };
     },
   };
-  const terminals = new WorkspaceHubTerminalCoordinator(machineId, checkouts);
+  // Observed terminal changes go to the host, whose relay connection tells the tabs watching them. One delivery runs at
+  // a time; changes during it cost one more, carrying each resource's latest cursor.
+  const pendingLiveNotices = new Map<string, MachineLiveNotice>();
+  const deliverLiveNotices = coalesced(async () => {
+    const notices = [...pendingLiveNotices.values()];
+    pendingLiveNotices.clear();
+    const hostUrl = process.env.GITSPACE_HOST_URL;
+    if (!hostUrl) return;
+    for (let start = 0; start < notices.length; start += 256) {
+      const response = await fetch(`${hostUrl}/__environment/live-notices`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${process.env.GITSPACE_CONTROL_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ notices: notices.slice(start, start + 256) }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`Live notice delivery answered ${response.status}`);
+    }
+  });
+  const announceLive = (notice: MachineLiveNotice): void => {
+    pendingLiveNotices.set(notice.resource, notice);
+    void deliverLiveNotices().catch((error: unknown) => console.error('[gitspace-live]', error));
+  };
+  const terminals = new WorkspaceHubTerminalCoordinator(machineId, checkouts, undefined, announceLive);
   const environments = new WorkspaceEnvironmentManager(checkouts, authority, terminals, authority, {
     machineId,
     stateRoot: join(environmentRoot, 'lifecycle-runs'),
@@ -281,6 +304,11 @@ export async function startMachineRuntime() {
         receiveMachineNotices(notices, noticeTargets);
         return Response.json({ received: true });
       }
+      if (url.pathname === '/__control/live-unwatched') {
+        const notice = machineLiveNoticeSchema.parse(await request.json());
+        terminals.unwatched(notice.resource, notice.cursor);
+        return Response.json({ received: true });
+      }
       if (url.pathname !== '/__control/code-version') return null;
       const input = z.object({ hash: z.string().optional() }).parse(await request.json());
       const hash = input.hash ?? 'unknown';
@@ -371,6 +399,8 @@ export async function startMachineRuntime() {
     startupCommitted = true;
     preparingReplacement = false;
   }
+  // Observers of an earlier generation are gone: tabs showing this machine's terminals read them again.
+  announceLive({ workspace: null, resource: machineLiveResource(machineId), cursor: Date.now() });
   await releases.start();
   return { environmentRoot, settings, http, stop };
 }

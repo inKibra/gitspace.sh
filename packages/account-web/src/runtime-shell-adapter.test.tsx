@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { emptyWorkspaceStatus as idle, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gitspace/protocol/project-authority';
 import { runtimeScope, runtimeSubagents, runtimeTurns } from './runtime-shell-adapter.js';
 import { GitSpaceShell, workspaceStatusColor, workspaceStatusLabel } from './GitSpaceShell.js';
@@ -10,8 +11,10 @@ import type { InputOf } from 'result-rpc';
 const stamp = '2026-10-03T00:00:00.000Z';
 const project = cloudProjectSummarySchema.parse({ id: 'project', name: 'GitSpace', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, archivedAt: null, updatedAt: stamp });
 const workspace = cloudWorkspaceDefinitionSchema.parse({ id: 'workspace', projectId: project.id, kind: 'worktree', name: 'Runtime restoration', branch: 'runtime', phase: 'review', sourceKind: 'base', sourceRef: 'main', lifecycle: 'active', goalId: null, revision: 1, archivedAt: null, createdAt: stamp, updatedAt: stamp });
-function fixture() {
-  return RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 3, attachments: [], tasks: [], questions: [], documents: {}, conversations: [{ id: 'root', parentId: null, title: 'Main agent', status: 'idle', messages: [{ id: 'user-1', role: 'user', content: [{ type: 'text', text: 'Keep working without a machine' }], createdAt: stamp }, { id: 'answer-1', role: 'assistant', content: [{ type: 'text', text: 'The cloud conversation remains available.' }], createdAt: stamp }] }] });
+const waiting: WorkspaceStatusSummary = { ...idle, primaryColor: 'blue', agents: { green: 0, blue: 1, orange: 0, red: 0 } };
+const working: WorkspaceStatusSummary = { ...idle, primaryColor: 'green', agents: { green: 1, blue: 0, orange: 0, red: 0 } };
+function fixture(summary = waiting) {
+  return RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 3, attachments: [], tasks: [], questions: [], documents: { 'gitspace.status': { summary, cloud: { version: null, conflicts: [] }, machines: [] } }, conversations: [{ id: 'root', parentId: null, title: 'Main agent', status: 'idle', messages: [{ id: 'user-1', role: 'user', content: [{ type: 'text', text: 'Keep working without a machine' }], createdAt: stamp }, { id: 'answer-1', role: 'assistant', content: [{ type: 'text', text: 'The cloud conversation remains available.' }], createdAt: stamp }] }] });
 }
 const inspection = { project, workspace, workspaces: [workspace], machines: [], placement: null };
 
@@ -28,19 +31,20 @@ describe('runtime to existing shell adapter', () => {
     expect(html).not.toContain('Open on machine');
   });
 
-  it('reports the runtime status of a cloud workspace with no attached machine, ignoring a stale legacy placement', () => {
+  it('reports the summary the runtime published for a cloud workspace with no attached machine, ignoring a stale legacy placement', () => {
     const machine = { id: 'desk', label: 'Desk', kind: 'physical' as const, provider: 'physical' as const, state: 'online' as const, desiredState: 'online' as const, rpcEndpoint: 'https://desk.test/rpc', notes: '', lifecycleRevision: 1, operationId: null, error: null };
     const stale = { ...inspection, machines: [machine], placement: { state: 'open' as const, machineId: 'desk', generation: 4, updatedAt: stamp } };
     const scope = runtimeScope(fixture(), stale).workspace;
     expect(scope.holder).toEqual({ kind: 'cloud' });
     expect(workspaceStatusLabel({ ...scope, freshness: 'fresh' })).toBe('Waiting');
     expect(workspaceStatusColor({ ...scope, freshness: 'fresh' })).toBe('blue');
-    const failed = fixture();
-    failed.conversations[0]!.status = 'failed';
-    expect(workspaceStatusLabel({ ...runtimeScope(failed, stale).workspace, freshness: 'fresh' })).toBe('Failed');
+    expect(workspaceStatusLabel({ ...runtimeScope(fixture({ ...idle, primaryColor: 'red', agents: { green: 0, blue: 0, orange: 0, red: 1 } }), stale).workspace, freshness: 'fresh' })).toBe('Failed');
+    // A conversation an interrupted turn left flagged running is not live work; only the published summary decides.
+    const stuck = fixture();
+    stuck.conversations[0]!.status = 'running';
+    expect(workspaceStatusColor({ ...runtimeScope(stuck, stale).workspace, freshness: 'fresh' })).toBe('blue');
   });
 
-  const idle = { primaryColor: 'dim' as const, agents: { green: 0, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } };
   const listedBase: InputOf<typeof SpaceViewCodec>['baseSpace'] = { id: project.id, projectId: project.id, kind: 'base', name: project.name, branch: 'main', possessedBy: null, spaceGeneration: 0, closedAt: null, status: idle };
   function listed(id: string, status: InputOf<typeof SpaceViewCodec>['workspaces'][number]['status'] = idle): InputOf<typeof SpaceViewCodec>['workspaces'][number] {
     return {
@@ -67,9 +71,7 @@ describe('runtime to existing shell adapter', () => {
 
   it('paints only the open workspace with its live status; the project and siblings keep their listed status', () => {
     const sibling = { ...workspace, id: 'sibling', name: 'Sibling' };
-    const running = fixture();
-    running.conversations[0]!.status = 'running';
-    const waiting = { ...idle, primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 } };
+    const running = fixture(working);
     const failedBase = { ...idle, primaryColor: 'red' as const, agents: { green: 0, blue: 0, orange: 0, red: 1 } };
     const scope = runtimeScope(running, { ...inspection, workspaces: [workspace, sibling] }, { baseSpace: { ...listedBase, status: failedBase }, workspaces: [listed(workspace.id), listed(sibling.id, waiting)] });
     expect(scope.workspace.status.primaryColor).toBe('green');

@@ -8,6 +8,7 @@ import { TenantControlDO } from './tenant-control.js';
 import { defaultFrontendResponse } from './default-release.js';
 import { defaultMachineResponse } from './default-native.js';
 import { invokeCompute } from './compute-provider.js';
+import { fetchUsageReport, usageReportKey, usageReportSchema, usageReportScripts, usageSpikes, utcDate, utcDayWindow, HOURLY_SPIKE_FLOORS, SPIKE_FLOORS, SPIKE_RATIO, type UsageReport } from './usage-report.js';
 
 export { CreditLedgerDO } from './credit-ledger.js';
 export { TenantDeploymentsDO } from './tenant-deployments.js';
@@ -385,6 +386,47 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
   return platformError(404, 'RESOURCE_NOT_FOUND', 'Tenant resource route does not exist');
 }
 
+/** Stored report for `date`, or null when absent or written by an incompatible version. */
+async function storedUsageReport(env: Env, script: string, date: string): Promise<UsageReport | null> {
+  const object = await env.RELEASES.get(usageReportKey(script, date));
+  if (!object) return null;
+  const parsed = usageReportSchema.safeParse(await object.json());
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Daily usage report of the previous UTC day per `USAGE_REPORT_SCRIPTS` entry, stored in R2 and logged so a runaway
+ * loop alerts within a day. Failures are logged, never thrown: a cron retry would only repeat the same queries.
+ */
+async function reportUsage(env: Env, scheduledTime: number): Promise<void> {
+  if (!env.CF_ANALYTICS_TOKEN) {
+    console.error(JSON.stringify({ event: 'usage-report-unconfigured', message: 'CF_ANALYTICS_TOKEN secret is not set' }));
+    return;
+  }
+  const date = utcDate(scheduledTime, -1);
+  const previousDate = utcDate(scheduledTime, -2);
+  for (const script of usageReportScripts(env.USAGE_REPORT_SCRIPTS)) {
+    try {
+      const request = { accountId: env.CF_ACCOUNT_ID, script, analyticsToken: env.CF_ANALYTICS_TOKEN, namespaceToken: env.CF_API_TOKEN };
+      const [report, previous] = await Promise.all([
+        fetchUsageReport({ ...request, window: utcDayWindow(date) }),
+        storedUsageReport(env, script, previousDate).then((stored) => stored ?? fetchUsageReport({ ...request, window: utcDayWindow(previousDate) })),
+      ]);
+      const spikes = usageSpikes(report, previous);
+      await env.RELEASES.put(usageReportKey(script, date), JSON.stringify({ ...report, spikes }), { httpMetadata: { contentType: 'application/json' } });
+      // Hourly series stay in R2; the log line carries the totals only.
+      const namespaces = report.namespaces.map(({ hourly: _hourly, ...namespace }) => namespace);
+      console.log(JSON.stringify({
+        event: 'usage-report', date, ...report, namespaces, previousWindow: previous.window, spikes: spikes.length,
+        spikeRatio: SPIKE_RATIO, spikeFloors: SPIKE_FLOORS, hourlySpikeFloors: HOURLY_SPIKE_FLOORS,
+      }));
+      for (const spike of spikes) console.error(JSON.stringify({ event: 'usage-report-spike', date, ...spike }));
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'usage-report-failed', script, date, message: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -440,5 +482,9 @@ export default {
 
     ctx.waitUntil(meterDispatch(env, tenant));
     return response;
+  },
+
+  async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    await reportUsage(env, controller.scheduledTime);
   },
 } satisfies ExportedHandler<Env>;

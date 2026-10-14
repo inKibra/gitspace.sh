@@ -1,14 +1,13 @@
 import type { DeploymentStatusView } from '@gitspace/protocol';
-import type { WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { emptyWorkspaceStatus, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { SidebarDeploymentProps } from './AppSidebar.js';
 import type { GitSpaceShellProps, WorkspaceView } from './GitSpaceShell.js';
 import { launchTrackFrom, type LaunchTrack } from './release.js';
 
 const status = (primaryColor: WorkspaceStatusSummary['primaryColor']): WorkspaceStatusSummary => ({
+  ...emptyWorkspaceStatus,
   primaryColor,
   agents: { green: primaryColor === 'green' ? 1 : 0, blue: primaryColor === 'blue' ? 1 : 0, orange: primaryColor === 'orange' ? 1 : 0, red: primaryColor === 'red' ? 1 : 0 },
-  services: { green: 0, red: 0 },
-  terminals: { green: 0, red: 0 },
 });
 
 const unrelated: Pick<WorkspaceView, 'relations' | 'stack'> = { relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] } };

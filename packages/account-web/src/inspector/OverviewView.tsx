@@ -24,7 +24,7 @@ import {
 } from '@gitspace/ui';
 import { AlertTriangle, XClose } from '@untitledui/icons';
 import { useState, type ReactNode } from 'react';
-import { EmptyState, PHASE_LABEL, StatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
+import { EmptyState, PHASE_LABEL, workspaceStatusColor, WorkspaceStatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
 import { isBlocking, useRelationWriter, WorkspaceGraph, type SetWorkspaceRelations } from '../WorkspaceGraph.js';
 import { WorkspacePicker } from '../WorkspacePicker.js';
 
@@ -47,7 +47,7 @@ function WorkspaceRow({ id, workspace, badge, onOpen, onRemove, index }: { id: s
   const name = workspace?.name ?? id;
   return <Card size="compact" index={index} onClick={workspace ? () => onOpen(workspace.id) : undefined} label={workspace ? `Open ${workspace.name}` : undefined}>
     <CardHeader>
-      <CardTitle><span className="flex items-center gap-2">{workspace ? <StatusDot color={workspace.status.primaryColor} pulse={workspace.status.primaryColor === 'green'} /> : null}{name}</span></CardTitle>
+      <CardTitle><span className="flex items-center gap-2">{workspace ? <WorkspaceStatusDot space={workspace} /> : null}{name}</span></CardTitle>
       <CardDescription>{workspace ? <span className="font-mono">{workspace.branch}</span> : 'Not in this project'}</CardDescription>
     </CardHeader>
     <CardContent><span className="flex flex-wrap items-center gap-1">{workspace ? <Badge variant="dot" size="compact" color="gray">{PHASE_LABEL[workspace.phase]}</Badge> : null}{badge}</span></CardContent>
@@ -69,15 +69,16 @@ function ProjectOverview({ scope, workspaces, onSelectWorkspace, onSetRelations 
     <header className="flex flex-col gap-1"><span className="text-caption text-muted-foreground">Project overview</span><h2 className="text-title font-semibold text-foreground">{scope.projectName}</h2><p className="text-body text-muted-foreground tabular-nums">{open.length} open workspaces{blocked ? ` · ${blocked} blocked` : ''}</p></header>
     {open.length ? <CardGroup columns={2} separated border="outlined">{open.map((workspace) => {
       const agents = workspace.status.agents.green + workspace.status.agents.blue + workspace.status.agents.orange + workspace.status.agents.red;
+      const color = workspaceStatusColor(workspace);
       return <Card key={workspace.id} size="compact" onClick={() => onSelectWorkspace(workspace.id)} label={`Open ${workspace.name}`}>
         <CardHeader>
-          <CardTitle><span className="flex items-center gap-2"><StatusDot color={workspace.status.primaryColor} pulse={workspace.status.primaryColor === 'green'} />{workspace.name}</span></CardTitle>
+          <CardTitle><span className="flex items-center gap-2"><WorkspaceStatusDot space={workspace} />{workspace.name}</span></CardTitle>
           <CardDescription><span className="font-mono">{workspace.branch}</span></CardDescription>
         </CardHeader>
         <CardContent><span className="flex flex-wrap items-center gap-1">
           <Badge variant="dot" size="compact" color="gray">{PHASE_LABEL[workspace.phase]}</Badge>
           {workspace.stack.blockedBy.length ? <Badge size="compact" color="amber">blocked · {workspace.stack.blockedBy.length}</Badge> : null}
-          {agents ? <Badge variant="dot" size="compact" color={workspace.status.primaryColor === 'dim' ? 'gray' : workspace.status.primaryColor}>{agents} {agents === 1 ? 'agent' : 'agents'}</Badge> : null}
+          {agents ? <Badge variant="dot" size="compact" color={color === 'dim' ? 'gray' : color}>{agents} {agents === 1 ? 'agent' : 'agents'}</Badge> : null}
         </span></CardContent>
       </Card>;
     })}</CardGroup> : <EmptyState title="No open workspaces" description="Create a workspace to start planning work in this project." />}
@@ -166,7 +167,7 @@ function WorkspaceOverview({ scope, workspaces, onSelectWorkspace, onSetRelation
         {scope.relations.stackedOn ? <WorkspaceRow id={scope.relations.stackedOn} workspace={parent} badge={<Badge variant="dot" size="compact" color="blue">parent</Badge>} onOpen={onSelectWorkspace} /> : null}
         <Card size="compact" selected>
           <CardHeader>
-            <CardTitle><span className="flex items-center gap-2"><StatusDot color={scope.status.primaryColor} pulse={scope.status.primaryColor === 'green'} />{scope.name}</span></CardTitle>
+            <CardTitle><span className="flex items-center gap-2"><WorkspaceStatusDot space={scope} />{scope.name}</span></CardTitle>
             <CardDescription><span className="font-mono">{scope.branch}</span></CardDescription>
           </CardHeader>
           <CardContent><span className="flex flex-wrap items-center gap-1"><Badge variant="dot" size="compact" color="gray">{PHASE_LABEL[scope.phase]}</Badge><Badge size="compact" color="gray">{scope.relations.stackedOn ? 'this workspace' : 'not stacked'}</Badge></span></CardContent>

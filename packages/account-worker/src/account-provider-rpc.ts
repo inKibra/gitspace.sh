@@ -49,24 +49,9 @@ export function providerCloudProcedures(env: Env, userId: string, requireAdminis
     try { await requireAdministration(); await vault.cloudLoginCancel(input); return ok({}); }
     catch (error) { return err(errors.OperationFailed({ operation: 'cancel provider login', message: message(error) })); }
   });
-  const events = server.implement(providerLoginEventsContract).stream(async function* ({ input, signal, errors }) {
-    let after = 0;
-    try {
-      while (!signal.aborted) {
-        await requireAdministration();
-        const page = await vault.cloudLoginEvents({ ...input, after });
-        await requireAdministration();
-        signal.throwIfAborted();
-        for (const event of page.events) {
-          yield ok(event);
-          after++;
-        }
-        if (page.done) return;
-        await scheduler.wait(1000, { signal });
-      }
-    } catch (error) {
-      if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'watch provider login', message: message(error) }));
-    }
+  const events = server.implement(providerLoginEventsContract).handler(async ({ input, errors }) => {
+    try { await requireAdministration(); return ok(await vault.cloudLoginEvents(input)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read provider login', message: message(error) })); }
   });
   const usage = server.implement(providerUsageContract).handler(async ({ input, errors }) => {
     try { return ok(await vault.cloudUsage(input.profileId, input.providerId, input.refresh)); }

@@ -3,12 +3,13 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RuntimeSnapshotSchema, SessionControlSchema } from '@gitspace/protocol-runtime';
+import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import { useRuntimeInspectorState, type RuntimeInspectorState } from './useRuntimeInspectorState.js';
 import type { RuntimeInspectorContext } from './RuntimeWorkspace.js';
 const rpc = vi.hoisted(() => ({ session: vi.fn() }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: rpc } }));
 function context(workspaceId: string, conversationId = 'child'): RuntimeInspectorContext {
-  return { snapshot: RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId, cursor: 1, conversations: [{ id: 'main', parentId: null, title: 'Main', status: 'idle', messages: [] }, { id: 'child', parentId: 'main', title: 'Child', status: 'running', messages: [] }], tasks: [], attachments: [], questions: [], documents: {} }), conversationId, sessionId: conversationId, turns: [], scope: { kind: 'workspace', id: workspaceId, name: workspaceId, branch: 'main', phase: 'code', closedAt: null, projectId: 'project', projectName: 'Project', generation: 0, possessedBy: '', holder: { kind: 'unknown' }, status: { primaryColor: 'dim', agents: { green: 0, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } }, relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] } }, workspaces: [], onClose() {}, onOpenTerminal() {}, async onAskAgent() {} };
+  return { snapshot: RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId, cursor: 1, conversations: [{ id: 'main', parentId: null, title: 'Main', status: 'idle', messages: [] }, { id: 'child', parentId: 'main', title: 'Child', status: 'running', messages: [] }], tasks: [], attachments: [], questions: [], documents: {} }), conversationId, sessionId: conversationId, turns: [], scope: { kind: 'workspace', id: workspaceId, name: workspaceId, branch: 'main', phase: 'code', closedAt: null, projectId: 'project', projectName: 'Project', generation: 0, possessedBy: '', holder: { kind: 'unknown' }, status: emptyWorkspaceStatus, relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] } }, workspaces: [], onClose() {}, onOpenTerminal() {}, async onAskAgent() {} };
 }
 const control = SessionControlSchema.parse({ sessionId: 'main', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null });
 const result = { status: 'ok', value: { control, setup: { sessionId: 'main', agents: [] } } };

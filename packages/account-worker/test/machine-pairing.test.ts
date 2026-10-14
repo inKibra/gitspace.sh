@@ -1,12 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { env, SELF, runInDurableObject } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
   createDeviceBinding, credentialAuthorityGrantPayload, credentialProtocolBase64, signDeviceInvite, signRpcRequest,
   verifyCredentialAuthorityGrant, type CredentialAuthorityGrant, type DeviceGrantRecord, type SignedCredentialAuthorityGrant,
 } from '@gitspace/protocol';
-import type { CredentialVaultDO } from '../src/index.js';
+import { CredentialVaultDO } from '../src/index.js';
 import { tenantRootPrivateKey as rootKey } from './setup.js';
+
+afterEach(() => vi.restoreAllMocks());
 
 interface TestAccount {
   userId: string;
@@ -107,6 +109,21 @@ describe('browser-approved machine pairing', () => {
     await owner.vault.revokeDeviceGrant(owner.deviceId);
     expect((await SELF.fetch(signedRequest('poll', body, pairing.pairingId, machineKey))).status).toBe(403);
     expect((await relayAuthority()).status).toBe(401);
+  });
+
+  it('answers other vault requests while a machine poll is in flight', async () => {
+    const owner = await account();
+    const pairing = await created(owner);
+    await approved(owner, pairing);
+    let answered: string | null = null;
+    vi.spyOn(CredentialVaultDO.prototype, 'artifactKey').mockImplementationOnce(async (userId: string) => {
+      // The vault is mid-poll; a vault holding a lock for the whole poll would deadlock on this second request.
+      answered = await env.CREDENTIALS.getByName(userId).artifactKey(userId);
+      return answered;
+    });
+    const response = await SELF.fetch(signedRequest('poll', { userId: owner.userId, pairingId: pairing.pairingId }, pairing.pairingId, machineKey));
+    expect(answered).not.toBeNull();
+    expect(await response.json()).toMatchObject({ status: 'ok', value: { state: 'enrolled', artifactKey: answered } });
   });
 
   it('rejects cross-account, cancelled, expired and revoked-machine delivery', async () => {

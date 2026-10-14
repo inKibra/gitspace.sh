@@ -446,8 +446,8 @@ export class SpaceContextDO extends DurableObject<Env> {
         parsed.phaseRunId,
       ).toArray()[0];
       if (!start) throw new InspectorStateError(`Journal phase run ${parsed.phaseRunId} does not exist`);
-      const ended = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM inspector_journal_entries WHERE phase_run_id = ? AND kind = 'phase-end'", parsed.phaseRunId).one().count;
-      if (ended > 0) throw new InspectorStateError(`Journal phase run ${parsed.phaseRunId} is already closed`);
+      const ended = this.ctx.storage.sql.exec("SELECT 1 FROM inspector_journal_entries WHERE phase_run_id = ? AND kind = 'phase-end' LIMIT 1", parsed.phaseRunId).toArray().length > 0;
+      if (ended) throw new InspectorStateError(`Journal phase run ${parsed.phaseRunId} is already closed`);
       if (!parsed.revert) this.assertPhaseGatesPassable(identity, start.phase);
       const startSnapshot = journalEntryViewSchema.shape.snapshot.unwrap().parse(JSON.parse(start.snapshot_json!));
       const endSnapshot = this.captureSnapshot(identity, parsed.repository);

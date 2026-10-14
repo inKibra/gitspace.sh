@@ -48,7 +48,11 @@ const segment = z.union([z.string().refine(value => !['__proto__', 'prototype', 
 const path = z.array(segment);
 const nonemptyPath = z.tuple([segment]).rest(segment);
 export const RuntimeDeltaOpSchema = z.union([z.tuple([z.literal('r'), RuntimeJsonSchema]), z.tuple([z.literal('s'), nonemptyPath, RuntimeJsonSchema]), z.tuple([z.literal('d'), nonemptyPath]), z.tuple([z.literal('a'), nonemptyPath, z.string()]), z.tuple([z.literal('t'), nonemptyPath, z.number().int().nonnegative()]), z.tuple([z.literal('p'), path, z.number().int().nonnegative(), z.number().int().nonnegative(), z.array(RuntimeJsonSchema)]), z.tuple([z.literal('m'), path, z.array(z.number().int().nonnegative())])]);
-export const RuntimeWatchEventSchema = z.discriminatedUnion('type', [z.object({ type: z.literal('snapshot'), snapshot: RuntimeSnapshotSchema }), z.object({ type: z.literal('reset'), snapshot: RuntimeSnapshotSchema, reason: z.enum(['cursor-expired', 'cursor-ahead', 'slow-consumer']) }), z.object({ type: z.literal('delta'), baseCursor: z.number().int().nonnegative(), cursor: z.number().int().positive(), ops: z.array(RuntimeDeltaOpSchema) })]);
+export const RuntimeWatchEventSchema = z.discriminatedUnion('type', [z.object({ type: z.literal('snapshot'), snapshot: RuntimeSnapshotSchema }), z.object({ type: z.literal('reset'), snapshot: RuntimeSnapshotSchema, reason: z.enum(['cursor-expired', 'cursor-ahead']) }), z.object({ type: z.literal('delta'), baseCursor: z.number().int().nonnegative(), cursor: z.number().int().positive(), ops: z.array(RuntimeDeltaOpSchema) })]);
+/** Most deltas one `runtime.watch` read returns; a reader further behind receives a reset instead. */
+export const RUNTIME_WATCH_EVENT_LIMIT = 256;
+/** The events newer than a reader's cursor: a snapshot, a reset, or the contiguous deltas after it, oldest first. */
+export const RuntimeWatchEventsSchema = z.array(RuntimeWatchEventSchema).max(RUNTIME_WATCH_EVENT_LIMIT);
 export const RuntimeActionResultSchema = z.object({ accepted: z.literal(true), cursor: z.number().int().nonnegative(), conversationId: z.string().optional() });
 export const RuntimeAttachInputSchema = z.object({ ...identity, machineId: RuntimeMachineIdSchema, generation: z.number().int().nonnegative(), checkout: RuntimeCheckoutSchema, capabilities: z.array(z.string()) });
 export const RuntimeAttachResultSchema = z.object({ attachment: RuntimeAttachmentSchema, executionSecret: z.string().min(1) });

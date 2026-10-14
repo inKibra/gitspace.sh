@@ -208,14 +208,16 @@ const CREATION_STATUS: Record<WorkspaceCreationState, { label: string; color: Wo
   failed: { label: 'Creation failed', color: 'red' },
 };
 
-type SpaceStatusView = Pick<AgentScopeView, 'closedAt' | 'holder'> & { status?: AgentScopeView['status']; freshness?: 'fresh' | 'stale' | 'unknown'; creation?: WorkspaceCreationState };
+export type SpaceStatusView = Pick<AgentScopeView, 'closedAt' | 'holder'> & { status?: AgentScopeView['status']; freshness?: 'fresh' | 'stale' | 'unknown'; creation?: WorkspaceCreationState };
 
+/** The color of a workspace's stored status summary, except where that summary does not apply right now. */
 export function workspaceStatusColor(space: SpaceStatusView): WorkspaceStatusColor {
   if (space.closedAt || space.holder.kind === 'released') return 'dim';
   if (space.creation) return CREATION_STATUS[space.creation].color;
-  if (space.status?.agents.red) return 'red';
-  // A cloud workspace's status comes only from its runtime; without one read yet there is nothing to flag.
-  if (space.holder.kind === 'cloud' && !space.status) return 'dim';
+  if (space.status?.primaryColor === 'red') return 'red';
+  // A cloud workspace's status comes only from its runtime; one that reported nothing has nothing to flag.
+  if (space.holder.kind === 'cloud' && (!space.status || space.status.primaryColor === 'dim')) return 'dim';
+  // A summary that is not confirmed now is never shown as live work.
   if (space.holder.kind === 'unknown' || space.freshness === 'stale' || space.freshness === 'unknown' || !space.status || space.status.primaryColor === 'dim') return 'orange';
   return space.status.primaryColor;
 }
@@ -224,20 +226,17 @@ export function workspaceStatusLabel(space: SpaceStatusView): string {
   if (space.closedAt) return 'Archived';
   if (space.creation) return CREATION_STATUS[space.creation].label;
   if (space.holder.kind === 'released') return 'Closed';
-  if (space.status?.agents.red) return 'Failed';
+  if (space.status?.primaryColor === 'red') return 'Failed';
   if (space.holder.kind === 'cloud' && !space.status) return 'Cloud workspace';
   if (space.freshness === 'stale') return 'Status unavailable · last known status';
   if (space.holder.kind === 'unknown' || space.freshness === 'unknown' || !space.status) return 'Status unavailable';
-  switch (space.status?.primaryColor) {
-    case 'green':
-      if (space.status.compaction) return `Compacting context${space.status.compaction.detail ? ` · ${space.status.compaction.detail}` : ''}`;
-      return 'Working';
-    case 'blue': return 'Waiting';
-    case 'orange': return 'Needs attention';
-    case 'red': return 'Failed';
-    case 'dim': return 'Agent unavailable';
-    default: return 'Status unknown';
-  }
+  const { primaryColor, agents, machines, sync } = space.status;
+  const state = primaryColor === 'green' ? 'Working'
+    : primaryColor === 'blue' ? 'Waiting'
+      : primaryColor === 'orange' ? agents.orange ? 'Needs approval' : 'Sync conflict'
+        : space.holder.kind === 'cloud' ? 'No activity' : 'Agent unavailable';
+  const offline = machines.attached - machines.online;
+  return [state, offline ? `${offline} ${offline === 1 ? 'machine' : 'machines'} offline` : null, sync.problems ? 'sync problem' : null].filter(Boolean).join(' · ');
 }
 
 /**
@@ -266,6 +265,12 @@ export function spaceHolderLabel(space: Pick<AgentScopeView, 'closedAt' | 'holde
 
 export function StatusDot({ color, pulse = false }: { color: WorkspaceStatusColor; pulse?: boolean }) {
   return <span className="status-dot" data-pulse={pulse || undefined} style={{ color: STATUS_COLOR[color] }} aria-hidden />;
+}
+
+/** A workspace's status dot: sidebar rows, header, picker, work pages, graph and overview all show this one. */
+export function WorkspaceStatusDot({ space }: { space: SpaceStatusView }) {
+  const color = workspaceStatusColor(space);
+  return <StatusDot color={color} pulse={color === 'green'} />;
 }
 
 // ── Page scaffolding shared by the wide views ──
@@ -417,7 +422,6 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
     {history ? <TranscriptHistoryNotice {...history} /> : null}
     {mainAgent?.errorMessage || mainAgent?.failed ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">Agent failure: {mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}</p> : null}
     {controlsError && !onRetryControls ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{controlsError}</p> : null}
-    {workspace.status.compaction && mainAgent?.state === 'running' ? <p role="status" className="flex shrink-0 items-center gap-2 px-4 py-2 text-caption text-muted-foreground"><ThinkingIndicator />Compacting context{workspace.status.compaction.detail ? ` · ${workspace.status.compaction.detail}` : ''}</p> : null}
     <ScrollArea ref={bindTranscriptViewport} onTouchStartCapture={transcript ? undefined : onTranscriptTouchStart} onTouchEndCapture={transcript ? undefined : onTranscriptTouchEnd} onTouchCancelCapture={transcript ? undefined : onTranscriptTouchEnd} className="min-h-0 flex-1" viewportClassName="h-full">
       {transcript
         ? <VirtualTranscript history={transcript} transport={transport} onAnswer={answerInline} />
@@ -632,7 +636,6 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     }
     return [...byProject.values()];
   }, [accountSidebar, projects, baseSpace, workspaces, workspace.id, selectedSummary]);
-  const statusColor = workspaceStatusColor(selectedSummary);
   const recovering = selectedSummary.detail === 'Agent is recovering';
   const inferenceState = useInference()?.state;
   const assignedProfileId = inferenceState?.assignments.find((entry) => entry.projectId === workspace.projectId)?.profileId;
@@ -666,7 +669,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
         </nav>
         <div className="flex items-center gap-1">
             {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); }, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
-            <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><StatusDot color={statusColor} pulse={statusColor === 'green'} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)}{profileChange ? ` · ${profileChange}` : ''}</span></span>
+            <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><WorkspaceStatusDot space={selectedSummary} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)}{profileChange ? ` · ${profileChange}` : ''}</span></span>
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
@@ -693,7 +696,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       setCreateError(null);
       try { await onCreateProject(input); setNewProject(false); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create project')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
-    {onCreateWorkspace ? <CreateWorkspaceDialog key={newWorkspaceFor ? `${newWorkspaceFor.projectId}:${newWorkspaceFor.phase}` : 'closed'} projectId={newWorkspaceFor?.projectId ?? null} initialPhase={newWorkspaceFor?.phase} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setNewWorkspaceFor(null); setCreateError(null); } }} pending={createPending} error={createError} onSubmit={async (input) => {
+    {onCreateWorkspace ? <CreateWorkspaceDialog key={newWorkspaceFor ? `${newWorkspaceFor.projectId}:${newWorkspaceFor.phase}` : 'closed'} projectId={newWorkspaceFor?.projectId ?? null} initialPhase={newWorkspaceFor?.phase} workspaces={workspaces.map((item) => item.id === workspace.id ? { ...item, ...selectedSummary } : item)} onOpenChange={(open) => { if (!open) { setNewWorkspaceFor(null); setCreateError(null); } }} pending={createPending} error={createError} onSubmit={async (input) => {
       if (createPendingRef.current) return;
       createPendingRef.current = true;
       setCreatePending(true);

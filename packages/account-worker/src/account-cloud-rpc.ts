@@ -1,15 +1,12 @@
 import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
-import { consumeDurableStream } from './durable-stream.js';
 import { activeAccount } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
-import type { LifecycleState } from '@gitspace/protocol-environment';
-import type { CloudImageState } from '@gitspace/protocol/cloud-image';
 import { MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import {
   credentialProtocolBase64, deviceCanAdminister, requiredCapability, requiresImageSelectionControl, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
   parseRuntimeSettings, runtimeSettingsView, type RuntimeConfigDocument,
-  type DeviceCapability, type GitSpaceRpcContext, type CloudProjectSummary,
+  type DeviceCapability, type GitSpaceRpcContext,
 } from '@gitspace/protocol';
 import {
   gitspaceContract, getUserSettingsContract, updateUserSettingsContract, reserveUserHandleContract,
@@ -26,7 +23,6 @@ import {
 } from '@gitspace/protocol/rpc-contract';
 import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract, inferenceEventsContract } from '@gitspace/protocol/rpc-contract';
 import { stackStatusContract } from '@gitspace/protocol/rpc-contract';
-import type { InferenceState } from '@gitspace/protocol/inference';
 import { parse } from 'devalue';
 import { contractDigest, err, ok } from 'result-rpc';
 import { createFetchHandler, serverRpc } from 'result-rpc/server';
@@ -36,9 +32,7 @@ import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js'
 import { controlFleetMachine, provisionManagedSandbox, readTenantDeployment, reconcileFleetMachines, revertTenantRelease, type CredentialVaultDO } from './application.js';
 import type { DeploymentStatus } from '@gitspace/protocol/deployment';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
-import type { UserSettingsDO, SettingsSnapshot } from './user-settings.js';
-import type { SpaceAuthorityDO } from './space-authority.js';
-import type { SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
+import type { UserSettingsDO } from './user-settings.js';
 import { inspectorCloudProcedures } from './account-inspector-rpc.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { environmentCloudProcedures } from './account-environment-rpc.js';
@@ -177,27 +171,17 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return result.status === 'conflict' ? err(errors.SettingsConflict(result)) : ok(runtimeView(result.value));
     } catch (error) { return err(errors.OperationFailed({ operation: 'set runtime setting', message: message(error) })); }
   });
-  const settingsEvents = server.implement(settingsEventsContract).stream(async function* ({ input, signal, errors }) {
-    try {
-      await requireSubscription();
-      for await (const event of consumeDurableStream<SettingsSnapshot>(await settings.watch(input.after), signal)) {
-        await requireSubscription();
-        yield ok(event);
-      }
-    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to settings', message: message(error) })); }
+  const settingsEvents = server.implement(settingsEventsContract).handler(async ({ input, errors }) => {
+    try { return ok(await settings.events(input.after)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read settings changes', message: message(error) })); }
   });
   const machines = server.implement(listMachinesContract).handler(async ({ errors }) => {
     try { return ok(await fleet()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list machines', message: message(error) })); }
   });
-  const machineEvents = server.implement(machineLifecycleEventsContract).stream(async function* ({ input, signal, errors }) {
-    try {
-      await requireSubscription();
-      for await (const event of consumeDurableStream<FleetMachineDefinition[]>(await catalog.watch(input.after), signal)) {
-        await requireSubscription();
-        yield ok(event);
-      }
-    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to machines', message: message(error) })); }
+  const machineEvents = server.implement(machineLifecycleEventsContract).handler(async ({ input, errors }) => {
+    try { return ok(await catalog.machineEvents(input.after)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read machine changes', message: message(error) })); }
   });
   const createSandbox = server.implement(createSandboxMachineContract).handler(async ({ input, errors }) => {
     try {
@@ -208,14 +192,9 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     try { return ok(await catalog.listCloudImages()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list cloud images', message: message(error) })); }
   });
-  const imageEvents = server.implement(cloudImageEventsContract).stream(async function* ({ input, signal, errors }) {
-    try {
-      await requireSubscription();
-      for await (const event of consumeDurableStream<CloudImageState[]>(await catalog.watchCloudImages(input.after), signal)) {
-        await requireSubscription();
-        yield ok(event);
-      }
-    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to cloud images', message: message(error) })); }
+  const imageEvents = server.implement(cloudImageEventsContract).handler(async ({ input, errors }) => {
+    try { return ok(await catalog.cloudImageEvents(input.after)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read cloud image changes', message: message(error) })); }
   });
   const imageDefault = server.implement(getCloudImageDefaultContract).handler(async ({ errors }) => {
     try { return ok(await catalog.cloudImageDefault()); }
@@ -336,49 +315,29 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return status ? ok(status) : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'read stack status', message: message(error) })); }
   });
-  const directoryEvents = server.implement(projectDirectoryEventsContract).stream(async function* ({ input, signal, errors }) {
+  const directoryEvents = server.implement(projectDirectoryEventsContract).handler(async ({ input, errors }) => {
     try {
-      await requireSubscription();
-      for await (const event of consumeDurableStream<CloudProjectSummary[]>(await projectIndex.watch(input.after), signal)) {
-        await requireSubscription();
-        yield ok(event.type === 'resync' ? event : { ...event, value: event.value.map((project) => ({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null })) });
-      }
-    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to projects', message: message(error) })); }
+      const events = await projectIndex.events(input.after);
+      return ok(events.map((event) => event.type === 'resync' ? event : { ...event, value: event.value.map((project) => ({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null })) }));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read project list changes', message: message(error) })); }
   });
-  const projectEvents = server.implement(projectEventsContract).stream(async function* ({ input, signal, errors }) {
-    try {
-      await requireSubscription();
-      const authority = await authorityFor(input.projectId);
-      for await (const event of consumeDurableStream<{ entity: string; entityId: string | null; eventOffset: number }>(await authority.watch(input.after), signal)) {
-        await requireSubscription();
-        yield ok(event);
-      }
-    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to project', message: message(error) })); }
+  const projectEvents = server.implement(projectEventsContract).handler(async ({ input, errors }) => {
+    try { return ok(await (await authorityFor(input.projectId)).events(input.after)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read project changes', message: message(error) })); }
   });
-  const environmentEvents = server.implement(environmentEventsContract).stream(async function* ({ input, signal, errors }) {
+  const environmentEvents = server.implement(environmentEventsContract).handler(async ({ input, errors }) => {
     try {
-      await requireSubscription();
       const projectId = await projectIndex.locateWorkspace(input.spaceId);
       if (!projectId) throw new Error('Workspace does not belong to this account');
-      const authority = await authorityFor(projectId);
-      for await (const event of consumeDurableStream<LifecycleState>(await authority.watchEnvironment(input.spaceId, input.after), signal)) {
-        await requireSubscription();
-        yield ok(event);
-      }
-    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to environment', message: message(error) })); }
+      return ok(await (await authorityFor(projectId)).environmentEvents(input.spaceId, input.after));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read environment changes', message: message(error) })); }
   });
-  const spaceEvents = server.implement(spaceEventsContract).stream(async function* ({ input, signal, errors }) {
+  const spaceEvents = server.implement(spaceEventsContract).handler(async ({ input, errors }) => {
     try {
-      await requireSubscription();
       const projectId = await projectIndex.locateWorkspace(input.spaceId);
       if (!projectId) throw new Error('Workspace does not belong to this account');
-      await authorityFor(projectId);
-      const authority = (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${input.spaceId}`);
-      for await (const event of consumeDurableStream<SpaceAuthorityRecord | null>(await authority.watch(input.spaceId, input.after), signal)) {
-        await requireSubscription();
-        yield ok(event);
-      }
-    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to workspace placement', message: message(error) })); }
+      return ok(await env.SPACE_AUTHORITY.getByName(`${userId}:${input.spaceId}`).events(input.spaceId, input.after));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read workspace placement changes', message: message(error) })); }
   });
   const recordIncident = server.implement(recordIncidentContract).handler(async ({ input, errors }) => {
     try {
@@ -471,18 +430,11 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return ok(result.value);
     } catch (error) { return err(errors.OperationFailed({ operation: 'assign inference profile', message: message(error) })); }
   });
-  const inferenceEvents = server.implement(inferenceEventsContract).stream(async function* ({ input, signal, errors }) {
+  const inferenceEvents = server.implement(inferenceEventsContract).handler(async ({ input, errors }) => {
     try {
-      await requireSubscription();
-      if ((await vault.inferenceReadiness()).status === 'waiting') {
-        yield err(errors.InferenceActivationPending({}));
-        return;
-      }
-      for await (const event of consumeDurableStream<InferenceState>(await vault.watchInference(input.after), signal)) {
-        await requireSubscription();
-        yield ok(event);
-      }
-    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to inference profiles', message: message(error) })); }
+      if ((await vault.inferenceReadiness()).status === 'waiting') return err(errors.InferenceActivationPending({}));
+      return ok(await vault.inferenceEvents(input.after));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read inference profile changes', message: message(error) })); }
   });
   const configuration = configurationCloudProcedures(env, userId, deviceId, origin);
   const lifecycle = workspaceLifecycleCloudProcedures(env, userId);

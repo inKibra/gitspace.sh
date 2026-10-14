@@ -4,7 +4,7 @@ import { WorkspaceDraftSchema, emptyWorkspaceDraft, type WorkspaceDraftSave, typ
 import { currentDevice } from './device-session.js';
 import { WorkspaceDraftController, type WorkspaceDraftBinding, type WorkspaceDraftState } from './workspace-draft.js';
 
-/** The existing runtime watch is the only remote subscription for drafts. */
+/** Drafts arrive only through the workspace runtime replica (`runtime.watch` reads after each `runtime` notice). */
 export function useWorkspaceDraft(snapshot: RuntimeSnapshot, connected: boolean, save: (input: WorkspaceDraftSave) => Promise<WorkspaceDraftSaveResult>): WorkspaceDraftBinding | undefined {
   const key = JSON.stringify([snapshot.projectId, snapshot.workspaceId]);
   const latest = useRef({ snapshot, connected, save });

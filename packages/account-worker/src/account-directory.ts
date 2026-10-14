@@ -17,6 +17,8 @@ export type DirectoryPublication = z.infer<typeof directoryPublicationSchema>;
 export type DirectorySource = DirectoryPublication extends infer P ? P extends DirectoryPublication ? Omit<P, 'cursor'> : never : never;
 interface SourceRow extends Record<string, SqlStorageValue> { cursor: number; value_json: string }
 interface OutboxRow extends SourceRow { attempts: number }
+/** A publication refused this many times parks until the next enqueue or object start instead of retrying forever. */
+export const DIRECTORY_OUTBOX_MAX_ATTEMPTS = 16;
 
 /** One coalescing outbox per authority. Full source snapshots make supersession safe. */
 export class DirectoryOutbox {
@@ -49,7 +51,12 @@ export class DirectoryOutbox {
       // Drain a coalesced burst, but yield sustained writers to the durable alarm.
       for (let delivered = 0; delivered < 8; delivered++) {
         const pending = this.pending();
-        if (!pending || !await this.deliver(pending)) return;
+        if (!pending) {
+          // A wake with nothing left to deliver releases this outbox's alarm; left armed it stays due and fires again at once.
+          if (delivered === 0) await this.alarm?.clear();
+          return;
+        }
+        if (!await this.deliver(pending)) return;
       }
     })().finally(() => { this.running = null; });
     return this.running;
@@ -64,12 +71,12 @@ export class DirectoryOutbox {
       else await (this.alarm ? this.alarm.clear() : this.ctx.storage.deleteAlarm());
       return true;
     } catch {
-      this.ctx.storage.sql.exec('UPDATE directory_outbox SET attempts=MIN(attempts+1,6) WHERE singleton=1 AND cursor=?', pending.cursor);
+      this.ctx.storage.sql.exec('UPDATE directory_outbox SET attempts=attempts+1 WHERE singleton=1 AND cursor=?', pending.cursor);
       const current = this.pending();
-      if (current) {
-        const timestamp = Date.now() + Math.min(60_000, 1_000 * 2 ** current.attempts);
+      if (current && current.attempts < DIRECTORY_OUTBOX_MAX_ATTEMPTS) {
+        const timestamp = Date.now() + Math.min(3_600_000, 1_000 * 2 ** current.attempts);
         await (this.alarm ? this.alarm.set(timestamp) : this.ctx.storage.setAlarm(timestamp));
-      }
+      } else if (current) await (this.alarm ? this.alarm.clear() : this.ctx.storage.deleteAlarm());
       return false;
     }
   }

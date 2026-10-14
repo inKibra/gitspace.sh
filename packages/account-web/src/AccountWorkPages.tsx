@@ -3,7 +3,7 @@ import { Badge, Button, Card, CardContent, CardDescription, CardFooter, CardGrou
 import { Archive, Plus, RefreshCcw01, Trash01, XClose } from '@untitledui/icons';
 import { useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AccountSidebarContext, type SidebarSpaceSummary } from './AppSidebar.js';
-import { CreateProjectDialog, CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, PHASE_LABEL, PHASES, StatusDot, spaceHolderLabel, workspacePhaseLabel, workspaceStatusLabel, type GitSpaceShellProps, type ProjectLifecycleView, type SpaceHolderView, type WorkspaceView } from './GitSpaceShell.js';
+import { CreateProjectDialog, CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, PHASE_LABEL, PHASES, spaceHolderLabel, workspacePhaseLabel, workspaceStatusLabel, WorkspaceStatusDot, type GitSpaceShellProps, type ProjectLifecycleView, type SpaceHolderView, type WorkspaceView } from './GitSpaceShell.js';
 import { WorkspaceGraph, type WorkspaceGraphItem } from './WorkspaceGraph.js';
 import type { Directory } from './useAccountDirectory.js';
 import { glyph } from './glyph.js';
@@ -48,7 +48,7 @@ function summaryFreshness(summary: SidebarSpaceSummary | undefined): 'fresh' | '
 function summaryStatusLabel(summary: SidebarSpaceSummary | undefined): string {
   if (!summary) return 'Status unknown';
   const freshness = summaryFreshness(summary);
-  const label = summary.status?.primaryColor === 'dim' ? 'No activity recorded' : workspaceStatusLabel(summary);
+  const label = workspaceStatusLabel(summary);
   return freshness === 'stale' ? `Last recorded: ${label}` : freshness === 'unknown' ? 'Status unknown' : label;
 }
 
@@ -74,7 +74,7 @@ function accountWorkspaces(projects: readonly ProjectLifecycleView[], directory:
 
 function WorkspaceStatus({ workspace }: { workspace: AccountWorkspace }) {
   return <span className="flex items-center gap-2 text-caption text-muted-foreground" data-freshness={workspace.freshness}>
-    <StatusDot color={workspace.status?.primaryColor ?? 'dim'} pulse={workspace.status?.primaryColor === 'green' && workspace.freshness === 'fresh'} />
+    <WorkspaceStatusDot space={workspace} />
     {workspace.statusLabel}
     {spaceHolderLabel(workspace) ? <span className="truncate text-muted-foreground/70">· {spaceHolderLabel(workspace)}</span> : null}
   </span>;
@@ -162,17 +162,16 @@ function InboxView({ projects, directory, onOpenWorkspace, onOpenProject }: Pick
       status.agents.orange ? `${status.agents.orange} ${status.agents.orange === 1 ? 'agent needs' : 'agents need'} permission` : null,
       status.agents.blue ? `${status.agents.blue} agent${status.agents.blue === 1 ? '' : 's'} waiting` : null,
       status.agents.red ? `${status.agents.red} agent error${status.agents.red === 1 ? '' : 's'}` : null,
-      status.services.red ? `${status.services.red} service error${status.services.red === 1 ? '' : 's'}` : null,
-      status.terminals.red ? `${status.terminals.red} terminal error${status.terminals.red === 1 ? '' : 's'}` : null,
+      status.sync.conflicts ? `${status.sync.conflicts} sync conflict${status.sync.conflicts === 1 ? '' : 's'}` : null,
     ].filter(Boolean);
     return reasons.length ? [{ ...scope, reasons }] : [];
   });
   const incomplete = scopes.filter((scope) => !scope.summary?.status || summaryFreshness(scope.summary) !== 'fresh');
   return <PageCanvas>
-    <PageHeader kicker="Attention" title="Inbox" description="Recorded waits and errors across project agents, workspace agents, services, and terminals." actions={<span className="text-caption text-muted-foreground tabular-nums">{attention.length} {attention.length === 1 ? 'space' : 'spaces'} with recorded attention</span>} />
+    <PageHeader kicker="Attention" title="Inbox" description="Recorded approvals, waits, failures and sync conflicts across project and workspace agents." actions={<span className="text-caption text-muted-foreground tabular-nums">{attention.length} {attention.length === 1 ? 'space' : 'spaces'} with recorded attention</span>} />
     {attention.length ? <CardGroup orientation="inline" border="outlined" separated>{attention.map((item, index) => <Card key={item.key} index={index} onClick={item.open} label={`Open ${item.name}`}><CardHeader><CardTitle>{item.name}</CardTitle><CardDescription>{item.reasons.join(' · ')}</CardDescription></CardHeader><CardContent><Badge size="compact" color={summaryFreshness(item.summary) === 'fresh' ? 'amber' : 'gray'}>{summaryFreshness(item.summary) === 'fresh' ? 'Recorded attention' : summaryFreshness(item.summary) === 'stale' ? 'Last recorded · stale' : 'Freshness unknown'}</Badge></CardContent></Card>)}</CardGroup>
       : <EmptyState title="No attention recorded" description={incomplete.length || projects.some((project) => !directory[project.id] || directory[project.id]?.error) ? 'Status coverage is incomplete. Unavailable or stale reports cannot establish that nothing needs attention.' : 'The available status summaries contain no recorded waits or errors.'} />}
-    {incomplete.length ? <section className="flex flex-col gap-3 pt-8"><h2 className="text-subtitle font-semibold text-foreground">Status coverage</h2><p className="text-body text-muted-foreground">These spaces have unknown or stale reports; their current agents, services, and terminals have not been confirmed.</p><CardGroup orientation="inline" border="outlined" separated>{incomplete.map((scope, index) => <Card key={scope.key} index={index} onClick={scope.open} label={`Inspect ${scope.name}`}><CardHeader><CardTitle>{scope.name}</CardTitle><CardDescription>{summaryFreshness(scope.summary) === 'stale' ? 'Stale status · last recorded only' : 'Status unknown'}{scope.summary?.detail ? ` · ${scope.summary.detail}` : ''}</CardDescription></CardHeader></Card>)}</CardGroup></section> : null}
+    {incomplete.length ? <section className="flex flex-col gap-3 pt-8"><h2 className="text-subtitle font-semibold text-foreground">Status coverage</h2><p className="text-body text-muted-foreground">These spaces have unknown or stale reports; their current agents and sync have not been confirmed.</p><CardGroup orientation="inline" border="outlined" separated>{incomplete.map((scope, index) => <Card key={scope.key} index={index} onClick={scope.open} label={`Inspect ${scope.name}`}><CardHeader><CardTitle>{scope.name}</CardTitle><CardDescription>{summaryFreshness(scope.summary) === 'stale' ? 'Stale status · last recorded only' : 'Status unknown'}{scope.summary?.detail ? ` · ${scope.summary.detail}` : ''}</CardDescription></CardHeader></Card>)}</CardGroup></section> : null}
   </PageCanvas>;
 }
 function KanbanView({ workspaces, onOpen, onSetRelations, onNewWorkspace }: { workspaces: readonly AccountWorkspace[]; onOpen: (workspace: AccountWorkspace) => void; onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations']; onNewWorkspace?: (phase: WorkspaceView['phase']) => void }) {

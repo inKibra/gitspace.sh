@@ -90,7 +90,7 @@ describe('Inspector independent reads', () => {
       props = { ...props, sectionErrors: {}, repositoryEntries: [{ spaceId: 'space', generation: 7, mode: 'current', path: 'file.ts', name: 'file.ts', kind: 'file', status: 'clean', oldPath: null, blobId: null, size: null }] };
       root.render(<Inspector {...props} />);
     });
-    props = { ...props, initialView: 'environment', environment: <button>Configure environment</button>, sectionErrors: { files: { message: 'Repository read failed (incident repo-123)', retained: false, retry } } };
+    props = { ...props, initialView: 'environment', environment: () => <button>Configure environment</button>, sectionErrors: { files: { message: 'Repository read failed (incident repo-123)', retained: false, retry } } };
     await render();
     await click('Configure environment');
     expect(container.textContent).not.toContain('Inspector could not load');

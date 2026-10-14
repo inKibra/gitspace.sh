@@ -12,8 +12,10 @@ export class GitLfsRetention {
   constructor(private readonly storage: DurableObjectStorage) {
     storage.sql.exec(`CREATE TABLE IF NOT EXISTS lfs_objects(oid TEXT PRIMARY KEY, size INTEGER NOT NULL, deleting INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS lfs_references(owner TEXT NOT NULL, oid TEXT NOT NULL, PRIMARY KEY(owner,oid));
+      CREATE INDEX IF NOT EXISTS lfs_references_oid ON lfs_references(oid);
       CREATE TABLE IF NOT EXISTS lfs_snapshots(snapshot_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,kind TEXT NOT NULL,inventory TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS lfs_origin_sources(oid TEXT NOT NULL,size INTEGER NOT NULL,origin TEXT NOT NULL,endpoint TEXT NOT NULL,PRIMARY KEY(origin,endpoint,oid));`);
+      CREATE TABLE IF NOT EXISTS lfs_origin_sources(oid TEXT NOT NULL,size INTEGER NOT NULL,origin TEXT NOT NULL,endpoint TEXT NOT NULL,PRIMARY KEY(origin,endpoint,oid));
+      CREATE INDEX IF NOT EXISTS lfs_origin_sources_object ON lfs_origin_sources(origin,oid,size);`);
   }
 
   retain(owner: string, objects: readonly GitLfsObject[]): void {
@@ -43,7 +45,7 @@ export class GitLfsRetention {
         });
       }
       this.retain(`snapshot:${snapshot.snapshotId}`, snapshot.objects.filter(object => object.source === 'r2'));
-      this.storage.sql.exec('INSERT INTO lfs_snapshots VALUES(?,?,?,?) ON CONFLICT(snapshot_id) DO UPDATE SET inventory=excluded.inventory', snapshot.snapshotId, snapshot.workspaceId, snapshot.kind, JSON.stringify(snapshot));
+      this.storage.sql.exec('INSERT INTO lfs_snapshots VALUES(?,?,?,?) ON CONFLICT(snapshot_id) DO UPDATE SET inventory=excluded.inventory WHERE inventory IS NOT excluded.inventory', snapshot.snapshotId, snapshot.workspaceId, snapshot.kind, JSON.stringify(snapshot));
     });
   }
 
@@ -63,7 +65,7 @@ export class GitLfsRetention {
   origin(objects: readonly (GitLfsObject & { location: GitLfsLocation })[]): void {
     const confirmed = new Map(objects.map(object => [object.oid, object]));
     this.storage.transactionSync(() => {
-      for (const object of objects) this.storage.sql.exec('INSERT INTO lfs_origin_sources VALUES(?,?,?,?) ON CONFLICT(origin,endpoint,oid) DO UPDATE SET size=excluded.size', object.oid, object.size, object.location.origin, object.location.endpoint);
+      for (const object of objects) this.storage.sql.exec('INSERT INTO lfs_origin_sources VALUES(?,?,?,?) ON CONFLICT(origin,endpoint,oid) DO UPDATE SET size=excluded.size WHERE size IS NOT excluded.size', object.oid, object.size, object.location.origin, object.location.endpoint);
       for (const snapshot of this.snapshots()) {
         if (snapshot.kind === 'migration') continue;
         snapshot.objects = snapshot.objects.map(object => {

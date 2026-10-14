@@ -174,6 +174,19 @@ describe('relay notices', () => {
   });
 });
 
+describe('relay live notices', () => {
+  it('forwards only notices for the sending machine\'s own resources, and reports one nobody watched', async () => {
+    const socket = await connect();
+    const messages: unknown[] = [];
+    socket.addEventListener('message', event => { messages.push(JSON.parse(String(event.data))); });
+    socket.send(JSON.stringify({ version: 1, type: 'live.notice', workspace: 'presence-a', resource: 'terminals:presence-a:other-machine:', cursor: 3 }));
+    socket.send(JSON.stringify({ version: 1, type: 'live.notice', workspace: 'presence-a', resource: `terminals:presence-a:${machineId}:`, cursor: 4 }));
+    await eventually(async () => messages.length > 0);
+    expect(messages).toEqual([{ version: 1, type: 'live.unwatched', workspace: 'presence-a', resource: `terminals:presence-a:${machineId}:`, cursor: 4 }]);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+});
+
 describe('machine-wide assignments', () => {
   it('read only the workspaces the fleet index holds for the machine', async () => {
     const indexed = await attachedWorkspace('indexed-a');

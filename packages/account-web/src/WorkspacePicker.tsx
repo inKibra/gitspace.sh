@@ -1,13 +1,11 @@
 import { Badge, Card, CardContent, CardDescription, CardGroup, CardHeader, CardTitle, InputField, InputGroup } from '@gitspace/ui';
 import { SearchMd } from '@untitledui/icons';
 import { useState, type ReactNode } from 'react';
-import { workspacePhaseLabel, StatusDot, type WorkspaceView } from './GitSpaceShell.js';
+import { workspacePhaseLabel, WorkspaceStatusDot, type SpaceStatusView, type WorkspaceView } from './GitSpaceShell.js';
 import { glyph } from './glyph.js';
 
-export type WorkspacePickerItem = Pick<WorkspaceView, 'id' | 'projectId' | 'name' | 'branch' | 'closedAt'> & {
+export type WorkspacePickerItem = Pick<WorkspaceView, 'id' | 'projectId' | 'name' | 'branch'> & SpaceStatusView & {
   phase?: WorkspaceView['phase'] | null;
-  status?: WorkspaceView['status'];
-  freshness?: 'fresh' | 'stale' | 'unknown';
 };
 
 export interface WorkspacePickerProps {
@@ -45,7 +43,7 @@ export function WorkspacePicker({ workspaces, exclude = [], selected = [], onPic
       ? <CardGroup orientation="inline" border="outlined" separated proximityHover={false}>
         {matches.map((workspace, index) => <Card key={workspace.id} index={index} size="compact" selected={selected.includes(workspace.id)} onClick={() => onPick(workspace.id)} label={`Pick ${workspace.name}`}>
           <CardHeader>
-            <CardTitle><span className="flex items-center gap-2"><StatusDot color={workspace.status?.primaryColor ?? 'dim'} pulse={workspace.status?.primaryColor === 'green' && (!workspace.freshness || workspace.freshness === 'fresh')} />{workspace.name}</span></CardTitle>
+            <CardTitle><span className="flex items-center gap-2"><WorkspaceStatusDot space={workspace} />{workspace.name}</span></CardTitle>
             <CardDescription><span className="font-mono">{workspace.branch}</span></CardDescription>
           </CardHeader>
           <CardContent><Badge variant="dot" size="compact" color="gray">{workspacePhaseLabel(workspace.phase)}</Badge></CardContent>

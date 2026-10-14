@@ -1,350 +1,235 @@
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardGroup,
-  CardHeader,
-  CardTitle,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  Elevated,
-  InputField,
-  InputGroup,
-  ScrollArea,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  Tooltip,
-  useShape,
-  type BadgeProps,
-} from '@gitspace/ui';
-import { AlertTriangle, Edit03, FileCode02, Key01, Play, Plus, ShieldTick, Terminal, Tool02, Trash01 } from '@untitledui/icons';
+import { Badge, Button, Card, CardContent, CardDescription, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DropdownContent, DropdownMenu, DropdownTrigger, InputField, InputGroup, MenuItem, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger } from '@gitspace/ui';
+import { DotsHorizontal, FileCode02, Key01, Play, Plus, RefreshCw01, Terminal, XClose } from '@untitledui/icons';
 import { useState, type ReactNode } from 'react';
+import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import { StatusDot } from '../GitSpaceShell.js';
 import { glyph } from '../glyph.js';
-import { PHASE_LABEL, PHASE_SCOPE } from './lifecycle.js';
-import { LIFECYCLE_PHASES, lifecycleSummary, lifecycleActions, lifecyclePhasePresentation, isLifecycleRunActive } from '@gitspace/protocol-environment';
-import type { CapabilityResult, EnvironmentCheckDefinition, EnvironmentProfileDefinition, EnvironmentViewProps, LifecyclePhase, LifecycleRun, LifecycleScript, TrustState } from './types.js';
+import { STEP_LABEL } from './lifecycle.js';
+import type { EnvironmentMachine, EnvironmentScript, EnvironmentStep, EnvironmentViewProps, ScriptRun } from './types.js';
 
-const AlertIcon = glyph(AlertTriangle);
-const EditIcon = glyph(Edit03);
-const FileIcon = glyph(FileCode02);
-const KeyIcon = glyph(Key01);
+const TerminalIcon = glyph(Terminal);
 const PlayIcon = glyph(Play);
 const PlusIcon = glyph(Plus);
-const ShieldIcon = glyph(ShieldTick);
-const TerminalIcon = glyph(Terminal);
-const ToolIcon = glyph(Tool02);
-const TrashIcon = glyph(Trash01);
+const RefreshIcon = glyph(RefreshCw01);
+const FileIcon = glyph(FileCode02);
+const KeyIcon = glyph(Key01);
+const DetachIcon = glyph(XClose);
 
-const TRUST_COLOR: Record<TrustState['status'], NonNullable<BadgeProps['color']>> = { approved: 'green', pending: 'amber', changed: 'red' };
-const RUN_COLOR: Record<LifecycleRun['status'], NonNullable<BadgeProps['color']>> = { succeeded: 'green', failed: 'red', running: 'blue', interrupted: 'amber', 'not-started': 'gray', never: 'gray' };
+const RUN_DOT: Record<ScriptRun['status'], WorkspaceStatusColor> = { succeeded: 'green', failed: 'red', running: 'blue', interrupted: 'orange', 'not-started': 'dim', never: 'dim' };
+const RUN_TEXT: Record<Exclude<ScriptRun['status'], 'succeeded' | 'failed'>, string> = { running: 'running', interrupted: 'interrupted', 'not-started': 'waiting', never: 'not run' };
+const SETUP_TEXT = { pending: 'waiting', 'waiting-for-approval': 'needs approval', running: 'running', succeeded: 'succeeded', failed: 'failed' } as const;
+const SETUP_DOT = { pending: 'dim', 'waiting-for-approval': 'orange', running: 'blue', succeeded: 'green', failed: 'red' } as const;
 
-function profileDefinition(profileName: string, profiles: Record<string, EnvironmentProfileDefinition>): EnvironmentProfileDefinition {
-  const base = profiles.base ?? { checks: [], secrets: [], inputs: [], notes: '' };
-  if (profileName === 'base') return base;
-  const selected = profiles[profileName] ?? { checks: [], secrets: [], inputs: [], notes: '' };
-  return {
-    checks: [...new Set([...base.checks, ...selected.checks])],
-    secrets: [...new Set([...base.secrets, ...selected.secrets])],
-    inputs: [...new Set([...base.inputs, ...selected.inputs])],
-    notes: [base.notes, selected.notes].filter(Boolean).join(' '),
+function Section({ title, label, action, children }: { title: ReactNode; label: string; action?: ReactNode; children: ReactNode }) {
+  return <section aria-label={label} className="flex flex-col gap-2">
+    <div className="flex min-h-10 items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">{title}</h3>{action}</div>
+    {children}
+  </section>;
+}
+
+function ScriptRow({ script, phase, machineId, busy, onApprove, onRevoke, onOpenScript, onOpenLog, onRunPhase }: { script: EnvironmentScript; phase: EnvironmentStep['phase']; machineId: string | null } & Pick<EnvironmentViewProps, 'busy' | 'onApprove' | 'onRevoke' | 'onOpenScript' | 'onOpenLog' | 'onRunPhase'>) {
+  const run = script.lastRun;
+  return <li aria-label={`Script ${script.label}`} className="flex min-h-10 flex-wrap items-center gap-2 text-caption">
+    <StatusDot color={script.approval.approved ? RUN_DOT[run.status] : 'orange'} pulse={run.status === 'running'} />
+    <Button variant="ghost" size="compact" className="min-w-0 flex-1 justify-start font-mono" onClick={() => onOpenScript(script.id)}><span className="truncate">{script.label}</span></Button>
+    {script.interactive ? <Badge className="shrink-0" size="compact" color="amber">Interactive</Badge> : null}
+    {!script.approval.approved
+      ? <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => onApprove(script.id)}>Review & approve</Button></>
+      : <>
+        {run.status === 'succeeded' || run.status === 'failed' ? <span className={`max-w-40 truncate tabular-nums ${run.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>{run.detail}</span> : script.interactive && run.status === 'never' ? null : <span className="shrink-0 text-muted-foreground">{RUN_TEXT[run.status]}</span>}
+        {script.interactive && run.status !== 'running' ? <Button variant="secondary" size="compact" leadingIcon={TerminalIcon} disabled={busy || !machineId} onClick={() => { if (machineId) onRunPhase(machineId, phase, { interactive: true }); }}>Run in terminal</Button> : null}
+        {run.status !== 'never' ? <Button variant="ghost" size="compact" onClick={() => onOpenLog(run.runId, { id: script.id, label: script.label })}>Log</Button> : null}
+        <Button variant="ghost" size="compact" disabled={busy} onClick={() => onRevoke(script.id)}>Revoke</Button>
+      </>}
+  </li>;
+}
+
+function StepBlock({ step, machineId, busy, onRetire, ...actions }: { step: EnvironmentStep; machineId: string | null; busy: boolean; onRetire(): void } & Pick<EnvironmentViewProps, 'onApprove' | 'onRevoke' | 'onOpenScript' | 'onOpenLog' | 'onRunPhase'>) {
+  const needsApproval = step.scripts.some(script => !script.approval.approved);
+  const ran = step.scripts.some(script => script.lastRun.status !== 'never');
+  const running = step.scripts.some(script => script.lastRun.status === 'running');
+  const run = (): void => {
+    if (!machineId) return;
+    if (step.phase === 'cloud/destroy') onRetire();
+    else actions.onRunPhase(machineId, step.phase, ran ? { rerun: true } : undefined);
   };
-}
-
-function statusDot(result: CapabilityResult): ReactNode {
-  return <StatusDot color={result.status === 'pass' ? 'green' : result.status === 'fail' ? 'red' : 'dim'} />;
-}
-
-function trustBadge(trust: TrustState): ReactNode {
-  return <Tooltip content={trust.status === 'approved' ? `Approved by ${trust.approvedBy} · ${trust.approvedAt}` : trust.status === 'changed' ? `Previously approved by ${trust.approvedBy} · ${trust.approvedAt}` : 'This command has never been approved'} side="top">
-    <Badge size="compact" color={TRUST_COLOR[trust.status]}>{trust.status === 'changed' ? 'changed · approval required' : trust.status}</Badge>
-  </Tooltip>;
-}
-
-// FLUID-GAP: the registry has no compact command-diff component.
-function CommandDiff({ trust }: { trust: Extract<TrustState, { status: 'changed' }> }) {
-  const shape = useShape();
-  return <div className={`${shape.container} overflow-hidden bg-surface-3 font-mono text-caption shadow-surface-1`} aria-label="Command changed since approval">
-    <div className="flex gap-2 px-3 py-2 text-destructive"><span aria-hidden>−</span><code className="min-w-0 break-all">{trust.approvedCommand}</code></div>
-    <div className="flex gap-2 bg-surface-4 px-3 py-2 text-foreground"><span aria-hidden>+</span><code className="min-w-0 break-all">{trust.currentCommand}</code></div>
+  return <div aria-label={`Setup step ${step.label}`} className="flex flex-col">
+    <div className="flex min-h-10 flex-wrap items-center justify-between gap-2">
+      <span className="flex items-center gap-2 text-caption font-medium">{step.label}{needsApproval ? <Badge size="compact" color="amber">Needs approval</Badge> : null}</span>
+      <span className="flex items-center gap-2"><code className="font-mono text-caption text-muted-foreground">{step.phase}</code>
+        {step.scripts.length ? <Button variant="ghost" size="compact" leadingIcon={step.phase === 'checks' ? RefreshIcon : PlayIcon} loading={running} disabled={busy || !machineId || running} onClick={run}>
+          {step.phase === 'checks' ? 'Run checks' : step.phase === 'cloud/destroy' ? 'Retire…' : ran ? 'Run again' : 'Run'}
+        </Button> : null}
+      </span>
+    </div>
+    {step.scripts.length
+      ? <ul className="flex flex-col">{step.scripts.map(script => <ScriptRow key={script.id} script={script} phase={step.phase} machineId={machineId} busy={busy} {...actions} />)}</ul>
+      : <p className="text-caption text-muted-foreground">No {step.phase === 'checks' ? 'checks' : 'scripts'} for this profile.</p>}
   </div>;
 }
 
-function CheckCard({ check, result, onApprove, onRevoke, onFix, onEdit, onDelete, index }: { check: EnvironmentCheckDefinition; result: CapabilityResult; onApprove(): void; onRevoke(): void; onFix?: () => void; onEdit(): void; onDelete(): void; index?: number }) {
-  return <Card size="compact" index={index}>
+function MachineCard({ machine, index, busy, props, onRecover }: { machine: EnvironmentMachine; index: number; busy: boolean; props: EnvironmentViewProps; onRecover(runId: string): void }) {
+  const failed = machine.setup.find(step => step.state === 'failed');
+  const running = machine.setup.some(step => step.state === 'running');
+  const { sync } = machine;
+  return <Card size="compact" index={index} aria-label={`Machine ${machine.name}`}>
     <CardHeader>
-      <CardTitle><span className="flex items-center gap-2">{statusDot(result)}{check.label}<Badge size="compact" color={check.source === 'catalog' ? 'blue' : 'violet'}>{check.source === 'catalog' ? 'built-in' : 'custom'}</Badge></span></CardTitle>
-      <CardDescription>
-        <span className="flex flex-col gap-1">
-          {check.requirement ? <span>Required {check.requirement}</span> : null}
-          {check.probe ? <code className="break-all font-mono">{check.probe}</code> : null}
-          <span className={result.status === 'fail' ? 'text-destructive' : undefined}>{result.status === 'unprobed' ? 'Not checked yet' : result.output}</span>
-        </span>
-      </CardDescription>
+      <CardTitle><span className="flex items-center gap-2">{machine.name}<span role="status" className="ml-auto flex items-center gap-2 text-caption font-normal"><StatusDot color={machine.color} />{machine.status}</span>
+        <DropdownMenu size="compact">
+          <DropdownTrigger render={<Button variant="ghost" size="icon-compact" type="button" aria-label={`${machine.name} actions`}><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></Button>} />
+          <DropdownContent align="end" sideOffset={6} className="min-w-[220px]">
+            {props.onOpenTerminal && machine.ready ? <MenuItem index={0} icon={TerminalIcon} label="Open terminal" onSelect={() => props.onOpenTerminal?.(machine.id)} /> : null}
+            {machine.online ? <MenuItem index={1} icon={RefreshIcon} label="Run checks" onSelect={() => props.onRunPhase(machine.id, 'checks')} /> : null}
+            <MenuItem index={2} icon={DetachIcon} label="Detach" onSelect={() => props.onDetach(machine.id)} />
+          </DropdownContent>
+        </DropdownMenu>
+      </span></CardTitle>
+      <CardDescription><span className="tabular-nums">Last sync {sync.lastSyncAt ? new Date(sync.lastSyncAt).toLocaleString() : 'not yet'}</span></CardDescription>
     </CardHeader>
-    {check.trust?.status === 'changed' ? <CardContent><CommandDiff trust={check.trust} /></CardContent> : null}
-    <CardFooter className="flex-wrap gap-1.5">
-      {result.status === 'fail' && onFix ? <Button variant="secondary" size="compact" leadingIcon={ToolIcon} onClick={onFix}>Ask agent to fix</Button> : null}
-      {check.trust ? <>{trustBadge(check.trust)}<Button variant={check.trust.status === 'approved' ? 'ghost' : 'secondary'} size="compact" leadingIcon={check.trust.status === 'approved' ? undefined : ShieldIcon} onClick={check.trust.status === 'approved' ? onRevoke : onApprove}>{check.trust.status === 'approved' ? 'Revoke approval' : 'Approve'}</Button></> : null}
-      <span className="ml-auto flex items-center gap-1"><Button variant="ghost" size="compact" leadingIcon={EditIcon} onClick={onEdit}>Edit</Button><Button variant="ghost" size="compact" leadingIcon={TrashIcon} onClick={onDelete}>Remove</Button></span>
-    </CardFooter>
-  </Card>;
-}
-
-const BUILT_IN_CHECKS: Record<string, EnvironmentCheckDefinition> = {
-  vercel: { id: 'vercel', label: 'Vercel CLI', source: 'catalog', probe: 'vercel whoami', fix: 'vercel login' },
-  node: { id: 'node', label: 'Node.js', source: 'catalog', requirement: '>= 22' },
-  postgres: { id: 'postgres', label: 'Postgres', source: 'catalog', probe: 'pg_isready', fix: 'Start Postgres.' },
-};
-
-function AddCheckDialog({ open, onOpenChange, onAdd }: { open: boolean; onOpenChange(open: boolean): void; onAdd(check: EnvironmentCheckDefinition): void }) {
-  const [kind, setKind] = useState<'built-in' | 'custom'>('built-in');
-  const [builtIn, setBuiltIn] = useState('vercel');
-  const [label, setLabel] = useState('');
-  const [probe, setProbe] = useState('');
-  const add = (): void => {
-    if (kind === 'built-in') {
-      const check = BUILT_IN_CHECKS[builtIn];
-      if (check) onAdd(check);
-    } else {
-      const id = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-      if (!id || !probe.trim()) return;
-      onAdd({ id, label: label.trim(), source: 'custom', probe: probe.trim() });
-    }
-    onOpenChange(false);
-  };
-  return <Dialog open={open} onOpenChange={onOpenChange}>
-    <DialogContent size="sm">
-      <DialogHeader><DialogTitle>Add check</DialogTitle><DialogDescription>Choose a GitSpace-built check for a common tool, or provide a project command.</DialogDescription></DialogHeader>
+    <CardContent>
       <div className="flex flex-col gap-3">
-        <Select value={kind} onValueChange={(value) => setKind(value as 'built-in' | 'custom')}><SelectTrigger aria-label="Check type" /><SelectContent><SelectItem value="built-in" index={0}>Built-in check</SelectItem><SelectItem value="custom" index={1}>Custom command</SelectItem></SelectContent></Select>
-        {kind === 'built-in'
-          ? <><Select value={builtIn} onValueChange={setBuiltIn}><SelectTrigger aria-label="Built-in check" /><SelectContent>{Object.values(BUILT_IN_CHECKS).map((check, index) => <SelectItem key={check.id} value={check.id} index={index}>{check.label}</SelectItem>)}</SelectContent></Select><p className="text-caption text-muted-foreground">Built-in checks verify installation and, when applicable, login or service readiness.</p></>
-          : <><InputGroup><InputField index={0} label="Name" value={label} onChange={setLabel} placeholder="Redis ready" /><InputField index={1} label="Command" value={probe} onChange={setProbe} placeholder="redis-cli ping" /></InputGroup><p className="text-caption text-muted-foreground">The exact project command must be approved before it can run.</p></>}
+        <ul aria-label="Setup results" className="flex flex-col">{machine.setup.length ? machine.setup.map(step => <li key={step.phase} className="flex min-h-10 flex-wrap items-center gap-2 text-caption">
+          <StatusDot color={SETUP_DOT[step.state]} pulse={step.state === 'running'} />
+          <span className="shrink-0">{STEP_LABEL[step.phase]}</span>
+          <span className={`min-w-0 flex-1 truncate text-right ${step.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>{SETUP_TEXT[step.state]}{step.error && step.state === 'failed' ? ` · ${step.error}` : ''}</span>
+          {step.runId ? <Button variant="ghost" size="compact" onClick={() => props.onOpenLog(step.runId!, { id: step.phase, label: STEP_LABEL[step.phase] })}>Log</Button> : null}
+        </li>) : <li className="text-caption text-muted-foreground">Setup has not run on this machine yet.</li>}</ul>
+        {failed && !running ? <div className="flex"><Button variant="secondary" size="compact" leadingIcon={PlayIcon} disabled={busy || !machine.online} onClick={() => props.onRunPhase(machine.id, failed.phase, { rerun: true })}>Run setup again</Button></div> : null}
+        <div aria-label="Sync" className="flex flex-col gap-1 text-caption">
+          <p className="tabular-nums text-muted-foreground">{sync.unsent === null ? 'Unsent changes not reported yet' : `${sync.unsent} unsent ${sync.unsent === 1 ? 'change' : 'changes'}`}{sync.unapplied ? ' · cloud changes not yet on this machine' : ''}</p>
+          {sync.problem ? <p role="status" className="break-words text-warning">Sync problem · {sync.problem}</p> : null}
+          <div className="flex flex-wrap gap-1">
+            <Button variant="ghost" size="compact" leadingIcon={RefreshIcon} disabled={busy || !machine.online} onClick={() => props.onSyncNow(machine.id)}>Sync now</Button>
+            <Button variant="ghost" size="compact" disabled={busy || !machine.online || sync.unsent === 0} onClick={() => props.onShowUnsent(machine.id)}>Show unsent changes</Button>
+          </div>
+        </div>
+        {machine.runs.length ? <details className="text-caption">
+          <summary className="min-h-10 cursor-pointer py-2 text-muted-foreground">Recent runs · last {machine.runs.length}</summary>
+          <ul className="flex flex-col">{machine.runs.map(run => <li key={run.id} className="flex min-h-10 flex-wrap items-center gap-2">
+            <StatusDot color={run.status === 'failed' ? 'red' : run.active ? 'blue' : run.status === 'succeeded' ? 'green' : 'dim'} />
+            <span className="flex-1">{STEP_LABEL[run.phase]} · {run.status}</span>
+            <span className="tabular-nums text-muted-foreground">{new Date(run.startedAt).toLocaleString()}</span>
+            <Button variant="ghost" size="compact" onClick={() => props.onOpenLog(run.id, { id: run.phase, label: STEP_LABEL[run.phase] })}>Logs</Button>
+            {run.active ? <><Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onCancelRun(run.id)}>Cancel</Button><Button variant="ghost" size="compact" disabled={busy} onClick={() => onRecover(run.id)}>Recover…</Button></> : null}
+          </li>)}</ul>
+        </details> : null}
       </div>
-      <DialogFooter><Button variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" disabled={kind === 'custom' && (!label.trim() || !probe.trim())} onClick={add}>Add</Button></DialogFooter>
-    </DialogContent>
-  </Dialog>;
-}
-
-function AddValueDialog({ open, onOpenChange, onAdd }: { open: boolean; onOpenChange(open: boolean): void; onAdd(name: string, defaultValue: string): void }) {
-  const [name, setName] = useState('');
-  const [defaultValue, setDefaultValue] = useState('');
-  const add = (): void => {
-    if (!name.trim()) return;
-    onAdd(name.trim(), defaultValue);
-    onOpenChange(false);
-  };
-  return <Dialog open={open} onOpenChange={onOpenChange}>
-    <DialogContent size="sm">
-      <DialogHeader><DialogTitle>Add value</DialogTitle><DialogDescription>Declare visible configuration required by this runtime profile.</DialogDescription></DialogHeader>
-      <InputGroup><InputField index={0} label="Name" value={name} onChange={(next) => setName(next.toUpperCase())} placeholder="API_ORIGIN" /><InputField index={1} label="Default value" value={defaultValue} onChange={setDefaultValue} placeholder="https://api.example.com" /></InputGroup>
-      <DialogFooter><Button variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" disabled={!name.trim()} onClick={add}>Add</Button></DialogFooter>
-    </DialogContent>
-  </Dialog>;
-}
-
-function EditCheckDialog({ check, open, onOpenChange, onSave }: { check: EnvironmentCheckDefinition | null; open: boolean; onOpenChange(open: boolean): void; onSave(patch: Partial<Pick<EnvironmentCheckDefinition, 'label' | 'probe' | 'requirement'>>): void }) {
-  const [label, setLabel] = useState(check?.label ?? '');
-  const [probe, setProbe] = useState(check?.probe ?? '');
-  const [requirement, setRequirement] = useState(check?.requirement ?? '');
-  if (!check) return null;
-  return <Dialog open={open} onOpenChange={onOpenChange}>
-    <DialogContent size="sm">
-      <DialogHeader><DialogTitle>Edit {check.label}</DialogTitle><DialogDescription>{check.source === 'catalog' ? 'GitSpace owns the probe. You can change the label and version requirement.' : 'Changing the command invalidates its existing approval.'}</DialogDescription></DialogHeader>
-      <InputGroup><InputField index={0} label="Label" value={label} onChange={setLabel} />{check.source === 'custom' ? <InputField index={1} label="Command" value={probe} onChange={setProbe} /> : null}<InputField index={2} label="Version requirement" value={requirement} onChange={setRequirement} placeholder=">= 1.3" /></InputGroup>
-      <DialogFooter><Button variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" onClick={() => { onSave({ label, probe: check.source === 'custom' ? probe : check.probe, requirement }); onOpenChange(false); }}>Save</Button></DialogFooter>
-    </DialogContent>
-  </Dialog>;
-}
-
-function EnvironmentValueField({ name, value, disabled, onSave }: { name: string; value: string; disabled: boolean; onSave(value: string): void }) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const displayed = draft ?? value;
-  return <div className="flex items-end gap-2"><InputGroup className="min-w-0 flex-1"><InputField index={0} label={name} value={displayed} onChange={setDraft} /></InputGroup><Button variant="secondary" size="compact" className="min-h-10" disabled={disabled || displayed === value} onClick={() => onSave(displayed)}>Save</Button></div>;
-}
-
-function LifecycleCard({ script, disabled, onApprove, onRevoke, onOpenFile, onOpenOutput, index }: { script: LifecycleScript; disabled: boolean; onApprove(): void; onRevoke(): void; onOpenFile?: () => void; onOpenOutput?: () => void; index?: number }) {
-  const run = script.lastRun;
-  return <Card size="compact" index={index}>
-    <CardHeader>
-      <CardTitle>{onOpenFile ? <Button variant="ghost" size="compact" className="-ml-2 min-h-10 justify-start break-all font-mono" leadingIcon={FileIcon} onClick={onOpenFile}>{script.path.replace(`${script.phase}/`, '')}</Button> : <code className="break-all font-mono text-caption">{script.path}</code>}</CardTitle>
-      <CardDescription><span className="flex flex-wrap items-center gap-1.5">{run.status === 'never' ? 'Never run' : <span className={run.status === 'failed' ? 'text-destructive' : undefined}>{run.status === 'not-started' ? 'Not started' : run.status}{'exitCode' in run && run.exitCode != null ? ` · exit ${run.exitCode}` : ''} · <span className="tabular-nums">{run.relativeTime}{'duration' in run && run.duration ? ` · ${run.duration}` : ''}</span></span>}<Badge size="compact" color={script.profiles ? 'blue' : 'gray'}>{script.profiles ? `${script.profiles.join(', ')} only` : 'all profiles'}</Badge></span></CardDescription>
-    </CardHeader>
-    {script.interactive ? <CardContent><Badge size="compact" color="amber">Interactive script</Badge><p className="mt-2 text-caption text-muted-foreground">Requires an explicit interactive run. Automatic preparation will not prompt.</p></CardContent> : null}
-    {script.trust.status === 'changed' ? <CardContent><CommandDiff trust={script.trust} /></CardContent> : null}
-    <CardFooter className="flex-wrap gap-1.5">
-      <Badge size="compact" color={RUN_COLOR[run.status]}>{run.status === 'not-started' ? 'not started' : run.status}</Badge>
-      {trustBadge(script.trust)}
-      <Button variant={script.trust.status === 'approved' ? 'ghost' : 'secondary'} size="compact" className="min-h-10" disabled={disabled} onClick={script.trust.status === 'approved' ? onRevoke : onApprove}>{script.trust.status === 'approved' ? 'Revoke' : 'Review & approve'}</Button>
-      {run.status !== 'never' && onOpenOutput ? <Button variant="ghost" size="compact" className="min-h-10" leadingIcon={TerminalIcon} onClick={onOpenOutput}>View log</Button> : null}
-    </CardFooter>
+    </CardContent>
   </Card>;
 }
 
-export function EnvironmentView({ model, machinePanel, busy = false, runtimeAvailable = true, cloudRunnerAvailable = runtimeAvailable, onConfigure, onRecoverRun, onCancelRun, onOpenRunLog, onProfileChange, onApprove, onRevoke, onGrantSecret, onInputChange, onFixCheck, onUpdateCheck, onDeleteCheck, onAddCheck, onAddValue, onOpenSecrets, onOpenLifecycleFile, onOpenLifecycleOutput, onRunChecks, onRunLifecycle }: EnvironmentViewProps) {
-  const shape = useShape();
-  const [addCheckOpen, setAddCheckOpen] = useState(false);
-  const [addValueOpen, setAddValueOpen] = useState(false);
-  const [editingCheck, setEditingCheck] = useState<EnvironmentCheckDefinition | null>(null);
-  const [removingCheck, setRemovingCheck] = useState<EnvironmentCheckDefinition | null>(null);
-  const [confirmation, setConfirmation] = useState<{ phase: LifecyclePhase; rerun: boolean; interactive?: boolean } | null>(null);
-  const [recovery, setRecovery] = useState<string | null>(null);
-  const selectedProfile = profileDefinition(model.workspace.profile, model.bundle.profiles);
-  const machine = model.machines.find((candidate) => candidate.id === model.workspace.machineId) ?? model.machines[0];
-  const checks = selectedProfile.checks.map((id) => model.bundle.checks[id]).filter((check): check is EnvironmentCheckDefinition => !!check);
-  const visibleLifecycle = model.lifecycle.filter((script) => !script.profiles || script.profiles.includes(model.workspace.profile));
-  const lifecycleNeedsApproval = visibleLifecycle.some((script) => script.trust.status !== 'approved');
-  const lifecycleFailed = visibleLifecycle.some((script) => script.lastRun.status === 'failed');
-  const summary = model.ledger ? lifecycleSummary(model.ledger) : { label: lifecycleFailed ? 'Environment needs attention' : lifecycleNeedsApproval ? 'Environment needs approval' : 'Environment', attention: lifecycleFailed || lifecycleNeedsApproval };
-  const requestPhase = (phase: LifecyclePhase, rerun: boolean, interactive = false): void => {
-    if (phase === 'cloud/destroy' || rerun || interactive) setConfirmation({ phase, rerun, interactive });
-    else onRunLifecycle(phase);
-  };
+function EditValueDialog({ value, onClose, onSave }: { value: { name: string; value: string }; onClose(): void; onSave(value: string): void }) {
+  const [draft, setDraft] = useState(value.value);
+  return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
+    <DialogContent size="sm">
+      <DialogHeader><DialogTitle>Edit {value.name}</DialogTitle><DialogDescription>Saved for this workspace. Setup scripts receive it on their next run.</DialogDescription></DialogHeader>
+      <InputGroup><InputField index={0} label={value.name} value={draft} onChange={setDraft} /></InputGroup>
+      <DialogFooter><Button variant="secondary" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={draft === value.value} onClick={() => { onSave(draft); onClose(); }}>Save</Button></DialogFooter>
+    </DialogContent>
+  </Dialog>;
+}
 
+/** The Environment tab: Overview, Machines (status, setup results, sync), Setup (steps and their scripts) and Values. */
+export function EnvironmentView(props: EnvironmentViewProps) {
+  const { model, busy = false } = props;
+  const [editing, setEditing] = useState<{ name: string; value: string } | null>(null);
+  const [retiring, setRetiring] = useState(false);
+  const [recovering, setRecovering] = useState<string | null>(null);
+  const setupMachine = model.machines.find(machine => machine.id === model.setupMachineId) ?? null;
+  const approvals = model.steps.flatMap(step => step.scripts).filter(script => !script.approval.approved).length + model.browserOrigins.filter(origin => !origin.approved).length;
+  const ready = model.machines.filter(machine => machine.ready).length;
+  const scriptActions = { onApprove: props.onApprove, onRevoke: props.onRevoke, onOpenScript: props.onOpenScript, onOpenLog: props.onOpenLog, onRunPhase: props.onRunPhase };
   return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full">
     <div className="flex flex-col gap-5 p-4">
-      <header className="flex flex-col gap-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 flex-col gap-1">
-            <span className="text-caption text-muted-foreground">{model.project.name} · {model.workspace.name}</span>
-            <h2 className="text-title font-semibold text-foreground text-balance">Workspace environment</h2>
-            <p className="text-caption text-muted-foreground text-pretty">Durable resources and local preparation. Your workspace stays accessible if preparation fails.</p>
+      <Section label="Overview" title="Overview">
+        <span className="text-caption text-muted-foreground">{model.project} · {model.workspace}</span>
+        <p role="status" className="flex flex-wrap items-center gap-2 text-caption tabular-nums">
+          <StatusDot color={approvals ? 'orange' : ready ? 'green' : 'dim'} />
+          {model.machines.length ? `${ready} of ${model.machines.length} ${model.machines.length === 1 ? 'machine' : 'machines'} ready` : 'No machine'}
+          {approvals ? ` · ${approvals} ${approvals === 1 ? 'needs' : 'need'} approval` : ''}
+        </p>
+        {model.profile.options.length > 1 ? <Select value={model.profile.selected} onValueChange={props.onProfileChange} disabled={busy}>
+          <SelectTrigger aria-label="Runtime profile" />
+          <SelectContent>{model.profile.options.map((name, index) => <SelectItem key={name} value={name} index={index}>{name}</SelectItem>)}</SelectContent>
+        </Select> : null}
+        {!model.configured ? <div className="flex flex-wrap items-center justify-between gap-2 text-caption text-muted-foreground">
+          <p className="max-w-prose text-pretty">This repository has no setup scripts yet.</p>
+          {props.onConfigure ? <Button variant="ghost" size="compact" disabled={busy} onClick={props.onConfigure}>Configure with agent</Button> : null}
+        </div> : null}
+        <details className="text-caption">
+          <summary className="flex min-h-10 cursor-pointer items-center gap-2 text-muted-foreground"><FileIcon size={16} strokeWidth={1.5} />About this setup</summary>
+          <div className="flex flex-col gap-2 pt-1 text-muted-foreground text-pretty">
+            {model.notes ? <p>{model.notes}</p> : null}
+            {Object.keys(model.bindings).length ? <dl aria-label="Resource bindings" className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-1">{Object.entries(model.bindings).map(([name, value]) => <div className="contents" key={name}><dt className="break-all font-mono">{name}</dt><dd className="break-all font-mono text-foreground">{value}</dd></div>)}</dl> : null}
+            <p>Approved scripts run as your user on the machine and can use its existing credentials. Secret grants control only the secrets GitSpace injects. This is not a sandbox.</p>
           </div>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <span className="text-caption font-medium text-muted-foreground">Runtime profile</span>
-          <Select value={model.workspace.profile} onValueChange={onProfileChange} disabled={busy}>
-            <SelectTrigger aria-label="Runtime profile" />
-            <SelectContent>{Object.keys(model.bundle.profiles).map((name, index) => <SelectItem key={name} value={name} index={index}>{name}{name === model.bundle.default ? ' · default' : ''}</SelectItem>)}</SelectContent>
-          </Select>
-          <p className="text-caption text-muted-foreground">Choose the kind of work this workspace needs to run.</p>
-        </div>
-        <div className="flex items-center gap-2 text-caption text-muted-foreground" role="status">
-          <StatusDot color={summary.attention ? 'orange' : 'dim'} />
-          <span>{summary.label}{runtimeAvailable ? ` · ${machine?.label ?? 'current machine'}` : ' · saved cloud state'}</span>
-        </div>
-        <p className="text-caption text-muted-foreground text-pretty">Approved scripts run as your machine user and can use existing home configuration and credentials. Secret grants control injected secrets, not other credentials on the machine. This is not a sandbox.</p>
-      </header>
-      {machinePanel}
-      {model.configured === false ? <section className="flex flex-wrap items-center justify-between gap-2 text-caption text-muted-foreground" aria-label="Repository environment configuration">
-        <p className="max-w-prose text-pretty">No repository lifecycle configured. Keep working, or ask the agent to plan one with you.</p>
-        {onConfigure ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={onConfigure}>Configure with agent</Button> : <span>Open this workspace to configure with the agent.</span>}
-      </section> : null}
-      {!runtimeAvailable ? <p className="text-caption text-muted-foreground text-pretty">{model.ledger?.destroyedAt ? 'Cloud resources were explicitly retired. Their history, recorded bindings, and logs remain available.' : 'History, bindings, and logs remain available without a runner. Attach and choose a workspace machine for checks, preparation, or explicit cloud retirement.'}</p> : null}
-      {model.ledger ? <section className="flex flex-col gap-2" aria-label="Durable environment state">
-        <div className="flex flex-wrap gap-2"><Badge size="compact" color={model.ledger.provisioned && !model.ledger.destroyedAt ? 'green' : 'gray'}>{model.ledger.destroyedAt ? 'Resources retired' : model.ledger.provisioned ? 'Provisioned' : 'Not provisioned'}</Badge><Badge size="compact" color="gray">{model.ledger.policy.automatic ? 'Automatic local preparation enabled' : model.ledger.destroyedAt || model.ledger.provisioned ? 'Automatic local preparation disabled' : 'Initial setup not requested'}</Badge></div>
-        {model.ledger.provisioned ? <p className="text-caption text-muted-foreground tabular-nums">Last successful provision · {model.ledger.provisioned.profile} · {new Date(model.ledger.provisioned.completedAt).toLocaleString()} · {model.ledger.provisioned.machineId}. Preserved across moves and failed reruns.</p> : null}
-        {model.ledger.claim?.status === 'blocked' && model.ledger.claim.reason ? <p role="status" className="text-caption text-destructive">{model.ledger.claim.reason}</p> : null}
-        <h3 className="text-caption font-medium">Resource bindings</h3>
-        {Object.keys(model.ledger.bindings).length ? <dl className={`${shape.container} grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-2 bg-surface-2 p-3 text-caption shadow-surface-1`}>{Object.entries(model.ledger.bindings).map(([name, value]) => <div className="contents" key={name}><dt className="break-all font-mono text-muted-foreground">{name}</dt><dd className="break-all font-mono">{value}</dd></div>)}</dl> : <p className="text-caption text-muted-foreground">No bindings recorded. Partial outputs remain here even when a run fails.</p>}
-      </section> : null}
+        </details>
+      </Section>
 
-      {selectedProfile.notes ? <Elevated offset={1} className={`${shape.container} flex items-start gap-3 p-3`}>
-        <AlertIcon size={16} strokeWidth={1.5} className="mt-0.5 shrink-0 text-muted-foreground" />
-        <p className="min-w-0 text-body text-muted-foreground">{selectedProfile.notes}</p>
-      </Elevated> : null}
+      <Section label="Machines" title={`Machines · ${model.machines.length}`} action={<DropdownMenu size="compact">
+        <DropdownTrigger render={<Button variant="secondary" size="compact" leadingIcon={PlusIcon} disabled={busy || !model.attachable.length}>Attach machine</Button>} />
+        <DropdownContent align="end" sideOffset={6} className="min-w-[240px]">
+          {model.attachable.map((machine, index) => <MenuItem index={index} key={machine.id} label={machine.label} onSelect={() => props.onAttach(machine.id)} />)}
+        </DropdownContent>
+      </DropdownMenu>}>
+        {model.machines.length
+          ? <div className="flex flex-col gap-3">{model.machines.map((machine, index) => <MachineCard key={machine.id} machine={machine} index={index} busy={busy} props={props} onRecover={setRecovering} />)}</div>
+          : <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><StatusDot color="dim" />No machine. Attach one so setup and commands can run.</p>}
+        {props.machinesFooter}
+        {model.conflicts.length ? <div role="alert" aria-label="Sync conflicts" className="flex flex-col gap-1 text-caption">
+          <p className="font-medium text-destructive">Conflicts · choose which version to keep. The other is backed up first.</p>
+          <ul className="flex flex-col">{model.conflicts.map(path => <li key={path} className="flex min-h-10 flex-wrap items-center gap-2">
+            <code className="min-w-0 flex-1 break-all font-mono">{path}</code>
+            <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onResolveConflict(path, 'cloud')}>Keep cloud</Button>
+            <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onResolveConflict(path, 'machine')}>Keep machine</Button>
+          </li>)}</ul>
+        </div> : null}
+      </Section>
 
-      {/* The definition is cloud state, editable with no machine; only running checks needs a runner. */}
-      <fieldset disabled={busy} className="contents">
-      <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Checks · <span className="tabular-nums">{checks.length}</span></h3><span className="flex items-center gap-1"><Button variant="ghost" size="compact" leadingIcon={PlayIcon} disabled={!runtimeAvailable} onClick={onRunChecks}>Run checks</Button><Button variant="secondary" size="compact" leadingIcon={PlusIcon} onClick={() => setAddCheckOpen(true)}>Add check</Button></span></div>
-        <CardGroup border="outlined" separated proximityHover={false}>{checks.map((check, index) => <CheckCard key={check.id} index={index} check={check} result={machine?.capabilities[check.id] ?? { status: 'unprobed' }} onApprove={() => onApprove(check.id)} onRevoke={() => onRevoke(check.id)} onFix={onFixCheck ? () => onFixCheck(check.id) : undefined} onEdit={() => setEditingCheck(check)} onDelete={() => setRemovingCheck(check)} />)}</CardGroup>
-      </section>
-      </fieldset>
-
-      <section className="flex flex-col gap-2" aria-label="Browser origins">
-        <h3 className="text-caption font-medium text-muted-foreground">Browser origins · <span className="tabular-nums">{model.ledger?.browserOrigins.length ?? 0}</span></h3>
-        <p className="text-caption text-muted-foreground">Committed host patterns for logged-in Chrome. Approvals do not run commands. Edit browser.origins in the environment bundle and commit to change this list.</p>
-        <CardGroup border="outlined" separated proximityHover={false}>{model.ledger?.browserOrigins.map((origin, index) => {
-          const approval = model.ledger?.approvals.find((entry) => entry.executionHash === origin.hash && entry.scope === 'project')
-            ?? model.ledger?.approvals.find((entry) => entry.executionHash === origin.hash && entry.scope === 'workspace');
-          return <Card key={origin.hash} size="compact" index={index}>
-            <CardHeader><CardTitle><code className="break-all font-mono">{origin.pattern}</code></CardTitle><CardDescription>{approval ? `Approved for this ${approval.scope}` : 'Approval required'}</CardDescription></CardHeader>
-            <CardFooter><Badge size="compact" color={approval ? 'green' : 'amber'}>{approval ? 'approved' : 'pending'}</Badge><Button variant={approval ? 'ghost' : 'secondary'} size="compact" className="min-h-10" disabled={busy} onClick={() => approval ? onRevoke(origin.hash) : onApprove(origin.hash)}>{approval ? 'Revoke approval' : 'Review & approve'}</Button></CardFooter>
-          </Card>;
-        })}</CardGroup>
-      </section>
-
-      <fieldset disabled={busy} className="contents">
-      <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Secrets</h3><Button variant="ghost" size="compact" onClick={onOpenSecrets}>Manage secrets & values</Button></div>
-        <CardGroup border="outlined" separated proximityHover={false}>{selectedProfile.secrets.map((name, index) => {
-          const secret = model.secrets.find((candidate) => candidate.name === name);
-          const granted = secret?.granted ?? false;
-          return <Card key={name} size="compact" index={index}>
-            <CardHeader className="py-2.5"><CardTitle><span className="flex items-center gap-2"><KeyIcon size={16} strokeWidth={1.5} className="text-muted-foreground" /><code className="min-w-0 truncate font-mono text-body">{name}</code><Badge className="ml-auto" size="compact" color={granted ? 'green' : 'red'}>{granted ? `${secret?.source} secret` : 'missing'}</Badge>{!granted ? <Button variant="secondary" size="compact" onClick={() => onGrantSecret(name)}>Add or grant</Button> : null}</span></CardTitle></CardHeader>
-          </Card>;
-        })}</CardGroup>
-      </section>
-
-      <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Values</h3><Button variant="secondary" size="compact" leadingIcon={PlusIcon} onClick={() => setAddValueOpen(true)}>Add value</Button></div>
-        {selectedProfile.inputs.length ? <><div className="flex flex-col gap-2">{selectedProfile.inputs.map((name) => {
-          const input = model.inputValues.find((candidate) => candidate.name === name);
-          return <EnvironmentValueField key={`${model.workspace.profile}:${name}`} name={name} value={input?.value ?? model.bundle.inputs[name]?.default ?? ''} disabled={busy} onSave={(value) => onInputChange(name, value)} />;
-        })}</div>
-        <div className="flex flex-wrap gap-1">{selectedProfile.inputs.map((name) => { const input = model.inputValues.find((candidate) => candidate.name === name); return <Badge key={name} size="compact" color={input?.source === 'workspace' ? 'blue' : 'gray'}>{name} · {input?.source === 'workspace' ? 'set for this workspace' : input?.source === 'account' ? 'account default' : input?.source === 'project' ? 'inherited from project' : 'bundle default'}</Badge>; })}</div></> : <p className="text-caption text-muted-foreground">No values declared for this profile.</p>}
-      </section>
-      </fieldset>
-
-      <section className="flex flex-col gap-4" aria-label="Lifecycle phases">
-        <div className="flex flex-col gap-1"><h3 className="text-caption font-medium text-muted-foreground">Lifecycle scripts</h3><p className="text-caption text-muted-foreground"><code className="font-mono">01-base.sh</code> runs for every profile. <code className="font-mono">01-base.ios.sh</code> runs only for ios.</p></div>
-        {LIFECYCLE_PHASES.map((phase) => {
-          const scripts = visibleLifecycle.filter((script) => script.phase === phase);
-          const presentation = model.ledger ? lifecyclePhasePresentation(model.ledger, phase, model.workspace) : { running: false, readiness: 'No durable run recorded', action: 'Run phase', rerun: false };
-          const actions = model.ledger ? lifecycleActions(model.ledger, phase, { runtimeAvailable, cloudRunnerAvailable, lifecycleControl: true }) : null;
-          const { running, readiness, action } = presentation;
-          const requiresInteraction = scripts.some((script) => script.interactive);
-          return <div key={phase} className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-body font-medium text-foreground">{PHASE_LABEL[phase]}</h4><span className="flex flex-wrap gap-1">{!requiresInteraction ? <Button variant="ghost" size="compact" className="min-h-10" loading={running} disabled={busy || !actions?.run} leadingIcon={phase === 'cloud/destroy' ? TrashIcon : PlayIcon} onClick={() => requestPhase(phase, presentation.rerun)}>{action}</Button> : null}<Button variant={requiresInteraction ? 'secondary' : 'ghost'} size="compact" className="min-h-10" disabled={busy || !actions?.run || !runtimeAvailable} leadingIcon={TerminalIcon} onClick={() => requestPhase(phase, presentation.rerun, true)}>Run interactively</Button></span></div>
-            <p className="text-caption text-muted-foreground text-pretty"><code className="font-mono">{phase}</code> · {PHASE_SCOPE[phase]}</p>
-            <span role="status" className={`text-caption ${requiresInteraction && !running || readiness === 'Needs attention' ? 'text-destructive' : 'text-muted-foreground'}`}>{requiresInteraction && !running ? 'Action required · start an interactive run to answer prompts' : readiness}</span>
-            <CardGroup border="outlined" separated proximityHover={false}>{scripts.map((script, index) => <LifecycleCard key={script.id} index={index} script={script} disabled={busy} onApprove={() => onApprove(script.id)} onRevoke={() => onRevoke(script.id)} onOpenFile={onOpenLifecycleFile ? () => onOpenLifecycleFile(script.id) : undefined} onOpenOutput={onOpenLifecycleOutput ? () => onOpenLifecycleOutput(script.id) : undefined} />)}</CardGroup>
-          </div>;
-        })}
-      </section>
-
-      {model.ledger ? <section className="flex flex-col gap-3" aria-label="Lifecycle history">
-        <h3 className="text-caption font-medium text-muted-foreground">Run history · <span className="tabular-nums">{model.ledger.runs.length}</span></h3>
-        {!model.ledger.runs.length ? <p className="text-caption text-muted-foreground">No runs recorded.</p> : model.ledger.runs.map((run) => {
-          const executions = model.executions?.filter((execution) => run.executionHashes.includes(execution.hash)) ?? [];
-          const scripts = [...executions, ...run.results.filter((result) => !executions.some((execution) => execution.id === result.id)).map((result) => ({ id: result.id, label: result.id }))];
-          return <details key={run.id} className={`${shape.container} bg-surface-2 px-3 shadow-surface-1`}>
-          <summary className="min-h-10 cursor-pointer py-3 text-caption"><span className="font-medium">{run.phase}</span> · {run.status} · <span className="tabular-nums">{new Date(run.startedAt).toLocaleString()}</span></summary>
-          <div className="flex min-w-0 flex-col gap-2 pb-3">
-            <p className="break-all text-caption text-muted-foreground">{run.profile} · {run.machineId} · <span className="tabular-nums">checkout {run.generation ?? 'not scoped'}{run.exitCode !== null ? ` · exit ${run.exitCode}` : ''}</span></p>
-            <code className="break-all text-caption text-muted-foreground">{run.id}</code>
-            {onOpenRunLog ? scripts.length ? <ul className="flex flex-col gap-1" aria-label="Script logs">{scripts.map((script) => <li key={script.id} className="flex min-w-0 flex-wrap items-center justify-between gap-2"><span className="break-all font-mono text-caption">{script.label}</span><Button variant="ghost" size="compact" className="min-h-10" leadingIcon={TerminalIcon} aria-label={`View log for ${script.label}`} onClick={() => onOpenRunLog(run.id, { id: script.id, label: script.label })}>View log</Button></li>)}</ul> : <p className="text-caption text-muted-foreground">No script execution was recorded for this run.</p> : null}
-            <div className="flex flex-wrap gap-2">{isLifecycleRunActive(run) && onRecoverRun ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={() => setRecovery(run.id)}>Recover interrupted run…</Button> : null}{isLifecycleRunActive(run) && run.status !== 'cancelling' && onCancelRun ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={() => onCancelRun(run.id)}>Cancel run</Button> : null}</div>
-            {run.failure ? <p role="status" className="text-caption text-destructive">{run.failure.message}</p> : null}
-            {run.incidents.length ? <ul className="flex flex-col gap-1 text-caption text-muted-foreground" aria-label="Run incidents">{run.incidents.map((incident) => <li key={incident.id}><time dateTime={incident.occurredAt}>{new Date(incident.occurredAt).toLocaleString()}</time> · {incident.kind} · {incident.message}</li>)}</ul> : null}
+      <Section label="Setup" title={setupMachine ? `Setup · ${setupMachine.name}` : 'Setup'} action={model.machines.length > 1 ? <select aria-label="Setup machine" className="min-h-10 rounded-md bg-surface-3 px-3 text-caption" value={model.setupMachineId ?? ''} disabled={busy} onChange={event => props.onSelectSetupMachine(event.target.value)}>
+        <option value="">Choose a machine</option>
+        {model.machines.map(machine => <option key={machine.id} value={machine.id}>{machine.name}</option>)}
+      </select> : null}>
+        {!model.setupMachineId ? <p className="text-caption text-muted-foreground">{model.machines.length ? 'Choose a machine to see its results and run setup there.' : 'Attach a machine to run setup. Approvals and logs stay available.'}</p> : null}
+        <div className="flex flex-col gap-3">
+          {model.steps.map(step => <StepBlock key={step.phase} step={step} machineId={model.setupMachineId} busy={busy} onRetire={() => setRetiring(true)} {...scriptActions} />)}
+          <div aria-label="Setup step Agent setup" className="flex min-h-10 flex-wrap items-center justify-between gap-2">
+            <span className="flex flex-col"><span className="text-caption font-medium">Agent setup</span><span className="text-caption text-muted-foreground">Agents, skills and rules this repository defines.</span></span>
+            {props.onOpenAgentSetup ? <Button variant="ghost" size="compact" onClick={props.onOpenAgentSetup}>Open Agent setup</Button> : null}
           </div>
-        </details>;
-        })}
-      </section> : null}
+          {model.browserOrigins.length ? <div aria-label="Setup step Browser access" className="flex flex-col">
+            <span className="flex min-h-10 items-center text-caption font-medium">Browser access</span>
+            <ul className="flex flex-col">{model.browserOrigins.map(origin => <li key={origin.hash} className="flex min-h-10 flex-wrap items-center gap-2 text-caption">
+              <StatusDot color={origin.approved ? 'green' : 'orange'} /><code className="min-w-0 flex-1 break-all font-mono">{origin.pattern}</code>
+              {origin.approved ? <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onRevoke(origin.hash)}>Revoke</Button> : <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => props.onApprove(origin.hash)}>Review & approve</Button></>}
+            </li>)}</ul>
+          </div> : null}
+        </div>
+      </Section>
 
-      <p className="text-caption text-muted-foreground">Machine compatibility and placement live under <strong className="font-medium text-foreground">Machines</strong>, not in this workspace editor.</p>
-      <AddCheckDialog open={addCheckOpen} onOpenChange={setAddCheckOpen} onAdd={onAddCheck} />
-      <AddValueDialog open={addValueOpen} onOpenChange={setAddValueOpen} onAdd={onAddValue} />
-      <EditCheckDialog key={editingCheck ? `${editingCheck.id}-${editingCheck.probe ?? ''}` : 'none'} check={editingCheck} open={!!editingCheck} onOpenChange={(open) => { if (!open) setEditingCheck(null); }} onSave={(patch) => { if (editingCheck) onUpdateCheck(editingCheck.id, patch); }} />
-      <Dialog open={!!removingCheck} onOpenChange={(open) => { if (!open) setRemovingCheck(null); }}>
-        <DialogContent size="sm"><DialogHeader><DialogTitle>Remove {removingCheck?.label}?</DialogTitle><DialogDescription>This removes the check from the {model.workspace.profile} runtime profile.</DialogDescription></DialogHeader><DialogFooter><Button variant="secondary" onClick={() => setRemovingCheck(null)}>Cancel</Button><Button variant="primary" onClick={() => { if (removingCheck) onDeleteCheck(removingCheck.id); setRemovingCheck(null); }}>Remove</Button></DialogFooter></DialogContent>
+      <Section label="Values" title="Values" action={<Button variant="ghost" size="compact" leadingIcon={KeyIcon} onClick={props.onOpenSecrets}>Open Secrets & values</Button>}>
+        {model.secrets.length || model.values.length ? <CardGroup border="outlined" separated proximityHover={false}>
+          {model.secrets.map((secret, index) => <Card size="compact" index={index} key={`secret:${secret.name}`} aria-label={`Secret ${secret.name}`}>
+            <CardHeader className="py-2.5"><CardTitle><span className="flex items-center gap-2"><KeyIcon size={16} strokeWidth={1.5} className="text-muted-foreground" /><code className="min-w-0 truncate font-mono text-body">{secret.name}</code><Badge className="ml-auto" size="compact" color={secret.granted ? 'green' : 'red'}>{secret.granted ? `${secret.source} secret` : 'missing'}</Badge></span></CardTitle></CardHeader>
+          </Card>)}
+          {model.values.map((value, index) => <Card size="compact" index={model.secrets.length + index} key={`value:${value.name}`} aria-label={`Value ${value.name}`}>
+            <CardHeader className="py-2.5"><CardTitle><span className="flex items-center gap-2"><code className="min-w-0 truncate font-mono text-body">{value.name}</code><Badge className="ml-auto" size="compact" color={value.source === 'default' ? 'gray' : 'blue'}>{value.source}</Badge><Button variant="ghost" size="compact" disabled={busy} onClick={() => setEditing(value)}>Edit</Button></span></CardTitle></CardHeader>
+          </Card>)}
+        </CardGroup> : <p className="text-caption text-muted-foreground">This profile declares no secrets or values.</p>}
+      </Section>
+
+      {editing ? <EditValueDialog value={editing} onClose={() => setEditing(null)} onSave={value => props.onEditValue(editing.name, value)} /> : null}
+      <Dialog open={retiring} onOpenChange={setRetiring}>
+        <DialogContent size="sm">
+          <DialogHeader><DialogTitle>Retire this workspace’s cloud resources?</DialogTitle><DialogDescription>Runs the approved cloud/destroy scripts to delete the resources recorded for this workspace. Check the bindings and script content first; deletion may be irreversible.</DialogDescription></DialogHeader>
+          <DialogFooter><Button variant="secondary" onClick={() => setRetiring(false)}>Cancel</Button><Button variant="primary" disabled={busy || !model.setupMachineId} onClick={() => { if (model.setupMachineId) props.onRunPhase(model.setupMachineId, 'cloud/destroy', { retire: true }); setRetiring(false); }}>Retire resources</Button></DialogFooter>
+        </DialogContent>
       </Dialog>
-      <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open) setConfirmation(null); }}>
-        <DialogContent size="sm"><DialogHeader><DialogTitle>{confirmation?.phase === 'cloud/destroy' ? 'Retire this workspace’s cloud resources?' : confirmation?.interactive ? 'Run interactively?' : 'Explicitly rerun this phase?'}</DialogTitle><DialogDescription>{confirmation?.phase === 'cloud/destroy' ? 'This authorizes the approved cloud/destroy scripts to delete the resources recorded for this workspace. It is not a close or move. Check the bindings and script content first; deletion may be irreversible.' : confirmation?.rerun ? 'A previous attempt may already have changed external resources. Review its logs and bindings before running again. This does not replace the last successful provision record unless the new provision succeeds.' : 'Run the approved scripts in a dedicated Environment terminal.'}</DialogDescription></DialogHeader>{confirmation?.interactive ? <p className="text-caption text-muted-foreground text-pretty">Unattended scripts are preferred. Interactive runs require you to stay available for prompts. Input is not echoed. Visible output stays in the open pane after success or failure, but closing, reloading, or losing the connection clears it. Raw output is not saved. The terminal never becomes a shell.</p> : null}<DialogFooter><Button variant="secondary" onClick={() => setConfirmation(null)}>Cancel</Button><Button variant="primary" disabled={busy} onClick={() => { if (confirmation) onRunLifecycle(confirmation.phase, { rerun: confirmation.rerun, retire: confirmation.phase === 'cloud/destroy', interactive: confirmation.interactive }); setConfirmation(null); }}>{confirmation?.phase === 'cloud/destroy' ? 'Approve retirement & run' : confirmation?.interactive ? 'Run interactively' : 'Rerun phase'}</Button></DialogFooter></DialogContent>
-      </Dialog>
-      <Dialog open={recovery !== null} onOpenChange={(open) => { if (!open) setRecovery(null); }}>
-        <DialogContent size="sm"><DialogHeader><DialogTitle>Recover an abandoned run?</DialogTitle><DialogDescription>Recovery revokes this run’s claim without rerunning it. The cloud accepts recovery only when its owning machine is confirmed destroyed; an offline machine could still be executing. Inspect external resources and partial bindings before explicitly retrying.</DialogDescription></DialogHeader><DialogFooter><Button variant="secondary" onClick={() => setRecovery(null)}>Cancel</Button><Button variant="primary" disabled={busy} onClick={() => { if (recovery) onRecoverRun?.(recovery); setRecovery(null); }}>Mark run abandoned</Button></DialogFooter></DialogContent>
+      <Dialog open={recovering !== null} onOpenChange={open => { if (!open) setRecovering(null); }}>
+        <DialogContent size="sm">
+          <DialogHeader><DialogTitle>Recover an abandoned run?</DialogTitle><DialogDescription>Recovery releases this run’s claim without rerunning it. The cloud accepts it only when the machine that owns the run is confirmed gone; an offline machine could still be running it. Check external resources before running again.</DialogDescription></DialogHeader>
+          <DialogFooter><Button variant="secondary" onClick={() => setRecovering(null)}>Cancel</Button><Button variant="primary" disabled={busy} onClick={() => { if (recovering) props.onRecoverRun(recovering); setRecovering(null); }}>Mark run abandoned</Button></DialogFooter>
+        </DialogContent>
       </Dialog>
     </div>
   </ScrollArea>;

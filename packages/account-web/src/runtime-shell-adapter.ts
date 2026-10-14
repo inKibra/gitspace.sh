@@ -5,20 +5,21 @@ import type { InputOf } from 'result-rpc';
 import type { RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuntimeSubagentRecordSchema, type RuntimeSubagentRecord } from '@gitspace/protocol-runtime/session-controls';
 import { z } from 'zod';
-import { deriveWorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type { AgentScopeView, ProjectAgentView, WorkspaceView } from './GitSpaceShell.js';
+import { workspaceStatus } from './workspace-status.js';
 
-/** Runtime ownership is cloud-owned, independently of any attached working copy. Only the open space shows its live
- * snapshot status; every other row keeps the status the project listing reported for it. */
+/** Runtime ownership is cloud-owned, independently of any attached working copy. The open space shows the status
+ * summary its live snapshot carries; every other row keeps the summary the project listing reported for it. */
 export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<InspectorView, 'project' | 'workspace' | 'workspaces' | 'placement'>, listing?: Pick<InputOf<typeof SpaceViewCodec>, 'baseSpace' | 'workspaces'>): { workspace: AgentScopeView; baseSpace: ProjectAgentView; workspaces: WorkspaceView[]; relationsReady: boolean } {
   const attached = snapshot.attachments.filter(item => item.state !== 'detached');
   const machine = attached.find(item => item.state === 'ready') ?? attached[0];
   const document = snapshot.documents['gitspace.workspace'];
   const phaseValue = document && typeof document === 'object' && !Array.isArray(document) ? document.phase : null;
   const phase = phaseValue === 'plan' || phaseValue === 'code' || phaseValue === 'review' || phaseValue === 'ship' ? phaseValue : inspection.workspace.phase ?? 'plan';
-  const status = deriveWorkspaceStatusSummary({ agents: snapshot.conversations.map(item => ({ state: item.status === 'running' ? 'running' : item.status === 'waiting' ? 'permission-needed' : 'waiting', ...(item.status === 'failed' ? { failure: { code: 'RUNTIME_FAILED', message: 'Conversation failed' } } : {}) })) });
+  const status = workspaceStatus(snapshot).summary;
   // A row the listing has not reported yet shows no activity rather than the open space's.
-  const unreported = deriveWorkspaceStatusSummary({ agents: [] });
+  const unreported = emptyWorkspaceStatus;
   const relationWorkspaces = listing?.workspaces ?? [];
   // The workspace lives in the cloud whatever machines are attached; a machine only routes tools (`possessedBy`).
   const common = { projectId: inspection.project.id, projectName: inspection.project.name, generation: inspection.placement?.generation ?? 0, possessedBy: machine?.machineId ?? '', holder: { kind: 'cloud' as const } };

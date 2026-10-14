@@ -2,7 +2,7 @@ import { Badge, badgeColors, useShape } from '@gitspace/ui';
 import { Background, BaseEdge, Controls, getBezierPath, Handle, MarkerType, Position, ReactFlow, useEdgesState, useNodesState, type Connection, type Edge, type EdgeProps, type Node, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { EmptyState, workspacePhaseLabel, StatusDot, type WorkspaceView } from './GitSpaceShell.js';
+import { EmptyState, workspacePhaseLabel, WorkspaceStatusDot, type WorkspaceView } from './GitSpaceShell.js';
 import type { WorkspacePickerItem } from './WorkspacePicker.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
@@ -147,7 +147,7 @@ const WorkspaceNode = memo(function WorkspaceNode({ data, selected, isConnectabl
   const blocked = workspace.stack?.blockedBy.length ?? 0;
   return <div className={`${shape.container} flex flex-col gap-1.5 bg-surface-3 p-3 text-left shadow-surface-2 ${selected ? 'ring-1 ring-[color:var(--focus-ring,#6B97FF)]' : ''}`} style={{ width: NODE_WIDTH }}>
     <Handle type="target" position={Position.Left} isConnectable={isConnectable} style={HANDLE_STYLE} />
-    <span className="flex min-w-0 items-center gap-2"><StatusDot color={workspace.status?.primaryColor ?? 'dim'} pulse={workspace.status?.primaryColor === 'green' && (!workspace.freshness || workspace.freshness === 'fresh')} /><strong className="truncate text-body font-medium text-foreground">{workspace.name}</strong></span>
+    <span className="flex min-w-0 items-center gap-2"><WorkspaceStatusDot space={workspace} /><strong className="truncate text-body font-medium text-foreground">{workspace.name}</strong></span>
     <span className="truncate text-caption text-muted-foreground">{workspace.projectName}</span>
     {workspace.statusLabel ? <span className="text-caption text-muted-foreground">{workspace.statusLabel}</span> : null}
     <code className="truncate font-mono text-caption text-muted-foreground">{workspace.branch}</code>

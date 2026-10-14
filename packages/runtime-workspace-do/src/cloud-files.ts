@@ -59,11 +59,13 @@ export class CloudFileStore {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_writer(singleton INTEGER PRIMARY KEY CHECK(singleton=1), fence INTEGER NOT NULL, attempt TEXT)');
     storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_writer(singleton,fence,attempt) VALUES(1,0,NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
+    storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_cloud_files_pending ON runtime_cloud_files(id) WHERE pending IS NOT NULL');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_commits(commit_id TEXT PRIMARY KEY, predecessor TEXT, checkpoint TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lfs_retention_outbox(commit_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL, previous TEXT)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_publications(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, checkpoint TEXT)');
     if (!storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_machine_publications)').toArray().some(column => column.name === 'abandoned')) storage.sql.exec('ALTER TABLE runtime_machine_publications ADD COLUMN abandoned TEXT');
+    storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_machine_publications_pending ON runtime_machine_publications(id) WHERE pending IS NOT NULL');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_paths(commit_id TEXT PRIMARY KEY, paths TEXT NOT NULL)');
   }
   snapshot(): Promise<Checkpoint | null> { return readCurrentCheckpoint(this.storage); }
@@ -226,7 +228,7 @@ export class CloudFileStore {
       this.enqueueRetention(accepted, current);
       this.enqueueRetention(checkpoint, current, `${machineId}:${checkpoint.checkpointRef}`);
       this.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(accepted));
-      this.storage.sql.exec('INSERT OR REPLACE INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?)', accepted.worktreeCommit, JSON.stringify(paths));
+      this.storage.sql.exec('INSERT INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?) ON CONFLICT(commit_id) DO UPDATE SET paths=excluded.paths WHERE paths IS NOT excluded.paths', accepted.worktreeCommit, JSON.stringify(paths));
       this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,checkpoint=? WHERE id=?', JSON.stringify(accepted), id);
       this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1');
     });
@@ -433,7 +435,7 @@ export class CloudFileStore {
       this.enqueueRetention(accepted, current);
       this.complete(input, completed, fence);
       this.storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', JSON.stringify(accepted));
-      this.storage.sql.exec('INSERT OR REPLACE INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?)', accepted.worktreeCommit, JSON.stringify([...paths].sort()));
+      this.storage.sql.exec('INSERT INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?) ON CONFLICT(commit_id) DO UPDATE SET paths=excluded.paths WHERE paths IS NOT excluded.paths', accepted.worktreeCommit, JSON.stringify([...paths].sort()));
     });
     await this.storage.sync(); await this.flushRetention(); this.publish(); return completed;
   }
@@ -547,19 +549,32 @@ export async function reconcileRuntimeLfsSources(storage: DurableObjectStorage, 
   const confirmed = new Map(objects.map(object => [object.oid, object]));
   const transition = (checkpoint: Checkpoint): Checkpoint => ({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(object => { const origin = confirmed.get(object.oid); return origin?.size === object.size ? { ...object, source: 'origin' as const, location: origin.location } : object; }) } } : {}) });
   const encoded = (value: string) => JSON.stringify(transition(RetentionCheckpointSchema.parse(JSON.parse(value))));
+  // Only rows whose encoding changes are written; a row already transitioned reads the same.
   storage.transactionSync(() => {
-    if (tables.has('runtime_code_snapshot')) for (const row of storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot').toArray()) storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', encoded(row.checkpoint));
-    if (tables.has('runtime_code_commits')) for (const row of storage.sql.exec<{ commit_id: string; checkpoint: string }>('SELECT commit_id,checkpoint FROM runtime_code_commits').toArray()) storage.sql.exec('UPDATE runtime_code_commits SET checkpoint=? WHERE commit_id=?', encoded(row.checkpoint), row.commit_id);
-    if (tables.has('runtime_lfs_retention_outbox')) for (const row of storage.sql.exec<{ commit_id: string; checkpoint: string; previous: string | null }>('SELECT commit_id,checkpoint,previous FROM runtime_lfs_retention_outbox').toArray()) storage.sql.exec('UPDATE runtime_lfs_retention_outbox SET checkpoint=?,previous=? WHERE commit_id=?', encoded(row.checkpoint), row.previous ? encoded(row.previous) : null, row.commit_id);
+    if (tables.has('runtime_code_snapshot')) for (const row of storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot').toArray()) {
+      const checkpoint = encoded(row.checkpoint);
+      if (checkpoint !== row.checkpoint) storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', checkpoint);
+    }
+    if (tables.has('runtime_code_commits')) for (const row of storage.sql.exec<{ commit_id: string; checkpoint: string }>('SELECT commit_id,checkpoint FROM runtime_code_commits').toArray()) {
+      const checkpoint = encoded(row.checkpoint);
+      if (checkpoint !== row.checkpoint) storage.sql.exec('UPDATE runtime_code_commits SET checkpoint=? WHERE commit_id=?', checkpoint, row.commit_id);
+    }
+    if (tables.has('runtime_lfs_retention_outbox')) for (const row of storage.sql.exec<{ commit_id: string; checkpoint: string; previous: string | null }>('SELECT commit_id,checkpoint,previous FROM runtime_lfs_retention_outbox').toArray()) {
+      const checkpoint = encoded(row.checkpoint), previous = row.previous ? encoded(row.previous) : null;
+      if (checkpoint !== row.checkpoint || previous !== row.previous) storage.sql.exec('UPDATE runtime_lfs_retention_outbox SET checkpoint=?,previous=? WHERE commit_id=?', checkpoint, previous, row.commit_id);
+    }
     if (tables.has('runtime_cloud_files')) for (const row of storage.sql.exec<{ id: string; pending: string }>('SELECT id,pending FROM runtime_cloud_files WHERE pending IS NOT NULL').toArray()) {
       const pending = PendingSchema.parse(JSON.parse(row.pending));
-      storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify({ ...pending, previous: transition(pending.previous) }), row.id);
+      const next = JSON.stringify({ ...pending, previous: transition(pending.previous) });
+      if (next !== row.pending) storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', next, row.id);
     }
     if (tables.has('runtime_machine_publications')) for (const row of storage.sql.exec<{ id: string; pending: string | null; checkpoint: string | null }>('SELECT id,pending,checkpoint FROM runtime_machine_publications').toArray()) {
-      if (row.checkpoint) storage.sql.exec('UPDATE runtime_machine_publications SET checkpoint=? WHERE id=?', encoded(row.checkpoint), row.id);
+      const checkpoint = row.checkpoint && encoded(row.checkpoint);
+      if (checkpoint !== row.checkpoint) storage.sql.exec('UPDATE runtime_machine_publications SET checkpoint=? WHERE id=?', checkpoint, row.id);
       if (row.pending) {
         const pending = MachinePendingSchema.parse(JSON.parse(row.pending));
-        storage.sql.exec('UPDATE runtime_machine_publications SET pending=? WHERE id=?', JSON.stringify({ ...pending, checkpoint: transition(pending.checkpoint), current: pending.current && transition(pending.current), base: pending.base && transition(pending.base) }), row.id);
+        const next = JSON.stringify({ ...pending, checkpoint: transition(pending.checkpoint), current: pending.current && transition(pending.current), base: pending.base && transition(pending.base) });
+        if (next !== row.pending) storage.sql.exec('UPDATE runtime_machine_publications SET pending=? WHERE id=?', next, row.id);
       }
     }
   });

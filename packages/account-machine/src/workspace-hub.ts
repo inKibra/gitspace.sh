@@ -3,9 +3,9 @@ import { mkdtemp, open, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { watch } from 'node:fs';
 import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
-import { TerminalSnapshotJournal, type TerminalSnapshot } from './terminal-stream.js';
+import { ProtectedTerminalTail, TerminalSnapshotJournal, type TerminalSnapshot } from './terminal-stream.js';
 import { PROTECTED_LIFECYCLE_SOCKET, protectedLifecycleLive, protectedLifecycleWrapper, sendProtectedLifecycleInput } from './protected-lifecycle.js';
-import { terminalStreamResource, type ProtectedTerminalEvent } from '@gitspace/protocol';
+import { terminalLiveResource, terminalStreamResource, type MachineLiveNotice, type ProtectedTerminalBatch } from '@gitspace/protocol';
 import { DEFAULT_LIFECYCLE_TIMEOUT_MS, LifecycleLogReader, type LifecycleRun, type LifecycleRunPhase } from '@gitspace/protocol-environment';
 import { checkoutTerminalEnvironment, inheritedCommandEnvironment } from '@gitspace/runtime-machine';
 import {
@@ -89,7 +89,14 @@ interface HubScope {
   space: { rootPath: string };
   client: DaemonBrokerClient;
 }
-interface TerminalObserver { controller: AbortController; references: number; failure: Error | null }
+/** An observer runs from a tab's first read until the relay reports nobody watches it; `lastRead` is the cursor a read
+ * last returned. */
+interface TerminalObserver { spaceId: string; controller: AbortController; ready: Promise<void>; failure: Error | null; lastRead: number }
+interface ProtectedObserver { spaceId: string; controller: AbortController; tail: ProtectedTerminalTail; ended: boolean; failure: Error | null; lastRead: number }
+/** Ended protected attachments kept for tabs still to read their completion; older ones are dropped. */
+const RETAINED_ENDED_PROTECTED = 8;
+/** Announces that a resource this machine observes changed, for the relay to tell the tabs watching it. */
+export type TerminalLiveNotify = (notice: MachineLiveNotice) => void;
 
 function isInside(parent: string, candidate: string): boolean {
   const path = relative(resolve(parent), resolve(candidate));
@@ -112,13 +119,19 @@ function displayCommand(spec: DaemonSpec): string {
 }
 
 export class WorkspaceHubTerminalCoordinator {
-  private readonly terminalJournal = new TerminalSnapshotJournal();
+  private readonly terminalJournal = new TerminalSnapshotJournal((resource, cursor) => {
+    const observer = this.terminalObservers.get(resource);
+    if (observer) this.notify?.({ workspace: observer.spaceId, resource, cursor });
+  });
   private readonly terminalObservers = new Map<string, TerminalObserver>();
+  private readonly protectedObservers = new Map<string, ProtectedObserver>();
+  private protectedRevision = 0;
   private readonly protectedSockets = new Map<string, string>();
   constructor(
     private readonly machineId: string,
     private readonly checkouts: WorkspaceCheckouts,
     private readonly clientForProject: HubClientFactory = daemonClientForProject,
+    private readonly notify?: TerminalLiveNotify,
   ) {}
 
   async list(spaceId: string): Promise<WorkspaceTerminalView[]> {
@@ -137,53 +150,52 @@ export class WorkspaceHubTerminalCoordinator {
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
   }
 
-  async *events(spaceId: string, name: string | null, after: number | null, signal: AbortSignal): AsyncGenerator<StreamEvent<TerminalSnapshot>> {
+  /** Starts (or keeps) observing the resource and returns its journal after `after`. The observer announces each commit
+   * through `notify` until `unwatched` stops it; a failed observer fails this read, and the next read starts another. */
+  async events(spaceId: string, name: string | null, after: number | null): Promise<StreamEvent<TerminalSnapshot>[]> {
     if (after !== null) streamCursorSchema.parse(after);
     const scope = await this.scope(spaceId);
-    if (signal.aborted) return;
     const resource = terminalStreamResource(spaceId, this.machineId, name);
-    let observer = this.terminalObservers.get(resource);
-    if (!observer) {
-      observer = { controller: new AbortController(), references: 0, failure: null };
-      this.terminalObservers.set(resource, observer);
-      const selected = observer;
-      void this.observeTerminals(spaceId, name, resource, scope, selected.controller.signal).catch((error: unknown) => {
-        if (selected.controller.signal.aborted) return;
-        selected.failure = error instanceof Error ? error : new Error(String(error));
-        for (const listener of this.terminalJournal.listeners) listener(resource);
-      });
+    const observer = this.terminalObservers.get(resource) ?? this.observe(spaceId, name, resource, scope);
+    await observer.ready;
+    if (observer.failure) {
+      if (this.terminalObservers.get(resource) === observer) this.terminalObservers.delete(resource);
+      throw observer.failure;
     }
-    observer.references++;
-    let cursor = after;
-    let initial = true;
-    let wake: (() => void) | undefined;
-    const notify = () => { wake?.(); wake = undefined; };
-    const committed = (changed: string) => { if (changed === resource) notify(); };
-    this.terminalJournal.listeners.add(committed);
-    signal.addEventListener('abort', notify, { once: true });
-    try {
-      while (!signal.aborted && !observer.controller.signal.aborted) {
-        const changed = Promise.withResolvers<void>();
-        wake = changed.resolve;
-        if (observer.failure) throw observer.failure;
-        for (const event of this.terminalJournal.replay(resource, cursor, initial)) {
-          if (signal.aborted || observer.controller.signal.aborted) return;
-          yield event;
-          if (event.type !== 'resync') { cursor = event.cursor; initial = false; }
-        }
-        await changed.promise;
-      }
-    } finally {
-      this.terminalJournal.listeners.delete(committed);
-      signal.removeEventListener('abort', notify);
-      if (--observer.references === 0) {
-        observer.controller.abort();
-        if (this.terminalObservers.get(resource) === observer) this.terminalObservers.delete(resource);
-      }
+    observer.lastRead = this.terminalJournal.cursor(resource);
+    return this.terminalJournal.replay(resource, after);
+  }
+
+  /** The relay reports no tab watched `resource` at `cursor`. Unless a read has returned that change since (its reader
+   * may still be subscribing), stop observing it; the next read starts again. */
+  unwatched(resource: string, cursor: number): void {
+    const terminal = this.terminalObservers.get(resource);
+    if (terminal && terminal.lastRead < cursor) {
+      terminal.controller.abort();
+      this.terminalObservers.delete(resource);
+    }
+    const live = this.protectedObservers.get(resource);
+    if (live && live.lastRead < cursor) {
+      live.controller.abort();
+      this.protectedObservers.delete(resource);
     }
   }
 
-  private async observeTerminals(spaceId: string, name: string | null, resource: string, scope: HubScope, signal: AbortSignal): Promise<void> {
+  /** `ready` settles once the first observation is committed or the observer stops. */
+  private observe(spaceId: string, name: string | null, resource: string, scope: HubScope): TerminalObserver {
+    const ready = Promise.withResolvers<void>();
+    const observer: TerminalObserver = { spaceId, controller: new AbortController(), ready: ready.promise, failure: null, lastRead: 0 };
+    this.terminalObservers.set(resource, observer);
+    void this.observeTerminals(spaceId, name, resource, scope, observer.controller.signal, ready.resolve).catch((error: unknown) => {
+      if (observer.controller.signal.aborted) return;
+      observer.failure = error instanceof Error ? error : new Error(String(error));
+      // Watching tabs read again and see the failure; their next read starts a new observer.
+      this.notify?.({ workspace: spaceId, resource, cursor: this.terminalJournal.cursor(resource) });
+    }).finally(ready.resolve);
+    return observer;
+  }
+
+  private async observeTerminals(spaceId: string, name: string | null, resource: string, scope: HubScope, signal: AbortSignal, observed: () => void): Promise<void> {
     let dirty = true;
     let failure: Error | null = null;
     let wake: (() => void) | undefined;
@@ -232,6 +244,7 @@ export class WorkspaceHubTerminalCoordinator {
           const output = name !== null && terminals.some((terminal) => terminal.name === name) ? await this.read(spaceId, name, null) : null;
           if (signal.aborted) return;
           this.terminalJournal.commit(resource, { terminals, output });
+          observed();
         }
         if (dirty) continue;
         await changed.promise;
@@ -519,11 +532,47 @@ export class WorkspaceHubTerminalCoordinator {
     };
   }
 
-  async *live(spaceId: string, name: string, signal: AbortSignal): AsyncGenerator<ProtectedTerminalEvent> {
-    const { spec } = await this.terminal(spaceId, name);
-    const path = spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET) ? this.protectedSockets.get(name) : undefined;
-    if (!path) throw new Error('Protected live stream is unavailable; its owning lifecycle coordinator must still be running');
-    yield* protectedLifecycleLive(path, signal);
+  /** Attaches (or keeps) this machine's private connection to a protected terminal and returns its events after `after`.
+   * Output stays in this process's memory, bounded; the attachment lasts until `unwatched` or the run ends, and a failed
+   * one fails this read so the next read attaches again. */
+  async live(spaceId: string, name: string, after: number | null): Promise<ProtectedTerminalBatch> {
+    const resource = terminalLiveResource(this.machineId, name);
+    const existing = this.protectedObservers.get(resource);
+    if (existing && existing.spaceId !== spaceId) throw new WorkspaceHubTerminalUnavailable(spaceId, name);
+    if (existing?.failure) {
+      this.protectedObservers.delete(resource);
+      throw existing.failure;
+    }
+    let observer = existing;
+    if (!observer) {
+      const { spec } = await this.terminal(spaceId, name);
+      const path = spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET) ? this.protectedSockets.get(name) : undefined;
+      if (!path) throw new Error('Protected live stream is unavailable; its owning lifecycle coordinator must still be running');
+      observer = this.protectedObservers.get(resource) ?? this.attachProtected(spaceId, resource, path);
+    }
+    observer.lastRead = observer.tail.head;
+    return observer.tail.read(after);
+  }
+
+  private attachProtected(spaceId: string, resource: string, path: string): ProtectedObserver {
+    const controller = new AbortController();
+    const observer: ProtectedObserver = { spaceId, controller, tail: new ProtectedTerminalTail(() => ++this.protectedRevision, this.protectedRevision), ended: false, failure: null, lastRead: 0 };
+    this.protectedObservers.set(resource, observer);
+    void (async () => {
+      for await (const event of protectedLifecycleLive(path, controller.signal)) this.notify?.({ workspace: spaceId, resource, cursor: observer.tail.append(event) });
+    })().catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      observer.failure = error instanceof Error ? error : new Error(String(error));
+      // Watching tabs read again and see the failure; their next read attaches again.
+      this.notify?.({ workspace: spaceId, resource, cursor: observer.tail.head });
+    }).finally(() => {
+      if (controller.signal.aborted) return;
+      observer.ended = true;
+      // An ended attachment holds only its bounded tail, for tabs still to read its completion; keep the latest few.
+      const ended = [...this.protectedObservers].filter(([, entry]) => entry.ended);
+      for (const [key] of ended.slice(0, -RETAINED_ENDED_PROTECTED)) this.protectedObservers.delete(key);
+    });
+    return observer;
   }
 
   async send(spaceId: string, name: string, data: string): Promise<WorkspaceTerminalView> {

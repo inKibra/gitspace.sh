@@ -1,8 +1,10 @@
 import { accountDirectoryEventSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { liveNoticeMessageSchema } from '@gitspace/protocol/live-notice';
 import { DEVICE_SOCKET_PROTOCOL } from '@gitspace/protocol/socket-auth';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { currentDevice, deviceRejected } from './device-session.js';
 import { createDeviceSignedFetch, DeviceRejectedError, signDeviceRequest, type BrowserDevice } from './device.js';
+import { liveNotices, type LiveNotices } from './live-notices.js';
 import type { SynchronizationSource } from './synchronization.js';
 
 const MAX_FRAME_SIZE = 8 * 1024 * 1024;
@@ -17,12 +19,15 @@ function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return promise;
 }
 
+/** The tab's one socket: account directory events, and live notices for the keys `notices` watches. */
 export function createAccountDirectorySource(options: {
   currentDevice: () => Promise<BrowserDevice | null>;
   onRejected: (code: string) => void;
   origin: () => string;
   openSocket?: (url: string, protocols: string[]) => WebSocket;
+  notices?: LiveNotices;
 }): SynchronizationSource<AccountDirectorySnapshot> {
+  const notices = options.notices ?? liveNotices;
   const signedFetch = createDeviceSignedFetch(options.currentDevice, options.onRejected);
   return async function* (after, signal) {
     if (signal.aborted) return;
@@ -55,13 +60,22 @@ export function createAccountDirectorySource(options: {
         failure = error;
         notify();
       };
-      const open = () => { opened = true; };
+      const open = () => {
+        opened = true;
+        if (socket) notices.attach(socket);
+      };
       const message = (event: MessageEvent) => {
         if (ended) return;
         try {
           if (typeof event.data !== 'string') throw new Error('Account directory requires JSON text frames');
           if (event.data.length > MAX_FRAME_SIZE || queuedBytes + event.data.length > MAX_FRAME_SIZE) throw new Error('Account directory delivery exceeded its size limit');
-          const value = accountDirectoryEventSchema.parse(JSON.parse(event.data));
+          const decoded: unknown = JSON.parse(event.data);
+          const notice = liveNoticeMessageSchema.safeParse(decoded);
+          if (notice.success) {
+            notices.receive(notice.data);
+            return;
+          }
+          const value = accountDirectoryEventSchema.parse(decoded);
           if (value.resource !== 'account-directory') throw new Error(`Unexpected stream resource: ${value.resource}`);
           queue.push({ value, size: event.data.length });
           queuedBytes += event.data.length;
@@ -80,6 +94,7 @@ export function createAccountDirectorySource(options: {
         socket?.removeEventListener('message', message);
         socket?.removeEventListener('error', error);
         socket?.removeEventListener('close', close);
+        if (socket) notices.detach(socket);
         if (socket && (socket.readyState === 0 || socket.readyState === 1)) socket.close();
       };
       socket.addEventListener('open', open);

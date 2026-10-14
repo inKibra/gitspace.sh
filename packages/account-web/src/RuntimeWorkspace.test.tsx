@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type { InspectorView } from '@gitspace/protocol';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gitspace/protocol/project-authority';
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
@@ -15,7 +16,6 @@ vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ s
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: null, run: vi.fn(), error: null }) }));
 vi.mock('./useTranscriptHistory.js', () => ({ useTranscriptHistory: () => ({ refresh: vi.fn() }) }));
-vi.mock('./RuntimeMachines.js', () => ({ RuntimeMachines: () => null }));
 vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
 const stamp = '2026-10-03T00:00:00.000Z';
 const inspectEnvironment = vi.fn();
@@ -34,7 +34,7 @@ const inspection: InspectorView = {
   savedTranscript: { status: 'none', reason: null },
 };
 const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 0, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
-const listedBase = { id: project.id, status: { primaryColor: 'dim', agents: { green: 0, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } } };
+const listedBase = { id: project.id, status: emptyWorkspaceStatus };
 const refreshInspection = vi.fn();
 let root: Root;
 let container: HTMLDivElement;
@@ -102,7 +102,7 @@ it('retains the accepted graph read-only and rejects stale edit callbacks during
 });
 
 it('announces persistent cloud merge conflicts while the machines dialog is closed', async () => {
-  const status = (conflicts: string[]) => ({ cloud: { version: null, conflicts }, machines: [] });
+  const status = (conflicts: string[]) => ({ summary: emptyWorkspaceStatus, cloud: { version: null, conflicts }, machines: [] });
   snapshot.documents['gitspace.status'] = status(['src/shared.ts', 'assets/config.json']);
   await act(render);
   const alert = container.querySelector('[role="alert"][aria-label="Workspace merge conflicts"]');

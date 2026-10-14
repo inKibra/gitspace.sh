@@ -1,6 +1,7 @@
 import { applyStreamEvent, initialStreamState, type StreamEvent, type StreamState } from '@gitspace/protocol-sync';
 
-export type SynchronizationSource<T> = (after: number | null, signal: AbortSignal) => AsyncIterable<{ status: 'ok'; value: StreamEvent<T> } | { status: 'error'; error: Error }>;
+/** `open`: the source is connected and the reader is current, with nothing new to apply. */
+export type SynchronizationSource<T> = (after: number | null, signal: AbortSignal) => AsyncIterable<{ status: 'ok'; value: StreamEvent<T> } | { status: 'open' } | { status: 'error'; error: Error }>;
 export interface SynchronizedValue<T> extends StreamState<T> { connection: 'connecting' | 'open' | 'disconnected'; transportError: Error | null }
 interface Channel<T> { value: SynchronizedValue<T>; listeners: Set<() => void>; eventListeners: Set<(event: StreamEvent<T>) => void>; refreshes: Set<() => void>; source: SynchronizationSource<T>; controller: AbortController | null; epoch: number; snapshotRequested: boolean }
 
@@ -82,6 +83,11 @@ export class SynchronizationOwner {
           for await (const result of channel.source(after, controller.signal)) {
             if (!current()) return;
             if (result.status === 'error') throw result.error;
+            if (result.status === 'open') {
+              if (channel.value.connection !== 'open') publish({ ...channel.value, connection: 'open', transportError: null });
+              delay = 250;
+              continue;
+            }
             const next = applyStreamEvent(channel.value, result.value);
             const accepted = next !== channel.value && !next.resync;
             publish({ ...next, connection: 'open', transportError: null });

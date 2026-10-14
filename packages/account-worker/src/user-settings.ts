@@ -19,7 +19,9 @@ import {
   type UserSettingsUpdate,
 } from '@gitspace/protocol';
 import { subscriptionIdentity, subscriptionActive } from './account-access.js';
-import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
+import { DurableChangeLog } from './durable-stream.js';
+import type { StreamEvent } from '@gitspace/protocol-sync';
+import { notifyBrowsers } from './live-notices.js';
 import { notifyMachines } from './machine-notices.js';
 
 const EMPTY_SHA256 = 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' as const;
@@ -74,9 +76,10 @@ interface SettingsChangedEvent { type: 'settings.changed'; userRevision: number;
 
 export class UserSettingsDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
+  private historyChecked = false;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new DurableChangeLog(ctx.storage);
+    this.changes = new DurableChangeLog(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS user_settings (
@@ -293,20 +296,24 @@ export class UserSettingsDO extends DurableObject<Env> {
     const git = identity ? { generation: identity.generation, publicKey: identity.publicKey, fingerprint: identity.fingerprint, updatedAt: identity.updatedAt, updatedBy: identity.updatedBy } : null;
     return { user: this.get('uninitialized'), runtime: this.getRuntime(), git, inferenceRevision: this.inferenceRevision() };
   }
-  watch(after: number | null): DurableStreamSubscription {
-    // Older releases stored entire OMP documents in their outbox. A repaired current
-    // document must not make credential-bearing historical snapshots replayable.
-    this.snapshot();
-    const rows = this.ctx.storage.sql.exec<{ cursor: number; value_json: string }>("SELECT cursor, value_json FROM app_changes WHERE resource = 'settings' ORDER BY cursor").toArray();
-    let unsafeCursor: number | undefined;
-    for (const row of rows) {
-      try {
-        const value = JSON.parse(row.value_json) as SettingsSnapshot;
-        parseRuntimeSettings(JSON.parse(value.runtime.content || '{}'));
-      } catch { unsafeCursor = row.cursor; }
+  /** `settings.events`: the settings snapshot after `after`, bounded. */
+  events(after: number | null): StreamEvent<SettingsSnapshot>[] {
+    if (!this.historyChecked) {
+      // Older releases stored entire OMP documents in their outbox. A repaired current
+      // document must not make credential-bearing historical snapshots replayable.
+      this.snapshot();
+      const rows = this.ctx.storage.sql.exec<{ cursor: number; value_json: string }>("SELECT cursor, value_json FROM app_changes WHERE resource = 'settings' ORDER BY cursor").toArray();
+      let unsafeCursor: number | undefined;
+      for (const row of rows) {
+        try {
+          const value = JSON.parse(row.value_json) as SettingsSnapshot;
+          parseRuntimeSettings(JSON.parse(value.runtime.content || '{}'));
+        } catch { unsafeCursor = row.cursor; }
+      }
+      if (unsafeCursor !== undefined) this.ctx.storage.sql.exec("DELETE FROM app_changes WHERE resource = 'settings' AND cursor <= ?", unsafeCursor);
+      this.historyChecked = true;
     }
-    if (unsafeCursor !== undefined) this.ctx.storage.sql.exec("DELETE FROM app_changes WHERE resource = 'settings' AND cursor <= ?", unsafeCursor);
-    return this.changes.watch('settings', after, () => this.snapshot());
+    return this.changes.replay('settings', after, () => this.snapshot(), false);
   }
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected WebSocket', { status: 426 });

@@ -6,7 +6,8 @@ import { accountDirectoryEventSchema, type AccountDirectorySnapshot } from '@git
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { http, HttpResponse } from 'msw';
 import { UserProjectIndexDO, ProjectAuthorityDO } from '../src/project-authority.js';
-import { DirectoryOutbox, type DirectoryPublication, type DirectorySource } from '../src/account-directory.js';
+import type { FleetCatalogDO } from '../src/fleet-catalog.js';
+import { DIRECTORY_OUTBOX_MAX_ATTEMPTS, DirectoryOutbox, type DirectoryPublication, type DirectorySource } from '../src/account-directory.js';
 import { DurableChangeLog } from '../src/durable-stream.js';
 import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { network } from './network.js';
@@ -94,6 +95,36 @@ describe('account directory projection', () => {
       expect(await state.storage.getAlarm()).toBeNull();
     });
     expect((await receiver.directorySnapshot()).projectRevisions[project.id]).toBe(1);
+  });
+
+  it('parks a publication the directory keeps refusing until a new enqueue resumes delivery', async () => {
+    const sender = env.USER_PROJECTS.getByName('outbox-refused-sender');
+    await runInDurableObject(sender, async (_instance, state) => {
+      // The directory rejects a workspace claimed for a different project, on every attempt.
+      const refused: DirectorySource = { ...source, workspaces: [{ ...workspace, projectId: 'another-project' }] };
+      const outbox = new DirectoryOutbox(state, env);
+      state.storage.transactionSync(() => outbox.enqueue(refused));
+      for (let attempt = 1; attempt < DIRECTORY_OUTBOX_MAX_ATTEMPTS; attempt++) {
+        await outbox.flush();
+        expect(await state.storage.getAlarm()).toBeLessThanOrEqual(Date.now() + 3_600_000);
+      }
+      await outbox.flush();
+      expect(await state.storage.getAlarm()).toBeNull();
+      state.storage.transactionSync(() => outbox.enqueue(refused));
+      await outbox.flush();
+      expect(await state.storage.getAlarm()).not.toBeNull();
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it('releases a due outbox wake that has nothing left to deliver instead of re-arming it', async () => {
+    await runInDurableObject(env.FLEET_CATALOG.getByName('outbox-idle-fleet'), async (instance: FleetCatalogDO, state) => {
+      // A directory wake left due after its publication was already delivered by a request-time flush.
+      state.storage.sql.exec("INSERT INTO fleet_alarms(owner,timestamp) VALUES('directory',?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp", Date.now() - 1_000);
+      await instance.alarm();
+      expect(state.storage.sql.exec("SELECT owner FROM fleet_alarms WHERE owner='directory'").toArray()).toEqual([]);
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
   });
 
   it('recovers a source commit that lost publication before the directory accepted it', async () => {

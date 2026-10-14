@@ -23,9 +23,11 @@ import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepos
 import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { LifecycleMutationSchema, environmentFailure, type LifecycleActor, type EnvironmentFailure, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
+import { liveClientMessageSchema, liveKeyId, liveNoticeSchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice, type LiveNoticeMessage } from '@gitspace/protocol/live-notice';
+import { notifyBrowsers } from './live-notices.js';
 import { AccountDirectoryProjection, DirectoryOutbox, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
-import { streamCursorSchema } from '@gitspace/protocol-sync';
+import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
 import { activeAccount, accountAccessResponse, accountStatus } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import type { CredentialVaultDO } from './application.js';
@@ -40,14 +42,34 @@ import { notifyLifecycleHolders } from './machine-notices.js';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 
+/** A `project.events` change: which record to refetch, never its state. */
+export interface ProjectChange { entity: string; entityId: string | null; eventOffset: number }
+
 /** The admitted device and generation; any change to that grant ends the socket. */
-interface DirectorySocketAttachment {
-  version: 2;
-  userId: string;
-  deviceId: string;
-  generation: number;
-  cursor: number | null;
-  initial: boolean;
+const directorySocketAttachmentSchema = z.object({
+  version: z.number(),
+  userId: z.string(),
+  deviceId: z.string(),
+  generation: z.number(),
+  cursor: z.number().nullable(),
+  initial: z.boolean(),
+  /** Hashes of the live keys this tab watches (`liveKeyHash`). */
+  live: z.array(z.number()).default([]),
+});
+type DirectorySocketAttachment = z.infer<typeof directorySocketAttachmentSchema>;
+
+function directoryAttachment(socket: WebSocket): DirectorySocketAttachment | null {
+  const parsed = directorySocketAttachmentSchema.safeParse(socket.deserializeAttachment());
+  return parsed.success ? parsed.data : null;
+}
+
+/** FNV-1a of a live key. A socket attachment holds 2 KiB: 128 hashes fit where 128 keys would not. A collision costs
+ * one needless refetch. */
+function liveKeyHash(key: LiveKey): number {
+  const id = liveKeyId(key);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < id.length; index++) hash = Math.imul(hash ^ id.charCodeAt(index), 0x01000193) >>> 0;
+  return hash;
 }
 
 interface ProjectIndexRow extends Record<string, SqlStorageValue> {
@@ -318,7 +340,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   private readonly socketDeliveries = new WeakMap<WebSocket, Promise<void>>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new DurableChangeLog(ctx.storage);
+    this.changes = new DurableChangeLog(ctx.storage, (notices) => { this.liveNotices(notices); });
     this.directory = new AccountDirectoryProjection(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
@@ -336,6 +358,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
           workspace_id TEXT PRIMARY KEY,
           project_id TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS workspace_projects_project ON workspace_projects(project_id);
         CREATE TABLE IF NOT EXISTS deleted_projects(project_id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS environment_values(name TEXT PRIMARY KEY,value TEXT NOT NULL);
       `);
@@ -347,8 +370,30 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     });
   }
 
-  watch(after: number | null): DurableStreamSubscription {
-    return this.changes.watch('projects', after, () => this.list());
+  /** `project.directoryEvents`: the project list after `after`, bounded. */
+  events(after: number | null): StreamEvent<CloudProjectSummary[]>[] {
+    return this.changes.replay('projects', after, () => this.list(), false);
+  }
+
+  /** The live object: forwards each notice to the tabs watching its key (sockets admitted as user-scoped devices with
+   * `rpc.read`). A notice carries no state; the tab refetches through an authorized query. Returns, per notice, how
+   * many sockets got it. */
+  liveNotices(input: readonly LiveNotice[]): number[] {
+    const notices = z.array(liveNoticeSchema).parse(input);
+    const watchers = this.ctx.getWebSockets().flatMap((socket) => {
+      const attachment = socket.readyState === WebSocket.OPEN ? directoryAttachment(socket) : null;
+      return attachment && attachment.live.length > 0 ? [{ socket, live: new Set(attachment.live) }] : [];
+    });
+    return notices.map((notice) => {
+      const hash = liveKeyHash(notice);
+      const message = JSON.stringify({ type: 'notice', ...notice } satisfies LiveNoticeMessage);
+      let delivered = 0;
+      for (const watcher of watchers) {
+        if (!watcher.live.has(hash)) continue;
+        try { watcher.socket.send(message); delivered++; } catch { /* A closing socket's tab refetches every key when it reconnects. */ }
+      }
+      return delivered;
+    });
   }
   private commit<T>(mutate: () => T): T {
     if (this.committing) return mutate();
@@ -380,7 +425,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
             else {
               const current = this.list().find((candidate) => candidate.id === project.id);
               if (!current || project.revision > current.revision) this.put(project);
-              this.ctx.storage.sql.exec('DELETE FROM workspace_projects WHERE project_id=?', project.id);
+              this.ctx.storage.sql.exec('DELETE FROM workspace_projects WHERE project_id=? AND workspace_id NOT IN (SELECT value FROM json_each(?))', project.id, JSON.stringify(publication.workspaces.map((workspace) => workspace.id)));
               for (const workspace of publication.workspaces) {
                 if (workspace.projectId !== project.id) throw new Error('Directory workspace project mismatch');
                 this.putWorkspaceLocation(workspace.id, project.id);
@@ -454,15 +499,26 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
     const { device } = authorized.value;
-    server.serializeAttachment({ version: 2, userId: this.env.ACCOUNT_ID, deviceId: device.deviceId, generation: device.generation, cursor: after === null ? null : Number(after), initial: true } satisfies DirectorySocketAttachment);
+    server.serializeAttachment({ version: 2, userId: this.env.ACCOUNT_ID, deviceId: device.deviceId, generation: device.generation, cursor: after === null ? null : Number(after), initial: true, live: [] } satisfies DirectorySocketAttachment);
     await this.deliverDirectory(server);
     return new Response(null, { status: 101, webSocket: client, headers: { 'sec-websocket-protocol': offered.protocol } });
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    // Client messages are only wake/replay requests; identity and cursor are server-owned.
-    if (message !== 'ping') { socket.close(1003, 'Unsupported directory message'); return; }
-    await this.deliverDirectory(socket);
+    // Client messages are wake/replay requests and live subscriptions; identity and cursor are server-owned.
+    if (message === 'ping') { await this.deliverDirectory(socket); return; }
+    let decoded: unknown = null;
+    try { if (typeof message === 'string') decoded = JSON.parse(message); } catch { /* Rejected below. */ }
+    const request = liveClientMessageSchema.safeParse(decoded);
+    const attachment = directoryAttachment(socket);
+    if (!request.success || !attachment) { socket.close(1003, 'Unsupported directory message'); return; }
+    const live = new Set(attachment.live);
+    for (const key of request.data.keys) {
+      if (request.data.type === 'subscribe') live.add(liveKeyHash(key));
+      else live.delete(liveKeyHash(key));
+    }
+    if (live.size > MAX_LIVE_SUBSCRIPTIONS) { socket.close(1008, 'Too many live subscriptions'); return; }
+    socket.serializeAttachment({ ...attachment, live: [...live] });
   }
 
   webSocketClose(socket: WebSocket): void { socket.close(); }
@@ -480,7 +536,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const head = this.changes.head('account-directory');
     const pending = this.ctx.getWebSockets().some((socket) => {
       if (socket.readyState !== WebSocket.OPEN) return false;
-      const attachment = socket.deserializeAttachment() as DirectorySocketAttachment | null;
+      const attachment = directoryAttachment(socket);
       return attachment?.initial || attachment?.cursor !== head;
     });
     if (pending) await this.ctx.storage.setAlarm(Date.now() + 1_000);
@@ -491,7 +547,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const previous = this.socketDeliveries.get(socket) ?? Promise.resolve();
     const delivery = previous.then(async () => {
       try {
-        const attachment = socket.deserializeAttachment() as DirectorySocketAttachment | null;
+        const attachment = directoryAttachment(socket);
         if (!attachment || attachment.userId !== this.env.ACCOUNT_ID) { socket.close(4401, 'RPC_DEVICE_UNKNOWN'); return; }
         // Sockets admitted before device grants were cached reconnect with a current proof.
         if (attachment.version !== 2) { socket.close(1012, 'Directory authorization changed'); return; }
@@ -510,9 +566,9 @@ export class UserProjectIndexDO extends DurableObject<Env> {
         const events = this.changes.replay('account-directory', attachment.cursor, () => this.directory.snapshot(this.list()), attachment.initial);
         for (const event of events) {
           socket.send(JSON.stringify(event));
-          attachment.cursor = event.cursor;
-          attachment.initial = false;
-          socket.serializeAttachment(attachment);
+          // Read again: live subscriptions may have changed while device authority loaded.
+          const current = directoryAttachment(socket);
+          if (current) socket.serializeAttachment({ ...current, cursor: event.cursor, initial: false });
         }
       } catch {
         try { socket.close(1013, 'Directory authority unavailable'); } catch { /* Already closed. */ }
@@ -624,7 +680,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     }
     this.ctx.storage.sql.exec(
       `INSERT INTO workspace_projects VALUES(?,?)
-       ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id`,
+       ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id WHERE project_id IS NOT excluded.project_id`,
       workspaceId,
       projectId,
     );
@@ -664,9 +720,10 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   private readonly lfs: GitLfsRetention;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new DurableChangeLog(ctx.storage);
+    const notify = (notices: LiveNotice[]) => { ctx.waitUntil(notifyBrowsers(env, notices)); };
+    this.changes = new DurableChangeLog(ctx.storage, notify);
     this.directoryOutbox = new DirectoryOutbox(ctx, env);
-    this.environment = new ProjectEnvironmentStore(ctx.storage);
+    this.environment = new ProjectEnvironmentStore(ctx.storage, notify);
     this.lfs = new GitLfsRetention(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.environment.initialize();
@@ -911,10 +968,16 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     }
   }
 
-  watch(after: number | null): DurableStreamSubscription {
-    const resource = `project:${this.requireProject().id}`;
-    return this.changes.watch(resource, after, () => ({ entity: 'snapshot', entityId: null, eventOffset: this.latestEventOffset() }));
+  /** `project.events`: invalidations of this project's records after `after`, bounded. */
+  events(after: number | null): StreamEvent<ProjectChange>[] {
+    return this.changes.replay(`project:${this.requireProject().id}`, after, () => ({ entity: 'snapshot', entityId: null, eventOffset: this.latestEventOffset() }), false);
   }
+  /** `environment.events`: the workspace's lifecycle state after `after`, bounded. */
+  environmentEvents(spaceId: string, after: number | null): StreamEvent<LifecycleState>[] {
+    this.requireLifecycleWorkspace(spaceId);
+    return this.changes.replay(`environment:${spaceId}`, after, () => this.getLifecycleState(spaceId), false);
+  }
+  /** Machines follow their environment runs over `project.environment.watch`; browsers read `environmentEvents`. */
   watchEnvironment(spaceId: string, after: number | null): DurableStreamSubscription {
     this.requireLifecycleWorkspace(spaceId);
     return this.changes.watch(`environment:${spaceId}`, after, () => this.getLifecycleState(spaceId));

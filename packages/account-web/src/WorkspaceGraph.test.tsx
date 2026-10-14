@@ -50,7 +50,7 @@ describe('layoutWorkspaces', () => {
   });
 
   it('retains directory-only nodes without inventing relations or phase and keeps other-project references separate', () => {
-    const unknown: WorkspaceGraphItem = { id: 'unknown', projectId: alpha.projectId, projectName: alpha.projectName, name: 'unknown', branch: 'offline', closedAt: null, phase: null };
+    const unknown: WorkspaceGraphItem = { id: 'unknown', projectId: alpha.projectId, projectName: alpha.projectName, name: 'unknown', branch: 'offline', closedAt: null, holder: { kind: 'unknown' }, phase: null };
     const foreign = workspace({ id: 'foreign', projectId: 'another-project', ...relations(['unknown']) });
     const positions = layoutWorkspaces([unknown, foreign]);
     expect([...positions.keys()].sort()).toEqual(['foreign', 'unknown']);

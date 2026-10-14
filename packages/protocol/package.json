@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./account-rpc": "./src/account-rpc.ts",
     "./account-directory": "./src/account-directory.ts",
+    "./live-notice": "./src/live-notice.ts",
     "./cloud-image": "./src/cloud-image.ts",
     "./credential-vault": "./src/credential-vault.ts",
     "./inference": "./src/inference.ts",

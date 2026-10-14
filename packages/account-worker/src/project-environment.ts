@@ -5,6 +5,7 @@ import {
   type LifecycleRunRecord, type LifecycleState,
 } from '@gitspace/protocol-environment';
 import { DurableChangeLog } from './durable-stream.js';
+import type { LiveNotice } from '@gitspace/protocol/live-notice';
 import { z } from 'zod';
 
 const StoredEnvironmentSchema = LifecycleStateSchema.extend({ browserOriginsAvailable: z.boolean().default(true) });
@@ -21,8 +22,8 @@ const LOG_PAGE_SIZE = 4;
 /** Owns persistence only; the same transition executes in browser, Bun and Worker. */
 export class ProjectEnvironmentStore {
   private readonly changes: DurableChangeLog;
-  constructor(private readonly storage: Pick<DurableObjectStorage, 'sql' | 'transactionSync'>) {
-    this.changes = new DurableChangeLog(storage);
+  constructor(private readonly storage: Pick<DurableObjectStorage, 'sql' | 'transactionSync'>, notify?: (notices: LiveNotice[]) => void) {
+    this.changes = new DurableChangeLog(storage, notify);
   }
 
   initialize(): void {

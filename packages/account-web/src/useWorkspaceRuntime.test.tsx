@@ -2,41 +2,27 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { RuntimeSnapshotSchema, type RuntimeSnapshot, type RuntimeWatchEvent } from '@gitspace/protocol-runtime';
+import { liveNotices } from './live-notices.js';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
 
-const rpc = vi.hoisted(() => ({ snapshot: vi.fn(), watch: vi.fn() }));
+const rpc = vi.hoisted(() => ({ watch: vi.fn() }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: rpc } }));
-type Reply = { status: 'ok'; value: RuntimeWatchEvent } | { status: 'error'; error: Error };
-interface ControlledStream {
-  iterable: AsyncIterable<Reply>;
-  emit(value: Reply): void;
-  end(): void;
-  fail(): void;
-  close: () => Promise<IteratorResult<Reply>>;
-}
-function controlledStream(): ControlledStream {
-  let pending = Promise.withResolvers<IteratorResult<Reply>>();
-  const close = vi.fn(async () => ({ done: true as const, value: undefined }));
-  return {
-    iterable: { [Symbol.asyncIterator]() { return { next: () => pending.promise, return: close }; } },
-    emit(value: Reply) {
-      const previous = pending;
-      pending = Promise.withResolvers<IteratorResult<Reply>>();
-      previous.resolve({ done: false, value });
-    },
-    end() { pending.resolve({ done: true, value: undefined }); },
-    fail() { pending.reject(new Error('transport lost')); },
-    close,
-  };
-}
+type Reply = { status: 'ok'; value: RuntimeWatchEvent[] } | { status: 'error'; error: Error };
+interface Read { workspaceId: string; after: number | null; signal: AbortSignal; reply(value: Reply): Promise<void>; fail(): Promise<void> }
 function snapshot(cursor = 0, workspaceId = 'workspace'): RuntimeSnapshot {
   return RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId, cursor, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
 }
+function delta(cursor: number): RuntimeWatchEvent {
+  return { type: 'delta', baseCursor: cursor - 1, cursor, ops: [['s', ['cursor'], cursor]] };
+}
+const ok = (...value: RuntimeWatchEvent[]): Reply => ({ status: 'ok', value });
+const notice = (version: number, workspaceId = 'workspace') => act(async () => { liveNotices.receive({ ...workspaceLiveKey(workspaceId, 'runtime', 'project'), version }); });
 let root: Root;
 let container: HTMLDivElement;
 let state: { snapshot: RuntimeSnapshot | null; connected: boolean; error: string | null; retry(): void };
-let streams: ControlledStream[];
+let reads: Read[];
 function View({ workspaceId = 'workspace' }: { workspaceId?: string }) {
   state = useWorkspaceRuntime('project', workspaceId);
   return <div>{state.snapshot?.workspaceId}:{state.snapshot?.cursor}</div>;
@@ -45,12 +31,15 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.useFakeTimers();
   vi.spyOn(Math, 'random').mockReturnValue(1);
-  rpc.snapshot.mockReset().mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({ status: 'ok', value: snapshot(0, workspaceId) }));
-  streams = [];
-  rpc.watch.mockReset().mockImplementation(() => {
-    const stream = controlledStream();
-    streams.push(stream);
-    return stream.iterable;
+  reads = [];
+  rpc.watch.mockReset().mockImplementation((input: { workspaceId: string; after: number | null }, options: { signal: AbortSignal }) => {
+    const pending = Promise.withResolvers<Reply>();
+    reads.push({
+      workspaceId: input.workspaceId, after: input.after, signal: options.signal,
+      reply: value => act(async () => { pending.resolve(value); }),
+      fail: () => act(async () => { pending.reject(new Error('transport lost')); }),
+    });
+    return pending.promise;
   });
   container = document.createElement('div');
   document.body.append(container);
@@ -64,142 +53,140 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it.each(['eof', 'throw', 'error'] as const)('automatically resumes the last applied cursor after %s', async (failure) => {
+it('reads a snapshot, then refetches once per notice after the current cursor', async () => {
   await act(() => root.render(<View />));
-  await act(async () => streams[0]!.emit({ status: 'ok', value: { type: 'delta', baseCursor: 0, cursor: 1, ops: [['s', ['cursor'], 1]] } }));
-  await act(async () => {
-    if (failure === 'eof') streams[0]!.end();
-    else if (failure === 'throw') streams[0]!.fail();
-    else streams[0]!.emit({ status: 'error', error: new Error('watch failed') });
-  });
-  expect(state.connected).toBe(false);
+  expect(reads.map(read => read.after)).toEqual([null]);
+  await reads[0]!.reply(ok({ type: 'snapshot', snapshot: snapshot(0) }));
+  expect(state.snapshot?.cursor).toBe(0);
+  expect(state.connected).toBe(true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(reads).toHaveLength(1);
+  await notice(1);
+  expect(reads.map(read => read.after)).toEqual([null, 0]);
+  await reads[1]!.reply(ok(delta(1)));
   expect(state.snapshot?.cursor).toBe(1);
+  expect(reads).toHaveLength(2);
+});
+
+it('a burst of notices during a fetch causes exactly one more fetch', async () => {
+  await act(() => root.render(<View />));
+  await reads[0]!.reply(ok({ type: 'snapshot', snapshot: snapshot(0) }));
+  await notice(1);
+  await notice(2);
+  await notice(3);
+  expect(reads).toHaveLength(2);
+  await reads[1]!.reply(ok(delta(1)));
+  expect(reads.map(read => read.after)).toEqual([null, 0, 1]);
+  await reads[2]!.reply(ok(delta(2), delta(3)));
+  expect(state.snapshot?.cursor).toBe(3);
+  expect(reads).toHaveLength(3);
+});
+
+it('applies only the deltas newer than its cursor, in order', async () => {
+  await act(() => root.render(<View />));
+  await reads[0]!.reply(ok({ type: 'snapshot', snapshot: snapshot(2) }));
+  await notice(4);
+  expect(reads[1]!.after).toBe(2);
+  const applied = state.snapshot;
+  await reads[1]!.reply(ok(delta(1), delta(2), delta(3), delta(4)));
+  expect(state.snapshot?.cursor).toBe(4);
+  expect(state.snapshot).not.toBe(applied);
+  expect(reads).toHaveLength(2);
+});
+
+it('replaces the replica from a reset and reads after its cursor', async () => {
+  await act(() => root.render(<View />));
+  await reads[0]!.reply(ok({ type: 'snapshot', snapshot: snapshot(10) }));
+  await notice(11);
+  await reads[1]!.reply(ok({ type: 'reset', reason: 'cursor-expired', snapshot: snapshot(3) }));
+  expect(state.snapshot?.cursor).toBe(3);
+  await notice(4);
+  expect(reads[2]!.after).toBe(3);
+});
+
+it('refetches a snapshot when a delta does not chain onto the replica', async () => {
+  await act(() => root.render(<View />));
+  await reads[0]!.reply(ok({ type: 'snapshot', snapshot: snapshot(0) }));
+  await notice(5);
+  await reads[1]!.reply(ok({ type: 'delta', baseCursor: 4, cursor: 5, ops: [['s', ['cursor'], 5]] }));
+  expect(state.snapshot?.cursor).toBe(0);
+  expect(reads.map(read => read.after)).toEqual([null, 0, null]);
+  await reads[2]!.reply(ok({ type: 'snapshot', snapshot: snapshot(7) }));
+  expect(state.snapshot?.cursor).toBe(7);
+  expect(state.connected).toBe(true);
+});
+
+it.each(['throw', 'error'] as const)('retries a failed read after a bounded delay from the last applied cursor (%s)', async (failure) => {
+  await act(() => root.render(<View />));
+  await reads[0]!.reply(ok({ type: 'snapshot', snapshot: snapshot(1) }));
+  await notice(2);
+  if (failure === 'throw') await reads[1]!.fail();
+  else await reads[1]!.reply({ status: 'error', error: new Error('watch failed') });
+  expect(state.connected).toBe(false);
+  expect(state.error).not.toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(249); });
-  expect(streams).toHaveLength(1);
+  expect(reads).toHaveLength(2);
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(rpc.watch.mock.calls[1]![0]).toEqual({ projectId: 'project', workspaceId: 'workspace', after: 1 });
-  expect(rpc.snapshot).toHaveBeenCalledTimes(1);
-  await act(async () => streams[1]!.emit({ status: 'ok', value: { type: 'delta', baseCursor: 1, cursor: 2, ops: [['s', ['cursor'], 2]] } }));
+  expect(reads[2]!.after).toBe(1);
+  await reads[2]!.reply(ok(delta(2)));
   expect(state.snapshot?.cursor).toBe(2);
   expect(state.connected).toBe(true);
   expect(state.error).toBeNull();
 });
 
-it('backs off repeated disconnects with a bounded delay', async () => {
+it('backs off repeated failures with a bounded delay', async () => {
   await act(() => root.render(<View />));
   for (const delay of [250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000]) {
-    const count = streams.length;
-    await act(async () => streams[count - 1]!.end());
+    const count = reads.length;
+    await reads[count - 1]!.fail();
     await act(async () => { await vi.advanceTimersByTimeAsync(delay - 1); });
-    expect(streams).toHaveLength(count);
+    expect(reads).toHaveLength(count);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(streams).toHaveLength(count + 1);
+    expect(reads).toHaveLength(count + 1);
   }
 });
 
-it('draws jitter per attempt, including at the cap, and resets after progress', async () => {
-  const random = vi.mocked(Math.random).mockReturnValueOnce(0).mockReturnValueOnce(0.5).mockReturnValue(1);
-  await act(() => root.render(<View />));
-  for (const delay of [125, 375, 1_000, 2_000, 4_000, 8_000, 10_000]) {
-    const count = streams.length;
-    await act(async () => streams[count - 1]!.end());
-    await act(async () => { await vi.advanceTimersByTimeAsync(delay - 1); });
-    expect(streams).toHaveLength(count);
-    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(streams).toHaveLength(count + 1);
-  }
-  random.mockReturnValueOnce(0);
-  await act(async () => streams.at(-1)!.end());
-  await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
-  expect(streams).toHaveLength(8);
-  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(streams).toHaveLength(9);
-  await act(async () => streams.at(-1)!.emit({ status: 'ok', value: { type: 'snapshot', snapshot: snapshot(1) } }));
-  random.mockReturnValueOnce(0);
-  await act(async () => streams.at(-1)!.end());
-  await act(async () => { await vi.advanceTimersByTimeAsync(124); });
-  expect(streams).toHaveLength(9);
-  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(streams).toHaveLength(10);
-  expect(rpc.watch.mock.calls.at(-1)![0].after).toBe(1);
-});
-
-it('retries an unavailable initial snapshot before subscribing', async () => {
-  rpc.snapshot.mockRejectedValueOnce(new Error('snapshot unavailable'));
-  await act(() => root.render(<View />));
-  expect(streams).toHaveLength(0);
-  await act(async () => { await vi.advanceTimersByTimeAsync(250); });
-  expect(state.snapshot?.cursor).toBe(0);
-  expect(streams).toHaveLength(1);
-});
-
-it('recovers a gap with a fresh snapshot even when recovery initially fails', async () => {
-  await act(() => root.render(<View />));
-  rpc.snapshot.mockRejectedValueOnce(new Error('snapshot unavailable')).mockResolvedValueOnce({ status: 'ok', value: snapshot(7) });
-  await act(async () => streams[0]!.emit({ status: 'ok', value: { type: 'delta', baseCursor: 4, cursor: 5, ops: [['s', ['cursor'], 5]] } }));
-  expect(streams[0]!.close).toHaveBeenCalledTimes(1);
-  expect(state.snapshot?.cursor).toBe(0);
-  await act(async () => { await vi.advanceTimersByTimeAsync(250); });
-  expect(state.snapshot?.cursor).toBe(7);
-  expect(rpc.watch.mock.calls[1]![0].after).toBe(7);
-});
-
-it('accepts server cursor resets and resumes from their replacement snapshot', async () => {
-  rpc.snapshot.mockResolvedValueOnce({ status: 'ok', value: snapshot(10) });
-  await act(() => root.render(<View />));
-  await act(async () => streams[0]!.emit({ status: 'ok', value: { type: 'reset', reason: 'cursor-ahead', snapshot: snapshot(3) } }));
-  await act(async () => streams[0]!.end());
-  await act(async () => { await vi.advanceTimersByTimeAsync(250); });
-  expect(state.snapshot?.cursor).toBe(3);
-  expect(rpc.watch.mock.calls[1]![0].after).toBe(3);
-});
-
-it('aborts the old workspace and ignores late stream callbacks', async () => {
-  await act(() => root.render(<View />));
-  const oldSignal = rpc.watch.mock.calls[0]![1].signal as AbortSignal;
-  await act(() => root.render(<View workspaceId="other" />));
-  expect(oldSignal.aborted).toBe(true);
-  await act(async () => streams[0]!.emit({ status: 'ok', value: { type: 'snapshot', snapshot: snapshot(99) } }));
-  expect(state.snapshot?.workspaceId).toBe('other');
-  expect(state.snapshot?.cursor).toBe(0);
-  expect(streams).toHaveLength(2);
-});
-
-it('ignores a late snapshot from an abandoned workspace', async () => {
-  const old = Promise.withResolvers<{ status: 'ok'; value: RuntimeSnapshot }>();
-  rpc.snapshot.mockReturnValueOnce(old.promise);
+it('stops listening on workspace switch and unmount and ignores late replies', async () => {
   await act(() => root.render(<View />));
   await act(() => root.render(<View workspaceId="other" />));
-  await act(async () => old.resolve({ status: 'ok', value: snapshot(99) }));
+  expect(reads[0]!.signal.aborted).toBe(true);
+  await reads[0]!.reply(ok({ type: 'snapshot', snapshot: snapshot(99) }));
+  await reads[1]!.reply(ok({ type: 'snapshot', snapshot: snapshot(0, 'other') }));
   expect(state.snapshot?.workspaceId).toBe('other');
-  expect(streams).toHaveLength(1);
+  expect(state.snapshot?.cursor).toBe(0);
+  await notice(1);
+  expect(reads).toHaveLength(2);
+  await notice(1, 'other');
+  expect(reads.map(read => read.workspaceId)).toEqual(['workspace', 'other', 'other']);
+  await reads[2]!.reply(ok(delta(1)));
+  await act(() => root.render(null));
+  await notice(2, 'other');
+  expect(reads).toHaveLength(3);
 });
 
-it('cancels pending reconnects on workspace switch and unmount', async () => {
+it('cancels a pending retry on workspace switch and unmount', async () => {
   await act(() => root.render(<View />));
-  await act(async () => streams[0]!.end());
+  await reads[0]!.fail();
   await act(() => root.render(<View workspaceId="other" />));
   await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-  expect(streams).toHaveLength(2);
-  await act(async () => streams[1]!.end());
+  expect(reads.map(read => read.workspaceId)).toEqual(['workspace', 'other']);
+  await reads[1]!.fail();
   await act(() => root.render(null));
   expect(vi.getTimerCount()).toBe(0);
   await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-  expect(streams).toHaveLength(2);
+  expect(reads).toHaveLength(2);
 });
 
-it('online and manual retries cancel previous subscriptions and scheduled retries', async () => {
+it('online and manual retries abort the previous read and refetch after the current cursor', async () => {
   await act(() => root.render(<View />));
-  const firstSignal = rpc.watch.mock.calls[0]![1].signal as AbortSignal;
+  await reads[0]!.reply(ok({ type: 'snapshot', snapshot: snapshot(4) }));
+  await notice(5);
   await act(async () => { window.dispatchEvent(new Event('online')); });
-  expect(firstSignal.aborted).toBe(true);
-  await act(async () => streams[1]!.end());
+  expect(reads[1]!.signal.aborted).toBe(true);
+  expect(reads[2]!.after).toBe(4);
+  await reads[2]!.fail();
   await act(() => state.retry());
-  expect(streams).toHaveLength(3);
+  expect(reads[3]!.after).toBe(4);
   await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-  expect(streams).toHaveLength(3);
-  await act(() => root.render(null));
-  expect((rpc.watch.mock.calls[2]![1].signal as AbortSignal).aborted).toBe(true);
-  await act(async () => streams[2]!.fail());
-  expect(vi.getTimerCount()).toBe(0);
+  expect(reads).toHaveLength(4);
 });

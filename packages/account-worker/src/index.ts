@@ -22,6 +22,9 @@ import {
   SIGNED_REQUEST_EXPIRED_CODE,
   SIGNED_REQUEST_EXPIRED_MESSAGE,
   SIGNED_REQUEST_MAX_AGE_MS,
+  machineAnnouncesResource,
+  machineLiveResource,
+  type LiveUnwatchedMessage,
   type RelayNotice,
   type RelayNoticeMessage,
   type SocketAttachment,
@@ -45,6 +48,7 @@ import { fetchInternalService, isHostedServiceHostname } from './service-access.
 import { ServiceSessions, ServiceSessionSchema, type ServiceSession, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, browserRelayArchive } from './browser-relay.js';
 import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+import { notifyBrowsers } from './live-notices.js';
 export {
   AccountStateDO, CredentialVaultDO, FleetCatalogDO, HostedRouteRegistryDO,
   ProjectAuthorityDO, ProjectCronsDO, ProjectSecretsDO, SpaceAuthorityDO,
@@ -541,6 +545,20 @@ export class UserRelayDO extends DurableObject<Env> {
       socket.close(1008, 'Only machines may answer tunnel requests');
       return;
     }
+    if (message.type === 'live.notice') {
+      const { workspace, resource, cursor } = message;
+      // A machine announces only its own terminals and its own start; anything else is dropped.
+      if (!machineAnnouncesResource(attachment.id, workspace, resource)) {
+        console.warn(JSON.stringify({ event: 'live_notice_rejected', machineId: attachment.id, workspace, resource }));
+        return;
+      }
+      // Never awaited: the machine does not wait on the tabs. Unwatched, the machine may stop observing the resource.
+      this.ctx.waitUntil(notifyBrowsers(this.env, [{ project: null, workspace, resource, version: cursor }]).then(([delivered]) => {
+        if (delivered !== 0 || socket.readyState !== 1) return;
+        try { socket.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'live.unwatched', workspace, resource, cursor } satisfies LiveUnwatchedMessage)); } catch { /* A closing machine's observers are announced again on reconnect. */ }
+      }));
+      return;
+    }
     const service = this.tunnelService(message.requestId, attachment);
     if (service) return this.machineServiceMessage(service.socket, service.service, message);
     const pending = this.pendingTunnels.get(message.requestId);
@@ -680,6 +698,8 @@ export class UserRelayDO extends DurableObject<Env> {
     if (machineGrant) {
       await this.scheduleMachineCheck();
       this.ctx.waitUntil(this.reconcilePresence(parsed.data.id, true));
+      // The machine's terminal observers may be gone: tabs showing its terminals read them again, which restarts them.
+      this.ctx.waitUntil(notifyBrowsers(this.env, [{ project: null, workspace: null, resource: machineLiveResource(parsed.data.id), version: Date.now() }]));
     }
     return new Response(null, { status: 101, webSocket: client });
   }

@@ -38,7 +38,7 @@ interface Fixture {
   revisions: Record<string, number>;
   publish: () => void;
 }
-const working = { primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } };
+const working = { primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
 const waiting = { ...working, primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 } };
 
 function fixture(): Fixture {

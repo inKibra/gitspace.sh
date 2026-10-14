@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
+import { gitspaceContract, terminalStreamResource } from '@gitspace/protocol/rpc-contract';
 import { createBrowserClient, fetchTransport } from 'result-rpc/client';
 import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
@@ -31,11 +31,15 @@ test('runs a shell in an explicit ready cache without a held workspace and fence
   const root = mkdtempSync(join(tmpdir(), 'gitspace-rpc-cache-'));
   const checkout = join(root, 'workspace');
   mkdirSync(checkout);
+  let announced = Promise.withResolvers<void>();
   const terminals = new WorkspaceHubTerminalCoordinator('machine-a', {
     path: spaceId => spaceId === 'workspace-a' ? checkout : null,
     projectId: spaceId => spaceId === 'workspace-a' ? 'project-a' : null,
     list: () => ['workspace-a'],
     use: async () => {}, changed: async () => {},
+  }, undefined, () => {
+    announced.resolve();
+    announced = Promise.withResolvers<void>();
   });
   const rpc = createGitSpaceRpcHandler({ machineId: 'machine-a', terminals });
   const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
@@ -49,13 +53,17 @@ test('runs a shell in an explicit ready cache without a held workspace and fence
     const target = { spaceId: 'workspace-a', machineId: 'machine-a', name: created.value.name };
     expect(await client.terminals.send({ ...target, machineId: 'machine-b', data: 'exit\r' })).toMatchObject({ status: 'error' });
     expect(await client.terminals.send({ ...target, data: "printf '%s%s\\n' rpc- cache-output\r" })).toMatchObject({ status: 'ok' });
-    const events = client.terminals.events({ ...target, after: null });
-    try {
-      for await (const result of events) {
-        if (result.status === 'error') throw result.error;
-        if (result.value.type !== 'resync' && result.value.value.output?.data.includes('rpc-cache-output')) break;
-      }
-    } finally { events.close(); }
+    // Each read returns the events after its cursor; a notice prompts the next read.
+    const follow = async (after: number | null): Promise<void> => {
+      const noticed = announced.promise;
+      const read = await client.terminals.events({ ...target, after });
+      if (read.status === 'error') throw read.error;
+      if (read.value.some((event) => event.type !== 'resync' && event.value.output?.data.includes('rpc-cache-output'))) return;
+      await noticed;
+      return follow(read.value.at(-1)?.cursor ?? after);
+    };
+    await follow(null);
+    terminals.unwatched(terminalStreamResource('workspace-a', 'machine-a', target.name), Number.MAX_SAFE_INTEGER);
     const output = await client.terminals.read({ ...target, cursor: null });
     expect(output).toMatchObject({ status: 'ok', value: { data: expect.stringContaining('rpc-cache-output') } });
     expect(await client.terminals.stop({ ...target, machineId: 'machine-b' })).toMatchObject({ status: 'error' });
@@ -71,9 +79,8 @@ test('runs a shell in an explicit ready cache without a held workspace and fence
     await Promise.race([started.promise, execution.then(() => { throw new Error('Lifecycle exited before terminal attachment'); })]);
     const protectedTarget = { ...target, name: 'life-protected-rpc' };
     try {
-      const stream = client.terminals.live(protectedTarget);
-      try { expect(await stream[Symbol.asyncIterator]().next()).toMatchObject({ value: { status: 'error' } }); }
-      finally { stream.close(); }
+      // Only a browser session reads protected output; the machine never attaches for anyone else.
+      expect(await client.terminals.live({ ...protectedTarget, after: null })).toMatchObject({ status: 'error' });
       expect(await client.terminals.send({ ...protectedTarget, data: 'unauthorized\\n' })).toMatchObject({ status: 'error' });
       expect(await client.terminals.stop(protectedTarget)).toMatchObject({ status: 'error' });
       const metadata = await client.terminals.read({ ...protectedTarget, cursor: null });

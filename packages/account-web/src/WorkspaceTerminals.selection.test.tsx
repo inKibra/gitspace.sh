@@ -1,9 +1,11 @@
 // @vitest-environment happy-dom
+import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { terminalStreamResource } from '@gitspace/protocol/rpc-contract';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SynchronizationContext } from './SynchronizationProvider.js';
+import { liveNotices } from './live-notices.js';
 import { SynchronizationOwner } from './synchronization.js';
 import { WorkspaceTerminals, type WorkspaceTerminalOutput, type WorkspaceTerminalView, type WorkspaceTerminalsProps } from './WorkspaceTerminals.js';
 
@@ -34,12 +36,14 @@ vi.mock('ghostty-web', () => ({
 
 interface Snapshot { terminals: readonly WorkspaceTerminalView[]; output: WorkspaceTerminalOutput | null }
 
-/** The hub's terminal journal: one head per stream resource, cursors allocated from one account-wide sequence. */
+/** The hub's terminal journal: one head per resource, cursors allocated from one account-wide sequence. Each change of a
+ * resource a tab has read is announced as a live notice, as the machine announces each commit it observes. */
 function hub(initial: WorkspaceTerminalView[]) {
   let terminals = initial;
   let sequence = 0;
   const heads = new Map<string, { cursor: number; body: string; value: Snapshot }>();
-  const changes = new EventTarget();
+  const observed = new Set<string | null>();
+  const reads: Array<{ name: string | null; after: number | null; cursor: number }> = [];
   const head = (name: string | null) => {
     const resource = terminalStreamResource('space', 'machine', name);
     const value: Snapshot = { terminals, output: name !== null && terminals.some((terminal) => terminal.name === name) ? { spaceId: 'space', name, state: 'running', cursor: 1, data: `${name} output` } : null };
@@ -50,36 +54,36 @@ function hub(initial: WorkspaceTerminalView[]) {
     heads.set(resource, next);
     return { resource, ...next };
   };
-  const events: WorkspaceTerminalsProps['events'] = async function* (_machineId, name, _after, signal) {
-    let delivered: number | null = null;
-    while (!signal.aborted) {
-      const changed = Promise.withResolvers<void>();
-      changes.addEventListener('change', () => changed.resolve(), { once: true });
-      signal.addEventListener('abort', () => changed.resolve(), { once: true });
+  const events: WorkspaceTerminalsProps['events'] = async (_machineId, name, after) => {
+    observed.add(name);
+    const current = head(name);
+    reads.push({ name, after, cursor: current.cursor });
+    return { status: 'ok', value: after === current.cursor ? [] : [{ type: 'snapshot', resource: current.resource, cursor: current.cursor, revision: current.cursor, previous: null, value: current.value }] };
+  };
+  const changed = () => {
+    for (const name of observed) {
+      const prior = heads.get(terminalStreamResource('space', 'machine', name))?.cursor;
       const current = head(name);
-      if (current.cursor !== delivered) {
-        delivered = current.cursor;
-        yield { status: 'ok', value: { type: 'snapshot', resource: current.resource, cursor: current.cursor, revision: current.cursor, previous: null, value: current.value } };
-      }
-      await changed.promise;
+      if (current.cursor !== prior) liveNotices.receive({ ...workspaceLiveKey('space', current.resource), version: current.cursor });
     }
   };
   return {
     events,
+    reads,
     update(next: WorkspaceTerminalView[]) {
       terminals = next;
-      changes.dispatchEvent(new Event('change'));
+      changed();
     },
     create: async () => {
       const created = shell(`shell-${sequence}`, 10 + sequence);
       terminals = [created, ...terminals];
-      changes.dispatchEvent(new Event('change'));
+      changed();
       return created;
     },
     // persist:false shells leave the supervisor inventory once stopped.
     stop: vi.fn(async (_machineId: string, name: string) => {
       terminals = terminals.filter((terminal) => terminal.name !== name);
-      changes.dispatchEvent(new Event('change'));
+      changed();
     }),
   };
 }
@@ -120,7 +124,7 @@ async function settle() {
 }
 
 async function render(terminals: Pick<WorkspaceTerminalsProps, 'events' | 'create' | 'stop'>) {
-  const props: WorkspaceTerminalsProps = { spaceId: 'space', machines: [{ id: 'machine', label: 'Machine' }], machineId: 'machine', onSelectMachine: vi.fn(), events: terminals.events, live: async function* () {}, create: terminals.create, send: vi.fn(async () => undefined), stop: terminals.stop };
+  const props: WorkspaceTerminalsProps = { spaceId: 'space', machines: [{ id: 'machine', label: 'Machine' }], machineId: 'machine', onSelectMachine: vi.fn(), events: terminals.events, live: async () => ({ status: 'ok', value: { cursor: 0, events: [] } }), create: terminals.create, send: vi.fn(async () => undefined), stop: terminals.stop };
   await act(() => root.render(<SynchronizationContext.Provider value={owner}><WorkspaceTerminals {...props} /></SynchronizationContext.Provider>));
   await settle();
 }
@@ -212,4 +216,17 @@ it('selects a created terminal at once and keeps it when the machine list catche
   expect(selectedTab()).toBe(created);
   expect(tabs().map((tab) => tab.name)).toEqual([created, 'shell-main', 'life-move-7']);
   expect(output()).toBe(`${created} output`);
+});
+
+it('reads the machine inventory again only on its notice, after the cursor it holds', async () => {
+  const terminals = hub([shell('shell-main', 1)]);
+  await render(terminals);
+  const inventory = () => terminals.reads.filter((read) => read.name === null);
+  expect(inventory().map((read) => read.after)).toEqual([null]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(inventory()).toHaveLength(1);
+  terminals.update([shell('agent-test', 2, 'agent'), shell('shell-main', 1)]);
+  await settle();
+  expect(inventory().map((read) => read.after)).toEqual([null, inventory()[0]!.cursor]);
+  expect(tabs().map((tab) => tab.name)).toEqual(['agent-test', 'shell-main']);
 });

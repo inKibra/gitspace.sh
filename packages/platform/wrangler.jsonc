@@ -87,7 +87,11 @@
     "CF_ACCOUNT_ID": "2ed07d2f77ecb2aa43ca99a9c970597c",
     "PLATFORM_URL": "https://platform.gssh.dev",
     "PLATFORM_SERVICE_NAME": "gitspace-platform-rebuild-20260913",
-    "PUBLIC_ASSETS_SERVICE": "gitspace-auth-rebuild-20260913"
+    "PUBLIC_ASSETS_SERVICE": "gitspace-auth-rebuild-20260913",
+    "USAGE_REPORT_SCRIPTS": "gitspace-rebuild-20260913-tenant-bradleat"
+  },
+  "triggers": {
+    "crons": ["15 0 * * *"]
   },
   "observability": {
     "enabled": true,

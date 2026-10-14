@@ -82,7 +82,7 @@ describe('device grants', () => {
 
   it('derives capabilities from procedure kind with agent and fleet exceptions', () => {
     expect(requiredCapability('space.view', 'query')).toBe('rpc.read');
-    expect(requiredCapability('runtime.watch', 'subscription')).toBe('rpc.read');
+    expect(requiredCapability('runtime.watch', 'query')).toBe('rpc.read');
     expect(requiredCapability('workspace.create', 'mutation')).toBe('rpc.write');
     expect(requiredCapability('runtime.submit', 'mutation')).toBe('session.prompt');
     expect(requiredCapability('runtime.cancel', 'mutation')).toBe('session.prompt');

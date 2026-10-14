@@ -17,6 +17,7 @@ import {
   type MachineReplacementHost,
 } from '@gitspace/deployment';
 import { z } from 'zod';
+import { machineLiveNoticeSchema, type MachineLiveNotice } from '@gitspace/protocol';
 import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
 import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { atomicJson, readJson, requestMachineUpdate } from './machine-update.js';
@@ -56,6 +57,8 @@ export interface ReplacementEnvironmentOptions {
   controlToken: string;
   bootstrap?: ReplacementEnvironmentBootstrap;
   environment?: Record<string, string>;
+  /** Sends the running generation's live notices over the host's relay connection. */
+  liveNotices?: (notices: readonly MachineLiveNotice[]) => void;
 }
 
 /** One replacement: candidate artifacts plus the release identity they came from (null for a local file-save build). */
@@ -87,6 +90,9 @@ export const environmentChannelRequestSchema = z.object({
   target: z.enum(['machine', 'frontend']),
 });
 export type EnvironmentChannelRequest = z.infer<typeof environmentChannelRequestSchema>;
+
+/** `POST /__environment/live-notices`: terminal resources the running generation observes changed. */
+export const environmentLiveNoticesRequestSchema = z.object({ notices: z.array(machineLiveNoticeSchema).min(1).max(256) });
 
 export const environmentLaunchResponseSchema = z.object({
   status: z.enum(['applied', 'pending', 'failed']),
@@ -510,12 +516,18 @@ class FrontendHost implements FrontendReplacementHost {
         if (url.pathname === '/__environment/health') {
           return Response.json({ status: this.generationPath ? 'ok' : 'starting', generationPath: this.generationPath });
         }
-        if (url.pathname === '/__environment/status' || url.pathname === '/__environment/launch' || url.pathname === '/__environment/channel') {
+        if (url.pathname === '/__environment/status' || url.pathname === '/__environment/launch' || url.pathname === '/__environment/channel' || url.pathname === '/__environment/live-notices') {
           if (request.headers.get('authorization') !== `Bearer ${options.controlToken}`) {
             return Response.json({ error: 'unauthorized' }, { status: 401 });
           }
           if (url.pathname === '/__environment/status') return Response.json(control.status());
           if (request.method !== 'POST') return Response.json({ error: 'method not allowed' }, { status: 405 });
+          if (url.pathname === '/__environment/live-notices') {
+            const parsed = environmentLiveNoticesRequestSchema.safeParse(await request.json());
+            if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 });
+            options.liveNotices?.(parsed.data.notices);
+            return Response.json({ received: true });
+          }
           if (url.pathname === '/__environment/channel') {
             const parsed = environmentChannelRequestSchema.safeParse(await request.json());
             if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 });

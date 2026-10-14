@@ -1,4 +1,4 @@
-import { RuntimeSnapshotSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RUNTIME_WATCH_EVENT_LIMIT, RuntimeSnapshotSchema, RuntimeWatchEventSchema, type RuntimeSnapshot, type RuntimeWatchEvent } from '@gitspace/protocol-runtime';
 
 /** Snapshot and delta payloads may exceed SQLite's per-value limit. */
 export function createReplicaStore(storage: DurableObjectStorage) {
@@ -69,10 +69,20 @@ export function createReplicaStore(storage: DurableObjectStorage) {
   };
 }
 
-/** The last published runtime snapshot, read without opening the runtime; null before its first publication. */
-export function readRuntimeSnapshot(storage: DurableObjectStorage): RuntimeSnapshot | null {
-  if (!storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_replica'").toArray().length) return null;
-  const parts = storage.sql.exec<{ payload: string }>("SELECT payload FROM runtime_replica WHERE kind='snapshot' ORDER BY part").toArray();
-  // A snapshot from an older release that no longer parses reads as absent until the runtime rebuilds it.
-  return parts.length ? RuntimeSnapshotSchema.safeParse(JSON.parse(parts.map(row => row.payload).join(''))).data ?? null : null;
+/** The runtime events newer than `after`: the snapshot for a first read, nothing when current, the retained delta chain
+ * from `after` to `current`, or a reset carrying `current` when `after` is ahead, expired, gapped or too far behind. */
+export function replicaEvents(current: RuntimeSnapshot, after: number | null, retained: (after: number) => { event: string }[] | null): RuntimeWatchEvent[] {
+  if (after === null) return [{ type: 'snapshot', snapshot: current }];
+  if (after === current.cursor) return [];
+  if (after > current.cursor) return [{ type: 'reset', reason: 'cursor-ahead', snapshot: current }];
+  const rows = retained(after);
+  const deltas: RuntimeWatchEvent[] = [];
+  let cursor = after;
+  for (const row of rows !== null && rows.length <= RUNTIME_WATCH_EVENT_LIMIT ? rows : []) {
+    const event = RuntimeWatchEventSchema.parse(JSON.parse(row.event));
+    if (event.type !== 'delta' || event.baseCursor !== cursor) break;
+    deltas.push(event);
+    cursor = event.cursor;
+  }
+  return cursor === current.cursor ? deltas : [{ type: 'reset', reason: 'cursor-expired', snapshot: current }];
 }

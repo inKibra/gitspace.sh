@@ -453,12 +453,12 @@ export class UserMcpConnectionsDO extends DurableObject<Env> {
 
   listAudit(principalId: string, after: string | null, limit = 200): McpAuditEvent[] {
     const boundedLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    // Every created_at is a non-empty timestamp, so '' pages from the start while keeping one seekable range.
     return this.ctx.storage.sql.exec<AuditRow>(
-      `SELECT * FROM mcp_audit_events WHERE principal_id=? AND (? IS NULL OR created_at>?)
+      `SELECT * FROM mcp_audit_events WHERE principal_id=? AND created_at>?
        ORDER BY created_at,event_id LIMIT ?`,
       principalId,
-      after,
-      after,
+      after ?? '',
       boundedLimit,
     ).toArray().map(auditEvent);
   }

@@ -9,6 +9,7 @@ import {
   RELAY_PING_MESSAGE,
   RELAY_PONG_MESSAGE,
   RELAY_PROTOCOL_VERSION,
+  type MachineLiveNotice,
   type RelayNotice,
 } from '@gitspace/protocol';
 import { credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
@@ -301,5 +302,26 @@ describe('MachineRelayConnector notices', () => {
     expect(batches).toHaveLength(3);
     expect(batches[2]).toEqual([{ topics: [...RELAY_NOTICE_TOPICS] }]);
     deliveries[2]!.resolve();
+  });
+});
+
+describe('MachineRelayConnector live notices', () => {
+  it('sends live notices only on an open connection and hands unwatched reports to the machine', () => {
+    const unwatched: MachineLiveNotice[] = [];
+    connector = new MachineRelayConnector({
+      relayUrl: 'https://relay.test', machineId: 'machine-test', machineGrant, signingPrivateKey: privateKey, localOrigin: 'http://127.0.0.1:8081',
+      onUnwatched: (notice) => { unwatched.push(notice); },
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const notice = { workspace: 'workspace-a', resource: 'terminals:workspace-a:machine-test:', cursor: 7 };
+    connector.start();
+    const socket = Socket.instances[0]!;
+    // Before the connection opens the notice is dropped: the relay announces each connection, and tabs read again.
+    connector.liveNotice(notice);
+    socket.open();
+    connector.liveNotice(notice);
+    expect(socket.sent.filter((sent) => sent !== RELAY_PING_MESSAGE).map((sent) => JSON.parse(sent))).toEqual([{ version: RELAY_PROTOCOL_VERSION, type: 'live.notice', ...notice }]);
+    socket.receive({ version: RELAY_PROTOCOL_VERSION, type: 'live.unwatched', ...notice });
+    expect(unwatched).toEqual([notice]);
   });
 });

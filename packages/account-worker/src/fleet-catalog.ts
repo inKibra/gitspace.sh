@@ -1,5 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
+import { DurableChangeLog } from './durable-stream.js';
+import type { StreamEvent } from '@gitspace/protocol-sync';
+import { notifyBrowsers } from './live-notices.js';
 import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { machineDiscardConfirmationSchema, machineDiscardScopeSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
@@ -74,7 +76,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
   private workspaceIndexing: Promise<void> | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new DurableChangeLog(ctx.storage);
+    this.changes = new DurableChangeLog(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS fleet_alarms(owner TEXT PRIMARY KEY, timestamp INTEGER NOT NULL)');
     this.directoryOutbox = new DirectoryOutbox(ctx, env, { set: timestamp => this.scheduleAlarm('directory', timestamp), clear: () => this.scheduleAlarm('directory', null) });
     ctx.blockConcurrencyWhile(async () => {
@@ -110,7 +112,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
       // No attempt survives an isolate restart; the provisioning lease retries interrupted work shortly.
       const retryAt = Date.now() + SANDBOX_PROVISIONING_RETRY_DELAY_MS;
       for (const row of this.ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM sandbox_enrollments').toArray()) {
-        this.ctx.storage.sql.exec("INSERT INTO sandbox_provisioning(machine_id,attempts,deadline_at,phase) VALUES(?,1,?,'provisioning') ON CONFLICT(machine_id) DO UPDATE SET deadline_at=MIN(deadline_at,excluded.deadline_at)", row.machine_id, retryAt);
+        this.ctx.storage.sql.exec("INSERT INTO sandbox_provisioning(machine_id,attempts,deadline_at,phase) VALUES(?,1,?,'provisioning') ON CONFLICT(machine_id) DO UPDATE SET deadline_at=excluded.deadline_at WHERE excluded.deadline_at<deadline_at", row.machine_id, retryAt);
         const machine = this.getMachine(row.machine_id);
         if (machine?.state === 'provisioning') this.saveMachine({
           ...machine, state: 'error', operationId: null, lifecycleRevision: machine.lifecycleRevision + 1,
@@ -147,10 +149,12 @@ export class FleetCatalogDO extends DurableObject<Env> {
 
   private scheduleAlarm(owner: 'directory' | 'provisioning' | 'images' | 'idle' | 'operations', timestamp: number | null): Promise<void> {
     if (timestamp === null) this.ctx.storage.sql.exec('DELETE FROM fleet_alarms WHERE owner=?', owner);
-    else this.ctx.storage.sql.exec('INSERT INTO fleet_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp', owner, timestamp);
+    else this.ctx.storage.sql.exec('INSERT INTO fleet_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp WHERE timestamp IS NOT excluded.timestamp', owner, timestamp);
     const operation = this.alarmLine.then(async () => {
-      const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>('SELECT MIN(timestamp) AS timestamp FROM fleet_alarms').toArray()[0]?.timestamp;
-      if (next === null || next === undefined) await this.ctx.storage.deleteAlarm();
+      const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>('SELECT MIN(timestamp) AS timestamp FROM fleet_alarms').toArray()[0]?.timestamp ?? null;
+      // Inside the alarm handler the fired alarm reads as null, so a still-pending owner re-arms.
+      if (next === await this.ctx.storage.getAlarm()) return;
+      if (next === null) await this.ctx.storage.deleteAlarm();
       else await this.ctx.storage.setAlarm(next);
     });
     this.alarmLine = operation.catch(() => {});
@@ -246,8 +250,9 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ state_json: string }>('SELECT state_json FROM cloud_images ORDER BY machine_id').toArray().map(row => cloudImageStateSchema.parse(JSON.parse(row.state_json)));
   }
 
-  watchCloudImages(after: number | null): DurableStreamSubscription {
-    return this.changes.watch('cloud-images', after, () => this.listCloudImages());
+  /** `machine.image.events`: image states after `after`, bounded. */
+  cloudImageEvents(after: number | null): StreamEvent<CloudImageState[]>[] {
+    return this.changes.replay('cloud-images', after, () => this.listCloudImages(), false);
   }
 
   saveCloudImage(input: CloudImageState): CloudImageState {
@@ -774,8 +779,9 @@ export class FleetCatalogDO extends DurableObject<Env> {
         return normalizeMachine(value);
       });
   }
-  watch(after: number | null): DurableStreamSubscription {
-    return this.changes.watch('machines', after, () => this.listMachines());
+  /** `machine.events`: fleet machines after `after`, bounded. */
+  machineEvents(after: number | null): StreamEvent<FleetMachineDefinition[]>[] {
+    return this.changes.replay('machines', after, () => this.listMachines(), false);
   }
 }
 

@@ -269,6 +269,7 @@ export class ProjectCronsDO extends DurableObject<Env> {
           created_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS project_cron_runs_history ON project_cron_runs(cron_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS project_cron_runs_state ON project_cron_runs(state, scheduled_for);
         CREATE TABLE IF NOT EXISTS project_cron_requests (
           request_id TEXT PRIMARY KEY,
           cron_id TEXT NOT NULL,
@@ -513,22 +514,26 @@ export class ProjectCronsDO extends DurableObject<Env> {
           await runtime.runtimeCronSubmit({ ...identity, requestId, text: row.prompt, readScopes: parseStringArray(row.read_scopes_json), writeScopes: parseStringArray(row.write_scopes_json) });
           receipt = await runtime.runtimeRequestStatus({ ...identity, requestId });
         }
-        if (receipt.startedAt !== undefined) this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=COALESCE(started_at,?) WHERE id=? AND claim_token=?', receipt.startedAt, row.id, row.claim_token);
-        if (receipt.state === 'pending' || receipt.state === 'queued') this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=NULL WHERE id=? AND claim_token=?', row.id, row.claim_token);
+        if (receipt.startedAt !== undefined) this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=? WHERE id=? AND claim_token=? AND started_at IS NULL', receipt.startedAt, row.id, row.claim_token);
+        if (receipt.state === 'pending' || receipt.state === 'queued') this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=NULL WHERE id=? AND claim_token=? AND started_at IS NOT NULL', row.id, row.claim_token);
         if (receipt.state === 'succeeded' || receipt.state === 'failed' || receipt.state === 'interrupted' || receipt.state === 'withdrawn') {
           const message = row.message?.startsWith('Overdue:') ? `${row.message}\n${receipt.message ?? `Completed: ${receipt.state}`}` : receipt.message;
           await this.completeRun({ projectId, runId: row.id, claimToken: row.claim_token, state: receipt.state === 'succeeded' ? 'succeeded' : receipt.state === 'withdrawn' ? 'blocked' : 'failed', message });
         } else if (receipt.state === 'running') {
           const startedAt = receipt.startedAt ?? row.started_at ?? Date.now();
-          this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=COALESCE(started_at,?) WHERE id=? AND claim_token=?', startedAt, row.id, row.claim_token);
+          this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=? WHERE id=? AND claim_token=? AND started_at IS NULL', startedAt, row.id, row.claim_token);
           if (Date.now() - startedAt >= PROJECT_CRON_OVERDUE_MS) {
-            this.ctx.storage.sql.exec("UPDATE project_cron_runs SET message='Overdue: running for more than one hour; workspace agent continues' WHERE id=? AND claim_token=?", row.id, row.claim_token);
+            const overdue = 'Overdue: running for more than one hour; workspace agent continues';
+            this.ctx.storage.sql.exec('UPDATE project_cron_runs SET message=? WHERE id=? AND claim_token=? AND message IS NOT ?', overdue, row.id, row.claim_token, overdue);
             await runtime.runtimeCronNotifyOverdue({ ...identity, requestId });
           }
         }
       } catch (error) {
         // Transport failure is not terminal proof. Preserve a recorded overdue notice.
-        if (!this.requiredRun(projectId, row.id).message?.startsWith('Overdue:')) this.ctx.storage.sql.exec('UPDATE project_cron_runs SET message=? WHERE id=? AND claim_token=?', `Cloud dispatch unresolved: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4000), row.id, row.claim_token);
+        if (!this.requiredRun(projectId, row.id).message?.startsWith('Overdue:')) {
+          const message = `Cloud dispatch unresolved: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4000);
+          this.ctx.storage.sql.exec('UPDATE project_cron_runs SET message=? WHERE id=? AND claim_token=? AND message IS NOT ?', message, row.id, row.claim_token, message);
+        }
       }
     }));
     await this.refreshAlarm(Date.now());
@@ -547,7 +552,7 @@ export class ProjectCronsDO extends DurableObject<Env> {
     const runtime = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.workspaceId}`);
     let receipt = await runtime.runtimeCronWithdraw({ ...identity, requestId: `cron:${row.id}` });
     if (receipt.state === 'running') {
-      this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=COALESCE(started_at,?) WHERE id=? AND claim_token=?', receipt.startedAt ?? Date.now(), row.id, row.claim_token);
+      this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=? WHERE id=? AND claim_token=? AND started_at IS NULL', receipt.startedAt ?? Date.now(), row.id, row.claim_token);
       if (input.confirmStopWorkspaceAgent !== true) throw new ProjectCronValidationError('confirmStopWorkspaceAgent', 'This cron is running. Explicit confirmation is required to Stop workspace agent and its child agents.');
       receipt = await runtime.runtimeCronCancel({ ...identity, requestId: `cron:${row.id}`, confirmStopWorkspaceAgent: true });
     }

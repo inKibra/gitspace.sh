@@ -182,7 +182,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
         spaceId, machines: terminalMachines, machineId: terminalChoice?.spaceId === spaceId ? terminalChoice.machineId : null,
         onSelectMachine: selectTerminalMachine,
         events: (machineId, name, after, signal) => rpcClient.terminals.events({ spaceId, machineId, name, after }, { signal }),
-        live: (machineId, name, signal) => rpcClient.terminals.live({ spaceId, machineId, name }, { signal }),
+        live: (machineId, name, after, signal) => rpcClient.terminals.live({ spaceId, machineId, name, after }, { signal }),
         create: async machineId => { const result = await rpcClient.terminals.create({ spaceId, machineId }); if (result.status === 'error') throw result.error; return result.value; },
         send: async (machineId, name, data) => { const result = await rpcClient.terminals.send({ spaceId, machineId, name, data }); if (result.status === 'error') throw result.error; },
         stop: async (machineId, name) => { const result = await rpcClient.terminals.stop({ spaceId, machineId, name }); if (result.status === 'error') throw result.error; },

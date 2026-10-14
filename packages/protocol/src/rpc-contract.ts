@@ -2,20 +2,21 @@ import { defineErrors, rpc, type InputOf } from 'result-rpc'; import { wire } fr
 import {
   RuntimeSnapshotInputSchema, RuntimeSnapshotSchema, RuntimeSubmitInputSchema,
   RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema,
-  RuntimeWatchEventSchema, RuntimeActionResultSchema,
+  RuntimeWatchEventsSchema, RuntimeActionResultSchema,
 } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema, AgentDefinitionDiagnosticSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeQaActionInputSchema, RuntimeQaActionResultSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyResultSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeDraftSaveInputSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema, RuntimeServiceResultSchema } from '@gitspace/protocol-runtime/services';
+import { RuntimeSyncRequestInputSchema, RuntimeSyncRequestResultSchema } from '@gitspace/protocol-runtime/tool-arguments';
 import { EnvironmentFailureSchema, LifecycleRunSchema, LifecycleStateSchema, type EnvironmentFailure, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
 import {
   AgentHealthStateSchema, AgentLifecycleStateSchema, AgentSessionRenderStateSchema, SessionActivitySchema,
   type AgentHealthState, type AgentLifecycleState, type AgentSessionRenderState, type SessionActivity,
 } from '@gitspace/protocol-agent';
 import { AgentFailureSchema, AgentIncidentChangeSchema, type AgentFailure, type AgentIncidentChange } from '@gitspace/protocol-agent';
-import { SpaceAuthorityRecordSchema, WorkspaceFailureSchema, WorkspaceRelationsSchema, WorkspacePhaseSchema, type SpaceAuthorityRecord, type WorkspaceFailure, type WorkspaceRelations, type WorkspacePhase } from '@gitspace/protocol-workspace';
+import { SpaceAuthorityRecordSchema, WorkspaceFailureSchema, WorkspaceRelationsSchema, WorkspacePhaseSchema, WorkspaceStatusSummarySchema, type SpaceAuthorityRecord, type WorkspaceFailure, type WorkspaceRelations, type WorkspacePhase, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { z } from 'zod';
 import { CloudImageChoiceCodec, CloudImageSelectionCodec, CloudImageStateCodec } from './cloud-image.js';
 import { StreamCursorCodec, streamCodec } from './stream-codec.js';
@@ -194,19 +195,7 @@ export const ProjectOperationViewCodec = wire.object({
 });
 
 
-const statusCountsCodec = wire.object({
-  green: wire.number,
-  blue: wire.number,
-  orange: wire.number,
-  red: wire.number,
-});
-export const WorkspaceStatusCodec = wire.object({
-  primaryColor: wire.enum(['dim', 'green', 'blue', 'orange', 'red']),
-  agents: statusCountsCodec,
-  services: wire.object({ green: wire.number, red: wire.number }),
-  terminals: wire.object({ green: wire.number, red: wire.number }),
-  compaction: wire.optional(wire.object({ detail: wire.optional(wire.string) })),
-});
+export const WorkspaceStatusCodec = wire.serializable((value): value is WorkspaceStatusSummary => WorkspaceStatusSummarySchema.safeParse(value).success, { id: 'gitspace/workspace-status/v2', jsonSchema: WorkspaceStatusSummarySchema });
 export const BaseSpaceViewCodec = wire.object({
   id: wire.string,
   projectId: wire.string,
@@ -576,10 +565,11 @@ export const runtimeBrowserTrustContract = gitspaceRpc.procedure()
   .input(wire.object({}))
   .output(wire.object({ accountId: wire.string, algorithm: wire.literal('Ed25519'), publicKey: wire.string }))
   .errors({ OperationFailed: rpcErrors.operationFailed }).query();
+/** The runtime events newer than `after`, bounded; a browser refetches when the live socket notices a `runtime` change. */
 export const runtimeWatchContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeWatchInputSchema, 'gitspace/runtime-watch/v1'))
-  .output(runtimeWire(RuntimeWatchEventSchema, 'gitspace/runtime-watch-event/v1'))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+  .output(runtimeWire(RuntimeWatchEventsSchema, 'gitspace/runtime-watch-events/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
 
 export const runtimeSessionContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeSessionInputSchema, 'gitspace/runtime-session-input/v1'))
@@ -588,6 +578,11 @@ export const runtimeSessionContract = gitspaceRpc.procedure()
 export const runtimeServicesContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeServiceInputSchema, 'gitspace/runtime-services-input/v1'))
   .output(runtimeWire(RuntimeServiceResultSchema, 'gitspace/runtime-services-result/v1'))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+/** A person's sync action on one machine (send now, list unsent changes) or one conflict choice. */
+export const runtimeSyncContract = gitspaceRpc.procedure()
+  .input(runtimeWire(RuntimeSyncRequestInputSchema, 'gitspace/runtime-sync-input/v1'))
+  .output(runtimeWire(RuntimeSyncRequestResultSchema, 'gitspace/runtime-sync-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const runtimeQaContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeQaActionInputSchema, 'gitspace/runtime-qa-input/v1'))
@@ -759,9 +754,10 @@ export const inferenceDeleteContract = gitspaceRpc.procedure()
 export const inferenceAssignContract = gitspaceRpc.procedure()
   .input(InferenceAssignInputCodec).output(InferenceStateCodec)
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed }).mutation();
+/** Inference state after `after`, bounded; read again on each `inference` live notice. */
 export const inferenceEventsContract = gitspaceRpc.procedure()
-  .input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(streamCodec(InferenceStateCodec))
-  .errors({ InferenceActivationPending: rpcErrors.inferenceActivationPending, OperationFailed: rpcErrors.operationFailed }).subscription();
+  .input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(wire.array(streamCodec(InferenceStateCodec)))
+  .errors({ InferenceActivationPending: rpcErrors.inferenceActivationPending, OperationFailed: rpcErrors.operationFailed }).query();
 
 export const updateMachineNotesContract = gitspaceRpc
   .procedure()
@@ -1084,7 +1080,8 @@ export const createSandboxMachineContract = gitspaceRpc
   .mutation();
 
 export const listCloudImagesContract = gitspaceRpc.procedure().input(wire.object({})).output(wire.array(CloudImageStateCodec)).errors({ OperationFailed: rpcErrors.operationFailed }).query();
-export const cloudImageEventsContract = gitspaceRpc.procedure().input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(streamCodec(wire.array(CloudImageStateCodec))).errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+/** Image states after `after`, bounded; read again on each `cloud-images` live notice. */
+export const cloudImageEventsContract = gitspaceRpc.procedure().input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(wire.array(streamCodec(wire.array(CloudImageStateCodec)))).errors({ OperationFailed: rpcErrors.operationFailed }).query();
 export const getCloudImageDefaultContract = gitspaceRpc.procedure().input(wire.object({})).output(CloudImageChoiceCodec).errors({ OperationFailed: rpcErrors.operationFailed }).query();
 export const setCloudImageDefaultContract = gitspaceRpc.procedure().input(wire.object({ selection: CloudImageSelectionCodec })).output(CloudImageChoiceCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setCloudImageContract = gitspaceRpc.procedure().input(wire.object({ machineId: wire.string, operationId: wire.string, selection: CloudImageSelectionCodec })).output(CloudImageStateCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
@@ -1099,18 +1096,20 @@ export const setRuntimeSettingContract = gitspaceRpc
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+/** Fleet machines after `after`, bounded; read again on each `machines` live notice. */
 export const machineLifecycleEventsContract = gitspaceRpc
   .procedure()
   .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
-  .output(streamCodec(wire.array(FleetMachineViewCodec)))
+  .output(wire.array(streamCodec(wire.array(FleetMachineViewCodec))))
   .errors({ OperationFailed: rpcErrors.operationFailed })
-  .subscription();
+  .query();
+/** Settings after `after`, bounded; read again on each `settings` live notice. */
 export const settingsEventsContract = gitspaceRpc
   .procedure()
   .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
-  .output(streamCodec(wire.object({ user: UserSettingsViewCodec, runtime: RuntimeConfigDocumentCodec, git: wire.nullable(GitIdentityViewCodec), inferenceRevision: wire.optional(wire.number) })))
+  .output(wire.array(streamCodec(wire.object({ user: UserSettingsViewCodec, runtime: RuntimeConfigDocumentCodec, git: wire.nullable(GitIdentityViewCodec), inferenceRevision: wire.optional(wire.number) }))))
   .errors({ OperationFailed: rpcErrors.operationFailed })
-  .subscription();
+  .query();
 
 // ── Providers ──
 export const ProviderAccountCodec = wire.object({
@@ -1187,12 +1186,13 @@ export const startProviderLoginContract = gitspaceRpc
   .output(wire.object({ flowId: wire.string }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+/** Sign-in events from index `after` on; read again on each `provider-login:<flowId>` live notice. */
 export const providerLoginEventsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ profileId: wire.string, flowId: wire.string }))
-  .output(ProviderLoginEventCodec)
+  .input(wire.object({ profileId: wire.string, flowId: wire.string, after: wire.integer({ min: 0 }) }))
+  .output(wire.object({ events: wire.array(ProviderLoginEventCodec), done: wire.boolean }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
-  .subscription();
+  .query();
 export const respondProviderLoginContract = gitspaceRpc
   .procedure()
   .input(wire.object({ profileId: wire.string, flowId: wire.string, promptId: wire.string, value: wire.string }))
@@ -1964,33 +1964,53 @@ export const deploymentRevertContract = gitspaceRpc
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+/** Invalidations of one project's records after `after`, bounded; read again on each `project` live notice. */
 export const projectEventsContract = gitspaceRpc.procedure()
   .input(wire.object({ projectId: wire.string, after: wire.nullable(StreamCursorCodec) }))
-  .output(streamCodec(wire.object({ entity: wire.string, entityId: wire.nullable(wire.string), eventOffset: StreamCursorCodec })))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+  .output(wire.array(streamCodec(wire.object({ entity: wire.string, entityId: wire.nullable(wire.string), eventOffset: StreamCursorCodec }))))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
+/** The project list after `after`, bounded; read again on each `projects` live notice. */
 export const projectDirectoryEventsContract = gitspaceRpc.procedure()
   .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
-  .output(streamCodec(wire.array(ProjectLifecycleViewCodec)))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+  .output(wire.array(streamCodec(wire.array(ProjectLifecycleViewCodec))))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
+/** A workspace's lifecycle state after `after`, bounded; read again on each `environment` live notice. */
 export const environmentEventsContract = gitspaceRpc.procedure()
   .input(wire.object({ spaceId: wire.string, after: wire.nullable(StreamCursorCodec) }))
-  .output(streamCodec(LifecycleStateCodec))
-  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed }).subscription();
+  .output(wire.array(streamCodec(LifecycleStateCodec)))
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed }).query();
+/** A workspace's authority record after `after`, bounded; read again on each `space` live notice. */
 export const spaceEventsContract = gitspaceRpc.procedure()
   .input(wire.object({ spaceId: wire.string, after: wire.nullable(StreamCursorCodec) }))
-  .output(streamCodec(wire.nullable(wire.serializable((value): value is SpaceAuthorityRecord => SpaceAuthorityRecordSchema.safeParse(value).success, { id: 'gitspace/workspace-authority/v1', jsonSchema: SpaceAuthorityRecordSchema }))))
-  .errors({ WorkspaceFailure: rpcErrors.workspaceFailure, OperationFailed: rpcErrors.operationFailed }).subscription();
+  .output(wire.array(streamCodec(wire.nullable(wire.serializable((value): value is SpaceAuthorityRecord => SpaceAuthorityRecordSchema.safeParse(value).success, { id: 'gitspace/workspace-authority/v1', jsonSchema: SpaceAuthorityRecordSchema })))))
+  .errors({ WorkspaceFailure: rpcErrors.workspaceFailure, OperationFailed: rpcErrors.operationFailed }).query();
 export const recordIncidentContract = gitspaceRpc.procedure()
   .input(wire.object({ projectId: wire.string, eventId: wire.string, change: wire.serializable((value): value is AgentIncidentChange => AgentIncidentChangeSchema.safeParse(value).success, { id: 'gitspace/agent-incident-change/v1', jsonSchema: AgentIncidentChangeSchema }) }))
   .output(wire.object({ eventId: wire.string }))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+/** After `after`, a bounded batch: null → [snapshot]; the head → []; else the retained changes, or [resync, snapshot]
+ * across a gap. The machine announces each change of an observed resource as a live notice; tabs then read again. */
 export const terminalEventsContract = gitspaceRpc.procedure()
   .input(wire.object({ ...terminalPlacementFields, name: wire.nullable(wire.string), after: wire.nullable(StreamCursorCodec) }))
-  .output(streamCodec(wire.object({ terminals: wire.array(WorkspaceTerminalViewCodec), output: wire.nullable(WorkspaceTerminalOutputCodec) })))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+  .output(wire.array(streamCodec(wire.object({ terminals: wire.array(WorkspaceTerminalViewCodec), output: wire.nullable(WorkspaceTerminalOutputCodec) }))))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
 /** Stream resource of `terminals.events`. It names the machine: each attached machine runs its own terminals. */
 export function terminalStreamResource(spaceId: string, machineId: string, name: string | null): string {
   return `terminals:${spaceId}:${machineId}:${name ?? ''}`;
+}
+/** Live resource of `terminals.live`: one protected terminal's output on the machine running it. */
+export function terminalLiveResource(machineId: string, name: string): string {
+  return `terminal-live:${machineId}:${name}`;
+}
+/** Account live resource announced whenever the machine's relay connection or runtime starts: its terminal observers
+ * may be gone, so tabs showing its terminals read them again (which restarts the observers). */
+export function machineLiveResource(machineId: string): string {
+  return `machine:${machineId}`;
+}
+/** A machine announces only its own resources: its terminals in a workspace, or (no workspace) its own start. */
+export function machineAnnouncesResource(machineId: string, workspace: string | null, resource: string): boolean {
+  if (workspace === null) return resource === machineLiveResource(machineId);
+  return resource.startsWith(terminalStreamResource(workspace, machineId, null)) || resource.startsWith(terminalLiveResource(machineId, ''));
 }
 /** Safe progress metadata surrounds live-only protected output; completion is distinct from transport loss. */
 export const ProtectedTerminalStepCodec = wire.object({
@@ -2005,10 +2025,16 @@ export const ProtectedTerminalEventCodec = wire.union([
   wire.object({ type: wire.literal('complete'), exitCode: wire.number }),
 ]);
 export type ProtectedTerminalEvent = InputOf<typeof ProtectedTerminalEventCodec>;
+/** One `terminals.live` read: protected events after the caller's cursor, oldest first, and the cursor to pass next. */
+export const ProtectedTerminalBatchCodec = wire.object({ cursor: StreamCursorCodec, events: wire.array(ProtectedTerminalEventCodec) });
+export type ProtectedTerminalBatch = InputOf<typeof ProtectedTerminalBatchCodec>;
+/** after=null attaches: the current `state` (and `complete` once ended) with the head cursor, never earlier output.
+ * After a cursor: the events newer than it, in order. The machine keeps only a bounded tail in memory; a cursor older
+ * than that tail receives the current `state` and the tail, and the output in between is gone. */
 export const terminalLiveContract = gitspaceRpc.procedure()
-  .input(wire.object({ ...terminalPlacementFields, name: wire.string }))
-  .output(ProtectedTerminalEventCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+  .input(wire.object({ ...terminalPlacementFields, name: wire.string, after: wire.nullable(StreamCursorCodec) }))
+  .output(ProtectedTerminalBatchCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
 
 export const gitspaceContract = gitspaceRpc.contract({
   runtime: {
@@ -2021,6 +2047,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     watch: runtimeWatchContract,
     session: runtimeSessionContract,
     services: runtimeServicesContract,
+    sync: runtimeSyncContract,
     qa: runtimeQaContract,
     attachment: { cache: { request: runtimeCacheAttachmentRequestContract }, detach: runtimeAttachmentDetachRequestContract },
   },

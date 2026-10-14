@@ -72,9 +72,9 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       const url = new URL(request.url);
       if (url.pathname === '/enable-definitions') { await this.ctx.storage.put('definitions-enabled', true); return Response.json({ enabled: true }); }
       if (url.pathname === '/draft') return Response.json(await runtime.saveDraft(WorkspaceDraftSaveSchema.parse(await request.json()), request.headers.get('x-fixture-device') ?? 'fixture-browser'));
-      if (url.pathname === '/watch-current') {
-        const snapshot = await runtime.snapshot();
-        return runtime.watch({ ...identity, after: snapshot.cursor });
+      if (url.pathname === '/events') {
+        const after = url.searchParams.get('after');
+        return Response.json(await runtime.events(after === null ? null : Number(after)));
       }
       if (url.pathname === '/session') {
         const body: unknown = await request.json();

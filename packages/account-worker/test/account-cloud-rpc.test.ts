@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encodeApiKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
+import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, DEVICE_SOCKET_PROTOCOL, encodeApiKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
+import { accountLiveKey, liveNoticeMessageSchema, workspaceLiveKey, type LiveKey, type LiveNotice } from '@gitspace/protocol/live-notice';
 import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
@@ -74,71 +75,42 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'previous-worker' } })));
     expect(await client.inference.list({})).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inference-activation-pending' } });
     expect(await fixture.vault.inferenceCutover()).toBe(false);
-    const controller = new AbortController();
-    const stream = client.inference.events({ after: null }, { signal: controller.signal })[Symbol.asyncIterator]();
-    try {
-      expect(await stream.next()).toMatchObject({ done: false, value: { status: 'error', error: { _tag: 'gitspace/inference-activation-pending' } } });
-    } finally {
-      controller.abort();
-      await stream.return?.();
-    }
+    expect(await client.inference.events({ after: null })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inference-activation-pending' } });
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
     expect(await client.inference.list({})).toMatchObject({ status: 'ok', value: { profiles: [{ id: 'default' }] } });
     expect(await fixture.vault.inferenceCutover()).toBe(true);
   });
 
-  it('fences an established environment stream before disclosing suspended account changes', async () => {
+  it('sends a watching tab one notice per committed change, and its read after the cursor returns only newer changes', async () => {
     const fixture = await account();
     const { spaceId, authority } = await inspectorWorkspace(fixture.userId);
     const client = inspectorClient(fixture);
-    const controller = new AbortController();
-    const stream = client.environment.events({ spaceId, after: null }, { signal: controller.signal })[Symbol.asyncIterator]();
+    const initial = await client.environment.events({ spaceId, after: null });
+    if (initial.status !== 'ok') throw initial.error;
+    expect(initial.value).toMatchObject([{ type: 'snapshot', resource: `environment:${spaceId}`, value: { policy: { automatic: false } } }]);
+    const cursor = initial.value[0]!.cursor;
+    const watching = await liveSocket(fixture);
+    const elsewhere = await liveSocket(fixture);
     try {
-      expect(await stream.next()).toMatchObject({ done: false, value: { status: 'ok' } });
-      network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'suspended' } })));
-      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
-      // The next refresh of the isolate's account state carries the suspension.
-      invalidateDeviceAuthority();
-      const pending = stream.next();
-      await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true });
-      expect(await pending).toMatchObject({ done: false, value: { status: 'error' } });
-    } finally {
-      controller.abort();
-      await stream.return?.();
-    }
-  });
-
-  it('streams committed environment changes and replays changes missed while disconnected', async () => {
-    const fixture = await account();
-    const { spaceId, authority } = await inspectorWorkspace(fixture.userId);
-    const client = inspectorClient(fixture);
-    const controller = new AbortController();
-    const stream = client.environment.events({ spaceId, after: null }, { signal: controller.signal })[Symbol.asyncIterator]();
-    let cursor: number;
-    try {
-      const initial = await stream.next();
-      expect(initial).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'snapshot', resource: `environment:${spaceId}`, value: { policy: { automatic: false } } } } });
-      const pending = stream.next();
+      await watching.subscribe(workspaceLiveKey(spaceId, 'environment'), accountLiveKey('cloud-images'));
+      await elsewhere.subscribe(workspaceLiveKey('another-space', 'environment'));
+      // Listed by `getWebSockets`: accepted for hibernation, so open tabs never pin the live object.
+      expect(await runInDurableObject(env.USER_PROJECTS.getByName(fixture.userId), (_instance, state) => state.getWebSockets().length)).toBeGreaterThanOrEqual(2);
       expect(await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true })).toMatchObject({ status: 'ok' });
-      const changed = await pending;
-      expect(changed).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'change', value: { policy: { automatic: true } } } } });
-      if (changed.done || changed.value.status === 'error') throw new Error('Expected a committed environment change');
-      cursor = changed.value.value.cursor;
+      const notice = await watching.next();
+      expect(notice).toEqual({ project: null, workspace: spaceId, resource: 'environment', version: expect.any(Number) });
+      // Each socket's next notice is this marker: no second notice for the change, none for a key a tab does not watch.
+      expect(await env.USER_PROJECTS.getByName(fixture.userId).liveNotices([
+        { ...accountLiveKey('cloud-images'), version: 1 }, { ...workspaceLiveKey('another-space', 'environment'), version: 1 }, { ...accountLiveKey('machines'), version: 1 },
+      ])).toEqual([1, 1, 0]);
+      expect(await watching.next()).toMatchObject({ resource: 'cloud-images' });
+      expect(await elsewhere.next()).toMatchObject({ workspace: 'another-space', resource: 'environment' });
+      const newer = await client.environment.events({ spaceId, after: cursor });
+      expect(newer).toMatchObject({ status: 'ok', value: [{ type: 'change', previous: cursor, cursor: notice.version, value: { policy: { automatic: true } } }] });
+      expect(await client.environment.events({ spaceId, after: notice.version })).toMatchObject({ status: 'ok', value: [] });
     } finally {
-      controller.abort();
-      await stream.return?.();
-    }
-    expect(await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: false }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true })).toMatchObject({ status: 'ok' });
-    const resumedController = new AbortController();
-    const resumed = client.environment.events({ spaceId, after: cursor }, { signal: resumedController.signal })[Symbol.asyncIterator]();
-    try {
-      expect(await resumed.next()).toMatchObject({
-        done: false,
-        value: { status: 'ok', value: { type: 'change', previous: cursor, value: { policy: { automatic: false } } } },
-      });
-    } finally {
-      resumedController.abort();
-      await resumed.return?.();
+      watching.socket.close();
+      elsewhere.socket.close();
     }
   });
 
@@ -365,27 +337,19 @@ describe('account cloud RPC without machines', () => {
     expect(await env.USER_SETTINGS.getByName(fixture.userId).getGitIdentity()).toBeNull();
   });
 
-  it('opens an empty fleet stream and reports the first machine without reconnecting', async () => {
+  it('reads an empty fleet, then only the machine added after its cursor', async () => {
     const fixture = await account();
-    const response = await SELF.fetch(fixture.request(single('machine.events', { after: null })));
-    const reader = response.body!.getReader();
-    try {
-      const ready = await reader.read();
-      expect(parse(new TextDecoder().decode(ready.value).trim())).toMatchObject({
-        response: { status: 'ok', value: { type: 'snapshot', previous: null, value: [] } },
-      });
-      await env.FLEET_CATALOG.getByName(fixture.userId).putMachine({
-        id: 'first-machine', label: 'First machine', state: 'offline', rpcEndpoint: null,
-        kind: 'physical', provider: 'physical', notes: '', desiredState: 'online',
-        lifecycleRevision: 1, operationId: null, error: null,
-      });
-      const changed = await reader.read();
-      expect(parse(new TextDecoder().decode(changed.value).trim())).toMatchObject({
-        response: { status: 'ok', value: { type: 'change', value: [{ id: 'first-machine', state: 'offline' }] } },
-      });
-    } finally {
-      await reader.cancel();
-    }
+    const client = inspectorClient(fixture);
+    const initial = await client.machine.events({ after: null });
+    expect(initial).toMatchObject({ status: 'ok', value: [{ type: 'snapshot', previous: null, value: [] }] });
+    if (initial.status !== 'ok') throw initial.error;
+    const cursor = initial.value[0]!.cursor;
+    await env.FLEET_CATALOG.getByName(fixture.userId).putMachine({
+      id: 'first-machine', label: 'First machine', state: 'offline', rpcEndpoint: null,
+      kind: 'physical', provider: 'physical', notes: '', desiredState: 'online',
+      lifecycleRevision: 1, operationId: null, error: null,
+    });
+    expect(await client.machine.events({ after: cursor })).toMatchObject({ status: 'ok', value: [{ type: 'change', previous: cursor, value: [{ id: 'first-machine', state: 'offline' }] }] });
   });
 
   it('keeps missing machine data from failing concurrent account queries for API clients', async () => {
@@ -566,29 +530,20 @@ describe('account cloud RPC without machines', () => {
     });
   });
 
-  it('streams committed profile invalidations without broker credentials and replays after reconnect', async () => {
+  it('reads committed profile invalidations after a cursor without broker credentials', async () => {
     const fixture = await account();
     const client = inspectorClient(fixture);
-    const controller = new AbortController();
-    const stream = client.inference.events({ after: null }, { signal: controller.signal })[Symbol.asyncIterator]();
-    let cursor: number;
-    try {
-      const initial = await stream.next();
-      if (initial.done || initial.value.status !== 'ok') throw new Error('Expected inference snapshot');
-      cursor = initial.value.value.cursor;
-      await fixture.vault.putBrowserApiKey('default', 'openai', 'never-in-events');
-      const pending = stream.next();
-      await fixture.vault.createInferenceProfile({ name: 'Streamed', sourceProfileId: null });
-      const changed = await pending;
-      expect(changed).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'change', previous: cursor, value: { profiles: [{ id: 'default' }, { name: 'Streamed' }] } } } });
-      expect(JSON.stringify(changed)).not.toContain('never-in-events');
-      expect(JSON.stringify(changed)).not.toContain('broker');
-    } finally { controller.abort(); await stream.return?.(); }
-    const replayController = new AbortController();
-    const replay = client.inference.events({ after: cursor }, { signal: replayController.signal })[Symbol.asyncIterator]();
-    try {
-      expect(await replay.next()).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'change', previous: cursor } } });
-    } finally { replayController.abort(); await replay.return?.(); }
+    const initial = await client.inference.events({ after: null });
+    if (initial.status !== 'ok') throw initial.error;
+    const cursor = initial.value[0]!.cursor;
+    await fixture.vault.putBrowserApiKey('default', 'openai', 'never-in-events');
+    await fixture.vault.createInferenceProfile({ name: 'Streamed', sourceProfileId: null });
+    const changed = await client.inference.events({ after: cursor });
+    expect(changed).toMatchObject({ status: 'ok', value: [{ type: 'change', previous: cursor, value: { profiles: [{ id: 'default' }, { name: 'Streamed' }] } }] });
+    if (changed.status !== 'ok') throw changed.error;
+    expect(changed.value).toHaveLength(1);
+    expect(JSON.stringify(changed)).not.toContain('never-in-events');
+    expect(JSON.stringify(changed)).not.toContain('broker');
   });
 
   it('authorizes every batch item before any mutation and rejects tampering and revocation', async () => {
@@ -735,6 +690,41 @@ describe('account routing of machine work', () => {
     expect(reached).toEqual([]);
   });
 
+  it('runs a person\'s sync actions as the sync tool on the named ready cache only', async () => {
+    const { fixture, held, reached } = await fleet(true);
+    const client = inspectorClient(fixture);
+    const ready = RuntimeAttachmentSchema.parse({
+      projectId: held.projectId, workspaceId: held.spaceId, attachmentId: 'cache-c', machineId: 'machine-c', generation: 1, state: 'ready',
+      checkout: { kind: 'shared', branch: 'review' }, capabilities: [], updatedAt: new Date().toISOString(), online: true,
+    });
+    const { checkpoint } = committedCheckout(held.spaceId);
+    const dispatched: RuntimeToolDispatch[] = [];
+    await runInDurableObject(held.placement, async (instance, state) => {
+      state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', ready.attachmentId, JSON.stringify(ready), 'fixture');
+      const runtime = await instance['runtime'];
+      if (!runtime) throw new Error('Workspace runtime did not open');
+      vi.spyOn(runtime.cloudFiles, 'initializeSnapshot').mockResolvedValue(checkpoint);
+      vi.spyOn(runtime.cloudFiles, 'snapshot').mockResolvedValue({ ...checkpoint, conflicts: [] });
+      // The machine half of `sync`: capture sends its changes; diff lists what it has not sent.
+      vi.spyOn(runtime.attachments, 'execute').mockImplementation(async (dispatch) => {
+        dispatched.push(dispatch);
+        const op = z.object({ op: z.string() }).parse(dispatch.args).op;
+        const value = op === 'capture' ? { version: checkpoint.worktreeCommit, conflicts: [] } : { base: checkpoint.worktreeCommit, unsent: [{ status: 'M', path: 'src/app.ts' }], unsentTruncated: false, patch: null };
+        return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(value) }] };
+      });
+    });
+    const identity = { projectId: held.projectId, workspaceId: held.spaceId };
+    expect(await client.runtime.sync({ ...identity, requestId: 'now-c', args: { method: 'now', on: 'machine-c' } })).toEqual({ status: 'ok', value: { method: 'now', version: checkpoint.worktreeCommit, conflicts: [] } });
+    expect(await client.runtime.sync({ ...identity, requestId: 'diff-c', args: { method: 'diff', on: 'machine-c' } })).toEqual({ status: 'ok', value: { method: 'diff', unsent: [{ status: 'M', path: 'src/app.ts' }], unsentTruncated: false, notOnMachine: [], notOnMachineTruncated: false } });
+    // An online machine that is not a ready cache of this workspace is never used instead.
+    expect(await client.runtime.sync({ ...identity, requestId: 'now-a', args: { method: 'now', on: 'machine-a' } })).toMatchObject({ status: 'error' });
+    expect(dispatched.map((dispatch) => ({ machineId: dispatch.machineId, tool: dispatch.tool, args: dispatch.args }))).toEqual([
+      { machineId: 'machine-c', tool: 'sync_machine', args: { op: 'capture', on: 'machine-c' } },
+      { machineId: 'machine-c', tool: 'sync_machine', args: { op: 'diff', on: 'machine-c' } },
+    ]);
+    expect(reached).toEqual([]);
+  });
+
   it('launches a release only on the named online enrolled machine, never the holder or any online machine', async () => {
     const { fixture, catalog, held, reached } = await fleet();
     await catalog.putMachine({ ...machine('machine-d'), state: 'offline' });
@@ -866,6 +856,40 @@ function inspectorClient(fixture: InspectorAccount, fetchResponse: (request: Req
     homeUrl: `https://${fixture.handle}.gitspace.sh/rpc`,
     fetch: createSignedRpcFetch({ deviceId: fixture.deviceId, userId: fixture.userId, signingPrivateKey: fixture.signingPrivateKey, fetch: fetcher }),
   }) });
+}
+
+/** A tab's account directory socket, collecting the live notices it receives. */
+async function liveSocket(fixture: InspectorAccount) {
+  const path = '/v1/directory/events';
+  const auth = signRpcRequest({ deviceId: fixture.deviceId, signingPrivateKey: fixture.signingPrivateKey, method: 'GET', path, body: new Uint8Array() });
+  const response = await SELF.fetch(new Request(`${env.ACCOUNT_URL}${path}`, { headers: { origin: env.ACCOUNT_URL, upgrade: 'websocket', 'sec-websocket-protocol': `${DEVICE_SOCKET_PROTOCOL}${auth}` } }));
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!;
+  const notices: LiveNotice[] = [];
+  let arrived = () => {};
+  socket.addEventListener('message', (event) => {
+    const parsed = liveNoticeMessageSchema.safeParse(JSON.parse(String(event.data)));
+    if (!parsed.success) return;
+    const { type: _type, ...notice } = parsed.data;
+    notices.push(notice);
+    arrived();
+  });
+  socket.accept();
+  const index = env.USER_PROJECTS.getByName(fixture.userId);
+  const watched = () => runInDurableObject(index, (_instance, state) => state.getWebSockets().map(server => z.object({ live: z.array(z.number()).default([]) }).parse(server.deserializeAttachment()).live.length));
+  return {
+    socket,
+    /** Resolves once the live object recorded the keys. */
+    async subscribe(...keys: LiveKey[]) {
+      const before = (await watched()).reduce((total, count) => total + count, 0);
+      socket.send(JSON.stringify({ type: 'subscribe', keys }));
+      await vi.waitFor(async () => expect((await watched()).reduce((total, count) => total + count, 0)).toBe(before + keys.length));
+    },
+    async next(): Promise<LiveNotice> {
+      while (notices.length === 0) await new Promise<void>((resolve) => { arrived = resolve; });
+      return notices.shift()!;
+    },
+  };
 }
 
 async function collectInspectorTranscript(client: BrowserClientOf<typeof gitspaceContract>, projectId: string, workspaceId: string) {

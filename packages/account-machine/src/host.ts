@@ -72,6 +72,8 @@ const environment = new ReplacementEnvironment({
   machineId: requiredEnvironment('GITSPACE_MACHINE_ID'),
   artifactKey,
   controlToken: process.env.GITSPACE_CONTROL_TOKEN,
+  // The host holds the relay connection; the running generation observes terminals.
+  liveNotices: (notices) => { for (const notice of notices) relay?.liveNotice(notice); },
 });
 process.env.GITSPACE_HOST_RPC_PORT = String(environment.options.rpcPort);
 process.env.GITSPACE_RPC_PORT = String(environment.options.rpcPort);
@@ -130,6 +132,15 @@ relay = relayUrl
           signal: AbortSignal.timeout(10_000),
         });
         if (!response.ok) throw new Error(`Machine notice delivery answered ${response.status}`);
+      },
+      onUnwatched: (notice) => {
+        void fetch(`http://${environment.options.rpcHost}:${environment.options.rpcPort}/__control/live-unwatched`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${process.env.GITSPACE_CONTROL_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify(notice),
+          signal: AbortSignal.timeout(10_000),
+        }).then((response) => { if (!response.ok) throw new Error(`Live unwatched delivery answered ${response.status}`); })
+          .catch((error: unknown) => console.error('[gitspace-relay]', new Date().toISOString(), error));
       },
       onError: (error) => console.error('[gitspace-relay]', new Date().toISOString(), error),
     })

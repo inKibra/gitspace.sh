@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { cloudWorkspaceDefinitionSchema, projectLifecycleSchema, workspaceLifecycleSchema, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle } from '@gitspace/protocol';
 import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { deriveWorkspaceStatusSummary, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { WorkspaceStatusSummarySchema, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 
 /** What a workspace object knows about itself: its identity, lifecycle, branch and phase, and the project lifecycle its
  * write policy needs. Runtime access is decided from this record alone; the project authority is read once to seed it. */
@@ -20,15 +20,6 @@ export const WorkspaceMetadataSchema = z.object({
   projectRevision: z.number().int().nonnegative(),
 });
 export type WorkspaceMetadata = z.infer<typeof WorkspaceMetadataSchema>;
-
-const statusCounts = z.object({ green: z.number(), red: z.number() });
-const WorkspaceStatusSummarySchema = z.object({
-  primaryColor: z.enum(['dim', 'green', 'blue', 'orange', 'red']),
-  agents: z.object({ green: z.number(), blue: z.number(), orange: z.number(), red: z.number() }),
-  services: statusCounts,
-  terminals: statusCounts,
-  compaction: z.object({ detail: z.string().optional() }).optional(),
-});
 
 export function createWorkspaceMetadataTables(storage: DurableObjectStorage): void {
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_metadata(id INTEGER PRIMARY KEY CHECK (id = 1), record TEXT NOT NULL)');
@@ -78,20 +69,17 @@ export function authorizeWorkspaceRuntime(metadata: WorkspaceMetadata, identity:
   return metadata;
 }
 
-/** Stores the sidebar summary of a runtime publication; an unchanged summary writes nothing. */
-export function storeWorkspaceStatus(storage: DurableObjectStorage, snapshot: RuntimeSnapshot): WorkspaceStatusSummary {
-  const summary = deriveWorkspaceStatusSummary({ agents: snapshot.conversations.map(item => ({
-    state: item.status === 'running' ? 'running' : item.status === 'waiting' ? 'permission-needed' : 'waiting',
-    ...(item.status === 'failed' ? { failure: { code: 'RUNTIME_FAILED', message: item.error ?? 'Conversation failed' } } : {}),
-  })) });
+/** Stores the status summary the runtime published; an unchanged summary writes nothing. */
+export function storeWorkspaceStatus(storage: DurableObjectStorage, summary: WorkspaceStatusSummary): void {
   const encoded = JSON.stringify(summary);
   if (storage.sql.exec<{ summary: string }>('SELECT summary FROM workspace_status WHERE id=1').toArray()[0]?.summary !== encoded) {
     storage.sql.exec('INSERT INTO workspace_status(id,summary) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary', encoded);
   }
-  return summary;
 }
 
+/** A summary stored by a release that derived it from conversation flags reads as unreported until the runtime publishes again. */
 export function readWorkspaceStatus(storage: DurableObjectStorage): WorkspaceStatusSummary | null {
   const row = storage.sql.exec<{ summary: string }>('SELECT summary FROM workspace_status WHERE id=1').toArray()[0];
-  return row ? WorkspaceStatusSummarySchema.parse(JSON.parse(row.summary)) : null;
+  const stored = row ? WorkspaceStatusSummarySchema.safeParse(JSON.parse(row.summary)) : null;
+  return stored?.success ? stored.data : null;
 }

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Miniflare } from 'miniflare';
 import { z } from 'zod';
-import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeSessionResultSchema, type RuntimeSessionCommand, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeSessionResultSchema, RuntimeWorkspaceStatusSchema, type RuntimeSessionCommand, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { WorkspaceDraftSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
 import { searchWasmModule } from './search-wasm.js';
 
@@ -44,17 +44,9 @@ try {
   const assistantReplies = (snapshot: RuntimeSnapshot) => snapshot.conversations.flatMap(item => item.messages).filter(message => message.role === 'assistant' && message.content.some(block => block.type === 'text' && block.text.startsWith('fixture reply:'))).length;
   console.log('PASS large Unicode replica, migration, bounded replay, atomic rollback', await request('/replica-proof'));
 
-  // No mutation races with this request: snapshot and watch registration happen in one DO call.
-  const watch = await fetch(new URL('/watch-current', await worker.ready));
-  assert(watch.body);
-  const reader = watch.body.getReader();
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const first = await Promise.race([reader.read(), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Current-cursor watch failed to emit an initial state')), 5000); })]);
-    assert(!first.done);
-    const event = RuntimeWatchEventSchema.parse(JSON.parse(new TextDecoder().decode(first.value).trim().split('\n')[0]!));
-    assert.equal(event.type, 'snapshot');
-  } finally { clearTimeout(timer); await reader.cancel(); }
+  const events = async (after: number) => z.array(RuntimeWatchEventSchema).parse(await request(`/events?after=${after}`));
+  const current = RuntimeSnapshotSchema.parse(await request('/')).cursor;
+  assert.deepEqual(await events(current), [], 'A current cursor must read no events');
 
   const saveDraft = async (text: string, expectedRevision: number, deviceId: string) => {
     assert(worker);
@@ -62,20 +54,18 @@ try {
     assert(response.ok, await response.clone().text());
     return WorkspaceDraftSaveResultSchema.parse(await response.json());
   };
-  const draftWatch = await fetch(new URL('/watch-current', await worker.ready));
-  assert(draftWatch.body);
-  const draftReader = draftWatch.body.pipeThrough(new TextDecoderStream()).getReader();
-  const initialDraftFrame = await draftReader.read();
-  assert(!initialDraftFrame.done);
+  const draftCursor = RuntimeSnapshotSchema.parse(await request('/')).cursor;
   const savedDraft = await saveDraft('Draft from device A', 0, 'device-a');
   assert.equal(savedDraft.draft.text, 'Draft from device A');
   let watchedDraft = '';
+  const draftDeadline = Date.now() + 30_000;
   while (!watchedDraft.includes('Draft from device A')) {
-    const frame = await draftReader.read();
-    assert(!frame.done);
-    watchedDraft += frame.value;
+    assert(Date.now() < draftDeadline, 'The saved draft never appeared in the events after the prior cursor');
+    const read = await events(draftCursor);
+    assert(read.every(event => event.type === 'delta'), 'A contiguous cursor must read only deltas');
+    watchedDraft = JSON.stringify(read);
+    if (!watchedDraft.includes('Draft from device A')) await Bun.sleep(20);
   }
-  await draftReader.cancel();
   assert.equal(WorkspaceDraftSchema.parse(RuntimeSnapshotSchema.parse(await request('/')).documents['gitspace.draft']).deviceId, 'device-a');
   const newerDraft = await saveDraft('Newer edit from device B ' + '🚀'.repeat(40_000), savedDraft.draft.revision, 'device-b');
   await worker.dispose();
@@ -108,10 +98,12 @@ try {
   console.log('PASS draft watch delivery, device authorship, cold recovery, accepted-send clearing and in-flight sent-text clearing');
 
   // A rejected model request must tell the user why instead of leaving an empty reply.
+  const summary = (snapshot: RuntimeSnapshot) => RuntimeWorkspaceStatusSchema.parse(snapshot.documents['gitspace.status']).summary;
   await request('/submit?text=fail%20the%20model');
   const failed = await until(snapshot => snapshot.conversations.some(item => item.status === 'failed'));
   assert.match(failed.conversations.find(item => item.status === 'failed')?.error ?? '', /fixture provider rejected the request/);
-  console.log('PASS failed model request surfaces its error');
+  assert.equal(summary(failed).primaryColor, 'red', 'A failed main agent is not red');
+  console.log('PASS failed model request surfaces its error and turns the workspace red');
 
   // Both public answer surfaces must restart a persisted suspended Pi task by themselves.
   for (const surface of ['session', 'answer'] as const) {
@@ -119,6 +111,7 @@ try {
     await request(`/submit?text=ask%20for%20a%20color&requestId=fallback-${surface}`);
     const pending = await until(snapshot => snapshot.questions.some(question => question.kind === 'ask' && question.answer === null));
     const question = pending.questions.find(item => item.kind === 'ask' && item.answer === null)!;
+    assert.equal(summary(pending).primaryColor, 'blue', 'A question for the user is not blue');
     await worker.dispose();
     worker = new Miniflare(options);
     const recovered = (await session({ type: 'control' })).control;
@@ -142,6 +135,7 @@ try {
     await request('/submit?text=propose%20a%20plan');
     const pending = await until(snapshot => snapshot.questions.some(item => item.kind === 'approval' && item.answer === null));
     const question = pending.questions.find(item => item.kind === 'approval' && item.answer === null)!;
+    assert.equal(summary(pending).primaryColor, 'orange', 'A pending approval is not orange');
     assert.equal((await session({ type: 'control' })).control.pendingAsk, null, 'Approval leaked into ask-only control');
     await request('/answer', { ...identity, questionId: question.id, answer: answer ? 'Approve' : 'Reject' }, true);
     await request('/session', { ...identity, command: { type: 'answerAsk', id: question.id, answers: [{ id: question.id, selectedOptions: ['Approve'], customInput: null }] }, canApprove: true }, true);
@@ -179,7 +173,8 @@ try {
   assert(!beforeInspection.some(task => [scope.child, scope.grandchild].includes(task.conversationId) && task.state !== 'terminal'), 'Inspection resumed stopped work');
   await session({ type: 'stop' }, scope.root);
   assert(!(await liveTasks()).some(task => Object.values(scope).includes(task.conversationId) && task.state !== 'terminal'), 'Main Stop failed to cascade');
-  console.log('PASS main-only input and scoped Stop with four live Pi conversations');
+  await until(snapshot => summary(snapshot).agents.green === 0);
+  console.log('PASS main-only input and scoped Stop with four live Pi conversations; stopped work is not green');
   const familyUsage = (await session({ type: 'usage' }, scope.root)).usage!;
   const childUsage = await Promise.all([scope.child, scope.sibling, scope.grandchild].map(async id => (await session({ type: 'usage' }, id)).usage!));
   assert.equal(familyUsage.totalsDeep.totalTokens, familyUsage.totals.totalTokens + childUsage.reduce((sum, report) => sum + report.totals.totalTokens, 0), 'Workspace usage omitted child inference');

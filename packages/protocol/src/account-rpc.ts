@@ -21,6 +21,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'runtime.watch': 'cloud',
   'runtime.session': 'cloud',
   'runtime.services': 'cloud',
+  'runtime.sync': 'cloud',
   'runtime.qa': 'cloud',
   'runtime.attachment.cache.request': 'cloud',
   'runtime.attachment.detach': 'cloud',

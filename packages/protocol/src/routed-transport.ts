@@ -62,8 +62,8 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   const batch = () => batchFetchTransport({ url: options.homeUrl, fetch, maxItems: options.maxItems ?? 32 });
   const home = batch();
   const account = batch();
-  // Repository provisioning, image startup and waking a paused cache for an environment run can outlast
-  // ordinary queries. Keep those calls out of their batch and timeout budget.
+  // Repository provisioning, image startup, waking a paused cache for an environment run and a machine's sync
+  // capture can outlast ordinary queries. Keep those calls out of their batch and timeout budget.
   const provisioning = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 });
   const inspectorContext = batch();
   // A signed machine batch goes whole to one explicit machine and workspace.
@@ -76,7 +76,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
 
   const resolve = (path: string, input: unknown): ClientTransport => {
     if (path === 'project.create' || path === 'workspace.create' || path === 'workspace.retryCreate' || path === 'machine.createSandbox' ||
-        path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' || path === 'environment.runChecks' || path === 'environment.runPhase' ||
+        path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' || path === 'environment.runChecks' || path === 'environment.runPhase' || path === 'runtime.sync' ||
         (path.startsWith('machine.image.') && path !== 'machine.image.list' && path !== 'machine.image.events')) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
     if (accountRpcAuthority(path) === 'cloud') return account;

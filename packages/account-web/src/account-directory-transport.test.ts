@@ -2,7 +2,9 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { decodeSignedRpcHeader, deviceProtocolBase64, rpcSignaturePayload } from '@gitspace/protocol/device-grant';
 import { DEVICE_SOCKET_PROTOCOL } from '@gitspace/protocol/socket-auth';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { accountLiveKey, workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { createAccountDirectorySource } from './account-directory-transport.js';
+import { LiveNotices } from './live-notices.js';
 import type { BrowserDevice } from './device.js';
 import { SynchronizationOwner } from './synchronization.js';
 
@@ -16,17 +18,19 @@ class Socket extends EventTarget {
   readyState = 0;
   constructor(readonly url: string, readonly protocols: string[]) { super(); }
   close = vi.fn(() => { this.readyState = 3; });
+  send = vi.fn();
   open() { this.readyState = 1; this.dispatchEvent(new Event('open')); }
   message(data: unknown) { this.dispatchEvent(Object.assign(new Event('message'), { data })); }
   end(code = 1006, reason = '') { this.readyState = 3; this.dispatchEvent(Object.assign(new Event('close'), { code, reason })); }
 }
-function fixture() {
+function fixture(notices = new LiveNotices()) {
   let current: BrowserDevice | null = device;
   const rejected = vi.fn(() => { current = null; });
   const sockets: Socket[] = [];
   const source = createAccountDirectorySource({
     currentDevice: async () => current, onRejected: rejected, origin: () => 'https://account.test',
     openSocket: (url, protocols) => { const socket = new Socket(url, protocols); sockets.push(socket); return socket as unknown as WebSocket; },
+    notices,
   });
   return { source, sockets, rejected, replace: (replacement: BrowserDevice) => { current = replacement; }, current: () => current };
 }
@@ -126,6 +130,38 @@ it('shares a single socket, resumes its durable cursor, and accepts an explicit 
   await vi.waitFor(() => expect(second.snapshot()).toMatchObject({ cursor: 2, resync: false, value: { projectRevisions: { reset: 2 } } }));
   stopSecond();
   expect(resumed.close).toHaveBeenCalledOnce();
+});
+
+it('carries live subscriptions on the directory socket and hands each tab only the notices it watches', async () => {
+  const notices = new LiveNotices();
+  const scene = fixture(notices);
+  const runtime = workspaceLiveKey('workspace-a', 'runtime');
+  const heard: Array<number | null> = [];
+  const stopRuntime = notices.watch(runtime, (version) => heard.push(version));
+  const owner = new SynchronizationOwner();
+  owners.push(owner);
+  const stop = owner.channel('account-directory', scene.source).subscribe(() => {});
+  await vi.waitFor(() => expect(scene.sockets).toHaveLength(1));
+  const socket = scene.sockets[0]!;
+  socket.open();
+  // Keys watched before the socket opened are subscribed on open and refetched once: notices may have been missed.
+  expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'subscribe', keys: [runtime] }));
+  expect(heard).toEqual([null]);
+  const settings = accountLiveKey('settings');
+  const stopSettings = notices.watch(settings, () => {});
+  expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'subscribe', keys: [settings] }));
+  socket.message(JSON.stringify({ type: 'notice', ...runtime, version: 7 }));
+  socket.message(JSON.stringify({ type: 'notice', ...workspaceLiveKey('workspace-b', 'runtime'), version: 8 }));
+  expect(heard).toEqual([null, 7]);
+  // A notice is not a directory frame: the directory channel stays open.
+  socket.message(JSON.stringify({ type: 'snapshot', resource: 'account-directory', cursor: 3, revision: 3, previous: null, value }));
+  stopRuntime();
+  expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'unsubscribe', keys: [runtime] }));
+  socket.message(JSON.stringify({ type: 'notice', ...runtime, version: 9 }));
+  expect(heard).toEqual([null, 7]);
+  expect(socket.close).not.toHaveBeenCalled();
+  stopSettings();
+  stop();
 });
 
 it('only clears a confirmed current device rejection, never a replacement or generic outage', async () => {

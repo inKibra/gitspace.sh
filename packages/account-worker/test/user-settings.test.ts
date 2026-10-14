@@ -124,49 +124,31 @@ describe('inference settings migration', () => {
     });
     const next = '{"toolExecution":"sequential"}';
     await stub.updateRuntime('machine-a', { expectedGeneration: 1, content: next, checksum: await checksum(next) });
-    const subscription = await stub.watch(0);
-    const reader = subscription.stream.getReader();
-    try {
-      // Events are newline-delimited; one chunk may carry both the resync marker and the snapshot.
-      let buffered = '';
-      while (buffered.split('\n').filter(Boolean).length < 2) buffered += new TextDecoder().decode((await reader.read()).value);
-      const [first, second] = buffered.split('\n').filter(Boolean).map(line => JSON.parse(line));
-      expect(first).toMatchObject({ type: 'resync', resource: 'settings' });
-      expect(second).toMatchObject({ type: 'snapshot', value: { runtime: { content: next, generation: 2 } } });
-      expect(JSON.stringify([first, second])).not.toContain('protected-legacy-secret');
-    } finally {
-      subscription[Symbol.dispose]();
-      await reader.cancel();
-      reader.releaseLock();
-    }
+    const [first, second] = await stub.events(0);
+    expect(first).toMatchObject({ type: 'resync', resource: 'settings' });
+    expect(second).toMatchObject({ type: 'snapshot', value: { runtime: { content: next, generation: 2 } } });
+    expect(JSON.stringify([first, second])).not.toContain('protected-legacy-secret');
   });
 
   it('publishes durable inference invalidations without changing settings revisions, and ignores delayed repeats', async () => {
     const stub = settingsStub(`invalidation-${crypto.randomUUID()}`);
     const initial = await stub.snapshot();
-    const subscription = await stub.watch(null);
-    const reader = subscription.stream.getReader();
-    try {
-      const first = JSON.parse(new TextDecoder().decode((await reader.read()).value));
-      await stub.inferenceChanged(4);
-      const changed = JSON.parse(new TextDecoder().decode((await reader.read()).value)) as { cursor: number; value: SettingsSnapshot };
-      expect(changed).toMatchObject({ type: 'change', previous: first.cursor, value: { ...initial, inferenceRevision: 4 } });
-      await runInDurableObject(stub, async (_instance, state) => {
-        const restarted = new UserSettingsDO(state, env);
-        await state.blockConcurrencyWhile(async () => {});
-        restarted.inferenceChanged(3);
-        restarted.inferenceChanged(4);
-        expect(restarted.snapshot()).toEqual({ ...initial, inferenceRevision: 4 });
-        restarted.inferenceChanged(5);
-      });
-      const next = JSON.parse(new TextDecoder().decode((await reader.read()).value));
-      expect(next).toMatchObject({ type: 'change', previous: changed.cursor, value: { ...initial, inferenceRevision: 5 } });
-      expect(next.cursor).toBe(changed.cursor + 1);
-    } finally {
-      subscription[Symbol.dispose]();
-      await reader.cancel();
-      reader.releaseLock();
-    }
+    const [first] = await stub.events(null);
+    await stub.inferenceChanged(4);
+    const [changed] = await stub.events(first!.cursor);
+    expect(changed).toMatchObject({ type: 'change', previous: first!.cursor, value: { ...initial, inferenceRevision: 4 } });
+    await runInDurableObject(stub, async (_instance, state) => {
+      const restarted = new UserSettingsDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      restarted.inferenceChanged(3);
+      restarted.inferenceChanged(4);
+      expect(restarted.snapshot()).toEqual({ ...initial, inferenceRevision: 4 });
+      restarted.inferenceChanged(5);
+    });
+    // Only what is newer than the reader's cursor: the delayed repeats wrote nothing.
+    const newer = await stub.events(changed!.cursor);
+    expect(newer).toHaveLength(1);
+    expect(newer[0]).toMatchObject({ type: 'change', previous: changed!.cursor, cursor: changed!.cursor + 1, value: { ...initial, inferenceRevision: 5 } });
   });
 
   it('pushes the inference revision to authenticated websocket subscribers without advancing runtime generation', async () => {

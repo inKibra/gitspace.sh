@@ -4,7 +4,7 @@ import { defineDoc } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
 import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, PlanDoc, QuestionsDoc, WorkspaceDoc, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
-import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeWatchInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
+import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
 import { createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
@@ -14,19 +14,21 @@ import type { z } from 'zod';
 import { createCronRuntime, type RuntimeCronInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord';
 import { createSessionHistory } from './session-history.js';
-import { createReplicaStore } from './replica-store.js';
+import { createReplicaStore, replicaEvents } from './replica-store.js';
 import { WorkspaceDraftStore } from './draft.js';
 import type { WorkspaceDraftSave, WorkspaceDraftSaveResult } from '@gitspace/protocol-runtime/draft';
 import { CloudFileStore } from './cloud-files.js';
 import { CodeSearchIndex, type CodeSearchSource } from './cloud-search-index.js';
 import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifacts.js';
-import type { GitLfsConfirmedObject, GitLfsStore } from '@gitspace/protocol-workspace';
+import type { GitLfsConfirmedObject, GitLfsStore, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat } from './transcript.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void };
+import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, status: WorkspaceStatusSummary): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
-/** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. */
-const MANAGEMENT_TIMEOUT_MS: Readonly<Record<'mcp_discover' | 'lifecycle', number>> = { mcp_discover: 30_000, lifecycle: 240_000 };
+/** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. A sync capture
+ * uploads the machine's changes. */
+const MANAGEMENT_TIMEOUT_MS: Readonly<Record<'mcp_discover' | 'lifecycle' | 'sync', number>> = { mcp_discover: 30_000, lifecycle: 240_000, sync: 120_000 };
 type ManagementTool = keyof typeof MANAGEMENT_TIMEOUT_MS;
 type RuntimeBrowserService = NonNullable<SessionControlServices['browser']>;
 export type WorkspaceRuntime = {
@@ -41,7 +43,9 @@ export type WorkspaceRuntime = {
   saveDraft(input: WorkspaceDraftSave, deviceId: string): Promise<WorkspaceDraftSaveResult>;
   cancel(input: RuntimeCancelInput): Promise<RuntimeAccepted>;
   answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted>;
-  watch(input: RuntimeWatchInput): Promise<Response>;
+  /** Runtime events newer than `after`, bounded: a snapshot for null, nothing when current, otherwise the retained
+   * deltas after it, or a reset when it is ahead, expired or further behind than one read returns. */
+  events(after: number | null): Promise<RuntimeWatchEvent[]>;
   wake(): Promise<void>;
   session(conversationId: string | undefined, command: RuntimeSessionCommand, canApprove?: boolean, deviceId?: string): Promise<RuntimeSessionResult>;
   /** The one status summary of this workspace. */
@@ -51,8 +55,8 @@ export type WorkspaceRuntime = {
   /** An agent asked for this attachment: once the machine reports it ready, the conversation is told so it can retry. */
   noticeWhenReady(input: { attachmentId: string; generation: number; conversationId: string; label: string }): void;
   invokeConversationTool: ToolServices['invoke'];
-  /** A human request run once per request id as a tool call of the main conversation: MCP discovery, or an
-   * environment run dispatched to the cache machine its arguments name. */
+  /** A human request run once per request id as a tool call of the main conversation: MCP discovery, a sync action,
+   * or an environment run dispatched to the cache machine its arguments name. */
   manage(input: { tool: ManagementTool; requestId: string; args: JsonValue }): Promise<RuntimeToolResult>;
   qa(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted & { shareDraft?: string }>;
   snapshotCommit(input: RuntimeSnapshotCommitInput): Promise<RuntimeSnapshotCommitResult>;
@@ -121,9 +125,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   await drafts.initialize();
   options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_management(request_id TEXT PRIMARY KEY, input TEXT NOT NULL, result TEXT)');
   options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attach_notices(attachment_id TEXT NOT NULL, generation INTEGER NOT NULL, conversation_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY(attachment_id, generation, conversation_id))');
-  const listeners = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const snapshotWaiters = new Set<() => void>();
-  const encoder = new TextEncoder();
   let line = Promise.resolve();
   let publicationPending = false;
   const stored: unknown = (() => { const current = replica.snapshot(); return current ? JSON.parse(current) : undefined; })();
@@ -143,6 +145,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const dirtyTasks = new Map<number, StoredTask>();
   let conversationsLoaded = false;
   let tasksLoaded = false;
+  // Agent counts of the last rebuild, read live from tasks and questions.
+  let agents: WorkspaceStatusSummary['agents'] = { green: 0, blue: 0, orange: 0, red: 0 };
   const TASK_ORDER: Record<StoredTask['state']['status'], number> = { pending: 0, running: 1, waiting: 2, completing: 3, terminal: 4 };
   const TERMINAL_TASK_WINDOW = 128;
   async function conversationView(record: ConversationRecord): Promise<ConversationView | undefined> {
@@ -223,53 +227,49 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   /** The one status summary of the workspace: every surface reads this, nothing else derives status. */
   function workspaceStatus(code: RuntimeGitCheckpoint | null): RuntimeWorkspaceStatus {
     const conflicts = code?.conflicts ?? [];
-    return {
-      cloud: { version: code?.worktreeCommit ?? null, conflicts },
-      machines: attachments.list().filter(item => item.state !== 'detached').map(item => {
-        const materialized = item.executionObservation?.materializedCommit ?? null;
-        return {
-          machineId: item.machineId, attachmentId: item.attachmentId, generation: item.generation,
-          online: isAttachmentOnline(item), ready: isAttachmentReady(item),
-          setup: item.cache?.setup ?? [],
-          sync: { lastSyncAt: item.cache?.lastSyncAt ?? null, unsent: item.cache?.unsent ?? null, unapplied: code !== null && materialized !== null && materialized !== code.worktreeCommit, problem: item.cache?.syncProblem ?? item.failure?.message ?? null, conflicts },
-        };
-      }),
-    };
+    const cloud = { version: code?.worktreeCommit ?? null, conflicts };
+    const machines = attachments.list().filter(item => item.state !== 'detached').map(item => {
+      const materialized = item.executionObservation?.materializedCommit ?? null;
+      return {
+        machineId: item.machineId, attachmentId: item.attachmentId, generation: item.generation,
+        online: isAttachmentOnline(item), ready: isAttachmentReady(item),
+        setup: item.cache?.setup ?? [],
+        sync: { lastSyncAt: item.cache?.lastSyncAt ?? null, unsent: item.cache?.unsent ?? null, unapplied: code !== null && materialized !== null && materialized !== code.worktreeCommit, problem: item.cache?.syncProblem ?? item.failure?.message ?? null, conflicts },
+      };
+    });
+    return { summary: workspaceStatusSummary(agents, { cloud, machines }), cloud, machines };
   }
   async function rebuild() {
     const inspection = await harness.inspect(BACKGROUND_CONTEXT);
     await refreshConversations();
     await refreshTasks();
-    const running = new Set(inspection.tasks.flatMap(task => task.state.kind === 'running' ? [String(task.record.conversationId)] : []));
     const questions = await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT);
-    const waiting = new Set(questions?.items.flatMap(question => question.answer === null ? [question.conversationId] : []) ?? []);
+    // Working means a live task right now, never a flag an earlier rebuild stored; a blocked task cannot run.
+    const views = [...conversationViews.values()];
+    const activity = agentActivity({ conversations: views, tasks: inspection.tasks.flatMap(task => task.state.kind === 'blocked' ? [] : [{ conversationId: String(task.record.conversationId), background: task.record.background }]), questions: questions?.items ?? [] });
+    agents = agentCounts(views, activity);
     const conversations: RuntimeSnapshot['conversations'] = [];
     const subagents: JsonValue[] = [];
-    for (const { failure, subagent, ...view } of conversationViews.values()) {
-      const active = running.has(view.id);
-      const error = !active ? failure : null;
-      conversations.push({ ...view, status: waiting.has(view.id) ? 'waiting' : active ? 'running' : error ? 'failed' : 'idle', ...(error ? { error } : {}) });
+    for (const { failure, subagent, ...view } of views) {
+      const state = conversationStatus(activity.get(view.id) ?? 'idle');
+      conversations.push({ ...view, status: state, ...(state === 'failed' && failure ? { error: failure } : {}) });
       if (subagent) subagents.push(subagent);
     }
     const tasks = [...taskViews].sort(([leftId, left], [rightId, right]) => TASK_ORDER[left.status] - TASK_ORDER[right.status] || leftId - rightId).map(([, task]) => task.view);
     const workspace = await harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT);
     const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
-    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.status': workspaceStatus(committedCode ?? null), 'gitspace.draft': drafts.snapshot() } });
+    const status = workspaceStatus(committedCode ?? null);
+    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.status': status, 'gitspace.draft': drafts.snapshot() } });
     const ops = diffRevisions(snapshot, next);
-    // An unchanged projection publishes nothing: no replica rewrite, no cursor advance, no listener traffic.
+    // An unchanged projection publishes nothing: no replica rewrite, no cursor advance, no browser notice.
     if (ops.length === 0) { for (const notify of snapshotWaiters) notify(); return; }
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
-    options.published?.(next);
+    options.published?.(next, status.summary);
     snapshot = next;
     for (const notify of snapshotWaiters) notify();
-    const bytes = encoder.encode(encodedEvent + '\n');
-    for (const listener of listeners) {
-      if ((listener.desiredSize ?? 0) <= 0) { listener.error(new Error('Runtime subscription exceeded bounded queue; reconnect for reset')); listeners.delete(listener); }
-      else listener.enqueue(bytes);
-    }
   }
   function publish() {
     // Keep at most one rebuild queued behind the active one. Commits during a rebuild
@@ -452,22 +452,9 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT));
       await line; return { accepted: true as const, cursor: snapshot.cursor };
     },
-    async watch(input: RuntimeWatchInput): Promise<Response> {
+    async events(after: number | null): Promise<RuntimeWatchEvent[]> {
       await line;
-      let controller: ReadableStreamDefaultController<Uint8Array>;
-      const stream = new ReadableStream<Uint8Array>({ start(value) {
-        controller = value;
-        const rows = input.after === null ? [] : replica.events(input.after);
-        const first = rows?.[0] ? RuntimeWatchEventSchema.parse(JSON.parse(rows[0].event)) : undefined;
-        let initial: RuntimeWatchEvent | undefined;
-        if (input.after === null || input.after === snapshot.cursor) initial = { type: 'snapshot', snapshot };
-        else if (input.after > snapshot.cursor) initial = { type: 'reset', reason: 'cursor-ahead', snapshot };
-        else if (input.after < snapshot.cursor && (first?.type !== 'delta' || first.baseCursor !== input.after)) initial = { type: 'reset', reason: 'cursor-expired', snapshot };
-        if (initial) value.enqueue(encoder.encode(JSON.stringify(initial) + '\n'));
-        else for (const row of rows ?? []) value.enqueue(encoder.encode(row.event + '\n'));
-        listeners.add(value);
-      }, cancel() { listeners.delete(controller); } }, { highWaterMark: 257 });
-      return new Response(stream, { headers: { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' } });
+      return replicaEvents(snapshot, after, replica.events);
     },
     async wake() {
       // Indexing runs beside recovery: a failing recovery step must not keep code_search from being built.

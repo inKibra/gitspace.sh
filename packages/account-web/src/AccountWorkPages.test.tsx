@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
-import type { WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { emptyWorkspaceStatus as idle } from '@gitspace/protocol-workspace';
 import { AccountWorkPages, type AccountWorkPagesProps } from './AccountWorkPages.js';
 import { verticalSliceFixture } from './App.js';
 import type { SidebarWorkspace } from './AppSidebar.js';
@@ -25,7 +25,6 @@ const projects: ProjectLifecycleView[] = [
   { id: 'alpha', name: 'Alpha', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 4, archivedAt: null, updatedAt: new Date(stamp) },
   { id: 'beta', name: 'Beta', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 7, archivedAt: null, updatedAt: new Date(stamp) },
 ];
-const idle: WorkspaceStatusSummary = { primaryColor: 'dim', agents: { green: 0, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } };
 function saved(id: string, projectId: string, phase: CloudWorkspaceDefinition['phase'], options: Partial<SidebarWorkspace> = {}): SidebarWorkspace {
   return {
     id, projectId, name: id, branch: `feature/${id}`, closedAt: null,
@@ -192,14 +191,14 @@ it('shows personal project Chrome approval, default, notes and offline identity 
   expect(document.body.querySelector('[aria-label="Revoke Staging Chrome"]')).not.toBeNull();
   expect(document.body.querySelector('[aria-label="Approve Personal Chrome"]')).not.toBeNull();
 });
-it('includes base-agent waits and component errors across projects while identifying incomplete coverage', async () => {
+it('includes base-agent waits, failures and sync conflicts across projects while identifying incomplete coverage', async () => {
   directory.alpha!.baseSummary = { holder: { kind: 'held', machineId: 'remote', label: 'Remote' }, closedAt: null, freshness: 'fresh', status: { ...idle, primaryColor: 'orange', agents: { green: 0, blue: 1, orange: 1, red: 0 } } };
-  directory.beta!.workspaces[0]!.summary = { holder: { kind: 'released' }, closedAt: null, freshness: 'stale', status: { ...idle, primaryColor: 'red', services: { green: 0, red: 2 }, terminals: { green: 0, red: 1 } } };
+  directory.beta!.workspaces[0]!.summary = { holder: { kind: 'released' }, closedAt: null, freshness: 'stale', status: { ...idle, primaryColor: 'red', agents: { green: 0, blue: 0, orange: 0, red: 1 }, sync: { conflicts: 2, problems: 0 } } };
   await render('inbox');
   expect(container.textContent).toContain('1 agent needs permission');
   expect(container.textContent).toContain('1 agent waiting');
-  expect(container.textContent).toContain('2 service errors');
-  expect(container.textContent).toContain('1 terminal error');
+  expect(container.textContent).toContain('1 agent error');
+  expect(container.textContent).toContain('2 sync conflicts');
   expect(container.textContent).toContain('Last recorded · stale');
   expect(container.querySelector('[aria-label="Inspect Beta · Base agent"]')).not.toBeNull();
   expect(container.querySelector('[aria-label="Inspect Alpha · alpha-work"]')).not.toBeNull();

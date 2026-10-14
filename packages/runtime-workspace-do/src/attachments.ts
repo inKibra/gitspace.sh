@@ -34,12 +34,17 @@ export class AttachmentStore {
   private readonly running = new Map<string, RuntimeAttachment['machineId']>();
   constructor(private readonly storage: DurableObjectStorage, private readonly services: AttachmentServices) {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attachments(id TEXT PRIMARY KEY, record TEXT NOT NULL, secret TEXT NOT NULL)');
-    // Runner and delegate attachments, leases, receipts and materialized results no longer exist.
-    storage.sql.exec("DELETE FROM runtime_attachments WHERE json_extract(record,'$.role') IN ('runner','delegate')");
-    storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.state','detached') WHERE json_extract(record,'$.state') IN ('lost','draining')");
-    storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.cache.state','setup') WHERE json_extract(record,'$.cache.state') IN ('paused','reclaimed','draining')");
-    storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.failure',json('null')) WHERE json_extract(record,'$.failure.operation') IN ('reclaim','detach')");
-    for (const table of ['runtime_attempts', 'runtime_executor_receipts', 'runtime_terminal_payloads', 'runtime_terminal_chunks', 'runtime_materialized_attempts', 'runtime_history_result_payloads', 'runtime_history_result_chunks', 'runtime_primary_flush', 'runtime_machine_kinds']) storage.sql.exec(`DROP TABLE IF EXISTS ${table}`);
+    // Runner and delegate attachments, leases, receipts and materialized results no longer exist. Retiring them scans
+    // every attachment, so it runs once per object; the marker row records that it has.
+    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attachments_retired(singleton INTEGER PRIMARY KEY CHECK(singleton=1))');
+    if (!storage.sql.exec('SELECT 1 FROM runtime_attachments_retired WHERE singleton=1').toArray().length) {
+      storage.sql.exec("DELETE FROM runtime_attachments WHERE json_extract(record,'$.role') IN ('runner','delegate')");
+      storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.state','detached') WHERE json_extract(record,'$.state') IN ('lost','draining')");
+      storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.cache.state','setup') WHERE json_extract(record,'$.cache.state') IN ('paused','reclaimed','draining')");
+      storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.failure',json('null')) WHERE json_extract(record,'$.failure.operation') IN ('reclaim','detach')");
+      for (const table of ['runtime_attempts', 'runtime_executor_receipts', 'runtime_terminal_payloads', 'runtime_terminal_chunks', 'runtime_materialized_attempts', 'runtime_history_result_payloads', 'runtime_history_result_chunks', 'runtime_primary_flush', 'runtime_machine_kinds']) storage.sql.exec(`DROP TABLE IF EXISTS ${table}`);
+      storage.sql.exec('INSERT INTO runtime_attachments_retired(singleton) VALUES(1)');
+    }
     // Every write to runtime_attachments draws a fresh random revision, so a token match means the cached rows are current.
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attachments_revision(singleton INTEGER PRIMARY KEY CHECK(singleton=1), token INTEGER NOT NULL)');
     storage.sql.exec('INSERT OR IGNORE INTO runtime_attachments_revision(singleton,token) VALUES(1,random() >> 11)');

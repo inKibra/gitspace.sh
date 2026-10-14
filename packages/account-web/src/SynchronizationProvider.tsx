@@ -1,10 +1,14 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { StreamEvent } from '@gitspace/protocol-sync';
+import { accountLiveKey, projectLiveKey, workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { SynchronizationOwner, type SynchronizationSource, type SynchronizedValue } from './synchronization.js';
 import { rpcClient } from './rpc-client.js';
 import { flushIncidentOutbox } from './incident-outbox.js';
 import { accountDirectorySource } from './account-directory-transport.js';
+import { liveSource } from './live-notices.js';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+
+const settingsSource = liveSource([accountLiveKey('settings')], (after, signal) => rpcClient.settings.events({ after }, { signal }));
 
 export const SynchronizationContext = createContext<SynchronizationOwner | null>(null);
 export function useSynchronizationOwner(): SynchronizationOwner {
@@ -19,7 +23,7 @@ export function useSynchronizedResource<T>(resource: string, source: Synchroniza
   return { ...value, refetch: channel.refresh };
 }
 export function useEnvironmentSynchronization(spaceId: string) {
-  return useSynchronizedResource(`environment:${spaceId}`, (after, signal) => rpcClient.environment.events({ spaceId, after }, { signal }));
+  return useSynchronizedResource(`environment:${spaceId}`, liveSource([workspaceLiveKey(spaceId, 'environment')], (after, signal) => rpcClient.environment.events({ spaceId, after }, { signal })));
 }
 /** Event consumers see every accepted frame, including frames React batches into one render. */
 export function useSynchronizedEvents<T>(resource: string, source: SynchronizationSource<T>, consume: (event: StreamEvent<T>) => void): void {
@@ -29,10 +33,10 @@ export function useSynchronizedEvents<T>(resource: string, source: Synchronizati
   useEffect(() => owner.channel(resource, source).events((event) => callback.current(event)), [owner, resource]);
 }
 export function useSpaceSynchronization(spaceId: string) {
-  return useSynchronizedResource(`space:${spaceId}`, (after, signal) => rpcClient.space.events({ spaceId, after }, { signal }));
+  return useSynchronizedResource(`space:${spaceId}`, liveSource([workspaceLiveKey(spaceId, 'space')], (after, signal) => rpcClient.space.events({ spaceId, after }, { signal })));
 }
 export function useProjectSynchronization(projectId: string) {
-  return useSynchronizedResource(`project:${projectId}`, (after, signal) => rpcClient.project.events({ projectId, after }, { signal }));
+  return useSynchronizedResource(`project:${projectId}`, liveSource([projectLiveKey(projectId, 'project')], (after, signal) => rpcClient.project.events({ projectId, after }, { signal })));
 }
 export function useAccountDirectorySnapshot(source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource) {
   return useSynchronizedResource('account-directory', source);
@@ -44,19 +48,19 @@ function readSnapshot<T, Value>(snapshot: SynchronizedValue<T> & { refetch(): Pr
   return { state: 'success' as const, value: select(snapshot.value), refetch: snapshot.refetch };
 }
 export function useAccountSettings() {
-  const snapshot = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
+  const snapshot = useSynchronizedResource('settings', settingsSource);
   return readSnapshot(snapshot, (value) => value.user);
 }
 export function useAccountGitIdentity() {
-  const snapshot = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
+  const snapshot = useSynchronizedResource('settings', settingsSource);
   return readSnapshot(snapshot, (value) => value.git);
 }
 export function useAccountRuntimeConfiguration() {
-  const snapshot = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
+  const snapshot = useSynchronizedResource('settings', settingsSource);
   return readSnapshot(snapshot, (value) => value.runtime);
 }
 export function useAccountInference() {
-  const snapshot = useSynchronizedResource('inference', (after, signal) => rpcClient.inference.events({ after }, { signal }));
+  const snapshot = useSynchronizedResource('inference', liveSource([accountLiveKey('inference')], (after, signal) => rpcClient.inference.events({ after }, { signal })));
   return readSnapshot(snapshot, (value) => value);
 }
 export function useAccountMachines() {
@@ -64,7 +68,7 @@ export function useAccountMachines() {
   return readSnapshot(snapshot, (value) => value.machines);
 }
 export function useAccountCloudImages() {
-  const snapshot = useSynchronizedResource('cloud-images', (after, signal) => rpcClient.machine.image.events({ after }, { signal }));
+  const snapshot = useSynchronizedResource('cloud-images', liveSource([accountLiveKey('cloud-images')], (after, signal) => rpcClient.machine.image.events({ after }, { signal })));
   return readSnapshot(snapshot, (value) => value);
 }
 export function useAccountProjects() {
@@ -97,7 +101,7 @@ export function useEventRefresh(cursor: number | null, refresh: () => Promise<un
 }
 
 function AccountSynchronization() {
-  const settings = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
+  const settings = useSynchronizedResource('settings', settingsSource);
   // The account directory stays connected for the app's lifetime; pages read its retained snapshot.
   useAccountDirectorySnapshot();
   useEffect(() => {

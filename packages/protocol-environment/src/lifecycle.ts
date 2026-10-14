@@ -127,41 +127,6 @@ export function latestExecutionRun(state: Pick<LifecycleState, 'runs'>, executio
   }
   return latest;
 }
-export function lifecycleSummary(state: Pick<LifecycleState, 'runs' | 'destroyedAt' | 'claim' | 'policy'>): { label: string; attention: boolean } {
-  if (state.runs.some(isLifecycleRunActive)) return { label: 'Environment running', attention: false };
-  if (state.claim?.status === 'blocked') return { label: 'Environment needs attention', attention: true };
-  for (const phase of ['checks', ...LIFECYCLE_PHASES] as const) {
-    const run = latestLifecycleRun(state, phase);
-    if (run && run.status !== 'succeeded') return { label: 'Environment needs attention', attention: true };
-  }
-  if (state.destroyedAt) return { label: 'Resources retired', attention: false };
-  return { label: state.policy.automatic ? 'Environment' : 'Environment not initialized', attention: false };
-}
-export function lifecycleActions(state: LifecycleState, phase: LifecycleRunPhase, facts: { runtimeAvailable: boolean; cloudRunnerAvailable: boolean; lifecycleControl: boolean }): { run: boolean; rerun: boolean; cancel: readonly string[]; reason: string | null } {
-  const active = state.runs.filter(isLifecycleRunActive);
-  const executions = state.executions.filter((entry) => phase === 'checks' ? entry.kind === 'check' : entry.phase === phase);
-  const reason = active.length ? 'A lifecycle run still owns this workspace'
-    : !(phase === 'cloud/destroy' ? facts.cloudRunnerAvailable : facts.runtimeAvailable) ? 'An authorized runner is unavailable'
-      : phase === 'cloud/destroy' && !facts.lifecycleControl ? 'Resource retirement requires lifecycle control authorization'
-        : executions.some((entry) => !state.approvals.some((approval) => approval.executionHash === entry.hash)) ? 'Awaiting human approval for execution content'
-          : state.destroyedAt && phase !== 'cloud/provision' && phase !== 'cloud/destroy' ? 'Workspace resources were explicitly retired' : null;
-  return { run: reason === null, rerun: reason === null, cancel: active.filter((run) => run.status !== 'cancelling').map((run) => run.id), reason };
-}
-
-export function lifecyclePhasePresentation(state: LifecycleState, phase: LifecyclePhase, scope: { profile: string; machineId: string; generation?: number | null }): { running: boolean; readiness: string; action: string; rerun: boolean } {
-  const run = latestLifecycleRun(state, phase, scope);
-  const scripts = state.executions.filter((entry) => entry.phase === phase);
-  const running = run !== undefined && isLifecycleRunActive(run);
-  const approved = scripts.every((script) => state.approvals.some((approval) => approval.executionHash === script.hash));
-  const succeeded = phase === 'cloud/provision' ? state.provisioned !== null : run?.status === 'succeeded';
-  const failed = run !== undefined && !running && run.status !== 'succeeded';
-  const contentMatches = run && sameHashes(scripts.map((script) => script.hash), run.executionHashes);
-  return {
-    running, rerun: succeeded || failed,
-    readiness: running ? 'Running' : failed ? 'Needs attention' : !approved ? 'Awaiting approval' : !scripts.length ? 'No scripts' : succeeded && (phase !== 'machine/prepare' || contentMatches) ? 'Completed for this scope' : 'Not run for this scope',
-    action: phase === 'cloud/destroy' ? 'Retire resources…' : succeeded ? 'Rerun explicitly…' : failed ? 'Retry explicitly…' : phase === 'cloud/provision' ? 'Request initial setup' : 'Run phase',
-  };
-}
 export function shouldPrepareEnvironment(state: Pick<LifecycleState, 'policy' | 'provisioned' | 'destroyedAt'>): boolean {
   return state.policy.automatic && state.provisioned !== null && state.destroyedAt === null;
 }

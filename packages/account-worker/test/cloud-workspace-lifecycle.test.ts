@@ -11,6 +11,7 @@ import { Result } from 'better-result';
 import { tenantRootPrivateKey } from './setup.js';
 import { createAccountWorkspaceRuntime } from '../src/account-runtime-host.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
+import { UserProjectIndexDO } from '../src/project-authority.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { PlanDoc, QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
 
@@ -121,6 +122,38 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(artifacts.forks).toContainEqual({ workspaceId: stacked.value.workspace.id, source: `workspace-${workspaceId}` });
     expect(artifacts.setBranch).toHaveBeenCalledWith(`workspace-${stacked.value.workspace.id}`, 'stacked', commit('1'));
     expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree').map(workspace => workspace.name).sort()).toEqual(['Cloud feature', 'Stacked']);
+  });
+
+  it('notices each runtime publication once and reads only the events after the cursor', async () => {
+    const { userId, client, project } = await cloudProject('Runtime notices');
+    const created = await client.workspace.create({ projectId: project.id, name: 'Noticed', branch: 'noticed', phase: 'plan', sourceKind: 'base', sourceRef: '' });
+    if (created.status === 'error') throw created.error;
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.value.workspace.id });
+    const first = await client.runtime.watch({ ...identity, after: null });
+    if (first.status === 'error') throw first.error;
+    expect(first.value).toMatchObject([{ type: 'snapshot', snapshot: identity }]);
+    const [initial] = first.value;
+    if (initial?.type !== 'snapshot') throw new Error('Expected a snapshot');
+    const cursor = initial.snapshot.cursor;
+    expect(await client.runtime.watch({ ...identity, after: cursor })).toEqual({ status: 'ok', value: [] });
+
+    const notices = vi.spyOn(UserProjectIndexDO.prototype, 'liveNotices');
+    await env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`).runtimeDraft({ ...identity, text: 'noticed draft', expectedRevision: 0 }, { deviceId: 'browser' });
+    const noticed = await vi.waitFor(() => {
+      const runtime = notices.mock.calls.flatMap(([batch]) => batch.filter(notice => notice.resource === 'runtime'));
+      expect(runtime.length).toBeGreaterThan(0);
+      return runtime;
+    });
+    expect(noticed[0]).toEqual({ project: project.id, workspace: identity.workspaceId, resource: 'runtime', version: expect.any(Number) });
+    const read = await client.runtime.watch({ ...identity, after: cursor });
+    if (read.status === 'error') throw read.error;
+    const published = read.value.map(event => event.type === 'delta' ? event.cursor : -1);
+    expect(published.every(version => version > cursor)).toBe(true);
+    expect(JSON.stringify(read.value)).toContain('noticed draft');
+    // Every publication noticed so far is noticed once, naming the cursor it published.
+    const versions = noticed.map(notice => notice.version);
+    expect(new Set(versions).size).toBe(versions.length);
+    expect(published).toEqual(expect.arrayContaining(versions));
   });
 
   it('indexes an existing snapshot for code_search from the runtime alarm, with no request searching first', async () => {
@@ -339,17 +372,22 @@ describe('cloud workspace lifecycle with no machines', () => {
     if (created.status === 'error') throw created.error;
     const workspaceId = created.value.workspace.id;
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
-    expect(await space.runtimeWorkspaceStatus()).toBeNull();
+    expect((await space.listingState()).status).toBeNull();
     expect(await client.runtime.snapshot(RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId }))).toMatchObject({ status: 'ok' });
-    const published = await space.runtimeWorkspaceStatus();
+    const published = (await space.listingState()).status;
     if (!published) throw new Error('Opening the runtime publishes its status');
+    // A freshly opened runtime has no live task: its main agent waits for the user.
+    expect(published).toEqual({ primaryColor: 'blue', agents: { green: 0, blue: 1, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } });
     expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, status: published }] } });
     await runInDurableObject(space, async (_instance, state) => {
       // The published snapshot is gone; only the stored summary remains, and the project is unreachable.
       state.storage.sql.exec("DELETE FROM runtime_replica WHERE kind='snapshot'");
       const local = new SpaceAuthorityDO(state, { ...env, PROJECT_AUTHORITY: new Proxy(env.PROJECT_AUTHORITY, { get() { throw new Error('ProjectAuthority was consulted'); } }) });
       await state.blockConcurrencyWhile(async () => {});
-      expect(local.runtimeWorkspaceStatus()).toEqual(published);
+      expect(local.listingState().status).toEqual(published);
+      // A summary an older release derived from conversation flags is not shown until the runtime publishes again.
+      state.storage.sql.exec('UPDATE workspace_status SET summary=? WHERE id=1', JSON.stringify({ primaryColor: 'green', agents: { green: 1, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } }));
+      expect(local.listingState().status).toBeNull();
     });
   });
 
@@ -408,13 +446,59 @@ describe('cloud workspace lifecycle with no machines', () => {
     if (!copy) throw new Error('Missing copy fixture');
     artifacts.copyCommit.mockImplementationOnce(copy).mockRejectedValueOnce(new Error('Checkpoint push interrupted'));
     const input = { projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' };
-    expect(await client.project.setBaseBranch(input)).toMatchObject({ status: 'error', error: { data: { message: 'Checkpoint push interrupted' } } });
+    expect(await client.project.setBaseBranch(input)).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Checkpoint push interrupted') } } });
     expect((await authority.getProject())?.baseBranch).toBe('main');
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')?.branch).toBe('main');
     expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'error' });
     expect(await client.project.setBaseBranch(input)).toMatchObject({ status: 'ok', value: { baseBranch: 'develop' } });
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'develop', headCommit: commit('2') });
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'develop', sourceCommit: commit('2') });
+  });
+
+  it('answers other requests while a base-branch change waits on the git store', async () => {
+    const { userId, client, project, artifacts, authority } = await cloudProject('Unblocked branch change');
+    artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    await space.runtimeRepositoryCheckpoint(identity);
+    const current = await authority.getProject();
+    if (!current) throw new Error('Missing project');
+    const copy = artifacts.copyCommit.getMockImplementation();
+    if (!copy) throw new Error('Missing copy fixture');
+    let answered: [unknown, string] | null = null;
+    artifacts.copyCommit.mockImplementationOnce(async (...args) => {
+      // Other requests reach the workspace object while the ref publication waits on the git store; a lock would deadlock them here.
+      const workspace = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+      answered = [await workspace.directoryPublication(), await workspace.runtimeSnapshot(identity).then(() => 'opened', (error: unknown) => error instanceof Error ? error.message : String(error))];
+      return copy(...args);
+    });
+    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'ok', value: { baseBranch: 'develop' } });
+    expect(answered).toEqual([expect.objectContaining({ source: 'space' }), expect.stringContaining('changing to develop')]);
+    expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'ok' });
+  });
+
+  it('resumes an interrupted base-branch change from its alarm after a restart, without a retry', async () => {
+    const { userId, client, project, artifacts, authority } = await cloudProject('Branch alarm recovery');
+    artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    await space.runtimeRepositoryCheckpoint(identity);
+    const current = await authority.getProject();
+    if (!current) throw new Error('Missing project');
+    const copy = artifacts.copyCommit.getMockImplementation();
+    if (!copy) throw new Error('Missing copy fixture');
+    artifacts.copyCommit.mockImplementationOnce(copy).mockRejectedValueOnce(new Error('Checkpoint push interrupted'));
+    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('retries the base branch change to develop automatically') } } });
+    expect((await authority.getProject())?.baseBranch).toBe('main');
+    await runInDurableObject(space, async (_instance, state) => {
+      const restarted = new SpaceAuthorityDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      await restarted.alarm();
+    });
+    expect((await authority.getProject())?.baseBranch).toBe('develop');
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'develop', headCommit: commit('2'), worktreeCommit: commit('2') });
+    expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'develop', sourceCommit: commit('2') });
+    expect(artifacts.refs.get(`workspace-${project.id} refs/heads/develop`)).toBe(commit('2'));
   });
 
   it('creates from advertised tags and pull request heads without a machine', async () => {

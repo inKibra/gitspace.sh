@@ -43,6 +43,14 @@ Every machine already holds one WebSocket to the account's `UserRelayDO`, accept
 - The tab refetches with a normal `result-rpc` query using its cursor.
 - Short streaming downloads (inspector file and transcript reads) stay as streams; they end.
 
+As built:
+
+- The live object is the account directory object (`UserProjectIndexDO`); the tab's directory socket also carries `{ type: 'subscribe' | 'unsubscribe', keys }` and receives `{ type: 'notice', … }` beside directory events. A socket's keys are kept as hashes in its attachment, so the object hibernates with tabs open. A workspace key matches on workspace and resource.
+- Keys: account `settings`, `inference`, `cloud-images`, `machines`, `projects`, `provider-login:<flow>`, `machine:<id>` (the machine reconnected); project `project`; workspace `runtime`, `environment`, `space`, and the machine terminal resources.
+- Owners: a change-log commit notices each changed resource once (`DurableChangeLog.wake`); a runtime publication notices `runtime`; a machine sends terminal notices over its relay socket, and the relay tells it when no tab watches one so it stops observing.
+- Reads: the former subscriptions keep their paths as queries returning only events newer than `after` — at most 64 changes (else the current snapshot), or 256 runtime deltas (else a reset). A tab keeps one read in flight plus at most one queued per key, and rereads every key when its socket reopens.
+- Still streamed: `inspector.transcript`, `inspector.artifacts.read`, `inspector.resources.read`, `inspector.repository.tree` (finite downloads), and the machine-facing `project.environment.watch`.
+
 ## Cloudflare usage rules
 
 From Cloudflare's pricing and lifecycle docs (2026-09-30): duration is billed while an object runs or is idle but cannot hibernate; reads are billed per row scanned ($0.001/M); writes cost 1,000× more ($1/M), each index and each `setAlarm` adds writes; incoming WebSocket messages bill 20:1, protocol pings and auto-responses are free.
@@ -56,7 +64,7 @@ From Cloudflare's pricing and lifecycle docs (2026-09-30): duration is billed wh
 7. **Safe across deploys.** Every deploy resets every object: in-flight calls are retried idempotently and no status is derived from a transient failure.
 8. **Bounded memory and fan-out:** never load a whole table or history into memory; no per-request fan-out across workspaces.
 9. **Cache API and KV only for immutable data** (git objects).
-10. **Usage alerts and a daily report** of rows read, rows written and active hours per worker and namespace, so a runaway loop is caught within a day.
+10. **Usage alerts and a daily report** of rows read, rows written and active hours per worker and namespace, so a runaway loop is caught within a day. The platform worker's cron (00:15 UTC) reports the previous UTC day for each script in `USAGE_REPORT_SCRIPTS`, stores it in R2 at `usage-reports/<script>/<date>.json`, and logs `usage-report-spike` for a namespace (or the whole worker) whose day, or any single hour, rose more than 5× (hourly: rows written, active time or requests). It needs the `CF_ANALYTICS_TOKEN` secret (Account Analytics: Read). `bun scripts/cloudflare-usage-report.ts [--hours 24 | --date YYYY-MM-DD]` prints the same report locally from the wrangler login.
 
 ## Agent and user tools
 
@@ -64,7 +72,7 @@ From Cloudflare's pricing and lifecycle docs (2026-09-30): duration is billed wh
 - `sync` tool, one method each: `status` (unsent machine changes, cloud changes not yet on the machine, conflicts, last sync), `now`, `diff` (with a patch for one path), `discard` (backs up first), `backups`, `restore(ref)`, `resolve(path, keep)`.
 - `environment.runPhase({ machine, phase, script? })`; an interactive script returns "needs a person at a terminal".
 - Conversation notices on machine offline/online, setup failure and sync conflicts.
-- Environment tab per the approved proposal (`?gallery=environment-proposal`) plus a sync line: Sync now, Show unsent changes, conflict choices.
+- Environment tab: Overview, Machines (one status each, setup results inline, sync line: Sync now, Show unsent changes, conflict choices through `runtime.sync`), Setup (named steps, interactive scripts, approvals), Values (names only).
 - Machine CLI: `gitspace status`, `gitspace setup [phase] [--interactive]`, `gitspace sync`, `gitspace env -- <command>`.
 
 ## Delete
@@ -92,13 +100,28 @@ Each phase ships to bradleat and is verified on Golconda and PR 101 in the brows
 1. **Sync** — base rule and backups (rules 1–2); `sync` tool; plain `git push` to one snapshot ref per workspace. Done.
 2. **History on Pi** — imported OMP history converted once into native Pi entries; transcript and `history_search` read pi-durable's own entries in bounded windows; transcript/history projection tables dropped. Done.
 3. **Execution and attachments** — proof machinery and attachment lifecycle deleted (`attaching|ready|detached`); `POST /runtime/execute` returns the tool result; `gitspace.status` document and `workspace_status` tool. Done.
-4. **Transport** — relay push replaces machine polling; live notices replace the 16 `result-rpc` subscriptions; signature checks in the worker; two-object rule; no long locks; Cloudflare usage rules and daily usage report.
+4. **Transport** — Done:
+   - **Auth:** every worker and Durable Object isolate caches the vault's device registry and account state (refresh 30 s, fail closed at 120 s) and verifies the existing per-request device signatures itself; 60 s window, clients learn server time from the `Date` header; no nonce writes; socket proofs in `Sec-WebSocket-Protocol`; sockets recheck against the cache and close on revocation. (Chosen over a JWT: the worker already has every device key, so a token would add a format and a secret without adding a property.)
+   - **Two objects per request:** the workspace object owns its metadata and lifecycle (seeded once from the project) and authorizes runtime requests locally; archive/delete/phase go to the workspace first.
+   - **Machines:** relay notices (`assignments`, `workspace.snapshot`, `release`, `devices`, `settings`, `environment`) carry no state; the machine fetches over HTTP, catches up on every connection, retries failed reads with backoff. Online = relay socket connected (ping auto-response). Machine-wide assignments read a per-machine index. Presence is re-asserted to workspaces on every accepted socket and on the relay sweep.
+   - **Browsers:** one hibernatable socket per tab to `UserProjectIndexDO`; owners send `{ project, workspace, resource, version }`; tabs re-read with bounded cursor queries. Finite downloads stay streams.
+   - **Sockets and timers:** service tunnels and the Chrome extension socket hibernate; no timers in object classes. The cloud browser's CDP socket is outgoing and cannot hibernate (open decision below).
+   - **Locks:** `runtimeSetBaseBranch` is a durable step list; machine pairing takes no lock.
+   - **Usage report:** platform cron `15 0 * * *` (needs secret `CF_ANALYTICS_TOKEN`) and `scripts/cloudflare-usage-report.ts`; flags daily and hourly spikes.
 5. **Machine** — old agent stack and `core` deleted (done); machine CLI.
-6. **UI** — demo code deleted (done); Environment tab per proposal; single status everywhere.
+6. **UI** — demo code deleted (done); Environment tab (done); single status everywhere (done: the workspace object derives one summary from live tasks, questions and `gitspace.status`; every surface shows it through one dot).
 7. **Cloud legacy** — legacy migration, placement mutators, and dead control operations deleted (done); remaining tests; old snapshot refs (`refs/gitspace/spaces/*/checkpoints/*`) cleanup; lightbeam rollout.
 
-Rows stored by older releases are rewritten when read: machine journal attachments and DO attachment rows map `lost`/`draining` to `detached`, and a stored runtime snapshot that no longer parses is rebuilt at startup from its cursor.
+Rows stored by older releases are rewritten when read: machine journal attachments and DO attachment rows map `lost`/`draining` to `detached`, and a stored runtime snapshot that no longer parses is rebuilt at startup from its cursor. A stored workspace status summary in the old shape (derived from conversation flags) reads as unreported until that workspace's runtime publishes again.
+
+Alarms: a due wake whose handler neither cleared nor moved it is dropped at the end of the alarm (an orphaned `leases` row from the deleted attachment lifecycle kept one workspace waking ~21 times a second).
+
+Search: `grep` is exact ripgrep and needs an attached machine; `code_search` is a cloud FTS5 trigram index per workspace (built in alarm steps per snapshot, bounded verification, reports how far behind it is). Agents may attach machines (`machines` `op: 'attach'`, attach on first need, per-machine "Agents may attach", default on).
 
 ## Open
 
 - Idle checkouts are never removed automatically; they stay until the machine is detached (assumed from the model; confirm).
+- Cloud browser CDP socket keeps the workspace object awake while a cloud browser is open: move it to its own data-free object, or connect per tool call.
+- The `afterSnapshot` long-poll exists only for machines released before `9f5bbae`; delete once lightbeam's machines have updated.
+- Old Cloudflare workers (`gitspace-api`, `-auth`, `-platform`, `-sandbox-worker`, `-docs`, relay spikes, `gitspace-relays`): punted.
+- Machine-wide assignments still take ~30 s for 4 workspaces (repository info and filter/submodule tree walk per assignment); cache per commit.

@@ -67,8 +67,10 @@ import {
   type InferenceProfile, type InferenceState,
 } from '@gitspace/protocol/inference';
 import { LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, type LifecycleState } from '@gitspace/protocol-environment';
-import { streamCursorSchema } from '@gitspace/protocol-sync';
-import { consumeDurableStream, DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
+import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
+import { consumeDurableStream, DurableChangeLog } from './durable-stream.js';
+import { accountLiveKey } from '@gitspace/protocol/live-notice';
+import { notifyBrowsers } from './live-notices.js';
 import {
   platformDeployResponseSchema,
   stageReleaseInputSchema,
@@ -388,7 +390,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
   }
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.inferenceChanges = new DurableChangeLog(ctx.storage);
+    this.inferenceChanges = new DurableChangeLog(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS vault_config (
@@ -594,9 +596,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return JSON.parse(row.profile_json) as InferenceProfile;
   }
 
-  async watchInference(after: number | null): Promise<DurableStreamSubscription> {
+  /** `inference.events`: inference state after `after`, bounded. */
+  async inferenceEvents(after: number | null): Promise<StreamEvent<InferenceState>[]> {
     await this.ensureInference();
-    return this.inferenceChanges.watch('inference', after, () => this.inferenceState());
+    return this.inferenceChanges.replay('inference', after, () => this.inferenceState(), false);
   }
 
   private inferenceChanged(): void {
@@ -999,127 +1002,131 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<BrowserInvitationRow>('SELECT * FROM browser_invitations WHERE invite_id = ?', inviteId).toArray()[0] ?? null;
   }
 
+  /** No lock: every transition is a conditional write made with no await between its read and write, and a poll that
+   * waits on the settings and fleet objects re-reads the pairing before it marks it enrolled. */
   async machinePairingRequest(input: { operation: string; header: string | null; target: string; body: Uint8Array; apiUrl: string }): Promise<CredentialVaultResult<MachinePairingValue>> {
-    return this.ctx.blockConcurrencyWhile(async () => {
-      const config = this.config();
-      if (!config || input.body.byteLength > REQUEST_MAX_BYTES) return publicError('INVALID_PAIRING', 'Pairing request is invalid');
-      const body = JSON.parse(new TextDecoder().decode(input.body)) as Record<string, unknown>;
-      if (body.userId !== config.user_id) return publicError('INVALID_PAIRING', 'Pairing belongs to another account');
-      const browserOperation = ['create', 'inspect', 'approve', 'cancel'].includes(input.operation);
-      let browserDeviceId: string | undefined;
-      if (browserOperation) {
-        const authorized = this.authorizeBrowserRequest({ ...input, capabilities: PAIRING_CAPABILITIES });
-        if (authorized.status === 'error') return authorized;
-        browserDeviceId = authorized.value.deviceId;
+    const config = this.config();
+    if (!config || input.body.byteLength > REQUEST_MAX_BYTES) return publicError('INVALID_PAIRING', 'Pairing request is invalid');
+    const body = JSON.parse(new TextDecoder().decode(input.body)) as Record<string, unknown>;
+    if (body.userId !== config.user_id) return publicError('INVALID_PAIRING', 'Pairing belongs to another account');
+    const browserOperation = ['create', 'inspect', 'approve', 'cancel'].includes(input.operation);
+    let browserDeviceId: string | undefined;
+    if (browserOperation) {
+      const authorized = this.authorizeBrowserRequest({ ...input, capabilities: PAIRING_CAPABILITIES });
+      if (authorized.status === 'error') return authorized;
+      browserDeviceId = authorized.value.deviceId;
+    }
+    const now = Date.now();
+    if (input.operation === 'create') {
+      const issuer = this.deviceGrant(browserDeviceId!)!;
+      if (!issuer.invite.invite.canDelegate) return publicError('PAIRING_FORBIDDEN', 'Browser may not delegate machine access');
+      const pairingId = crypto.randomUUID();
+      const token = credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+      const tokenHash = credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))));
+      // The limit check and the insert run with no await between them.
+      this.ctx.storage.sql.exec('DELETE FROM machine_pairings WHERE expires_at <= ?', now);
+      const count = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM machine_pairings WHERE creator_device_id = ? AND state != 'cancelled'", browserDeviceId!).one().count;
+      if (count >= 5) return publicError('PAIRING_LIMIT', 'Too many active pairing sessions');
+      const expiresAt = now + MACHINE_PAIRING_TTL_MS;
+      this.ctx.storage.sql.exec("INSERT INTO machine_pairings(pairing_id, creator_device_id, token_hash, expires_at, state) VALUES (?, ?, ?, ?, 'created')", pairingId, browserDeviceId!, tokenHash, expiresAt);
+      return { status: 'ok', value: { pairingId, token, expiresAt } };
+    }
+    const pairingId = z.uuid().parse(body.pairingId);
+    const row = this.ctx.storage.sql.exec<PairingRow>('SELECT * FROM machine_pairings WHERE pairing_id = ?', pairingId).toArray()[0];
+    if (!row || row.expires_at <= now || row.state === 'cancelled') return publicError('PAIRING_UNAVAILABLE', 'Pairing is expired, cancelled or unavailable');
+    if (browserOperation && row.creator_device_id !== browserDeviceId) return publicError('PAIRING_FORBIDDEN', 'Pairing belongs to another browser');
+    let machine = row.machine_json ? pairingMachineSchema.parse(JSON.parse(row.machine_json)) : null;
+    if (!browserOperation) {
+      const header = input.header ? decodeSignedRpcHeader(input.header) : null;
+      const claimant = input.operation === 'claim' ? pairingMachineSchema.parse({
+        machineId: body.machineId, label: body.label, signingPublicKey: body.signingPublicKey, exchangePublicKey: body.exchangePublicKey,
+      }) : machine;
+      if (!claimant || !header || header.deviceId !== pairingId) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof is missing');
+      let signingPublicKey: Uint8Array;
+      try {
+        signingPublicKey = credentialProtocolBase64.decode(claimant.signingPublicKey);
+        if (signingPublicKey.byteLength !== 32 || credentialProtocolBase64.decode(claimant.exchangePublicKey).byteLength !== 32) throw new Error('Invalid keys');
+      } catch {
+        return publicError('PAIRING_UNAUTHORIZED', 'Machine keys are invalid');
       }
-      const now = Date.now();
-      if (input.operation === 'create') {
-        const issuer = this.deviceGrant(browserDeviceId!)!;
-        if (!issuer.invite.invite.canDelegate) return publicError('PAIRING_FORBIDDEN', 'Browser may not delegate machine access');
-        this.ctx.storage.sql.exec('DELETE FROM machine_pairings WHERE expires_at <= ?', now);
-        const count = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM machine_pairings WHERE creator_device_id = ? AND state != 'cancelled'", browserDeviceId!).one().count;
-        if (count >= 5) return publicError('PAIRING_LIMIT', 'Too many active pairing sessions');
-        const pairingId = crypto.randomUUID();
-        const token = credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
-        const tokenHash = credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))));
-        const expiresAt = now + MACHINE_PAIRING_TTL_MS;
-        this.ctx.storage.sql.exec("INSERT INTO machine_pairings(pairing_id, creator_device_id, token_hash, expires_at, state) VALUES (?, ?, ?, ?, 'created')", pairingId, browserDeviceId!, tokenHash, expiresAt);
-        return { status: 'ok', value: { pairingId, token, expiresAt } };
-      }
-      const pairingId = z.uuid().parse(body.pairingId);
-      const row = this.ctx.storage.sql.exec<PairingRow>('SELECT * FROM machine_pairings WHERE pairing_id = ?', pairingId).toArray()[0];
-      if (!row || row.expires_at <= now || row.state === 'cancelled') return publicError('PAIRING_UNAVAILABLE', 'Pairing is expired, cancelled or unavailable');
-      if (browserOperation && row.creator_device_id !== browserDeviceId) return publicError('PAIRING_FORBIDDEN', 'Pairing belongs to another browser');
-      let machine = row.machine_json ? pairingMachineSchema.parse(JSON.parse(row.machine_json)) : null;
-      if (!browserOperation) {
-        const header = input.header ? decodeSignedRpcHeader(input.header) : null;
-        const claimant = input.operation === 'claim' ? pairingMachineSchema.parse({
-          machineId: body.machineId, label: body.label, signingPublicKey: body.signingPublicKey, exchangePublicKey: body.exchangePublicKey,
-        }) : machine;
-        if (!claimant || !header || header.deviceId !== pairingId) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof is missing');
-        let signingPublicKey: Uint8Array;
-        try {
-          signingPublicKey = credentialProtocolBase64.decode(claimant.signingPublicKey);
-          if (signingPublicKey.byteLength !== 32 || credentialProtocolBase64.decode(claimant.exchangePublicKey).byteLength !== 32) throw new Error('Invalid keys');
-        } catch {
-          return publicError('PAIRING_UNAUTHORIZED', 'Machine keys are invalid');
+      if (!verifyRpcSignature(header, { method: 'POST', path: input.target, body: input.body }, signingPublicKey)) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof does not match request');
+      if (Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE);
+      if (input.operation === 'claim') {
+        if (machine && row.state !== 'created' && claimant.machineId === machine.machineId && claimant.label === machine.label
+          && claimant.signingPublicKey === machine.signingPublicKey && claimant.exchangePublicKey === machine.exchangePublicKey) {
+          return { status: 'ok', value: { pairingId, state: row.state } };
         }
-        if (!verifyRpcSignature(header, { method: 'POST', path: input.target, body: input.body }, signingPublicKey)) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof does not match request');
-        if (Math.abs(now - header.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE);
-        if (input.operation === 'claim') {
-          if (machine && row.state !== 'created' && claimant.machineId === machine.machineId && claimant.label === machine.label
-            && claimant.signingPublicKey === machine.signingPublicKey && claimant.exchangePublicKey === machine.exchangePublicKey) {
-            return { status: 'ok', value: { pairingId, state: row.state } };
-          }
-          if (row.state !== 'created' || typeof body.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(body.token)) return publicError('PAIRING_USED', 'Pairing token has already been claimed');
-          const tokenHash = credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body.token))));
-          if (tokenHash !== row.token_hash) return publicError('PAIRING_UNAUTHORIZED', 'Pairing token is invalid');
-          if (this.ctx.storage.sql.exec('SELECT machine_id FROM credential_devices WHERE machine_id = ?', claimant.machineId).toArray().length) return publicError('MACHINE_EXISTS', 'Choose a new machine identity');
-          const changed = this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'claimed', machine_json = ?, token_hash = '' WHERE pairing_id = ? AND state = 'created' AND expires_at > ?", JSON.stringify(claimant), pairingId, Date.now()).rowsWritten;
-          return changed === 1 ? { status: 'ok', value: { pairingId, state: 'claimed' } } : publicError('PAIRING_USED', 'Pairing token is expired or already claimed');
-        }
+        if (row.state !== 'created' || typeof body.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(body.token)) return publicError('PAIRING_USED', 'Pairing token has already been claimed');
+        const tokenHash = credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body.token))));
+        if (tokenHash !== row.token_hash) return publicError('PAIRING_UNAUTHORIZED', 'Pairing token is invalid');
+        if (this.ctx.storage.sql.exec('SELECT machine_id FROM credential_devices WHERE machine_id = ?', claimant.machineId).toArray().length) return publicError('MACHINE_EXISTS', 'Choose a new machine identity');
+        const changed = this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'claimed', machine_json = ?, token_hash = '' WHERE pairing_id = ? AND state = 'created' AND expires_at > ?", JSON.stringify(claimant), pairingId, Date.now()).rowsWritten;
+        return changed === 1 ? { status: 'ok', value: { pairingId, state: 'claimed' } } : publicError('PAIRING_USED', 'Pairing token is expired or already claimed');
       }
-      const issuerChain: DeviceGrantRecord[] = [];
-      let issuerId: string | null = row.creator_device_id;
-      while (issuerId && issuerChain.length < 4) {
-        const issuer = this.deviceGrant(issuerId);
-        if (!issuer || issuerChain.some((record) => record.binding.deviceId === issuerId)) return publicError('PAIRING_FORBIDDEN', 'Browser issuer chain is unavailable');
-        issuerChain.push(issuer);
-        issuerId = issuer.invite.issuer.kind === 'device' ? issuer.invite.issuer.deviceId : null;
-      }
-      if (issuerId) return publicError('PAIRING_FORBIDDEN', 'Browser issuer chain is too deep');
-      const expiresAt = Math.min(row.expires_at + 365 * 24 * 60 * 60_000, ...issuerChain.map((record) => deviceGrantExpiresAt(record) ?? Infinity));
-      const grant: CredentialAuthorityGrant | null = machine ? {
-        version: 1, userId: config.user_id, machineId: machine.machineId,
-        signingPublicKey: machine.signingPublicKey, exchangePublicKey: machine.exchangePublicKey,
-        capabilities: ['storage.access', 'space.control', 'credential.access'],
-        generation: 1, issuerDeviceId: row.creator_device_id, expiresAt,
-      } : null;
-      if (input.operation === 'inspect') return { status: 'ok', value: { pairingId, state: row.state, expiresAt: row.expires_at, machine, grant, issuerChain } };
-      if (input.operation === 'cancel') {
-        if (row.state === 'enrolled') return publicError('PAIRING_USED', 'Machine is enrolled; revoke it from the fleet');
-        if (machine && row.state === 'approved') this.removeManagedDevice(machine.machineId);
-        this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'cancelled', token_hash = '' WHERE pairing_id = ?", pairingId);
-        return { status: 'ok', value: { pairingId, state: 'cancelled' } };
-      }
-      if (input.operation === 'approve') {
-        if (row.state !== 'claimed' || !grant) return publicError('PAIRING_NOT_CLAIMED', 'Pairing must be claimed before approval');
-        const signed = signedCredentialAuthorityGrantSchema.parse(body.grant);
-        if (credentialProtocolBase64.encode(credentialAuthorityGrantPayload(signed.grant)) !== credentialProtocolBase64.encode(credentialAuthorityGrantPayload(grant))) return publicError('PAIRING_GRANT_MISMATCH', 'Approval does not match the claimed machine');
-        return this.ctx.storage.transactionSync(() => {
-          const registered = this.registerDevice(signed);
-          if (registered.status === 'error') return registered;
-          this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'approved', grant_json = ? WHERE pairing_id = ? AND state = 'claimed'", JSON.stringify(signed), pairingId);
-          return { status: 'ok', value: { pairingId, state: 'approved' } };
-        });
-      }
-      if (input.operation !== 'poll' || !machine) return publicError('INVALID_PAIRING', 'Unknown pairing operation');
-      if (row.state === 'claimed') return { status: 'ok', value: { state: 'pending' } };
-      if ((row.state !== 'approved' && row.state !== 'enrolled') || !row.grant_json) return publicError('PAIRING_UNAVAILABLE', 'Pairing is not approved');
-      const signed = signedCredentialAuthorityGrantSchema.parse(JSON.parse(row.grant_json));
-      const authorized = this.verifier().authorizeRelayGrant(signed, 'space.control', Date.now());
-      if (authorized.status === 'error') return { status: 'error', error: authorized.error };
-      const settings = await (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id).get(machine.machineId);
-      const handle = settings.profile.handle;
-      if (!handle) return publicError('ACCOUNT_UNPROVISIONED', 'Account tenant is not provisioned');
-      const relayUrl = `https://${handle}.gssh.dev`;
-      if (row.state === 'approved') await (this.env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(config.user_id).putMachine({
-        id: machine.machineId, label: machine.label, state: 'offline', rpcEndpoint: `${relayUrl}/tunnel/${encodeURIComponent(machine.machineId)}/rpc`,
-        kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: signed.grant.generation, operationId: null, error: null,
+    }
+    const issuerChain: DeviceGrantRecord[] = [];
+    let issuerId: string | null = row.creator_device_id;
+    while (issuerId && issuerChain.length < 4) {
+      const issuer = this.deviceGrant(issuerId);
+      if (!issuer || issuerChain.some((record) => record.binding.deviceId === issuerId)) return publicError('PAIRING_FORBIDDEN', 'Browser issuer chain is unavailable');
+      issuerChain.push(issuer);
+      issuerId = issuer.invite.issuer.kind === 'device' ? issuer.invite.issuer.deviceId : null;
+    }
+    if (issuerId) return publicError('PAIRING_FORBIDDEN', 'Browser issuer chain is too deep');
+    const expiresAt = Math.min(row.expires_at + 365 * 24 * 60 * 60_000, ...issuerChain.map((record) => deviceGrantExpiresAt(record) ?? Infinity));
+    const grant: CredentialAuthorityGrant | null = machine ? {
+      version: 1, userId: config.user_id, machineId: machine.machineId,
+      signingPublicKey: machine.signingPublicKey, exchangePublicKey: machine.exchangePublicKey,
+      capabilities: ['storage.access', 'space.control', 'credential.access'],
+      generation: 1, issuerDeviceId: row.creator_device_id, expiresAt,
+    } : null;
+    if (input.operation === 'inspect') return { status: 'ok', value: { pairingId, state: row.state, expiresAt: row.expires_at, machine, grant, issuerChain } };
+    if (input.operation === 'cancel') {
+      if (row.state === 'enrolled') return publicError('PAIRING_USED', 'Machine is enrolled; revoke it from the fleet');
+      if (machine && row.state === 'approved') this.removeManagedDevice(machine.machineId);
+      this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'cancelled', token_hash = '' WHERE pairing_id = ?", pairingId);
+      return { status: 'ok', value: { pairingId, state: 'cancelled' } };
+    }
+    if (input.operation === 'approve') {
+      if (row.state !== 'claimed' || !grant) return publicError('PAIRING_NOT_CLAIMED', 'Pairing must be claimed before approval');
+      const signed = signedCredentialAuthorityGrantSchema.parse(body.grant);
+      if (credentialProtocolBase64.encode(credentialAuthorityGrantPayload(signed.grant)) !== credentialProtocolBase64.encode(credentialAuthorityGrantPayload(grant))) return publicError('PAIRING_GRANT_MISMATCH', 'Approval does not match the claimed machine');
+      return this.ctx.storage.transactionSync(() => {
+        const registered = this.registerDevice(signed);
+        if (registered.status === 'error') return registered;
+        this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'approved', grant_json = ? WHERE pairing_id = ? AND state = 'claimed'", JSON.stringify(signed), pairingId);
+        return { status: 'ok', value: { pairingId, state: 'approved' } };
       });
-      const artifactKey = await this.artifactKey(config.user_id);
-      // Retrieval is retryable for the same proof-bound key until the original
-      // short expiry; a lost HTTP response never strands a newly enrolled CLI.
-      if (row.expires_at <= Date.now()) return publicError('PAIRING_UNAVAILABLE', 'Pairing has expired');
-      const current = this.verifier().authorizeRelayGrant(signed, 'space.control', Date.now());
-      if (current.status === 'error') return { status: 'error', error: current.error };
-      this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'enrolled' WHERE pairing_id = ?", pairingId);
-      return { status: 'ok', value: {
-        state: 'enrolled', userId: config.user_id, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl,
-        apiUrl: input.apiUrl, rootPublicKey: config.root_public_key, machineId: machine.machineId, grant: signed,
-        artifactKey,
-      } };
+    }
+    if (input.operation !== 'poll' || !machine) return publicError('INVALID_PAIRING', 'Unknown pairing operation');
+    if (row.state === 'claimed') return { status: 'ok', value: { state: 'pending' } };
+    if ((row.state !== 'approved' && row.state !== 'enrolled') || !row.grant_json) return publicError('PAIRING_UNAVAILABLE', 'Pairing is not approved');
+    const signed = signedCredentialAuthorityGrantSchema.parse(JSON.parse(row.grant_json));
+    const authorized = this.verifier().authorizeRelayGrant(signed, 'space.control', Date.now());
+    if (authorized.status === 'error') return { status: 'error', error: authorized.error };
+    const settings = await (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id).get(machine.machineId);
+    const handle = settings.profile.handle;
+    if (!handle) return publicError('ACCOUNT_UNPROVISIONED', 'Account tenant is not provisioned');
+    const relayUrl = `https://${handle}.gssh.dev`;
+    if (row.state === 'approved') await (this.env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(config.user_id).putMachine({
+      id: machine.machineId, label: machine.label, state: 'offline', rpcEndpoint: `${relayUrl}/tunnel/${encodeURIComponent(machine.machineId)}/rpc`,
+      kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: signed.grant.generation, operationId: null, error: null,
     });
+    const artifactKey = await this.artifactKey(config.user_id);
+    // Retrieval is retryable for the same proof-bound key until the original
+    // short expiry; a lost HTTP response never strands a newly enrolled CLI.
+    // The pairing may have been cancelled while this poll waited on the settings and fleet objects.
+    const latest = this.ctx.storage.sql.exec<PairingRow>('SELECT * FROM machine_pairings WHERE pairing_id = ?', pairingId).toArray()[0];
+    if (!latest || latest.expires_at <= Date.now()) return publicError('PAIRING_UNAVAILABLE', 'Pairing has expired');
+    if (latest.state !== 'approved' && latest.state !== 'enrolled') return publicError('PAIRING_UNAVAILABLE', 'Pairing was cancelled; start a new pairing from the browser');
+    const current = this.verifier().authorizeRelayGrant(signed, 'space.control', Date.now());
+    if (current.status === 'error') return { status: 'error', error: current.error };
+    this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'enrolled' WHERE pairing_id = ? AND state = 'approved'", pairingId);
+    return { status: 'ok', value: {
+      state: 'enrolled', userId: config.user_id, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl,
+      apiUrl: input.apiUrl, rootPublicKey: config.root_public_key, machineId: machine.machineId, grant: signed,
+      artifactKey,
+    } };
   }
   removeManagedDevice(machineId: string): void {
     this.ctx.storage.sql.exec("UPDATE credential_devices SET capabilities_json = '[]', updated_at = ? WHERE machine_id = ?", new Date().toISOString(), machineId);
@@ -1474,6 +1481,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         await this.advanceCloudLogin({ profileId: row.profile_id, flowId: row.flow_id });
       } catch {
         this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', sealed_state = '', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND revision = ? AND status != 'done'", JSON.stringify({ type: 'done', ok: false, error: 'Authorization is no longer available; start a new login' }), row.flow_id, row.revision);
+        this.loginChanged(row.flow_id);
       }
     }
     await this.ctx.blockConcurrencyWhile(async () => {
@@ -1534,8 +1542,14 @@ export class CredentialVaultDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec("INSERT INTO cloud_provider_logins VALUES (?, ?, ?, 0, '', '[]', 'pending', ?)", flowId, profileId, provider, Date.now() + 15 * 60_000);
     const running: UpstreamLogin = { abort: new AbortController(), answer: null };
     this.upstreamLogins.set(flowId, running);
-    const append = (event: ProviderLoginEvent) => this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND status != 'done'", JSON.stringify(event), flowId);
-    const finish = (event: ProviderLoginEvent) => this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND status != 'done'", JSON.stringify(event), flowId);
+    const append = (event: ProviderLoginEvent) => {
+      this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND status != 'done'", JSON.stringify(event), flowId);
+      this.loginChanged(flowId);
+    };
+    const finish = (event: ProviderLoginEvent) => {
+      this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND status != 'done'", JSON.stringify(event), flowId);
+      this.loginChanged(flowId);
+    };
     void (async () => {
       try {
         const credential = await upstreamOAuth(provider).login({
@@ -1592,7 +1606,14 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return { flowId };
   }
 
+  /** A watching tab hears of every event the step appended. */
   private async advanceCloudLogin(input: { profileId: string; flowId: string }, response?: { promptId: string; value: string }): Promise<void> {
+    const before = this.loginEventCount(input.flowId);
+    try { await this.stepCloudLogin(input, response); }
+    finally { if (this.loginEventCount(input.flowId) !== before) this.loginChanged(input.flowId); }
+  }
+
+  private async stepCloudLogin(input: { profileId: string; flowId: string }, response?: { promptId: string; value: string }): Promise<void> {
     const row = this.loginRow(input.profileId, input.flowId);
     if (row.status === 'done') return;
     if (isUpstreamOAuthProvider(row.provider)) {
@@ -1659,6 +1680,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const row = this.loginRow(input.profileId, input.flowId);
     if (row.status === 'done') return;
     this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'done', revision = revision + 1, sealed_state = '', events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ?", JSON.stringify({ type: 'done', ok: false, error: 'Login cancelled' }), row.flow_id);
+    this.loginChanged(row.flow_id);
     this.upstreamLogins.get(row.flow_id)?.abort.abort();
   }
 
@@ -1675,6 +1697,15 @@ export class CredentialVaultDO extends DurableObject<Env> {
       return decoded.value;
     });
     return { events: events.slice(input.after ?? 0), done: row.status === 'done' };
+  }
+
+  private loginEventCount(flowId: string): number {
+    return this.ctx.storage.sql.exec<{ events: number }>('SELECT json_array_length(events_json) AS events FROM cloud_provider_logins WHERE flow_id = ?', flowId).toArray()[0]?.events ?? 0;
+  }
+
+  /** The flow gained events: a watching tab refetches them (`providers.login.events`). */
+  private loginChanged(flowId: string): void {
+    this.ctx.waitUntil(notifyBrowsers(this.env, [{ ...accountLiveKey(`provider-login:${flowId}`), version: this.loginEventCount(flowId) }]));
   }
 
   async putBrowserApiKey(profileId: string, provider: string, key: string): Promise<void> {

@@ -129,13 +129,13 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
 | `machines` | `rpc.read` + `fleet.control` in MCP | T | - | - | F | Tool | Listing reconciles managed machines toward their recorded desired state; that housekeeping changes no caller-visible desired state, so the tool is advertised read-only. MCP still requires fleet control. Follow `machine.events` instead of polling. |
-| `machine.events` | `rpc.read` | T | - | - | F | Bounded | Live stream: bounded wait/page with cursor and cancellation; preserve expiration/resync signals and recheck grants. |
+| `machine.events` | `rpc.read` | T | - | - | F | Tool | Cursor query: returns only the changes after `after`, bounded; read again from the newest cursor. Browsers learn when to read from a live notice. |
 | `machine.updateNotes` | `fleet.control` | F | T | T | F | Tool | Replaces a machine's notes; power state and image are unchanged. |
 | `machine.updateAgentAttach` | `fleet.control` | F | F | T | F | Tool | Allows or forbids agents to attach the machine on their own; forbidden, an agent's attach becomes an approval question. |
 | `machine.sleep`<br>`machine.destroy` | `fleet.control` | F | T | T | F | Tool | Checkpoints and stops, or removes, a managed machine. Destroy requires no open spaces and no active image operation; an already absent machine reports removal. |
 | `machine.createSandbox`<br>`machine.resume` | `fleet.control` | F | F | F | F | Tool | Provisions a new sandbox or brings a machine online. Returns while provisioning continues; accepted is not ready. Sandbox creation with image selection also requires deployment.control. |
 | `machine.image.list`<br>`machine.image.defaults.get` | `rpc.read` | T | - | - | F | Tool | Read saved state or metadata. Secrets/private keys must not enter outputs; status is not a live probe unless explicitly documented. |
-| `machine.image.events` | `rpc.read` | T | - | - | F | Bounded | Observe an existing operation; do not start or advance it. Bound the wait and recheck access. |
+| `machine.image.events` | `rpc.read` | T | - | - | F | Tool | Observe an existing operation; do not start or advance it. Cursor query: returns only the changes after `after`, bounded; read again from the newest cursor. Browsers learn when to read from a live notice. |
 | `machine.image.set`<br>`machine.image.cancel` | `deployment.control` | F | T | T | T | Tool | Replaces a machine image or cancels its image operation; preserve operation IDs and lifecycle gates. Accepted is not activated. |
 | `machine.image.recover` | `deployment.control` | F | T | T | T | Tool | Recovery may discard an uncheckpointed candidate. The recorded approving identity is the authenticated device; it is not proof of a human browser. |
 | `machine.image.retry` | `deployment.control` | F | F | F | T | Tool | Resumes a stalled image operation under its existing machine and operation IDs; a finished operation stays finished. Follow image events. |
@@ -148,14 +148,14 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | `settings.get`<br>`settings.git.get`<br>`settings.omp.get` | `rpc.read` | T | - | - | F | Tool | Read saved state or metadata. Secrets/private keys must not enter outputs; status is not a live probe unless explicitly documented. |
 | `settings.update`<br>`settings.reserveHandle` | `rpc.write` | F | T | T | F | Tool | Changes, replaces, or removes saved state/permissions. Revision checks are not a general retry guarantee. Configuration can affect later execution; describe that effect. |
 | `settings.omp.set` | `rpc.write` | F | T | F | F | Tool | Changes, replaces, or removes saved state/permissions. Revision checks are not a general retry guarantee. Configuration can affect later execution; describe that effect. |
-| `settings.events` | `rpc.read` | T | - | - | F | Bounded | Live stream: bounded wait/page with cursor and cancellation; preserve expiration/resync signals and recheck grants. |
+| `settings.events` | `rpc.read` | T | - | - | F | Tool | Cursor query: returns only the changes after `after`, bounded; read again from the newest cursor. Browsers learn when to read from a live notice. |
 
 ### inference
 
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
 | `inference.list` | `rpc.read` | T | - | - | F | Tool | Returns profiles and assignments without credential values. The read can initialize or migrate canonical inference state; that one-time housekeeping is not a caller-visible change. |
-| `inference.events` | `rpc.read` | T | - | - | F | Bounded | Live stream: bounded wait/page with cursor and cancellation; preserve expiration/resync signals and recheck grants. Starting the stream can initialize or migrate inference state as housekeeping. |
+| `inference.events` | `rpc.read` | T | - | - | F | Tool | Cursor query: returns only the changes after `after`, bounded; read again from the newest cursor. Browsers learn when to read from a live notice. The first read can initialize or migrate inference state as housekeeping. |
 | `inference.update`<br>`inference.delete` | `rpc.write` + `account.admin` for clients | F | T | T | F | Tool | Replaces or deletes a profile. Account-scoped API clients need explicit administration authority. Existing browser administration remains supported. |
 | `inference.assign` | `rpc.write` + `account.admin` for clients | F | F | T | F | Tool | Reversible selection of a project's profile. Account-scoped API clients need explicit administration authority. |
 | `inference.create` | `rpc.write` + `account.admin` for clients | F | F | F | F | Tool | Creates a profile copied from another; credentials are not copied. Account-scoped API clients need explicit administration authority. |
@@ -206,7 +206,7 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
-| `environment.events` | `rpc.read` | T | - | - | F | Bounded | Live stream: bounded wait/page with cursor and cancellation; preserve expiration/resync signals and recheck grants. |
+| `environment.events` | `rpc.read` | T | - | - | F | Tool | Cursor query: returns only the changes after `after`, bounded; read again from the newest cursor. Browsers learn when to read from a live notice. |
 | `environment.get`<br>`environment.runLog` | `rpc.read` | T | - | - | F | Tool | Bounded inspection; preserve resource ownership and generation checks. Never implicitly open a space or start its runtime. |
 | `environment.putBundle`<br>`environment.putValue`<br>`environment.deleteValue` | `rpc.write` | F | T | T | F | Tool | Changes, replaces, or removes saved state/permissions. Revision checks are not a general retry guarantee. Configuration can affect later execution; describe that effect. |
 | `environment.setProfile` | `rpc.write` | F | F | T | F | Tool | Reversible selection of the workspace environment profile; changes configuration without starting checks or provisioning resources. |
@@ -282,7 +282,7 @@ Only one run per cron may be queued or running. Queue time does not count as exe
 
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
-| `project.events`<br>`project.directoryEvents` | `rpc.read` | T | - | - | F | Bounded | Live stream: bounded wait/page with cursor and cancellation; preserve expiration/resync signals and recheck grants. |
+| `project.events`<br>`project.directoryEvents` | `rpc.read` | T | - | - | F | Tool | Cursor query: returns only the changes after `after`, bounded; read again from the newest cursor. Browsers learn when to read from a live notice. |
 | `project.list` | `rpc.read` | T | - | - | F | Tool | The cloud read may create the built-in GitSpace project record before listing; that one-time setup is housekeeping, so the tool is advertised read-only. |
 | `project.create` | `rpc.write` | F | F | F | T | Tool | Creates a project from a remote or new managed repository plus its canonical agent. Returns lifecycle and operation records, not proof of readiness. |
 | `project.open` | `rpc.write` | F | F | T | T | Tool | Materializes a cloud-only project's repository on a machine; returns null when no operation is needed. |
@@ -294,7 +294,7 @@ Only one run per cron may be queued or running. Queue time does not count as exe
 
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
-| `space.events` | `rpc.read` | T | - | - | F | Bounded | Live stream: bounded wait/page with cursor and cancellation; preserve expiration/resync signals and recheck grants. |
+| `space.events` | `rpc.read` | T | - | - | F | Tool | Cursor query: returns only the changes after `after`, bounded; read again from the newest cursor. Browsers learn when to read from a live notice. |
 | `space.close` | `rpc.write` | F | T | T | F | Tool | Can stop work, checkpoint, remove materialization, or delete records. Preserve revisions/generations and distinguish archive from permanent deletion. |
 | `space.reopen` | `rpc.write` | F | F | T | T | Tool | Opens a closed space from saved state or recovers its canonical agent on the matching holder. Returns lifecycle state and generation, not completed-work claims. |
 
@@ -313,7 +313,7 @@ Only one run per cron may be queued or running. Queue time does not count as exe
 
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
-| `terminals.events` | `rpc.read` | T | - | - | F | Bounded | Live stream: bounded wait/page with cursor and cancellation; preserve expiration/resync signals and recheck grants. |
+| `terminals.events` | `rpc.read` | T | - | - | F | Tool | Cursor query: returns only the changes after `after`, bounded; read again from the newest cursor. Browsers learn when to read from a live notice. |
 | `terminals.live` | Browser session + `rpc.read` | T | - | - | F | Excluded | Protected lifecycle output is live-only, with no persistent log or replay. Never expose authentication output to MCP. |
 | `terminals.list`<br>`terminals.read` | `rpc.read` | T | - | - | F | Tool | Bounded inspection; preserve resource ownership and generation checks. Never implicitly open a space or start its runtime. |
 | `terminals.create` | `rpc.write` | F | F | F | F | Tool | Starts a new shell on the named `machineId`, which must be a ready cache of a cloud workspace; nothing runs until input is sent. Every terminal call names its machine. |

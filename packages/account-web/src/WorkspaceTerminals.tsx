@@ -5,8 +5,10 @@ import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type R
 import { glyph } from './glyph.js';
 import { EmptyState } from './GitSpaceShell.js';
 import type { StreamEvent } from '@gitspace/protocol-sync';
-import { terminalStreamResource, type ProtectedTerminalEvent, type ProtectedTerminalStep } from '@gitspace/protocol/rpc-contract';
+import { accountLiveKey, workspaceLiveKey } from '@gitspace/protocol/live-notice';
+import { machineLiveResource, terminalLiveResource, terminalStreamResource, type ProtectedTerminalBatch, type ProtectedTerminalStep } from '@gitspace/protocol/rpc-contract';
 import { useSynchronizedResource } from './SynchronizationProvider.js';
+import { liveSource, liveTicks } from './live-notices.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 export type WorkspaceTerminalKind = 'user' | 'agent' | 'lifecycle' | 'service';
@@ -41,7 +43,7 @@ export interface WorkspaceTerminalMachine {
   label: string;
 }
 
-type ProtectedTerminalStream = AsyncIterable<{ status: 'ok'; value: ProtectedTerminalEvent } | { status: 'error'; error: Error }>;
+type ProtectedTerminalRead = Promise<{ status: 'ok'; value: ProtectedTerminalBatch } | { status: 'error'; error: Error }>;
 
 /** Terminals run only on the machine the user picks; there is no implicit default machine. */
 export interface WorkspaceTerminalsProps {
@@ -52,8 +54,10 @@ export interface WorkspaceTerminalsProps {
   onSelectMachine(machineId: string): void;
   /** Opens the workspace's machine controls, where a machine is attached. */
   onAttachMachine?: () => void;
-  events(machineId: string, name: string | null, after: number | null, signal: AbortSignal): AsyncIterable<{ status: 'ok'; value: StreamEvent<{ terminals: readonly WorkspaceTerminalView[]; output: WorkspaceTerminalOutput | null }> } | { status: 'error'; error: Error }>;
-  live(machineId: string, name: string, signal: AbortSignal): ProtectedTerminalStream;
+  /** One `terminals.events` read after `after`; a live notice for the resource (or the machine's restart) prompts the next. */
+  events(machineId: string, name: string | null, after: number | null, signal: AbortSignal): Promise<{ status: 'ok'; value: readonly StreamEvent<{ terminals: readonly WorkspaceTerminalView[]; output: WorkspaceTerminalOutput | null }>[] } | { status: 'error'; error: Error }>;
+  /** One `terminals.live` read of a protected terminal after `after`; null attaches without earlier output. */
+  live(machineId: string, name: string, after: number | null, signal: AbortSignal): ProtectedTerminalRead;
   requestedName?: string | null;
   create(machineId: string): Promise<WorkspaceTerminalView>;
   send(machineId: string, name: string, data: string): Promise<void>;
@@ -460,7 +464,7 @@ class TerminalErrorBoundary extends Component<{ children: ReactNode; resetKey: s
 }
 
 
-function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect }: { name: string; running: boolean; live(name: string, signal: AbortSignal): ProtectedTerminalStream; onData(data: string): void; onError(error: Error): void; onDisconnect(): void }) {
+function ProtectedTerminal({ spaceId, machineId, name, running, live, onData, onError, onDisconnect }: { spaceId: string; machineId: string; name: string; running: boolean; live(name: string, after: number | null, signal: AbortSignal): ProtectedTerminalRead; onData(data: string): void; onError(error: Error): void; onDisconnect(): void }) {
   const [frame, setFrame] = useState<{ data: string; epoch: number; connected: boolean; steps: readonly ProtectedTerminalStep[]; exitCode: number | null; disconnected: boolean }>({ data: '', epoch: 0, connected: false, steps: [], exitCode: null, disconnected: false });
   const liveRef = useRef(live);
   liveRef.current = live;
@@ -474,28 +478,34 @@ function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect 
     const { signal } = controller;
     let retry: number | undefined;
     let completed = false;
+    const keys = [workspaceLiveKey(spaceId, terminalLiveResource(machineId, name)), accountLiveKey(machineLiveResource(machineId))];
     const attach = async (): Promise<void> => {
+      // Null attaches without earlier output; each notice burst then reads once after the cursor.
+      let cursor: number | null = null;
       try {
-        for await (const result of liveRef.current(name, signal)) {
+        for await (const _tick of liveTicks(keys, signal)) {
+          const result = await liveRef.current(name, cursor, signal);
           if (signal.aborted) return;
           if (result.status === 'error') break;
-          const event = result.value;
-          if (event.type === 'state') {
-            inputEnabledRef.current = true;
-            setFrame((previous) => ({ ...previous, steps: event.steps, connected: true, disconnected: false }));
-          } else if (event.type === 'output') {
-            setFrame((previous) => {
-              const data = previous.data + event.data;
-              return data.length > 128 * 1_024
-                ? { ...previous, data: data.slice(-128 * 1_024), epoch: previous.epoch + 1 }
-                : { ...previous, data };
-            });
-          } else {
-            completed = true;
-            inputEnabledRef.current = false;
-            disconnectRef.current();
-            setFrame((previous) => ({ ...previous, connected: false, exitCode: event.exitCode }));
-            return;
+          cursor = result.value.cursor;
+          for (const event of result.value.events) {
+            if (event.type === 'state') {
+              inputEnabledRef.current = true;
+              setFrame((previous) => ({ ...previous, steps: event.steps, connected: true, disconnected: false }));
+            } else if (event.type === 'output') {
+              setFrame((previous) => {
+                const data = previous.data + event.data;
+                return data.length > 128 * 1_024
+                  ? { ...previous, data: data.slice(-128 * 1_024), epoch: previous.epoch + 1 }
+                  : { ...previous, data };
+              });
+            } else {
+              completed = true;
+              inputEnabledRef.current = false;
+              disconnectRef.current();
+              setFrame((previous) => ({ ...previous, connected: false, exitCode: event.exitCode }));
+              return;
+            }
           }
         }
       } catch {
@@ -510,7 +520,7 @@ function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect 
       }, 1_000);
     };
     // Attempt attachment once; only retry while status still reports an active run.
-    // Status delivery can overtake private output: only unmount aborts this stream.
+    // Status delivery can overtake private output: only unmount aborts these reads.
     void attach();
     return () => {
       controller.abort();
@@ -518,7 +528,7 @@ function ProtectedTerminal({ name, running, live, onData, onError, onDisconnect 
       inputEnabledRef.current = false;
       disconnectRef.current();
     };
-  }, [name]);
+  }, [spaceId, machineId, name]);
   const completed = frame.exitCode !== null;
   return <>
     <p role="status" className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground">{completed ? `Environment run ended (exit ${frame.exitCode}). Visible output is retained until this pane is closed or reloaded.` : frame.disconnected ? `Protected live output disconnected; previous output was cleared.${running ? ' Reconnecting to the same run without replay.' : ' The Environment run has ended.'}` : frame.connected ? running ? 'Protected live output · input is not echoed · history is cleared on disconnect or close.' : 'Environment run ended. Receiving its final live output; input is disabled.' : 'Connecting to the same Environment run. Previous output is not replayed; input is paused until connected.'}</p>
@@ -560,8 +570,12 @@ function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceT
   // The machine's list comes from the unnamed stream, which never depends on the selection. The
   // selected terminal's stream adds its output and keeps a completed lifecycle run listed; its list
   // never replaces the machine's, so switching streams cannot feed back into the selection.
-  const listed = useSynchronizedResource(terminalStreamResource(spaceId, machine.id, null), (after, signal) => events(machine.id, null, after, signal));
-  const streamed = useSynchronizedResource(terminalStreamResource(spaceId, machine.id, selectedName), (after, signal) => events(machine.id, selectedName, after, signal));
+  // Each is read again on a notice for its resource or for the machine's (re)start, which loses its observers.
+  const listedResource = terminalStreamResource(spaceId, machine.id, null);
+  const streamedResource = terminalStreamResource(spaceId, machine.id, selectedName);
+  const restarted = accountLiveKey(machineLiveResource(machine.id));
+  const listed = useSynchronizedResource(listedResource, liveSource([workspaceLiveKey(spaceId, listedResource), restarted], (after, signal) => events(machine.id, null, after, signal)));
+  const streamed = useSynchronizedResource(streamedResource, liveSource([workspaceLiveKey(spaceId, streamedResource), restarted], (after, signal) => events(machine.id, selectedName, after, signal)));
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const pendingInput = useRef<Array<{ name: string; chunks: string[]; send: WorkspaceTerminalsProps['send'] }>>([]);
@@ -681,7 +695,7 @@ function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceT
         <code className="min-w-0 truncate font-mono text-foreground">{selected.command}</code>
         <span className="ml-auto shrink-0">Machine <span className="font-mono text-foreground">{selected.machineId}</span></span>
       </div>
-      <TerminalErrorBoundary resetKey={selected.id} onError={() => setError('Terminal display unavailable. Close and reopen to reconnect.')}><div className="flex min-h-0 flex-1 flex-col" key={selected.id}>{selected.protected ? <ProtectedTerminal name={selected.name} running={isRunning(selected.state)} live={(name, signal) => props.live(machine.id, name, signal)} onData={sendInput} onDisconnect={() => { pendingInput.current.length = 0; }} onError={() => setError('Protected terminal display unavailable. Close and reopen to reconnect.')} /> : <HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} />}</div></TerminalErrorBoundary>
+      <TerminalErrorBoundary resetKey={selected.id} onError={() => setError('Terminal display unavailable. Close and reopen to reconnect.')}><div className="flex min-h-0 flex-1 flex-col" key={selected.id}>{selected.protected ? <ProtectedTerminal spaceId={spaceId} machineId={machine.id} name={selected.name} running={isRunning(selected.state)} live={(name, after, signal) => props.live(machine.id, name, after, signal)} onData={sendInput} onDisconnect={() => { pendingInput.current.length = 0; }} onError={() => setError('Protected terminal display unavailable. Close and reopen to reconnect.')} /> : <HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} />}</div></TerminalErrorBoundary>
     </> : <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="No terminals" description={`Open a terminal on ${machine.label} in this workspace's checkout.`} action={newTerminal} /></div>}
     {error ? <div className="shrink-0 bg-destructive-light px-3 py-1.5 text-caption text-destructive" role="alert">{error}</div> : null}
     {listed.transportError ?? streamed.transportError ? <div className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground" role="status">{selected?.protected ? 'Terminal status disconnected; reconnecting.' : 'Terminal delivery disconnected. Last received output is retained; reconnecting.'}</div> : null}

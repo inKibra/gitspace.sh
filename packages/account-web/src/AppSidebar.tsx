@@ -40,7 +40,7 @@ import { createContext, useContext, useState, type Dispatch, type SetStateAction
 import { glyph } from './glyph.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
-import { StatusDot, workspaceStatusColor, workspaceStatusLabel, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
+import { StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
 
 const NAV: Array<{ view: Exclude<AppView, 'agent'>; icon: IconComponent }> = [
   { view: 'kanban', icon: glyph(Columns03) },
@@ -99,10 +99,9 @@ const NewWorkspaceGlyph = glyph(Plus);
 /** Icon slots take component types, so keep this type stable while context updates the accepted status. */
 function SpaceStatusGlyph({ className, size, strokeWidth }: IconComponentProps) {
   const summary = useContext(SpaceSummaryContext);
-  const color = summary ? workspaceStatusColor(summary) : 'dim';
   const freshness = summary?.freshness ?? (summary?.status ? 'fresh' : 'unknown');
   return <span className={`inline-flex items-center justify-center ${className ?? ''}`} style={{ width: size, height: size }} data-freshness={freshness}>
-    {summary?.closedAt ? <ArchiveGlyph size={size} strokeWidth={strokeWidth} /> : <StatusDot color={color} pulse={color === 'green' && freshness === 'fresh'} />}
+    {summary?.closedAt ? <ArchiveGlyph size={size} strokeWidth={strokeWidth} /> : summary ? <WorkspaceStatusDot space={summary} /> : <StatusDot color="dim" />}
   </span>;
 }
 
@@ -115,6 +114,13 @@ export interface SidebarWorkspace {
   definition?: CloudWorkspaceDefinition;
   runtime?: WorkspaceView;
   summary?: SidebarSpaceSummary;
+}
+
+/** The status a workspace row shows: its directory summary, else its open runtime view. An archived row is archived
+ * whatever either says. Pickers offering the same workspace show this too. */
+export function sidebarWorkspaceSummary(workspace: SidebarWorkspace): SidebarSpaceSummary | undefined {
+  const supplied = workspace.summary ?? workspace.runtime;
+  return workspace.closedAt ? { ...supplied, closedAt: workspace.closedAt, holder: supplied?.holder ?? { kind: 'unknown' } } : supplied;
 }
 
 export interface SidebarProject {
@@ -266,11 +272,10 @@ function ProjectRows({ project, collapsed, onCollapse, selected, machines, deplo
   const baseSummary = project.baseSummary ?? base;
   const baseReleased = baseSummary && !baseSummary.closedAt && baseSummary.holder.kind === 'released';
   const createWorkspace = onNewWorkspace && project.lifecycle !== 'archived' && project.lifecycle !== 'deleting' ? () => onNewWorkspace(project.id) : undefined;
-  const running = workspaces.filter(({ runtime, summary = runtime }) => summary && !summary.closedAt && (summary.holder.kind === 'held' || summary.holder.kind === 'cloud') && summary.status?.primaryColor === 'green').length;
+  const running = workspaces.filter((workspace) => { const summary = sidebarWorkspaceSummary(workspace); return summary && workspaceStatusColor(summary) === 'green'; }).length;
   const row = (workspace: SidebarWorkspace) => {
     const runtime = workspace.runtime;
-    const supplied: SidebarSpaceSummary | undefined = workspace.summary ?? runtime;
-    const summary = workspace.closedAt ? { ...supplied, closedAt: workspace.closedAt, holder: supplied?.holder ?? { kind: 'unknown' as const } } : supplied;
+    const summary = sidebarWorkspaceSummary(workspace);
     const released = summary?.holder.kind === 'released';
     const suffix = released && !summary?.closedAt;
     return <SpaceSummaryContext.Provider key={workspace.id} value={summary}><SidebarMenuSubItem>

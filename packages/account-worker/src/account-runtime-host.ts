@@ -11,6 +11,8 @@ import { createAccountGitLfsStore } from './git-lfs-store.js';
 import { setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { readWorkspaceMetadata, storeWorkspaceStatus } from './workspace-metadata.js';
 import { notifyMachines } from './machine-notices.js';
+import { notifyBrowsers } from './live-notices.js';
+import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 
 /** The project repository every workspace forks: a scratch repository with an initial commit, or the imported origin with its history. */
 export async function ensureProjectCodeRepository(code: ArtifactsCodeStore, project: Pick<CloudProjectSummary, 'id' | 'repositoryReference' | 'baseBranch'>) {
@@ -90,7 +92,10 @@ export async function createAccountWorkspaceRuntime(
     ...inference,
     workspacePhase,
     async setWorkspacePhase(phase) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase); },
-    published: snapshot => { storeWorkspaceStatus(ctx.storage, snapshot); },
+    published: (snapshot, status) => {
+      storeWorkspaceStatus(ctx.storage, status);
+      ctx.waitUntil(notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
+    },
     snapshotChanged: machineIds => { ctx.waitUntil(notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId)); },
     code,
     lfs,

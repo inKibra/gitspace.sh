@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { latestLifecycleRun, latestExecutionRun, lifecycleSummary, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
+import { latestLifecycleRun, latestExecutionRun, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
 
 const completed: LifecycleRun = {
   id: 'run-a', projectId: 'project-a', spaceId: 'workspace-a', phase: 'machine/prepare', status: 'succeeded',
@@ -37,7 +37,6 @@ describe('environment readiness scopes', () => {
 
     const ledger = { ...state, runs: [completed, failed] };
     expect(latestLifecycleRun(ledger, 'machine/prepare')?.status).toBe('failed');
-    expect(lifecycleSummary(ledger).attention).toBe(true);
   });
 
   it('projects the newest matching check offline without substituting another profile or a known different machine', () => {

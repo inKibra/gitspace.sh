@@ -1,5 +1,5 @@
 import { RuntimeWorkspaceStatusSchema, type RuntimeSnapshot, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
-import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
+import { emptyWorkspaceStatus, type WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 
 type Attachment = RuntimeSnapshot['attachments'][number];
 export type MachineStatus = RuntimeWorkspaceStatus['machines'][number];
@@ -16,7 +16,7 @@ export interface WorkspaceMachine {
   errors: string[];
 }
 
-const NO_STATUS: RuntimeWorkspaceStatus = { cloud: { version: null, conflicts: [] }, machines: [] };
+const NO_STATUS: RuntimeWorkspaceStatus = { summary: emptyWorkspaceStatus, cloud: { version: null, conflicts: [] }, machines: [] };
 
 /** The workspace status summary written by the cloud. The UI reads it and never derives machine state itself. */
 export function workspaceStatus(snapshot: RuntimeSnapshot | null | undefined): RuntimeWorkspaceStatus {

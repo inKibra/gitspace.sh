@@ -1,6 +1,7 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { Result, TaggedError, type Result as ResultType } from 'better-result';
 import { z } from 'zod';
+import { streamCursorSchema } from '@gitspace/protocol-sync';
 import { SIGNED_REQUEST_EXPIRED_MESSAGE } from './server-clock.js';
 
 export const RELAY_PROTOCOL_VERSION = 1 as const;
@@ -49,8 +50,24 @@ export type RelayNotice = z.infer<typeof relayNoticeSchema>;
 const relayNoticeMessageSchema = relayNoticeSchema.extend({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('notice') });
 export type RelayNoticeMessage = z.infer<typeof relayNoticeMessageSchema>;
 
+/** A machine resource changed to `cursor`; the relay tells the account's tabs watching it, which read it again. Only the
+ * machine's own start resource has no workspace. */
+export const machineLiveNoticeSchema = z.object({
+  workspace: z.string().min(1).max(256).nullable(),
+  resource: z.string().min(1).max(512),
+  cursor: streamCursorSchema,
+});
+export type MachineLiveNotice = z.infer<typeof machineLiveNoticeSchema>;
+const liveNoticeMessageSchema = machineLiveNoticeSchema.extend({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('live.notice') });
+export type LiveNoticeMessage = z.infer<typeof liveNoticeMessageSchema>;
+/** No tab watched the `live.notice` for `cursor`: unless a read has seen that change since, the machine stops observing the
+ * resource until a tab reads it again. */
+const liveUnwatchedMessageSchema = machineLiveNoticeSchema.extend({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('live.unwatched') });
+export type LiveUnwatchedMessage = z.infer<typeof liveUnwatchedMessageSchema>;
+
 export const relaySocketMessageSchema = z.discriminatedUnion('type', [
   relayFrameMessageSchema,
+  liveNoticeMessageSchema,
   z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.open'), requestId }),
   z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.data'), requestId, data: z.string().max(MAX_ROUTED_PAYLOAD_CHARS), binary: z.boolean() }),
   z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.close'), requestId, code: z.number().int(), reason: z.string().max(123) }),
@@ -80,7 +97,7 @@ export const relaySocketMessageSchema = z.discriminatedUnion('type', [
   }),
 ]);
 export type RelaySocketMessage = z.infer<typeof relaySocketMessageSchema>;
-export type TunnelResponseMessage = Exclude<RelaySocketMessage, { type: 'frame' }>;
+export type TunnelResponseMessage = Exclude<RelaySocketMessage, { type: 'frame' | 'live.notice' }>;
 
 export const tunnelRequestMessageSchema = z.discriminatedUnion('type', [
   z.object({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('tunnel.websocket.data'), requestId, data: z.string().max(MAX_ROUTED_PAYLOAD_CHARS), binary: z.boolean() }),
@@ -111,7 +128,7 @@ export const tunnelRequestMessageSchema = z.discriminatedUnion('type', [
   }),
 ]);
 export type TunnelRequestMessage = z.infer<typeof tunnelRequestMessageSchema>;
-export const machineRelayMessageSchema = z.union([tunnelRequestMessageSchema, relayFrameMessageSchema, relayNoticeMessageSchema]);
+export const machineRelayMessageSchema = z.union([tunnelRequestMessageSchema, relayFrameMessageSchema, relayNoticeMessageSchema, liveUnwatchedMessageSchema]);
 export type MachineRelayMessage = z.infer<typeof machineRelayMessageSchema>;
 
 export class InvalidRelayMessage extends TaggedError('InvalidRelayMessage')<{

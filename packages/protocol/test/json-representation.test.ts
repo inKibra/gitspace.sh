@@ -85,14 +85,14 @@ describe('RPC JSON representations', () => {
 
   it('composes stream validation with project invalidation JSON representations', () => {
     const representation = procedureJsonRepresentation('project.events');
-    const value = {
+    const change = {
       type: 'snapshot', resource: 'project/example', cursor: 1, revision: 1, previous: null,
       value: { entity: 'workspace', entityId: 'one', eventOffset: 1 },
     };
-    const encoded = representation.encodeOutput(value);
+    const encoded = representation.encodeOutput([change]);
     expect(ajv.compile(representation.outputSchema)(encoded)).toBe(true);
-    expect(decodeJsonValue(JSON.parse(JSON.stringify(encoded)))).toEqual(value);
-    expect(() => representation.encodeOutput({ ...value, cursor: -1 })).toThrow();
+    expect(decodeJsonValue(JSON.parse(JSON.stringify(encoded)))).toEqual([change]);
+    expect(() => representation.encodeOutput([{ ...change, cursor: -1 }])).toThrow();
   });
 
   it('preserves declared failure data without exporting Error causes', () => {

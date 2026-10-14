@@ -143,7 +143,8 @@ export interface InspectorProps {
   onSelectWorkspace(workspaceId: string): void;
   onSetRelations?: OverviewViewProps['onSetRelations'];
   stackStatus?: OverviewViewProps['stackStatus'];
-  environment?: ReactNode;
+  /** The Environment tab; `openAgentSetup` switches to the Agent setup tab. */
+  environment?: (openAgentSetup: () => void) => ReactNode;
   repositoryEntries: readonly RepositoryTreeEntry[];
   lfsHeldBack?: readonly GitLfsHeldBack[];
   repositoryMode: RepositoryMode;
@@ -1161,7 +1162,7 @@ export function Inspector(props: InspectorProps) {
     }
     switch (id) {
       case 'overview': return props.scope ? <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} /> : null;
-      case 'environment': return props.environment ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
+      case 'environment': return props.environment?.(() => selectSurface('agents')) ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'agents': return null;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} onStop={props.onStopSubagent} renderTranscript={props.renderSubagentTranscript} />;

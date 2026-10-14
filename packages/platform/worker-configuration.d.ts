@@ -15,6 +15,8 @@ interface Env {
   PUBLIC_ASSETS_SERVICE: string;
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
+  CF_ANALYTICS_TOKEN: string;
+  USAGE_REPORT_SCRIPTS: string;
   R2_API_TOKEN: string;
   R2_PARENT_ACCESS_KEY_ID: string;
   PLATFORM_BOOTSTRAP_TOKEN: string;

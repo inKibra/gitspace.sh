@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RuntimeSnapshotSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import { LaunchMachineDialog } from './LaunchSheet.js';
 
 const runtime = vi.hoisted((): { snapshot: RuntimeSnapshot | null; connected: boolean; error: string | null; retry: () => void } => ({ snapshot: null, connected: true, error: null, retry: vi.fn() }));
@@ -15,7 +16,7 @@ function snapshot(ids: string[]): RuntimeSnapshot {
   const now = new Date().toISOString();
   return RuntimeSnapshotSchema.parse({
     version: 1, projectId: 'project', workspaceId: 'workspace', cursor: 0, conversations: [], tasks: [], questions: [],
-    documents: { 'gitspace.status': { cloud: { version: null, conflicts: [] }, machines: ids.map(machineId => ({ machineId, attachmentId: machineId, generation: 1, online: true, ready: true, setup: [], sync: { lastSyncAt: now, unsent: 0, unapplied: false, problem: null, conflicts: [] } })) } },
+    documents: { 'gitspace.status': { summary: emptyWorkspaceStatus, cloud: { version: null, conflicts: [] }, machines: ids.map(machineId => ({ machineId, attachmentId: machineId, generation: 1, online: true, ready: true, setup: [], sync: { lastSyncAt: now, unsent: 0, unapplied: false, problem: null, conflicts: [] } })) } },
     attachments: ids.map(machineId => ({ projectId: 'project', workspaceId: 'workspace', attachmentId: machineId, machineId, generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'work' }, capabilities: [], updatedAt: now, heartbeatAt: now })),
   });
 }

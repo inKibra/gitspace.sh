@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeContentSchema, RuntimeJsonSchema } from './base.js';
+import { RuntimeContentSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeMachineIdSchema } from './base.js';
 import { RuntimeJobHandleSchema } from './execution-contracts.js';
 import { RuntimeDispatchSelectionSchema, RuntimeMachineNeedsSchema } from './scheduling.js';
 import { LifecycleRunRequestSchema, LifecycleMutationSchema } from '@gitspace/protocol-environment';
@@ -105,6 +105,22 @@ export const RuntimeSyncBackupSchema = z.object({ checkpointRef: path, commit: c
 export const RuntimeSyncMachineDiscardSchema = z.object({ discarded: z.array(RuntimeSyncChangeSchema), backup: RuntimeSyncBackupSchema.nullable(), machineId: path, error: z.string().optional() });
 export const RuntimeSyncMachineCaptureSchema = z.object({ version: commitId.nullable(), conflicts: z.array(path) });
 export const RuntimeSyncMachineRestoreSchema = RuntimeSyncMachineCaptureSchema.extend({ restored: z.array(RuntimeSyncChangeSchema), mergeConflicts: z.array(path) });
+/** What a person runs from the Environment tab's sync line, through the same `sync` operations an agent calls. */
+export const RuntimeSyncRequestInputSchema = RuntimeIdentitySchema.extend({
+  requestId: z.string().min(1).max(128),
+  args: z.discriminatedUnion('method', [
+    z.object({ method: z.literal('now'), on: RuntimeMachineIdSchema }),
+    z.object({ method: z.literal('diff'), on: RuntimeMachineIdSchema }),
+    z.object({ method: z.literal('resolve'), path, keep: z.enum(['cloud', 'machine']) }),
+  ]),
+});
+export const RuntimeSyncRequestResultSchema = z.discriminatedUnion('method', [
+  RuntimeSyncMachineCaptureSchema.extend({ method: z.literal('now') }),
+  z.object({ method: z.literal('diff'), unsent: z.array(RuntimeSyncChangeSchema), unsentTruncated: z.boolean(), notOnMachine: z.array(RuntimeSyncChangeSchema), notOnMachineTruncated: z.boolean() }),
+  z.object({ method: z.literal('resolve'), resolved: path, keep: z.enum(['cloud', 'machine']), backup: path, conflicts: z.array(path) }),
+]);
+export type RuntimeSyncRequestInput = z.infer<typeof RuntimeSyncRequestInputSchema>;
+export type RuntimeSyncRequestResult = z.infer<typeof RuntimeSyncRequestResultSchema>;
 export const RuntimeHistoryReadArgumentsSchema = z.union([
   z.object({ mode: z.literal('page').default('page'), workspaceId: path.optional(), conversationId: path, offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(200).default(50) }),
   z.object({ mode: z.literal('content'), workspaceId: path.optional(), conversationId: path, ordinal: z.number().int().nonnegative(), contentOffset: z.number().int().nonnegative().default(0), contentLimit: z.number().int().min(1).max(65_536).default(16_384) }),

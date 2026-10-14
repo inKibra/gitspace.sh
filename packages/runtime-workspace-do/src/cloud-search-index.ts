@@ -204,11 +204,12 @@ export class CodeSearchIndex {
     return { phase: 'publish', items: 1 };
   }
 
-  /** Build counters for logs and for the answer a search gives while the first index is built. */
+  /** Build counters for logs and for the answer a search gives while the first index is built. Pending trees are counted
+   * up to 1000, so a step's log line never scans a large listing frontier. */
   private progress() {
     const state = this.state();
-    const trees = this.options.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM code_search_tree').one().count;
-    return { servedCommit: state.served_commit, targetCommit: state.target_commit, queuedFiles: state.build_queued, indexedFiles: state.build_indexed, pendingFiles: state.build_queued - state.build_indexed, pendingTrees: trees, failure: state.failure };
+    const trees = this.options.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM (SELECT 1 FROM code_search_tree LIMIT 1001)').one().count;
+    return { servedCommit: state.served_commit, targetCommit: state.target_commit, queuedFiles: state.build_queued, indexedFiles: state.build_indexed, pendingFiles: state.build_queued - state.build_indexed, pendingTrees: trees > 1000 ? '1000+' : trees, failure: state.failure };
   }
 
   private log(event: CodeSearchEvent): void {

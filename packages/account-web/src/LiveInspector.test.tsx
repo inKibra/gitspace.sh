@@ -5,25 +5,23 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { InspectorView } from '@gitspace/protocol';
 import type { WorkspaceEnvironmentView } from '@gitspace/protocol/rpc-contract';
 import { emptyLifecycleState } from '@gitspace/protocol-environment';
-import { deriveWorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type * as Synchronization from './SynchronizationProvider.js';
 import type { WorkspaceView } from './GitSpaceShell.js';
 import { LiveInspector } from './LiveApp.js';
 import { RuntimeSnapshotSchema, SessionControlSchema } from '@gitspace/protocol-runtime';
-import type { EnvironmentViewProps } from './environment/types.js';
 import type { InspectorProps } from './inspector/Inspector.js';
 
 type Read = { state: 'success'; value: unknown; fetch: 'idle'; refetch: () => Promise<unknown> } | { state: 'pending'; fetch: 'idle'; refetch: () => Promise<unknown> };
 // result-rpc keeps one cache entry per procedure and input: an unchanged request keeps serving the same accepted value.
 const queries = vi.hoisted(() => new Map<string, Read>());
-const runs = vi.hoisted(() => ({ checks: vi.fn(), phase: vi.fn() }));
 const runtimeSession = vi.hoisted(() => vi.fn());
 vi.mock('./rpc-client.js', () => ({
   homeRpcUrl: '/rpc',
   rpcClient: {
     inspector: { overview: 'overview', artifacts: { list: 'artifacts' }, journal: { list: 'journal' }, review: { list: 'threads' } },
     workspace: { stackStatus: 'stack' },
-    environment: { get: 'environment', runChecks: runs.checks, runPhase: runs.phase },
+    environment: { get: 'environment' },
     runtime: { snapshot: 'snapshot', session: runtimeSession },
   },
 }));
@@ -41,8 +39,8 @@ vi.mock('./SynchronizationProvider.js', async () => ({
   useEventRefresh: (await vi.importActual<typeof Synchronization>('./SynchronizationProvider.js')).useEventRefresh,
 }));
 vi.mock('./useRepositoryTree.js', () => ({ useRepositoryTree: () => ({ state: 'pending', fetch: 'idle', refetch: async () => {} }) }));
-vi.mock('./environment/EnvironmentView.js', () => ({ EnvironmentView: (props: EnvironmentViewProps) => <><p>Environment ready</p><button disabled={!props.runtimeAvailable || props.busy} onClick={props.onRunChecks}>Run checks</button><button disabled={!props.runtimeAvailable || props.busy} onClick={() => props.onRunLifecycle('machine/prepare')}>Prepare machine</button></> }));
-vi.mock('./inspector/index.js', () => ({ Inspector: ({ overview: shown, environment, usage }: Pick<InspectorProps, 'overview' | 'environment' | 'usage'>) => <><p>Inspector overview for {shown.spaceId}</p>{environment}<button onClick={usage.load}>Load usage</button>{usage.report ? <p>Session cost: {usage.report.totalsDeep.costUsd}</p> : null}</> }));
+vi.mock('./environment/EnvironmentView.js', () => ({ EnvironmentView: () => <p>Environment ready</p> }));
+vi.mock('./inspector/index.js', () => ({ Inspector: ({ overview: shown, environment, usage }: Pick<InspectorProps, 'overview' | 'environment' | 'usage'>) => <><p>Inspector overview for {shown.spaceId}</p>{environment?.(() => {})}<button onClick={usage.load}>Load usage</button>{usage.report ? <p>Session cost: {usage.report.totalsDeep.costUsd}</p> : null}</> }));
 
 const overview = (revision: number): InspectorView['overview'] => ({
   projectId: 'project', spaceId: 'workspace', revision,
@@ -59,7 +57,7 @@ const environment: WorkspaceEnvironmentView = {
 };
 const scope = (possessedBy: string, generation: number): WorkspaceView => ({
   kind: 'workspace', id: 'workspace', projectId: 'project', projectName: 'Project', name: 'Work', branch: 'work', phase: 'code',
-  generation, possessedBy, holder: { kind: 'cloud' }, status: deriveWorkspaceStatusSummary({ agents: [] }), closedAt: null,
+  generation, possessedBy, holder: { kind: 'cloud' }, status: emptyWorkspaceStatus, closedAt: null,
   relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] },
 });
 let root: Root;
@@ -77,9 +75,6 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   queries.clear();
   runtimeSession.mockReset();
-  runs.checks.mockReset(); runs.phase.mockReset();
-  runs.checks.mockResolvedValue({ status: 'ok', value: {} });
-  runs.phase.mockResolvedValue({ status: 'ok', value: {} });
   queries.set(`overview ${JSON.stringify({ spaceId: 'workspace', expectedGeneration: 0 })}`, { state: 'success', value: overview(1), fetch: 'idle', refetch: async () => {} });
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
@@ -118,42 +113,6 @@ it('coalesces cursor refreshes instead of restarting Inspector reads that are st
   await act(async () => { read.resolve(); });
   // One follow-up read covers every cursor that arrived while the first was in flight.
   expect(refetch).toHaveBeenCalledTimes(2);
-});
-
-it('requires an attached machine and never substitutes another cache for a removed selection', async () => {
-  queries.set('environment', { state: 'success', value: environment, fetch: 'idle', refetch: async () => {} });
-  const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId: 'workspace', cursor: 0, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
-  const save = () => queries.set('snapshot', { state: 'success', value: { ...snapshot }, fetch: 'idle', refetch: async () => {} });
-  const checks = () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Run checks')!;
-  save();
-  await act(() => render({}));
-  expect(container.textContent).toContain('Attach a machine');
-  expect(checks().disabled).toBe(true);
-  const now = new Date().toISOString();
-  const attach = (ids: string[]) => {
-    snapshot.attachments = ids.map(machineId => RuntimeSnapshotSchema.shape.attachments.element.parse({
-      projectId: 'project', workspaceId: 'workspace', attachmentId: machineId, machineId, generation: 1, state: 'ready',
-      checkout: { kind: 'shared', branch: 'work' }, capabilities: [], updatedAt: now, heartbeatAt: now,
-      cache: { state: 'live', platform: 'linux', lastSyncAt: now, setup: [] },
-    }));
-    snapshot.documents = { 'gitspace.status': { cloud: { version: null, conflicts: [] }, machines: ids.map(machineId => ({ machineId, attachmentId: machineId, generation: 1, online: true, ready: true, setup: [], sync: { lastSyncAt: now, unsent: 0, unapplied: false, problem: null, conflicts: [] } })) } };
-  };
-  attach(['a', 'b']);
-  save();
-  await act(() => render({}));
-  expect(checks().disabled).toBe(true);
-  const select = container.querySelector<HTMLSelectElement>('select[aria-label="Environment run machine"]')!;
-  await act(() => { select.value = 'b'; select.dispatchEvent(new Event('change', { bubbles: true })); });
-  await act(() => checks().click());
-  expect(runs.checks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'b', runId: expect.any(String) });
-  await act(() => [...container.querySelectorAll('button')].find(button => button.textContent === 'Prepare machine')!.click());
-  expect(runs.phase).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'b', runId: expect.any(String), phase: 'machine/prepare', rerun: null, interactive: undefined });
-  attach(['a']);
-  save();
-  await act(() => render({}));
-  expect(checks().disabled).toBe(true);
-  expect(select.value).toBe('');
-  expect(runs.checks).toHaveBeenCalledTimes(1);
 });
 
 it('loads cloud session usage without a cache and retains it when a cache is attached', async () => {

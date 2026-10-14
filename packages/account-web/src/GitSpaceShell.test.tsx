@@ -23,9 +23,16 @@ describe('GitSpaceShell', () => {
 
   it('labels a cloud workspace by its runtime status, never as unavailable for lack of a machine', () => {
     const cloud = { ...verticalSliceFixture.workspace, holder: { kind: 'cloud' as const }, freshness: 'fresh' as const };
-    expect(workspaceStatusLabel({ ...cloud, status: { ...cloud.status, primaryColor: 'green' } })).toBe('Working');
-    expect(workspaceStatusLabel({ ...cloud, status: { ...cloud.status, primaryColor: 'blue' } })).toBe('Waiting');
-    expect(workspaceStatusLabel({ ...cloud, status: { ...cloud.status, agents: { ...cloud.status.agents, red: 1 } } })).toBe('Failed');
+    const idle = { ...cloud.status, primaryColor: 'dim' as const, agents: { green: 0, blue: 0, orange: 0, red: 0 } };
+    expect(workspaceStatusLabel({ ...cloud, status: { ...idle, primaryColor: 'green', agents: { ...idle.agents, green: 1 } } })).toBe('Working');
+    expect(workspaceStatusLabel({ ...cloud, status: { ...idle, primaryColor: 'blue', agents: { ...idle.agents, blue: 1 } } })).toBe('Waiting');
+    expect(workspaceStatusLabel({ ...cloud, status: { ...idle, primaryColor: 'orange', agents: { ...idle.agents, orange: 1 } } })).toBe('Needs approval');
+    expect(workspaceStatusLabel({ ...cloud, status: { ...idle, primaryColor: 'orange', agents: { ...idle.agents, blue: 1 }, sync: { conflicts: 1, problems: 0 } } })).toBe('Sync conflict');
+    expect(workspaceStatusLabel({ ...cloud, status: { ...idle, primaryColor: 'red', agents: { ...idle.agents, red: 1 } } })).toBe('Failed');
+    expect(workspaceStatusLabel({ ...cloud, status: { ...idle, primaryColor: 'blue', agents: { ...idle.agents, blue: 1 }, machines: { attached: 2, online: 1, ready: 1 }, sync: { conflicts: 0, problems: 1 } } })).toBe('Waiting · 1 machine offline · sync problem');
+    // A workspace whose runtime never reported shows no activity, not a warning.
+    expect(workspaceStatusLabel({ ...cloud, status: idle })).toBe('No activity');
+    expect(workspaceStatusColor({ ...cloud, status: idle })).toBe('dim');
     expect(workspaceStatusLabel({ ...cloud, status: undefined, freshness: 'unknown' })).toBe('Cloud workspace');
     expect(workspaceStatusColor({ ...cloud, status: undefined, freshness: 'unknown' })).toBe('dim');
   });

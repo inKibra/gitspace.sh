@@ -42,21 +42,21 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   const requireTerminalMachine = (machineId: string) => {
     if (machineId !== options.machineId) throw new Error(`Terminal request for machine ${machineId} reached machine ${options.machineId}`);
   };
-  const terminalEvents = server.implement(terminalEventsContract).stream(async function* ({ input, errors, signal }) {
+  const terminalEvents = server.implement(terminalEventsContract).handler(async ({ input, errors }) => {
     try {
       requireTerminalMachine(input.machineId);
-      for await (const event of options.terminals.events(input.spaceId, input.name, input.after, signal)) yield ok(event);
+      return ok(await options.terminals.events(input.spaceId, input.name, input.after));
     } catch (error) {
-      if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'follow workspace terminals', message: error instanceof Error ? error.message : 'Unable to follow workspace terminals' }));
+      return err(errors.OperationFailed({ operation: 'read workspace terminal events', message: error instanceof Error ? error.message : 'Unable to read workspace terminal events' }));
     }
   });
-  const terminalLive = server.implement(terminalLiveContract).stream(async function* ({ input, errors, signal, context }) {
+  const terminalLive = server.implement(terminalLiveContract).handler(async ({ input, errors, context }) => {
     try {
       requireTerminalMachine(input.machineId);
       if (context.caller?.kind !== 'browser') throw new Error('Protected terminal output requires a browser session');
-      for await (const output of options.terminals.live(input.spaceId, input.name, signal)) yield ok(output);
+      return ok(await options.terminals.live(input.spaceId, input.name, input.after));
     } catch (error) {
-      if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'follow protected workspace terminal', message: error instanceof Error ? error.message : 'Unable to follow protected workspace terminal' }));
+      return err(errors.OperationFailed({ operation: 'read protected workspace terminal', message: error instanceof Error ? error.message : 'Unable to read protected workspace terminal' }));
     }
   });
   const listTerminals = server.implement(listWorkspaceTerminalsContract).handler(async ({ input, errors }) => {

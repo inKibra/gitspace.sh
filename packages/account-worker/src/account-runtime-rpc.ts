@@ -4,9 +4,9 @@ import {
   runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract,
   runtimeQaContract, runtimeCacheAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
   runtimeBrowserTrustContract, runtimeDraftContract,
-  runtimeServicesContract,
+  runtimeServicesContract, runtimeSyncContract,
 } from '@gitspace/protocol/rpc-contract';
-import { RuntimeIdentitySchema, RuntimeWatchEventSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeWatchEventsSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
@@ -15,7 +15,6 @@ import { requireWorkspaceAccess } from './runtime-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority } from './device-authority.js';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
-const MAX_EVENT_CHARACTERS = 8 * 1024 * 1024;
 
 /** Device scope is checked first; the workspace object then authorizes from its own metadata. Possession of a project
  * id is not authority. */
@@ -30,39 +29,6 @@ export async function requireRuntimeAccess(
   if (device.scope.kind === 'project' && device.scope.projectId !== input.projectId) throw new Error('Workspace is outside the device project scope');
   if (device.scope.kind === 'workspace' && device.scope.workspaceId !== input.workspaceId) throw new Error('Workspace is outside the device workspace scope');
   return { device, ...await requireWorkspaceAccess(env, userId, input, capability !== 'rpc.read') };
-}
-
-async function* watchEvents(response: Response, signal: AbortSignal) {
-  if (!response.ok || !response.body) throw new Error(`Runtime subscription failed (${response.status})`);
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder('utf-8', { fatal: true });
-  let pending = '';
-  const cancel = () => { void reader.cancel(signal.reason).catch(() => {}); };
-  signal.addEventListener('abort', cancel, { once: true });
-  try {
-    signal.throwIfAborted();
-    for (;;) {
-      const chunk = await reader.read();
-      signal.throwIfAborted();
-      pending += chunk.done ? decoder.decode() : decoder.decode(chunk.value, { stream: true });
-      let newline: number;
-      while ((newline = pending.indexOf('\n')) !== -1) {
-        if (newline > MAX_EVENT_CHARACTERS) throw new Error('Runtime event exceeds the delivery limit');
-        const line = pending.slice(0, newline);
-        pending = pending.slice(newline + 1);
-        if (line.trim()) yield RuntimeWatchEventSchema.parse(JSON.parse(line));
-      }
-      if (pending.length > MAX_EVENT_CHARACTERS) throw new Error('Runtime event exceeds the delivery limit');
-      if (chunk.done) {
-        if (pending.trim()) throw new Error('Runtime subscription ended inside an event');
-        return;
-      }
-    }
-  } finally {
-    signal.removeEventListener('abort', cancel);
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
 }
 
 export function runtimeCloudProcedures(env: Env, userId: string, deviceId: string) {
@@ -122,6 +88,12 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(await authority.runtimeServices(input));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control workspace services', message: message(error) })); }
   });
+  const sync = server.implement(runtimeSyncContract).handler(async ({ input, errors }) => {
+    try {
+      const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
+      return ok(await authority.runtimeSync(input));
+    } catch (error) { return err(errors.OperationFailed({ operation: `sync ${input.args.method}`, message: message(error) })); }
+  });
   const qa = server.implement(runtimeQaContract).handler(async ({ input, errors }) => {
     try {
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
@@ -141,16 +113,11 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(await authority.runtimeAttachmentDetachRequest(input));
     } catch (error) { return err(errors.OperationFailed({ operation: 'drain executor attachment', message: message(error) })); }
   });
-  const watch = server.implement(runtimeWatchContract).stream(async function* ({ input, signal, errors }) {
+  const watch = server.implement(runtimeWatchContract).handler(async ({ input, errors }) => {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.read');
-      for await (const event of watchEvents(await authority.runtimeWatch(input), signal)) {
-        await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.read');
-        yield ok(event);
-      }
-    } catch (error) {
-      if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'watch cloud runtime', message: message(error) }));
-    }
+      return ok(RuntimeWatchEventsSchema.parse(await (await authority.runtimeEvents(input)).json()));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read cloud runtime events', message: message(error) })); }
   });
-  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, qa, attachment: { cache: { request: requestCacheAttachment }, detach: detachAttachment }, watch };
+  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, sync, qa, attachment: { cache: { request: requestCacheAttachment }, detach: detachAttachment }, watch };
 }

@@ -1,92 +1,28 @@
-export type WorkspaceStatusColor = 'dim' | 'green' | 'blue' | 'orange' | 'red';
-export type WorkspaceAgentState = 'permission-needed' | 'running' | 'waiting' | 'retrying' | 'closed' | 'dormant' | 'archived';
+import { z } from 'zod';
 
-export interface WorkspaceStatusSummary {
-  primaryColor: WorkspaceStatusColor;
-  agents: { green: number; blue: number; orange: number; red: number };
-  services: { green: number; red: number };
-  terminals: { green: number; red: number };
-  compaction?: { detail?: string };
-}
+export const WorkspaceStatusColorSchema = z.enum(['dim', 'green', 'blue', 'orange', 'red']);
+export type WorkspaceStatusColor = z.infer<typeof WorkspaceStatusColorSchema>;
 
+const count = z.number().int().nonnegative();
 
-export function deriveWorkspaceStatusSummary(input: {
-  agents: Array<{ state: WorkspaceAgentState; failure?: { code: string; message: string } | null; compaction?: { detail?: string } }>;
-  services?: Array<{ running: boolean; exitCode?: number }>;
-  terminals?: Array<{ running: boolean; exitCode?: number }>;
-  serviceConfigError?: boolean;
-}): WorkspaceStatusSummary {
-  const agents = { green: 0, blue: 0, orange: 0, red: 0 };
-  const services = { green: 0, red: 0 };
-  const terminals = { green: 0, red: 0 };
-  let compaction: WorkspaceStatusSummary['compaction'];
-  for (const agent of input.agents) {
-    if (agent.failure && agent.state !== 'closed' && agent.state !== 'archived' && agent.state !== 'dormant') {
-      agents.red += 1;
-      continue;
-    }
-    switch (agent.state) {
-      case 'archived':
-      case 'closed':
-      case 'dormant':
-        break;
-      case 'permission-needed':
-        agents.orange += 1;
-        break;
-      case 'running':
-        agents.green += 1;
-        if (agent.compaction && !compaction) compaction = { detail: agent.compaction.detail };
-        break;
-      case 'waiting':
-        agents.blue += 1;
-        break;
-      case 'retrying':
-        agents.red += 1;
-        break;
-    }
-  }
-  for (const service of input.services ?? []) {
-    if (service.running) services.green += 1;
-    else if (service.exitCode !== undefined && service.exitCode !== 0) services.red += 1;
-  }
-  if (input.serviceConfigError) services.red += 1;
-  for (const terminal of input.terminals ?? []) {
-    if (terminal.running) terminals.green += 1;
-    else if (terminal.exitCode !== undefined && terminal.exitCode !== 0) terminals.red += 1;
-  }
-  let primaryColor: WorkspaceStatusColor = 'dim';
-  if (agents.red > 0) primaryColor = 'red';
-  else if (agents.orange > 0) primaryColor = 'orange';
-  else if (agents.green > 0) primaryColor = 'green';
-  else if (agents.blue > 0) primaryColor = 'blue';
-  else if (services.red > 0 || terminals.red > 0) primaryColor = 'red';
-  return { primaryColor, agents, services, terminals, ...(compaction ? { compaction } : {}) };
-}
+/** The one status summary of a workspace. Its workspace object computes it from live state, publishes it in the
+ * `gitspace.status` document and stores it where listings read it; every surface shows it as is. */
+export const WorkspaceStatusSummarySchema = z.object({
+  /** Red when an agent failed; orange when an approval or a sync conflict needs a person; green while a task runs;
+   * blue when the agents wait for the user; dim when nothing was reported. */
+  primaryColor: WorkspaceStatusColorSchema,
+  /** Agents by state: green has a live task, blue waits for the user, orange waits for an approval, red failed. */
+  agents: z.object({ green: count, blue: count, orange: count, red: count }),
+  machines: z.object({ attached: count, online: count, ready: count }),
+  /** Conflicted paths in the cloud working copy, and machines whose sync reports a problem. */
+  sync: z.object({ conflicts: count, problems: count }),
+});
+export type WorkspaceStatusSummary = z.infer<typeof WorkspaceStatusSummarySchema>;
 
-export interface ActiveWorkspaceStatusItem {
-  id: string;
-  projectId: string;
-  projectName: string;
-  name: string;
-  status: WorkspaceStatusSummary;
-}
-
-function tier(item: ActiveWorkspaceStatusItem, currentWorkspaceId: string): number {
-  if (item.id === currentWorkspaceId) return -1;
-  const color = item.status.primaryColor;
-  if (color === 'orange' || color === 'red') return 0;
-  if (color === 'blue') return 1;
-  if (color === 'green') return 2;
-  return 3;
-}
-
-export function visibleActiveWorkspaces<T extends ActiveWorkspaceStatusItem>(workspaces: readonly T[], currentWorkspaceId: string): T[] {
-  return [...workspaces]
-    .filter((workspace) => workspace.id === currentWorkspaceId || workspace.status.primaryColor !== 'dim')
-    .sort((left, right) => {
-      const tierDifference = tier(left, currentWorkspaceId) - tier(right, currentWorkspaceId);
-      if (tierDifference !== 0) return tierDifference;
-      const projectDifference = left.projectName.localeCompare(right.projectName);
-      return projectDifference !== 0 ? projectDifference : left.name.localeCompare(right.name);
-    });
-}
+/** A workspace that has not reported a status yet. */
+export const emptyWorkspaceStatus: WorkspaceStatusSummary = {
+  primaryColor: 'dim',
+  agents: { green: 0, blue: 0, orange: 0, red: 0 },
+  machines: { attached: 0, online: 0, ready: 0 },
+  sync: { conflicts: 0, problems: 0 },
+};

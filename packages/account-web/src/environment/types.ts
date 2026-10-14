@@ -1,131 +1,86 @@
 import type { ReactNode } from 'react';
-import type { LifecyclePhase as ProtocolLifecyclePhase, LifecycleState } from '@gitspace/protocol-environment';
+import type { LifecycleRunPhase } from '@gitspace/protocol-environment';
+import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
+import type { MachineStatus } from '../workspace-status.js';
 
-export type LifecycleLedger = LifecycleState;
-
-export type CheckSource = 'catalog' | 'custom';
-export type Platform = 'darwin' | 'linux' | 'win32';
-export type TrustState =
-  | { status: 'approved'; approvedBy: string; approvedAt: string; commandHash: string }
-  | { status: 'pending'; commandHash: string }
-  | { status: 'changed'; commandHash: string; approvedCommand: string; currentCommand: string; approvedBy: string; approvedAt: string };
-
-export interface EnvironmentCheckDefinition {
-  id: string;
-  label: string;
-  source: CheckSource;
-  requirement?: string;
-  command?: string;
-  probe?: string;
-  version?: string;
-  fix?: string;
-  url?: string;
-  platform?: Platform;
-  trust?: TrustState;
-}
-
-export interface EnvironmentProfileDefinition {
-  checks: readonly string[];
-  secrets: readonly string[];
-  inputs: readonly string[];
-  notes: string;
-}
-
-export interface EnvironmentInputDefinition {
-  default?: string;
-  choices?: readonly string[];
-  description?: string;
-}
-
-export interface EnvironmentBundle {
-  profiles: Record<string, EnvironmentProfileDefinition>;
-  default: string;
-  checks: Record<string, EnvironmentCheckDefinition>;
-  inputs: Record<string, EnvironmentInputDefinition>;
-}
-
-export type CapabilityResult =
-  | { status: 'pass'; output: string }
-  | { status: 'fail'; output: string; fix?: string }
-  | { status: 'unprobed' };
-
-export interface EnvironmentMachine {
-  id: string;
-  label: string;
-  platform: string | null;
-  current: boolean;
-  capabilities: Record<string, CapabilityResult>;
-}
-
-export type LifecyclePhase = ProtocolLifecyclePhase;
-export type LifecycleRun =
-  | { status: 'succeeded'; relativeTime: string; duration?: string; output?: string; exitCode?: number }
-  | { status: 'failed'; relativeTime: string; duration?: string; output: string; exitCode?: number }
-  | { status: 'running'; relativeTime: string; output?: string }
-  | { status: 'interrupted' | 'not-started'; relativeTime: string; output?: string }
+/** The result of one script or check on the machine the Setup section shows. */
+export type ScriptRun =
+  | { status: 'succeeded' | 'failed'; runId: string; detail: string }
+  | { status: 'running' | 'interrupted' | 'not-started'; runId: string }
   | { status: 'never' };
 
-export interface LifecycleScript {
+export interface EnvironmentScript {
+  /** Execution id: the check id, or `<phase>:<fileName>` for a script. */
   id: string;
-  phase: LifecyclePhase;
-  path: string;
-  command: string;
-  interactive?: boolean;
-  profiles?: readonly string[];
-  trust: TrustState;
-  lastRun: LifecycleRun;
+  label: string;
+  /** Prompts for input, so it runs only in a terminal on the machine. */
+  interactive: boolean;
+  approval: { approved: true; by: string; at: string } | { approved: false };
+  lastRun: ScriptRun;
 }
 
-export interface EnvironmentSecret {
-  name: string;
-  source: 'user' | 'project';
-  granted: boolean;
-  requiredBy: readonly string[];
-  unused?: boolean;
+export interface EnvironmentStep {
+  phase: LifecycleRunPhase;
+  label: string;
+  scripts: readonly EnvironmentScript[];
 }
 
-export interface EnvironmentInputValue {
+/** One attached machine as the gitspace.status document reports it; nothing here is derived in the browser. */
+export interface EnvironmentMachine {
+  id: string;
   name: string;
-  value: string;
-  source: 'account' | 'bundle' | 'project' | 'workspace';
+  /** `Linux · online`, `Linux · starting`, `Offline` or `Paused`. */
+  status: string;
+  color: WorkspaceStatusColor;
+  online: boolean;
+  ready: boolean;
+  setup: MachineStatus['setup'];
+  sync: MachineStatus['sync'];
+  runs: readonly { id: string; phase: LifecycleRunPhase; status: string; startedAt: string; active: boolean }[];
 }
 
 export interface EnvironmentViewModel {
-  project: { name: string; repository: string };
-  workspace: { name: string; profile: string; machineId: string; generation?: number | null };
-  bundle: EnvironmentBundle;
+  project: string;
+  workspace: string;
+  profile: { selected: string; options: readonly string[] };
+  /** The repository has an environment bundle or lifecycle scripts. */
+  configured: boolean;
+  notes: string;
+  bindings: Readonly<Record<string, string>>;
   machines: readonly EnvironmentMachine[];
-  lifecycle: readonly LifecycleScript[];
-  executions?: readonly { id: string; label: string; hash: string }[];
-  ledger?: LifecycleLedger;
-  configured?: boolean;
-  secrets: readonly EnvironmentSecret[];
-  inputValues: readonly EnvironmentInputValue[];
+  attachable: readonly { id: string; label: string }[];
+  /** The machine whose results the Setup section shows and whose runs it starts. */
+  setupMachineId: string | null;
+  steps: readonly EnvironmentStep[];
+  browserOrigins: readonly { hash: string; pattern: string; approved: boolean }[];
+  /** Conflicted paths in the cloud working copy. */
+  conflicts: readonly string[];
+  secrets: readonly { name: string; source: 'account' | 'project'; granted: boolean }[];
+  values: readonly { name: string; source: 'workspace' | 'project' | 'account' | 'default'; value: string }[];
 }
 
 export interface EnvironmentViewProps {
   model: EnvironmentViewModel;
-  machinePanel?: ReactNode;
   busy?: boolean;
-  runtimeAvailable?: boolean;
-  cloudRunnerAvailable?: boolean;
-  onConfigure?(): void;
-  onRecoverRun?(runId: string): void;
-  onCancelRun?(runId: string): void;
-  onOpenRunLog?(runId: string, script: { id: string; label: string }): void;
+  /** Rendered at the end of the Machines section: browser groups and held-back LFS changes. */
+  machinesFooter?: ReactNode;
   onProfileChange(profile: string): void;
+  onConfigure?(): void;
+  onAttach(machineId: string): void;
+  onDetach(machineId: string): void;
+  onOpenTerminal?(machineId: string): void;
+  onSelectSetupMachine(machineId: string): void;
+  onRunPhase(machineId: string, phase: LifecycleRunPhase, options?: { rerun?: boolean; interactive?: boolean; retire?: boolean }): void;
   onApprove(targetId: string): void;
   onRevoke(targetId: string): void;
-  onGrantSecret(name: string): void;
-  onInputChange(name: string, value: string): void;
-  onFixCheck?(checkId: string): void;
-  onUpdateCheck(checkId: string, patch: Partial<Pick<EnvironmentCheckDefinition, 'label' | 'probe' | 'requirement'>>): void;
-  onDeleteCheck(checkId: string): void;
-  onAddCheck(check: EnvironmentCheckDefinition): void;
-  onAddValue(name: string, defaultValue: string): void;
+  onOpenScript(scriptId: string): void;
+  onOpenLog(runId: string, script: { id: string; label: string }): void;
+  onCancelRun(runId: string): void;
+  onRecoverRun(runId: string): void;
+  onSyncNow(machineId: string): void;
+  onShowUnsent(machineId: string): void;
+  onResolveConflict(path: string, keep: 'cloud' | 'machine'): void;
   onOpenSecrets(): void;
-  onOpenLifecycleFile?(scriptId: string): void;
-  onOpenLifecycleOutput?(scriptId: string): void;
-  onRunChecks(): void;
-  onRunLifecycle(phase: LifecyclePhase, options?: { rerun?: boolean; retire?: boolean; interactive?: boolean }): void;
+  onEditValue(name: string, value: string): void;
+  onOpenAgentSetup?(): void;
 }

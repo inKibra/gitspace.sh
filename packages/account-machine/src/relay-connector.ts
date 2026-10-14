@@ -14,6 +14,7 @@ import {
   decodeTunnelChunk,
   encodeTunnelChunk,
   parseMachineRelayMessage,
+  type MachineLiveNotice,
   type RelayNotice,
   type RelayNoticeTopic,
   type RelaySocketMessage,
@@ -38,6 +39,8 @@ export interface MachineRelayConnectorOptions {
   /** Receives coalesced notices; the next batch waits for this one. Every opened connection first delivers all topics,
    * the catch-up for anything missed while disconnected. */
   onNotice?: (notices: RelayNotice[]) => Promise<void>;
+  /** The relay found no tab watching a `liveNotice`; the observer of that resource may stop. */
+  onUnwatched?: (notice: MachineLiveNotice) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -213,6 +216,14 @@ export class MachineRelayConnector {
     void this.deliver().catch((error: unknown) => this.options.onError?.(error));
   }
 
+  /** Tells the relay a resource this machine observes changed. Without an open connection the notice is dropped: the
+   * relay announces each connection of this machine, and the tabs watching its terminals read them again. */
+  liveNotice(notice: MachineLiveNotice): void {
+    const socket = this.socket;
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    this.send(socket, { version: RELAY_PROTOCOL_VERSION, type: 'live.notice', ...notice });
+  }
+
   private async handleMessage(socket: BunWebSocket, input: string): Promise<void> {
     if (input === RELAY_PONG_MESSAGE) {
       if (!this.awaitingPong) return;
@@ -228,6 +239,10 @@ export class MachineRelayConnector {
     if (message.type === 'frame') return;
     if (message.type === 'notice') {
       this.notice(message);
+      return;
+    }
+    if (message.type === 'live.unwatched') {
+      this.options.onUnwatched?.({ workspace: message.workspace, resource: message.resource, cursor: message.cursor });
       return;
     }
     if (message.type === 'tunnel.websocket.data') {

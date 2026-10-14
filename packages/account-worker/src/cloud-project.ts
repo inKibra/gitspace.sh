@@ -1,6 +1,6 @@
 import { cloudResourceId, normalizeRemoteRepositoryUrl, type CloudProjectOperation, type CloudProjectSummary, type CloudWorkspaceDefinition } from '@gitspace/protocol';
 import type { SpaceView } from '@gitspace/protocol/rpc-contract';
-import { deriveWorkspaceStatusSummary, emptyRelations, emptyStack, validateStack } from '@gitspace/protocol-workspace';
+import { emptyRelations, emptyStack, emptyWorkspaceStatus, validateStack } from '@gitspace/protocol-workspace';
 
 /** A public remote names its default branch within this window, or the import asks for the branch. */
 const DEFAULT_BRANCH_PROBE_MS = 15_000;
@@ -105,7 +105,7 @@ export async function readCloudSpaceView(env: Env, userId: string, projectId: st
     return {
       closedAt: definition.archivedAt ? new Date(definition.archivedAt) : null,
       possessedBy, spaceGeneration: record?.generation ?? 0,
-      status: status ?? deriveWorkspaceStatusSummary({ agents: [] }),
+      status: status ?? emptyWorkspaceStatus,
     };
   };
   const stacks = validateStack(worktrees.map(definition => ({

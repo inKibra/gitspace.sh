@@ -72,9 +72,9 @@ describe('tenant MCP authority boundary', () => {
       if (!skill) throw new Error('Expected an enabled built-in skill resource');
       const content = await value.client.readResource({ uri: skill.uri });
       expect(content.contents[0]).toMatchObject({ mimeType: 'text/markdown' });
-      const events = await value.client.callTool({ name: 'gitspace_settings_events', arguments: { after: null, _mcp: { waitMs: 100 } } });
+      const events = await value.client.callTool({ name: 'gitspace_settings_events', arguments: { after: null } });
       expect(events.isError).not.toBe(true);
-      expect(events.structuredContent).toMatchObject({ complete: false });
+      expect(events.structuredContent).toMatchObject({ result: [{ type: 'snapshot', resource: 'settings' }] });
       const missing = await value.client.callTool({ name: 'gitspace_environment_get', arguments: { spaceId: 'mcp-missing-workspace' } });
       expect(missing.isError).toBe(true);
       expect(JSON.stringify(missing.content)).toContain('mcp-missing-workspace');

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { ProtectedTerminalEvent } from '@gitspace/protocol';
+import { terminalLiveResource, terminalStreamResource, type MachineLiveNotice, type ProtectedTerminalEvent } from '@gitspace/protocol';
 import { closeDaemonClients, daemonClientForProject, getDaemonRuntimeDir } from '@gitspace/supervisor';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 
@@ -10,20 +10,29 @@ interface Fixture {
   root: string;
   workspace: string;
   coordinator: WorkspaceHubTerminalCoordinator;
+  notices: MachineLiveNotice[];
+  /** Settles on the next notice. */
+  announced(): Promise<void>;
 }
 const fixtures: Fixture[] = [];
 function fixture(): Fixture {
   const root = mkdtempSync(join(tmpdir(), 'gitspace-interactive-test-'));
   const workspace = join(root, 'workspace');
   mkdirSync(workspace);
+  const notices: MachineLiveNotice[] = [];
+  let arrived = Promise.withResolvers<void>();
   const coordinator = new WorkspaceHubTerminalCoordinator('machine-a', {
     path: (spaceId) => spaceId === 'workspace-a' ? workspace : null,
     projectId: (spaceId) => spaceId === 'workspace-a' ? 'project-a' : null,
     list: () => ['workspace-a'],
     use: async () => {},
     changed: async () => {},
+  }, undefined, (notice) => {
+    notices.push(notice);
+    arrived.resolve();
+    arrived = Promise.withResolvers<void>();
   });
-  const value = { root, workspace, coordinator };
+  const value = { root, workspace, coordinator, notices, announced: () => arrived.promise };
   fixtures.push(value);
   return value;
 }
@@ -40,14 +49,22 @@ afterEach(async () => {
   }
 });
 
-async function until(stream: AsyncIterator<ProtectedTerminalEvent>, predicate: (text: string) => boolean): Promise<string> {
-  let output = '';
+/** Reads the protected terminal as a tab does: after its cursor, and again on each notice, until `done`. */
+async function until({ coordinator, notices, announced }: Fixture, name: string, after: number | null, done: (events: ProtectedTerminalEvent[]) => boolean): Promise<{ cursor: number; events: ProtectedTerminalEvent[] }> {
+  const resource = terminalLiveResource('machine-a', name);
+  const events: ProtectedTerminalEvent[] = [];
+  let cursor = after;
   for (;;) {
-    const item = await stream.next();
-    if (item.done) throw new Error('Terminal ended before expected output');
-    if (item.value.type === 'output') output += item.value.data;
-    if (predicate(output)) return output;
+    const batch = await coordinator.live('workspace-a', name, cursor);
+    events.push(...batch.events);
+    cursor = batch.cursor;
+    if (done(events)) return { cursor, events };
+    while (!notices.some((notice) => notice.resource === resource && notice.cursor > batch.cursor)) await announced();
   }
+}
+
+function output(events: readonly ProtectedTerminalEvent[]): string {
+  return events.flatMap((event) => event.type === 'output' ? [event.data] : []).join('');
 }
 
 function retainedFiles(root: string): string {
@@ -65,8 +82,9 @@ function alive(pid: number): boolean {
 }
 
 describe('protected interactive lifecycle terminals', () => {
-  it('feeds ordinary terminal input without echo, reconnects the same script, and keeps output out of durable storage', async () => {
-    const { coordinator, workspace } = fixture();
+  it('feeds ordinary terminal input without echo, reattaches the same script without replay, and keeps output out of durable storage', async () => {
+    const live = fixture();
+    const { coordinator, workspace } = live;
     const started = Promise.withResolvers<void>();
     const inputCanary = `input-café-${crypto.randomUUID()}`;
     const outputCanary = new Bun.CryptoHasher('sha256').update(inputCanary).digest('hex');
@@ -83,57 +101,48 @@ describe('protected interactive lifecycle terminals', () => {
     await Promise.race([started.promise, execution.then(() => { throw new Error('Runner exited before attach'); })]);
     const terminal = (await coordinator.list('workspace-a')).find((item) => item.name === 'life-protected-roundtrip');
     expect(terminal?.protected).toBe(true);
-    const controller = new AbortController();
-    const stream = coordinator.live('workspace-a', terminal!.name, controller.signal);
-    const prompt = await until(stream, (text) => text.includes('First code:'));
-    expect(prompt).not.toContain(inputCanary);
+    const name = terminal!.name;
+    const prompt = await until(live, name, null, (events) => output(events).includes('First code:'));
+    expect(output(prompt.events)).not.toContain(inputCanary);
     const pid = readFileSync(join(workspace, 'process-id'), 'utf8');
-    await coordinator.send('workspace-a', terminal!.name, `${inputCanary}\n`);
-    const reply = await until(stream, (text) => text.includes('Second code:'));
-    expect(reply).toContain(outputCanary);
-    expect(reply).not.toContain(inputCanary);
+    await coordinator.send('workspace-a', name, `${inputCanary}\n`);
+    const reply = await until(live, name, prompt.cursor, (events) => output(events).includes('Second code:'));
+    expect(output(reply.events)).not.toContain('First code:');
+    expect(output(reply.events)).toContain(outputCanary);
+    expect(output(reply.events)).not.toContain(inputCanary);
     expect(readFileSync(join(workspace, 'received'), 'utf8')).toBe(inputCanary);
-    const observerController = new AbortController();
-    const observations = coordinator.events('workspace-a', terminal!.name, null, observerController.signal);
-    await observations.next();
-    observerController.abort();
-    await observations.return(undefined);
-    controller.abort();
-    await stream.return(undefined);
-
-    const reconnect = new AbortController();
-    const resumed = coordinator.live('workspace-a', terminal!.name, reconnect.signal);
-    const notice = await resumed.next();
-    expect(notice.done).toBe(false);
-    expect(notice.value).toEqual({ type: 'state', steps: [{ id: 'auth', status: 'running', exitCode: null }] });
+    expect((await coordinator.events('workspace-a', name, null))[0]).toMatchObject({ type: 'snapshot' });
+    // A fresh read attaches without earlier output, whether or not the machine is still attached.
+    expect((await coordinator.live('workspace-a', name, null)).events).toEqual([{ type: 'state', steps: [{ id: 'auth', status: 'running', exitCode: null }] }]);
+    coordinator.unwatched(terminalLiveResource('machine-a', name), Number.MAX_SAFE_INTEGER);
+    const resumed = await until(live, name, null, (events) => events.length > 0);
+    expect(resumed.events).toEqual([{ type: 'state', steps: [{ id: 'auth', status: 'running', exitCode: null }] }]);
     expect(readFileSync(join(workspace, 'process-id'), 'utf8')).toBe(pid);
-    await coordinator.send('workspace-a', terminal!.name, 'finish\n');
-    const finalEvents: ProtectedTerminalEvent[] = [];
-    for await (const event of resumed) finalEvents.push(event);
-    const resumedOutput = finalEvents.filter((event) => event.type === 'output').map((event) => event.data).join('');
-    expect(resumedOutput).toContain('COMPLETE');
-    expect(resumedOutput).not.toContain(outputCanary);
-    expect(resumedOutput).not.toContain('First code:');
-    expect(finalEvents.filter((event) => event.type === 'complete')).toEqual([{ type: 'complete', exitCode: 0 }]);
-    expect(finalEvents.at(-2)).toEqual({ type: 'state', steps: [{ id: 'auth', status: 'succeeded', exitCode: 0 }] });
-    expect(finalEvents.at(-1)).toEqual({ type: 'complete', exitCode: 0 });
+    await coordinator.send('workspace-a', name, 'finish\n');
+    const final = await until(live, name, resumed.cursor, (events) => events.some((event) => event.type === 'complete'));
+    expect(output(final.events)).toContain('COMPLETE');
+    expect(output(final.events)).not.toContain(outputCanary);
+    expect(output(final.events)).not.toContain('First code:');
+    expect(final.events.filter((event) => event.type === 'complete')).toEqual([{ type: 'complete', exitCode: 0 }]);
+    expect(final.events.at(-2)).toEqual({ type: 'state', steps: [{ id: 'auth', status: 'succeeded', exitCode: 0 }] });
+    expect(final.events.at(-1)).toEqual({ type: 'complete', exitCode: 0 });
     const result = await execution;
-    reconnect.abort();
-    await resumed.return(undefined);
     expect(result.exitCode).toBe(0);
     expect(result.steps.map((step) => ({ id: step.id, exitCode: step.exitCode }))).toEqual([{ id: 'auth', exitCode: 0 }]);
     expect(JSON.parse(readFileSync(bindingsPath, 'utf8'))).toEqual({ bindings: { resource: 'fixture-resource' } });
-    const completionController = new AbortController();
-    const completion = coordinator.events('workspace-a', terminal!.name, null, completionController.signal);
-    let ended = false;
-    for await (const event of completion) {
-      if (event.type !== 'resync' && event.value.terminals.some((entry) => entry.name === terminal!.name && entry.state === 'exited')) {
-        ended = true;
-        completionController.abort();
-        break;
-      }
+    // A tab arriving after the end reads the completion, still without earlier output.
+    expect((await coordinator.live('workspace-a', name, null)).events).toEqual([
+      { type: 'state', steps: [{ id: 'auth', status: 'succeeded', exitCode: 0 }] }, { type: 'complete', exitCode: 0 },
+    ]);
+    const metadata = terminalStreamResource('workspace-a', 'machine-a', name);
+    let cursor: number | null = null;
+    for (;;) {
+      const events = await coordinator.events('workspace-a', name, cursor);
+      if (events.some((event) => event.type !== 'resync' && event.value.terminals.some((entry) => entry.name === name && entry.state === 'exited'))) break;
+      cursor = events.at(-1)?.cursor ?? cursor;
+      while (!live.notices.some((notice) => notice.resource === metadata && notice.cursor > (cursor ?? 0))) await live.announced();
     }
-    expect(ended).toBe(true);
+    coordinator.unwatched(metadata, Number.MAX_SAFE_INTEGER);
     const safeRead = await coordinator.read('workspace-a', terminal!.name, null);
     const retained = JSON.stringify({ result, durableOutput, safeRead }) + retainedFiles(getDaemonRuntimeDir(workspace)) + readFileSync(join(workspace, 'runner.log'), 'utf8');
     expect(retained).not.toContain(inputCanary);
@@ -146,7 +155,8 @@ describe('protected interactive lifecycle terminals', () => {
   }, 25_000);
 
   it('delivers fast ordered steps and the final private UTF-8 stderr bytes before one failed completion', async () => {
-    const { coordinator, workspace } = fixture();
+    const live = fixture();
+    const { coordinator, workspace } = live;
     const started = Promise.withResolvers<void>();
     const seed = crypto.randomUUID();
     const canary = new Bun.CryptoHasher('sha256').update(seed).digest('hex');
@@ -163,8 +173,7 @@ describe('protected interactive lifecycle terminals', () => {
       onStarted: async () => started.resolve(), onOutput: async (chunk) => { durableOutput += chunk; },
     });
     await Promise.race([started.promise, execution.then(() => { throw new Error('Runner exited before attach'); })]);
-    const events: ProtectedTerminalEvent[] = [];
-    for await (const event of coordinator.live('workspace-a', 'life-protected-fast', new AbortController().signal)) events.push(event);
+    const { events } = await until(live, 'life-protected-fast', null, (received) => received.some((event) => event.type === 'complete'));
     const result = await execution;
     const states = events.filter((event) => event.type === 'state');
     expect(events[0]).toEqual({
@@ -192,22 +201,19 @@ describe('protected interactive lifecycle terminals', () => {
   }, 25_000);
 
   it('cancels the script and its background child without creating a replacement shell', async () => {
-    const { coordinator, workspace } = fixture();
+    const live = fixture();
+    const { coordinator, workspace } = live;
     const started = Promise.withResolvers<void>();
     const execution = coordinator.runLifecyclePlan('workspace-a', 'workspace/materialize', [{
       id: 'waiting', kind: 'script', command: '/approved/wait.sh',
       content: 'sleep 300 &\nprintf "%s" "$!" > child-id\nprintf "Ready: "\nread -r answer\nwait',
     }], { PATH: process.env.PATH ?? '' }, { interactive: true, runId: 'protected-cancel', deadlineAt: new Date(Date.now() + 15_000).toISOString(), onStarted: async () => started.resolve() });
     await Promise.race([started.promise, execution.then(() => { throw new Error('Runner exited before attach'); })]);
-    const controller = new AbortController();
-    const stream = coordinator.live('workspace-a', 'life-protected-cancel', controller.signal);
-    await until(stream, (text) => text.includes('Ready:'));
+    await until(live, 'life-protected-cancel', null, (events) => output(events).includes('Ready:'));
     const child = Number(readFileSync(join(workspace, 'child-id'), 'utf8'));
     expect(alive(child)).toBe(true);
     await coordinator.cancelLifecycleRun('workspace-a', 'life-protected-cancel');
     const result = await execution;
-    controller.abort();
-    await stream.return(undefined);
     expect(result.exitCode).not.toBe(0);
     expect(alive(child)).toBe(false);
     await expect(coordinator.send('workspace-a', 'life-protected-cancel', 'echo bypass\n')).rejects.toThrow();
