@@ -53,9 +53,12 @@ export function createJobTask(services: JobServices) {
       const settled = observation.status === 'terminal' || observation.status === 'not-started';
       const completionRequestId = `job-completion:${job.jobId}`;
       let continuationReady = true;
-      if (settled && !record.delivered) {
+      if ((observation.status === 'terminal' || observation.status === 'not-started') && !record.delivered) {
         try {
-          await services.deliverConversationEvent({ conversationId: String(runtime.conversationId), requestId: completionRequestId, kind: 'command-completed', text: `Background command completion:\n${JSON.stringify(observation)}`, payload: observation });
+          const text = observation.status === 'terminal'
+            ? `Background command ${observation.job.jobId} ${observation.result.status}${observation.result.status === 'failed' ? ` (${observation.result.error.message})` : ''}:\n${observation.result.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('\n')}`
+            : `Background command ${observation.job.jobId} did not start (${observation.reason})${observation.message ? `: ${observation.message}` : ''}`;
+          await services.deliverConversationEvent({ conversationId: String(runtime.conversationId), requestId: completionRequestId, kind: 'command-completed', text, payload: observation });
         } catch (error) {
           if (runtime.signal.aborted) throw error;
           runtime.report(error);

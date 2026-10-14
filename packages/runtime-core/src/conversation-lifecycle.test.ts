@@ -1,4 +1,4 @@
-import { expect, test, onTestFinished } from 'vitest';
+import { expect, test, onTestFinished, vi } from 'vitest';
 import { Harness, MemoryStorage, createRegistry, defineTask, defineExtension, type ConversationId, type Storage } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, createAssistantMessageEventStream, type Models, type Model, type Api, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 
 const context = BACKGROUND_CONTEXT;
 const model: Model<Api> = { id: 'lifecycle-fixture', name: 'Lifecycle fixture', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
-async function fixture(storage: Storage = new MemoryStorage(), blocked = false) {
+async function fixture(storage: Storage = new MemoryStorage(), blocked = false, failFirst?: Promise<void>) {
   const seen: string[] = [];
   const threeStarted = Promise.withResolvers<void>();
   let aborted = 0;
@@ -25,7 +25,8 @@ async function fixture(storage: Storage = new MemoryStorage(), blocked = false) 
     const stream = createAssistantMessageEventStream();
     const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const finish = () => { aborted++; const error = { ...reply, stopReason: 'aborted' as const }; stream.push({ type: 'error', reason: 'aborted', error }); stream.end(error); };
-    if (blocked) { if (options?.signal?.aborted) finish(); else options?.signal?.addEventListener('abort', finish, { once: true }); }
+    if (failFirst && seen.length === 1) void failFirst.then(() => { const error = { ...reply, stopReason: 'error' as const, errorMessage: 'Provider unavailable' }; stream.push({ type: 'error', reason: 'error', error }); stream.end(error); });
+    else if (blocked) { if (options?.signal?.aborted) finish(); else options?.signal?.addEventListener('abort', finish, { once: true }); }
     else { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(reply); }
     return stream;
   } };
@@ -51,6 +52,39 @@ test('idle event delivery wakes inference with visible durable sender labels and
     expect(f.wakeCount()).toBe(1);
   } finally { await f.harness.close(context); }
 });
+
+test('events delivered during a run that ends without an answer reach the agent on the next drive', async () => {
+  const f = await fixture(new MemoryStorage(), true);
+  try {
+    const first: ConversationEvent = { conversationId: String(f.root.id), requestId: 'job-1', kind: 'command-completed', text: 'Background command job:1 completed:\nfirst' };
+    await f.lifecycle.deliver(first);
+    await f.lifecycle.deliver({ ...first, requestId: 'job-2', text: 'Background command job:2 completed:\nsecond' });
+    await vi.waitFor(() => expect(f.seen).toHaveLength(1));
+    await f.root.abort(context);
+    await f.root.waitForIdle(context);
+    await f.lifecycle.recover();
+    await vi.waitFor(() => expect(f.seen).toHaveLength(2));
+    expect(f.seen[1]).toContain('Background command job:2 completed');
+    await f.root.abort(context);
+  } finally { await f.harness.close(context); }
+}, 5000);
+
+test('input queued behind a run that fails without an answer starts on the next drive', async () => {
+  const fail = Promise.withResolvers<void>();
+  const f = await fixture(new MemoryStorage(), false, fail.promise);
+  try {
+    await f.root.submit({ type: 'input', requestId: 'first', content: 'First request' }, context);
+    await vi.waitFor(() => expect(f.seen).toHaveLength(1));
+    await f.root.submit({ type: 'input', requestId: 'second', content: 'Queued request', whenBusy: 'followUp' }, context);
+    fail.resolve();
+    await f.root.waitForIdle(context);
+    expect(f.seen).toHaveLength(1);
+    await f.lifecycle.recover();
+    await f.root.waitForIdle(context);
+    expect(f.seen).toHaveLength(2);
+    expect(f.seen[1]).toContain('Queued request');
+  } finally { await f.harness.close(context); }
+}, 5000);
 
 test('Stop aborts three actual running child conversations and persists the latch across restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gitspace-agent-lifecycle-'));
@@ -81,6 +115,8 @@ test('Stop aborts three actual running child conversations and persists the latc
     expect(reopened.seen).toEqual([]);
     expect(await reopened.lifecycle.wait(String(reopened.root.id), { timeoutMs: 100 })).toEqual({ kind: 'stopped' });
     await reopened.lifecycle.resume(String(reopened.root.id));
+    await reopened.harness.waitForIdle(context);
+    await reopened.lifecycle.recover();
     await reopened.harness.waitForIdle(context);
     expect(reopened.seen.join('\n')).toContain('Background command finished after Stop');
     expect(reopened.seen.join('\n')).toContain('Message from One');

@@ -11,11 +11,11 @@ import type { CloudProjectOperation } from '@gitspace/protocol/project-authority
 import type { MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ContextType, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type ContextType, type ReactNode } from 'react';
 import { ResultRpcProvider, useResultMutation, useResultQuery, useResultRuntime } from 'result-rpc/react';
 import { CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, ProjectCreationNotice, type GitSpaceShellProps } from './GitSpaceShell.js';
 import { AccountWorkPages } from './AccountWorkPages.js';
-import { rpcClient } from './rpc-client.js';
+import { appUpdate, rpcClient } from './rpc-client.js';
 import { currentDevice, DEVICE_REJECTED_EVENT, deviceRejected, setCurrentDevice } from './device-session.js';
 import { createApiClient, enrollDevice, type ApiClientDraft, type BrowserDevice } from './device.js';
 import { requestMcpAccess } from './mcp-access.js';
@@ -937,7 +937,7 @@ function GitSpaceProduct() {
   // Account/machine metadata refreshes are not navigation away from an open workspace.
   if (settingsValue && draft?.onboardingComplete && !forceOnboarding && route !== 'settings') return <>
     <LiveWorkspace onOpenSettings={(section) => navigateProduct('settings', 'push', section ?? null)} />
-    {settingsQuery.state === 'failure' ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto w-fit max-w-full rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">Account settings: {rpcErrorMessage(settingsQuery.error, 'settings.get')}<Button variant="ghost" size="compact" onClick={() => void settingsQuery.refetch()}>Retry</Button></div> : null}
+    {settingsQuery.state === 'failure' && !appUpdate.current() ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto w-fit max-w-full rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">Account settings: {rpcErrorMessage(settingsQuery.error, 'settings.get')}<Button variant="ghost" size="compact" onClick={() => void settingsQuery.refetch()}>Retry</Button></div> : null}
   </>;
   if (!settingsValue && settingsQuery.state === 'failure') {
     return <PageCanvas><EmptyState title="GitSpace setup is unavailable" description={rpcErrorMessage(settingsQuery.error, 'settings.get')} action={<Button variant="ghost" onClick={() => void settingsQuery.refetch()}>Retry</Button>} /></PageCanvas>;
@@ -1355,14 +1355,19 @@ function AccountCrons({ projects, projectsLoading }: { projects: readonly Config
 function AccountProductRoute() {
   const location = useProductLocation();
   const route = productRouteFromLocation(location);
+  const updated = useSyncExternalStore(appUpdate.subscribe, appUpdate.current);
   useEffect(() => {
     if (isGlobalView(route) && (location.searchParams.has('project') || location.searchParams.has('workspace'))) {
       navigateProductUrl(setProductRoute(new URL(location), route), 'replace');
     }
   }, [location.href, route]);
-  if (isConfigurationView(route)) return <AccountConfiguration view={route} />;
-  if (route === 'kanban' || route === 'projects' || route === 'inbox') return <AccountWork view={route} />;
-  return <GitSpaceProduct />;
+  const page = isConfigurationView(route) ? <AccountConfiguration view={route} />
+    : route === 'kanban' || route === 'projects' || route === 'inbox' ? <AccountWork view={route} />
+      : <GitSpaceProduct />;
+  return <>
+    {page}
+    {updated ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto flex w-fit max-w-full items-center gap-2 rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">GitSpace was updated. Reload to load the new version.<Button variant="primary" size="compact" onClick={() => window.location.reload()}>Reload</Button></div> : null}
+  </>;
 }
 
 

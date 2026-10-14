@@ -60,6 +60,20 @@ it('reports contract skew, not an unexplained decode failure, to the strict v1 r
   expect(events).toContainEqual({ type: 'skew', clientContract: contractDigest(legacy), serverContract: contractDigest(current) });
 });
 
+it('reports a stale client when a newer server answers a former subscription as a query', async () => {
+  const streaming = contract.contract({ events: contract.procedure().input(wire.object({})).output(wire.number).subscription() });
+  const queried = contract.contract({ events: contract.procedure().input(wire.object({})).output(wire.array(wire.number)).query() });
+  const body = serialize({ v: 1, status: 'ok', value: [1] });
+  if (!body.ok) throw new Error(body.message);
+  const fetchMock: typeof fetch = Object.assign(async () => new Response(body.value, {
+    headers: { 'content-type': 'application/result-rpc+devalue; sv=1', 'x-result-rpc-contract': contractDigest(queried) },
+  }), { preconnect: fetch.preconnect });
+  const client = createBrowserClient({ contract: streaming, transport: fetchTransport({ url: 'https://machine.test/rpc', fetch: fetchMock }) });
+  const results = [];
+  for await (const result of client.events({})) results.push(result);
+  expect(results).toMatchObject([{ status: 'error', error: { _tag: 'client/stale' } }]);
+});
+
 it('preserves recovery evidence for the compatible reader and accepts pre-attempt health', async () => {
   const client = createBrowserClient({ contract: current, transport: transport(encodedSession(), contractDigest(current)) });
   expect(await client.bootstrap({})).toMatchObject({ status: 'ok', value: { mainAgent: session } });

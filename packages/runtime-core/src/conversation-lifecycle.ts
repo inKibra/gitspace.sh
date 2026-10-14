@@ -1,4 +1,4 @@
-import { defineDoc, type Harness, type Storage, type Cursor, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
+import { defineDoc, InboxDoc, LiveDoc, type Harness, type Storage, type Cursor, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { RuntimeHarnessOptions } from './harness.js';
 import { applyInferenceThinking, SessionControlsDoc } from './session-controls.js';
@@ -49,19 +49,32 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     if (!conversation) throw new Error('Conversation not found');
     return conversation;
   }
+  // Events wait here, not in the harness follow-up queue: a run that ends without a final boundary (abort, model
+  // error, deploy) leaves that queue unread. The alarm drive flushes the next event once the conversation is idle, and
+  // resumes input such a run left queued: an idle write applies the final boundary, which starts the next queued item.
   async function flush(id: string) {
     const conversation = await resolve(id);
     const state = await harness.snapshot(ConversationLifecycleDoc, conversation.id, context);
     if (state?.stopped) return;
-    for (const pending of state?.events ?? []) {
-      if (pending.delivered) continue;
-      const event = pending.event;
+    const admit = async (requestId: string) => {
       const child = (await harness.snapshot(AgentDefinitionContextDoc, conversation.id, context))?.child;
       const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, conversation.id, context))?.selection ?? { kind: 'default' as const };
-      const model = await options.admitInference({ conversationId: id, requestId: event.requestId, selection });
+      const model = await options.admitInference({ conversationId: id, requestId, selection });
       await options.configureModel(conversation.id, model);
       await applyInferenceThinking(conversation, model);
-      const content = event.sender ? `Message from ${event.sender.name} (${event.sender.id}):\n${event.text}` : `${event.kind}:\n${event.text}`;
+    };
+    const queued = (await harness.snapshot(InboxDoc, conversation.id, context))?.items.find(item => item.mode !== 'write');
+    if (queued && (await harness.snapshot(LiveDoc, conversation.id, context))?.run === undefined) {
+      await admit(`queue-resume:${queued.id}`);
+      await conversation.submit({ type: 'write', entry: { kind: 'gitspace.queue-resumed', data: { submission: String(queued.id) } } }, context);
+      await options.wake();
+    }
+    for (const pending of state?.events ?? []) {
+      if (pending.delivered) continue;
+      if ((await harness.snapshot(LiveDoc, conversation.id, context))?.run !== undefined) { await options.wake(); return; }
+      const event = pending.event;
+      await admit(event.requestId);
+      const content = event.sender ? `Message from ${event.sender.name} (${event.sender.id}):\n${event.text}` : event.text;
       await conversation.submit({ type: 'input', requestId: event.requestId, content, whenBusy: 'followUp' }, context);
       await conversation.commit(async tx => { const draft = await tx.doc(ConversationLifecycleDoc, conversation.id); const stored = draft.events.find(item => item.event.requestId === event.requestId); if (stored) stored.delivered = true; }, context);
       await options.wake();
