@@ -62,13 +62,14 @@ export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: s
 const QA_EVENT_PAGE = 500;
 export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
-  // Project QA is append-only and folded by item id; each runtime keeps its fold and reads only events after the
-  // last applied offset (indexed by `project_events_entity`), so a rebuild no longer re-reads all QA history.
+  // QA items are loaded from the project once per runtime; snapshot rebuilds reuse them instead of calling the
+  // project object each time.
   const items = new Map<string, z.infer<typeof RuntimeQaItemSchema>>();
   let applied = 0;
-  let reading: Promise<void> = Promise.resolve();
+  let reading: Promise<void> | undefined;
   function list(): Promise<z.infer<typeof RuntimeQaItemSchema>[]> {
-    reading = reading.catch(() => {}).then(async () => {
+    if (reading) return reading.then(() => [...items.values()]);
+    reading = (async () => {
       for (;;) {
         const events = z.array(projectEventSchema).parse(await authority.listEntityEvents('qa', applied, QA_EVENT_PAGE));
         for (const event of events) {
@@ -77,7 +78,7 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
         }
         if (events.length < QA_EVENT_PAGE) return;
       }
-    });
+    })().catch(error => { reading = undefined; throw error; });
     return reading.then(() => [...items.values()]);
   }
   return {

@@ -96,6 +96,7 @@ test('two caches of one workspace converge when a canonical snapshot reaches a c
   };
   try {
     await git(root, ['init', '--bare', remote]);
+    await git(remote, ['config', 'receive.shallowUpdate', 'true']);
     await git(root, ['init', '-b', 'main', seed]);
     await writeFile(join(seed, 'tracked.txt'), 'base\n');
     await git(seed, ['add', '.']);

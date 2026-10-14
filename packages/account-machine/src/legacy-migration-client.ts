@@ -225,7 +225,7 @@ export async function runLegacyMigrationPlan(options: {
           }
         }
         const remote = new ArtifactsGitRemote({ credentials: async () => stage.credentials });
-        await remote.publishCheckpoint({ binding: { projectId: request.projectId, repository: stage.repository.name }, repositoryPath: item.repository, checkpointRef: item.checkpointRef, headCommit: saved.headCommit });
+        await remote.publishCheckpoint({ binding: { projectId: request.projectId, repository: stage.repository.name }, repositoryPath: item.repository, checkpointRef: item.checkpointRef, headCommit: saved.headCommit, remoteHead: null });
         if (item.largeBlobs.length) await verifyTransportBlobs(temporary, stage.credentials, item.commit, item.largeBlobs);
         options.progress?.({ workspaceId: request.workspaceId, state: 'uploaded', lfsObjects: item.objects.length });
         receipt = await control('space.migrateLegacy', { ...request, historicalLfs: item.objects, ...(item.largeBlobs.length ? { transportVerifiedBlobs: item.largeBlobs } : {}) }, LegacySpaceMigrationReceiptSchema);

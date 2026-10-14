@@ -11,7 +11,7 @@ import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
 import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, completeGitCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase, readGitCheckpointInputStamp, gitCheckpointRejectionError, gitCheckpointRejectionNeedsRevalidation } from './git-checkpoint.js';
 import type { GitIntermediateCheckpoint, GitCheckpointRejection } from './git-checkpoint.js';
-import { ArtifactsRepositoryIncompatibleError, artifactsPublicationRejection, type ArtifactsGitRemote } from './artifacts-git-remote.js';
+import { artifactsPublicationRejection, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { spaceGitCheckpointRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { LocalAttachment, ExecutorOperationHandler, ExecutorContent } from '@gitspace/runtime-machine';
 import { createArtifactsCredentialHelper } from './artifacts-credential-helper.js';
@@ -164,9 +164,9 @@ export async function createMachineExecutor(options: {
         savePending: async pending => { snapshots.query('UPDATE snapshots SET pending=? WHERE attachment=?').run(JSON.stringify(pending), key); },
         loadRejected: async () => rejectedSnapshot(key),
         saveRejected: async rejection => { saveRejectedSnapshot(key, rejection); },
-        publish: checkpoint => options.gitRemote.publishCheckpoint({
+        publish: (checkpoint, committed) => options.gitRemote.publishCheckpoint({
           binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` },
-          repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit,
+          repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: committed?.headCommit ?? null,
         }),
         commit: async (checkpoint, base) => {
           const accepted = await options.commitSnapshot(local, checkpoint, base);
@@ -358,7 +358,7 @@ export async function createMachineExecutor(options: {
         return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: [], backup: null, machineId: options.machineId }));
       }
       // No upload, no discard.
-      await options.gitRemote.publishCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef, headCommit: snapshot.headCommit });
+      await options.gitRemote.publishCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef, headCommit: snapshot.headCommit, remoteHead: base.headCommit });
       published = true;
       const backup = { checkpointRef, commit: snapshot.worktreeCommit, base: base.worktreeCommit };
       try {
@@ -602,11 +602,11 @@ export async function createMachineExecutor(options: {
       snapshots.query('INSERT INTO snapshots(attachment,revision,pending) VALUES(?,?,?) ON CONFLICT(attachment) DO UPDATE SET pending=excluded.pending').run(key, revision, JSON.stringify({ checkpoint, base: previous?.worktreeCommit ?? null }));
       journaled = true;
       try {
-        await options.gitRemote.publishCheckpoint({ binding: { projectId: attachment.projectId, repository: `workspace-${attachment.workspaceId}` }, repositoryPath: owned.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit });
+        await options.gitRemote.publishCheckpoint({ binding: { projectId: attachment.projectId, repository: `workspace-${attachment.workspaceId}` }, repositoryPath: owned.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: previous?.headCommit ?? null });
       } catch (error) {
         const rejection = artifactsPublicationRejection(error);
         if (rejection) {
-          saveRejectedSnapshot(key, { stamp: capturedStamp, checkpoint, message: rejection.message, issues: rejection instanceof ArtifactsRepositoryIncompatibleError ? rejection.issues : null });
+          saveRejectedSnapshot(key, { stamp: capturedStamp, checkpoint, message: rejection.message, issues: rejection.issues });
           journaled = false;
         }
         throw error;

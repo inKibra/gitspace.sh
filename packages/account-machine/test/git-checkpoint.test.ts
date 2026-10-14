@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, readGitCacheBase, IncrementalGitSnapshots } from '../src/git-checkpoint.js';
 import type { GitIntermediateCheckpoint, GitCheckpointRejection, PendingGitSnapshot } from '../src/git-checkpoint.js';
-import { ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError, ArtifactsUploadLimitError } from '../src/artifacts-git-remote.js';
+import { ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError } from '../src/artifacts-git-remote.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -59,7 +59,7 @@ function fixture(): { root: string; source: string; remote: string; target: stri
   writeFileSync(join(source, 'secret.env'), 'never upload\n');
   mkdirSync(join(source, 'cache'));
   writeFileSync(join(source, 'cache', 'build.bin'), 'cache\n');
-  git(root, 'init', '--bare', remote);
+  git(root, 'init', '--bare', remote); git(remote, 'config', 'receive.shallowUpdate', 'true');
   return { root, source, remote, target };
 }
 
@@ -209,7 +209,7 @@ describe('Git intermediate checkpoint', () => {
     git(source, 'checkout', '--orphan', 'unborn');
     let revision = 0;
     let committed: GitIntermediateCheckpoint | null = null;
-    let pending: GitIntermediateCheckpoint | null = null;
+    let pending: PendingGitSnapshot | null = null;
     const publications: GitIntermediateCheckpoint[] = [];
     const snapshots = new IncrementalGitSnapshots({
       repositoryPath: source, spaceId: 'unborn-space',
@@ -284,7 +284,7 @@ describe('Git intermediate checkpoint', () => {
     let revision = 0;
     const published: string[] = [];
     let committed = '';
-    let pending: GitIntermediateCheckpoint | null = null;
+    let pending: PendingGitSnapshot | null = null;
     const snapshots = new IncrementalGitSnapshots({
       repositoryPath: source,
       loadPending: async () => pending,
@@ -311,7 +311,7 @@ describe('Git intermediate checkpoint', () => {
     const { source, remote } = fixture();
     git(source, 'config', `url.${remote}.insteadOf`, 'https://artifacts.invalid/repository');
     let revision = 0, publications = 0, credentials = 0;
-    const journal: { pending: GitIntermediateCheckpoint | null; committed: GitIntermediateCheckpoint | null; rejected: GitCheckpointRejection | null } = { pending: null, committed: null, rejected: null };
+    const journal: { pending: PendingGitSnapshot | null; committed: GitIntermediateCheckpoint | null; rejected: GitCheckpointRejection | null } = { pending: null, committed: null, rejected: null };
     const gitRemote = new ArtifactsGitRemote({ credentials: async () => {
       credentials++;
       return { remote: 'https://artifacts.invalid/repository', plaintext: 'local-proof', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
@@ -322,7 +322,7 @@ describe('Git intermediate checkpoint', () => {
       loadRejected: async () => journal.rejected,
       saveRejected: async rejection => { journal.rejected = rejection; if (rejection) journal.pending = null; },
       savePending: async checkpoint => { journal.pending = checkpoint; },
-      publish: async checkpoint => { publications++; await gitRemote.publishCheckpoint({ binding: { projectId: 'project', repository: 'workspace' }, repositoryPath: source, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit }); },
+      publish: async (checkpoint, committed) => { publications++; await gitRemote.publishCheckpoint({ binding: { projectId: 'project', repository: 'workspace' }, repositoryPath: source, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: committed?.headCommit ?? null }); },
       commit: async checkpoint => { journal.committed = checkpoint; journal.pending = null; return checkpoint; },
     });
     let snapshots = create();
@@ -367,9 +367,9 @@ describe('Git intermediate checkpoint', () => {
       saveRejected: async rejection => { journal.rejected = rejection; if (rejection) journal.pending = null; },
       savePending: async checkpoint => { journal.pending = checkpoint; },
       publish: async () => { if (failure === 'publication') throw new ArtifactsRepositoryIncompatibleError([{ oid: 'a'.repeat(40), path: 'portable.txt', size: 32_000_001, location: 'current' }]); },
-      commit: async checkpoint => { if (failure === 'commit') throw new ArtifactsUploadLimitError('canonical admission outcome unknown'); journal.pending = null; return checkpoint; },
+      commit: async checkpoint => { if (failure === 'commit') throw new ArtifactsRepositoryIncompatibleError([{ oid: 'b'.repeat(40), path: 'admission.txt', size: 32_000_001, location: 'current' }]); journal.pending = null; return checkpoint; },
     });
-    await expect(create().capture()).rejects.toBeInstanceOf(ArtifactsUploadLimitError);
+    await expect(create().capture()).rejects.toBeInstanceOf(ArtifactsRepositoryIncompatibleError);
     const uncertain = journal.pending;
     if (!uncertain) throw new Error('Expected a pending checkpoint after uncertain canonical admission');
     expect(journal.rejected).toBeNull();

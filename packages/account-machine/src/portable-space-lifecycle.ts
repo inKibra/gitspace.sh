@@ -220,7 +220,7 @@ export class PortableSpaceLifecycle {
         portableUntrackedPaths: space.portableUntrackedPaths,
         lfs,
       });
-      await this.gitRemote.publishCheckpoint({ binding: space.binding, repositoryPath: space.repositoryPath, checkpointRef: repository.checkpointRef, headCommit: repository.headCommit });
+      await this.gitRemote.publishCheckpoint({ binding: space.binding, repositoryPath: space.repositoryPath, checkpointRef: repository.checkpointRef, headCommit: repository.headCommit, remoteHead: null });
       const [agent, artifacts] = await Promise.all([runtime.captureAgent(), runtime.captureArtifacts()]);
       const agentCheckpoint = agent.kind === 'cloud' ? agent : {
         kind: 'legacy' as const, sessionId: agent.sessionId, ompSessionId: agent.ompSessionId,

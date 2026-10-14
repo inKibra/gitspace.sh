@@ -159,7 +159,7 @@ async function leaseProof(workspaces: readonly string[], options: { prepareAttac
       override async publishCheckpoint(input: Parameters<ArtifactsGitRemote['publishCheckpoint']>[0]) {
         publicationAttempts++;
         if (options.nativeGit) await super.publishCheckpoint(input);
-        else await git(input.repositoryPath, 'push', remote, `${input.checkpointRef}:${input.checkpointRef}`);
+        else await git(input.repositoryPath, 'push', '--force', remote, `${input.checkpointRef}:${input.checkpointRef}`);
       }
     }
     const unavailable = async (): Promise<never> => { throw new Error('External service forbidden'); };

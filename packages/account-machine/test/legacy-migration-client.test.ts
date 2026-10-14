@@ -118,15 +118,6 @@ for (const blobLayer of ['head', 'index', 'tracked', 'worktree'] as const) {
   }, 120_000);
 }
 
-it('rejects only the space with an oversized required commit', async () => {
-  const first = fixture('valid-first');
-  const second = fixture('oversized-second', { oversized: 'commit' });
-  const run = control([first, second], true);
-  await expect(run.result).rejects.toThrow(/oversized-second \(preflight\): .*upload pack limit/u);
-  expect(run.requests).toEqual(attemptedOnlyFirst.map(request => request.replace('{second}', 'oversized-second')));
-  first.expectRetained(); second.expectRetained();
-}, 120_000);
-
 it('accepts historical-only oversized blobs while retaining the full original source and checkpoint IDs', async () => {
   const spaces = [fixture('historical-first', { oversized: 'blob', blobLayer: 'history' }), fixture('valid-second')];
   const run = control(spaces, false);

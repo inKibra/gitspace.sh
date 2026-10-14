@@ -91,7 +91,7 @@ test.each(['committed', 'unborn', 'published unborn'])('cache executor reaches r
         await git(input.repositoryPath, 'fetch', remote, `${input.checkpointRef}:${input.checkpointRef}`);
       }
       override async publishCheckpoint(input: Parameters<ArtifactsGitRemote['publishCheckpoint']>[0]) {
-        await git(input.repositoryPath, 'push', remote, `${input.checkpointRef}:${input.checkpointRef}`);
+        await git(input.repositoryPath, 'push', '--force', remote, `${input.checkpointRef}:${input.checkpointRef}`);
       }
     }
     const unavailable = async (): Promise<never> => { throw new Error('External service forbidden'); };

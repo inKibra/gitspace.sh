@@ -119,6 +119,12 @@ export function spaceGitCheckpointRef(spaceId: string, revision: number): string
   return `refs/gitspace/spaces/${storageId(spaceId)}/checkpoints/${revision}`;
 }
 
+/** The one ref a machine's sync snapshots are pushed to, overwritten each time: the cloud merges a snapshot by
+ * commit, so the ref only has to hold the latest one until the cloud accepts it. */
+export function spaceGitSnapshotRef(spaceId: string): string {
+  return `refs/gitspace/spaces/${storageId(spaceId)}/snapshot`;
+}
+
 export function checkpointRevision(revision: number): void {
   if (!Number.isSafeInteger(revision) || revision <= 0) throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_REVISION_INVALID', message: 'Checkpoint revision must be a positive safe integer', context: { revision } });
 }

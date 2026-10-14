@@ -816,7 +816,7 @@ describe('ProjectLifecycleManager', () => {
         const base = database.getBaseSpace(projectId);
         if (!base) throw new Error('Missing cloned base');
         const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: base.rootPath, spaceId: projectId, revision: 1 });
-        await project.gitRemote.publishCheckpoint({ binding: { projectId, repository: `workspace-${projectId}` }, repositoryPath: base.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit });
+        await project.gitRemote.publishCheckpoint({ binding: { projectId, repository: `workspace-${projectId}` }, repositoryPath: base.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: null });
       }, undefined, undefined, project.gitRemote);
       const result = kind === 'source' ? await manager.openProject('source') : await manager.createProject({ name: 'Historical', repositoryUrl: source, baseBranch: null });
       expect(result.project.lifecycle).toBe('active');

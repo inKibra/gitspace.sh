@@ -99,7 +99,7 @@ for (const scenario of ['automatic normal', 'automatic held', 'manual held rejec
     }
     class LocalRemote extends ArtifactsGitRemote {
       override async fetchCheckpoint(input: Parameters<ArtifactsGitRemote['fetchCheckpoint']>[0]) { await git(input.repositoryPath, 'fetch', remote, `${input.checkpointRef}:${input.checkpointRef}`); }
-      override async publishCheckpoint(input: Parameters<ArtifactsGitRemote['publishCheckpoint']>[0]) { await git(input.repositoryPath, 'push', remote, `${input.checkpointRef}:${input.checkpointRef}`); }
+      override async publishCheckpoint(input: Parameters<ArtifactsGitRemote['publishCheckpoint']>[0]) { await git(input.repositoryPath, 'push', '--force', remote, `${input.checkpointRef}:${input.checkpointRef}`); }
     }
     const forbidden = async (): Promise<never> => { throw new Error('External access forbidden'); };
     runtime = await createMachineExecutor({ environmentRoot: join(root, 'runtime'), machineId: 'machine', database,

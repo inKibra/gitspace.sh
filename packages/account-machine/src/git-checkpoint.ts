@@ -1,12 +1,12 @@
 import { copyFile, lstat, mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spaceGitCheckpointRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
+import { spaceGitCheckpointRef, spaceGitSnapshotRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { z } from 'zod';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
 import { captureGitLfs, checkoutGitLfs, gitLfsRestoreReceipt, gitLfsWorktreeTree, hydrateGitLfs, restoredGitLfsPaths, type MachineGitLfs, type MachineGitLfsPublication } from './git-lfs.js';
 import { gitWorktreeClock, gitWorktreeDelay, type GitWorktreeClock } from './git-worktree-watch.js';
-import { ArtifactsRepositoryIncompatibleError, ArtifactsUploadLimitError, artifactsPublicationRejection, type ArtifactsRepositoryIssue } from './artifacts-git-remote.js';
+import { ArtifactsRepositoryIncompatibleError, artifactsPublicationRejection, type ArtifactsRepositoryIssue } from './artifacts-git-remote.js';
 
 export type GitIntermediateCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 
@@ -321,16 +321,14 @@ export async function gitCheckpointIncludes(repositoryPath: string, checkpoint: 
 /** A proven local preflight rejection is not an uncertain remote write. */
 export type GitCheckpointRejection = { stamp: string; checkpoint: GitIntermediateCheckpoint; message: string; issues: ArtifactsRepositoryIssue[] | null };
 
-/** Old policy rejected ancestors too. Only those proven preflight rejections
- * are revalidated after cutover; current-file failures and uncertain writes stay fenced. */
+/** Rejections from removed policies are revalidated: ancestors (old history policy) and `issues: null`
+ * (the old upload-size limit). Current-file failures and uncertain writes stay fenced. */
 export function gitCheckpointRejectionNeedsRevalidation(rejection: GitCheckpointRejection): boolean {
-  return rejection.issues !== null && rejection.issues.length > 0 && rejection.issues.every(issue => issue.location === 'history');
+  return rejection.issues === null || (rejection.issues.length > 0 && rejection.issues.every(issue => issue.location === 'history'));
 }
 
-export function gitCheckpointRejectionError(rejection: GitCheckpointRejection): ArtifactsRepositoryIncompatibleError | ArtifactsUploadLimitError {
-  const error = rejection.issues === null ? new ArtifactsUploadLimitError(rejection.message) : new ArtifactsRepositoryIncompatibleError(rejection.issues);
-  if (rejection.issues === null) error.message = rejection.message;
-  return error;
+export function gitCheckpointRejectionError(rejection: GitCheckpointRejection): ArtifactsRepositoryIncompatibleError {
+  return new ArtifactsRepositoryIncompatibleError(rejection.issues ?? []);
 }
 
 /** A captured snapshot and the committed worktree it was taken against. */
@@ -360,7 +358,8 @@ export class IncrementalGitSnapshots {
     loadRejected(): Promise<GitCheckpointRejection | null>;
     /** A rejection atomically clears pending, never committed. */
     saveRejected(rejection: GitCheckpointRejection | null): Promise<void>;
-    publish(checkpoint: GitIntermediateCheckpoint): Promise<void>;
+    /** `committed` is the last accepted checkpoint, whose HEAD the remote holds. */
+    publish(checkpoint: GitIntermediateCheckpoint, committed: GitIntermediateCheckpoint | null): Promise<void>;
     /** `base` is the committed worktree the snapshot was taken against, never the current one. */
     commit(checkpoint: GitIntermediateCheckpoint, base: string | null): Promise<GitIntermediateCheckpoint>;
   }) {}
@@ -408,7 +407,7 @@ export class IncrementalGitSnapshots {
           }
         }
         const revision = await this.options.allocateRevision();
-        const publicationId = spaceGitCheckpointRef(this.options.captureId ?? this.options.spaceId, revision);
+        const publicationId = spaceGitSnapshotRef(this.options.captureId ?? this.options.spaceId);
         const lfs = await this.options.lfs?.(publicationId);
         // Allocation and storage preparation can yield after the settle check.
         if (stable !== await readGitCheckpointInputStamp(this.options.repositoryPath)) {
@@ -420,6 +419,7 @@ export class IncrementalGitSnapshots {
           spaceId: this.options.spaceId,
           captureId: this.options.captureId,
           revision,
+          checkpointRef: publicationId,
           lfs,
         });
         if (stable !== await readGitCheckpointInputStamp(this.options.repositoryPath)) {
@@ -450,7 +450,7 @@ export class IncrementalGitSnapshots {
     this.unpublished = { checkpoint, base };
     await this.options.savePending({ checkpoint, base });
     if (storedRejection) await this.options.saveRejected(null);
-    try { await this.options.publish(checkpoint); }
+    try { await this.options.publish(checkpoint, committed); }
     catch (error) {
       const rejection = artifactsPublicationRejection(error);
       if (rejection && capturedStamp !== undefined) {
@@ -460,7 +460,7 @@ export class IncrementalGitSnapshots {
           stamp: capturedStamp,
           checkpoint,
           message: rejection.message,
-          issues: rejection instanceof ArtifactsRepositoryIncompatibleError ? rejection.issues : null,
+          issues: rejection.issues,
         });
         this.unpublished = undefined;
         await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();

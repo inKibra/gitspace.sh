@@ -129,13 +129,13 @@ it('does not interpret working attributes as authority for an ordinary file', as
 
 it('publishes only private Git refs without invoking snapshot LFS or pre-push origin uploads', async () => {
   const f = fixture(); const checkpoint = await f.capture(1);
-  const remote = join(f.root, 'artifacts.git'); git(f.root, 'init', '--bare', remote);
+  const remote = join(f.root, 'artifacts.git'); git(f.root, 'init', '--bare', remote); git(remote, 'config', 'receive.shallowUpdate', 'true');
   git(f.root, 'config', `url.${remote}.insteadOf`, 'https://artifacts.invalid/repository');
   const marker = join(f.root, 'hook-ran');
   const hook = join(f.root, '.git/hooks/pre-push');
   writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`); chmodSync(hook, 0o755);
   const publication = new ArtifactsGitRemote({ credentials: async () => ({ remote: 'https://artifacts.invalid/repository', plaintext: 'offline-token', expiresAt: new Date(Date.now() + 3_600_000).toISOString() }) });
-  await publication.publishCheckpoint({ repositoryPath: f.root, binding: { projectId: 'project', repository: 'workspace-space' }, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit });
+  await publication.publishCheckpoint({ repositoryPath: f.root, binding: { projectId: 'project', repository: 'workspace-space' }, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: null });
   expect(git(remote, 'rev-parse', checkpoint.checkpointRef)).toBe(checkpoint.worktreeCommit);
   expect(existsSync(marker)).toBe(false);
   // Normal deliberate pushes still execute the unchanged project hook.

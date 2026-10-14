@@ -585,8 +585,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (machine) runtime.attachments.recordMachineKind(input.machineId, attachmentMachineKind(machine));
     if (input.browserCapabilities && (machine?.kind !== 'physical' || machine.desiredState === 'removed')) input.browserCapabilities = [];
     if (input.cache?.state === 'reclaimed' && runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents cache reclamation');
+    // A heartbeat that only moves timestamps changes nothing anyone sees: no snapshot rebuild.
+    const visible = (value: unknown) => JSON.stringify(value, (key, field: unknown) => key.endsWith('At') ? undefined : field);
+    const before = visible(runtime.attachments.list().find(item => item.attachmentId === input.attachmentId));
     const attachment = runtime.attachments.heartbeat(input);
-    runtime.publish();
+    if (visible(attachment) !== before) runtime.publish();
     await this.scheduleLeases(runtime);
     return { attachment };
   }
