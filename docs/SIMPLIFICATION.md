@@ -25,6 +25,10 @@ The runtime treats a user's machine as an untrusted cache and wraps every effect
 5. **No long exclusive locks.** Slow work is a durable step list processed by alarms.
 6. **Errors say what to do next** in plain language (e.g. "Darktop is offline since 9:41 and no other machine is ready; start GitSpace on Darktop or attach another machine").
 7. **No checks nobody asked for.** Tests that only pin removed behavior are deleted with it.
+8. **Reads return stored rows.** A read never re-derives, never rebuilds a snapshot, never fans out across objects and never writes.
+9. **Derive once, when the data changes.** The object that owns the data recomputes what changed and stores the result; reads serve that result.
+10. **Live updates are small messages about the one thing that changed.** A lost message is corrected by the next change or by one small read on reconnect. No outboxes, replay streams, cursors or snapshots for anything a screen shows.
+11. **A simplification pass only deletes checks, refusals and locks.** Adding one needs the user's OK first, even inside a fix.
 
 ## Relay push (machines)
 
@@ -50,6 +54,8 @@ As built:
 - Owners: a change-log commit notices each changed resource once (`DurableChangeLog.wake`); a runtime publication notices `runtime`; a machine sends terminal notices over its relay socket, and the relay tells it when no tab watches one so it stops observing.
 - Reads: the former subscriptions keep their paths as queries returning only events newer than `after` — at most 64 changes (else the current snapshot), or 256 runtime deltas (else a reset). A tab keeps one read in flight plus at most one queued per key, and rereads every key when its socket reopens.
 - Still streamed: `inspector.transcript`, `inspector.artifacts.read`, `inspector.resources.read`, `inspector.repository.tree` (finite downloads), and the machine-facing `project.environment.watch`.
+
+Batch 1 below replaces the cursor reads, change-log snapshots and the directory stream with rule 10.
 
 ## Cloudflare usage rules
 
@@ -94,7 +100,7 @@ Signed requests with replay protection (indexed), credential vault and secret in
 
 ## Phases
 
-Each phase ships to bradleat and is verified on Golconda and PR 101 in the browser before the next; then lightbeam.
+Each phase ships to bradleat and is verified on Golconda and PR 101 in the browser before the next. Darktop is the only machine; lightbeam is not migrated.
 
 0. **Safety** — commit and push current work; index the nonce table; reproduce and fix the snapshot that deletes 16 Golconda files (rule 1). Done.
 1. **Sync** — base rule and backups (rules 1–2); `sync` tool; plain `git push` to one snapshot ref per workspace. Done.
@@ -110,7 +116,7 @@ Each phase ships to bradleat and is verified on Golconda and PR 101 in the brows
    - **Usage report:** platform cron `15 0 * * *` (needs secret `CF_ANALYTICS_TOKEN`) and `scripts/cloudflare-usage-report.ts`; flags daily and hourly spikes.
 5. **Machine** — old agent stack and `core` deleted (done); machine CLI.
 6. **UI** — demo code deleted (done); Environment tab (done); single status everywhere (done: the workspace object derives one summary from live tasks, questions and `gitspace.status`; every surface shows it through one dot).
-7. **Cloud legacy** — legacy migration, placement mutators, and dead control operations deleted (done); remaining tests; old snapshot refs (`refs/gitspace/spaces/*/checkpoints/*`) cleanup; lightbeam rollout.
+7. **Cloud legacy** — legacy migration, placement mutators, and dead control operations deleted (done); remaining tests; old snapshot refs (`refs/gitspace/spaces/*/checkpoints/*`) cleanup.
 
 Rows stored by older releases are rewritten when read: machine journal attachments and DO attachment rows map `lost`/`draining` to `detached`, and a stored runtime snapshot that no longer parses is rebuilt at startup from its cursor. A stored workspace status summary in the old shape (derived from conversation flags) reads as unreported until that workspace's runtime publishes again.
 
@@ -118,10 +124,54 @@ Alarms: a due wake whose handler neither cleared nor moved it is dropped at the 
 
 Search: `grep` is exact ripgrep and needs an attached machine; `code_search` is a cloud FTS5 trigram index per workspace (built in alarm steps per snapshot, bounded verification, reports how far behind it is). Agents may attach machines (`machines` `op: 'attach'`, attach on first need, per-machine "Agents may attach", default on).
 
-## Open
+## Work plan
 
-- Idle checkouts are never removed automatically; they stay until the machine is detached (assumed from the model; confirm).
-- Cloud browser CDP socket keeps the workspace object awake while a cloud browser is open: move it to its own data-free object, or connect per tool call.
-- The `afterSnapshot` long-poll exists only for machines released before `9f5bbae`; delete once lightbeam's machines have updated.
+Every item is verified the way the user works, in the browser, before it is reported done.
+
+**Batch 0 — rules and audit.** Rules 8–11 above. Audit every read endpoint (objects touched, derive/fan-out/snapshot, bounded reads) and every check (what it refuses, keep or delete); the user decides which checks stay.
+
+**Batch 1 — status and live updates.**
+1. Status as a small message: on change each workspace sends `{ workspaceId, status }`; the socket object keeps one row per workspace and forwards it; the sidebar updates that row; page load reads the rows once. The open workspace's view is unchanged. Done when an agent working, then the user clicking away, leaves the row Working until it stops.
+2. Remove outboxes, replay streams and snapshots (account-directory outbox and stream, `project.events` / `environment.events` cursors) for the same pattern.
+3. "Account directory connection failed": record close codes to tell deploys from network drops; brief reconnects are not shown as errors.
+
+**Batch 2 — drive and documents.**
+1. `local://` → `drive://`, hard cutover, no alias: parser, composer, tools, skills, agent instructions, inspector tab "Drive".
+2. Agents read PDFs and documents: Workers AI `toMarkdown` (`[ai]` binding), result cached in drive storage by content hash; large text paged. Test size limits and scanned PDFs first.
+3. Files tab shows binary files (PDF in the viewer, not base64).
+4. Chat: attachments as links; user messages rendered as Markdown.
+5. File names with `:`; abandoned upload chunks cleaned up.
+
+**Batch 3 — environment and reads that rebuild.**
+1. `environment.get`: the workspace object stores its environment, derived when files change; the read returns stored rows (now 3.4 s, five objects).
+2. Environment mutations read only the workspace's runs, not every run of the project.
+3. A run releases its slot when it finishes, is cancelled, passes its deadline or its process is gone.
+4. A run's row shows "Running in terminal" with Open terminal and Cancel.
+5. `space.view` and the rest of the audit's findings.
+
+**Batch 4 — machine and relay.**
+1. Delete old-machine paths: `afterSnapshot` long-poll, `runtime.heartbeat`, echo heartbeat.
+2. Relay drops on Darktop (every connection resets together); a finished command is not reported failed.
+3. Machine-wide assignments take ~30 s for 4 workspaces: cache per commit.
+4. Agents attaching machines, tested live.
+5. Conversation notices: machine offline/online, setup failure, sync conflict.
+6. The release follower logs an old launch failure on every start.
+
+**Batch 5 — inference.**
+1. Claude fast mode sends requests without the Claude Code identity.
+2. Provider errors in plain words with the next step, not raw JSON.
+3. OpenAI usage on the Inference page (port omp's ChatGPT usage reader; check the stored provider id).
+
+**Batch 6 — cleanup.** Old snapshot refs (Golconda ~1,108, PR 101 4); `saved-transcript-*` in the worker; the failing LFS and Artifacts tests.
+
+**Batch 7 — small UI bugs.** Golconda's mode switcher; Deedible Info's context meter at 264%; empty `system` messages in Validator and PR 101; ~925 "client disconnected" errors on Validator.
+
+**Later.** Machine CLI (`gitspace status`, `setup`, `sync`, `env --`).
+
+**Parked.** Cloud browser (until Inkibra Aperture): its CDP socket keeps the workspace object awake while a browser is open.
+
+## Needs a decision
+
+- Usage report: `wrangler secret put CF_ANALYTICS_TOKEN`, then deploy the platform worker.
+- Idle checkouts stay until the machine is detached — confirm.
 - Old Cloudflare workers (`gitspace-api`, `-auth`, `-platform`, `-sandbox-worker`, `-docs`, relay spikes, `gitspace-relays`): punted.
-- Machine-wide assignments still take ~30 s for 4 workspaces (repository info and filter/submodule tree walk per assignment); cache per commit.
