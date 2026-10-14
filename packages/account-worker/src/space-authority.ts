@@ -102,6 +102,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    const startedAt = Date.now();
+    const due = this.ctx.storage.sql.exec<{ owner: string; timestamp: number }>("SELECT owner, timestamp FROM runtime_alarms WHERE timestamp <= ? AND owner <> 'runtime'", startedAt).toArray();
     await this.directoryOutbox.flush();
     await this.flushPortableLfs();
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
@@ -109,6 +111,14 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       await this.scheduleAlarm('runtime', null);
       const identity = await this.ctx.storage.get<Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>>('runtime.identity');
       if (identity) await (await this.getRuntime(identity)).wake();
+    }
+    // A wake that was due and that its handler neither cleared nor moved has nothing to do: re-arming it would fire again
+    // at once, forever (an empty outbox, an LFS flush with no placement). It is dropped; a handler that has work
+    // schedules again.
+    const stale = due.filter(row => this.ctx.storage.sql.exec<{ timestamp: number }>('SELECT timestamp FROM runtime_alarms WHERE owner=?', row.owner).toArray()[0]?.timestamp === row.timestamp);
+    for (const row of stale) {
+      console.error(JSON.stringify({ event: 'space_alarm_stale_wake_dropped', owner: row.owner, dueAt: new Date(row.timestamp).toISOString() }));
+      await this.scheduleAlarm(row.owner, null);
     }
   }
 
