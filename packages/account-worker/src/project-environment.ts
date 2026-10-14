@@ -15,7 +15,7 @@ function availableState({ browserOriginsAvailable, ...state }: StoredEnvironment
 }
 
 interface JsonRow extends Record<string, SqlStorageValue> { data: string }
-interface RunRow extends JsonRow { scope: string; token: string | null; lock_key: string }
+interface RunRow extends JsonRow { scope: string; token: string | null }
 interface SharedEnvironment { values: Record<string, string>; approvals: LifecycleState['approvals'] }
 const LOG_PAGE_SIZE = 4;
 
@@ -30,12 +30,15 @@ export class ProjectEnvironmentStore {
     this.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS environment_state(space_id TEXT PRIMARY KEY,data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS environment_shared(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS lifecycle_runs(id TEXT PRIMARY KEY,space_id TEXT NOT NULL,scope TEXT NOT NULL,lock_key TEXT NOT NULL,token TEXT,data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS lifecycle_runs(id TEXT PRIMARY KEY,space_id TEXT NOT NULL,scope TEXT NOT NULL,token TEXT,data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS lifecycle_runs_space ON lifecycle_runs(space_id);
       CREATE INDEX IF NOT EXISTS lifecycle_runs_scope ON lifecycle_runs(scope);
-      CREATE INDEX IF NOT EXISTS lifecycle_runs_lock ON lifecycle_runs(lock_key);
       CREATE TABLE IF NOT EXISTS lifecycle_logs(run_id TEXT NOT NULL,offset INTEGER NOT NULL,output TEXT NOT NULL,PRIMARY KEY(run_id,offset));
     `);
+    // One-time: runs no longer hold a machine-wide lock.
+    if (this.storage.sql.exec("SELECT name FROM pragma_table_info('lifecycle_runs') WHERE name='lock_key'").toArray().length) {
+      this.storage.sql.exec('DROP INDEX IF EXISTS lifecycle_runs_lock; ALTER TABLE lifecycle_runs DROP COLUMN lock_key');
+    }
   }
 
   get(projectId: string, spaceId: string): LifecycleState {
@@ -140,8 +143,8 @@ export class ProjectEnvironmentStore {
 
   mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor): LifecycleState {
     const result = this.storage.transactionSync(() => {
-      const runs: LifecycleRunRecord[] = this.storage.sql.exec<RunRow>('SELECT scope,token,lock_key,data FROM lifecycle_runs')
-        .toArray().map((row) => ({ run: LifecycleRunSchema.parse(JSON.parse(row.data)), token: row.token, scope: row.scope, lock: row.lock_key }));
+      const runs: LifecycleRunRecord[] = this.storage.sql.exec<RunRow>('SELECT scope,token,data FROM lifecycle_runs')
+        .toArray().map((row) => ({ run: LifecycleRunSchema.parse(JSON.parse(row.data)), token: row.token, scope: row.scope }));
       const stored = this.stored(projectId, spaceId);
       const current = availableState(stored);
       if (input.op === 'approval' && input.approved && input.scope === 'project' && spaceId !== projectId && current.browserOrigins.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('PermissionDenied', 'Approve browser origins on the base workspace for project-wide access');
@@ -149,8 +152,8 @@ export class ProjectEnvironmentStore {
       if (!transition.changed) return transition.state;
       const { state, record, log } = transition;
       if (record) this.storage.sql.exec(
-        'INSERT INTO lifecycle_runs(id,space_id,scope,lock_key,token,data) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,data=excluded.data',
-        record.run.id, spaceId, record.scope, record.lock, record.token, JSON.stringify(record.run),
+        'INSERT INTO lifecycle_runs(id,space_id,scope,token,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,data=excluded.data',
+        record.run.id, spaceId, record.scope, record.token, JSON.stringify(record.run),
       );
       if (log?.output) {
         let offset = this.storage.sql.exec<{ next: number }>('SELECT COALESCE(MAX(offset)+1,0) AS next FROM lifecycle_logs WHERE run_id=?', log.runId).one().next;

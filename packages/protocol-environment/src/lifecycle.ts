@@ -24,10 +24,10 @@ export interface LifecycleActor {
   lostHolder?: { machineId: string; attachment?: { attachmentId: string; generation: number }; reason: string };
   attachment?: { attachmentId: string; generation: number };
 }
-export interface LifecycleRunRecord { run: LifecycleRun; token: string | null; scope: string; lock: string }
+export interface LifecycleRunRecord { run: LifecycleRun; token: string | null; scope: string }
 export interface LifecycleTransitionFacts {
   state: LifecycleState;
-  /** All runs for this project; includes other workspaces sharing machine preparation. */
+  /** All runs for this project. */
   runs: readonly LifecycleRunRecord[];
   actor: LifecycleActor;
   now: string;
@@ -288,8 +288,8 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         return { state: { ...state, claim: { runId: run.id, status: 'existing', reason: null, token: null } }, changed: false, sharedChanged: false };
       }
       const scope = lifecycleRunScope({ ...input, executionHashes }, actor.machineId, state.spaceId);
-      const lock = input.phase === 'machine/prepare' ? `machine:${actor.machineId}` : input.attachment ? `attachment:${input.attachment.attachmentId}:${input.attachment.generation}` : `workspace:${state.spaceId}`;
-      if (facts.runs.some((entry) => entry.token && (entry.run.spaceId === state.spaceId || entry.lock === lock))) throw new EnvironmentError('RunConflict', 'A runner still owns this lifecycle claim; stop it or confirm machine destruction before recovery');
+      const active = facts.runs.find((entry) => entry.token && entry.run.spaceId === state.spaceId);
+      if (active) throw new EnvironmentError('RunConflict', `Environment ${active.run.phase} is already running in this workspace; open its terminal or cancel it`, { runId: active.run.id });
       if (state.destroyedAt && input.phase !== 'cloud/destroy' && !(input.phase === 'cloud/provision' && input.rerun)) throw new EnvironmentError('PreconditionFailed', 'This workspace lifecycle was explicitly destroyed');
       if (input.phase.startsWith('cloud/') && !input.rerun && facts.runs.some((entry) => entry.scope === scope && entry.run.phase === input.phase && !isLifecycleRunActive(entry.run) && entry.run.status !== 'succeeded')) throw new EnvironmentError('RecoveryRequired', 'Previous cloud effects require inspection and an explicit rerun');
       if (input.phase === 'cloud/provision' && !state.policy.automatic) throw new EnvironmentError('PreconditionFailed', 'Explicit workspace setup must enable lifecycle policy first');
@@ -304,7 +304,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         ...(input.attachment ? { attachment: input.attachment } : {}),
         executionHashes, terminalName: input.terminalName ?? null, results: [], output: '',
         exitCode: skipped ? 0 : null, startedAt: now, finishedAt: skipped ? now : null, deadlineAt, cancelRequestedAt: null, failure: null, incidents: [] };
-      record = { run, scope, lock, token: skipped ? null : input.ownershipToken ?? facts.token };
+      record = { run, scope, token: skipped ? null : input.ownershipToken ?? facts.token };
       state.claim = { runId: run.id, status: skipped ? 'skipped' : 'claimed', reason: skipped ? 'This lifecycle scope already succeeded' : null, token: record.token };
       break;
     }

@@ -137,7 +137,7 @@ it('lists the named setup steps with approvals and interactive scripts', async (
   expect(loginRow.textContent).toContain('Interactive');
   expect(loginRow.textContent).not.toContain('Needs approval');
   await click('Run in terminal', loginRow);
-  expect(rpc.runPhase).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'darktop', runId: expect.any(String), phase: 'machine/prepare', rerun: null, interactive: true });
+  expect(rpc.runPhase).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'darktop', runId: expect.any(String), phase: 'machine/prepare', rerun: true, interactive: true });
   expect(openTerminal).toHaveBeenCalledWith('darktop', 'lifecycle-1');
   await click('Revoke', loginRow);
   expect(rpc.revokeApproval).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'project', executionHash: loginHash });

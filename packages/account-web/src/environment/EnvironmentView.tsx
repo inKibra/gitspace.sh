@@ -37,7 +37,7 @@ function ScriptRow({ script, phase, machineId, busy, onApprove, onRevoke, onOpen
       ? <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => onApprove(script.id)}>Review & approve</Button></>
       : <>
         {run.status === 'succeeded' || run.status === 'failed' ? <span className={`max-w-40 truncate tabular-nums ${run.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>{run.detail}</span> : script.interactive && run.status === 'never' ? null : <span className="shrink-0 text-muted-foreground">{RUN_TEXT[run.status]}</span>}
-        {script.interactive && run.status !== 'running' ? <Button variant="secondary" size="compact" leadingIcon={TerminalIcon} disabled={busy || !machineId} onClick={() => { if (machineId) onRunPhase(machineId, phase, { interactive: true }); }}>Run in terminal</Button> : null}
+        {script.interactive && run.status !== 'running' ? <Button variant="secondary" size="compact" leadingIcon={TerminalIcon} disabled={busy || !machineId} onClick={() => { if (machineId) onRunPhase(machineId, phase, { interactive: true, rerun: true }); }}>Run in terminal</Button> : null}
         {run.status !== 'never' ? <Button variant="ghost" size="compact" onClick={() => onOpenLog(run.runId, { id: script.id, label: script.label })}>Log</Button> : null}
         <Button variant="ghost" size="compact" disabled={busy} onClick={() => onRevoke(script.id)}>Revoke</Button>
       </>}
