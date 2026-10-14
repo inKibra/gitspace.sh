@@ -39,6 +39,7 @@ export class AttachmentStore {
     storage.sql.exec("DELETE FROM runtime_attachments WHERE json_extract(record,'$.role') IN ('runner','delegate')");
     storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.state','detached') WHERE json_extract(record,'$.state') IN ('lost','draining')");
     storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.cache.state','setup') WHERE json_extract(record,'$.cache.state') IN ('paused','reclaimed','draining')");
+    storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.failure',json('null')) WHERE json_extract(record,'$.failure.operation') IN ('reclaim','detach')");
     for (const table of ['runtime_attempts', 'runtime_executor_receipts', 'runtime_terminal_payloads', 'runtime_terminal_chunks', 'runtime_materialized_attempts', 'runtime_history_result_payloads', 'runtime_history_result_chunks', 'runtime_primary_flush', 'runtime_machine_kinds']) storage.sql.exec(`DROP TABLE IF EXISTS ${table}`);
     // Every write to runtime_attachments draws a fresh random revision, so a token match means the cached rows are current.
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attachments_revision(singleton INTEGER PRIMARY KEY CHECK(singleton=1), token INTEGER NOT NULL)');
