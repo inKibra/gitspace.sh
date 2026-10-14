@@ -38,7 +38,6 @@ export class MachineExecutor {
     const local = this.options.journal.attachment(dispatch.attachmentId);
     if (!local || dispatch.machineId !== this.options.machineId || local.attachment.machineId !== dispatch.machineId || local.attachment.workspaceId !== dispatch.workspaceId || local.attachment.projectId !== dispatch.projectId || local.attachment.generation !== dispatch.generation) throw new Error('Execution attachment is stale or unauthorized');
     if (local.attachment.state !== 'ready' || !local.prerequisitesComplete) throw new Error('Attachment is not ready');
-    if (!local.attachment.capabilities.includes(dispatch.tool)) throw new Error('Attachment does not permit this tool');
     return local;
   }
 
