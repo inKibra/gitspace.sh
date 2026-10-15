@@ -154,7 +154,7 @@ Every item is verified the way the user works, in the browser, before it is repo
 
 **Batch 2 — status and live updates.**
 1. Done (`4245232c`). Status as a small message: on change each workspace sends `{ workspaceId, status }`; the socket object keeps one row per workspace and forwards it; the sidebar updates that row; page load reads the rows once. The open workspace's view is unchanged. Done when an agent working, then the user clicking away, leaves the row Working until it stops.
-2. Remove outboxes, replay streams and snapshots (account-directory outbox and stream, every `*.events` cursor endpoint) for the same pattern.
+2. Done (`d67a2e14`, `1d34a697`). Remove outboxes, replay streams and snapshots (account-directory outbox and stream, every `*.events` cursor endpoint) for the same pattern. A change sends a notice and the tab reads the current state (settings.state, inference.list, machine.image.list, environment.state); the account directory is sent whole when a socket opens, then one slice per change; sources publish directly. `terminals.events` stays: it is a machine's terminal output stream, not screen state.
 3. Done. "Account directory connection failed": record close codes to tell deploys from network drops; brief reconnects are not shown as errors.
 
 **Batch 3 — drive and documents.**
