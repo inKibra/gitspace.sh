@@ -453,7 +453,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect([...artifacts.refs]).toEqual(refs);
   });
 
-  it('fences an interrupted ref publication and resumes it without exposing partial metadata', async () => {
+  it('reports an interrupted ref publication and finishes it on retry without exposing partial metadata', async () => {
     const { userId, client, project, artifacts, authority } = await cloudProject('Branch recovery');
     artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
@@ -468,7 +468,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await client.project.setBaseBranch(input)).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Checkpoint push interrupted') } } });
     expect((await authority.getProject())?.baseBranch).toBe('main');
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')?.branch).toBe('main');
-    expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'error' });
+    expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'ok' });
     expect(await client.project.setBaseBranch(input)).toMatchObject({ status: 'ok', value: { baseBranch: 'develop' } });
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'develop', headCommit: commit('2') });
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'develop', sourceCommit: commit('2') });
@@ -492,32 +492,8 @@ describe('cloud workspace lifecycle with no machines', () => {
       return copy(...args);
     });
     expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'ok', value: { baseBranch: 'develop' } });
-    expect(answered).toEqual([expect.objectContaining({ source: 'space' }), expect.stringContaining('changing to develop')]);
+    expect(answered).toEqual([expect.objectContaining({ source: 'space' }), 'opened']);
     expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'ok' });
-  });
-
-  it('resumes an interrupted base-branch change from its alarm after a restart, without a retry', async () => {
-    const { userId, client, project, artifacts, authority } = await cloudProject('Branch alarm recovery');
-    artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
-    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
-    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
-    await space.runtimeRepositoryCheckpoint(identity);
-    const current = await authority.getProject();
-    if (!current) throw new Error('Missing project');
-    const copy = artifacts.copyCommit.getMockImplementation();
-    if (!copy) throw new Error('Missing copy fixture');
-    artifacts.copyCommit.mockImplementationOnce(copy).mockRejectedValueOnce(new Error('Checkpoint push interrupted'));
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('retries the base branch change to develop automatically') } } });
-    expect((await authority.getProject())?.baseBranch).toBe('main');
-    await runInDurableObject(space, async (_instance, state) => {
-      const restarted = new SpaceAuthorityDO(state, env);
-      await state.blockConcurrencyWhile(async () => {});
-      await restarted.alarm();
-    });
-    expect((await authority.getProject())?.baseBranch).toBe('develop');
-    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'develop', headCommit: commit('2'), worktreeCommit: commit('2') });
-    expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'develop', sourceCommit: commit('2') });
-    expect(artifacts.refs.get(`workspace-${project.id} refs/heads/develop`)).toBe(commit('2'));
   });
 
   it('creates from advertised tags and pull request heads without a machine', async () => {

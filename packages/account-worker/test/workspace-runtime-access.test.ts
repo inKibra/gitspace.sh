@@ -23,8 +23,9 @@ describe('workspace runtime access', () => {
       await authority.setProjectLifecycle(project.revision, lifecycle);
       const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId });
       const write = requireWorkspaceAccess(env, env.ACCOUNT_ID, identity, true);
-      if (lifecycle === 'cloud-only' || lifecycle === 'provisioning' || lifecycle === 'active') await expect(write).resolves.toMatchObject({ workspace: { kind: 'base', branch: 'main', projectLifecycle: lifecycle } });
-      else await expect(write).rejects.toThrow(lifecycle === 'deleting' ? 'Runtime project is unavailable' : 'Archived runtime state is read-only');
+      if (lifecycle === 'deleting') await expect(write).rejects.toThrow('Runtime project is unavailable');
+      else if (lifecycle === 'archived') await expect(write).rejects.toThrow('Archived runtime state is read-only');
+      else await expect(write).resolves.toMatchObject({ workspace: { kind: 'base', branch: 'main', projectLifecycle: lifecycle } });
       const read = requireWorkspaceAccess(env, env.ACCOUNT_ID, identity, false);
       if (lifecycle === 'deleting') await expect(read).rejects.toThrow('Runtime project is unavailable');
       else await expect(read).resolves.toMatchObject({ workspace: { projectLifecycle: lifecycle } });

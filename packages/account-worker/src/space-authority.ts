@@ -27,23 +27,6 @@ import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, 
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { LifecycleRunRequestSchema, LifecycleRunSchema, type EnvironmentFailure, type LifecycleRun } from '@gitspace/protocol-environment';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
-const BaseBranchChangeSchema = z.object({
-  projectId: z.string(), previousBranch: z.string(), branch: z.string(),
-  previous: RuntimeGitCheckpointSchema, checkpoint: RuntimeGitCheckpointSchema,
-  previousBranchTip: z.string().nullable(),
-});
-/** Steps an interrupted base-branch change resumes from: `check` reads the project and fixes the target checkout;
- * `switch` fences the checkout (`prepared`), publishes its refs and records the branch on the project. */
-const BaseBranchStepsSchema = z.object({
-  projectId: z.string(), branch: z.string(), expectedRevision: z.number().int(), step: z.enum(['check', 'switch']),
-  checkpoint: RuntimeGitCheckpointSchema.nullable(), prepared: BaseBranchChangeSchema.nullable(),
-  attempts: z.number().int().nonnegative(), error: z.string().nullable(),
-});
-type BaseBranchSteps = z.infer<typeof BaseBranchStepsSchema>;
-/** A step interrupted by a restart resumes from this alarm. */
-const BASE_BRANCH_RECOVERY_MS = 60_000;
-/** A fenced change that keeps failing stops retrying here; retrying `project.setBaseBranch` resumes it. */
-const BASE_BRANCH_MAX_ATTEMPTS = 8;
 /** A legacy LFS retention that keeps failing stays pending (its objects stay retained) and stops retrying here. */
 const PORTABLE_LFS_MAX_ATTEMPTS = 12;
 type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
@@ -57,7 +40,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   private cloudRuntimePublished = false;
   private alarmLine: Promise<void> = Promise.resolve();
   private seeding: Promise<WorkspaceMetadata> | undefined;
-  private baseBranchRun: Promise<CloudProjectSummary> | undefined;
   /** Tabs learn of a committed change without the writer waiting for them. */
   private readonly liveNotify = (notices: LiveNotice[]) => { this.ctx.waitUntil(notifyBrowsers(this.env, notices)); };
   constructor(ctx: DurableObjectState, env: Env) {
@@ -70,14 +52,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       const identity = await this.ctx.storage.get('runtime.identity') ?? (state ? { projectId: state.projectId, workspaceId: state.spaceId } : null);
       this.cloudRuntime = identity !== null && await this.hasCloudRuntime() ? RuntimeIdentitySchema.parse(identity) : null;
       this.cloudRuntimePublished = await this.ctx.storage.get('directory.runtimePublished') === true;
-      // A base-branch change an older release left awaiting a retry resumes as a step list.
-      const legacyChange = await this.ctx.storage.get('runtime.baseBranchChange');
-      if (legacyChange !== undefined) {
-        const change = BaseBranchChangeSchema.parse(legacyChange);
-        this.ctx.storage.sql.exec("INSERT OR IGNORE INTO base_branch_steps(singleton,project_id,branch,expected_revision,step,checkpoint,prepared,attempts) VALUES(1,?,?,0,'switch',?,?,0)", change.projectId, change.branch, JSON.stringify(change.checkpoint), JSON.stringify(change));
-        await this.ctx.storage.delete('runtime.baseBranchChange');
-        await this.scheduleAlarm('baseBranch', Date.now());
-      }
+      // Base-branch changes no longer keep a step list: a pending one is dropped once and is retried by its caller.
+      await this.ctx.storage.delete('runtime.baseBranchChange');
       this.ctx.waitUntil(this.flushPortableLfs());
       this.directoryOutbox.kick();
     });
@@ -99,10 +75,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_recovery_receipts(operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)');
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS portable_lfs_outbox(snapshot_id TEXT PRIMARY KEY,inventory TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0)');
     if (!this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(portable_lfs_outbox)').toArray().some(column => column.name === 'attempts')) this.ctx.storage.sql.exec('ALTER TABLE portable_lfs_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
-    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS base_branch_steps(
-      singleton INTEGER PRIMARY KEY CHECK(singleton=1), project_id TEXT NOT NULL, branch TEXT NOT NULL, expected_revision INTEGER NOT NULL,
-      step TEXT NOT NULL, checkpoint TEXT, prepared TEXT, attempts INTEGER NOT NULL DEFAULT 0, error TEXT
-    )`);
+    this.ctx.storage.sql.exec('DROP TABLE IF EXISTS base_branch_steps');
+    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner='baseBranch'");
     createWorkspaceMetadataTables(this.ctx.storage);
   }
 
@@ -126,8 +100,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     // Runtime wakes from several sources (task wake, retention retry, code_search retry): a later request never postpones an earlier one.
     else this.ctx.storage.sql.exec("INSERT INTO runtime_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=CASE WHEN owner='runtime' THEN MIN(timestamp,excluded.timestamp) ELSE excluded.timestamp END", owner, timestamp);
     const operation = this.alarmLine.then(async () => {
-      // Runtime wakes are held while a base-branch change keeps the runtime closed; its end arms them.
-      const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>("SELECT MIN(timestamp) AS timestamp FROM runtime_alarms WHERE owner<>'runtime' OR NOT EXISTS (SELECT 1 FROM base_branch_steps)").toArray()[0]?.timestamp ?? null;
+      const next = this.ctx.storage.sql.exec<{ timestamp: number | null }>('SELECT MIN(timestamp) AS timestamp FROM runtime_alarms').toArray()[0]?.timestamp ?? null;
       // Every alarm write is billed: only a changed time is written.
       const current = await this.ctx.storage.getAlarm();
       if (next === null) { if (current !== null) await this.ctx.storage.deleteAlarm(); }
@@ -142,18 +115,14 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const due = this.ctx.storage.sql.exec<{ owner: string; timestamp: number }>("SELECT owner, timestamp FROM runtime_alarms WHERE timestamp <= ? AND owner <> 'runtime'", startedAt).toArray();
     await this.directoryOutbox.flush();
     await this.flushPortableLfs();
-    const change = this.baseBranchSteps();
-    if (change && change.attempts < BASE_BRANCH_MAX_ATTEMPTS) {
-      await this.advanceBaseBranch().catch((error: unknown) => console.error(JSON.stringify({ event: 'base_branch_step_failed', branch: change.branch, message: error instanceof Error ? error.message : String(error) })));
-    }
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
-    if (wake && wake.timestamp <= Date.now() && !this.baseBranchSteps()) {
+    if (wake && wake.timestamp <= Date.now()) {
       await this.scheduleAlarm('runtime', null);
       const identity = await this.ctx.storage.get<Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>>('runtime.identity');
       if (identity) await (await this.getRuntime(identity)).wake();
     }
     // A wake that was due and that its handler neither cleared nor moved has nothing to do: re-arming it would fire again
-    // at once, forever (a base-branch change past its attempts, an empty outbox). It is dropped; a handler that has work
+    // at once, forever (an empty outbox). It is dropped; a handler that has work
     // schedules again.
     const stale = due.filter(row => this.ctx.storage.sql.exec<{ timestamp: number }>('SELECT timestamp FROM runtime_alarms WHERE owner=?', row.owner).toArray()[0]?.timestamp === row.timestamp);
     for (const row of stale) {
@@ -248,7 +217,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   private async getRuntime(raw: unknown): Promise<WorkspaceRuntime> {
     const identity = RuntimeIdentitySchema.parse(raw);
     authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
-    this.assertNoBaseBranchChange();
     return this.loadRuntime(identity);
   }
 
@@ -279,7 +247,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeAttachments(raw: unknown) { return (await this.getRuntime(raw)).attachments.list(); }
   async runtimeCodeCheckpoint(raw: unknown) {
     const identity = RuntimeIdentitySchema.parse(raw);
-    this.assertNoBaseBranchChange();
     const authority = this.get();
     if (authority && (authority.projectId !== identity.projectId || authority.spaceId !== identity.workspaceId)) throw new Error('Checkpoint workspace identity mismatch');
     const stored = await this.ctx.storage.get('runtime.identity');
@@ -290,87 +257,20 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return readCurrentCheckpoint(this.ctx.storage);
   }
 
-  /** The pending base-branch change, if any. */
-  private baseBranchSteps(): BaseBranchSteps | null {
-    const row = this.ctx.storage.sql.exec<{ project_id: string; branch: string; expected_revision: number; step: string; checkpoint: string | null; prepared: string | null; attempts: number; error: string | null }>('SELECT project_id,branch,expected_revision,step,checkpoint,prepared,attempts,error FROM base_branch_steps WHERE singleton=1').toArray()[0];
-    return row ? BaseBranchStepsSchema.parse({
-      projectId: row.project_id, branch: row.branch, expectedRevision: row.expected_revision, step: row.step,
-      checkpoint: row.checkpoint === null ? null : JSON.parse(row.checkpoint), prepared: row.prepared === null ? null : JSON.parse(row.prepared),
-      attempts: row.attempts, error: row.error,
-    }) : null;
-  }
-
-  /** Runtime calls are refused, not queued, while the base checkout changes. */
-  private assertNoBaseBranchChange(): void {
-    const change = this.baseBranchSteps();
-    if (!change) return;
-    if (change.attempts >= BASE_BRANCH_MAX_ATTEMPTS) throw new Error(`The base branch change to ${change.branch} stopped after ${change.attempts} attempts (${change.error ?? 'unknown error'}); retry project.setBaseBranch with branch ${change.branch}`);
-    throw new Error(`The base branch is changing to ${change.branch}; try again when the change finishes`);
-  }
-
-  /** The base checkout, its Git refs and metadata change as a durable step list. Requests and the alarm run the steps;
-   * nothing holds this object while they wait on the project, the git store or the index. Dirty state, agents and
-   * live caches are rejected before the checkout is fenced. */
+  /** The base checkout, its Git refs and the project's branch change in one run of the checkout's queue: cloud edits
+   * and cache publications wait for it rather than being refused. Every step is repeatable, so a failed change is
+   * reported and running it again finishes it. Dirty state, agents and live caches are rejected first. */
   async runtimeSetBaseBranch(raw: unknown, expectedRevision: number, branch: string): Promise<CloudProjectSummary> {
     const identity = RuntimeIdentitySchema.parse(raw);
     if (!isSupportedBranchName(branch)) throw new Error('Invalid base branch');
     const projectId: string = identity.projectId;
     if (identity.workspaceId !== projectId) throw new Error('Base branch changes require the project base workspace');
-    const pending = this.baseBranchSteps();
-    if (pending && (pending.projectId !== identity.projectId || pending.branch !== branch)) throw new Error(`Retry the pending base branch change to ${pending.branch} first`);
-    // A person retrying a stopped change restarts its retries.
-    if (pending) this.ctx.storage.sql.exec('UPDATE base_branch_steps SET attempts=0 WHERE singleton=1 AND attempts>0');
-    else this.ctx.storage.sql.exec("INSERT INTO base_branch_steps(singleton,project_id,branch,expected_revision,step,attempts) VALUES(1,?,?,?,'check',0)", identity.projectId, branch, expectedRevision);
-    return this.advanceBaseBranch();
-  }
-
-  /** One run of the steps at a time; a request and the alarm share it. */
-  private advanceBaseBranch(): Promise<CloudProjectSummary> {
-    this.baseBranchRun ??= this.runBaseBranchSteps().finally(() => { this.baseBranchRun = undefined; });
-    return this.baseBranchRun;
-  }
-
-  private async runBaseBranchSteps(): Promise<CloudProjectSummary> {
-    const steps = this.baseBranchSteps();
-    if (!steps) throw new Error('No base branch change is pending');
-    await this.scheduleAlarm('baseBranch', Date.now() + BASE_BRANCH_RECOVERY_MS);
-    try {
-      const result = await this.baseBranchStep(steps);
-      await this.endBaseBranch();
-      return result;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const current = this.baseBranchSteps();
-      // Nothing is fenced before the switch prepares: the change ends and its caller learns why.
-      if (!current?.prepared) {
-        await this.endBaseBranch();
-        throw error;
-      }
-      const attempts = current.attempts + 1;
-      this.ctx.storage.sql.exec('UPDATE base_branch_steps SET attempts=?,error=? WHERE singleton=1', attempts, message);
-      if (attempts >= BASE_BRANCH_MAX_ATTEMPTS) {
-        await this.scheduleAlarm('baseBranch', null);
-        throw new Error(`${message}. The base branch change to ${current.branch} stopped after ${attempts} attempts; retry project.setBaseBranch with branch ${current.branch}`);
-      }
-      await this.scheduleAlarm('baseBranch', Date.now() + Math.min(3_600_000, 30_000 * 2 ** (attempts - 1)));
-      throw new Error(`${message}. GitSpace retries the base branch change to ${current.branch} automatically; retry project.setBaseBranch with branch ${current.branch} to resume it now`);
-    }
-  }
-
-  private async endBaseBranch(): Promise<void> {
-    this.ctx.storage.sql.exec('DELETE FROM base_branch_steps WHERE singleton=1');
-    await this.scheduleAlarm('baseBranch', null);
-  }
-
-  private async baseBranchStep(steps: BaseBranchSteps): Promise<CloudProjectSummary> {
-    const identity = RuntimeIdentitySchema.parse({ projectId: steps.projectId, workspaceId: steps.projectId });
-    const branch = steps.branch;
-    const authority = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${steps.projectId}`);
+    const authority = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`);
     const project = await authority.getProject();
     if (!project) throw new Error('Project is unavailable');
     if (project.role === 'gitspace-source') throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
-    if (steps.step === 'check' && project.revision !== steps.expectedRevision) throw new Error(`Project revision conflict: expected ${steps.expectedRevision}, actual ${project.revision}`);
-    if (steps.step === 'check' && project.baseBranch === branch) return this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(project);
+    if (project.baseBranch === branch) return this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(project);
+    if (project.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
     if (project.lifecycle !== 'active') throw new Error('Project must be active to change its base branch');
     authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
     const runtime = await this.loadRuntime(identity);
@@ -381,48 +281,38 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const repository = artifactsWorkspaceRepository(identity.workspaceId);
     const source = artifactsProjectRepository(project.id);
     await ensureProjectCodeRepository(code, project);
-    let checkpoint = steps.checkpoint;
-    if (!checkpoint) {
-      const head = await code.resolveRef(source, `refs/heads/${branch}`)
-        ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/heads/${branch}`) : null);
-      if (!head) throw new Error(`Branch ${branch} does not exist in the project repository`);
-      const metadata = await code.readCommit(source, head);
-      if (!metadata) throw new Error('Base branch commit is unavailable');
-      checkpoint = RuntimeGitCheckpointSchema.parse({
-        checkpointRef: `refs/gitspace/spaces/${identity.workspaceId}/checkpoints`, branch, headCommit: head,
-        indexCommit: head, trackedWorktreeCommit: head, worktreeCommit: head, indexTree: metadata.treeHash, worktreeTree: metadata.treeHash,
-      });
-      this.ctx.storage.sql.exec("UPDATE base_branch_steps SET step='switch',checkpoint=? WHERE singleton=1", JSON.stringify(checkpoint));
-    }
-    const target = checkpoint;
-    const commit = target.headCommit;
-    if (!commit) throw new Error('Base branch commit is unavailable');
-    let prepared = steps.prepared;
+    const head = await code.resolveRef(source, `refs/heads/${branch}`)
+      ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/heads/${branch}`) : null);
+    if (!head) throw new Error(`Branch ${branch} does not exist in the project repository`);
+    const metadata = await code.readCommit(source, head);
+    if (!metadata) throw new Error('Base branch commit is unavailable');
+    const target = RuntimeGitCheckpointSchema.parse({
+      checkpointRef: `refs/gitspace/spaces/${identity.workspaceId}/checkpoints`, branch, headCommit: head,
+      indexCommit: head, trackedWorktreeCommit: head, worktreeCommit: head, indexTree: metadata.treeHash, worktreeTree: metadata.treeHash,
+    });
+    let previous: z.infer<typeof RuntimeGitCheckpointSchema> | undefined;
+    let previousBranchTip: string | null = null;
     const result = await runtime.cloudFiles.changeBranch({
       checkpoint: target,
       validate: async current => {
-        if (prepared) {
-          if (current.worktreeCommit !== prepared.previous.worktreeCommit && current.worktreeCommit !== target.worktreeCommit) throw new Error('Base checkout changed during branch recovery');
-          return;
-        }
-        const head = current.headCommit ? await code.readCommit(repository, current.headCommit) : null;
-        if (!head || current.indexTree !== head.treeHash || current.worktreeTree !== head.treeHash || current.conflicts?.length || current.lfs?.heldBack.length) throw new Error('Base workspace has uncommitted changes; commit or discard them before changing its branch');
+        // A change that already switched the checkout and failed later finishes from there.
+        if (current.worktreeCommit === target.worktreeCommit) return;
+        const currentHead = current.headCommit ? await code.readCommit(repository, current.headCommit) : null;
+        if (!currentHead || current.indexTree !== currentHead.treeHash || current.worktreeTree !== currentHead.treeHash || current.conflicts?.length || current.lfs?.heldBack.length) throw new Error('Base workspace has uncommitted changes; commit or discard them before changing its branch');
       },
       prepare: async current => {
-        if (prepared) return;
-        prepared = BaseBranchChangeSchema.parse({ projectId: project.id, previousBranch: project.baseBranch, branch, previous: current, checkpoint: target, previousBranchTip: await code.resolveRef(repository, `refs/heads/${branch}`) });
-        this.ctx.storage.sql.exec('UPDATE base_branch_steps SET prepared=? WHERE singleton=1', JSON.stringify(prepared));
+        previous = current;
+        previousBranchTip = await code.resolveRef(repository, `refs/heads/${branch}`);
       },
       publish: async () => {
-        if (!prepared) throw new Error('Base branch intent is missing');
-        await code.copyCommit(source, repository, `refs/heads/${branch}`, commit, prepared.previousBranchTip);
-        await code.copyCommit(source, repository, target.checkpointRef, commit, prepared.previous.worktreeCommit);
+        if (!previous) throw new Error('Base branch change has no prepared checkout');
+        await code.copyCommit(source, repository, `refs/heads/${branch}`, head, previousBranchTip);
+        await code.copyCommit(source, repository, target.checkpointRef, head, previous.worktreeCommit);
       },
       commit: async () => {
-        if (!prepared) throw new Error('Base branch intent is missing');
         const latest = await authority.getProject();
-        if (!latest || (latest.baseBranch !== prepared.previousBranch && latest.baseBranch !== branch)) throw new Error('Project base branch changed during checkout publication');
-        const updated = latest.baseBranch === branch ? latest : await authority.setBaseBranch(latest.revision, branch, commit);
+        if (!latest || (latest.baseBranch !== project.baseBranch && latest.baseBranch !== branch)) throw new Error('Project base branch changed during checkout publication');
+        const updated = latest.baseBranch === branch ? latest : await authority.setBaseBranch(latest.revision, branch, head);
         return this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(updated);
       },
     });
