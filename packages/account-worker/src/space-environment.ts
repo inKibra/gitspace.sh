@@ -7,7 +7,7 @@ import type { LiveChanges } from './live-changes.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 
 /** The workspace object's environment operations its own runtime calls in-process. */
-export type WorkspaceEnvironment = Pick<SpaceAuthorityDO, 'getLifecycleState' | 'refreshBrowserOrigins' | 'mutateLifecycleState' | 'getLifecycleRunLog' | 'lifecycleRunEnded'>;
+export type WorkspaceEnvironment = Pick<SpaceAuthorityDO, 'getLifecycleState' | 'currentLifecycleState' | 'refreshBrowserOrigins' | 'mutateLifecycleState' | 'getLifecycleRunLog' | 'lifecycleRunEnded'>;
 
 const StoredEnvironmentSchema = LifecycleStateSchema.extend({ browserOriginsAvailable: z.boolean().default(true) });
 type StoredEnvironment = z.output<typeof StoredEnvironmentSchema>;
@@ -50,6 +50,18 @@ export class SpaceEnvironmentStore {
       CREATE TABLE IF NOT EXISTS lifecycle_runs(id TEXT PRIMARY KEY,scope TEXT NOT NULL,data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS lifecycle_logs(run_id TEXT NOT NULL,offset INTEGER NOT NULL,output TEXT NOT NULL,PRIMARY KEY(run_id,offset));
     `);
+    if (!storage.sql.exec<{ name: string }>('PRAGMA table_info(environment_state)').toArray().some(column => column.name === 'derived_from')) {
+      storage.sql.exec('ALTER TABLE environment_state ADD COLUMN derived_from TEXT');
+    }
+  }
+
+  /** The workspace files and profile the stored configuration was last derived from; null before the first derivation. */
+  derivedFrom(): string | null {
+    return this.storage.sql.exec<{ derived_from: string | null }>('SELECT derived_from FROM environment_state WHERE id=1').toArray()[0]?.derived_from ?? null;
+  }
+
+  markDerived(source: string): void {
+    this.storage.sql.exec('UPDATE environment_state SET derived_from=? WHERE id=1', source);
   }
 
   /** False until the workspace's environment was imported from the project object (or started empty here). */

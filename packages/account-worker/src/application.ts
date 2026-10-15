@@ -3400,7 +3400,7 @@ const worker = {
                 break;
               }
               let state: LifecycleState;
-              if (body.operation === 'project.environment.get') state = await space.refreshBrowserOrigins(identity);
+              if (body.operation === 'project.environment.get') state = await space.currentLifecycleState(identity);
               else {
                 const input = LifecycleMutationSchema.parse(body.payload.input);
                 const machine = input.op === 'claim'

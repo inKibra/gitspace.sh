@@ -12,12 +12,9 @@ import {
   runWorkspaceEnvironmentChecksContract, runWorkspaceEnvironmentPhaseContract,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
-import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
-import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { serverRpc } from 'result-rpc/server';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
-import { refreshCloudEnvironment } from './cloud-environment.js';
 
 /** Cloud reads do not possess, materialize, or start an agent in the workspace; edits land in cloud state alone. */
 export function environmentCloudProcedures(env: Env, userId: string, deviceId: string, currentDevice: () => Promise<VerifiedDevice>, requireLifecycleControl: () => Promise<VerifiedDevice>) {
@@ -30,22 +27,21 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     // The workspace object owns the workspace's environment.
     return { projectId, authority, space: env.SPACE_AUTHORITY.getByName(`${userId}:${spaceId}`), identity: { projectId, workspaceId: spaceId } };
   };
-  /** Cloud workspaces derive configuration from their checkpoint; legacy holders configure it from their checkout. */
+  /** The workspace object's stored environment; it derives the configuration again only when the workspace's files
+   * changed since. */
   const currentState = async (spaceId: string) => {
-    const { projectId, space } = await authorityFor(spaceId);
-    const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: spaceId });
-    if (!await space.hasCloudRuntime()) return space.refreshBrowserOrigins(identity);
-    return refreshCloudEnvironment({ code: new ArtifactsCodeStore(env.ARTIFACTS), environment: space, identity, checkpoint: await space.runtimeRepositoryCheckpoint(identity) });
+    const { space, identity } = await authorityFor(spaceId);
+    return space.currentLifecycleState(identity);
   };
+  /** Account values and the workspace's secret names join the state; a project's base workspace has the project's id. */
   const view = async (spaceId: string, lifecycle: LifecycleState): Promise<WorkspaceEnvironmentView> => {
-    lifecycle.values.global = await projects.getEnvironmentValues();
-    const projected = projectEnvironmentState(lifecycle);
-    const { authority } = await authorityFor(spaceId);
-    const workspace = (await authority.listWorkspaces()).find(entry => entry.id === spaceId);
-    if (!workspace) throw new EnvironmentError('NotFound', 'Workspace does not belong to this project', { spaceId });
-    const metadata = await (env.PROJECT_SECRETS as DurableObjectNamespace<ProjectSecretsDO>).getByName(userId).listEffective(lifecycle.projectId, workspace.kind === 'base' ? null : spaceId);
+    const [global, metadata] = await Promise.all([
+      projects.getEnvironmentValues(),
+      (env.PROJECT_SECRETS as DurableObjectNamespace<ProjectSecretsDO>).getByName(userId).listEffective(lifecycle.projectId, spaceId === lifecycle.projectId ? null : spaceId),
+    ]);
+    lifecycle.values.global = global;
     return {
-      ...projected,
+      ...projectEnvironmentState(lifecycle),
       configuredSecrets: metadata.map((secret) => secret.name),
       secretMetadata: metadata,
     };

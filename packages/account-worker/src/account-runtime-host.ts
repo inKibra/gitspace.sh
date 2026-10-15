@@ -101,7 +101,11 @@ export async function createAccountWorkspaceRuntime(
       if (storeWorkspaceStatus(ctx.storage, status)) ctx.waitUntil(env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
       ctx.waitUntil(notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
     },
-    snapshotChanged: machineIds => { ctx.waitUntil(notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId)); },
+    snapshotChanged: machineIds => {
+      ctx.waitUntil(notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId));
+      // The environment is derived from the workspace's files: derive it when they change, not when it is read.
+      ctx.waitUntil(environment.currentLifecycleState(identity).catch((error: unknown) => console.error('Environment was not derived', { workspaceId: identity.workspaceId, error })));
+    },
     code,
     lfs,
     async retainLfs(checkpoint, publicationId) {

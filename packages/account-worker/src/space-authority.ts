@@ -6,6 +6,7 @@ import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
@@ -514,6 +515,19 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async getLifecycleState(raw: unknown): Promise<LifecycleState> {
     const { identity, project } = await this.environmentReady(raw);
     return this.environment.get(identity.projectId, identity.workspaceId, await project.environmentShared());
+  }
+  /** The stored environment, derived again first when the workspace's files or selected profile changed since it was
+   * last derived. A workspace with no cloud checkout yet has nothing to derive from. */
+  async currentLifecycleState(raw: unknown): Promise<LifecycleState> {
+    const { identity, project } = await this.environmentReady(raw);
+    const stored = this.environment.get(identity.projectId, identity.workspaceId, await project.environmentShared());
+    if (!await this.hasCloudRuntime()) return stored;
+    const checkpoint = await this.runtimeRepositoryCheckpoint(identity);
+    const source = (state: LifecycleState) => `${checkpoint.worktreeCommit}:${state.selectedProfile ?? ''}`;
+    if (this.environment.derivedFrom() === source(stored)) return stored;
+    const state = await refreshCloudEnvironment({ code: new ArtifactsCodeStore(this.env.ARTIFACTS), environment: this, identity, checkpoint });
+    this.environment.markDerived(source(state));
+    return state;
   }
   /** Re-derives the browser origins the workspace's committed HEAD declares. */
   async refreshBrowserOrigins(raw: unknown): Promise<LifecycleState> {

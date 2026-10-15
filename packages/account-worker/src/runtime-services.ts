@@ -24,7 +24,6 @@ import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper } from './runtime-inference.js';
 import { RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
-import { refreshCloudEnvironment } from './cloud-environment.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { executorCapabilities } from './runtime-attachments.js';
 import type { FleetMachineDefinition } from './fleet-catalog.js';
@@ -393,9 +392,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);
     const method = args.method;
     if (method === 'get') {
-      const checkpoint = await options.runtime().cloudFiles.initializeSnapshot();
-      if (!checkpoint) throw new Error('Cloud working copy is unavailable');
-      const lifecycle = await refreshCloudEnvironment({ code: new ArtifactsCodeStore(env.ARTIFACTS), environment: options.environment, identity, checkpoint });
+      const lifecycle = await options.environment.currentLifecycleState(identity);
       lifecycle.values.global = await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).getEnvironmentValues();
       return completed(input, projectEnvironmentState(lifecycle));
     }
