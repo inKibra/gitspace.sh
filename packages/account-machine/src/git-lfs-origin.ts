@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { confirmGitLfsObjects, downloadGitLfsObject, type GitLfsConfirmedObject, type GitLfsObject, type GitLfsOriginConfirmation } from '@gitspace/protocol-workspace';
+import { confirmGitLfsObjects, downloadGitLfsObject, type GitLfsConfirmedObject, type GitLfsObject } from '@gitspace/protocol-workspace';
 import { createHash } from 'node:crypto';
 import { originLfsInventory } from './git-lfs-inventory.js';
 
@@ -74,8 +74,6 @@ function originIdentity(origin: string): string | null {
 
 export async function originConfirmation(root: string, head: string | null, git: Git, environment: Record<string, string>, options?: {
   canonicalOrigin?: string | null;
-  confirmOrigin?(receipt: GitLfsOriginConfirmation): Promise<void>;
-  recheck?: boolean;
 }) {
   const config = async (args: string[]) => {
     try { return decode(await git(root, ['config', ...args], environment)); } catch { return ''; }
@@ -115,24 +113,15 @@ export async function originConfirmation(root: string, head: string | null, git:
     return async (_objects: readonly GitLfsObject[]): Promise<GitLfsConfirmedObject[]> => [];
   }
   const extra = await endpointHeaders(root, endpoint, headers, git, environment);
-  const identity = createHash('sha256').update(JSON.stringify([origin, rewritten, explicit, committed, endpoint.href, extra, environment, options?.canonicalOrigin, Boolean(options?.confirmOrigin)])).digest('hex');
+  const identity = createHash('sha256').update(JSON.stringify([origin, rewritten, explicit, committed, endpoint.href, extra, environment, options?.canonicalOrigin])).digest('hex');
   const location = { origin: cleanOrigin(options?.canonicalOrigin ?? origin), endpoint: cleanUrl(endpoint.href) };
   return async (objects: readonly GitLfsObject[]): Promise<GitLfsConfirmedObject[]> => {
     const operation = (confirmations.get(root) ?? Promise.resolve()).then(async () => {
       const inventory = await originLfsInventory(root, identity, git);
-      const candidates = options?.recheck
-        ? [...inventory.attempted.values()].filter(object => inventory.confirmed.get(object.oid)?.size !== object.size).sort((a, b) => a.oid.localeCompare(b.oid))
-        : objects.filter(object => inventory.attempted.get(object.oid)?.size !== object.size);
-      const cursor = inventory.cursor;
-      const afterCursor = cursor ? candidates.findIndex(object => object.oid > cursor) : 0;
-      const start = afterCursor < 0 ? 0 : afterCursor;
-      const missing = options?.recheck ? [...candidates.slice(start), ...candidates.slice(0, start)].slice(0, 64) : candidates;
+      const missing = objects.filter(object => inventory.attempted.get(object.oid)?.size !== object.size);
       const fresh = await confirmGitLfsObjects({ endpoint: endpoint.href, objects: missing, headers, signal: AbortSignal.timeout(10_000) });
-      // A failed receipt must remain undiscovered so the next capture can safely retry it.
-      if (fresh.length) await options?.confirmOrigin?.({ ...location, objects: fresh });
       for (const object of missing) inventory.attempted.set(object.oid, object);
       for (const object of fresh) inventory.confirmed.set(object.oid, object);
-      if (options?.recheck && missing.length) inventory.cursor = missing[missing.length - 1]!.oid;
       if (missing.length) await inventory.save();
       return objects.filter(object => inventory.confirmed.get(object.oid)?.size === object.size).map(object => ({ ...object, location }));
     });

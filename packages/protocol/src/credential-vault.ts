@@ -73,8 +73,6 @@ export const controlOperationSchema = z.enum([
   'data.put',
   'lfs.pin',
   'lfs.release',
-  'lfs.originConfirmed',
-  'lfs.sources',
   'catalog.machine.put',
   'catalog.machine.list',
   'settings.get',

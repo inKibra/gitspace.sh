@@ -15,7 +15,7 @@ async function fixture() {
   const projectId = crypto.randomUUID();
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
   await authority.bootstrap({ id: projectId, name: 'LFS control', repositoryReference: 'https://origin.invalid/repo.git', baseBranch: 'main', createdBy: 'writer' });
-  const request = (machineId: string, operation: 'lfs.pin' | 'lfs.release' | 'lfs.originConfirmed' | 'lfs.sources', payload: Record<string, unknown>) => SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(createSignedControlRequest({ userId, machineId, operation, payload, signingPrivateKey })) });
+  const request = (machineId: string, operation: 'lfs.pin' | 'lfs.release', payload: Record<string, unknown>) => SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(createSignedControlRequest({ userId, machineId, operation, payload, signingPrivateKey })) });
   return { userId, signingPrivateKey, projectId, authority, request };
 }
 
@@ -34,19 +34,7 @@ describe('authenticated LFS publication controls', () => {
     await store.put(object, lfsBytes(bytes));
     expect((await request('other-writer', 'lfs.release', { projectId, publicationId: 'capture' })).ok).toBe(true);
     expect(await readLfs(store, object)).toEqual(bytes);
-    const receipt = { projectId, origin: 'https://origin.invalid/repo.git', endpoint: 'https://origin.invalid/repo.git/info/lfs', objects: [object] };
-    expect((await request('storage-only', 'lfs.originConfirmed', receipt)).ok).toBe(false);
-    expect((await request('writer', 'lfs.originConfirmed', { ...receipt, origin: 'https://wrong.invalid/repo.git' })).ok).toBe(false);
-    for (const endpoint of [`${receipt.endpoint}?token=secret`, `${receipt.endpoint}#secret`, 'https://user:secret@origin.invalid/repo.git/info/lfs']) {
-      expect((await request('writer', 'lfs.originConfirmed', { ...receipt, endpoint })).ok).toBe(false);
-      await runInDurableObject(authority, async instance => {
-        await expect(instance.lfsOriginConfirmed({ ...receipt, endpoint })).rejects.toThrow('Invalid LFS origin endpoint');
-      });
-    }
-    expect(await authority.lfsResolveSources([{ ...object, source: 'r2' }])).toEqual([{ ...object, source: 'r2' }]);
-    expect((await request('writer', 'lfs.originConfirmed', receipt)).ok).toBe(true);
     expect((await request('writer', 'lfs.release', { projectId, publicationId: 'capture' })).ok).toBe(true);
-    expect(await readLfs(store, object)).toBeNull();
   });
 
   it('rejects raw encrypted uploads without a prior durable publication pin and cross-project reads', async () => {

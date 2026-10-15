@@ -676,7 +676,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     try {
       if (input.kind === 'CronSchedule') {
         const args = z.object({ cronId: idSchema }).parse(input.args);
-        const crons = env.PROJECT_CRONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+        const crons = env.PROJECT_CRONS.getByName(JSON.stringify([env.ACCOUNT_ID, identity.projectId]));
         const receipt = await crons.runNow({ projectId: identity.projectId, cronId: args.cronId, requestId: input.attemptId });
         return completed(input, receipt);
       }

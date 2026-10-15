@@ -80,6 +80,11 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
   }
   const identity = RuntimeIdentitySchema.parse(payload);
   const access = await requireWorkspaceAccess(env, userId, identity, operation !== 'runtime.snapshot');
+  if (operation === 'runtime.attachment.cache.request') {
+    const input = RuntimeCacheAttachmentRequestInputSchema.parse(payload);
+    if (input.machineId !== machine) throw new Error('Cache request target mismatch');
+    return access.authority.runtimeCacheAttachmentRequest(input);
+  }
   const attachments = await access.authority.runtimeAttachments(identity);
   if (!attachments.some(item => item.machineId === machine && item.state !== 'detached')) throw new Error('Machine has no active assignment in this workspace');
   if (operation === 'runtime.browser.authority') {
@@ -99,11 +104,6 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
       const input = RuntimeSessionInputSchema.parse(payload);
       if (['setWorkspacePhase', 'saveAgentDefinition'].includes(input.command.type)) throw new Error('Administrative session changes require the direct device-signed cloud API');
       return RuntimeSessionResultSchema.parse(await (await access.authority.runtimeSession(input, { canApprove: false })).json());
-    }
-    case 'runtime.attachment.cache.request': {
-      const input = RuntimeCacheAttachmentRequestInputSchema.parse(payload);
-      if (input.machineId !== machine) throw new Error('Cache request target mismatch');
-      return access.authority.runtimeCacheAttachmentRequest(input);
     }
     case 'runtime.attachment.ready': {
       const input = RuntimeAttachmentReadyInputSchema.parse(payload);

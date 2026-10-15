@@ -37,7 +37,6 @@ const OriginInventory = z.object({
   identity: z.string(),
   attempted: z.array(GitLfsObjectSchema),
   confirmed: z.array(GitLfsObjectSchema),
-  cursor: z.string().optional(),
 });
 
 /** Local discovery classifications survive process restarts; only acknowledged positives are saved. */
@@ -54,11 +53,10 @@ export async function originLfsInventory(root: string, identity: string, git: Gi
   const confirmed = new Map(previous?.confirmed.map(object => [object.oid, object]) ?? []);
   return {
     attempted, confirmed,
-    cursor: previous?.cursor,
     async save() {
       await mkdir(dirname(path), { recursive: true });
       const temporary = `${path}.${randomUUID()}.tmp`;
-      await writeFile(temporary, JSON.stringify({ version: 1, identity, attempted: [...attempted.values()], confirmed: [...confirmed.values()], cursor: this.cursor }));
+      await writeFile(temporary, JSON.stringify({ version: 1, identity, attempted: [...attempted.values()], confirmed: [...confirmed.values()] }));
       await rename(temporary, path);
     },
   };

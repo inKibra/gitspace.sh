@@ -31,10 +31,6 @@ export const GitLfsSnapshotSchema = z.object({
   heldBack: z.array(GitLfsHeldBackSchema),
 });
 export type GitLfsSnapshot = z.infer<typeof GitLfsSnapshotSchema>;
-export const GitLfsOriginConfirmationSchema = GitLfsLocationSchema.extend({
-  objects: z.array(GitLfsObjectSchema),
-});
-export type GitLfsOriginConfirmation = z.infer<typeof GitLfsOriginConfirmationSchema>;
 export const GitLfsProtectionSchema = z.object({ objects: z.array(GitLfsObjectSchema) });
 
 /** Plaintext interface; implementations encrypt storage and verify oid/size. */

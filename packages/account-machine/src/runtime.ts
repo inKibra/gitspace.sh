@@ -147,15 +147,13 @@ export async function startMachineRuntime() {
     read: async projectId => {
       const origin = await lfsOrigin(projectId);
       const store = await createCloudGitLfsStore({ projectId, blobs: checkpointBlobs, encryptionKey, controlOptions });
-      return { ...origin, store, confirmOrigin: confirmation => store.confirmOrigin(confirmation), resolveSources: objects => store.resolveSources(objects) };
+      return { ...origin, store };
     },
     publish: async (projectId, publicationId) => {
       const origin = await lfsOrigin(projectId);
       const store = await createCloudGitLfsPublisher({ projectId, publicationId, blobs: checkpointBlobs, encryptionKey, controlOptions });
       return {
         ...origin, store,
-        confirmOrigin: confirmation => store.confirmOrigin(confirmation),
-        resolveSources: objects => store.resolveSources(objects),
         releasePublication: () => store.releasePublication(),
       };
     },

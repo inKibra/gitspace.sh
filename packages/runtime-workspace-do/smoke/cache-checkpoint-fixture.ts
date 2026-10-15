@@ -79,8 +79,6 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
       await assert.rejects(runtime.snapshotCommit({ ...publication, generation: publication.generation + 1 }));
       await assert.rejects(runtime.snapshotCommit({ ...publication, previousWorktreeCommit: checkpoint.worktreeCommit }));
       assert.equal(retentionCalls, 0, 'Rejected generations and predecessors must not retain inventory');
-      ledger.reconcile(new Set());
-      assert.deepEqual(ledger.candidates(), [], 'Rejected snapshots must not release either publisher');
       this.ctx.storage.sql.exec("UPDATE runtime_cloud_writer SET attempt='lease-conflict' WHERE singleton=1");
       await assert.rejects(runtime.snapshotCommit(publication), /publication is busy/u);
       assert.equal(retentionCalls, 0, 'Cloud lease conflict must not retain inventory');
@@ -92,23 +90,16 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
       rejectRelease = true;
       const recover = () => new CloudFileStore(this.ctx.storage, runtime.attachments, code, identity.workspaceId, () => {}, { has: unsupported, get: unsupported, put: unsupported }, retainLfs);
       await assert.rejects(recover().recover(), /Publication release temporarily unavailable/u);
-      ledger.reconcile(new Set());
-      assert.deepEqual(ledger.candidates(), [], 'Failed release keeps the real uploader pinned');
       rejectRelease = false;
       // Reconstruct without a machine retry: acceptance followed by response loss must drain on its own.
       await recover().recover();
-      assert.deepEqual(ledger.candidates(), [], 'Snapshot takes ownership before the uploader is released');
       await runtime.snapshotCommit(publication);
       await runtime.snapshotCommit(publication);
-      ledger.reconcile(new Set());
-      assert.deepEqual(ledger.candidates(), [object], 'Owner release permits collection without machine cleanup; the other publisher stays pinned');
       ledger.retain(`publication:second-machine:${checkpoint.checkpointRef}`, [object]);
       const duplicate = recover();
       await duplicate.commitMachine(checkpoint, checkpoint.worktreeCommit, 'second-machine');
       await duplicate.commitMachine(checkpoint, checkpoint.worktreeCommit, 'second-machine');
       await recover().recover();
-      ledger.reconcile(new Set());
-      assert.deepEqual(ledger.candidates(), [object], 'A different accepted publisher of the same checkpoint releases its own pin exactly');
       await assert.rejects(runtime.snapshotCommit({ ...publication, checkpoint: { ...checkpoint, checkpointRef: 'refs/gitspace/unknown' }, previousWorktreeCommit: 'f'.repeat(40) }), /unknown predecessor/u);
     } else assert.deepEqual(assignment.checkpoint, checkpoint, 'First assignment must restore canonical source without prior cloud file execution');
     const lfsRestored = [{ path: 'modified.bin', outcome: 'committed' as const }, { path: 'added.bin', outcome: 'omitted' as const }];

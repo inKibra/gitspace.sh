@@ -33,7 +33,7 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } fr
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
-import { GitLfsSnapshotSchema, WorkspaceDomainError, WorkspaceRelationsSchema, resolveWorkspaceRelations, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput } from '@gitspace/protocol-workspace';
+import { WorkspaceDomainError, WorkspaceRelationsSchema, resolveWorkspaceRelations, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
@@ -900,7 +900,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN workspaces_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS deleted_workspaces(workspace_id TEXT PRIMARY KEY)');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_relations(workspace_id TEXT PRIMARY KEY,relations_json TEXT NOT NULL)');
-      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS lfs_origin_confirmations(origin TEXT NOT NULL,endpoint TEXT NOT NULL,oid TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(origin,endpoint,oid))');
+      this.ctx.storage.sql.exec('DROP TABLE IF EXISTS lfs_origin_confirmations');
       if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length && await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
       this.directoryOutbox.kick();
     });
@@ -927,19 +927,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     await this.ctx.storage.sync();
   }
 
-
-  async lfsOriginConfirmed(input: { origin: string; endpoint: string; objects: GitLfsObject[] }): Promise<void> {
-    const project = this.requireProject();
-    if (!project.repositoryReference || input.origin !== project.repositoryReference || project.lifecycle === 'deleting') throw new Error('LFS origin identity changed');
-    const endpoint = new URL(input.endpoint);
-    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error('Invalid LFS origin endpoint');
-    for (const object of input.objects) this.ctx.storage.sql.exec('INSERT INTO lfs_origin_confirmations VALUES(?,?,?,?) ON CONFLICT(origin,endpoint,oid) DO UPDATE SET size=excluded.size', input.origin, endpoint.href, object.oid, object.size);
-    await this.ctx.storage.sync();
-  }
-
-  lfsResolveSources(objects: GitLfsSnapshot['objects']) {
-    return this.lfs.resolve(GitLfsSnapshotSchema.shape.objects.parse(objects), this.requireProject().repositoryReference);
-  }
 
   lfsObjectAccess(oid: string): boolean {
     return this.requireProject().lifecycle !== 'deleting'

@@ -23,7 +23,7 @@ import { serveArtifactShare } from './account-inspector-data.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
 import { mcpAccessStatusRequestSchema, mcpAccessChangeRequestSchema, mcpAccessEnableRequestSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
-import { GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot } from '@gitspace/protocol-workspace';
+import { GitLfsObjectSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot } from '@gitspace/protocol-workspace';
 import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
@@ -3246,21 +3246,6 @@ const worker = {
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
         }
         if (diagnostics) diagnostics.stage = 'processing';
-        if (body.operation === 'lfs.originConfirmed' || body.operation === 'lfs.sources') {
-          const input = body.operation === 'lfs.originConfirmed'
-            ? { operation: body.operation, ...GitLfsOriginConfirmationSchema.extend({ projectId: z.string().min(1) }).strict().parse(body.payload) }
-            : { operation: body.operation, ...z.object({ projectId: z.string().min(1), objects: GitLfsSnapshotSchema.shape.objects }).strict().parse(body.payload) };
-          if (body.userId !== env.ACCOUNT_ID) throw new Error('LFS account identity mismatch');
-          projectStorageRoot(input.projectId);
-          const authority = env.PROJECT_AUTHORITY.getByName(`${body.userId}:${input.projectId}`);
-          const project = await authority.getProject();
-          if (!project || project.lifecycle === 'deleting') throw new Error('LFS project is unavailable');
-          if (input.operation === 'lfs.originConfirmed') {
-            await authority.lfsOriginConfirmed({ origin: input.origin, endpoint: input.endpoint, objects: input.objects });
-            return Response.json({ status: 'ok', value: null }, { headers: { 'cache-control': 'private, no-store' } });
-          }
-          return Response.json({ status: 'ok', value: await authority.lfsResolveSources(input.objects) }, { headers: { 'cache-control': 'private, no-store' } });
-        }
         if (body.operation === 'lfs.pin' || body.operation === 'lfs.release') {
           const identity = z.object({ projectId: z.string().min(1), publicationId: z.string().min(1).max(256) });
           const input = body.operation === 'lfs.pin'

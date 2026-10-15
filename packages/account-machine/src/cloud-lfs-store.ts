@@ -1,5 +1,5 @@
 import { createSignedControlRequest, deriveArtifactScopeKey, sendSigned } from '@gitspace/protocol';
-import { collectBytes, streamBytes, GitLfsObjectSchema, GitLfsOriginConfirmationSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot, type GitLfsObject, type GitLfsOriginConfirmation, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { collectBytes, streamBytes, GitLfsObjectSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot, type GitLfsObject, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { EncryptedCheckpointBlobStore, type CheckpointBlobStore } from './checkpoint-blobs.js';
 import { cloudControlOptions, type SignedCloudRequestOptions } from './cloud-space-authority.js';
 import { z } from 'zod';
@@ -12,8 +12,6 @@ export type CloudGitLfsStoreOptions = {
 };
 /** Restores read verified objects; they hold no publication and so can neither pin nor upload. */
 export type CloudGitLfsReader = Pick<GitLfsStore, 'has' | 'get'> & {
-  confirmOrigin(confirmation: GitLfsOriginConfirmation): Promise<void>;
-  resolveSources(objects: GitLfsSnapshot['objects']): Promise<GitLfsSnapshot['objects']>;
 };
 /** Every pin and upload belongs to the publication identity fixed at construction until it is released. */
 export type CloudGitLfsPublisher = CloudGitLfsReader & Required<GitLfsStore> & { releasePublication(): Promise<void> };
@@ -61,15 +59,6 @@ async function cloudGitLfs(options: CloudGitLfsStoreOptions) {
   const reader: CloudGitLfsReader = {
     get,
     has,
-    async confirmOrigin(confirmation) {
-      await control('lfs.originConfirmed', GitLfsOriginConfirmationSchema.parse(confirmation), z.null());
-    },
-    async resolveSources(objects) {
-      const requested = GitLfsSnapshotSchema.shape.objects.parse(objects);
-      const resolved = await control('lfs.sources', { objects: requested }, GitLfsSnapshotSchema.shape.objects);
-      if (resolved.length !== requested.length || resolved.some((object, index) => object.oid !== requested[index]?.oid || object.size !== requested[index]?.size)) throw new Error('LFS source resolution changed the requested inventory');
-      return resolved;
-    },
   };
   return { reader, control, verify, encrypted, objectKey };
 }

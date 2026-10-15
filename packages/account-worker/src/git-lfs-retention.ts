@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { GitLfsObjectSchema, GitLfsSnapshotSchema, type GitLfsObject, type GitLfsLocation, type GitLfsSnapshot } from '@gitspace/protocol-workspace';
+import { GitLfsObjectSchema, GitLfsSnapshotSchema, type GitLfsObject } from '@gitspace/protocol-workspace';
 
 export const RetainedLfsSnapshotSchema = z.object({
   snapshotId: z.string().min(1), workspaceId: z.string().min(1), kind: z.enum(['runtime', 'portable', 'migration']),
@@ -14,8 +14,7 @@ export class GitLfsRetention {
       CREATE TABLE IF NOT EXISTS lfs_references(owner TEXT NOT NULL, oid TEXT NOT NULL, PRIMARY KEY(owner,oid));
       CREATE INDEX IF NOT EXISTS lfs_references_oid ON lfs_references(oid);
       CREATE TABLE IF NOT EXISTS lfs_snapshots(snapshot_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,kind TEXT NOT NULL,inventory TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS lfs_origin_sources(oid TEXT NOT NULL,size INTEGER NOT NULL,origin TEXT NOT NULL,endpoint TEXT NOT NULL,PRIMARY KEY(origin,endpoint,oid));
-      CREATE INDEX IF NOT EXISTS lfs_origin_sources_object ON lfs_origin_sources(origin,oid,size);`);
+      DROP TABLE IF EXISTS lfs_origin_sources;`);
   }
 
   retain(owner: string, objects: readonly GitLfsObject[]): void {
@@ -23,8 +22,7 @@ export class GitLfsRetention {
     const verified = objects.map(object => GitLfsObjectSchema.parse(object));
     this.storage.transactionSync(() => {
       for (const object of verified) {
-        const previous = this.storage.sql.exec<{ size: number; deleting: number }>('SELECT size,deleting FROM lfs_objects WHERE oid=?', object.oid).toArray()[0];
-        if (previous?.deleting) throw new Error('LFS object deletion must finish before a new publication');
+        const previous = this.storage.sql.exec<{ size: number }>('SELECT size FROM lfs_objects WHERE oid=?', object.oid).toArray()[0];
         if (previous && previous.size !== object.size) throw new Error('LFS object size conflicts with retained identity');
         this.storage.sql.exec('INSERT OR IGNORE INTO lfs_objects(oid,size) VALUES(?,?)', object.oid, object.size);
         this.storage.sql.exec('INSERT OR IGNORE INTO lfs_references(owner,oid) VALUES(?,?)', owner, object.oid);
@@ -49,48 +47,5 @@ export class GitLfsRetention {
     });
   }
 
-  snapshots(): RetainedLfsSnapshot[] {
-    return this.storage.sql.exec<{ inventory: string }>('SELECT inventory FROM lfs_snapshots').toArray().map(row => RetainedLfsSnapshotSchema.parse(JSON.parse(row.inventory)));
-  }
-
-  reconcile(roots: ReadonlySet<string>): void {
-    this.storage.transactionSync(() => {
-      for (const snapshot of this.snapshots()) {
-        this.release(`snapshot:${snapshot.snapshotId}`);
-        if (roots.has(snapshot.snapshotId)) this.retain(`snapshot:${snapshot.snapshotId}`, snapshot.objects.filter(object => object.source === 'r2'));
-      }
-    });
-  }
-
-  origin(objects: readonly (GitLfsObject & { location: GitLfsLocation })[]): void {
-    const confirmed = new Map(objects.map(object => [object.oid, object]));
-    this.storage.transactionSync(() => {
-      for (const object of objects) this.storage.sql.exec('INSERT INTO lfs_origin_sources VALUES(?,?,?,?) ON CONFLICT(origin,endpoint,oid) DO UPDATE SET size=excluded.size WHERE size IS NOT excluded.size', object.oid, object.size, object.location.origin, object.location.endpoint);
-      for (const snapshot of this.snapshots()) {
-        if (snapshot.kind === 'migration') continue;
-        snapshot.objects = snapshot.objects.map(object => {
-          const source = confirmed.get(object.oid);
-          return source?.size === object.size ? { ...object, source: 'origin', location: source.location } : object;
-        });
-        this.storage.sql.exec('UPDATE lfs_snapshots SET inventory=? WHERE snapshot_id=?', JSON.stringify(snapshot), snapshot.snapshotId);
-        for (const object of objects) this.storage.sql.exec('DELETE FROM lfs_references WHERE owner=? AND oid=?', `snapshot:${snapshot.snapshotId}`, object.oid);
-      }
-    });
-  }
-
-  resolve(objects: GitLfsSnapshot['objects'], origin: string | null): GitLfsSnapshot['objects'] {
-    return objects.map(object => {
-      const source = this.storage.sql.exec<{ origin: string; endpoint: string }>('SELECT origin,endpoint FROM lfs_origin_sources WHERE oid=? AND size=? AND origin=? LIMIT 1', object.oid, object.size, origin).toArray()[0];
-      return source ? { ...object, source: 'origin', location: source } : object;
-    });
-  }
-
   release(owner: string): void { this.storage.sql.exec('DELETE FROM lfs_references WHERE owner=?', owner); }
-  objects(): GitLfsObject[] { return this.storage.sql.exec<{ oid: string; size: number }>('SELECT oid,size FROM lfs_objects').toArray().map(object => GitLfsObjectSchema.parse(object)); }
-  candidates(): GitLfsObject[] { return this.storage.sql.exec<{ oid: string; size: number }>('SELECT oid,size FROM lfs_objects WHERE NOT EXISTS(SELECT 1 FROM lfs_references WHERE lfs_references.oid=lfs_objects.oid)').toArray().map(object => GitLfsObjectSchema.parse(object)); }
-  beginDelete(object: GitLfsObject): boolean {
-    this.storage.sql.exec('UPDATE lfs_objects SET deleting=1 WHERE oid=? AND size=? AND NOT EXISTS(SELECT 1 FROM lfs_references WHERE lfs_references.oid=lfs_objects.oid)', object.oid, object.size);
-    return this.storage.sql.exec('SELECT 1 FROM lfs_objects WHERE oid=? AND size=? AND deleting=1 AND NOT EXISTS(SELECT 1 FROM lfs_references WHERE lfs_references.oid=lfs_objects.oid)', object.oid, object.size).toArray().length === 1;
-  }
-  forget(object: GitLfsObject): void { this.storage.sql.exec('DELETE FROM lfs_objects WHERE oid=? AND deleting=1 AND NOT EXISTS(SELECT 1 FROM lfs_references WHERE lfs_references.oid=lfs_objects.oid)', object.oid); }
 }

@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { streamBytes, GitLfsRestoredSchema, parseGitLfsPointer, type GitLfsObject, type GitLfsOriginConfirmation, type GitLfsRestored, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { streamBytes, GitLfsRestoredSchema, parseGitLfsPointer, type GitLfsObject, type GitLfsRestored, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { downloadQueryObject, hydrationEndpoint, originConfirmation } from './git-lfs-origin.js';
 import { committedLfsInventory } from './git-lfs-inventory.js';
 import { cachedLfsObject, installLfsObject, verifiedLfsSource } from './git-lfs-cache.js';
@@ -13,8 +13,6 @@ export type MachineGitLfs = {
   store: Pick<GitLfsStore, 'has' | 'get'>;
   originEnvironment(repositoryPath: string): Promise<Record<string, string>>;
   canonicalOrigin?: string | null;
-  confirmOrigin?(receipt: GitLfsOriginConfirmation): Promise<void>;
-  resolveSources?(objects: GitLfsSnapshot['objects']): Promise<GitLfsSnapshot['objects']>;
 };
 /** Capture access bound to one durable publication identity; its pins hold uploaded and protected objects until released. */
 export type MachineGitLfsPublication = Omit<MachineGitLfs, 'store'> & {
@@ -164,18 +162,8 @@ export async function captureGitLfs(root: string, head: string | null, authority
   };
 }
 
-/** Bounded authenticated retention maintenance; never scans committed history. */
-export async function recheckGitLfsOrigin(root: string, access: MachineGitLfs): Promise<void> {
-  if (!access.confirmOrigin || access.canonicalOrigin === null) return;
-  let head: string | null = null;
-  try { head = text(await git(root, ['rev-parse', '--verify', 'HEAD'])).trim(); } catch { /* Unborn repositories have no committed route. */ }
-  const confirm = await originConfirmation(root, head, git, await access.originEnvironment(root), { ...access, recheck: true });
-  await confirm([]);
-}
-
 /** Resolve every required object before changing HEAD, index or worktree. */
 export async function hydrateGitLfs(root: string, refs: string[], snapshot: GitLfsSnapshot | undefined, access?: MachineGitLfs): Promise<void> {
-  if (snapshot && access?.resolveSources) snapshot.objects = await access.resolveSources(snapshot.objects);
   const required = await readGitLfsPointers(root, refs);
   for (const object of snapshot?.objects ?? []) required.set(object.oid, object);
   const sources = new Map(snapshot?.objects.map(object => [object.oid, object]));
