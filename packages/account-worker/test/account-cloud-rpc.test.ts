@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, DEVICE_SOCKET_PROTOCOL, encodeApiKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
 import { accountLiveKey, liveNoticeMessageSchema, workspaceLiveKey, type LiveKey, type LiveNotice } from '@gitspace/protocol/live-notice';
+import { workspaceStatusMessageSchema } from '@gitspace/protocol/account-directory';
 import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
@@ -67,6 +68,30 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     expect(line).toContain(privateCause);
     expect(body).toContain(incident.incidentId);
     expect(body).not.toContain(privateCause);
+  });
+
+  it('sends a tab every status row when it connects, then each changed row once', async () => {
+    const fixture = await account();
+    const { projectId, spaceId } = await inspectorWorkspace(fixture.userId);
+    const index = env.USER_PROJECTS.getByName(fixture.userId);
+    const idle = { primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle });
+    const path = '/v1/directory/events';
+    const auth = signRpcRequest({ deviceId: fixture.deviceId, signingPrivateKey: fixture.signingPrivateKey, method: 'GET', path, body: new Uint8Array() });
+    const response = await SELF.fetch(new Request(`${env.ACCOUNT_URL}${path}`, { headers: { origin: env.ACCOUNT_URL, upgrade: 'websocket', 'sec-websocket-protocol': `${DEVICE_SOCKET_PROTOCOL}${auth}` } }));
+    const socket = response.webSocket!;
+    const messages: z.infer<typeof workspaceStatusMessageSchema>[] = [];
+    socket.addEventListener('message', (event) => {
+      const parsed = workspaceStatusMessageSchema.safeParse(JSON.parse(String(event.data)));
+      if (parsed.success) messages.push(parsed.data);
+    });
+    socket.accept();
+    await vi.waitFor(() => expect(messages).toEqual([{ type: 'statuses', rows: expect.arrayContaining([{ projectId, workspaceId: spaceId, status: idle }]) }]));
+    const working = { ...idle, primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 } };
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working });
+    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working }]));
+    socket.close();
   });
 
   it('sends a watching tab one notice per committed change, and its read after the cursor returns only newer changes', async () => {

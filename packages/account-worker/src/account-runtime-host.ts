@@ -95,7 +95,8 @@ export async function createAccountWorkspaceRuntime(
     workspacePhase,
     async setWorkspacePhase(phase) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase); },
     published: (snapshot, status) => {
-      storeWorkspaceStatus(ctx.storage, status);
+      // The sidebar's row: sent to every tab only when the status changed.
+      if (storeWorkspaceStatus(ctx.storage, status)) ctx.waitUntil(env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
       ctx.waitUntil(notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
     },
     snapshotChanged: machineIds => { ctx.waitUntil(notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId)); },

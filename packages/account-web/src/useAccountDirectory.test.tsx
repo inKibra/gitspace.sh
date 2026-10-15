@@ -15,6 +15,7 @@ import { ACCOUNT_DIRECTORY_CHANGED, type ProductRoute } from './routes.js';
 import { useWorkspaceProjection, type Directory, type DirectoryClient, type WorkspaceProjection } from './useAccountDirectory.js';
 import { SynchronizationContext, useAccountMachines, useAccountProjects } from './SynchronizationProvider.js';
 import { SynchronizationOwner, type SynchronizationSource } from './synchronization.js';
+import { WorkspaceStatuses } from './workspace-statuses.js';
 
 type DirectoryProject = Pick<ProjectLifecycleView, 'id' | 'name' | 'lifecycle'>;
 type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
@@ -124,11 +125,12 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
+let statuses = new WorkspaceStatuses();
 function Probe(props: { scene: Fixture; selected?: { projectId: string; workspaceId: string | null } | null; view?: ProductRoute; projects?: Fixture['projects'] }) {
   return <SynchronizationContext.Provider value={synchronization}><DirectoryProbe {...props} /></SynchronizationContext.Provider>;
 }
 function DirectoryProbe({ scene, selected = null, view = 'settings', projects = scene.projects }: { scene: Fixture; selected?: { projectId: string; workspaceId: string | null } | null; view?: ProductRoute; projects?: Fixture['projects'] }) {
-  ({ directory, acceptRuntime } = useWorkspaceProjection(projects, scene.client, scene.source));
+  ({ directory, acceptRuntime } = useWorkspaceProjection(projects, scene.client, scene.source, statuses));
   return <SidebarProvider persist={false}><AppSidebar view={view} onView={() => undefined} selected={selected} projects={projects.map((project) => ({ ...project, ...(directory[project.id] ?? { workspaces: [] }) }))} machines={[]} onSelectWorkspace={() => undefined} /></SidebarProvider>;
 }
 
@@ -166,47 +168,33 @@ it('populates every project and holder independently of the selected pane', asyn
   expect(directory.b?.workspaces[0]?.summary?.status).toBeUndefined();
 });
 
-it('shows a cloud workspace by its listed status, without its stale legacy placement or any machine', async () => {
+it('shows a cloud workspace by its status row, without its stale legacy placement or any machine', async () => {
+  statuses = new WorkspaceStatuses();
   const scene = fixture();
   scene.cloud.add('a-work');
-  scene.runtime.workspaces[0]!.status = waiting;
+  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a-work', status: waiting }] });
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh', refreshing: false, detail: null });
+  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh', refreshing: false });
   expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
   expect(directory.a?.baseSummary?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Desk machine' });
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Waiting');
   expect(container.textContent).not.toContain('Desk machine');
 });
 
-it('keeps every unopened cloud row on its own listed status, read once per project change', async () => {
+it('updates one unopened cloud row from its status message, with no read', async () => {
+  statuses = new WorkspaceStatuses();
   const scene = fixture();
   scene.projects[0]!.lifecycle = 'cloud-only';
   scene.machines.length = 0;
-  scene.runtime.workspaces[0]!.status = waiting;
-  const worktree = scene.saved.a[1]!;
-  scene.saved.a = [scene.saved.a[0]!];
+  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a', status: working }, { projectId: 'a', workspaceId: 'a-work', status: working }] });
   await act(async () => { root.render(<Probe scene={scene} view="projects" />); });
-  expect(directory.a).toEqual({
-    baseSummary: { closedAt: null, holder: { kind: 'cloud' }, status: working, freshness: 'fresh', refreshing: false, detail: null },
-    workspaces: [], error: null,
-  });
-  expect(scene.spaceView).toHaveBeenCalledTimes(1);
-
-  scene.saved.a.push(worktree);
-  await act(async () => { scene.publish(); });
-  expect(directory.a?.workspaces[0]).toMatchObject({
-    id: 'a-work', branch: 'feature', definition: { phase: 'code' },
-    summary: { holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh', refreshing: false },
-  });
+  expect(directory.a?.workspaces[0]?.summary).toMatchObject({ holder: { kind: 'cloud' }, status: working, freshness: 'fresh' });
+  const reads = scene.spaceView.mock.calls.length;
+  await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting }); });
+  expect(directory.a?.workspaces[0]?.summary).toMatchObject({ holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh' });
   expect(directory.a?.baseSummary?.status).toEqual(working);
-  expect(directory.a?.error).toBeNull();
-  expect(scene.spaceView).toHaveBeenCalledTimes(2);
-
-  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: null }} view="agent" />); });
-  expect(directory.a?.baseSummary?.holder).toEqual({ kind: 'cloud' });
-  expect(directory.a?.workspaces.map((space) => space.id)).toEqual(['a-work']);
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Waiting');
-  expect(scene.spaceView).toHaveBeenCalledTimes(2);
+  expect(scene.spaceView).toHaveBeenCalledTimes(reads);
 });
 
 it('retains accepted activity across navigation and older reads, then converges on a newer read', async () => {

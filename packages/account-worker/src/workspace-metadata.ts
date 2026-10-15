@@ -82,11 +82,12 @@ export function authorizeWorkspaceRuntime(metadata: WorkspaceMetadata, identity:
 }
 
 /** Stores the status summary the runtime published; an unchanged summary writes nothing. */
-export function storeWorkspaceStatus(storage: DurableObjectStorage, summary: WorkspaceStatusSummary): void {
+/** Returns whether the stored summary changed. */
+export function storeWorkspaceStatus(storage: DurableObjectStorage, summary: WorkspaceStatusSummary): boolean {
   const encoded = JSON.stringify(summary);
-  if (storage.sql.exec<{ summary: string }>('SELECT summary FROM workspace_status WHERE id=1').toArray()[0]?.summary !== encoded) {
-    storage.sql.exec('INSERT INTO workspace_status(id,summary) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary', encoded);
-  }
+  if (storage.sql.exec<{ summary: string }>('SELECT summary FROM workspace_status WHERE id=1').toArray()[0]?.summary === encoded) return false;
+  storage.sql.exec('INSERT INTO workspace_status(id,summary) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary', encoded);
+  return true;
 }
 
 /** A summary stored by a release that derived it from conversation flags reads as unreported until the runtime publishes again. */

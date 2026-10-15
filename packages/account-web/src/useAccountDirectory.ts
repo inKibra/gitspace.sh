@@ -11,6 +11,7 @@ import { ACCOUNT_DIRECTORY_CHANGED } from './routes.js';
 import { useSynchronizationOwner } from './SynchronizationProvider.js';
 import { accountDirectorySource } from './account-directory-transport.js';
 import type { SynchronizationSource } from './synchronization.js';
+import { workspaceStatuses, type WorkspaceStatuses } from './workspace-statuses.js';
 
 export type Directory = Record<string, Pick<SidebarProject, 'workspaces' | 'baseSummary' | 'error'>>;
 export interface WorkspaceProjection {
@@ -40,8 +41,9 @@ async function readResult<T>(request: Promise<{ status: 'ok'; value: T } | { sta
   }
 }
 
-/** One account projection owns cloud lifecycle; cloud spaces take their status from one project listing read per change, native reads only enrich current holders. */
-export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleView, 'id' | 'lifecycle'>[], client: DirectoryClient = directoryClient, source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource): WorkspaceProjection {
+/** One account projection owns cloud lifecycle; cloud spaces take their status from the status rows the directory socket
+ * delivers (all on open, then one per change), native reads only enrich current holders. */
+export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleView, 'id' | 'lifecycle'>[], client: DirectoryClient = directoryClient, source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource, statuses: WorkspaceStatuses = workspaceStatuses): WorkspaceProjection {
   const owner = useSynchronizationOwner();
   const accepted = useRef<Directory>({});
   const [directory, setDirectory] = useState<Directory>(accepted.current);
@@ -151,10 +153,9 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         const errors = directoryError ? [`Directory unavailable: ${directoryError}`] : [];
         const summarize = (id: string, closedAt: Date | null, previous: SidebarSpaceSummary | undefined): SidebarSpaceSummary => {
           // Cloud-only projects have canonical workspaces before their first runtime opens; neither needs a machine.
-          // Their status comes from the project listing read below; until it answers, the last listed status stays.
           if (project.lifecycle === 'cloud-only' || (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud')) {
-            const listed = !closedAt && previous?.holder.kind === 'cloud' && !previous.closedAt ? previous : undefined;
-            return { closedAt, holder: { kind: 'cloud' }, status: listed?.status, freshness: listed?.freshness ?? 'unknown', refreshing: false, detail: listed?.detail };
+            const status = closedAt ? undefined : statuses.get(id);
+            return { closedAt, holder: { kind: 'cloud' }, status, freshness: status ? 'fresh' : 'unknown', refreshing: false };
           }
           const placement = placements.get(id);
           if (closedAt) return { closedAt, holder: { kind: 'released' }, generation: placement?.generation, freshness: 'fresh' };
@@ -202,21 +203,6 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
           const runtime = previous?.runtime;
           if (runtime && !space.closedAt && !runtime.closedAt && runtime.projectId === project.id && summary.holder.kind === 'held' && runtime.possessedBy === summary.holder.machineId && runtime.generation === summary.generation && placements.get(space.id)?.state === 'open') runtimes.set(space.id, runtime);
         }
-        // One project listing read covers every cloud space of the project; machines are never consulted.
-        const cloudSpaces = [...summaries].filter(([, summary]) => summary.holder.kind === 'cloud' && !summary.closedAt).map(([id]) => id);
-        const readListing = async () => {
-          if (!cloudSpaces.length) return;
-          const listing = await readResult(client.spaceView({ projectId: project.id, workspaceId: null }, { signal: controller.signal }));
-          if (!current()) return;
-          for (const id of cloudSpaces) {
-            const summary = summaries.get(id)!;
-            const space = id === project.id ? listing.value?.baseSpace : listing.value?.workspaces.find((item) => item.id === id);
-            summaries.set(id, space
-              ? { ...summary, status: space.status, freshness: 'fresh', refreshing: false, detail: null }
-              : { ...summary, freshness: summary.status ? 'stale' : 'unknown', refreshing: false, detail: `Status unavailable: ${listing.error ?? 'not in the project listing'}` });
-          }
-          if (listing.error) errors.push(listing.error);
-        };
         const publish = (error: string | null) => {
           if (!current()) return;
           for (const [id, summary] of summaries) {
@@ -236,10 +222,9 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
           setDirectory(accepted.current);
         };
         // Cloud closes, deletes and generation changes take effect even while old native reads are pending.
-        publish(errors.length ? errors.join('; ') : holders.size || cloudSpaces.length ? prior?.error ?? null : null);
+        publish(errors.length ? errors.join('; ') : holders.size ? prior?.error ?? null : null);
         currentWork.pending = async () => {
           if (!current()) return;
-          const listed = readListing();
           await Promise.all([...holders].map(async ([holderId, placement]) => {
             const observedRevision = observationRevision.current;
             const runtime = await readResult(client.spaceView({ projectId: project.id, workspaceId: placement.spaceId === project.id ? null : placement.spaceId }, { signal: controller.signal }));
@@ -282,7 +267,6 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
             if (error) { errors.push(error); currentWork.holderErrors.set(holderId, error); }
             else currentWork.holderErrors.delete(holderId);
           }));
-          await listed;
           publish(errors.length ? errors.join('; ') : null);
         };
         if (!currentWork.reading) {
@@ -300,12 +284,28 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
       }
     };
     reconcileScope.current = reconcile;
+    // A status row changed: only the cloud spaces' status changes, with no read.
+    const stopStatuses = statuses.subscribe(() => {
+      let changed = false;
+      const apply = (id: string, summary: SidebarSpaceSummary | undefined): SidebarSpaceSummary | undefined => {
+        if (!summary || summary.holder.kind !== 'cloud' || summary.closedAt) return summary;
+        const status = statuses.get(id);
+        if (status === summary.status) return summary;
+        changed = true;
+        return { ...summary, status, freshness: status ? 'fresh' : 'unknown' };
+      };
+      const next = Object.fromEntries(Object.entries(accepted.current).map(([projectId, project]) => [projectId,
+        { ...project, baseSummary: apply(projectId, project.baseSummary), workspaces: project.workspaces.map(space => ({ ...space, summary: apply(space.id, space.summary) })) }]));
+      if (!changed) return;
+      accepted.current = next;
+      setDirectory(next);
+    });
     const stop = channel.subscribe(reconcile);
     reconcile();
     const changed = () => { force = true; void channel.refresh(); };
     window.addEventListener(ACCOUNT_DIRECTORY_CHANGED, changed);
-    return () => { controller.abort(); stop(); reconcileScope.current = () => {}; window.removeEventListener(ACCOUNT_DIRECTORY_CHANGED, changed); };
-  }, [client, owner, source]);
+    return () => { controller.abort(); stop(); stopStatuses(); reconcileScope.current = () => {}; window.removeEventListener(ACCOUNT_DIRECTORY_CHANGED, changed); };
+  }, [client, owner, source, statuses]);
   useEffect(() => { reconcileScope.current(); }, [projectKey]);
   return { directory, acceptRuntime };
 }

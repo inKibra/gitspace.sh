@@ -1,10 +1,11 @@
-import { accountDirectoryEventSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { accountDirectoryEventSchema, workspaceStatusMessageSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import { liveNoticeMessageSchema } from '@gitspace/protocol/live-notice';
 import { DEVICE_SOCKET_PROTOCOL } from '@gitspace/protocol/socket-auth';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { currentDevice, deviceRejected } from './device-session.js';
 import { createDeviceSignedFetch, DeviceRejectedError, signDeviceRequest, type BrowserDevice } from './device.js';
 import { liveNotices, type LiveNotices } from './live-notices.js';
+import { workspaceStatuses, type WorkspaceStatuses } from './workspace-statuses.js';
 import type { SynchronizationSource } from './synchronization.js';
 
 const MAX_FRAME_SIZE = 8 * 1024 * 1024;
@@ -26,8 +27,10 @@ export function createAccountDirectorySource(options: {
   origin: () => string;
   openSocket?: (url: string, protocols: string[]) => WebSocket;
   notices?: LiveNotices;
+  statuses?: WorkspaceStatuses;
 }): SynchronizationSource<AccountDirectorySnapshot> {
   const notices = options.notices ?? liveNotices;
+  const statuses = options.statuses ?? workspaceStatuses;
   const signedFetch = createDeviceSignedFetch(options.currentDevice, options.onRejected);
   return async function* (after, signal) {
     if (signal.aborted) return;
@@ -73,6 +76,11 @@ export function createAccountDirectorySource(options: {
           const notice = liveNoticeMessageSchema.safeParse(decoded);
           if (notice.success) {
             notices.receive(notice.data);
+            return;
+          }
+          const status = workspaceStatusMessageSchema.safeParse(decoded);
+          if (status.success) {
+            statuses.receive(status.data);
             return;
           }
           const value = accountDirectoryEventSchema.parse(decoded);

@@ -25,7 +25,7 @@ import { DurableChangeLog } from './durable-stream.js';
 import { liveClientMessageSchema, liveKeyId, liveNoticeSchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice, type LiveNoticeMessage } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { AccountDirectoryProjection, DirectoryOutbox, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
-import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { workspaceStatusRowSchema, type AccountDirectorySnapshot, type WorkspaceStatusRow } from '@gitspace/protocol/account-directory';
 import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
 import { activeAccount, accountAccessResponse, accountStatus } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
@@ -353,6 +353,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
         CREATE INDEX IF NOT EXISTS workspace_projects_project ON workspace_projects(project_id);
         CREATE TABLE IF NOT EXISTS deleted_projects(project_id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS environment_values(name TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS workspace_statuses(workspace_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,summary TEXT NOT NULL);
       `);
       for (const column of ['role TEXT', 'source_json TEXT']) {
         try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
@@ -365,6 +366,42 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   /** `project.directoryEvents`: the project list after `after`, bounded. */
   events(after: number | null): StreamEvent<CloudProjectSummary[]>[] {
     return this.changes.replay('projects', after, () => this.list(), false);
+  }
+
+  /** A workspace's status changed: keep its one row and send it to every open tab. */
+  setWorkspaceStatus(row: WorkspaceStatusRow): void {
+    const { projectId, workspaceId, status } = workspaceStatusRowSchema.parse(row);
+    const summary = JSON.stringify(status);
+    const stored = this.ctx.storage.sql.exec<{ summary: string }>('SELECT summary FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray()[0];
+    if (stored?.summary === summary) return;
+    this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary) VALUES(?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id,summary=excluded.summary', workspaceId, projectId, summary);
+    const message = JSON.stringify({ type: 'status', projectId, workspaceId, status });
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      try { socket.send(message); } catch { /* A reconnecting tab reads every row again. */ }
+    }
+  }
+
+  private statusSeed: Promise<void> | null = null;
+  /** One-time: rows for workspaces whose status was stored before the socket object kept them. */
+  private async seedWorkspaceStatuses(): Promise<void> {
+    if (this.ctx.storage.sql.exec("SELECT value FROM directory_metadata WHERE name='statuses'").toArray().length) return;
+    this.statusSeed ??= (async () => {
+      const workspaces = this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string }>('SELECT workspace_id,project_id FROM workspace_projects').toArray();
+      await Promise.all(workspaces.map(async ({ workspace_id: workspaceId, project_id: projectId }) => {
+        const { status } = await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).listingState();
+        if (status && !this.ctx.storage.sql.exec('SELECT 1 FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray().length) {
+          this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary) VALUES(?,?,?)', workspaceId, projectId, JSON.stringify(status));
+        }
+      }));
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO directory_metadata(name,value) VALUES('statuses',1)");
+    })().finally(() => { this.statusSeed = null; });
+    await this.statusSeed;
+  }
+
+  private workspaceStatuses(): WorkspaceStatusRow[] {
+    return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string; summary: string }>('SELECT workspace_id,project_id,summary FROM workspace_statuses').toArray()
+      .map(row => workspaceStatusRowSchema.parse({ projectId: row.project_id, workspaceId: row.workspace_id, status: JSON.parse(row.summary) }));
   }
 
   /** The live object: forwards each notice to the tabs watching its key (sockets admitted as user-scoped devices with
@@ -493,6 +530,9 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const { device } = authorized.value;
     server.serializeAttachment({ version: 2, userId: this.env.ACCOUNT_ID, deviceId: device.deviceId, generation: device.generation, cursor: after === null ? null : Number(after), initial: true, live: [] } satisfies DirectorySocketAttachment);
     await this.deliverDirectory(server);
+    await this.seedWorkspaceStatuses();
+    // Every status row once per socket; later changes arrive one row at a time.
+    server.send(JSON.stringify({ type: 'statuses', rows: this.workspaceStatuses() }));
     return new Response(null, { status: 101, webSocket: client, headers: { 'sec-websocket-protocol': offered.protocol } });
   }
 
@@ -659,6 +699,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     if (project?.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be removed. Release its machine caches instead.');
     this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleted_projects(project_id) VALUES(?)', projectId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_projects WHERE project_id=?', projectId);
+    this.ctx.storage.sql.exec('DELETE FROM workspace_statuses WHERE project_id=?', projectId);
     return this.ctx.storage.sql.exec(
       'DELETE FROM user_projects WHERE project_id=? RETURNING project_id',
       projectId,
@@ -679,6 +720,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   }
 
   removeWorkspaceLocation(workspaceId: string): boolean {
+    this.ctx.storage.sql.exec('DELETE FROM workspace_statuses WHERE workspace_id=?', workspaceId);
     return this.ctx.storage.sql.exec(
       'DELETE FROM workspace_projects WHERE workspace_id=? RETURNING workspace_id',
       workspaceId,
