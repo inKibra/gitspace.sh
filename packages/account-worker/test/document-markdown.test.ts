@@ -25,11 +25,16 @@ describe('document Markdown', () => {
     });
   });
 
-  it('pages a long document and names where the rest starts', () => {
+  it('pages a long document within the tool output limit and names where the rest starts', () => {
     const text = Array.from({ length: 2_500 }, (_, index) => `line ${index + 1}`).join('\n');
     const first = documentPage(text);
     expect(first.split('\n')[1_999]).toBe('line 2000');
     expect(first).toContain('[500 more lines; read again with offset 2001]');
     expect(documentPage(text, 2_001)).toBe(Array.from({ length: 500 }, (_, index) => `line ${index + 2_001}`).join('\n'));
+    const wide = Array.from({ length: 2_000 }, (_, index) => `${'x'.repeat(99)}${index + 1}`).join('\n');
+    const page = documentPage(wide);
+    expect(page.length).toBeLessThan(41_000);
+    expect(page).toMatch(/\[\d+ more lines; read again with offset \d+\]$/u);
+    expect(documentPage(wide, 1, 2_000).split('\n')).toHaveLength(2_000);
   });
 });

@@ -29,14 +29,22 @@ function assertValidMutations(mutations: z.infer<typeof PendingSchema>['mutation
 }
 
 const checkpointIdentity = (checkpoint: Checkpoint) => canonicalJson({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(({ oid, size }) => ({ oid, size })) } } : {}) });
-/** Lines one document read returns when it names no range. */
+/** A document page without a range: at most this many lines and characters, under the tool output limit. */
 const DOCUMENT_PAGE_LINES = 2_000;
-/** The lines a document read asked for; with no range, the first page and a note naming the rest. Converted documents
- * are long, so a whole one never fills a context. */
+const DOCUMENT_PAGE_CHARACTERS = 40_000;
+/** The lines a document read asked for; with no limit, one page and a note naming where the rest starts. Converted
+ * documents are long, so a whole one never fills a context. */
 export function documentPage(text: string, offset?: number, limit?: number): string {
   const lines = text.split('\n');
   const start = (offset ?? 1) - 1;
-  const end = start + (limit ?? DOCUMENT_PAGE_LINES);
+  let end = start + (limit ?? DOCUMENT_PAGE_LINES);
+  if (limit === undefined) {
+    let characters = 0;
+    for (let index = start; index < Math.min(end, lines.length); index++) {
+      characters += lines[index]!.length + 1;
+      if (characters > DOCUMENT_PAGE_CHARACTERS) { end = Math.max(index, start + 1); break; }
+    }
+  }
   const page = lines.slice(start, end).join('\n');
   return lines.length > end ? `${page}\n\n[${lines.length - end} more lines; read again with offset ${end + 1}]` : page;
 }
