@@ -52,7 +52,6 @@ type MachineAttachOutcome =
   | { state: 'awaiting-approval'; machineId: string; label: string; questionId: string };
 const object = z.record(z.string(), RuntimeJsonSchema);
 const methodSchema = z.object({ method: z.string().min(1) });
-const idSchema = z.string().min(1);
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const completed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
 const interrupted = (input: Pick<Invocation, 'requestId' | 'attemptId'>, text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text }] });
@@ -674,12 +673,6 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   async function execute(input: Operation): Promise<RuntimeToolResult> {
     try {
-      if (input.kind === 'CronSchedule') {
-        const args = z.object({ cronId: idSchema }).parse(input.args);
-        const crons = env.PROJECT_CRONS.getByName(JSON.stringify([env.ACCOUNT_ID, identity.projectId]));
-        const receipt = await crons.runNow({ projectId: identity.projectId, cronId: args.cronId, requestId: input.attemptId });
-        return completed(input, receipt);
-      }
       const tool = { Checkpoint: 'checkpoint_code', LifecycleRun: 'lifecycle', Job: 'bash', Service: 'service', Merge: 'merge' }[input.kind];
       if (input.kind === 'LifecycleRun') RuntimeAgentLifecycleRunArgumentsSchema.parse(input.args);
       const result = await executeMachine({ ...input, tool }, input.deadlineAt);

@@ -1,7 +1,7 @@
 import { defineTask } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
-export type OperationalKind = 'Checkpoint' | 'LifecycleRun' | 'Job' | 'Service' | 'Merge' | 'CronSchedule';
+export type OperationalKind = 'Checkpoint' | 'LifecycleRun' | 'Job' | 'Service' | 'Merge';
 export type OperationalInput = { args: JsonValue; deadlineAt: string; replay: 'safe' | 'unsafe'; scheduledAt?: number };
 export type OperationalExecution = { kind: OperationalKind; args: JsonValue; attemptId: string; requestId: string; conversationId: string; taskId: string; deadlineAt: string; replay: 'safe' | 'unsafe' };
 export type OperationalServices = {
@@ -17,7 +17,7 @@ export type OperationalServices = {
 };
 type State = { phase: 'prepare' } | { phase: 'execute'; attemptId: string; poll?: number };
 export function createOperationalTasks(services: OperationalServices) {
-  return (['Checkpoint', 'LifecycleRun', 'Service', 'Merge', 'CronSchedule'] as const).map(kind => defineTask<OperationalInput, State, RuntimeToolResult>({
+  return (['Checkpoint', 'LifecycleRun', 'Service', 'Merge'] as const).map(kind => defineTask<OperationalInput, State, RuntimeToolResult>({
     name: `gitspace.${kind}`, version: 1, initial: () => ({ phase: 'prepare' }),
     phases: {
       async prepare(task, runtime, context) {
