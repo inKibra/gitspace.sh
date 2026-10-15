@@ -63,7 +63,7 @@ export class CloudFileStore {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_commits(commit_id TEXT PRIMARY KEY, predecessor TEXT, checkpoint TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lfs_retention_outbox(commit_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL, previous TEXT)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_publications(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, checkpoint TEXT)');
-    if (!storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_machine_publications)').toArray().some(column => column.name === 'abandoned')) storage.sql.exec('ALTER TABLE runtime_machine_publications ADD COLUMN abandoned TEXT');
+    if (storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_machine_publications)').toArray().some(column => column.name === 'abandoned')) storage.sql.exec('ALTER TABLE runtime_machine_publications DROP COLUMN abandoned');
     storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_machine_publications_pending ON runtime_machine_publications(id) WHERE pending IS NOT NULL');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_paths(commit_id TEXT PRIMARY KEY, paths TEXT NOT NULL)');
   }
@@ -142,9 +142,8 @@ export class CloudFileStore {
     return publication;
   }
   private async publishMachine(id: string, identity: string, checkpoint: Checkpoint, previous: string | null, machineId: string, authorize?: () => void): Promise<Checkpoint> {
-    const saved = this.storage.sql.exec<{ input: string; pending: string | null; checkpoint: string | null; abandoned: string | null }>('SELECT input,pending,checkpoint,abandoned FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
+    const saved = this.storage.sql.exec<{ input: string; pending: string | null; checkpoint: string | null }>('SELECT input,pending,checkpoint FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
     if (saved && saved.input !== identity) throw new Error('Machine snapshot publication identity changed');
-    if (saved?.abandoned) throw new Error(`Machine snapshot publication was abandoned when its attachment was lost: ${saved.abandoned}`);
     if (saved?.checkpoint) { await this.flushRetention(); return RuntimeGitCheckpointSchema.parse(JSON.parse(saved.checkpoint)); }
     let pending: z.infer<typeof MachinePendingSchema>;
     if (saved?.pending) pending = MachinePendingSchema.parse(JSON.parse(saved.pending));
@@ -167,8 +166,7 @@ export class CloudFileStore {
   }
 
   /** Before a machine's attachment is released, settle every publication it admitted: one in flight finishes, one left
-   * durably pending resumes, and one the provider proved unpublished is abandoned, so no late finish can advance the
-   * canonical snapshot after the release.
+   * durably pending resumes, and one the provider proved unpublished is forgotten and reported.
    * Returns why a publication did not settle, for the released attachment's record. */
   async settleMachine(machineId: string): Promise<string | null> {
     await Promise.allSettled([...this.machineRunning].filter(([id]) => id.startsWith(`${machineId}:refs/`)).map(([, publication]) => publication));
@@ -182,8 +180,8 @@ export class CloudFileStore {
           failure = `Snapshot publication ${row.id} remains pending recovery: ${error instanceof Error ? error.message : String(error)}`;
           continue;
         }
-        failure = `Snapshot publication ${row.id} was abandoned: ${error.message}`;
-        this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,abandoned=? WHERE id=? AND pending IS NOT NULL', error.message, row.id);
+        failure = `Snapshot publication ${row.id} was not published: ${error.message}`;
+        this.storage.sql.exec('DELETE FROM runtime_machine_publications WHERE id=? AND pending IS NOT NULL', row.id);
         await this.storage.sync();
       }
     }
