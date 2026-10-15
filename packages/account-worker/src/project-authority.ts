@@ -912,6 +912,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN workspaces_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS deleted_workspaces(workspace_id TEXT PRIMARY KEY)');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_relations(workspace_id TEXT PRIMARY KEY,relations_json TEXT NOT NULL)');
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS stack_comparisons(workspace_id TEXT PRIMARY KEY,source TEXT NOT NULL,result_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('DROP TABLE IF EXISTS lfs_origin_confirmations');
       if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length && await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
     });
@@ -1175,6 +1176,15 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }
 
   /** The canonical relation graph of this project's workspaces, keyed by workspace id. */
+  /** A stacked workspace's last history comparison, as JSON, while the commits it compared (`source`) are unchanged. */
+  stackComparison(workspaceId: string, source: string): string | null {
+    return this.ctx.storage.sql.exec<{ result_json: string }>('SELECT result_json FROM stack_comparisons WHERE workspace_id=? AND source=?', workspaceId, source).toArray()[0]?.result_json ?? null;
+  }
+
+  putStackComparison(workspaceId: string, source: string, resultJson: string): void {
+    this.ctx.storage.sql.exec('INSERT INTO stack_comparisons(workspace_id,source,result_json) VALUES(?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET source=excluded.source,result_json=excluded.result_json', workspaceId, source, resultJson);
+  }
+
   listWorkspaceRelations(): Record<string, WorkspaceRelations> {
     return Object.fromEntries(this.ctx.storage.sql.exec<{ workspace_id: string; relations_json: string }>('SELECT workspace_id,relations_json FROM workspace_relations').toArray()
       .map(row => [row.workspace_id, WorkspaceRelationsSchema.parse(JSON.parse(row.relations_json))]));
@@ -1298,6 +1308,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec('DELETE FROM hosted_routes WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM workspaces WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_relations WHERE workspace_id=?', workspaceId);
+    this.ctx.storage.sql.exec('DELETE FROM stack_comparisons WHERE workspace_id=?', workspaceId);
     return true;
     });
   }
@@ -1733,10 +1744,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).one().offset;
     return Response.json(this.readEventRecords(offset - 1, 1)[0]!);
     });
-  }
-
-  latestEventOffset(): number {
-    return this.ctx.storage.sql.exec<{ offset: number }>('SELECT COALESCE(MAX(offset), 0) AS offset FROM project_events').one().offset;
   }
 
   /** One page after `afterOffset`; callers continue from the last returned offset. */

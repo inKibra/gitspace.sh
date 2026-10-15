@@ -1,5 +1,6 @@
 import type { StackStatus } from '@gitspace/protocol';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { z } from 'zod';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 
 /** Commits examined per comparison; beyond it the cloud fails rather than report a wrong position. */
@@ -103,6 +104,8 @@ export async function compareCloudHistory(code: HistoryReader, left: Tip, right:
  * report on a machine. The base tip is the base workspace's checkpoint, or the project's imported base branch
  * before that workspace has one. Returns null when the workspace is not in the project.
  */
+const StackComparisonSchema = z.object({ mergeBase: z.string().nullable(), parentAhead: z.number(), parentMerged: z.enum(['merged', 'not-merged', 'unknown']) });
+
 export async function readCloudStackStatus(env: Env, userId: string, projectId: string, workspaceId: string): Promise<StackStatus | null> {
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
   const [project, workspaces, relations] = await Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations()]);
@@ -123,21 +126,32 @@ export async function readCloudStackStatus(env: Env, userId: string, projectId: 
   };
   const [child, parentCheckpoint, base] = await Promise.all([checkpoint(workspaceId), checkpoint(parent.id), baseTip()]);
   const parentTip = parentCheckpoint.headCommit === null ? null : { head: parentCheckpoint.headCommit, repositories: [artifactsWorkspaceRepository(parent.id)] };
-  const stack = parentTip && child.headCommit !== null ? await compareCloudHistory(code, parentTip, { head: child.headCommit, repositories: [artifactsWorkspaceRepository(workspaceId)] }) : null;
-  if (stack && !stack.complete) throw new Error('Stack comparison is unavailable because cloud history is shallow or incomplete');
-  const parentAhead = stack?.leftAhead ?? 0;
-  // A parent working on the base branch itself trivially reaches it; that is not a merge.
-  let parentMerged: StackStatus['parentMerged'] = 'not-merged';
-  if (parent.branch !== baseBranch) {
-    if (!parentTip || !base) parentMerged = 'unknown';
-    else {
-      const comparison = await compareCloudHistory(code, parentTip, base);
-      if (comparison.bases.includes(parentTip.head)) parentMerged = 'merged';
-      else if (!comparison.complete) parentMerged = 'unknown';
+  // The comparison depends only on these commits and branches, so it is computed once per change of any of them.
+  const source = JSON.stringify([child.headCommit, parentTip?.head ?? null, base?.head ?? null, parent.branch, baseBranch]);
+  const compare = async (): Promise<z.infer<typeof StackComparisonSchema>> => {
+    const stack = parentTip && child.headCommit !== null ? await compareCloudHistory(code, parentTip, { head: child.headCommit, repositories: [artifactsWorkspaceRepository(workspaceId)] }) : null;
+    if (stack && !stack.complete) throw new Error('Stack comparison is unavailable because cloud history is shallow or incomplete');
+    // A parent working on the base branch itself trivially reaches it; that is not a merge.
+    let merged: StackStatus['parentMerged'] = 'not-merged';
+    if (parent.branch !== baseBranch) {
+      if (!parentTip || !base) merged = 'unknown';
+      else {
+        const comparison = await compareCloudHistory(code, parentTip, base);
+        if (comparison.bases.includes(parentTip.head)) merged = 'merged';
+        else if (!comparison.complete) merged = 'unknown';
+      }
     }
+    return { mergeBase: stack?.bases[0] ?? null, parentAhead: stack?.leftAhead ?? 0, parentMerged: merged };
+  };
+  const saved = await authority.stackComparison(workspaceId, source);
+  let comparison = saved === null ? null : StackComparisonSchema.parse(JSON.parse(saved));
+  if (!comparison) {
+    comparison = await compare();
+    await authority.putStackComparison(workspaceId, source, JSON.stringify(comparison));
   }
+  const { mergeBase, parentAhead, parentMerged } = comparison;
   const instruction = parentMerged === 'merged'
     ? `The parent merged into ${baseBranch}. Rebase only your own commits: \`git rebase --onto ${baseBranch} ${parent.branch}\`, then this workspace is no longer stacked.`
     : parentAhead > 0 ? `Rebase onto the parent: \`git rebase ${parent.branch}\`` : null;
-  return { parentId: parent.id, parentBranch: parent.branch, baseBranch, mergeBase: stack?.bases[0] ?? null, parentAhead, parentMerged, instruction };
+  return { parentId: parent.id, parentBranch: parent.branch, baseBranch, mergeBase, parentAhead, parentMerged, instruction };
 }

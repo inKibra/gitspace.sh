@@ -221,6 +221,13 @@ type MachinePairingValue =
   | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; apiUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant; artifactKey: string };
 const PAIRING_CAPABILITIES: DeviceCapability[] = ['devices.manage', 'fleet.control', 'rpc.write', 'session.prompt', 'deployment.control'];
 
+const SignedInAccountSchema = z.object({ type: z.enum(['api_key', 'oauth']), identity: z.string().nullable(), email: z.string().nullable() });
+function credentialAccount(credential: StoredVaultCredential): z.infer<typeof SignedInAccountSchema> {
+  return credential.type === 'api_key'
+    ? { type: 'api_key', identity: null, email: null }
+    : { type: 'oauth', identity: credentialIdentity(credential), email: credential.email ?? null };
+}
+
 function credentialIdentity(credential: StoredVaultCredential): string | null {
   if (credential.type === 'api_key') return null;
   const account = credential.accountId?.trim();
@@ -484,6 +491,11 @@ export class CredentialVaultDO extends DurableObject<Env> {
       if (!columns.some((column) => column.name === 'grant_json')) this.ctx.storage.sql.exec('ALTER TABLE credential_devices ADD COLUMN grant_json TEXT');
       const legacyColumns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(oauth_credentials)').toArray();
       if (!legacyColumns.some(column => column.name === 'profile_id')) this.ctx.storage.sql.exec("ALTER TABLE oauth_credentials ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default'");
+      // The non-secret account a credential signs in as, so listing providers decrypts nothing; filled on write, or once on first list.
+      for (const table of ['oauth_credentials', 'inference_credentials']) {
+        const tableColumns = this.ctx.storage.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray();
+        if (tableColumns.length && !tableColumns.some(column => column.name === 'account_json')) this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN account_json TEXT`);
+      }
       if (this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inference_credentials'").toArray().length) {
         this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'active' WHERE state = 'refresh-uncertain'");
       }
@@ -1250,13 +1262,13 @@ export class CredentialVaultDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       if (scoped !== this.inferenceCutover()) throw new Error('Credential scope migrated; retry through profile management');
       this.ctx.storage.sql.exec(`
-        INSERT INTO ${table}(rowid, id, provider, sealed_json, revision, expires_at, state, updated_at, profile_id)
-        VALUES ((SELECT MAX(row_id) + 1 FROM (SELECT MAX(rowid) AS row_id FROM ${table} UNION ALL SELECT row_id FROM retired_credential_rowid)), ?, ?, ?, ?, ?, 'active', ?, ?)
+        INSERT INTO ${table}(rowid, id, provider, sealed_json, revision, expires_at, state, updated_at, profile_id, account_json)
+        VALUES ((SELECT MAX(row_id) + 1 FROM (SELECT MAX(rowid) AS row_id FROM ${table} UNION ALL SELECT row_id FROM retired_credential_rowid)), ?, ?, ?, ?, ?, 'active', ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           provider = excluded.provider, sealed_json = excluded.sealed_json, revision = excluded.revision,
-          expires_at = excluded.expires_at, state = 'active', updated_at = excluded.updated_at
+          expires_at = excluded.expires_at, state = 'active', updated_at = excluded.updated_at, account_json = excluded.account_json
           WHERE ${table}.profile_id = excluded.profile_id
-      `, id, credential.provider, sealed, revision, credential.type === 'api_key' ? 0 : credential.expires, new Date().toISOString(), profileId);
+      `, id, credential.provider, sealed, revision, credential.type === 'api_key' ? 0 : credential.expires, new Date().toISOString(), profileId, JSON.stringify(credentialAccount(credential)));
       this.credentialsChanged(profileId);
     });
     return revision;
@@ -1356,11 +1368,15 @@ export class CredentialVaultDO extends DurableObject<Env> {
     this.assertProfileAccess(profileId);
     const config = this.config();
     if (!config) throw new Error('Vault is not configured');
-    const rows = this.ctx.storage.sql.exec<ProfileCredentialRow>('SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? ORDER BY rowid', profileId).toArray();
+    const rows = this.ctx.storage.sql.exec<ProfileCredentialRow & { account_json: string | null }>('SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at, account_json FROM inference_credentials WHERE profile_id = ? ORDER BY rowid', profileId).toArray();
     const accounts = await Promise.all(rows.map(async row => {
-      const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
-      const type = credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const;
-      return { id: String(row.row_id), provider: row.provider, type, identity: credentialIdentity(credential), email: credential.type === 'api_key' ? null : credential.email ?? null, disabled: row.state !== 'active' };
+      let account = row.account_json === null ? null : SignedInAccountSchema.parse(JSON.parse(row.account_json));
+      if (!account) {
+        // A credential stored before accounts were recorded is opened once to record its account.
+        account = credentialAccount(await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key)));
+        this.ctx.storage.sql.exec('UPDATE inference_credentials SET account_json = ? WHERE rowid = ? AND revision = ?', JSON.stringify(account), row.row_id, row.revision);
+      }
+      return { id: String(row.row_id), provider: row.provider, ...account, disabled: row.state !== 'active' };
     }));
     this.assertProfileAccess(profileId);
     const descriptors = describeCloudProviders(this.requireInferenceProfile(profileId).settings);
@@ -1799,8 +1815,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
       const revision = row.revision + 1;
       const sealed = await sealVaultCredential(refreshed, vaultKey, row.id, revision);
       const changed = this.ctx.storage.sql.exec(
-        "UPDATE inference_credentials SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ? WHERE profile_id = ? AND rowid = ? AND revision = ? AND state = 'active'",
-        sealed, revision, refreshed.expires, new Date().toISOString(), profileId, rowId, row.revision,
+        "UPDATE inference_credentials SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ?, account_json = ? WHERE profile_id = ? AND rowid = ? AND revision = ? AND state = 'active'",
+        sealed, revision, refreshed.expires, new Date().toISOString(), JSON.stringify(credentialAccount(refreshed)), profileId, rowId, row.revision,
       ).rowsWritten;
       if (changed !== 1) throw new Error('Credential changed during refresh');
       this.credentialsChanged(profileId);
@@ -1847,8 +1863,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
           const sealed = await sealVaultCredential(next, vaultKey, refreshRow.id, nextRevision);
           const table = this.inferenceCutover() ? 'inference_credentials' : 'oauth_credentials';
           const changed = this.ctx.storage.sql.exec(
-            `UPDATE ${table} SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ? WHERE profile_id = 'default' AND id = ? AND revision = ? AND state = 'active'`,
-            sealed, nextRevision, next.expires, new Date().toISOString(), refreshRow.id, refreshRow.revision,
+            `UPDATE ${table} SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ?, account_json = ? WHERE profile_id = 'default' AND id = ? AND revision = ? AND state = 'active'`,
+            sealed, nextRevision, next.expires, new Date().toISOString(), JSON.stringify(credentialAccount(next)), refreshRow.id, refreshRow.revision,
           ).rowsWritten;
           if (changed !== 1) throw new Error('Credential changed during refresh');
           this.credentialsChanged();

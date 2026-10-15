@@ -91,8 +91,6 @@ export async function createCloudProject(env: Env, userId: string, input: { name
 /** The project's workspaces, relations, and stack read from cloud state; no machine is consulted. */
 export async function readCloudSpaceView(env: Env, userId: string, projectId: string): Promise<SpaceView> {
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
-  // Captured before the reads, so a client resuming from it replays any change made while they ran.
-  const eventOffset = await authority.latestEventOffset();
   const [project, definitions, relations] = await Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations()]);
   if (!project || project.lifecycle === 'deleting') throw new Error(`Project ${projectId} is unavailable`);
   const live = definitions.filter(definition => definition.lifecycle !== 'deleting');
@@ -126,6 +124,5 @@ export async function readCloudSpaceView(env: Env, userId: string, projectId: st
     project: { id: project.id, name: project.name, baseBranch: project.baseBranch, connected: true },
     workspaces,
     baseSpace: { ...baseSpace, id: base.id, projectId, kind: 'base', name: base.name, branch: base.branch },
-    mainAgent: null, artifacts: [], eventOffset, checkpoint: null,
   };
 }

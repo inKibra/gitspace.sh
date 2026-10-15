@@ -773,7 +773,7 @@ describe('cloud projects and workspace relations with no machines', () => {
     expect(await client.space.view({ projectId, workspaceId: null })).toMatchObject({ status: 'ok', value: {
       project: { id: projectId, baseBranch: 'main', connected: true },
       baseSpace: { id: projectId, kind: 'base', branch: 'main', possessedBy: null, closedAt: null, status: { primaryColor: 'dim' } },
-      workspaces: [], mainAgent: null,
+      workspaces: [],
     } });
   });
 

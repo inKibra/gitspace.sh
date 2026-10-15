@@ -502,23 +502,10 @@ export const WorkspaceTerminalOutputCodec = wire.object({
 });
 
 /** Read-only source of a closed space's transcript: the cloud checkpoint, served without opening the space. */
-export const SpaceCheckpointViewCodec = wire.object({
-  sessionId: wire.string,
-  /** Cloud placement generation the checkpoint belongs to; restore/claim must present it. */
-  generation: wire.number,
-  /** Machine that published the canonical session last, i.e. where the space was released from. */
-  lastMachineId: wire.nullable(wire.string),
-});
-export type SpaceCheckpointView = InputOf<typeof SpaceCheckpointViewCodec>;
 export const SpaceViewCodec = wire.object({
   project: ProjectViewCodec,
   workspaces: wire.array(WorkspaceViewCodec),
   baseSpace: BaseSpaceViewCodec,
-  mainAgent: wire.nullable(SessionViewCodec),
-  artifacts: wire.array(ArtifactViewCodec),
-  eventOffset: wire.number,
-  /** Set when history is read from the checkpoint of a closed space (`mainAgent` is null then). */
-  checkpoint: wire.nullable(SpaceCheckpointViewCodec),
 });
 export type SpaceView = InputOf<typeof SpaceViewCodec>;
 
