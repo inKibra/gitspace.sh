@@ -143,12 +143,13 @@ Every item is verified the way the user works, in the browser, before it is repo
 4. Base-branch change becomes a Pi task; the fence that refuses every other call while it runs is deleted.
 5. Workspace creation and machine snapshot publication become Pi tasks; "pending" and "abandoned" publication states and the detach refusal are deleted.
 6. Workspace lifecycle lives only in the workspace object; the project lists workspaces and keeps no copy (ends the archive/delete loop).
-7. Stuck states become reported failures: Composio "not ready", uncertain logins, browser fences (the agent is told the action's outcome is unknown), cached checkpoint rejections, the inference activation gate.
+7. Stuck states become reported failures: Composio "not ready", uncertain logins, browser fences (the agent is told the action's outcome is unknown), cached checkpoint rejections. The inference activation gate's server check is gone (`87a9814`); its "Verifying the new release…" UI and `InferenceActivationPending` error remain to delete.
 8. State refusals removed: a failed project making workspaces read-only, "lifecycle was destroyed", delete waiting for cloud destroy, provision requiring automatic setup, cron delete while running, journal gates.
 9. Duplicate authorization removed: membership scans, the hostname settings hop, the capability map, repeated subagent/approval/generation checks.
 10. Approval mode, approval cards and the approval queue removed.
 11. Agent commands longer than 5 minutes no longer time out at the relay.
 12. Bugs the audit found: an agent's cron run opens the wrong object; a machine is refused when it asks to be attached; an LFS table that is never read.
+13. New accounts: the platform channel is a Sep 12 build whose signup crashes ("internal error"); `cloudflare-judges` and `signup-test-1014` were put on bradleat's release by hand (`/tmp/opdeploy/deploy-tenant.ts`). Publish a current default release so invitations work unaided. The Workers AI key dialog should ask for the account ID instead of taking `{"token","accountId"}`. An agent's `read` right after its own `write` in the cloud returned empty once.
 
 **Batch 2 — status and live updates.**
 1. Status as a small message: on change each workspace sends `{ workspaceId, status }`; the socket object keeps one row per workspace and forwards it; the sidebar updates that row; page load reads the rows once. The open workspace's view is unchanged. Done when an agent working, then the user clicking away, leaves the row Working until it stops.

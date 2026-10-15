@@ -6,13 +6,20 @@ You or an agent can modify GitSpace from a workspace and hot-deploy changes thro
 
 ## Start in the browser
 
-1. Open [gitspace.sh](https://gitspace.sh) with an invitation and choose your permanent account handle.
-2. Save the recovery key in a password manager and confirm it before creating the account.
-3. Choose **Open GitSpace** to enroll the browser and enter your account.
-4. Create a cloud machine or choose **Settings > Machines > Add a computer**.
-5. Connect an agent provider, create a project and workspace, and try a small task.
+GitSpace is invite-only. No installation or machine is needed: agents, inference and file edits run on Cloudflare.
 
-No local installation is required for account creation or cloud-only use. The [getting-started guide](https://gitspace.sh/docs/getting-started) walks through both paths.
+1. Open your invitation link (`https://gitspace.sh/?invite=gsi_…`) and choose a permanent account handle.
+2. Choose **Prepare recovery key**, save the key in a password manager, paste it back to confirm, then choose **Create invited account**.
+3. Choose **Open GitSpace** within five minutes. This connects the browser to `https://<handle>.gitspace.sh`.
+4. Follow the six setup steps. Machines, runtime, Git and defaults can be left as they are. At **Default inference**, connect a provider and choose a Default model on the **Models** tab:
+   - **Sign in** with an Anthropic, OpenAI or GitHub Copilot subscription, or **Add API key** for any listed provider.
+   - **Cloudflare Workers AI**: create a Cloudflare API token with *Workers AI Read*, then add `{"token":"<token>","accountId":"<Cloudflare account ID>"}` as the API key. Kimi K2.7 Code works well as the Default model.
+5. Choose **New project**. Leave the repository address empty for a new repository, or paste a GitHub address to import one (add your GitSpace SSH key to GitHub first, in **Settings → Git**). Type a task in the composer; the agent reads and writes the project's files in the cloud.
+6. To run agents in parallel, choose **+** next to the project in the sidebar, enter a name and branch, and choose **Create workspace**. Each workspace has its own branch, agent conversation and files; agents in different workspaces work at the same time.
+
+To open an existing account in another browser: on [gitspace.sh](https://gitspace.sh), enter the handle, tick **Resume with a saved recovery key**, paste the key, choose **Use saved recovery key**, then **Recover or finish signup** and **Open GitSpace**.
+
+Attach a computer or create a cloud machine (below) when an agent needs to run commands, tests or Git operations.
 
 ## Connect your own computer
 
