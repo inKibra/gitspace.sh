@@ -101,7 +101,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
       color: machine.ready ? 'green' : machine.status.online ? 'orange' : 'dim',
       online: machine.status.online, ready: machine.ready, setup: machine.status.setup, sync: machine.status.sync,
       runs: remote.lifecycle.runs.filter(run => run.machineId === machine.id).toSorted((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 5)
-        .map(run => ({ id: run.id, phase: run.phase, status: run.status, startedAt: run.startedAt, active: isLifecycleRunActive(run) })),
+        .map(run => ({ id: run.id, phase: run.phase, status: run.status, startedAt: run.startedAt, active: isLifecycleRunActive(run), terminalName: isLifecycleRunActive(run) && run.interactive ? run.terminalName : null })),
     };
   });
   const model: EnvironmentViewModel = {
@@ -150,6 +150,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
         if (result.status === 'error') throw result.error;
         runtimeContext.onOpenTerminal(id, result.value.name);
       }) : undefined}
+      onOpenRunTerminal={runtimeContext ? (id, name) => runtimeContext.onOpenTerminal(id, name) : undefined}
       onSelectSetupMachine={runMachine.select}
       onRunPhase={(id, phase, options) => mutate(async () => {
         if (phase === 'checks') {

@@ -36,7 +36,8 @@ export interface EnvironmentMachine {
   ready: boolean;
   setup: MachineStatus['setup'];
   sync: MachineStatus['sync'];
-  runs: readonly { id: string; phase: LifecycleRunPhase; status: string; startedAt: string; active: boolean }[];
+  /** `terminalName` is set while an interactive run is running in that terminal. */
+  runs: readonly { id: string; phase: LifecycleRunPhase; status: string; startedAt: string; active: boolean; terminalName: string | null }[];
 }
 
 export interface EnvironmentViewModel {
@@ -69,6 +70,8 @@ export interface EnvironmentViewProps {
   onAttach(machineId: string): void;
   onDetach(machineId: string): void;
   onOpenTerminal?(machineId: string): void;
+  /** Shows the terminal an interactive run is running in. */
+  onOpenRunTerminal?(machineId: string, terminalName: string): void;
   onSelectSetupMachine(machineId: string): void;
   onRunPhase(machineId: string, phase: LifecycleRunPhase, options?: { rerun?: boolean; interactive?: boolean; retire?: boolean }): void;
   onApprove(targetId: string): void;

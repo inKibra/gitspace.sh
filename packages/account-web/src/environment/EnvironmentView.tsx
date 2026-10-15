@@ -107,9 +107,10 @@ function MachineCard({ machine, index, busy, props }: { machine: EnvironmentMach
           <summary className="min-h-10 cursor-pointer py-2 text-muted-foreground">Recent runs · last {machine.runs.length}</summary>
           <ul className="flex flex-col">{machine.runs.map(run => <li key={run.id} className="flex min-h-10 flex-wrap items-center gap-2">
             <StatusDot color={run.status === 'failed' ? 'red' : run.active ? 'blue' : run.status === 'succeeded' ? 'green' : 'dim'} />
-            <span className="flex-1">{STEP_LABEL[run.phase]} · {run.status}</span>
+            <span className="flex-1">{STEP_LABEL[run.phase]} · {run.terminalName ? 'Running in terminal' : run.status}</span>
             <span className="tabular-nums text-muted-foreground">{new Date(run.startedAt).toLocaleString()}</span>
             <Button variant="ghost" size="compact" onClick={() => props.onOpenLog(run.id, { id: run.phase, label: STEP_LABEL[run.phase] })}>Logs</Button>
+            {run.terminalName && props.onOpenRunTerminal ? <Button variant="ghost" size="compact" onClick={() => { if (run.terminalName) props.onOpenRunTerminal?.(machine.id, run.terminalName); }}>Open terminal</Button> : null}
             {run.active ? <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onCancelRun(run.id)}>Cancel</Button> : null}
           </li>)}</ul>
         </details> : null}
