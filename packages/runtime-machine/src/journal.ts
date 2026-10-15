@@ -1,18 +1,19 @@
 import { Database } from 'bun:sqlite';
-import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeToolResultSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 
 const LocalAttachmentSchema = z.object({ attachment: RuntimeAttachmentSchema, rootPath: z.string().min(1), executionSecret: z.string().min(1), prerequisitesComplete: z.boolean() });
 export type LocalAttachment = z.infer<typeof LocalAttachmentSchema>;
 const RowSchema = z.object({ payload: z.string() });
 
-/** The machine's local checkouts (one row per attachment) and staged AST proposals. Commands are not journaled. */
+/** The machine's local checkouts (one row per attachment), staged AST proposals, and the results of commands finished
+ * in the last day, so a reply lost with the relay connection can be answered again. */
 export class ExecutorJournal {
   private readonly database: Database;
   constructor(path: string, options: { readonly?: boolean } = {}) {
     this.database = new Database(path, options.readonly ? { readonly: true } : { create: true });
     if (options.readonly) return;
-    this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS executor_attachments (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS executor_proposals(id TEXT PRIMARY KEY, payload TEXT NOT NULL); DROP TABLE IF EXISTS executor_attempts;');
+    this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS executor_attachments (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS executor_proposals(id TEXT PRIMARY KEY, payload TEXT NOT NULL); DROP TABLE IF EXISTS executor_attempts; CREATE TABLE IF NOT EXISTS executor_results(attempt_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, completed_at INTEGER NOT NULL);');
     // Rows from the old attachment lifecycle: lost/draining become detached and an old-shape cache observation is
     // dropped (the next heartbeat sends a new one). A row that still does not parse is removed; the cloud reassigns it.
     const OldRowSchema = z.object({ id: z.string(), payload: z.string() });
@@ -50,5 +51,17 @@ export class ExecutorJournal {
     return row === null ? null : JSON.parse(RowSchema.parse(row).payload);
   }
   saveProposal(id: string, value: unknown): void { this.database.query('INSERT INTO executor_proposals(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(id, JSON.stringify(value)); }
+  /** A finished command's result and the fingerprint of the dispatch that ran it. */
+  executionResult(attemptId: string): { fingerprint: string; result: RuntimeToolResult } | null {
+    const row = this.database.query('SELECT fingerprint, result FROM executor_results WHERE attempt_id = ?').get(attemptId);
+    if (row === null) return null;
+    const { fingerprint, result } = z.object({ fingerprint: z.string(), result: z.string() }).parse(row);
+    return { fingerprint, result: RuntimeToolResultSchema.parse(JSON.parse(result)) };
+  }
+  saveExecutionResult(attemptId: string, fingerprint: string, result: RuntimeToolResult): void {
+    const now = Date.now();
+    this.database.query('DELETE FROM executor_results WHERE completed_at < ?').run(now - 24 * 60 * 60 * 1000);
+    this.database.query('INSERT OR REPLACE INTO executor_results(attempt_id, fingerprint, result, completed_at) VALUES (?, ?, ?, ?)').run(attemptId, fingerprint, JSON.stringify(result), now);
+  }
   close(): void { this.database.close(); }
 }

@@ -147,7 +147,7 @@ export async function createAccountWorkspaceRuntime(
 /** Every machine executes through the tenant relay tunnel; a missing tunnel fails at once. */
 export async function dispatchRuntimeAttachment(env: Env, input: Parameters<AttachmentServices['dispatch']>[0]): Promise<Response> {
   const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(input.machineId);
-  if (!machine || machine.state !== 'online' || machine.desiredState !== 'online') throw new Error('Assigned executor is unavailable');
+  if (!machine || machine.state !== 'online' || machine.desiredState !== 'online') throw new ExecutorNotConnected(input.machineId);
   const path = '/runtime/execute';
   const request = new Request(new URL(`/tunnel/${encodeURIComponent(input.machineId)}${path}`, env.RELAY_URL), {
     method: 'POST',

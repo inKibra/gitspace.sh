@@ -90,8 +90,10 @@ export class ReleaseFollower {
     // The child becomes healthy before its complete host is committed. It must not
     // report success or request another update in that window.
     if (await readJson(join(this.options.environmentRoot, 'machine-update.json'))) return;
+    // A failure the release record already shows for this machine was reported by an earlier start; say it once.
+    const recorded = (sha: string) => status.releases.find((release) => release.sha === sha)?.status.machines[this.options.machineId] === 'failed';
     const updateFailure = await readJson<{ sha: string | null; hash: string; error: string }>(join(this.options.environmentRoot, 'machine-update-failure.json'));
-    if (updateFailure?.sha) await this.reportFailure(updateFailure.sha, 'machine', updateFailure.error);
+    if (updateFailure?.sha && !recorded(updateFailure.sha)) await this.reportFailure(updateFailure.sha, 'machine', updateFailure.error);
     if (this.options.hostUrl && this.options.controlToken && this.options.generation
       && process.env.GITSPACE_MACHINE_RUNTIME_PATH && !process.env.GITSPACE_HOST_PID
       && updateFailure?.hash !== this.options.generation) {
@@ -114,7 +116,7 @@ export class ReleaseFollower {
     }
     const host = await this.hostStatus();
     await this.reportMachineApplied(host);
-    if (desired.machine !== null && host.lastLaunch?.sha === desired.machine && host.lastLaunch.target === 'machine' && host.lastLaunch.status === 'failed') {
+    if (desired.machine !== null && host.lastLaunch?.sha === desired.machine && host.lastLaunch.target === 'machine' && host.lastLaunch.status === 'failed' && !recorded(desired.machine)) {
       await this.reportFailure(desired.machine, 'machine', host.lastLaunch.error ?? 'Host rolled the release back');
     }
     if (desired.frontend === null && host.frontendReleaseSha !== null) await this.launchChannel('frontend');

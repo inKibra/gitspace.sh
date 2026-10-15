@@ -24,6 +24,21 @@ export class ExecutorNotConnected extends TaggedError('ExecutorNotConnected')<{ 
   }
 }
 // The machine rejects with `{ error }`; the relay tunnel fails with `{ error: { code, message } }`.
+/** How long a command's result is waited for after the machine's connection drops, and how often it is asked again. */
+const RESULT_RECOVERY_MS = 120_000;
+const RESULT_RETRY_MS = 2_000;
+const TransportFailureSchema = z.object({ error: z.object({ code: z.literal('TUNNEL_TRANSPORT_FAILED') }) });
+/** The relay lost the machine connection after it sent the command, so the reply never arrived. */
+async function lostReply(response: Response): Promise<boolean> {
+  return response.status === 502 && TransportFailureSchema.safeParse(await response.clone().json().catch(() => null)).success;
+}
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
+  const abort = () => { clearTimeout(timer); reject(signal.reason); };
+  signal.addEventListener('abort', abort, { once: true });
+  return promise;
+}
 const RejectionSchema = z.object({ error: z.union([z.string(), z.object({ message: z.string() }).transform(error => error.message)]) });
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 const isBrowserCapability = (capability: string) => capability === 'browser' || capability === 'browser_control' || capability.startsWith('browser.');
@@ -164,11 +179,24 @@ export class AttachmentStore {
     const signature = encode(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body))));
     let response: Response;
     this.running.set(dispatch.attemptId, dispatch.machineId);
-    try { response = await this.services.dispatch({ machineId: dispatch.machineId, body, signature, signal }); }
-    catch (error) {
-      signal.throwIfAborted();
-      if (error instanceof ExecutorNotConnected) return failed(dispatch, `Machine ${dispatch.machineId} is not connected; start GitSpace on it or attach another machine`);
-      return { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: 'interrupted', content: [{ type: 'text', text: `Machine ${dispatch.machineId} stopped responding while running this command; its outcome is unknown` }] };
+    try {
+      // A dropped relay connection loses the reply, not the command: the machine keeps it running and answers the same
+      // signed dispatch again with its result, so it is sent again while the machine reconnects.
+      let lostAt: number | null = null;
+      for (;;) {
+        let answer: Response | null = null;
+        try { answer = await this.services.dispatch({ machineId: dispatch.machineId, body, signature, signal }); }
+        catch (error) {
+          signal.throwIfAborted();
+          if (lostAt === null && error instanceof ExecutorNotConnected) return failed(dispatch, `Machine ${dispatch.machineId} is not connected; start GitSpace on it or attach another machine`);
+        }
+        if (answer && !await lostReply(answer)) { response = answer; break; }
+        lostAt ??= Date.now();
+        if (Date.now() - lostAt > RESULT_RECOVERY_MS || Date.now() + RESULT_RETRY_MS >= Date.parse(dispatch.deadlineAt)) {
+          return { requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: 'interrupted', content: [{ type: 'text', text: `Machine ${dispatch.machineId} stopped responding while running this command; its outcome is unknown` }] };
+        }
+        await delay(RESULT_RETRY_MS, signal);
+      }
     } finally { this.running.delete(dispatch.attemptId); }
     if (!response.ok) {
       const rejection = RejectionSchema.safeParse(await response.json().catch(() => null));

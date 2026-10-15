@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { RuntimeToolDispatchSchema, isSubagentToolCallAllowed, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { ExecutorJournal, LocalAttachment } from './journal.js';
 import { executeMachineTool, type MachineToolOptions } from './tools.js';
@@ -7,10 +7,12 @@ import { executeMachineTool, type MachineToolOptions } from './tools.js';
 export type MachineExecutorOptions = MachineToolOptions & { machineId: string; journal: ExecutorJournal; activeChanged?: (attachmentId: string) => void };
 type Run = { attachmentId: string; tool: string; controller: AbortController; done: Promise<RuntimeToolResult> };
 
-/** Runs a signed dispatch on its attachment's checkout and returns the result. Nothing is journaled: a machine restart
- * ends the request, and the cloud reports the command as interrupted. */
+/** Runs a signed dispatch on its attachment's checkout and returns the result. The same dispatch sent again (its reply
+ * was lost with the relay connection) waits for the running command or answers with the result it finished with. A
+ * machine restart ends running commands, and the cloud reports them as interrupted. */
 export class MachineExecutor {
   private readonly running = new Map<symbol, Run>();
+  private readonly attempts = new Map<string, { fingerprint: string; done: Promise<RuntimeToolResult> }>();
   constructor(private readonly options: MachineExecutorOptions) {}
 
   async fetch(request: Request): Promise<Response> {
@@ -28,9 +30,22 @@ export class MachineExecutor {
     const expected = createHmac('sha256', Buffer.from(local.executionSecret, 'base64url')).update(raw).digest();
     const signature = supplied && /^[A-Za-z0-9_-]+$/u.test(supplied) ? Buffer.from(supplied, 'base64url') : Buffer.alloc(0);
     if (signature.byteLength !== expected.byteLength || !timingSafeEqual(signature, expected)) return new Response('Execution authentication failed', { status: 403 });
-    try { this.authorize(dispatch); }
-    catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
-    return Response.json(await this.execute(dispatch, request.signal));
+    const fingerprint = createHash('sha256').update(raw).digest('base64url');
+    const finished = this.options.journal.executionResult(dispatch.attemptId);
+    if (finished) return finished.fingerprint === fingerprint ? Response.json(finished.result) : Response.json({ error: 'Another command already ran with this attempt id' }, { status: 409 });
+    let attempt = this.attempts.get(dispatch.attemptId);
+    if (attempt && attempt.fingerprint !== fingerprint) return Response.json({ error: 'Another command is running with this attempt id' }, { status: 409 });
+    if (!attempt) {
+      try { this.authorize(dispatch); }
+      catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
+      const done = this.execute(dispatch, request.signal).then(result => {
+        this.options.journal.saveExecutionResult(dispatch.attemptId, fingerprint, result);
+        return result;
+      }).finally(() => this.attempts.delete(dispatch.attemptId));
+      attempt = { fingerprint, done };
+      this.attempts.set(dispatch.attemptId, attempt);
+    }
+    return Response.json(await attempt.done);
   }
 
   private authorize(dispatch: RuntimeToolDispatch): LocalAttachment {

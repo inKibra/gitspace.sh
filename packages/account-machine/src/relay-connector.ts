@@ -78,7 +78,7 @@ export class MachineRelayConnector {
   private stopped = false;
   private readonly clock = createServerClock();
   private readonly pending = new Map<string, PendingRequest>();
-  private readonly forwarding = new Map<string, AbortController>();
+  private readonly forwarding = new Map<string, { controller: AbortController; path: string }>();
   private readonly serviceSockets = new Map<string, WebSocket>();
   /** Notices not yet delivered, one per topic and workspace. */
   private readonly notices = new Map<string, { topic: RelayNoticeTopic; workspaceId: string | undefined }>();
@@ -154,7 +154,8 @@ export class MachineRelayConnector {
   private reconnect(socket: BunWebSocket, disconnect: RelayDisconnect): void {
     if (this.socket !== socket) return;
     const now = Date.now();
-    // Aborting transport does not roll back mutations. Never replay them on a new socket.
+    // Aborting transport does not roll back mutations. Never replay them on a new socket. A command keeps running: the
+    // cloud sends its dispatch again and the executor answers with the command's result.
     const abortedRequests = this.forwarding.size;
     const discardedRequests = this.pending.size;
     const connectionAgeMs = this.openedAt === null ? null : now - this.openedAt;
@@ -165,7 +166,7 @@ export class MachineRelayConnector {
     this.livenessTimer = null;
     this.awaitingPong = false;
     this.pending.clear();
-    for (const controller of this.forwarding.values()) controller.abort();
+    for (const forwarded of this.forwarding.values()) if (new URL(forwarded.path, this.options.localOrigin).pathname !== '/runtime/execute') forwarded.controller.abort();
     this.forwarding.clear();
     for (const service of this.serviceSockets.values()) service.close(1011, 'Machine relay disconnected');
     this.serviceSockets.clear();
@@ -256,7 +257,7 @@ export class MachineRelayConnector {
     }
     if (message.type === 'tunnel.request.cancel') {
       this.pending.delete(message.requestId);
-      this.forwarding.get(message.requestId)?.abort();
+      this.forwarding.get(message.requestId)?.controller.abort();
       this.serviceSockets.get(message.requestId)?.close();
       this.serviceSockets.delete(message.requestId);
       return;
@@ -281,7 +282,8 @@ export class MachineRelayConnector {
 
   private async forward(socket: BunWebSocket, requestId: string, pending: PendingRequest): Promise<void> {
     const controller = new AbortController();
-    this.forwarding.set(requestId, controller);
+    const forwarded = { controller, path: pending.path };
+    this.forwarding.set(requestId, forwarded);
     try {
       const websocket = new Headers(pending.headers).get('upgrade')?.toLowerCase() === 'websocket';
       if (websocket) {
@@ -360,7 +362,7 @@ export class MachineRelayConnector {
         message: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) || 'Local request failed',
       });
     } finally {
-      if (this.forwarding.get(requestId) === controller) this.forwarding.delete(requestId);
+      if (this.forwarding.get(requestId) === forwarded) this.forwarding.delete(requestId);
     }
   }
 
