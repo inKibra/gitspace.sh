@@ -54,7 +54,6 @@ describe('MCP tool failure detail', () => {
         expect(response instanceof Error || response.isError === true).toBe(true);
       }
       for (const [name, payload] of [
-        ['gitspace_runtime_session', { command: { type: 'setApproval', approvalMode: 'yolo' } }],
         ['gitspace_runtime_session', { command: { type: 'answerAsk', id: 'q', answers: [] } }],
         ['gitspace_runtime_qa', { itemId: 'q', action: { kind: 'share', target: 'repository', redactedExcerpt: 'secret', confirmed: true } }],
       ] as const) {

@@ -30,7 +30,7 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
       if (groupId) await tx.put(`runtime.browser.revoked:${groupId}`, true);
       const created = crypto.randomUUID(); await tx.put(groupKey, created); return { groupId: created, grant: undefined };
     });
-    const card = RuntimeAccountBrowserPreparationSchema.parse({ ...identity, placement: current, groupId: group.groupId, groupName: await options.groupName(), source: args.source, origins, expiresAt: group.grant?.expiresAt ?? new Date(Date.now() + 30 * 60_000).toISOString(), id: crypto.randomUUID(), action: args.action, requiresApproval: false });
+    const card = RuntimeAccountBrowserPreparationSchema.parse({ ...identity, placement: current, groupId: group.groupId, groupName: await options.groupName(), source: args.source, origins, expiresAt: group.grant?.expiresAt ?? new Date(Date.now() + 30 * 60_000).toISOString(), id: crypto.randomUUID(), action: args.action });
     return storage.transaction(async tx => { const prior = await tx.get(key); if (prior) { const saved = savedSchema.parse(prior); if (saved.fingerprint !== fingerprint) throw new Error('Browser attempt identity reused'); return saved.card; } await tx.put(key, { fingerprint, card }); return card; });
   }
   async function execute(input: Input, args: RuntimeBrowserArguments, origins: string[]): Promise<RuntimeToolResult> {

@@ -332,7 +332,6 @@ No hashline. Each model gets exactly one edit tool, chosen by the format its ven
 - **Plan mode:** a read-only phase extension (pi-durable example 27); plan file in `local://`; approval through the question card with an Open plan link.
 - **Skills:** discovery, live refresh, `skill://` URLs, skill list as a system-prompt section.
 - **Instructions and phase context:** system-prompt sections from workspace controls.
-- **Approval modes:** `beforeTool` hook.
 - **Titles:** a cheap-model call after the first turn.
 
 ### 8.10 Browser ownership and approval

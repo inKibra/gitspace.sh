@@ -1,43 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RuntimeIdentitySchema, type RuntimeBrowserApprovalCard, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
-
-export function BrowserApprovalCard({ request, requestDetails, machineName, connected, onAnswer }: { request: RuntimeBrowserApprovalCard; requestDetails?: string; machineName?: string; connected: boolean; onAnswer(approved: boolean): Promise<void> }) {
-  const shape = useShape();
-  const [now, setNow] = useState(Date.now);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const busy = useRef(false);
-  useEffect(() => { setError(null); }, [request.id]);
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
-  const expired = Date.parse(request.expiresAt) <= now;
-  const answer = async (approved: boolean) => {
-    if (busy.current || !connected || (approved && Date.parse(request.expiresAt) <= Date.now())) return;
-    busy.current = true; setPending(true); setError(null);
-    try { await onAnswer(approved); }
-    catch (cause) { setError(rpcErrorMessage(cause, 'Answer browser request')); }
-    finally { busy.current = false; setPending(false); }
-  };
-  return <section aria-label="Browser approval" className={`${shape.container} pointer-events-auto mb-2 flex max-h-[55dvh] flex-col gap-3 overflow-y-auto bg-surface-3 p-4 shadow-surface-3`}>
-    <div className="flex items-start justify-between gap-3"><h2 className="text-body font-semibold text-balance">Create workspace browser group?</h2><Badge color={expired ? 'gray' : 'amber'}>{expired ? 'Expired' : 'Approval required'}</Badge></div>
-    <p className="break-words text-body font-medium">{request.groupName}</p>
-    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-caption">
-      <dt className="text-muted-foreground">Approved origins</dt><dd className="break-all font-mono font-semibold">{request.origins.join(', ') || 'None'}</dd>
-      <dt className="text-muted-foreground">Execution</dt><dd className="break-words">{'placement' in request ? request.placement.kind === 'cloud' ? 'Cloud headless browser' : 'Account Chrome extension' : machineName ?? request.machineId}</dd>
-      <dt className="text-muted-foreground">Browser</dt><dd>{request.source === 'relay' ? 'Your Chrome profile · Browser Relay' : 'Workspace-owned headless profile'}</dd>
-      <dt className="text-muted-foreground">Access</dt><dd>Only tabs in this workspace group. JavaScript and screenshots included.</dd>
-      <dt className="text-muted-foreground">Expires</dt><dd className="tabular-nums"><time dateTime={request.expiresAt}>{new Date(request.expiresAt).toLocaleString()}</time>{expired ? '' : ` · ${Math.max(0, Math.ceil((Date.parse(request.expiresAt) - now) / 1000))}s`}</dd>
-    </dl>
-    {requestDetails ? <details className="text-caption"><summary className="flex min-h-10 cursor-pointer items-center font-medium">Review complete request</summary><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-md bg-surface-2 p-3">{requestDetails}</pre></details> : null}
-    <p className="text-caption text-muted-foreground text-pretty">This creates a named Chrome group for the workspace. Environment approvals control allowed origins; this decision cannot broaden them. Tabs dragged out become inaccessible. Observations and screenshots may enter agent history. Revoke the group from Workspace machines.</p>
-    {!connected ? <p role="status" className="text-caption text-muted-foreground">Reconnect before answering.</p> : null}
-    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
-    <div className="flex justify-end gap-2"><Button variant="secondary" disabled={pending || !connected} onClick={() => void answer(false)}>Reject</Button><Button variant="primary" loading={pending} disabled={pending || expired || !connected} onClick={() => void answer(true)}>Create browser group</Button></div>
-  </section>;
-}
 
 type MachineStatus = { machineId: string | null; status: RuntimeBrowserStatus | null; error: string | null };
 export function RuntimeBrowserGroups({ snapshot, conversationId, machines }: { snapshot: RuntimeSnapshot; conversationId?: string; machines: readonly { id: string; label: string; kind: string }[] }) {

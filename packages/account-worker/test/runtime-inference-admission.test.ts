@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { profileApprovalMode, type InferenceProfile } from '@gitspace/protocol/inference';
+import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { createCloudRuntimeInference } from '../src/runtime-inference.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durable';
 import { createModels } from '@earendil-works/pi-ai';
 import { createConversationLifecycle } from '@gitspace/runtime-core';
-import { createSessionControls, SessionControlsDoc, sessionApprovalMode, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
+import { createSessionControls, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 
-async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInference'> & { session: Pick<SessionControlServices, 'catalog' | 'reload'> }, approvalDefault: SessionControlServices['approvalDefault']) {
+async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInference'> & { session: Pick<SessionControlServices, 'catalog' | 'reload'> }) {
   const storage = new MemoryStorage();
   const harness = await Harness.open(storage, { registry: createRegistry(), models: createModels() }, BACKGROUND_CONTEXT);
   const root = await harness.root(BACKGROUND_CONTEXT);
@@ -20,7 +20,7 @@ async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInfere
   const lifecycle = createConversationLifecycle({ harness, storage, configureModel, admitInference: runtime.admitInference, wake: async () => {} });
   const unavailable = async (): Promise<never> => { throw new Error('Unused history operation'); };
   const controls = createSessionControls({
-    harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, approvalDefault, ...runtime.session,
+    harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, ...runtime.session,
     history: {
       conversation: unavailable, resolve: unavailable, usage: unavailable,
       recent: async () => ({ anchorId: null, prompts: [], tokens: null }),
@@ -151,7 +151,6 @@ describe('durable inference selection intent', () => {
       models: [{ provider: 'studio', id: 'custom-chat:0', name: 'Custom Chat', contextWindow: 32768 }],
       roles: [{ id: 'custom', label: 'custom', provider: 'studio', model: 'custom-chat:0', thinking: 'high', current: false }],
       inference: { profileId: 'configured', profileName: 'Configured', profileRevision: 3, assignmentRevision: 4 },
-      approvalDefault: 'yolo',
     });
     expect(runtime.models.getModel('studio', 'custom-chat:0')).toMatchObject({ name: 'Custom Chat', contextWindow: 32768 });
     expect(runtime.models.getModels('studio').map(model => model.id)).toEqual(['custom-chat:0']);
@@ -162,7 +161,7 @@ describe('durable inference selection intent', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('reads control and history with no migrated vault snapshot without adopting approval or resolving inference', async () => {
+  it('reads control and history with no migrated vault snapshot without resolving inference', async () => {
     const rejectMutation = vi.fn(async (): Promise<never> => { throw new Error('Vault requires explicit inference admission'); });
     const vault = {
       cloudInferenceCatalog: async () => null,
@@ -174,7 +173,7 @@ describe('durable inference selection intent', () => {
       { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env,
       RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }),
     );
-    const f = await sessionFixture(runtime, rejectMutation);
+    const f = await sessionFixture(runtime);
     try {
       const commands = [
         { type: 'control' },
@@ -184,48 +183,13 @@ describe('durable inference selection intent', () => {
       ] as const;
       for (const command of commands) {
         const result = await f.controls.execute(String(f.root.id), command);
-        expect(result.control).toMatchObject({ sessionId: String(f.root.id), models: [], roles: [], approvalMode: 'always-ask' });
+        expect(result.control).toMatchObject({ sessionId: String(f.root.id), models: [], roles: [] });
         if (command.type !== 'control') expect(result[command.type]).toBeDefined();
       }
-      expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, BACKGROUND_CONTEXT))?.approvalMode).toBeNull();
       expect(rejectMutation).not.toHaveBeenCalled();
       await expect(f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Explicit admission' })).rejects.toThrow('Vault requires explicit inference admission');
       expect(rejectMutation).toHaveBeenCalledTimes(1);
-      expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, BACKGROUND_CONTEXT))?.approvalMode).toBeNull();
     } finally { await f.harness.close(BACKGROUND_CONTEXT); }
   });
 
-  it('previews configured approval without adopting it, then retains authoritative and explicit session modes', async () => {
-    let profile: InferenceProfile = { version: 1, id: 'profile', name: 'Profile', revision: 1, settings: { 'approval.defaultMode': 'yolo', 'modelRoles.default': 'openai-codex/retired' }, createdAt: stamp, updatedAt: stamp };
-    const rejectMutation = vi.fn(async (): Promise<never> => { throw new Error('Unexpected credential resolution or storage write'); });
-    const resolveCloudInference = vi.fn(async () => ({ profile, assignmentRevision: 1 }));
-    const vault = {
-      cloudInferenceCatalog: async () => ({ profile, assignmentRevision: 1, accounts: [] }),
-      resolveCloudInference, cloudCredentialAccounts: rejectMutation, cloudResolveCredential: rejectMutation,
-    };
-    const runtime = await createCloudRuntimeInference(
-      { storage: { get: async () => undefined, put: rejectMutation, delete: rejectMutation } } as unknown as DurableObjectState,
-      { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env,
-      RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }),
-    );
-    const approvalDefault = async () => profileApprovalMode((await vault.resolveCloudInference()).profile.settings);
-    const f = await sessionFixture(runtime, approvalDefault);
-    try {
-      expect((await f.controls.control(f.root)).approvalMode).toBe('yolo');
-      expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, BACKGROUND_CONTEXT))?.approvalMode).toBeNull();
-      profile = { ...profile, revision: 2, settings: { ...profile.settings, 'approval.defaultMode': 'always-ask' } };
-      expect((await f.controls.control(f.root)).approvalMode).toBe('always-ask');
-      expect(resolveCloudInference).not.toHaveBeenCalled();
-      expect(rejectMutation).not.toHaveBeenCalled();
-      expect(await sessionApprovalMode(f.root, f.root.id, BACKGROUND_CONTEXT, approvalDefault)).toBe('always-ask');
-      profile = { ...profile, revision: 3, settings: { ...profile.settings, 'approval.defaultMode': 'yolo' } };
-      expect((await f.controls.control(f.root)).approvalMode).toBe('always-ask');
-      expect(await sessionApprovalMode(f.root, f.root.id, BACKGROUND_CONTEXT, approvalDefault)).toBe('always-ask');
-      await f.controls.execute(String(f.root.id), { type: 'setApproval', approvalMode: 'write' }, true);
-      expect((await f.controls.control(f.root)).approvalMode).toBe('write');
-      expect(await sessionApprovalMode(f.root, f.root.id, BACKGROUND_CONTEXT, approvalDefault)).toBe('write');
-      expect(resolveCloudInference).toHaveBeenCalledTimes(1);
-      expect(rejectMutation).not.toHaveBeenCalled();
-    } finally { await f.harness.close(BACKGROUND_CONTEXT); }
-  });
 });

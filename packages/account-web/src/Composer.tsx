@@ -1,4 +1,4 @@
-import type { SessionControlView, SkillView } from '@gitspace/protocol';
+import type { SkillView } from '@gitspace/protocol';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, Zap } from '@untitledui/icons';
 import { useMemo, useState, type ReactNode } from 'react';
@@ -257,7 +257,6 @@ export function Composer({ workspace, controls, providers, skills = [], running,
           <DropdownContent align="end" side="top" sideOffset={6} className="min-w-[240px] w-[240px]">
             <MenuItem index={0} icon={icons.user} label={`Role: ${controls.value.roleLabel ?? 'Default'}`} disabled={controls.selectionReadOnly} onSelect={() => void controls.onCycleRole('forward')} closeOnClick={false} />
             <MenuItem index={1} icon={glyph(Zap)} label="Fast mode" checked={controls.value.fastMode} onSelect={() => void controls.onSetFast(!controls.value.fastMode)} />
-            <MenuItem index={2} icon={icons.shield} label={`Approval: ${{ 'always-ask': 'Always ask', write: 'Ask for writes', yolo: 'Auto-approve' }[controls.value.approvalMode]}`} onSelect={() => { const order: SessionControlView['approvalMode'][] = ['always-ask', 'write', 'yolo']; void controls.onSetApproval(order[(order.indexOf(controls.value.approvalMode) + 1) % order.length]); }} closeOnClick={false} />
             {workspace.kind === 'workspace' && workspace.phase === 'code' ? <MenuItem index={3} icon={icons.rocket} label="Goal mode" checked={!!controls.value.goal} onSelect={() => void controls.onSetGoal(!controls.value.goal)} /> : null}
             <MenuItem index={4} icon={icons['rotate-ccw']} label="Compact context" onSelect={() => void controls.onCompact()} />
             <MenuItem index={5} icon={icons.clock} label="Session history" disabled={!controls.onReadHistory} onSelect={() => setShowHistory((value) => !value)} />

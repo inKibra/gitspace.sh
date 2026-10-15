@@ -76,9 +76,9 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
     try {
       const read = ['control', 'agentSetup', 'historyAnchorId', 'historyPage', 'messages', 'transcriptPage', 'transcriptContent', 'usage'].includes(input.command.type);
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, read ? 'rpc.read' : 'session.prompt');
-      if (['setApproval', 'setWorkspacePhase', 'saveAgentDefinition', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(input.command.type)
+      if (['setWorkspacePhase', 'saveAgentDefinition', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(input.command.type)
         && !deviceCanAdminister(device, 'account.admin')) throw new Error('This session command requires account administration');
-      if (['setApproval', 'answerAsk'].includes(input.command.type) && device.kind !== 'browser') throw new Error('Human session decisions require the browser');
+      if (input.command.type === 'answerAsk' && device.kind !== 'browser') throw new Error('Human session decisions require the browser');
       return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession(input, { deviceId, canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin') })).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control cloud session', message: message(error) })); }
   });

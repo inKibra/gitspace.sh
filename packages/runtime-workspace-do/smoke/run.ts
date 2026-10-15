@@ -126,8 +126,6 @@ try {
     assert(notice[0]!.message.includes('fixture/removed'));
   }
 
-  await request('/session', { ...identity, command: { type: 'setApproval', approvalMode: 'yolo' }, canApprove: false }, true);
-  assert.equal((await session({ type: 'control' })).control.approvalMode, 'write');
   for (const answer of [false, true]) {
     await session({ type: 'setWorkspacePhase', phase: 'plan' });
     assert.equal((await session({ type: 'control' })).control.planMode, true);
@@ -148,7 +146,6 @@ try {
     assert.equal((await session({ type: 'control' })).control.planMode, workspace.phase === 'plan');
   }
   console.log('PASS cold ask recovery, both answer surfaces, idle watch, approval authority and canonical phase');
-  console.log('PASS browser approval binds displayed resolved preparation', await request('/browser-approval-proof'));
   console.log('PASS bounded tasks and full receipts', await request('/burst'));
   const scope = z.object({ root: z.string(), child: z.string(), sibling: z.string(), grandchild: z.string() }).parse(await request('/scoped-stop-seed'));
   await until(snapshot => Object.values(scope).every(id => snapshot.questions.some(question => question.conversationId === id && question.answer === null)));

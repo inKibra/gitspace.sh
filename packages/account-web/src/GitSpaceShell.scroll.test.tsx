@@ -106,8 +106,8 @@ it('preserves newer controlled text when a streaming queued send is accepted', a
   const send = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(() => accepted.promise);
   const operation = async () => undefined;
   const controls: SessionControlsProps = {
-    value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
-    onCycleRole: operation, onSetModel: operation, onSetThinking: operation, onSetFast: operation, onSetApproval: operation, onSetGoal: operation, onCompact: operation, onClearQueue: operation, onRemoveQueuedMessage: operation, onPromoteQueuedMessage: operation, onAnswerAsk: operation, onStop: operation, onNavigateTree: operation,
+    value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
+    onCycleRole: operation, onSetModel: operation, onSetThinking: operation, onSetFast: operation, onSetGoal: operation, onCompact: operation, onClearQueue: operation, onRemoveQueuedMessage: operation, onPromoteQueuedMessage: operation, onAnswerAsk: operation, onStop: operation, onNavigateTree: operation,
   };
   const controller = new WorkspaceDraftController({ deviceId: 'device', key: 'test', storage: null, save: async () => { throw new Error('Offline fixture must not save'); } });
   function View() {

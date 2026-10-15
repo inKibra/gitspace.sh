@@ -36,7 +36,7 @@ export function browserInvoker(browser: MachineBrowser, authority: BrowserTestAu
     if (!grant) {
       const groupId = crypto.randomUUID();
       const prepared = browserText(await browser.execute(await authority.dispatch(args, { type: 'prepare', args, groupId }, workspaceId, conversationId), local, AbortSignal.timeout(30_000)));
-      const { id: _id, action: _action, requiresApproval: _requiresApproval, ...fields } = prepared;
+      const { id: _id, action: _action, ...fields } = prepared;
       const body = RuntimeBrowserGrantSchema.parse({ ...fields, origins: args.source === 'relay' ? ['fixture.test'] : [] });
       grant = await authority.grant(body); grants.set(args.source, grant);
     }

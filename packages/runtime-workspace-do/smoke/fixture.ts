@@ -51,7 +51,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       code: { readFile: async (_repository, _commit, path) => path === '.agents/agents/repository.md' ? new Blob([repositoryDefinition]) : null, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], reader: () => ({ readTree: async () => [], readBlob: unsupported, close: async () => {} }) },
       initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
-      tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported, approvalDefault: async () => 'write', preflight: async () => {} },
+      tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported, preflight: async () => {} },
       operations: this.operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
       onReport: error => console.error('RUNTIME_REPORT', String(error)),
       admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },
@@ -85,18 +85,6 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       if (url.pathname === '/answer') {
         const input = RuntimeAnswerInputSchema.parse(await request.json());
         return Response.json(await runtime.answer(input, { deviceId: 'fixture-browser', canApprove: true }));
-      }
-      if (url.pathname === '/browser-approval-proof') {
-        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
-        const questionId = 'approval:browser-group-proof';
-        const card = { ...identity, id: 'current-group', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: crypto.randomUUID(), groupName: 'Smoke workspace', origins: ['example.com'], source: 'relay' as const, expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'open' as const, requiresApproval: true };
-        await runtime.harness.commit(async tx => { (await tx.doc(QuestionsDoc)).items.push({ id: questionId, conversationId: String(root.id), kind: 'approval', prompt: 'Create workspace browser group', choices: ['Approve', 'Reject'], answer: null, browser: card }); }, BACKGROUND_CONTEXT);
-        const answer = (expectedBrowserPreparationId?: string) => runtime.answer({ ...identity, questionId, answer: true, expectedBrowserPreparationId }, { deviceId: 'fixture-browser', canApprove: true });
-        const mustReject = async (expected?: string) => { let rejected = false; try { await answer(expected); } catch { rejected = true; } check(rejected, 'Missing or stale browser preparation accepted'); check((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === questionId)?.answer === null, 'Failed browser approval changed durable answer'); };
-        await mustReject(); await mustReject('previous-group');
-        await answer(card.id);
-        check((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === questionId)?.answer === true, 'Group creation approval was not committed');
-        return Response.json({ missingRejected: true, staleRejected: true, groupApproved: true });
       }
       if (url.pathname === '/scoped-stop-seed') {
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);

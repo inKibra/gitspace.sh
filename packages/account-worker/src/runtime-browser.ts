@@ -1,16 +1,15 @@
 import type { BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
 import type { ToolServices } from '@gitspace/runtime-core';
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
-import { committedSessionApproval, sessionApprovalMode, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 import type { AccountStateDO } from './account-state.js';
 import { createAccountBrowserAuthority } from './runtime-browser-account.js';
+import type { SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { BrowserRenderingBinding } from './browser-cdp.js';
 import type { RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
 export interface RuntimeBrowserAuthority {
@@ -47,7 +46,7 @@ export async function runtimeBrowserPublicKey(storage: DurableObjectStorage) {
   const pair = await runtimeBrowserKey(storage);
   return { algorithm: 'Ed25519' as const, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))) };
 }
-export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; approvalDefault: ToolServices['approvalDefault']; groupName(): Promise<string>; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname };
+export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; groupName(): Promise<string>; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname };
 export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOptions): RuntimeBrowserAuthority {
   const { storage, env, identity } = options;
   async function eligible(machineId: string) {
@@ -100,7 +99,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     return { conversation, args, origins };
   }
   async function prepare(input: Input) {
-    const { conversation, args, origins } = await context(input);
+    const { args, origins } = await context(input);
     if (accountPlacement(args)) return account.prepare(input, args, origins);
     const fingerprint = canonicalBrowserAuthorization({ ...input, signal: undefined, args });
     const key = `runtime.browser.prepare:${input.attemptId}`;
@@ -128,8 +127,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       await tx.put(groupKey, groupId);
       return { groupId, grant: undefined };
     });
-    const approvalMode = await sessionApprovalMode(options.runtime().harness, conversation.id, BACKGROUND_CONTEXT, options.approvalDefault);
-    const card = RuntimeBrowserApprovalCardSchema.parse({ ...identity, machineId: placement.machineId, attachmentId: placement.attachmentId, generation: placement.generation, groupId, groupName: await options.groupName(), source: args.source, origins, expiresAt: grant?.expiresAt ?? new Date(Date.now() + 30 * 60_000).toISOString(), id: crypto.randomUUID(), action: args.action, requiresApproval: args.source === 'relay' && !grant && approvalMode !== 'yolo' });
+    const card = RuntimeBrowserApprovalCardSchema.parse({ ...identity, machineId: placement.machineId, attachmentId: placement.attachmentId, generation: placement.generation, groupId, groupName: await options.groupName(), source: args.source, origins, expiresAt: grant?.expiresAt ?? new Date(Date.now() + 30 * 60_000).toISOString(), id: crypto.randomUUID(), action: args.action });
     const saved = await storage.transaction(async tx => {
       if (await tx.get(`runtime.browser.revoked:${card.groupId}`) || await tx.get(groupKey) !== card.groupId) throw new Error('Browser group grant expired or revoked');
       const current = await tx.get(key);
@@ -150,10 +148,6 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     if ('placement' in card) throw new Error('Browser placement changed');
     if (Date.parse(card.expiresAt) <= Date.now() || await storage.get(`runtime.browser.revoked:${card.groupId}`)) throw new Error('Browser group grant expired or revoked');
     if (canonicalBrowserAuthorization(origins) !== canonicalBrowserAuthorization(card.origins)) throw new Error('Approved environment browser origins changed; prepare a new browser request.');
-    if (card.requiresApproval) {
-      const question = await committedSessionApproval(options.runtime().harness, input.conversationId, input.taskId);
-      if (question?.answer !== true || canonicalBrowserAuthorization(question.browser) !== canonicalBrowserAuthorization(card)) throw new Error('Committed human browser group approval required');
-    }
     const body = RuntimeBrowserGrantSchema.strip().parse(card);
     const placement = await execution(args);
     if (placement.machineId !== body.machineId || placement.attachmentId !== body.attachmentId || placement.generation !== body.generation) throw new Error('Browser executing machine or attachment changed');

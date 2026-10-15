@@ -6,7 +6,6 @@ import { Harness, MemoryStorage, createRegistry, defineExtension } from '@earend
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createRuntimeTools, WorkspaceDoc, type ToolServices } from '@gitspace/runtime-core';
-import { SessionControlsDoc } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
 
 const noModel = async (): Promise<never> => { throw new Error('No inference in local isolate proof'); };
@@ -150,7 +149,7 @@ test('real durable authority completes a caught denied read after an effect with
         if (input.tool === 'write') effects++;
         return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [] };
       },
-      prepareBrowser: noModel, question: noModel, instructions: async () => '', authorizeCronTool: noModel, approvalDefault: noModel, preflight: async () => {},
+      prepareBrowser: noModel, question: noModel, instructions: async () => '', authorizeCronTool: noModel, preflight: async () => {},
     };
     const jobs: Parameters<typeof createRuntimeTools>[1] = { execute: noModel, reconcile: noModel, cancel: noModel, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: noModel, wakeAt: noModel, deliverConversationEvent: noModel, observeProcess: noModel, stopProcess: noModel };
     const tools = createRuntimeTools(services, jobs, (id, context) => harness.abortTask(id, context), async call => {
@@ -168,7 +167,7 @@ test('real durable authority completes a caught denied read after an effect with
     const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
     try {
       const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });
-      await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'yolo'; }, BACKGROUND_CONTEXT);
+      await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; }, BACKGROUND_CONTEXT);
       await root.submit({ type: 'input', content: 'Run the composition.' }, BACKGROUND_CONTEXT);
       await root.waitForIdle(BACKGROUND_CONTEXT);
       expect(results).toHaveLength(2);

@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { canonicalJson, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
-import { profileApprovalMode } from '@gitspace/protocol/inference';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
@@ -177,7 +176,6 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   const codemode = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: options.model });
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   const source = () => readInspectorContext(env, env.ACCOUNT_ID, identity.workspaceId, identity.projectId);
-  const approvalDefault = async () => profileApprovalMode((await env.CREDENTIALS.getByName(env.ACCOUNT_ID).resolveCloudInference(identity.projectId)).profile.settings);
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
     serviceFetch: request => fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, ...identity }, request),
@@ -189,7 +187,6 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     },
     selectExecution: (args, candidates) => selections.cache(args, candidates),
     approvedOrigins: async () => approvedBrowserOrigins(await authority.refreshBrowserOrigins(identity.workspaceId)),
-    approvalDefault,
     groupName: async () => {
       const project = await authority.getProject();
       if (!project) throw new Error('Browser workspace project is unavailable');
@@ -720,7 +717,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   return {
     browser: browser.manage,
-    tools: { invoke, prepareBrowser: browser.prepare, authorizeCronTool, approvalDefault,
+    tools: { invoke, prepareBrowser: browser.prepare, authorizeCronTool,
       // A machine tool with no ready machine attaches one and fails here, before the user is asked to approve it.
       async preflight(input) {
         // Replay/reconciliation follows the admitted identity, not today's cache availability.

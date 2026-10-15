@@ -488,6 +488,12 @@ export class CredentialVaultDO extends DurableObject<Env> {
       if (this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inference_credentials'").toArray().length) {
         this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'active' WHERE state = 'refresh-uncertain'");
       }
+      // Approval mode was removed; profiles drop its stored default once.
+      for (const row of this.ctx.storage.sql.exec<InferenceProfileRow>("SELECT * FROM inference_profiles WHERE profile_json LIKE '%\"approval%'").toArray()) {
+        const profile = z.looseObject({ settings: z.record(z.string(), z.json()) }).parse(JSON.parse(row.profile_json));
+        profile.settings = Object.fromEntries(Object.entries(profile.settings).filter(([path]) => path !== 'approval' && !path.startsWith('approval.')));
+        this.ctx.storage.sql.exec('UPDATE inference_profiles SET profile_json = ? WHERE profile_id = ?', JSON.stringify(profile), row.profile_id);
+      }
     });
   }
 

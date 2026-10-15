@@ -11,7 +11,6 @@ import { createRuntimeServices } from '../src/runtime-services.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
 import { ConversationLifecycleDoc, QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
-import { SessionControlsDoc } from '@gitspace/runtime-core/session-controls';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
@@ -100,7 +99,6 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
     const { runtime, root, services, invoke, text, calls, reports } = await ownerFixture(ctx);
     await runtime.harness.commit(async tx => {
       (await tx.doc(WorkspaceDoc)).phase = 'code';
-      (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'yolo';
     }, BACKGROUND_CONTEXT);
     const execute = async (code: string, timeoutMs = 3000) => {
       const callId = crypto.randomUUID();
@@ -246,12 +244,11 @@ test('agents write and edit their own workspace artifacts through local:// in th
   expect((await authority.listArtifactScopes()).map(scope => [scope.workspaceId, scope.generation])).toEqual([[workspaceId, 2]]);
 });
 
-test('machine availability precedes approval for shell, structural reads, and lifecycle runs', async () => {
+test('shell, structural reads, and lifecycle runs fail without an available machine', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`preflight:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, root, calls } = await ownerFixture(ctx);
     await runtime.harness.commit(async tx => {
       (await tx.doc(WorkspaceDoc)).phase = 'code';
-      (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'always-ask';
     }, BACKGROUND_CONTEXT);
     const requests: ToolCall[] = [
       { type: 'toolCall', id: 'shell', name: 'bash', arguments: { command: 'pwd' } },
@@ -353,7 +350,6 @@ test('a machine tool with no ready machine attaches the default one and says to 
       const machine = vi.spyOn(runtime.attachments, 'execute');
       await runtime.harness.commit(async tx => {
         (await tx.doc(WorkspaceDoc)).phase = 'code';
-        (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'always-ask';
       }, BACKGROUND_CONTEXT);
       try {
         calls.push({ type: 'toolCall', id: 'shell', name: 'bash', arguments: { command: 'pwd' } });
@@ -363,7 +359,7 @@ test('a machine tool with no ready machine attaches the default one and says to 
         if (!result || result.role !== 'toolResult') throw new Error('Missing tool result');
         expect(result.isError).toBe(true);
         expect(JSON.stringify(result.content)).toContain('No machine was ready, so Darktop is being attached to this workspace. Retry this call when its setup finishes');
-        // Attaching happens before, and instead of, an approval question; nothing ran.
+        // Attaching happens instead of running; nothing ran.
         expect((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
         expect(machine).not.toHaveBeenCalled();
         expect(attachRequests).toEqual([darktop]);

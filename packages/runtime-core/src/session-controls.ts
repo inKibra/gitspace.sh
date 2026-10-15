@@ -1,6 +1,5 @@
-import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type ToolExecutionApi, type Harness, type Conversation, type ConversationId, type ModelRef, type EntryId, type Cursor } from '@earendil-works/pi-durable';
+import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type Harness, type Conversation, type ConversationId, type ModelRef, type EntryId, type Cursor } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import type { Context, JsonValue } from '@earendil-works/chord';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
 import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type AgentSetupView, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
@@ -9,8 +8,8 @@ import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRe
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, type RuntimeBrowserApprovalCard, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage } from '@gitspace/protocol-runtime';
-import { isSubagentReadonlyTool, isSubagentToolCallAllowed, runtimeOperationIsReadOnly } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage } from '@gitspace/protocol-runtime';
+import { isSubagentReadonlyTool } from '@gitspace/protocol-runtime';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { cronHasOutstanding } from './cron.js';
@@ -18,9 +17,8 @@ import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/proto
 
 const ThinkingSchema = modelRoleThinkingSchema.unwrap();
 const ThinkingSelectionSchema = z.discriminatedUnion('source', [z.object({ source: z.literal('profile') }), z.object({ source: z.literal('conversation'), thinking: modelRoleThinkingSchema })]);
-// `approvalMode` is null until the conversation first needs it; it then adopts its inference profile's default once.
-const ControlsSchema = z.object({ revision: z.number(), settingsRevision: z.number(), instructionsRevision: z.number(), inferenceRevision: z.number(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), thinkingSelection: ThinkingSelectionSchema.optional(), fastMode: z.boolean(), approvalMode: SessionControlSchema.shape.approvalMode.nullable(), goal: SessionControlSchema.shape.goal, definitions: z.array(AgentDefinitionSchema), definitionErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional() });
-export const SessionControlsDoc = defineDoc<z.infer<typeof ControlsSchema>>({ kind: 'gitspace.session-controls', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ revision: 0, settingsRevision: 0, instructionsRevision: 0, inferenceRevision: 0, selection: { kind: 'default' }, role: null, thinkingSelection: { source: 'profile' }, fastMode: false, approvalMode: null, goal: null, definitions: [] }) });
+const ControlsSchema = z.object({ revision: z.number(), settingsRevision: z.number(), instructionsRevision: z.number(), inferenceRevision: z.number(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), thinkingSelection: ThinkingSelectionSchema.optional(), fastMode: z.boolean(), goal: SessionControlSchema.shape.goal, definitions: z.array(AgentDefinitionSchema), definitionErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional() });
+export const SessionControlsDoc = defineDoc<z.infer<typeof ControlsSchema>>({ kind: 'gitspace.session-controls', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ revision: 0, settingsRevision: 0, instructionsRevision: 0, inferenceRevision: 0, selection: { kind: 'default' }, role: null, thinkingSelection: { source: 'profile' }, fastMode: false, goal: null, definitions: [] }) });
 /** An explicit session effort (including auto/null) wins until the user selects another role. */
 export async function applyInferenceThinking(target: Conversation, admission: InferenceModelAdmission): Promise<void> {
   const thinking = await target.commit(async tx => {
@@ -68,44 +66,6 @@ export const sessionControlsExtension = defineExtension({ name: 'gitspace.sessio
   if (!controls) return '';
   return [controls.goal?.status === 'active' ? `Active goal: ${controls.goal.objective}` : '', ...(controls.definitionErrors ?? []).map(error => `Unavailable agent definition ${error.path}: ${error.message}`), ...resolveAgentDefinitions(controls.definitions).agents.map(definition => `Available agent ${definition.name}: ${definition.description}; model ${definition.modelSelectors.join(', ') || 'workspace default (independent of parent)'}; tools ${definition.tools.join(', ') || 'fixed read-only defaults'}. Invoke agents spawn with agent: "${definition.name}" and task; name is a separate optional address. This child uses only its saved instructions and retained repository rules.`)].filter(Boolean).join('\n\n');
 } }] });
-export async function committedSessionApproval(harness: Harness, conversationId: string, taskId: string) {
-  const questions = await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT);
-  return questions?.items.find(item => item.id === `approval:${taskId}` && item.conversationId === conversationId);
-}
-export type ApprovalMode = SessionControlView['approvalMode'];
-/** The conversation's approval mode; a conversation without one adopts its inference profile's default and keeps it, so later profile edits apply to new conversations only. */
-export async function sessionApprovalMode(owner: Pick<Harness, 'commit'>, conversationId: ConversationId, context: Context, approvalDefault: () => Promise<ApprovalMode>): Promise<ApprovalMode> {
-  const stored = await owner.commit(async tx => (await tx.doc(SessionControlsDoc, conversationId)).approvalMode, context);
-  if (stored) return stored;
-  const adopted = await approvalDefault();
-  return owner.commit(async tx => {
-    const draft = await tx.doc(SessionControlsDoc, conversationId);
-    if (draft.approvalMode === null) { draft.approvalMode = adopted; draft.revision++; }
-    return draft.approvalMode;
-  }, context);
-}
-export async function enforceSessionApproval(api: ToolExecutionApi, context: Context, tool: string, args: JsonValue, approvalDefault: () => Promise<ApprovalMode>, browser?: RuntimeBrowserApprovalCard): Promise<boolean> {
-  if (tool === 'browser' && !browser) throw new Error('Browser preflight required');
-  if ((await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child) return isSubagentToolCallAllowed(tool, args);
-  if (browser && !browser.requiresApproval) return true;
-  const approvalMode = await sessionApprovalMode(api, api.conversationId, context, approvalDefault);
-  if (approvalMode === 'yolo') return true;
-  const readOnly = runtimeOperationIsReadOnly(tool, args);
-  if (readOnly && (tool === 'bash' || tool === 'proc' || approvalMode === 'write')) return true;
-  const id = `approval:${api.taskId}`;
-  await api.commit(async tx => { const questions = await tx.doc(QuestionsDoc); if (!questions.items.some(item => item.id === id)) questions.items.push({ id, conversationId: String(api.conversationId), kind: 'approval', prompt: browser ? `Create browser group "${browser.groupName}" with access to ${browser.origins.join(', ')}?` : `Allow ${tool}?`, choices: ['Approve', 'Reject'], answer: null, ...(browser ? { browser } : { tool: { name: tool, args } }) }); }, context);
-  const watch = await api.watchDoc(QuestionsDoc, context);
-  if (!watch) throw new Error('Approval document missing');
-  const answer = watch.value?.items.find(item => item.id === id)?.answer;
-  if (answer !== null && answer !== undefined) { await watch.stop(); return answer === true; }
-  try {
-    return await new Promise<boolean>((resolve, reject) => {
-      watch.start(async value => { const answer = value?.items.find(item => item.id === id)?.answer; if (answer !== null && answer !== undefined) resolve(answer === true); });
-      void watch.closed.then(result => { if (result.reason !== 'stopped') reject(new Error(`Approval wait ended: ${result.reason}`)); });
-    });
-  } finally { await watch.stop(); }
-}
-
 export interface SessionHistoryService {
   conversation(id: string): Promise<ConversationId>;
   recent(target: ConversationId): Promise<{ anchorId: string | null; prompts: { entryId: string; text: string }[]; tokens: number | null }>;
@@ -116,11 +76,9 @@ export interface SessionHistoryService {
   usage(target: ConversationId, harness: Harness): Promise<SessionUsageReport>;
 }
 /** A passive snapshot; an unavailable profile has no displayed default to adopt. */
-export type SessionCatalog = { models: SessionControlView['models']; roles: SessionControlView['roles']; inference?: SessionControlView['inference']; approvalDefault?: ApprovalMode };
+export type SessionCatalog = { models: SessionControlView['models']; roles: SessionControlView['roles']; inference?: SessionControlView['inference'] };
 export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference' | 'setWorkspacePhase'> & {
   harness: Harness;
-  /** Resolves the authoritative profile default on admission, never for passive control reads. */
-  approvalDefault(): Promise<ApprovalMode>;
   root: Conversation;
   history: SessionHistoryService;
   lifecycle: ConversationLifecycle;
@@ -208,10 +166,7 @@ export function createSessionControls(services: SessionControlServices) {
     const context = tokens !== null && currentModel?.contextWindow ? { tokens, contextWindow: currentModel.contextWindow, percent: tokens / currentModel.contextWindow * 100 } : null;
     const clock = await harness.snapshot(GoalClockDoc, target.id, ctx);
     const goal = state.goal ? { ...state.goal, tokensUsed: Math.max(0, buckets.reduce((sum, value) => sum + value.totalTokens, 0) - (clock?.tokensAtStart ?? 0)), timeUsedSeconds: (clock?.elapsedSeconds ?? 0) + (clock?.startedAt === null || clock?.startedAt === undefined ? 0 : Math.max(0, (Date.now() - clock.startedAt) / 1000)) } : null;
-    // A missing profile displays a conservative mode without freezing it into the
-    // conversation. Actual admission/effects still resolve the authoritative default.
-    const approvalMode = state.approvalMode ?? catalog.approvalDefault ?? 'always-ask';
-    return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role, roleLabel: child ? child.role : catalog.roles.find(role => role.id === state.role)?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? null, thinking: child ? child.thinking : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', approvalMode, context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null }] } : null };
+    return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role, roleLabel: child ? child.role : catalog.roles.find(role => role.id === state.role)?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? null, thinking: child ? child.thinking : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null }] } : null };
   }
   async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false): Promise<RuntimeSessionResult> {
     let target = await conversation(id);
@@ -236,7 +191,6 @@ export function createSessionControls(services: SessionControlServices) {
           const requestId = crypto.randomUUID();
           const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, target.id, ctx))?.selection ?? { kind: 'default' as const };
           const model = await services.admitInference({ conversationId: String(target.id), requestId, selection });
-          await sessionApprovalMode(target, target.id, ctx, services.approvalDefault);
           await services.configureModel(target.id, model);
           await applyInferenceThinking(target, model);
           const cronOutstanding = await target.commit(tx => cronHasOutstanding(tx, target.id), ctx);
@@ -248,10 +202,6 @@ export function createSessionControls(services: SessionControlServices) {
       case 'setThinking': { const thinking = modelRoleThinkingSchema.parse(command.thinking); await target.configure({ thinkingLevel: thinking }, ctx); await mutate(draft => { draft.thinkingSelection = { source: 'conversation', thinking }; }); break; }
       case 'cycleRole': { const catalog = await services.catalog(); if (!catalog.roles.length) throw new Error('No configured inference roles'); const state = await harness.snapshot(SessionControlsDoc, target.id, ctx); const index = catalog.roles.findIndex(role => role.id === state?.role); const next = index < 0 ? command.direction === 'forward' ? 0 : catalog.roles.length - 1 : (index + (command.direction === 'forward' ? 1 : catalog.roles.length - 1)) % catalog.roles.length; const role = catalog.roles[next]!; await services.configureModel(target.id, { provider: role.provider, modelId: role.model }); await target.configure({ thinkingLevel: modelRoleThinkingSchema.parse(role.thinking) }, ctx); await mutate(draft => { draft.role = role.id; draft.selection = role.id === 'default' ? { kind: 'default' } : { kind: 'role', role: role.id }; draft.thinkingSelection = { source: 'profile' }; }); break; }
       case 'setFast': await mutate(draft => { draft.fastMode = command.enabled; }); break;
-      case 'setApproval': {
-        if (!canApprove) throw new Error('Human approval authority required');
-        await mutate(draft => { draft.approvalMode = command.approvalMode; }); break;
-      }
       case 'setWorkspacePhase':
         await services.setWorkspacePhase?.(command.phase);
         await harness.commit(async tx => { const workspace = await tx.doc(WorkspaceDoc); workspace.phase = command.phase; }, ctx);

@@ -5,7 +5,6 @@ import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, ty
 import { Type } from 'typebox';
 import { createModels, createAssistantMessageEventStream, getCurrentTools, type AssistantMessage, type Models, type Model, type Api, type ToolCall } from '@earendil-works/pi-ai';
 import { RuntimeBrowserApprovalCardSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema } from '@gitspace/protocol-runtime';
-import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
 import { createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
@@ -18,8 +17,8 @@ const operations: JobServices = { execute: unused, reconcile: unused, cancel: un
 const completed: ToolServices['invoke'] = async input => ({ status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: `Executed ${input.tool}` }] });
 const services: ToolServices = {
   invoke: completed,
-  async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs', requiresApproval: false }); },
-  question: async () => 'answered', instructions: async () => '', authorizeCronTool: unused, approvalDefault: unused, preflight: async () => {},
+  async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
+  question: async () => 'answered', instructions: async () => '', authorizeCronTool: unused, preflight: async () => {},
 };
 const samples: Record<string, ToolCall['arguments']> = {
   read: { path: 'src/main.ts', offset: 1, limit: 10 }, write: { path: 'src/main.ts', content: 'new content' },
@@ -35,8 +34,8 @@ const samples: Record<string, ToolCall['arguments']> = {
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'] },
 };
-async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = [], approvalDefault: ToolServices['approvalDefault'] = async () => 'yolo') {
-  const tools = [...createRuntimeTools({ ...services, invoke, approvalDefault }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
+async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = []) {
+  const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools, tasks: [createJobTask(jobServices)] }));
   let generation = 0;
   const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, context) {
@@ -204,65 +203,9 @@ test('background bash rejects unavailable execution before returning acceptance 
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
 
-test('readonly process and background command controls bypass always-ask approval', async () => {
-  const calls = [call('bash', { op: 'list' }, 'commands'), ...['list', 'status', 'logs', 'wait'].map(op => call('proc', op === 'list' ? { op } : { op, name: 'service' }, `proc-${op}`))];
-  const { harness, root } = await registered([calls]);
-  try {
-    await harness.commit(async tx => { (await tx.doc(SessionControlsDoc, root.id)).approvalMode = 'always-ask'; }, BACKGROUND_CONTEXT);
-    await root.submit({ type: 'input', content: 'Inspect running work.' }, BACKGROUND_CONTEXT);
-    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(1500), BACKGROUND_CONTEXT));
-    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
-    const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
-    expect(results.map(result => result.toolCallId).sort()).toEqual(calls.map(item => item.id).sort());
-    expect(results.some(result => result.isError)).toBe(false);
-  } finally { await harness.close(BACKGROUND_CONTEXT); }
-}, 5000);
-
-test('a new conversation adopts its inference profile default approval mode once, unaffected by later profile edits', async () => {
-  let profileDefault: SessionControlView['approvalMode'] = 'yolo';
-  let mutations = 0;
-  const { harness, root } = await registered([[call('write', { path: 'a.ts', content: 'a' }, 'first')], [call('write', { path: 'b.ts', content: 'b' }, 'second')]], async input => {
-    mutations++;
-    profileDefault = 'always-ask';
-    return completed(input);
-  }, operations, [], async () => profileDefault);
-  try {
-    await root.submit({ type: 'input', content: 'Write both files.' }, BACKGROUND_CONTEXT);
-    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(1500), BACKGROUND_CONTEXT));
-    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
-    expect(mutations).toBe(2);
-    expect((await harness.snapshot(SessionControlsDoc, root.id, BACKGROUND_CONTEXT))?.approvalMode).toBe('yolo');
-  } finally { await harness.close(BACKGROUND_CONTEXT); }
-}, 5000);
-
-test('a profile defaulting to Ask for writes asks before a new conversation mutates', async () => {
-  let mutations = 0;
-  const fixture = await registered([[call('write', { path: 'denied.ts', content: 'denied' })]], async input => { mutations++; return completed(input); }, operations, [], async () => 'write');
-  await fixture.harness.commit(async tx => { await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
-  const watch = await fixture.harness.watchDoc(QuestionsDoc, BACKGROUND_CONTEXT);
-  if (!watch) throw new Error('Questions fixture document missing');
-  const asked = Promise.withResolvers<string>();
-  watch.start(async value => {
-    const question = value?.items.find(item => item.kind === 'approval' && item.answer === null);
-    if (question) asked.resolve(question.id);
-  });
-  try {
-    await fixture.root.submit({ type: 'input', content: 'Write a file.' }, BACKGROUND_CONTEXT);
-    const id = await asked.promise;
-    await fixture.harness.commit(async tx => {
-      const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === id);
-      if (!question) throw new Error('Approval disappeared');
-      question.answer = false;
-    }, BACKGROUND_CONTEXT);
-    await fixture.root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
-    expect(mutations).toBe(0);
-    expect((await fixture.harness.snapshot(SessionControlsDoc, fixture.root.id, BACKGROUND_CONTEXT))?.approvalMode).toBe('write');
-  } finally { await watch.stop(); await fixture.harness.close(BACKGROUND_CONTEXT); }
-}, 5000);
-
-test('a mutating machine command with no machine attached fails before asking for approval', async () => {
+test('a mutating machine command with no machine attached fails before dispatch', async () => {
   let dispatched = 0;
-  const tools = createRuntimeTools({ ...services, approvalDefault: async () => 'write', async invoke(input) { dispatched++; return completed(input); }, async preflight(input) { if (input.tool === 'bash') throw new Error('No machine attached: attach a ready workspace cache or choose an available execution machine.'); } }, operations, (id, context) => harness.abortTask(id, context), async () => {});
+  const tools = createRuntimeTools({ ...services, async invoke(input) { dispatched++; return completed(input); }, async preflight(input) { if (input.tool === 'bash') throw new Error('No machine attached: attach a ready workspace cache or choose an available execution machine.'); } }, operations, (id, context) => harness.abortTask(id, context), async () => {});
   const registry = createRegistry(); registry.install(defineExtension({ name: 'preflight-proof', tools }));
   let generation = 0;
   const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
@@ -374,7 +317,7 @@ test('bash logs exposes executor failures as tool errors rather than successful 
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 4000);
 
-test('codemode children own durable attempts rather than inheriting parent approval', async () => {
+test('codemode children own durable attempts', async () => {
   const invoked: Array<Parameters<ToolServices['invoke']>[0]> = [];
   const fixture = await registered([[call('codemode', { code: 'composed' })]], async input => {
     invoked.push(input);
@@ -397,41 +340,6 @@ test('codemode children own durable attempts rather than inheriting parent appro
     const parentResult = results.find(result => result.toolCallId === 'codemode');
     expect(parentResult?.isError, JSON.stringify(parentResult)).not.toBe(true);
   } finally { await fixture.harness.close(BACKGROUND_CONTEXT); }
-}, 5000);
-
-test('codemode child mutation asks independently and rejection prevents its effect', async () => {
-  let mutations = 0;
-  const fixture = await registered([[call('codemode', { code: 'composed' })]], async input => {
-    if (input.tool !== 'codemode') { mutations++; return completed(input); }
-    if (!input.codemodeTools) throw new Error('Missing codemode permission authority');
-    await fixture.harness.commit(async tx => { (await tx.doc(SessionControlsDoc, fixture.root.id)).approvalMode = 'write'; }, BACKGROUND_CONTEXT);
-    await expect(input.codemodeTools({ tool: 'write', args: { path: 'denied', content: 'denied' }, callId: 'nested-rejected', signal: AbortSignal.timeout(2000) })).resolves.toMatchObject({ status: 'failed', error: expect.stringContaining('not approved') });
-    return completed(input);
-  });
-  await fixture.harness.commit(async tx => { await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
-  const watch = await fixture.harness.watchDoc(QuestionsDoc, BACKGROUND_CONTEXT);
-  if (!watch) throw new Error('Questions fixture document missing');
-  const asked = Promise.withResolvers<NonNullable<typeof watch.value>['items'][number]>();
-  watch.start(async value => {
-    const question = value?.items.find(item => item.kind === 'approval' && item.answer === null);
-    if (question) asked.resolve(question);
-  });
-  try {
-    await fixture.root.submit({ type: 'input', content: 'Request a denied mutation.' }, BACKGROUND_CONTEXT);
-    const { id, prompt, tool } = await asked.promise;
-    expect(tool).toEqual({ name: 'write', args: { path: 'denied', content: 'denied' } });
-    expect(prompt).not.toContain('"content"');
-    expect(mutations).toBe(0);
-    await fixture.harness.commit(async tx => {
-      const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === id);
-      if (!question) throw new Error('Child approval disappeared');
-      question.answer = false;
-    }, BACKGROUND_CONTEXT);
-    await fixture.root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
-    expect(mutations).toBe(0);
-    const parent = (await fixture.root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'codemode');
-    expect(parent?.role === 'toolResult' && parent.isError, JSON.stringify(parent)).not.toBe(true);
-  } finally { await watch.stop(); await fixture.harness.close(BACKGROUND_CONTEXT); }
 }, 5000);
 
 test('codemode authority distinguishes definitive denied reads from interrupted child effects', async () => {

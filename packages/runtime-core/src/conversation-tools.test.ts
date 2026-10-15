@@ -41,7 +41,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   } };
   const harness = await Harness.open(storage, { registry, models, settings: { extensions: registry.snapshot().installed(), compaction: { enabled: false } } }, context);
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: 'parent-only-model' }, thinkingLevel: 'max', instructions: 'PRIVATE PARENT PERSONA', tools } });
-  await root.commit(async tx => { const state = await tx.doc(SessionControlsDoc, root.id); state.definitions = files ? [] : [definition]; state.fastMode = true; state.approvalMode = 'yolo'; state.role = 'parent'; state.selection = { kind: 'explicit', provider: 'test', modelId: 'parent-only-model' }; }, context);
+  await root.commit(async tx => { const state = await tx.doc(SessionControlsDoc, root.id); state.definitions = files ? [] : [definition]; state.fastMode = true; state.role = 'parent'; state.selection = { kind: 'explicit', provider: 'test', modelId: 'parent-only-model' }; }, context);
   const catalog = async () => {
     const role = resolveProfileModel(settings, models, 'review');
     return { models: available.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })), roles: [{ id: 'review', label: 'Reviewer role', provider: role.model.provider, model: role.model.id, thinking: role.thinking, current: false }] };
@@ -56,7 +56,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };
   const controls = createSessionControls({
-    harness, root, lifecycle, admitInference, configureModel, catalog, approvalDefault: async () => 'write',
+    harness, root, lifecycle, admitInference, configureModel, catalog,
     reload: async () => {},
     ...(files ? { loadAgentDefinitions: async () => files } : {}),
     browser: async id => { browserTargets.push(id); return { groups: [], records: [] }; },
@@ -216,7 +216,6 @@ test('role and file children independently resolve selection, persona, thinking 
     for (const child of [role.child, file.child]) {
       const controls = await f.harness.snapshot(SessionControlsDoc, child.id, context);
       expect(controls?.fastMode).toBe(false);
-      expect(controls?.approvalMode).not.toBe('yolo');
       expect(controls?.goal).toBe(null);
       expect(await f.harness.snapshot(PlanDoc, child.id, context)).toBeUndefined();
     }
@@ -295,24 +294,6 @@ test.each(childMutations)('a child session rejects $type before workspace or bro
       await f.controls.execute(String(f.root.id), command, true);
       expect(f.browserTargets).toEqual([String(f.root.id)]);
     }
-  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
-});
-
-test('passive controls leave approval unadopted until a prompt is admitted and preserve explicit overrides', async () => {
-  const f = await fixture();
-  try {
-    await f.root.commit(async tx => { (await tx.doc(SessionControlsDoc, f.root.id)).approvalMode = null; }, context);
-    await f.controls.execute(String(f.root.id), { type: 'control' });
-    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.approvalMode).toBeNull();
-    const admitted = await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Admit using the configured approval default.' });
-    await f.root.waitForIdle(context);
-    expect(admitted.control.approvalMode).toBe('write');
-    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.approvalMode).toBe('write');
-    await f.controls.execute(String(f.root.id), { type: 'setApproval', approvalMode: 'always-ask' }, true);
-    const overridden = await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Keep my explicit approval override.' });
-    await f.root.waitForIdle(context);
-    expect(overridden.control.approvalMode).toBe('always-ask');
-    expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.approvalMode).toBe('always-ask');
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 });
 

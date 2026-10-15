@@ -117,7 +117,7 @@ it('coalesces cursor refreshes instead of restarting Inspector reads that are st
 
 it('loads cloud session usage without a cache and retains it when a cache is attached', async () => {
   const totals = { requests: 2, input: 100, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 120, reasoningTokens: 0, costUsd: 0.75 };
-  const control = SessionControlSchema.parse({ sessionId: 'main', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0.75, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null });
+  const control = SessionControlSchema.parse({ sessionId: 'main', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0.75, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null });
   runtimeSession.mockResolvedValue({ status: 'ok', value: { control, usage: { sessionId: 'main', totals, totalsDeep: totals, childSessions: 0, byModel: [], byRole: [], byAgent: [], byCompletion: [], warnings: [] } } });
   await act(() => render({}));
   await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Load usage')!.click(); });

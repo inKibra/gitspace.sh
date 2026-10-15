@@ -16,8 +16,6 @@ import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
 import { workspaceMachines, workspaceMachinesSummary, workspaceStatus } from './workspace-status.js';
-import { BrowserApprovalCard } from './RuntimeBrowser.js';
-import { ToolApprovalCard } from './ToolApprovalCard.js';
 import { RELEASE_TARGETS } from './release.js';
 import { LaunchMachineDialog, LaunchSheet, LaunchedBanner, RevertSheet } from './LaunchSheet.js';
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
@@ -106,12 +104,11 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const transcript = useTranscriptHistory(transcriptSource);
   const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null);
   const controls: SessionControlsProps | undefined = value ? {
-    value: value.pendingAsk || !question || question.browser || question.tool ? value : { ...value, pendingAsk: { id: question.id, source: 'gitspace', links: [], questions: [{ id: question.id, question: question.prompt, header: question.kind === 'approval' ? 'Approval required' : null, multi: false, recommended: null, options: (question.kind === 'approval' ? ['Approve', 'Reject'] : question.choices).map(label => ({ label, description: null, preview: null })) }] } },
+    value: value.pendingAsk || !question ? value : { ...value, pendingAsk: { id: question.id, source: 'gitspace', links: [], questions: [{ id: question.id, question: question.prompt, header: question.kind === 'approval' ? 'Approval required' : null, multi: false, recommended: null, options: (question.kind === 'approval' ? ['Approve', 'Reject'] : question.choices).map(label => ({ label, description: null, preview: null })) }] } },
     onCycleRole: async direction => { await run({ type: 'cycleRole', direction }); },
     onSetModel: async (provider, model) => { await run({ type: 'setModel', provider, model }); },
     onSetThinking: async thinking => { await run({ type: 'setThinking', thinking }); },
     onSetFast: async enabled => { await run({ type: 'setFast', enabled }); },
-    onSetApproval: async approvalMode => { await run({ type: 'setApproval', approvalMode }); },
     onSetGoal: async enabled => { await run({ type: 'setGoal', enabled }); },
     onCompact: async instructions => { await run({ type: 'compact', ...(instructions ? { instructions } : {}) }); },
     onClearQueue: async () => { await run({ type: 'clearQueue' }); },
@@ -162,15 +159,6 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       onRetryAgent={async () => { await run({ type: 'resume' }); }} onOpenSettings={props.onOpenSettings} onSelectProject={props.onSelectProject} onSelectWorkspace={props.onSelectWorkspace}
       controlsError={session.error ?? (providers.state === 'failure' ? rpcErrorMessage(providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
-      approvalCard={question?.browser ? <BrowserApprovalCard key={`${question.id}:${question.browser.id}`} request={question.browser} requestDetails={question.prompt} connected={connected} machineName={inspection.machines.find(machine => question.browser && 'machineId' in question.browser && machine.id === question.browser.machineId)?.label} onAnswer={async approved => {
-        const response = await rpcClient.runtime.answer({ ...identity, questionId: question.id, answer: approved, expectedBrowserPreparationId: question.browser!.id });
-        if (response.status === 'error') throw response.error;
-        await run({ type: 'control' });
-      }} /> : question?.tool ? <ToolApprovalCard key={question.id} tool={question.tool} machines={inspection.machines} connected={connected} onAnswer={async approved => {
-        const response = await rpcClient.runtime.answer({ ...identity, questionId: question.id, answer: approved });
-        if (response.status === 'error') throw response.error;
-        await run({ type: 'control' });
-      }} /> : undefined}
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
       onSetWorkspacePhase={async (_id, phase) => { await perform(async () => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }); }}
       onSetWorkspaceRelations={relationsEditable ? setRelations : undefined}

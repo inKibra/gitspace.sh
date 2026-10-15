@@ -8,7 +8,7 @@ import { useCloudSessionControls, type CloudSessionControls } from './useCloudSe
 const rpc = vi.hoisted(() => ({ session: vi.fn() }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: rpc } }));
 const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId: 'workspace', cursor: 1, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
-function control(sessionId: string) { return SessionControlSchema.parse({ sessionId, role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null }); }
+function control(sessionId: string) { return SessionControlSchema.parse({ sessionId, role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null }); }
 let root: Root;
 let container: HTMLDivElement;
 let state: CloudSessionControls;

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, profileApprovalMode, type InferenceProfile } from '@gitspace/protocol/inference';
+import { applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
@@ -145,7 +145,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
             if (!(error instanceof Error) || error.message !== `Inference profile has no admitted model for role ${role}`) throw error;
           }
         }
-        return { models: models.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })), roles, approvalDefault: profileApprovalMode(currentProfile.settings),
+        return { models: models.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })), roles,
           ...(currentAssignment === null ? {} : { inference: { profileId: currentProfile.id, profileName: currentProfile.name, profileRevision: currentProfile.revision, assignmentRevision: currentAssignment } }) };
       },
       async reload(_kind: 'settings' | 'instructions' | 'inference') {

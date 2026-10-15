@@ -114,7 +114,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     return files;
   };
   const history = createSessionHistory(options.storage, storage);
-  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, approvalDefault: options.tools.approvalDefault, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference });
+  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference });
   const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
   const cron = createCronRuntime({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { await options.schedule(Date.now() + 1000); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
@@ -433,7 +433,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         if (question.answer !== null) { if (JSON.stringify(question.answer) !== JSON.stringify(input.answer)) throw new Error('Question already answered'); return; }
         if (question.kind === 'approval' && !actor.canApprove) throw new Error('Human approval capability required');
         if (question.kind === 'approval' && typeof input.answer !== 'boolean') throw new Error('Approval answer must be a boolean');
-        if (question.browser && input.answer === true && input.expectedBrowserPreparationId !== question.browser.id) throw new Error('Browser group approval must match the displayed preparation');
         question.answer = input.answer;
         if (question.kind === 'approval') {
           const id = conversationIds.get(question.conversationId); if (id === undefined) throw new Error('Approval conversation missing');

@@ -97,7 +97,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
       if (operation === 'runtime.cancel') return access.authority.runtimeCancel(payload);
       if (operation === 'runtime.answer') return access.authority.runtimeAnswer(payload, { deviceId: machineId, canApprove: false });
       const input = RuntimeSessionInputSchema.parse(payload);
-      if (['setApproval', 'setWorkspacePhase', 'saveAgentDefinition'].includes(input.command.type)) throw new Error('Administrative session changes require the direct device-signed cloud API');
+      if (['setWorkspacePhase', 'saveAgentDefinition'].includes(input.command.type)) throw new Error('Administrative session changes require the direct device-signed cloud API');
       return RuntimeSessionResultSchema.parse(await (await access.authority.runtimeSession(input, { canApprove: false })).json());
     }
     case 'runtime.attachment.cache.request': {

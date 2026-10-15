@@ -20,7 +20,7 @@ export type RuntimeBrowserArguments = z.infer<typeof RuntimeBrowserArgumentsSche
 const executionScope = { projectId: id, workspaceId: id, machineId: id, attachmentId: id, generation: z.number().int().nonnegative() };
 export const RuntimeBrowserGrantSchema = z.strictObject({ ...executionScope, groupId: z.string().uuid(), groupName: id, source: z.enum(['relay', 'headless']), origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime() });
 export type RuntimeBrowserGrant = z.infer<typeof RuntimeBrowserGrantSchema>;
-export const RuntimeBrowserPreparationSchema = RuntimeBrowserGrantSchema.extend({ id, action: z.enum(['open', 'tabs', 'navigate', 'observe', 'act', 'evaluate', 'screenshot', 'close']), requiresApproval: z.boolean() });
+export const RuntimeBrowserPreparationSchema = RuntimeBrowserGrantSchema.extend({ id, action: z.enum(['open', 'tabs', 'navigate', 'observe', 'act', 'evaluate', 'screenshot', 'close']) });
 export type RuntimeBrowserPreparation = z.infer<typeof RuntimeBrowserPreparationSchema>;
 export const RuntimeAccountBrowserPlacementSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('cloud'), accountId: id }),
@@ -29,7 +29,7 @@ export const RuntimeAccountBrowserPlacementSchema = z.discriminatedUnion('kind',
 export type RuntimeAccountBrowserPlacement = z.infer<typeof RuntimeAccountBrowserPlacementSchema>;
 export const RuntimeAccountBrowserGrantSchema = RuntimeBrowserGrantSchema.omit({ machineId: true, attachmentId: true, generation: true }).extend({ placement: RuntimeAccountBrowserPlacementSchema });
 export type RuntimeAccountBrowserGrant = z.infer<typeof RuntimeAccountBrowserGrantSchema>;
-export const RuntimeAccountBrowserPreparationSchema = RuntimeAccountBrowserGrantSchema.extend({ id, action: RuntimeBrowserPreparationSchema.shape.action, requiresApproval: z.boolean() });
+export const RuntimeAccountBrowserPreparationSchema = RuntimeAccountBrowserGrantSchema.extend({ id, action: RuntimeBrowserPreparationSchema.shape.action });
 export const RuntimeBrowserApprovalCardSchema = z.union([RuntimeBrowserPreparationSchema, RuntimeAccountBrowserPreparationSchema]);
 export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCardSchema>;
 export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional() });
@@ -105,7 +105,6 @@ export const RuntimeBrowserStatusSchema = z.strictObject({
   records: z.array(z.strictObject({ id, groupId: z.string().uuid().optional(), projectId: id, workspaceId: id, state: z.enum(['uncertain', 'fenced', 'stopped']), reason: z.string().max(1024), expiresAt: z.iso.datetime().optional(), actions: z.array(z.enum(['reconcile', 'discard'])).max(2) })).max(200),
 });
 export type RuntimeBrowserStatus = z.infer<typeof RuntimeBrowserStatusSchema>;
-export function browserNeedsExplicitApproval(args: RuntimeBrowserArguments): boolean { return args.action === 'open' && args.source === 'relay'; }
 
 /** Domain-separated canonical JSON: signatures never accept a key supplied by the command. */
 export function canonicalBrowserAuthorization(value: unknown): string {

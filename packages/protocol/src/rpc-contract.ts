@@ -442,7 +442,6 @@ export const SessionControlViewCodec = wire.object({
   model: wire.nullable(wire.string),
   thinking: wire.nullable(wire.string),
   fastMode: wire.boolean,
-  approvalMode: wire.enum(['always-ask', 'write', 'yolo']),
   planMode: wire.boolean,
   context: wire.nullable(wire.object({ tokens: wire.number, contextWindow: wire.number, percent: wire.number })),
   cost: wire.number,

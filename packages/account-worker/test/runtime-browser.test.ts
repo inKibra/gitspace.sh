@@ -2,7 +2,6 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durable';
 import { createModels } from '@earendil-works/pi-ai';
-import { SessionControlsDoc } from '@gitspace/runtime-core/session-controls';
 import { createRuntimeBrowserAuthority } from '../src/runtime-browser.js';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
 import { RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
@@ -54,35 +53,33 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
     if (!selected) throw new Error('No selected browser cache is ready');
     return selected;
-  }, approvedOrigins: async () => state.origins, approvalDefault: async () => 'write', groupName: async () => 'Workspace' });
+  }, approvedOrigins: async () => state.origins, groupName: async () => 'Workspace' });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  const mode = async (approvalMode: 'write' | 'always-ask' | 'yolo') => harness.commit(async tx => { (await tx.doc(SessionControlsDoc, root.id)).approvalMode = approvalMode; }, BACKGROUND_CONTEXT);
-  return { authority, input, mode, state, dispatches, attachments, machines, attachment, pairing, forgottenPairings, offlinePairings };
+  return { authority, input, state, dispatches, attachments, machines, attachment, pairing, forgottenPairings, offlinePairings };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
-  expect(card.requiresApproval).toBe(false);
   await f.authority.execute(f.input);
   const next = await f.authority.prepare({ ...f.input, attemptId: 'next' });
   expect(next.groupId).toBe(card.groupId);
   expect(next.origins).toEqual(['example.com', 'other.test']);
 });
-test('yolo creates groups without approving missing environment origins', async () => {
-  const f = await fixture(); await f.mode('yolo');
-  expect((await f.authority.prepare(f.input)).requiresApproval).toBe(false);
+test('groups are created without approving missing environment origins', async () => {
+  const f = await fixture();
+  await f.authority.prepare(f.input);
   await f.authority.execute(f.input);
   f.state.origins = [];
   await expect(f.authority.prepare({ ...f.input, attemptId: 'missing' })).rejects.toThrow('.gitspace/bundle.json');
 });
 test('yolo cannot prepare unapproved Chrome and project revocation invalidates an already prepared group', async () => {
-  const f = await fixture(); await f.mode('yolo'); f.state.projectApproved = false;
+  const f = await fixture(); f.state.projectApproved = false;
   await expect(f.authority.prepare(f.input)).rejects.toThrow('not approved for this project');
   f.state.projectApproved = true; await f.authority.prepare(f.input); f.state.projectApproved = false;
   await expect(f.authority.execute(f.input)).rejects.toThrow('not approved for this project');
   expect(f.dispatches).toEqual([]);
 });
 test('origin narrowing invalidates prepared grants and renews with only current origins', async () => {
-  const f = await fixture(); await f.mode('yolo');
+  const f = await fixture();
   await f.authority.prepare(f.input); await f.authority.execute(f.input);
   f.state.origins = ['example.com'];
   await expect(f.authority.execute(f.input)).rejects.toThrow('origins changed');
@@ -91,14 +88,14 @@ test('origin narrowing invalidates prepared grants and renews with only current 
   await f.authority.execute(next);
 });
 test('expired prepared group grant cannot dispatch', async () => {
-  const f = await fixture(); await f.mode('yolo'); const card = await f.authority.prepare(f.input);
+  const f = await fixture(); const card = await f.authority.prepare(f.input);
   vi.spyOn(Date, 'now').mockReturnValue(Date.parse(card.expiresAt) + 1);
   try { await expect(f.authority.execute(f.input)).rejects.toThrow('expired'); expect(f.dispatches).toEqual([]); } finally { vi.restoreAllMocks(); }
 });
 
 
 test('relay works without any machine and rejects subagents before dispatch', async () => {
- const f=await fixture(); f.attachments.splice(0); f.machines.clear(); await f.mode('yolo');
+ const f=await fixture(); f.attachments.splice(0); f.machines.clear();
  const card=await f.authority.prepare(f.input); expect('placement' in card && card.placement.kind).toBe('account-relay');
  await f.authority.execute(f.input); expect(f.dispatches).toHaveLength(1); f.state.root=false;
  await expect(f.authority.prepare({...f.input,attemptId:'child'})).rejects.toThrow('main-agent-only'); expect(f.dispatches).toHaveLength(1);
@@ -106,11 +103,11 @@ test('relay works without any machine and rejects subagents before dispatch', as
 test('headless cloud placement does not require a registered machine attachment',async()=>{
  const f=await fixture(); f.attachments.splice(0); f.machines.clear();
  f.input.args=RuntimeBrowserArgumentsSchema.parse({action:'open',source:'headless',url:'https://example.com/'});
- const card=await f.authority.prepare(f.input); expect(card.source).toBe('headless'); expect(card.requiresApproval).toBe(false);
+ const card=await f.authority.prepare(f.input); expect(card.source).toBe('headless');
  expect('placement' in card && card.placement).toEqual({kind:'cloud',accountId:'account'}); expect('machineId' in card).toBe(false);
 });
 test('pairing replacement rotates grants and rejects saved authorization',async()=>{
- const f=await fixture();await f.mode('yolo');const first=await f.authority.prepare(f.input);await f.authority.execute(f.input);
+ const f=await fixture();const first=await f.authority.prepare(f.input);await f.authority.execute(f.input);
  f.pairing.pairingId=crypto.randomUUID();f.pairing.generation++;
  await expect(f.authority.execute(f.input)).rejects.toThrow('placement changed');
  const next=await f.authority.prepare({...f.input,attemptId:'replacement'});expect(next.groupId).not.toBe(first.groupId);
@@ -121,13 +118,13 @@ test('headless explicit on still dispatches to exact ready machine',async()=>{
  await f.authority.execute(f.input);const dispatched=f.dispatches[0];expect(dispatched && 'machineId' in dispatched && dispatched.machineId).toBe('machine');
 });
 test('account group revocation prevents old approval reuse',async()=>{
- const f=await fixture(); await f.mode('yolo');const first=await f.authority.prepare(f.input);await f.authority.execute(f.input);
+ const f=await fixture();const first=await f.authority.prepare(f.input);await f.authority.execute(f.input);
  await f.authority.manage(f.input.conversationId,undefined,{action:'revoke',groupId:first.groupId});
  await expect(f.authority.execute(f.input)).rejects.toThrow('revoked');
  const next=await f.authority.prepare({...f.input,attemptId:'next'});expect(next.groupId).not.toBe(first.groupId);
 });
 test('account browser status discovers groups on every approved Chrome', async () => {
-  const f = await fixture('physical', true); await f.mode('yolo');
+  const f = await fixture('physical', true);
   f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' });
   const first = await f.authority.prepare(f.input); await f.authority.execute(f.input);
   f.pairing.pairingId = crypto.randomUUID();
@@ -137,7 +134,7 @@ test('account browser status discovers groups on every approved Chrome', async (
   expect(status.groups.map(group => group.groupId).sort()).toEqual([first.groupId, second.groupId].sort());
 });
 test('forgetting a Chrome leaves remaining browser groups discoverable', async () => {
-  const f = await fixture('physical', true); await f.mode('yolo');
+  const f = await fixture('physical', true);
   f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' });
   await f.authority.prepare(f.input); await f.authority.execute(f.input);
   const forgotten = f.pairing.pairingId;

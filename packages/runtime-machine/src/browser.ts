@@ -3,7 +3,7 @@ import { chmod, mkdir, readFile, readdir, rm, open, stat } from 'node:fs/promise
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { Browser, detectBrowserPlatform, getInstalledBrowsers, install, resolveBuildId } from '@puppeteer/browsers';
 import { ProcessSupervisor, DaemonStartSpecSchema, DaemonSpecSchema, ProcessIdentitySchema, processIdentity, sameProcess } from '@gitspace/supervisor';
-import { RuntimeBrowserArgumentsSchema, RuntimeBrowserGrantSchema, browserNeedsExplicitApproval, canonicalJson, type RuntimeBrowserAuthorization, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserGrant, type RuntimeBrowserSignedGrant, type RuntimeBrowserPreparation, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserArgumentsSchema, RuntimeBrowserGrantSchema, canonicalJson, type RuntimeBrowserAuthorization, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserGrant, type RuntimeBrowserSignedGrant, type RuntimeBrowserPreparation, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import type { ExecutorContent } from './tools.js';
@@ -271,7 +271,7 @@ export class MachineBrowser {
       await this.options.relay.prepare(args, groupId, signal);
     }
     const grant = RuntimeBrowserGrantSchema.parse({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, machineId: dispatch.machineId, attachmentId: dispatch.attachmentId, generation: dispatch.generation, groupId, groupName: dispatch.workspaceId, source: args.source, origins: [], expiresAt: new Date(Date.now() + (this.options.grantMilliseconds ?? 30 * 60_000)).toISOString() });
-    const result: RuntimeBrowserPreparation = { ...grant, id: randomUUID(), action: args.action, requiresApproval: browserNeedsExplicitApproval(args) };
+    const result: RuntimeBrowserPreparation = { ...grant, id: randomUUID(), action: args.action };
     return [{ type: 'text', text: JSON.stringify(result) }];
   }
   private async manage(dispatch: RuntimeToolDispatch, command: Extract<RuntimeBrowserAuthorizationBody['command'], {type:'manage'}>): Promise<ExecutorContent> {

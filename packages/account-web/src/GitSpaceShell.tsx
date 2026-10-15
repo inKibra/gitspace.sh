@@ -119,7 +119,6 @@ export interface SessionControlsProps {
   onSetModel(provider: string, model: string): Promise<void>;
   onSetThinking(thinking: string | null): Promise<void>;
   onSetFast(enabled: boolean): Promise<void>;
-  onSetApproval(mode: SessionControlView['approvalMode']): Promise<void>;
   onSetGoal(enabled: boolean): Promise<void>;
   onCompact(instructions?: string): Promise<void>;
   onClearQueue(): Promise<void>;
@@ -155,7 +154,6 @@ export interface GitSpaceShellProps {
   /** Present when composer attachments may be uploaded into the session's `uploads/` artifact folder. */
   artifactUpload?: ArtifactUploadClient;
   sessionControls?: SessionControlsProps;
-  approvalCard?: ReactNode;
   controlsError?: string;
   onRetryControls?: () => void;
   onRetryAgent?: () => Promise<void>;
@@ -309,11 +307,10 @@ export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, pending, error, providers, skills, banner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, pending, error, providers, skills, banner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
-  approvalCard?: ReactNode;
   controlsError?: string;
   onRetryControls?: () => void;
   onRetryAgent?: GitSpaceShellProps['onRetryAgent'];
@@ -430,7 +427,6 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, approvalCard, cont
     {banner ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-3"><div className="pointer-events-auto">{banner}</div></div> : null}
     <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-4">
       <div className="w-full max-w-xl">
-        {approvalCard}
         {standaloneAsk && pendingAsk && sessionControls
           ? <div className={`${shape.container} pointer-events-auto mb-2 flex max-h-[50dvh] flex-col gap-2 overflow-y-auto bg-surface-3 p-3 shadow-surface-3`}>
               {pendingAsk.links.length
@@ -583,7 +579,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionControls, approvalCard, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -680,7 +676,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content">
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} approvalCard={approvalCard} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}
