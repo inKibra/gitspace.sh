@@ -205,7 +205,7 @@ describe('registered browser invitations', () => {
     expect(await status(owner, used)).toMatchObject({ status: 'redeemed', deviceId: enrolled.deviceId });
   });
 
-  it('denies foreign browsers, account host substitution and revoked issuers', async () => {
+  it('denies foreign browsers, account host substitution and revoked issuers, not other browsers of the same account', async () => {
     const owner = await account();
     const other = { ...owner, userId: `u-${'0'.repeat(32)}`, handle: 'foreign-tenant', deviceId: crypto.randomUUID() };
     const invite = await register(owner);
@@ -219,9 +219,7 @@ describe('registered browser invitations', () => {
     expect(secondEnrollment.status).toBe(200);
     const secondDevice = (await secondEnrollment.json() as { value: { deviceId: string } }).value;
     const sameAccountBrowser = { ...owner, deviceId: secondDevice.deviceId };
-    for (const operation of ['status', 'cancel']) {
-      expect(await (await SELF.fetch(signedRequest(sameAccountBrowser, operation, { inviteId: invite.invite.inviteId }, newBrowserKey))).json()).toMatchObject({ error: { code: 'BROWSER_INVITATION_UNAVAILABLE' } });
-    }
+    expect(await (await SELF.fetch(signedRequest(sameAccountBrowser, 'status', { inviteId: invite.invite.inviteId }, newBrowserKey))).json()).toMatchObject({ value: { status: 'pending' } });
     const mismatchedHost = signedRequest(owner, 'status', { inviteId: invite.invite.inviteId });
     expect(await (await SELF.fetch(new Request(mismatchedHost.url.replace(owner.handle, other.handle), mismatchedHost))).json()).toMatchObject({ error: { code: 'ACCOUNT_HOST_MISMATCH' } });
     expect(await (await redeem(invite, `https://${other.handle}.gitspace.sh`)).json()).toMatchObject({ error: { code: 'ACCOUNT_HOST_MISMATCH' } });

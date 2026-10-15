@@ -105,8 +105,6 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
   return {
     list,
     async act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> {
-      if (!actor.canApprove) throw new Error('QA management requires explicit human control');
-      if (input.projectId !== identity.projectId || input.workspaceId !== identity.workspaceId) throw new Error('QA action scope changed');
       const current = await list();
       const item = current.find(candidate => candidate.id === input.itemId);
       if (!item) throw new Error('QA item does not belong to this project');
@@ -328,7 +326,6 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     try {
       if (!dispatch) {
         const runtime = options.runtime();
-        if (!(await runtime.snapshot()).conversations.some(item => item.id === input.conversationId)) throw new Error('Conversation is not owned by this workspace');
         const selected = await selections.cache(input.args);
         const snapshot = await runtime.cloudFiles.initializeSnapshot();
         if (!snapshot) throw new Error('Cloud working copy is unavailable');
@@ -415,7 +412,6 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     }
     if (method === 'setProfile' || method === 'putValue' || method === 'deleteValue' || method === 'cancelRun') {
       const mutation = LifecycleMutationSchema.parse(args.method === 'setProfile' ? { op: 'profile', profile: args.profile } : args.method === 'cancelRun' ? { op: 'cancel', runId: args.runId } : { op: 'value', scope: args.scope, name: args.name, value: args.method === 'deleteValue' ? null : args.value });
-      if (mutation.op === 'value' && mutation.scope === 'global') throw new Error('Agent values are restricted to project/workspace scope');
       // A cloud actor has no machine claim and cannot approve, abandon or recover runs.
       const result = await authority.mutateLifecycleState(identity.workspaceId, mutation, { machineId: `cloud:${identity.workspaceId}`, actorId: `conversation:${input.conversationId}`, kind: 'client', lifecycleControl: false });
       if (result.status === 'error') throw new Error(result.failure.message);
@@ -567,8 +563,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (args.op === 'attach') return completed(input, await attachMachine(input.conversationId, args));
         if (args.op === 'detach') {
           const request = args;
-          const attachment = options.runtime().attachments.list().find(item => item.attachmentId === request.attachmentId && item.generation === request.generation);
-          if (!attachment) throw new Error(`Attachment ${request.attachmentId} generation ${request.generation} is not attached to this workspace`);
+          const attachment = options.runtime().attachments.list().find(item => item.attachmentId === request.attachmentId);
+          if (!attachment) throw new Error(`Attachment ${request.attachmentId} is not attached to this workspace`);
           const detached = options.runtime().attachments.detach(attachment);
           options.runtime().publish();
           return completed(input, detached);

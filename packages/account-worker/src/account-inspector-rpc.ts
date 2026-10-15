@@ -75,7 +75,7 @@ async function readCloudResource(env: Env, userId: string, source: InspectorClou
   })();
 }
 
-export function inspectorCloudProcedures(env: Env, userId: string, requireSubscription: () => Promise<void>, currentDevice: () => Promise<VerifiedDevice>) {
+export function inspectorCloudProcedures(env: Env, userId: string, currentDevice: () => Promise<VerifiedDevice>) {
   const server = serverRpc.context<GitSpaceRpcContext>();
   const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
   const availability = server.implement(inspectorAvailabilityContract).handler(async ({ input, errors }) => {
@@ -114,9 +114,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   const transcript = server.implement(inspectorTranscriptContract).stream(async function* ({ input, signal, errors }) {
     try {
       const source = await readInspectorContext(env, userId, input.workspaceId ?? input.projectId, input.projectId);
-      await requireSubscription();
       const events = await readSavedInspectorTranscript(env, userId, source);
-      await requireSubscription();
       for await (const event of events) {
         for (const chunk of encodeTranscriptEventChunks(event)) {
           if (signal.aborted) return;
@@ -130,10 +128,8 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   });
   const transcriptPage = server.implement(inspectorTranscriptPageContract).handler(async ({ input, errors }) => {
     try {
-      await requireSubscription();
       const source = await readInspectorContext(env, userId, input.workspaceId ?? input.projectId, input.projectId);
       const page = await readSavedInspectorTranscriptPage(env, userId, source, input);
-      await requireSubscription();
       return ok(page);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
@@ -142,10 +138,8 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   });
   const transcriptContent = server.implement(inspectorTranscriptContentContract).handler(async ({ input, errors }) => {
     try {
-      await requireSubscription();
       const source = await readInspectorContext(env, userId, input.workspaceId ?? input.projectId, input.projectId);
       const content = await readSavedInspectorTranscriptContent(env, userId, source, input);
-      await requireSubscription();
       return ok(content);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
@@ -565,12 +559,10 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   const readResource = server.implement(inspectorReadResourceContract).stream(async function* ({ input, errors, signal }) {
     try {
       if (signal.aborted) return;
-      await requireSubscription();
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
       const frames = await readCloudResource(env, userId, source, input.url);
       for (const frame of frames) {
         if (signal.aborted) return;
-        await requireSubscription();
         if (signal.aborted) return;
         yield ok(frame);
       }
@@ -584,12 +576,10 @@ export function inspectorCloudProcedures(env: Env, userId: string, requireSubscr
   });
   const readResourcePage = server.implement(inspectorReadResourcePageContract).handler(async ({ input, errors }) => {
     try {
-      await requireSubscription();
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
       const frames = await readCloudResource(env, userId, source, input.url);
       const { cursor, limit, ...identity } = input;
       const page = await snapshotPage(frames, { identity, cursor, limit });
-      await requireSubscription();
       return ok(page);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));

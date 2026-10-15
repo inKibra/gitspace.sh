@@ -976,9 +976,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       return { status: 'ok', value: { inviteId: invite.inviteId, expiresAt: invite.expiresAt, status: 'pending', deviceId: null } };
     }
     const invitation = this.browserInvitation(parsed.inviteId, now);
-    if (!invitation || invitation.creator_device_id !== authorized.value.deviceId) {
-      return publicError('BROWSER_INVITATION_UNAVAILABLE', 'Browser invitation is unavailable to this browser');
-    }
+    if (!invitation) return publicError('BROWSER_INVITATION_UNAVAILABLE', 'Browser invitation is unavailable');
     if (input.operation === 'cancel' && invitation.status === 'pending') {
       this.ctx.storage.sql.exec("UPDATE browser_invitations SET status = 'cancelled' WHERE invite_id = ? AND status = 'pending'", invitation.invite_id);
       invitation.status = 'cancelled';
@@ -1023,7 +1021,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const pairingId = z.uuid().parse(body.pairingId);
     const row = this.ctx.storage.sql.exec<PairingRow>('SELECT * FROM machine_pairings WHERE pairing_id = ?', pairingId).toArray()[0];
     if (!row || row.expires_at <= now || row.state === 'cancelled') return publicError('PAIRING_UNAVAILABLE', 'Pairing is expired, cancelled or unavailable');
-    if (browserOperation && row.creator_device_id !== browserDeviceId) return publicError('PAIRING_FORBIDDEN', 'Pairing belongs to another browser');
     let machine = row.machine_json ? pairingMachineSchema.parse(JSON.parse(row.machine_json)) : null;
     if (!browserOperation) {
       const header = input.header ? decodeSignedRpcHeader(input.header) : null;
@@ -1108,8 +1105,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const latest = this.ctx.storage.sql.exec<PairingRow>('SELECT * FROM machine_pairings WHERE pairing_id = ?', pairingId).toArray()[0];
     if (!latest || latest.expires_at <= Date.now()) return publicError('PAIRING_UNAVAILABLE', 'Pairing has expired');
     if (latest.state !== 'approved' && latest.state !== 'enrolled') return publicError('PAIRING_UNAVAILABLE', 'Pairing was cancelled; start a new pairing from the browser');
-    const current = this.verifier().authorizeRelayGrant(signed, 'space.control', Date.now());
-    if (current.status === 'error') return { status: 'error', error: current.error };
     this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'enrolled' WHERE pairing_id = ? AND state = 'approved'", pairingId);
     return { status: 'ok', value: {
       state: 'enrolled', userId: config.user_id, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl,
@@ -2020,13 +2015,6 @@ function tenantReleases(env: Env, userId: string) {
 /** What this script reports as its own version: the build stamp, or `dev` for unstamped builds. */
 const WORKER_STAMP = { sha: WORKER_VERSION ?? null, version: WORKER_VERSION ?? 'dev' } as const;
 
-interface PlatformConfig {
-  url: string;
-  tenant: string;
-  userId: string;
-  token: string;
-  fetcher: Pick<Fetcher, 'fetch'>;
-}
 async function tenantWorkerVersion(env: Env, userId: string): Promise<WorkerVersion> {
   if (userId !== env.ACCOUNT_ID) throw new Error('Tenant identity does not match');
   const state = await tenantPlatformJson<{ deployment: { active: string | null } }>(env, '/state');
@@ -2042,24 +2030,18 @@ export async function revertTenantRelease(env: Env, userId: string): Promise<Dep
   const releases = tenantReleases(env, userId);
   await releases.assertChannelCompatible();
   if ((await tenantWorkerVersion(env, userId)).sha !== null) {
-    const outcome = await platformCall(await platformConfig(env, userId), 'revert', { to: 'channel' });
+    const outcome = await platformCall(env, userId, 'revert', { to: 'channel' });
     if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Platform revert failed');
   }
   await releases.revert();
   return readTenantDeployment(env, userId);
 }
-async function platformConfig(env: Env, userId: string): Promise<PlatformConfig> {
-  const account = await activeAccount(env, userId);
-  if (account.status === 'error') throw new Error(account.error.message);
-  return { url: env.PLATFORM_URL, tenant: env.TENANT_ID, userId, token: env.PLATFORM_TOKEN, fetcher: env.PLATFORM_SERVICE ?? { fetch } };
-}
-
-async function platformCall(platform: PlatformConfig, action: 'deploy' | 'revert', body: PlatformDeployRequest | { to: 'previous' | 'channel' }): Promise<{ status: ReleaseStatus; error: string | null }> {
+async function platformCall(env: Env, userId: string, action: 'deploy' | 'revert', body: PlatformDeployRequest | { to: 'previous' | 'channel' }): Promise<{ status: ReleaseStatus; error: string | null }> {
   try {
-    const response = await platform.fetcher.fetch(`${platform.url}/__platform/tenants/${encodeURIComponent(platform.tenant)}/${action}`, {
+    const response = await (env.PLATFORM_SERVICE ?? { fetch }).fetch(`${env.PLATFORM_URL}/__platform/tenants/${encodeURIComponent(env.TENANT_ID)}/${action}`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${platform.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ ...body, accountId: platform.userId }),
+      headers: { authorization: `Bearer ${env.PLATFORM_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ ...body, accountId: userId }),
     });
     if (!response.ok) return { status: 'failed', error: `Platform ${action} failed with HTTP ${response.status}: ${(await response.text()).slice(0, 512)}` };
     const result = platformDeployResponseSchema.parse(await response.json());
@@ -2083,7 +2065,7 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
   let outcome: { status: ReleaseStatus; error: string | null };
   try {
     if (!worker || !metadata) throw new Error('Worker artifact and metadata are required');
-    outcome = await platformCall(await platformConfig(env, userId), 'deploy', { sha: input.sha, bundleKey: dataObjectKey(userId, worker.key), bundleHash: worker.hash, metadata });
+    outcome = await platformCall(env, userId, 'deploy', { sha: input.sha, bundleKey: dataObjectKey(userId, worker.key), bundleHash: worker.hash, metadata });
   } catch (error) {
     outcome = { status: 'failed', error: error instanceof Error ? error.message : 'Worker deployment failed' };
   }

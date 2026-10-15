@@ -178,7 +178,6 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
   const updateSkill = server.implement(updateSkillContract).handler(async ({ input, errors }) => {
     try {
       const update = skillUpdateSchema.parse(input.update);
-      for (const id of new Set([...update.exceptions, ...update.assignments.map(entry => entry.projectId)])) await project(id);
       return ok(await skills.update(update));
     } catch (error) {
       if (error instanceof SkillRevisionConflict) return err(errors.SkillConflict({ skillId: error.skillId, expected: error.expected, actual: error.actual }));

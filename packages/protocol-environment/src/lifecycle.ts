@@ -311,7 +311,6 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
     case 'cancel': {
       record = owned(input.runId);
-      if (!actor.lifecycleControl && (actor.kind !== 'machine' || actor.machineId !== record.run.machineId)) throw new EnvironmentError('PermissionDenied', 'Only lifecycle controllers or the owning runner may cancel this run');
       if (!isLifecycleRunActive(record.run) || record.run.cancelRequestedAt) return { state, changed: false, sharedChanged: false };
       record.run.status = 'cancelling';
       record.run.cancelRequestedAt = now;

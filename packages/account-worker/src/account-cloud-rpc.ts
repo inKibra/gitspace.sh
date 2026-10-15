@@ -1,5 +1,4 @@
 import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
-import { activeAccount } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import { MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
@@ -104,13 +103,6 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     const device = await currentDevice();
     if (!deviceCanAdminister(device, capability)) throw new Error(`Account scope, rpc.write and ${capability} authorization are required`);
     return device;
-  };
-  // Every delivery consumes the same bounded tenant authority as request admission.
-  const requireSubscription = async () => {
-    const account = await activeAccount(env, userId);
-    if (account.status === 'error') throw new Error(account.error.message);
-    const device = await currentDevice();
-    if (device.scope.kind !== 'user' || !device.capabilities.includes('rpc.read')) throw new Error('Device subscription authorization ended');
   };
   const fleet = async () => reconcileFleetMachines(env, userId, catalog);
   const composioSetup = async () => {
@@ -444,7 +436,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     space: { events: spaceEvents, view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, deployment: { status: deploymentStatus, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
-    inspector: inspectorCloudProcedures(env, userId, requireSubscription, currentDevice),
+    inspector: inspectorCloudProcedures(env, userId, currentDevice),
     environment: { ...environmentCloudProcedures(env, userId, deviceId, currentDevice, () => requireAdministration('lifecycle.control')), events: environmentEvents },
   });
 }

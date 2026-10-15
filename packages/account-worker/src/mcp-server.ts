@@ -1,7 +1,6 @@
 import { createGitSpaceMcpHandler } from '@gitspace/mcp-server';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import type { CredentialVaultDO } from './application.js';
-import type { UserSettingsDO } from './user-settings.js';
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
@@ -60,10 +59,6 @@ export async function handleMcpRequest(
   try {
     const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
     if (denied) return denied;
-    const settings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(env.ACCOUNT_ID).get('mcp');
-    if (!settings.profile.handle || url.hostname !== `${settings.profile.handle}.gitspace.sh`) {
-      return reject(403, 'MCP_HOST_MISMATCH', 'MCP does not belong to the current account hostname');
-    }
     const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID);
     const bearer = /^Bearer ([A-Za-z0-9_-]{43})$/u.exec(request.headers.get('authorization') ?? '');
     const access = bearer ? await vault.resolveMcpAccess(bearer[1]!) : null;

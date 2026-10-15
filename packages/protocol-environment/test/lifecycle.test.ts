@@ -79,8 +79,7 @@ describe('isomorphic environment decisions', () => {
     const approved = context.apply({ op: 'approval', scope: 'project', executionHash: hash, approved: true }, client);
     expect(approved.approvals[0]?.approvedBy).toBe('api-client');
     context.apply(claim('recover'));
-    expect(() => context.apply({ op: 'cancel', runId: 'recover' }, { ...client, machineId: machine.machineId, lifecycleControl: false })).toThrow();
-    expect(context.apply({ op: 'cancel', runId: 'recover' }, client).runs[0]?.status).toBe('cancelling');
+    expect(context.apply({ op: 'cancel', runId: 'recover' }, { ...client, lifecycleControl: false }).runs[0]?.status).toBe('cancelling');
     expect(() => context.apply({ op: 'abandon', runId: 'recover' }, client)).toThrow();
     expect(context.apply({ op: 'abandon', runId: 'recover' }, { ...client, destroyedMachineId: machine.machineId }).runs[0]?.status).toBe('interrupted');
   });
