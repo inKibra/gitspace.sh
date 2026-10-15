@@ -653,7 +653,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const runtime = await this.getRuntime(raw);
     return new RuntimeAttachmentController({
       attachments: runtime.attachments, code: new ArtifactsCodeStore(this.env.ARTIFACTS), publish: () => runtime.publish(),
-      snapshot: () => runtime.cloudFiles.initializeSnapshot(),
+      // The stored checkpoint; only a workspace that has none yet initializes it (and waits on its retention flush).
+      snapshot: async () => await runtime.cloudFiles.snapshot() ?? runtime.cloudFiles.initializeSnapshot(),
       origin: async projectId => (await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getProject())?.repositoryReference ?? null,
       // The worker authenticated this machine's request; only fleet membership is checked here.
       authorizeMachine: async machineId => {
