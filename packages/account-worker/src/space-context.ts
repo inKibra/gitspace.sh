@@ -413,8 +413,6 @@ export class SpaceContextDO extends DurableObject<Env> {
     const parsed = startJournalPhaseInputSchema.parse(input);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
-      const open = this.openJournalPhase();
-      if (open) throw new InspectorStateError(`Journal phase ${open.phase} is still open`);
       const snapshot = this.captureSnapshot(identity, parsed.repository);
       const entry = this.insertJournal(identity, {
         id: parsed.entryId,
@@ -446,9 +444,12 @@ export class SpaceContextDO extends DurableObject<Env> {
         parsed.phaseRunId,
       ).toArray()[0];
       if (!start) throw new InspectorStateError(`Journal phase run ${parsed.phaseRunId} does not exist`);
-      const ended = this.ctx.storage.sql.exec("SELECT 1 FROM inspector_journal_entries WHERE phase_run_id = ? AND kind = 'phase-end' LIMIT 1", parsed.phaseRunId).toArray().length > 0;
-      if (ended) throw new InspectorStateError(`Journal phase run ${parsed.phaseRunId} is already closed`);
-      if (!parsed.revert) this.assertPhaseGatesPassable(identity, start.phase);
+      // Ending a phase twice (a retry after a lost response) returns the existing end entry.
+      const ended = this.ctx.storage.sql.exec<JournalRow>(
+        "SELECT sequence, entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by FROM inspector_journal_entries WHERE phase_run_id = ? AND kind = 'phase-end' LIMIT 1",
+        parsed.phaseRunId,
+      ).toArray()[0];
+      if (ended) return this.journalRecord(identity, ended);
       const startSnapshot = journalEntryViewSchema.shape.snapshot.unwrap().parse(JSON.parse(start.snapshot_json!));
       const endSnapshot = this.captureSnapshot(identity, parsed.repository);
       const entry = this.insertJournal(identity, {
@@ -544,13 +545,6 @@ export class SpaceContextDO extends DurableObject<Env> {
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
       const guide = this.requireGuideVersion(parsed.revision, parsed.headCommit);
-      if (parsed.decision === 'approved') {
-        const totals = this.ctx.storage.sql.exec<{ sections: number; read_sections: number }>(
-          'SELECT (SELECT COUNT(*) FROM inspector_guide_sections WHERE revision = ?) AS sections, (SELECT COUNT(*) FROM inspector_guide_section_reads WHERE revision = ? AND reviewer_id = ?) AS read_sections',
-          guide.revision, guide.revision, parsed.reviewerId,
-        ).one();
-        if (totals.read_sections !== totals.sections) throw new InspectorStateError('Every Change Guide section must be read before approval');
-      }
       const timestamp = new Date().toISOString();
       this.ctx.storage.sql.exec(
         'INSERT INTO inspector_guide_reviewer_state (revision, head_commit, reviewer_id, decision, note, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (revision, reviewer_id) DO UPDATE SET head_commit = excluded.head_commit, decision = excluded.decision, note = excluded.note, updated_at = excluded.updated_at',
@@ -916,17 +910,6 @@ export class SpaceContextDO extends DurableObject<Env> {
       evidenceIds: [...evidenceIds],
       capturedAt: new Date().toISOString(),
     };
-  }
-
-  private assertPhaseGatesPassable(identity: InspectorIdentity, phase: string): void {
-    const workflow = this.readWorkflow(identity);
-    if (!workflow) return;
-    const phaseNodes = workflow.nodes.filter((node) => node.kind === 'phase' && (node.id === phase || node.label.toLocaleLowerCase() === phase.toLocaleLowerCase()));
-    if (phaseNodes.length === 0) return;
-    const phaseIds = new Set(phaseNodes.map((node) => node.id));
-    const gateIds = new Set(workflow.edges.filter((edge) => phaseIds.has(edge.from)).map((edge) => edge.to));
-    const blocked = workflow.nodes.filter((node) => node.kind === 'gate' && gateIds.has(node.id) && !node.passable);
-    if (blocked.length > 0) throw new InspectorStateError(`Phase ${phase} has ${blocked.length} unsatisfied workflow gate(s): ${blocked.map((gate) => gate.label).join(', ')}`);
   }
 
   private latestGuideRow(): GuideRow | undefined {

@@ -639,7 +639,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
       const profile = this.requireInferenceProfile(parsed.profileId);
       if (profile.revision !== parsed.expectedRevision) return { status: 'conflict', resource: 'inference-profile', expected: parsed.expectedRevision, actual: profile.revision };
       if (profile.id === DEFAULT_INFERENCE_PROFILE_ID) throw new Error('Default inference profile cannot be deleted');
-      if (this.ctx.storage.sql.exec('SELECT project_id FROM inference_assignments WHERE profile_id = ? LIMIT 1', profile.id).toArray().length) throw new Error('Reassign this profile’s projects before deleting it');
+      // Projects that used this profile move to Default rather than refusing the delete.
+      this.ctx.storage.sql.exec('UPDATE inference_assignments SET profile_id = ?, revision = revision + 1 WHERE profile_id = ?', DEFAULT_INFERENCE_PROFILE_ID, profile.id);
       this.ctx.storage.sql.exec('UPDATE inference_profiles SET deleted_at = ?, credential_generation = credential_generation + 1 WHERE profile_id = ?', new Date().toISOString(), profile.id);
       this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'disabled' WHERE profile_id = ?", profile.id);
       this.inferenceChanged();
