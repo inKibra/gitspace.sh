@@ -213,3 +213,45 @@ describe('machine-wide assignments', () => {
     expect(reads.mock.calls.map(([input]) => input)).toEqual([{ ...recorded, machineId }]);
   });
 });
+
+describe('machine notices', () => {
+  /** The notices in the workspace's main conversation, as its transcript shows them. */
+  async function notices(workspaceId: string): Promise<string[]> {
+    const response = await space(workspaceId).runtimeTranscript({ projectId, workspaceId }, 'ndjson');
+    return (await response.text()).split('\n').filter(Boolean).flatMap(line => {
+      const message = JSON.parse(line)?.payload?.message;
+      return message?.customType === 'gitspace.machine-notice' ? [String(message.content)] : [];
+    });
+  }
+
+  it('tells the conversation of an absence only once it lasts a minute, then of the return', async () => {
+    const workspace = await attachedWorkspace('notice-offline');
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    // A blip: offline and back within the minute says nothing.
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, false);
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    expect(await notices(workspace.workspaceId)).toEqual([]);
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, false);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+    await runDurableObjectAlarm(space(workspace.workspaceId));
+    clock.mockRestore();
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    expect(await notices(workspace.workspaceId)).toEqual([
+      'Machine Darktop went offline. Commands on it fail until it reconnects; attach another machine if this work cannot wait.',
+      'Machine Darktop is back online; commands can run on it again.',
+    ]);
+  });
+
+  it('tells the conversation of a failed setup step once', async () => {
+    const workspace = await attachedWorkspace('notice-setup');
+    const [attachment] = await space(workspace.workspaceId).runtimeAttachments(workspace);
+    const report = () => space(workspace.workspaceId).runtimeHeartbeat({
+      ...workspace, machineId, attachmentId: attachment!.attachmentId, generation: attachment!.generation,
+      executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: null },
+      cache: { state: 'setup', platform: 'linux', lastSyncAt: null, unsent: null, syncProblem: null, setup: [{ phase: 'workspace/materialize', state: 'failed', runId: 'run-1', error: '30-fail.sh exited 3' }] },
+    });
+    await report();
+    await report();
+    expect(await notices(workspace.workspaceId)).toEqual(['Setup on Darktop failed at workspace/materialize: 30-fail.sh exited 3. Commands that need it wait until setup runs again.']);
+  });
+});

@@ -30,8 +30,10 @@ const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry
 /** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. */
 export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader): TranscriptEvent[] {
   const base = Number(entry.id) * ENTRY_ORDINALS;
-  if (entry.kind === MACHINE_NOTICE) return [];
   return (entry.model ?? []).map((source, index) => {
+    if (entry.kind === MACHINE_NOTICE) {
+      return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
+    }
     let message = source;
     if (source.role === 'toolResult' && source.details && typeof source.details === 'object' && 'executorResultReference' in source.details) {
       const reference = source.details.executorResultReference;
@@ -47,10 +49,9 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
 /** Display-only Gitspace entries rendered as custom transcript messages. */
 function noticeEvent(entry: EntryRecord): TranscriptEventInput | undefined {
   const data = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) ? entry.data : undefined;
-  const machine = entry.kind === MACHINE_NOTICE ? entry.model?.[0]?.content : undefined;
-  const text = entry.kind === 'gitspace.model-fallback' ? data?.message : entry.kind === 'gitspace.cron-overdue' ? data?.text : typeof machine === 'string' ? machine : undefined;
+  const text = entry.kind === 'gitspace.model-fallback' ? data?.message : entry.kind === 'gitspace.cron-overdue' ? data?.text : undefined;
   if (text === undefined) return undefined;
-  return { sessionId: '', ordinal: Number(entry.id) * ENTRY_ORDINALS + (entry.kind === MACHINE_NOTICE ? 0 : entry.model?.length ?? 0), kind: 'message_end', payload: { message: { role: 'custom', customType: entry.kind, display: true, content: typeof text === 'string' ? text : '' } } };
+  return { sessionId: '', ordinal: Number(entry.id) * ENTRY_ORDINALS + (entry.model?.length ?? 0), kind: 'message_end', payload: { message: { role: 'custom', customType: entry.kind, display: true, content: typeof text === 'string' ? text : '' } } };
 }
 
 /** Newest-first entries at or below `maxEntry` (inclusive), one bounded page at a time. */
