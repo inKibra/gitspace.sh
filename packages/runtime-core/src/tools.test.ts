@@ -89,39 +89,31 @@ test('registration rejects missing required fields and invalid nested edits with
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
 
-test('registered mutations serialize across multi-tool rounds and failure while safe reads run concurrently', async () => {
-  const started = Promise.withResolvers<void>(), readsFinished = Promise.withResolvers<void>();
-  let active = 0, maximum = 0, reads = 0, calls = 0;
+test('registered mutations run one at a time and in model order across rounds, and a failed one does not stop the rest', async () => {
+  let active = 0, maximum = 0;
   const effects: string[] = [];
   const { harness, root } = await registered([
     [call('write', { path: 'first', content: 'one' }, 'first'), call('write', { path: 'second', content: 'two' }, 'second'), call('read', { path: 'read-a' }, 'read-a'), call('read', { path: 'read-b' }, 'read-b')],
     [call('write', { path: 'third', content: 'three' }, 'third')],
   ], async input => {
-    if (input.tool === 'read') {
-      await started.promise;
-      expect(active).toBe(1);
-      reads++;
-      if (reads === 2) readsFinished.resolve();
-      await readsFinished.promise;
-      return completed(input);
-    }
-    active++; maximum = Math.max(maximum, active); calls++; effects.push(input.requestId);
+    effects.push(input.requestId);
+    if (input.tool === 'read') return completed(input);
+    active++; maximum = Math.max(maximum, active);
     try {
-      if (calls === 1) { started.resolve(); await readsFinished.promise; throw new Error('First mutation failed'); }
+      await new Promise(resolve => setTimeout(resolve, 10));
+      if (input.requestId === 'first') throw new Error('First mutation failed');
       return completed(input);
     } finally { active--; }
   });
   try {
-    await root.submit({ type: 'input', content: 'Exercise parallel reads and serialized writes.' }, BACKGROUND_CONTEXT); await root.waitForIdle(BACKGROUND_CONTEXT);
-    expect(maximum).toBe(1); expect(reads).toBe(2); expect(calls).toBe(3);
-    expect(new Set(effects)).toEqual(new Set(['first', 'second', 'third']));
-    expect(effects.at(-1)).toBe('third');
+    await root.submit({ type: 'input', content: 'Exercise ordered writes and reads.' }, BACKGROUND_CONTEXT); await root.waitForIdle(BACKGROUND_CONTEXT);
+    expect(maximum).toBe(1);
+    expect(effects).toEqual(['first', 'second', 'read-a', 'read-b', 'third']);
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.filter(result => result.isError)).toHaveLength(1);
     expect(results.find(result => result.toolCallId === 'third')?.isError).toBe(false);
-  } finally { started.resolve(); readsFinished.resolve(); await harness.close(BACKGROUND_CONTEXT); }
-});
-
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
 test('machine selectors survive real bash and proc registrations and invalid selectors never dispatch', async () => {
   const routed: Array<Parameters<ToolServices['invoke']>[0]> = [];
   const bash = { command: 'pwd', on: 'machine-chosen' };
@@ -360,4 +352,19 @@ test('codemode authority distinguishes definitive denied reads from interrupted 
     expect(effects).toBe(1);
     expect(outcomes).toMatchObject([{ status: 'completed' }, { status: 'failed' }, { status: 'interrupted' }]);
   } finally { await fixture.harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('a round that writes runs its calls in the order the model wrote them, so a read sees the write', async () => {
+  const order: string[] = [];
+  const { harness, root } = await registered([[call('write', { path: 'a.ts', content: 'a' }, 'write'), call('read', { path: 'a.ts' }, 'read')]], async input => {
+    order.push(`start ${input.tool}`);
+    if (input.tool === 'write') await new Promise(resolve => setTimeout(resolve, 50));
+    order.push(`end ${input.tool}`);
+    return completed(input);
+  });
+  try {
+    await root.submit({ type: 'input', content: 'Write a file, then read it.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(order).toEqual(['start write', 'end write', 'start read', 'end read']);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 5000);

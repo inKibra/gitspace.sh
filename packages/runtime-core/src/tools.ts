@@ -139,7 +139,8 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     parameters: runtimeToolParameters(contract.schema),
     // Preserve the owner parser's rejection semantics instead of generic model-argument coercion.
     prepareArguments: input => contract.schema.parse(input),
-    executionMode: 'parallel', replay: ['read', 'grep', 'code_search', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'bash'].includes(name) ? 'safe' : 'unsafe',
+    // A round that changes files runs its calls in the order the model wrote them, so a later read sees the write.
+    executionMode: ['write', 'edit', 'apply_patch'].includes(name) ? 'sequential' : 'parallel', replay: ['read', 'grep', 'code_search', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'bash'].includes(name) ? 'safe' : 'unsafe',
     async execute(input, api, context) {
       const args = RuntimeJsonSchema.parse(contract.schema.parse(input));
       const safe = Arguments.runtimeOperationIsReadOnly(name, args);
