@@ -6,7 +6,6 @@ interface Env {
   CREDENTIALS: DurableObjectNamespace<import('./src/index').CredentialVaultDO>;
   USER_STORAGE: DurableObjectNamespace<import('./src/index').UserStorageDO>;
   SPACE_AUTHORITY: DurableObjectNamespace<import('./src/index').SpaceAuthorityDO>;
-  SAVED_TRANSCRIPTS: DurableObjectNamespace<import('./src/index').SavedTranscriptIndexDO>;
   FLEET_CATALOG: DurableObjectNamespace<import('./src/index').FleetCatalogDO>;
   USER_SETTINGS: DurableObjectNamespace<import('./src/index').UserSettingsDO>;
   PROJECT_SECRETS: DurableObjectNamespace<import('./src/index').ProjectSecretsDO>;

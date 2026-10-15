@@ -52,8 +52,8 @@ import { encodeTranscriptEventChunks } from '@gitspace/protocol/transcript';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 import { InspectorConflictError, InspectorStateError } from './space-context.js';
-import { InspectorCloudArtifacts, InspectorGenerationConflict, InspectorWorkspaceMissing, readInspectorContext, readSavedInspectorTranscript } from './account-inspector-data.js';
-import { readSavedInspectorTranscriptContent, readSavedInspectorTranscriptPage } from './account-inspector-data.js';
+import { InspectorCloudArtifacts, InspectorGenerationConflict, InspectorWorkspaceMissing, readInspectorContext, readInspectorTranscript } from './account-inspector-data.js';
+import { readInspectorTranscriptContent, readInspectorTranscriptPage } from './account-inspector-data.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, type CloudCheckout } from './cloud-repository.js';
@@ -113,7 +113,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const transcript = server.implement(inspectorTranscriptContract).stream(async function* ({ input, signal, errors }) {
     try {
       const source = await readInspectorContext(env, userId, input.workspaceId ?? input.projectId, input.projectId);
-      const events = await readSavedInspectorTranscript(env, userId, source);
+      const events = await readInspectorTranscript(env, userId, source);
       for await (const event of events) {
         for (const chunk of encodeTranscriptEventChunks(event)) {
           if (signal.aborted) return;
@@ -128,7 +128,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const transcriptPage = server.implement(inspectorTranscriptPageContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.workspaceId ?? input.projectId, input.projectId);
-      const page = await readSavedInspectorTranscriptPage(env, userId, source, input);
+      const page = await readInspectorTranscriptPage(env, userId, source, input);
       return ok(page);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
@@ -138,7 +138,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const transcriptContent = server.implement(inspectorTranscriptContentContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.workspaceId ?? input.projectId, input.projectId);
-      const content = await readSavedInspectorTranscriptContent(env, userId, source, input);
+      const content = await readInspectorTranscriptContent(env, userId, source, input);
       return ok(content);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));

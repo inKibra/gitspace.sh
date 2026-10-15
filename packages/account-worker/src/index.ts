@@ -54,7 +54,6 @@ export {
   SpaceContextDO, TenantReleasesDO, UserMcpConnectionsDO, UserProjectIndexDO,
   UserSettingsDO, UserSkillsDO, UserStorageDO,
 } from './application.js';
-export { SavedTranscriptIndexDO } from './saved-transcript-index-do.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
 const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : 'channel';

@@ -56,7 +56,7 @@ function stageInput(sha: string): StageReleaseInput {
         { name: 'ASSETS', source: 'public-assets' },
         { name: 'STORAGE_BUCKET', source: 'object-storage-name' },
       ],
-      migrations: [{ tag: 'v1', newSqliteClasses: ['CredentialVaultDO'] }],
+      migrations: [{ tag: 'v1', newSqliteClasses: ['CredentialVaultDO'], deletedClasses: [] }],
     },
   };
 }

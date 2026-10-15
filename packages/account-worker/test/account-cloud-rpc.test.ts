@@ -924,7 +924,8 @@ describe('machine-independent Inspector', () => {
     expect(parse(await saved.text())).toMatchObject({ status: 'ok', value: { id: 'offline-goal', revision: 1 } });
     const overview = await worker.fetch(fixture.request(single('inspector.overview', { spaceId: space.spaceId, expectedGeneration: 0 })), cloudEnv);
     expect(parse(await overview.text())).toMatchObject({ status: 'ok', value: { goal: { title: 'Review without compute' } } });
-    expect(await space.placement.hasCloudRuntime()).toBe(true);
+    // Reading the Inspector never starts the workspace's runtime.
+    expect(await space.placement.hasCloudRuntime()).toBe(false);
     const workspace = (await space.authority.listWorkspaces()).find(candidate => candidate.id === space.spaceId)!;
     await space.authority.putWorkspace({ ...workspace, lifecycle, expectedRevision: workspace.revision });
     expect(await space.authority.listCanonicalSessions()).toEqual([]);

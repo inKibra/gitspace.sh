@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { posix } from 'node:path';
 import {
-  artifactManifestSchema, credentialProtocolBase64, decryptArtifactBytes, deriveArtifactScopeKey, encryptArtifactBytes,
+  artifactManifestSchema, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes,
   type ArtifactCopyRecord, type ArtifactManifest, type ArtifactShareRecord, type CanonicalArtifactScope, type CloudProjectSummary, type CloudWorkspaceDefinition,
   type InspectorView, type InspectorIdentity,
 } from '@gitspace/protocol';
@@ -10,13 +10,11 @@ import { createResourcePreview, parseResourceUri, resourceMediaType } from '@git
 import type { CredentialVaultDO } from './application.js';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
-import { CHUNKED_CHECKPOINT_VERSION, chunkedCheckpointManifestSchema, parseWorkspaceCheckpoint, spaceOmpCheckpointKey, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
+import type { SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import type { SpaceContextDO } from './space-context.js';
-import { SavedTranscriptIndex } from './saved-transcript-index.js';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
-import { applyTextEdits, RuntimeIdentitySchema, RuntimeSnapshotSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime';
+import { applyTextEdits, RuntimeSnapshotSchema, RuntimeSessionResultSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime';
 import { readRuntimeTranscript } from './runtime-transcript-reader.js';
-import { openLegacySession } from './legacy-checkpoint-reader.js';
 import { readArtifactObject, readArtifactManifestObject } from './artifact-object-reader.js';
 import { ARTIFACT_UPLOAD_CHUNK_BYTES } from '@gitspace/protocol/rpc-contract';
 
@@ -72,19 +70,6 @@ export async function readInspectorContext(env: Env, userId: string, spaceId: st
 async function digest(bytes: Uint8Array): Promise<`sha256:${string}`> {
   const hash = await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>);
   return `sha256:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
-function assertSavedObjectKey(key: string): void {
-  if (!key || key.startsWith('/') || key.includes('..') || key.length > 1_024) throw new Error('Saved object key is invalid');
-}
-
-async function readObject(env: Env, userId: string, key: string, hash: string): Promise<Uint8Array> {
-  assertSavedObjectKey(key);
-  const object = await env.DATA.get(`users/${userId}/${key}`);
-  if (!object) throw new Error(`Saved object ${key} is unavailable`);
-  const bytes = new Uint8Array(await object.arrayBuffer());
-  if (await digest(bytes) !== hash) throw new Error(`Saved object ${key} failed content verification`);
-  return bytes;
 }
 
 async function boundedArtifactBytes(env: Env, userId: string, hash: string, key: Uint8Array, expectedSize: number | undefined, limit: number): Promise<Uint8Array<ArrayBuffer>> {
@@ -495,156 +480,38 @@ export async function serveArtifactShare(request: Request, env: Env): Promise<Re
   }
 }
 
-type SavedInspectorTranscriptSource = {
-  kind: 'legacy';
-  sessionId: string;
-  ompSessionId: string;
-  objectKey: string;
-  objectHash: string;
-  key: Uint8Array | null;
-} | { kind: 'cloud'; sessionId: string; conversationId: string; cursor: number };
-
-interface SavedInspectorSource {
-  savedTranscript: { status: 'available' | 'unavailable' | 'none'; reason: string | null };
-  snapshot: SavedInspectorTranscriptSource | null;
+/** The workspace's main cloud conversation, read without starting a runtime that never ran; null before it exists. */
+async function mainConversation(env: Env, userId: string, source: InspectorCloudContext): Promise<string | null> {
+  const space = env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`);
+  if (!await space.hasCloudRuntime()) return null;
+  const live = RuntimeSnapshotSchema.parse(await (await space.runtimeSnapshot({ projectId: source.project.id, workspaceId: source.workspace.id })).json());
+  return live.conversations.find(item => item.parentId === null)?.id ?? null;
 }
 
-function savedTranscriptIdentity(source: InspectorCloudContext, snapshot: Extract<SavedInspectorTranscriptSource, { kind: 'legacy' }> | null): (string | null)[] {
-  return [source.project.id, source.workspace.id, snapshot?.sessionId ?? null, snapshot?.ompSessionId ?? null, snapshot?.objectKey ?? null, snapshot?.objectHash ?? null];
+async function conversationSession(env: Env, userId: string, source: InspectorCloudContext, command: RuntimeSessionCommand) {
+  const conversationId = await mainConversation(env, userId, source);
+  if (!conversationId) throw new Error('This workspace has no conversation yet');
+  const response = await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).runtimeSession({ projectId: source.project.id, workspaceId: source.workspace.id, conversationId, command }, { canApprove: false });
+  return RuntimeSessionResultSchema.parse(await response.json());
 }
 
-/** Discovers a saved snapshot without downloading or projecting its conversation. */
-async function savedInspectorSource(env: Env, userId: string, source: InspectorCloudContext): Promise<SavedInspectorSource> {
-  const sessions = await source.authority.listCanonicalSessions();
-  const canonical = sessions.find((session) => session.workspaceId === source.workspace.id);
-  const placement = source.placement;
-  const identity = RuntimeIdentitySchema.parse({ projectId: source.project.id, workspaceId: source.workspace.id });
-  const runtime = env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`);
-  async function cloudSnapshot(conversationId?: string, sessionId?: string): Promise<SavedInspectorSource> {
-    const live = RuntimeSnapshotSchema.parse(await (await runtime.runtimeSnapshot(identity)).json());
-    const conversation = conversationId ? live.conversations.find(item => item.id === conversationId) : live.conversations.find(item => item.parentId === null);
-    if (!conversation) return { savedTranscript: { status: 'none', reason: 'Cloud conversation has not been created.' }, snapshot: null };
-    return { savedTranscript: { status: 'available', reason: 'Conversation is owned by the cloud runtime and remains available without a machine.' }, snapshot: { kind: 'cloud', sessionId: sessionId ?? conversation.id, conversationId: conversation.id, cursor: live.cursor } };
-  }
-  try {
-    if (await runtime.hasCloudRuntime()) return await cloudSnapshot();
-    if (!canonical && !placement?.manifestKey) return await cloudSnapshot();
-    let key: Uint8Array | null = null;
-    let sessionId = canonical?.id;
-    let ompSessionId = canonical?.ompSessionId;
-    let objectKey = canonical?.sessionObjectKey;
-    let objectHash = canonical?.sessionObjectHash;
-    if (canonical?.sessionFormatVersion === 'omp-checkpoint-1') {
-      key = credentialProtocolBase64.decode(await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId));
-    } else if (canonical?.sessionFormatVersion != null && canonical.sessionFormatVersion !== 'omp-jsonl-1') {
-      throw new Error(`Unsupported canonical session format ${canonical.sessionFormatVersion}`);
-    }
-    if (placement?.manifestKey && placement.manifestHash) {
-      key = credentialProtocolBase64.decode(await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId));
-      const bytes = await decryptArtifactBytes(await readObject(env, userId, placement.manifestKey, placement.manifestHash), key);
-      const manifest = parseWorkspaceCheckpoint(JSON.parse(new TextDecoder().decode(bytes)), {
-        projectId: source.project.id,
-        spaceId: source.workspace.id,
-        revision: placement.publishedRevision,
-      });
-      sessionId = manifest.agent.sessionId;
-      if (manifest.agent.kind === 'cloud') return await cloudSnapshot(manifest.agent.conversationId, manifest.agent.sessionId);
-      ompSessionId = manifest.agent.ompSessionId;
-      objectKey = spaceOmpCheckpointKey(source.project.id, source.workspace.id, manifest.revision);
-      objectHash = manifest.agent.ompCheckpointHash;
-    }
-    if (!sessionId || !ompSessionId || !objectKey || !objectHash) throw new Error('A canonical session exists, but its saved conversation has not been published.');
-    assertSavedObjectKey(objectKey);
-    const snapshot = { kind: 'legacy' as const, sessionId, ompSessionId, objectKey, objectHash, key };
-    if (!await env.DATA.head(`users/${userId}/${objectKey}`)) {
-      // A verified projection can still serve Inspector pages/content after the
-      // source is lost. Archival transcript export continues to require it.
-      const index = await SavedTranscriptIndex.locate(env.SAVED_TRANSCRIPTS, userId, savedTranscriptIdentity(source, snapshot), key);
-      if (!await index.ready()) throw new Error(`Saved object ${objectKey} is unavailable`);
-    }
-    return {
-      savedTranscript: { status: 'available', reason: 'Saved conversation is published, not live. Contents are verified when loaded. Separately stored session attachments may be unavailable.' },
-      snapshot,
-    };
-  } catch (error) {
-    return { savedTranscript: { status: 'unavailable', reason: error instanceof Error ? error.message : 'The saved conversation could not be read.' }, snapshot: null };
-  }
+export async function readInspectorTranscript(env: Env, userId: string, source: InspectorCloudContext): Promise<AsyncIterable<TranscriptEvent>> {
+  const conversationId = await mainConversation(env, userId, source);
+  if (!conversationId) return (async function* () {})();
+  const response = await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).runtimeTranscript({ projectId: source.project.id, workspaceId: source.workspace.id, conversationId }, 'ndjson');
+  return (async function* () {
+    for await (const event of readRuntimeTranscript(response)) yield { ...event, sessionId: conversationId, createdAt: new Date(event.createdAt) };
+  })();
 }
 
-async function readCheckpointChunk(env: Env, userId: string, key: string, hash: string, size: number, encryptionKey: Uint8Array): Promise<Uint8Array> {
-  const sealed = await readObject(env, userId, key, hash);
-  if (sealed.byteLength !== size + 29) throw new Error(`Checkpoint chunk ${key} has an unexpected size`);
-  const plaintext = await decryptArtifactBytes(sealed, encryptionKey);
-  if (plaintext.byteLength !== size) throw new Error(`Checkpoint chunk ${key} has an unexpected size`);
-  return plaintext;
+export async function readInspectorTranscriptPage(env: Env, userId: string, source: InspectorCloudContext, request: TranscriptPageRequest) {
+  const result = await conversationSession(env, userId, source, { type: 'transcriptPage', request });
+  if (!result.transcriptPage) throw new Error('Cloud transcript page is unavailable');
+  return result.transcriptPage;
 }
 
-async function* readSavedSnapshot(env: Env, userId: string, snapshot: Extract<SavedInspectorTranscriptSource, { kind: 'legacy' }>): AsyncGenerator<Uint8Array> {
-  const stored = await readObject(env, userId, snapshot.objectKey, snapshot.objectHash);
-  if (!snapshot.key) { yield stored; return; }
-  if (stored[0] !== CHUNKED_CHECKPOINT_VERSION) { yield await decryptArtifactBytes(stored, snapshot.key); return; }
-  const inventory = await decryptArtifactBytes(stored.subarray(1), snapshot.key);
-  const manifest = chunkedCheckpointManifestSchema.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(inventory)));
-  for (const chunk of manifest.chunks) {
-    const chunkKey = `${snapshot.objectKey}.chunks/${chunk.hash.slice(7)}`;
-    // Leave ciphertext out of the suspended generator while the caller parses plaintext.
-    yield await readCheckpointChunk(env, userId, chunkKey, chunk.hash, chunk.size, snapshot.key);
-  }
-}
-
-async function legacyCheckpointKey(env: Env, userId: string): Promise<Uint8Array> {
-  if (userId !== env.ACCOUNT_ID) throw new Error('Account does not own this checkpoint');
-  return credentialProtocolBase64.decode(await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId));
-}
-
-export async function readSavedInspectorTranscript(env: Env, userId: string, source: InspectorCloudContext): Promise<AsyncIterable<TranscriptEvent>> {
-  const { savedTranscript, snapshot } = await savedInspectorSource(env, userId, source);
-  if (savedTranscript.status === 'none') return (async function* () {})();
-  if (!snapshot) throw new Error(savedTranscript.reason ?? 'The saved conversation could not be read.');
-  if (snapshot.kind === 'cloud') {
-    const identity = RuntimeIdentitySchema.parse({ projectId: source.project.id, workspaceId: source.workspace.id });
-    const response = await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).runtimeTranscript({ ...identity, conversationId: snapshot.conversationId }, 'ndjson');
-    return (async function* () {
-      for await (const event of readRuntimeTranscript(response)) yield { ...event, sessionId: snapshot.sessionId, createdAt: new Date(event.createdAt) };
-    })();
-  }
-  return (await openLegacySession(() => readSavedSnapshot(env, userId, snapshot), snapshot.sessionId, snapshot.ompSessionId)).events;
-}
-
-async function savedTranscriptIndex(env: Env, userId: string, source: InspectorCloudContext, saved: SavedInspectorSource): Promise<SavedTranscriptIndex> {
-  const { savedTranscript, snapshot } = saved;
-  if (snapshot?.kind === 'cloud') throw new Error('Cloud conversations use their owning runtime transcript index');
-  if (!snapshot && savedTranscript.status !== 'none') throw new Error(savedTranscript.reason ?? 'The saved conversation could not be read.');
-  return SavedTranscriptIndex.open(env.SAVED_TRANSCRIPTS, userId,
-    savedTranscriptIdentity(source, snapshot),
-    snapshot?.key ?? null,
-    async () => snapshot ? (await openLegacySession(() => readSavedSnapshot(env, userId, snapshot), snapshot.sessionId, snapshot.ompSessionId)).events : []);
-}
-
-export async function readSavedInspectorTranscriptPage(env: Env, userId: string, source: InspectorCloudContext, request: TranscriptPageRequest) {
-  const saved = await savedInspectorSource(env, userId, source);
-  if (saved.snapshot?.kind === 'cloud') {
-    const response = await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).runtimeSession({
-      projectId: source.project.id, workspaceId: source.workspace.id, conversationId: saved.snapshot.conversationId,
-      command: { type: 'transcriptPage', request },
-    }, { canApprove: false });
-    const result = RuntimeSessionResultSchema.parse(await response.json());
-    if (!result.transcriptPage) throw new Error('Cloud transcript page is unavailable');
-    return result.transcriptPage;
-  }
-  return (await savedTranscriptIndex(env, userId, source, saved)).page(request);
-}
-
-export async function readSavedInspectorTranscriptContent(env: Env, userId: string, source: InspectorCloudContext, request: TranscriptContentRequest) {
-  const saved = await savedInspectorSource(env, userId, source);
-  if (saved.snapshot?.kind === 'cloud') {
-    const response = await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).runtimeSession({
-      projectId: source.project.id, workspaceId: source.workspace.id, conversationId: saved.snapshot.conversationId,
-      command: { type: 'transcriptContent', request },
-    }, { canApprove: false });
-    const result = RuntimeSessionResultSchema.parse(await response.json());
-    if (!result.transcriptContent) throw new Error('Cloud transcript content is unavailable');
-    return result.transcriptContent;
-  }
-  return (await savedTranscriptIndex(env, userId, source, saved)).content(request);
+export async function readInspectorTranscriptContent(env: Env, userId: string, source: InspectorCloudContext, request: TranscriptContentRequest) {
+  const result = await conversationSession(env, userId, source, { type: 'transcriptContent', request });
+  if (!result.transcriptContent) throw new Error('Cloud transcript content is unavailable');
+  return result.transcriptContent;
 }
