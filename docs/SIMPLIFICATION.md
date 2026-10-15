@@ -184,7 +184,7 @@ Every item is verified the way the user works, in the browser, before it is repo
 
 **Batch 7 — cleanup.** Done. Old snapshot refs (Golconda ~1,108, PR 101 4): the per-revision capture refs (`refs/gitspace/spaces/*/checkpoints/<n>`, from before captures moved to one `snapshot` ref) deleted in the six repositories Darktop can reach: Golconda 1,113 → 4 refs, PR 101 9 → 5. `saved-transcript-*` in the worker: deleted with `SavedTranscriptIndexDO` (migration `account-v3`; the platform now sends delete-class migrations, `dd483892`, `b7fcd780`). Failing tests: the three Artifacts tests mocked reads the code no longer makes; runtime-core used vitest-only helpers under bun; account-worker now 513/513. The `artifacts-live-protocol` Node test needs `node` on PATH.
 
-**Batch 8 — small UI bugs.** Golconda's mode switcher; Deedible Info's context meter at 264%; empty `system` messages in Validator and PR 101; ~925 "client disconnected" errors on Validator.
+**Batch 8 — small UI bugs.** Golconda's mode switcher; Deedible Info's context meter at 264%; empty `system` messages in Validator and PR 101; ~925 "client disconnected" errors on Validator. Golconda is the project's base space: it has no phase by design and its runtime now reports `code`, so it is not plan-locked. Deedible Info's meter reads 686,635 of 1,000,000 tokens (69%) for claude-opus-5-5; the 264% came from a 200k window the catalog no longer gives that model. The empty system messages are each turn's system-prompt record; transcripts now skip them (`973c25d1`). The disconnect errors were not seen in a 90 s tail (one canceled request); finding them needs the source of the 925 count.
 
 **Later.** Machine CLI (`gitspace status`, `setup`, `sync`, `env --`).
 
