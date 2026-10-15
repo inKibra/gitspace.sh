@@ -161,8 +161,8 @@ Every item is verified the way the user works, in the browser, before it is repo
 1. Done. `local://` → `drive://`, hard cutover, no alias (cron artifact scopes rewritten once; links in old transcripts stay text): parser, composer, tools, skills, agent instructions, inspector tab "Drive".
 2. Done (`3aa874b3`, `add8482a`). Agents read PDFs and documents: Workers AI `toMarkdown` (`[ai]` binding), result kept in the workspace object by content hash; pages of at most 2,000 lines / 40,000 characters with an offset note. Measured: a 200-page text PDF (715 KB) converts in 0.6 s to 626 KB of Markdown; a scanned PDF converts to empty pages, so it reports that it has no text layer.
 3. Done (`daebf26d`, `24580074`). Files tab shows binary files (PDF in the viewer, not base64): PDFs embed with a download fallback, images render, other binaries download. The automation browser loses its page when Chrome's PDF viewer attaches, so the PDF view itself was not screenshotted.
-4. Chat: attachments as links; user messages rendered as Markdown.
-5. File names with `:`; abandoned upload chunks cleaned up.
+4. Done (`f3ec1514`). Chat: attachments as links; user messages rendered as Markdown.
+5. Done (`974dfb75`, `7276d1be`, `aa6823bb`). File names with `:`; abandoned upload chunks cleaned up. Drive URLs encode each path segment, so `log 10:30.txt` is `log%2010%3A30.txt` and never reads as a selector; starting an upload removes staged uploads untouched for a day. Found on the way: agents could not read a drive text file over 128 KiB at all; agent reads of drive and repository text now page like documents.
 
 **Batch 4 — reads that rebuild** (from the audit).
 1. `environment.get` returns the workspace's stored environment, derived when its files change (now 3.4 s, five objects).
