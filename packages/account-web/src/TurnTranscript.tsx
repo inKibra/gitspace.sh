@@ -257,6 +257,17 @@ export function AskBlockView({ item, onAnswer, state, onStateChange }: { item: A
   </div>;
 }
 
+/** A user message as Markdown: an uploaded attachment becomes a link to its drive file, an inline text attachment a
+ * titled block of its text. */
+export function userMessageMarkdown(text: string): string {
+  return text
+    .replace(/<attachment name="([^"]*)" url="([^"]*)"[^>]*\/>/gu, (_match, name: string, url: string) => `📎 [${name.replace(/[[\]]/gu, '\\$&')}](${url})`)
+    .replace(/<attachment name="([^"]*)">\n([\s\S]*?)\n<\/attachment>/gu, (_match, name: string, content: string) => {
+      const fence = '~'.repeat(Math.max(3, ...[...content.matchAll(/~{3,}/gu)].map(run => run[0].length + 1)));
+      return `📎 **${name}**\n\n${fence}\n${content}\n${fence}`;
+    });
+}
+
 export function TranscriptItemView({ item, active, onAnswer, state, onStateChange, renderExecutionHistory }: { item: TranscriptItem; active: boolean; onAnswer?: TurnTranscriptProps['onAnswer']; renderExecutionHistory?: ExecutionHistoryRenderer } & ItemInteractionProps) {
   switch (item.type) {
     case 'message':
@@ -264,7 +275,7 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
         attachments={item.images?.length ? <MessageAttachments images={item.images} /> : undefined}
         from={item.role}
         data-pending={item.pending || undefined}
-      >{item.role === 'assistant' ? <GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown> : item.text}</ChatMessage>;
+      >{item.role === 'assistant' ? <GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown> : <GitSpaceMarkdown>{userMessageMarkdown(item.text)}</GitSpaceMarkdown>}</ChatMessage>;
     case 'thinking':
       return <ThinkingBlock active={active} text={item.text} state={state} onStateChange={onStateChange} />;
     case 'tool-call':

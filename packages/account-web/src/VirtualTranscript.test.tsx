@@ -217,7 +217,8 @@ it('automatically renders complete text above 256 Ki characters and attachments 
   })) });
   await render(history);
   const complete = container.querySelector('[data-transcript-row="row-0"]')!;
-  expect(complete.textContent).toContain(item.text);
+  // User messages render as Markdown, which drops the trailing line break.
+  expect(complete.textContent).toContain(item.text.trimEnd());
   expect(complete.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,aW1hZ2U=');
   expect(history.content).toHaveBeenCalledTimes(Math.ceil(serialized.length / TRANSCRIPT_CONTENT_CHARACTERS));
   expect(document.querySelector('[role="dialog"]')).toBeNull();
