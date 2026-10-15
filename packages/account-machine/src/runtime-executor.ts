@@ -173,7 +173,17 @@ export async function createMachineExecutor(options: {
       const base = snapshotRow(key);
       if (!base?.committed && !base?.pending && incoming) throw new Error('Cache reconciliation requires its durable applied base');
       const before = committedOf(key);
-      const accepted = await capture(local);
+      let accepted: GitIntermediateCheckpoint | null;
+      try { accepted = await capture(local); }
+      catch (error) {
+        // Local changes the cloud refuses (an oversized file) never reached it, so they must not keep cloud changes out:
+        // the incoming version, say a new .gitignore, is applied over them and the next capture tries again with it.
+        if (incoming && before && artifactsPublicationRejection(error) && await install(local, before, incoming, true)) {
+          snapshots.query('UPDATE snapshots SET committed=? WHERE attachment=?').run(JSON.stringify(incoming), key);
+          await saveGitCacheBase(local.rootPath, incoming);
+        }
+        throw error;
+      }
       // Only a no-op capture may apply the incoming tip; a publication already merged inside the cloud.
       if (incoming && accepted && before?.worktreeCommit === accepted.worktreeCommit && incoming.worktreeCommit !== accepted.worktreeCommit) {
         if (await install(local, accepted, incoming, true)) {
