@@ -126,25 +126,25 @@ describe('user artifact flows', () => {
     ]);
     await publish(projectId, 1, [{ path: 'notes.txt', content: 'project notes' }]);
     const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null };
-    const url = 'local://notes.txt:raw:2-2';
+    const url = 'drive://notes.txt:raw:2-2';
     const frames = [];
     for await (const frame of client.inspector.resources.read({ ...request, url })) frames.push(frame);
     expect(frames).toEqual([
       { status: 'ok', value: { type: 'metadata', url, mediaType: 'text/plain', text: true, size: 6 } },
       { status: 'ok', value: { type: 'chunk', base64: Buffer.from('second').toString('base64') } },
     ]);
-    expect((await readBytes(client.inspector.resources.read({ ...request, sessionId: 'former-session', url: 'local://base/notes.txt' }))).toString()).toBe('project notes');
-    expect((await readBytes(client.inspector.resources.read({ ...request, spaceId: projectId, url: 'local://notes.txt' }))).toString()).toBe('project notes');
+    expect((await readBytes(client.inspector.resources.read({ ...request, sessionId: 'former-session', url: 'drive://base/notes.txt' }))).toString()).toBe('project notes');
+    expect((await readBytes(client.inspector.resources.read({ ...request, spaceId: projectId, url: 'drive://notes.txt' }))).toString()).toBe('project notes');
     const empty = [];
-    for await (const frame of client.inspector.resources.read({ ...request, url: 'local://empty.txt' })) empty.push(frame);
-    expect(empty).toEqual([{ status: 'ok', value: { type: 'metadata', url: 'local://empty.txt', mediaType: 'text/plain', text: true, size: 0 } }]);
+    for await (const frame of client.inspector.resources.read({ ...request, url: 'drive://empty.txt' })) empty.push(frame);
+    expect(empty).toEqual([{ status: 'ok', value: { type: 'metadata', url: 'drive://empty.txt', mediaType: 'text/plain', text: true, size: 0 } }]);
   });
 
   it('pages complete cloud resource bytes and rejects cursors from another version or identity', async () => {
     const { client, workspaceId, publish } = await fixture();
     const content = '\0audio'.repeat(25_000);
     await publish(workspaceId, 1, [{ path: 'capture.wav', content, mediaType: 'audio/wav' }]);
-    const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null, url: 'local://capture.wav' };
+    const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null, url: 'drive://capture.wav' };
     const first = await client.inspector.resources.readPage({ ...request, cursor: null, limit: 1 });
     if (first.status === 'error') throw first.error;
     expect(first.value.items).toEqual([{ type: 'metadata', url: request.url, mediaType: 'audio/wav', text: false, size: Buffer.byteLength(content) }]);
@@ -175,9 +175,9 @@ describe('user artifact flows', () => {
     const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null };
     const pageRequest = { ...request, cursor: null, limit: 16 };
     for (const url of [
-      `local://workspaces/${siblingId}/private.txt`,
-      'local://workspace/%2e%2e/private.txt',
-      'local://missing.txt',
+      `drive://workspaces/${siblingId}/private.txt`,
+      'drive://workspace/%2e%2e/private.txt',
+      'drive://missing.txt',
       'artifact://123',
       'browser-artifact://machine/capture',
     ]) {
@@ -187,15 +187,15 @@ describe('user artifact flows', () => {
       expect(await client.inspector.resources.readPage({ ...pageRequest, url })).toMatchObject({ status: 'error' });
     }
     expect(await client.inspector.resources.readPage({ ...pageRequest, url: 'artifact://123' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
-    expect(await client.inspector.resources.readPage({ ...pageRequest, expectedGeneration: 1, url: 'local://private.txt' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/space-generation-conflict' } });
-    expect(await client.inspector.resources.readPage({ ...pageRequest, spaceId: crypto.randomUUID(), url: 'local://private.txt' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
-    expect((await readBytes(client.inspector.resources.read({ ...request, spaceId: projectId, url: `local://workspaces/${siblingId}/private.txt` }))).toString()).toBe('sibling workspace');
+    expect(await client.inspector.resources.readPage({ ...pageRequest, expectedGeneration: 1, url: 'drive://private.txt' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/space-generation-conflict' } });
+    expect(await client.inspector.resources.readPage({ ...pageRequest, spaceId: crypto.randomUUID(), url: 'drive://private.txt' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
+    expect((await readBytes(client.inspector.resources.read({ ...request, spaceId: projectId, url: `drive://workspaces/${siblingId}/private.txt` }))).toString()).toBe('sibling workspace');
   });
 
   it('applies the text preview limit before streaming and allows bounded resource selections', async () => {
     const { client, workspaceId, publish } = await fixture();
     await publish(workspaceId, 1, [{ path: 'output.txt', content: `retained line\n${'large output\n'.repeat(20_000)}` }]);
-    const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null, url: 'local://output.txt' };
+    const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null, url: 'drive://output.txt' };
     const frames = [];
     for await (const frame of client.inspector.resources.read(request)) frames.push(frame);
     expect(frames).toMatchObject([{ status: 'error', error: { _tag: 'gitspace/operation-failed' } }]);
@@ -208,9 +208,9 @@ describe('user artifact flows', () => {
     await publish(workspaceId, 1, [{ path: 'output.txt', content: `selected line\n${'remaining output\n'.repeat(20_000)}` }]);
     const request = { spaceId: workspaceId, expectedGeneration: 0, hash: null };
     const full = [];
-    for await (const frame of client.inspector.artifacts.read({ ...request, url: 'local://workspace/output.txt' })) full.push(frame);
+    for await (const frame of client.inspector.artifacts.read({ ...request, url: 'drive://workspace/output.txt' })) full.push(frame);
     expect(full).toMatchObject([{ status: 'error' }]);
-    const selected = await readBytes(client.inspector.artifacts.read({ ...request, url: 'local://workspace/output.txt:raw:1-1' }));
+    const selected = await readBytes(client.inspector.artifacts.read({ ...request, url: 'drive://workspace/output.txt:raw:1-1' }));
     expect(selected.toString()).toBe('selected line');
   });
 
@@ -218,7 +218,7 @@ describe('user artifact flows', () => {
     const { client, workspaceId, publish } = await fixture();
     const content = '\0'.repeat(1024 * 1024 + 17);
     const entries = await publish(workspaceId, 1, [{ path: 'capture.wav', content, mediaType: 'audio/wav' }]);
-    const bytes = await readBytes(client.inspector.artifacts.read({ spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/capture.wav', hash: entries[0]!.blobHash }));
+    const bytes = await readBytes(client.inspector.artifacts.read({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/capture.wav', hash: entries[0]!.blobHash }));
     expect(bytes).toEqual(Buffer.from(content));
   });
 
@@ -228,7 +228,7 @@ describe('user artifact flows', () => {
     const source = await publish(workspaceId, 1, [{ path: 'a.txt', content: 'original A' }, { path: 'b.txt', content: 'original B' }]);
     await publish(projectId, 1, [{ path: 'occupied.txt', content: 'keep project content' }]);
     const request = { spaceId: workspaceId, expectedGeneration: 0, expectedProjectGeneration: 1 };
-    const files = source.map((entry, index) => ({ url: `local://workspace/${entry.path}`, hash: entry.blobHash, destinationPath: index === 0 ? 'copied/a.txt' : 'occupied.txt', expectedDestinationHash: null }));
+    const files = source.map((entry, index) => ({ url: `drive://workspace/${entry.path}`, hash: entry.blobHash, destinationPath: index === 0 ? 'copied/a.txt' : 'occupied.txt', expectedDestinationHash: null }));
     expect((await client.inspector.artifacts.copyToProject({ ...request, files })).status).toBe('error');
     const unchanged = await client.inspector.artifacts.list({ spaceId: workspaceId, expectedGeneration: 0 });
     if (unchanged.status === 'error') throw unchanged.error;
@@ -237,33 +237,33 @@ describe('user artifact flows', () => {
     if (copied.status === 'error') throw copied.error;
     await publish(workspaceId, 2, [{ path: 'a.txt', content: 'changed A' }]);
     for (const [index, expected] of ['original A', 'original B'].entries()) {
-      const value = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: `local://base/copied/${index}.txt`, hash: null }));
+      const value = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: `drive://base/copied/${index}.txt`, hash: null }));
       expect(value.toString()).toBe(expected);
     }
     expect((await authority.listArtifactCopies()).sort((left, right) => left.sourcePath.localeCompare(right.sourcePath))).toMatchObject(source.map((entry, index) => ({ sourceHash: entry.blobHash, sourcePath: entry.path, destinationPath: `copied/${index}.txt`, sourceGeneration: 1, destinationGeneration: 2 })));
-    expect((await client.inspector.artifacts.copyToProject({ ...request, files: [{ url: 'local://workspace/a.txt', hash: source[0]!.blobHash, destinationPath: 'stale.txt', expectedDestinationHash: null }] })).status).toBe('error');
+    expect((await client.inspector.artifacts.copyToProject({ ...request, files: [{ url: 'drive://workspace/a.txt', hash: source[0]!.blobHash, destinationPath: 'stale.txt', expectedDestinationHash: null }] })).status).toBe('error');
   });
 
   it('replaces only an explicitly confirmed destination version and requires confirmation again after a concurrent edit', async () => {
     const { client, workspaceId, projectId, publish } = await fixture();
     const source = await publish(workspaceId, 1, [{ path: 'report.txt', content: 'selected workspace report' }]);
     const original = await publish(projectId, 1, [{ path: 'report.txt', content: 'original project report' }]);
-    const file = { url: 'local://workspace/report.txt', hash: source[0]!.blobHash, destinationPath: 'report.txt', expectedDestinationHash: original[0]!.blobHash };
+    const file = { url: 'drive://workspace/report.txt', hash: source[0]!.blobHash, destinationPath: 'report.txt', expectedDestinationHash: original[0]!.blobHash };
     const current = await publish(projectId, 2, [{ path: 'report.txt', content: 'concurrent project edit' }]);
     const request = { spaceId: workspaceId, expectedGeneration: 0, expectedProjectGeneration: 2 };
     // Even with a refreshed manifest generation, consent to the earlier file version is stale.
     expect((await client.inspector.artifacts.copyToProject({ ...request, files: [file] })).status).toBe('error');
-    const preserved = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: null }));
+    const preserved = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'drive://base/report.txt', hash: null }));
     expect(preserved.toString()).toBe('concurrent project edit');
     const replaced = await client.inspector.artifacts.copyToProject({ ...request, files: [{ ...file, expectedDestinationHash: current[0]!.blobHash }] });
     if (replaced.status === 'error') throw replaced.error;
-    const copied = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: null }));
+    const copied = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'drive://base/report.txt', hash: null }));
     expect(copied.toString()).toBe('selected workspace report');
     // Replacement changes the path, not previously published immutable versions.
-    const priorVersion = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'local://base/report.txt', hash: current[0]!.blobHash }));
+    const priorVersion = await readBytes(client.inspector.artifacts.read({ spaceId: projectId, expectedGeneration: 0, url: 'drive://base/report.txt', hash: current[0]!.blobHash }));
     expect(priorVersion.toString()).toBe('concurrent project edit');
     const scopeGeneration = replaced.value.scopes.find((scope) => scope.workspaceId === projectId)!.generation;
-    const copiedHash = replaced.value.artifacts.find((artifact) => artifact.url === 'local://base/report.txt')!.hash;
+    const copiedHash = replaced.value.artifacts.find((artifact) => artifact.url === 'drive://base/report.txt')!.hash;
     expect((await client.inspector.artifacts.copyToProject({ ...request, expectedProjectGeneration: scopeGeneration, files: [{ ...file, destinationPath: 'report.txt/child.txt', expectedDestinationHash: copiedHash }] })).status).toBe('error');
   });
 
@@ -271,7 +271,7 @@ describe('user artifact flows', () => {
     const { client, workspaceId, publish, authority, origin } = await fixture();
     const source = await publish(workspaceId, 1, [{ path: 'demo.html', content: '<script>unsafe()</script>', mediaType: 'text/html' }]);
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
-    const created = await client.inspector.artifacts.shares.create({ spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/demo.html', hash: source[0]!.blobHash, expiresAt });
+    const created = await client.inspector.artifacts.shares.create({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/demo.html', hash: source[0]!.blobHash, expiresAt });
     if (created.status === 'error') throw created.error;
     await publish(workspaceId, 2, [{ path: 'demo.html', content: '<h1>new version</h1>', mediaType: 'text/html' }]);
     const response = await worker.fetch(new Request(new URL(created.value.url, origin)), env);
@@ -287,18 +287,18 @@ describe('user artifact flows', () => {
     expect((await worker.fetch(new Request(new URL(created.value.url, origin)), env)).status).toBe(404);
     const current = await client.inspector.artifacts.list({ spaceId: workspaceId, expectedGeneration: 0 });
     if (current.status === 'error') throw current.error;
-    const expired = await client.inspector.artifacts.shares.create({ spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/demo.html', hash: current.value.artifacts[0]!.hash, expiresAt });
+    const expired = await client.inspector.artifacts.shares.create({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/demo.html', hash: current.value.artifacts[0]!.hash, expiresAt });
     if (expired.status === 'error') throw expired.error;
     // Simulate a persisted link whose expiry passed, without wall-clock sleeps in the suite.
     await runInDurableObject(authority, (_instance: ProjectAuthorityDO, state) => { state.storage.sql.exec('UPDATE artifact_shares SET expires_at=? WHERE token=?', '2000-01-01T00:00:00.000Z', expired.value.id); });
     expect((await worker.fetch(new Request(new URL(expired.value.url, origin)), env)).status).toBe(404);
-    expect(await client.inspector.artifacts.shares.list({ spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/demo.html' })).toMatchObject({ status: 'ok', value: [] });
+    expect(await client.inspector.artifacts.shares.list({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/demo.html' })).toMatchObject({ status: 'ok', value: [] });
   });
 
   it('streams chunked shares completely, keeps preview/copy size limits honest, and rejects corrupt final parts', async () => {
     const { client, workspaceId, publishChunked, origin } = await fixture();
     const artifact = await publishChunked();
-    const request = { spaceId: workspaceId, expectedGeneration: 0, url: 'local://workspace/large.bin', hash: artifact.blobHash };
+    const request = { spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/large.bin', hash: artifact.blobHash };
     const previews = [];
     for await (const frame of client.inspector.artifacts.read(request)) previews.push(frame);
     expect(previews).toMatchObject([{ status: 'error' }]);
@@ -342,7 +342,7 @@ describe('user artifact flows', () => {
     };
     const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'capture (1).bin', size: bytes.length, mediaType: 'application/octet-stream' });
     if (begun.status === 'error') throw begun.error;
-    expect(begun.value).toMatchObject({ url: 'local://workspace/uploads/capture (1).bin', chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES });
+    expect(begun.value).toMatchObject({ url: 'drive://workspace/uploads/capture (1).bin', chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES });
     const upload = { ...request, uploadId: begun.value.uploadId };
 
     expect(await client.inspector.artifacts.uploadChunk({ ...upload, ...chunk(ARTIFACT_UPLOAD_CHUNK_BYTES) })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
@@ -355,8 +355,8 @@ describe('user artifact flows', () => {
 
     const committed = await client.inspector.artifacts.uploadCommit(upload);
     if (committed.status === 'error') throw committed.error;
-    expect(committed.value).toMatchObject({ url: 'local://workspace/uploads/capture (1).bin', path: 'uploads/capture (1).bin', size: bytes.length, mediaType: 'application/octet-stream', scope: 'workspace', workspaceId });
-    const stored = await readBytes(client.inspector.artifacts.read({ ...request, url: 'local://workspace/uploads/capture%20(1).bin', hash: committed.value.hash }));
+    expect(committed.value).toMatchObject({ url: 'drive://workspace/uploads/capture (1).bin', path: 'uploads/capture (1).bin', size: bytes.length, mediaType: 'application/octet-stream', scope: 'workspace', workspaceId });
+    const stored = await readBytes(client.inspector.artifacts.read({ ...request, url: 'drive://workspace/uploads/capture%20(1).bin', hash: committed.value.hash }));
     expect(stored).toEqual(Buffer.from(bytes));
     expect(await client.inspector.artifacts.uploadAbort(upload)).toMatchObject({ status: 'ok', value: { aborted: false } });
 

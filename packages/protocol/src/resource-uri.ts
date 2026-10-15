@@ -3,7 +3,7 @@ export interface ResourceSelector {
   ranges: readonly { start: number; end: number | null }[];
 }
 export type ResourceUri = (
-  | { kind: 'local'; mount: 'base' | 'workspace' | 'workspaces' | null; path: string; workspaceId: string | null }
+  | { kind: 'drive'; mount: 'base' | 'workspace' | 'workspaces' | null; path: string; workspaceId: string | null }
   | { kind: 'artifact'; id: string }
   | { kind: 'browser-artifact'; machineId: string; id: string }
 ) & { url: string; selector: ResourceSelector; suffix: string };
@@ -11,7 +11,7 @@ export type ResourceUri = (
 /** Parse OMP resources without URL's dot-segment normalization or hostname lowercasing. */
 export function parseResourceUri(input: string): ResourceUri | null {
   if (input.length > 8_192 || /[\u0000-\u0020\u007f\\?#]/u.test(input)) return null;
-  const match = /^(local|artifact|browser-artifact):\/\/(.*)$/iu.exec(input);
+  const match = /^(drive|artifact|browser-artifact):\/\/(.*)$/iu.exec(input);
   if (!match) return null;
   const scheme = match[1]!.toLowerCase();
   let target = match[2]!;
@@ -54,11 +54,11 @@ export function parseResourceUri(input: string): ResourceUri | null {
   // Encode path components exactly once. Encoded separators never become another mount.
   const path = parts.join('/');
   const encoded = [...(mount ? [mount] : []), ...(workspaceId ? [workspaceId] : []), ...parts].map(encodeURIComponent).join('/');
-  return { kind: 'local', mount, workspaceId, path, url: `local://${encoded}`, selector, suffix };
+  return { kind: 'drive', mount, workspaceId, path, url: `drive://${encoded}`, selector, suffix };
 }
 
-export function canonicalLocalResourceUrl(resource: Extract<ResourceUri, { kind: 'local' }>, scope: 'base' | 'workspace'): string {
-  return resource.mount ? resource.url : `local://${scope}/${resource.path.split('/').map(encodeURIComponent).join('/')}`;
+export function canonicalDriveResourceUrl(resource: Extract<ResourceUri, { kind: 'drive' }>, scope: 'base' | 'workspace'): string {
+  return resource.mount ? resource.url : `drive://${scope}/${resource.path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 export function selectResourceText(text: string, selector: ResourceSelector): string {
@@ -97,7 +97,7 @@ export function* createResourcePreview(url: string, bytes: Uint8Array, mediaType
   const resource = parseResourceUri(url);
   if (!resource) throw new Error('Unsupported or unsafe resource URI');
   if (bytes.byteLength > 16 * 1024 * 1024) throw new Error('Resource reads are limited to 16 MiB');
-  mediaType ??= resource.kind === 'local' ? MEDIA_TYPES[resource.path.split('.').at(-1)?.toLowerCase() ?? ''] ?? null : 'text/plain';
+  mediaType ??= resource.kind === 'drive' ? MEDIA_TYPES[resource.path.split('.').at(-1)?.toLowerCase() ?? ''] ?? null : 'text/plain';
   const binary = mediaType !== null && (/^(audio|video|image)\//u.test(mediaType) && mediaType !== 'image/svg+xml' || mediaType === 'application/pdf');
   let text: string | null = null;
   if (!binary) {

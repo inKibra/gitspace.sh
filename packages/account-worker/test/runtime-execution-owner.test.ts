@@ -214,7 +214,7 @@ test('agent workspace creation and phase changes run in the cloud with no machin
   expect((await authority.listWorkspaces()).find(workspace => workspace.id === 'owner-workspace')).toMatchObject({ phase: 'review' });
 });
 
-test('agents write and edit their own workspace artifacts through local:// in the cloud', async () => {
+test('agents write and edit their own workspace artifacts through drive:// in the cloud', async () => {
   const projectId = 'artifact-project';
   const workspaceId = 'artifact-workspace';
   await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(19)) });
@@ -225,7 +225,7 @@ test('agents write and edit their own workspace artifacts through local:// in th
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`artifact-proof:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
     try {
-      const url = 'local://workspace/notes/a.md';
+      const url = 'drive://workspace/notes/a.md';
       const written = await invoke('write', { path: url, content: 'first draft\n', message: 'Record notes' });
       expect(written.status, text(written)).toBe('completed');
       expect(text(await invoke('read', { path: url }))).toBe('first draft\n');
@@ -236,9 +236,9 @@ test('agents write and edit their own workspace artifacts through local:// in th
       expect(missed.status).toBe('failed');
       expect(text(await invoke('read', { path: url }))).toBe('final draft\n');
 
-      const base = await invoke('write', { path: 'local://base/notes/a.md', content: 'shared', message: 'Write project notes' });
+      const base = await invoke('write', { path: 'drive://base/notes/a.md', content: 'shared', message: 'Write project notes' });
       expect(base.status).toBe('failed');
-      expect(text(base)).toBe('This workspace can write local://workspace/<path>; local://base/ is written from the project session');
+      expect(text(base)).toBe('This workspace can write drive://workspace/<path>; drive://base/ is written from the project session');
     } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
   expect((await authority.listArtifactScopes()).map(scope => [scope.workspaceId, scope.generation])).toEqual([[workspaceId, 2]]);

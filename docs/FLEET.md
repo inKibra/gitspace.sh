@@ -9,7 +9,7 @@ generation-fenced tool execution; `supervisor` owns their processes and PTYs.
 There is no active OMP runtime or machine inference fallback.
 
 Code repositories use Artifacts and Git LFS. Optional ArtifactFS attachments are
-distinct from encrypted `local://` evidence. Runner tasks pin source snapshots;
+distinct from encrypted `drive://` evidence. Runner tasks pin source snapshots;
 delegated work uses separate branches and explicit integration tasks. Uncertain
 unsafe effects are not replayed automatically.
 
@@ -93,7 +93,7 @@ evidence-backed consumer requires it.
   the #126 ownership-inversion pattern at process scope.
 - **Dead code**: `startProcessScheduler` / `autostartProcesses` have no
   production callers → `restart.policy` in processes.json never fires.
-- **local://** binds to `artifactsScope(cwd).rootDir` — the artifacts mount
+- **drive://** binds to `artifactsScope(cwd).rootDir` — the artifacts mount
   (`<workspace>/.gitspace/artifacts`), goal subfolder when a goal exists.
   The `.sessions/<sid>` machinery (exclude, walk-skip, classify-guard, GC)
   exists but nothing binds to it. Header comment in `makeLocalProtocolOptions`
@@ -118,7 +118,7 @@ evidence-backed consumer requires it.
 - GitHub App exists (verify `checks:write`, `deployments:write`; private key
   custody with gitspace.sh → delegate mints installation tokens via API).
 - Embedded OMP packages are 18.0.6 (`f061638`); native `askDialog` replaced
-  one patch, while queue removal, role-only models, flat `local://`, and
+  one patch, while queue removal, role-only models, flat `drive://`, and
   missing-image fallback remain explicit patches.
 - Skinny-event cut `b972282` replaces recurring whole-fleet agent snapshots
   with workspace snapshots and growing text blocks with append deltas.
@@ -168,8 +168,8 @@ evidence-backed consumer requires it.
 ## 6. Agent topology
 
 - **One writer agent per workspace** (mirrors one-writer-per-goal artifacts
-  invariant), one project agent (local:// = tree root, `goals/**` denied).
-- **Side agents**: read tier only (deny bash/eval/task/write/edit), local://
+  invariant), one project agent (drive:// = tree root, `goals/**` denied).
+- **Side agents**: read tier only (deny bash/eval/task/write/edit), drive://
   bound to `<mount>/.sessions/<sid>` (guards/GC already exist; only the
   binding is missing). Promotion of side output is the main agent's act.
 - **Crons/triggers**: the daemon-side scheduler routes to the project agent
@@ -505,7 +505,7 @@ before execution; there is no silent legacy alias.
   product transcript; only committed semantic events produce replay facts.
 - Goal/workflow/review documents open in context or wide application surfaces;
   transcript references point to them rather than embedding document editors.
-  Inline `.gssh.html` blocks are removed in favor of `local://apps/<id>` plus a
+  Inline `.gssh.html` blocks are removed in favor of `drive://apps/<id>` plus a
   named OMP workspace-hub service and preview reference.
 - OpenSession provides reference patterns for turn grouping, compact tool
   lifecycles, asks, turn footers, diffs, and virtualization. Gooey Pi provides
@@ -780,7 +780,7 @@ before execution; there is no silent legacy alias.
 
 - **Tier 0 — data conventions**: block schemas, artifact kinds, workflow/goal
   formats, and local-backed mini-app descriptors.
-- **Mini-app reset**: a mini-app is a `local://apps/<app-id>/` artifact tree
+- **Mini-app reset**: a mini-app is a `drive://apps/<app-id>/` artifact tree
   (source, assets, manifest, durable app data) plus a named OMP broker process.
   The process owns build/dev-server lifetime, logs, readiness, ports, restart,
   and re-adoption; GitSpace supplies workspace capability policy, hostname/
@@ -1051,7 +1051,7 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
 9. Build canonical typed handlers + `better-result`, then full
    `space.*`/`gitspace.*` parity and web adoption domain by domain.
 10. Adopt OMP broker for processes/PTYS; delete tmux-lite process ownership.
-11. Rebuild mini-apps as `local://` artifact trees backed by named broker
+11. Rebuild mini-apps as `drive://` artifact trees backed by named broker
     processes and development-tunnel routes; remove inline `.gssh.html` state.
 12. Add encrypted R2 artifacts/session mirrors, shares, and move/resume.
 13. Delete routine CLI, local relay/cloudflared architecture, scattered state
@@ -1116,14 +1116,14 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     browser; the same OMP session survives. Stable bootloader promotion and
     wiring installed `gssh web` to the common current-environment host remain.
 15. IN PROGRESS “Encrypted R2 artifacts + session mirrors” — the first
-    capability-scoped `local://` projection now provides base/current/sibling
+    capability-scoped `drive://` projection now provides base/current/sibling
     views, client encryption, lazy object fetch, local materialization,
     generation-CAS manifests, and explicit re-encrypting workspace→base
     promotion. Shares, chunked large blobs, remote ref authority, eviction
     policy, and fleet move/resume remain.
 16. NEW “Workspace email on platform domain” — default-branch allowlist,
     DKIM/SPF gate, plaintext-at-MX disclosure, sealed MIME in R2.
-17. NEW “Broker-backed local mini-apps” — `local://apps/<id>` artifact tree,
+17. NEW “Broker-backed local mini-apps” — `drive://apps/<id>` artifact tree,
     named OMP process, readiness/logs/route reference block, immutable promote/
     share snapshot; delete inline `.gssh.html` program state.
 18. DONE “First local 1.0 vertical slice” — `packages/machine` enforces and

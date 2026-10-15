@@ -158,7 +158,7 @@ Every item is verified the way the user works, in the browser, before it is repo
 3. Done. "Account directory connection failed": record close codes to tell deploys from network drops; brief reconnects are not shown as errors.
 
 **Batch 3 — drive and documents.**
-1. `local://` → `drive://`, hard cutover, no alias: parser, composer, tools, skills, agent instructions, inspector tab "Drive".
+1. Done. `local://` → `drive://`, hard cutover, no alias (cron artifact scopes rewritten once; links in old transcripts stay text): parser, composer, tools, skills, agent instructions, inspector tab "Drive".
 2. Agents read PDFs and documents: Workers AI `toMarkdown` (`[ai]` binding), result cached in drive storage by content hash; large text paged. Test size limits and scanned PDFs first.
 3. Files tab shows binary files (PDF in the viewer, not base64).
 4. Chat: attachments as links; user messages rendered as Markdown.

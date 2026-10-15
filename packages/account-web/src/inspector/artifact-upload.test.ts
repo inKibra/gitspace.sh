@@ -4,7 +4,7 @@ import { ClientNetworkFailure } from 'result-rpc';
 import { describe, expect, it, vi } from 'vitest';
 import { ArtifactUploadRejected, uploadArtifactFile, type ArtifactUploadClient, type ArtifactUploadSession } from './artifact-upload.js';
 
-const url = 'local://workspace/uploads/data.zip';
+const url = 'drive://workspace/uploads/data.zip';
 const artifact = { kind: 'artifact' as const, url, hash: 'hash', label: 'uploads/data.zip', mediaType: null, generation: 1 };
 
 function contents(size: number): Uint8Array<ArrayBuffer> {

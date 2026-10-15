@@ -24,7 +24,7 @@ export function ArtifactActions({ selected, actions }: { selected: readonly Arti
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const canCopy = selected.length > 0 && selected.every((reference) => reference.url.startsWith('local://workspace/'));
+  const canCopy = selected.length > 0 && selected.every((reference) => reference.url.startsWith('drive://workspace/'));
   const existingFile = (path: string) => actions.projectFiles.find((file) => file.path === path);
   const conflict = (path: string, index: number): boolean =>
     actions.projectFiles.some((file) => file.path !== path && (path.startsWith(`${file.path}/`) || file.path.startsWith(`${path}/`)))

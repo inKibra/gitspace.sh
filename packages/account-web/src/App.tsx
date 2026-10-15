@@ -34,8 +34,8 @@ export const verticalSliceFixture: GitSpaceShellProps = {
   }],
   transport: [],
   artifacts: [
-    { url: 'local://base/reference.txt', name: 'reference.txt', path: 'reference.txt', scope: 'base', size: 824, mediaType: 'text/plain' },
-    { url: 'local://workspace/apps/demo/index.html', name: 'index.html', path: 'apps/demo/index.html', scope: 'workspace', size: 1842, mediaType: 'text/html' },
+    { url: 'drive://base/reference.txt', name: 'reference.txt', path: 'reference.txt', scope: 'base', size: 824, mediaType: 'text/plain' },
+    { url: 'drive://workspace/apps/demo/index.html', name: 'index.html', path: 'apps/demo/index.html', scope: 'workspace', size: 1842, mediaType: 'text/html' },
   ],
 };
 

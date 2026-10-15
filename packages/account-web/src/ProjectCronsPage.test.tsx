@@ -16,8 +16,8 @@ function cronFixture(): ProjectCronView {
     description: 'Check release readiness and record blockers.',
     prompt: 'Review the release goal and current repository state.',
     target: { scope: 'workspace', projectId: 'project-a', spaceId: 'space-a' },
-    readScopes: ['repository/**', 'local://workspace/goal/**'],
-    writeScopes: ['local://workspace/reports/**'],
+    readScopes: ['repository/**', 'drive://workspace/goal/**'],
+    writeScopes: ['drive://workspace/reports/**'],
     enabled: true,
     state: 'blocked',
     nextRunAt: new Date('2026-09-01T06:00:00.000Z'),
@@ -50,8 +50,8 @@ describe('ProjectCronsPage', () => {
     expect(html).toContain('release-readiness');
     expect(html).toContain('Check release readiness and record blockers.');
     expect(html).toContain('Workspace agent · release-work');
-    expect(html).toContain('repository/**, local://workspace/goal/**');
-    expect(html).toContain('local://workspace/reports/**');
+    expect(html).toContain('repository/**, drive://workspace/goal/**');
+    expect(html).toContain('drive://workspace/reports/**');
     expect(html).toContain('Workspace is closed and has no canonical agent');
     expect(html).toContain('Talk to for release-readiness');
     expect(html).toContain('Run history');

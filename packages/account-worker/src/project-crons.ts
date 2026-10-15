@@ -228,6 +228,9 @@ export class ProjectCronsDO extends DurableObject<Env> {
           updated_at INTEGER NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS project_crons_name ON project_crons(project_id, name);
+        -- One-time: artifact scopes moved from local:// to drive://.
+        UPDATE project_crons SET read_scopes_json=replace(read_scopes_json,'local://','drive://'), write_scopes_json=replace(write_scopes_json,'local://','drive://')
+          WHERE read_scopes_json LIKE '%local://%' OR write_scopes_json LIKE '%local://%';
         CREATE INDEX IF NOT EXISTS project_crons_due ON project_crons(enabled, next_run_at);
         CREATE TABLE IF NOT EXISTS project_cron_runs (
           id TEXT PRIMARY KEY,

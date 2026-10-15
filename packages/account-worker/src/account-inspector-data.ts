@@ -130,10 +130,10 @@ export class InspectorCloudArtifacts {
     return manifest.entries;
   }
 
-  /** Normalizes a local:// URL to the workspace it addresses; that workspace's scope may not exist yet. */
+  /** Normalizes a drive:// URL to the workspace it addresses; that workspace's scope may not exist yet. */
   private target(url: string) {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'local:') throw new Error('Artifact URL must use local://');
+    if (parsed.protocol !== 'drive:') throw new Error('Artifact URL must use drive://');
     const decoded = decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
     let path = decoded ? posix.normalize(decoded) : '';
     if (path === '..' || path.startsWith('../') || path.startsWith('/')) throw new Error('Artifact path escapes its scope');
@@ -184,7 +184,7 @@ export class InspectorCloudArtifacts {
     const groups = await Promise.all(selected.map(async (scope) => {
       const base = scope.workspaceId === this.source.project.id;
       return (await this.entries(scope)).map((entry) => ({
-        url: `local://${base ? 'base' : 'workspace'}/${entry.path}`, path: entry.path, hash: entry.blobHash,
+        url: `drive://${base ? 'base' : 'workspace'}/${entry.path}`, path: entry.path, hash: entry.blobHash,
         size: entry.size, mediaType: entry.mediaType, scope: base ? 'base' as const : 'workspace' as const,
         workspaceId: base ? null : scope.workspaceId,
       }));
@@ -194,7 +194,7 @@ export class InspectorCloudArtifacts {
 
   async read(url: string, hash?: string | null) {
     const resource = parseResourceUri(url);
-    if (resource?.kind !== 'local' || !resource.mount) throw new Error('Inspector artifacts require a canonical local resource URI');
+    if (resource?.kind !== 'drive' || !resource.mount) throw new Error('Inspector artifacts require a canonical drive resource URI');
     const resolved = await this.resolve(resource.url);
     const current = (await this.entries(resolved.scope)).find((candidate) => candidate.path === resolved.path);
     const entry = hash ? { blobHash: hash, mediaType: current?.mediaType ?? null, size: current?.blobHash === hash ? current.size : undefined } : current;
@@ -222,7 +222,7 @@ export class InspectorCloudArtifacts {
     const paths = new Set<string>();
     const selected = files.map((file) => {
       const parsed = new URL(file.url);
-      if (parsed.protocol !== 'local:' || parsed.hostname !== 'workspace') throw new Error('Only this workspace’s artifacts can be copied');
+      if (parsed.protocol !== 'drive:' || parsed.hostname !== 'workspace') throw new Error('Only this workspace’s artifacts can be copied');
       const path = decodeURIComponent(parsed.pathname).replace(/^\/+/u, '');
       const entry = sourceByPath.get(path);
       if (!entry || entry.blobHash !== file.hash) throw new Error(`Selected version of ${path} changed. Refresh and select it again.`);
@@ -260,7 +260,7 @@ export class InspectorCloudArtifacts {
     return this.catalog();
   }
 
-  /** This session's writable scope: a worktree session writes local://workspace/…, the project session local://base/…. */
+  /** This session's writable scope: a worktree session writes drive://workspace/…, the project session drive://base/…. */
   private writable(): { mount: 'base' | 'workspace'; spaceId: string } {
     return this.source.workspace.kind === 'base' ? { mount: 'base', spaceId: this.source.project.id } : { mount: 'workspace', spaceId: this.source.workspace.id };
   }
@@ -272,11 +272,11 @@ export class InspectorCloudArtifacts {
   async write(url: string, change: ArtifactChange) {
     const writable = this.writable();
     const resource = parseResourceUri(url);
-    if (resource?.kind !== 'local') throw new Error('Unsupported or unsafe resource URI');
+    if (resource?.kind !== 'drive') throw new Error('Unsupported or unsafe resource URI');
     if (resource.mount !== writable.mount) {
       throw new Error(writable.mount === 'workspace'
-        ? 'This workspace can write local://workspace/<path>; local://base/ is written from the project session'
-        : 'The project session can write local://base/<path>; local://workspace/ is written from that workspace’s session');
+        ? 'This workspace can write drive://workspace/<path>; drive://base/ is written from the project session'
+        : 'The project session can write drive://base/<path>; drive://workspace/ is written from that workspace’s session');
     }
     return this.put(this.target(resource.url).path, change);
   }
@@ -304,7 +304,7 @@ export class InspectorCloudArtifacts {
     const generation = scope.generation + 1;
     const manifestHash = await this.sealManifest(scope, generation, entries.values(), scopeKey);
     await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation });
-    return { url: `local://${mount}/${path}`, path, hash: entry.blobHash, size: entry.size, mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
+    return { url: `drive://${mount}/${path}`, path, hash: entry.blobHash, size: entry.size, mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
   }
 
   /** Staged upload objects live under the account prefix until commit or abort removes them. */
@@ -334,7 +334,7 @@ export class InspectorCloudArtifacts {
     const uploadId = crypto.randomUUID();
     const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation: this.source.placement?.generation ?? 0, path: `uploads/${name}`, size, mediaType, received: 0, last: null };
     await this.env.DATA.put(this.uploadKey(uploadId, 'state'), JSON.stringify(state));
-    return { uploadId, url: `local://${this.writable().mount}/${state.path}`, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES };
+    return { uploadId, url: `drive://${this.writable().mount}/${state.path}`, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES };
   }
 
   /** Stores the chunk at the next offset; resending the last stored chunk is acknowledged without rewriting it. */

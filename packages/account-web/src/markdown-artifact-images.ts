@@ -47,10 +47,10 @@ export function markdownImageSources(source: string): string[] {
 
 /** The artifact URL an image source names, relative to the Markdown artifact; null for web, data, and anchor sources. */
 export function artifactImageUrl(src: string, documentUrl: string): string | null {
-  if (src.startsWith('local://')) return decodeURI(src);
-  if (/^[a-z][a-z0-9+.-]*:/iu.test(src) || src.startsWith('//') || src.startsWith('#') || !documentUrl.startsWith('local://')) return null;
-  const directory = documentUrl.slice('local://'.length, documentUrl.lastIndexOf('/') + 1);
+  if (src.startsWith('drive://')) return decodeURI(src);
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(src) || src.startsWith('//') || src.startsWith('#') || !documentUrl.startsWith('drive://')) return null;
+  const directory = documentUrl.slice('drive://'.length, documentUrl.lastIndexOf('/') + 1);
   let resolved: URL;
   try { resolved = new URL(src, `https://artifact.invalid/${directory}`); } catch { return null; }
-  return `local://${decodeURIComponent(resolved.pathname.slice(1))}`;
+  return `drive://${decodeURIComponent(resolved.pathname.slice(1))}`;
 }

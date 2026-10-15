@@ -11,7 +11,7 @@ Replace GitSpace's embedded OMP (oh-my-pi 18.2.11) agent runtime with a runtime 
 - `@earendil-works/chord` for replicated state, services, and UI sync,
 - `@earendil-works/pi-mcp` for MCP and cloud WorkerLoader isolates for scripted tool fan-out.
 
-Target architecture (**option B**): each workspace lives in a **Cloudflare Durable Object** that hosts its pi-durable Session (agent conversation, subagents, operational tasks, documents). Code lives in a per-workspace **Artifacts** repository (internal storage; the `local://` artifact store keeps its name). Machines become **executors**: they hold working copies, run tools, processes, and environment scripts, and attach or detach without moving the workspace.
+Target architecture (**option B**): each workspace lives in a **Cloudflare Durable Object** that hosts its pi-durable Session (agent conversation, subagents, operational tasks, documents). Code lives in a per-workspace **Artifacts** repository (internal storage; the `drive://` artifact store keeps its name). Machines become **executors**: they hold working copies, run tools, processes, and environment scripts, and attach or detach without moving the workspace.
 
 ```text
                        ┌────────────────────── Tenant Worker (Cloudflare) ──────────────────────┐
@@ -96,7 +96,7 @@ Every Pi package is pinned to an exact version. GitSpace code imports Pi only th
 | **Project DOs** (existing `ProjectAuthorityDO`, `ProjectSecretsDO`, `ProjectCronsDO`) | Tenant Worker | Project-scoped state: environment ledger and values, secrets and grants, cron definitions, and the new QA queue. Workspace definitions here are the project's record of what each workspace applied, for listings and the directory. |
 | **Credential vault DO** (existing) | Tenant Worker | Sealed provider credentials, refresh leases, profiles, assignments. |
 | **Artifacts namespace** | Cloudflare Artifacts, one per tenant | One repo per project (imported) and one fork per workspace. |
-| **R2 bucket** (existing, one per tenant: `gsp-relay-<accountId>`) | Cloudflare | Blobs: `local://` artifacts, uploads, large tool outputs. |
+| **R2 bucket** (existing, one per tenant: `gsp-relay-<accountId>`) | Cloudflare | Blobs: `drive://` artifacts, uploads, large tool outputs. |
 | **Machine runtime** | User machines, GitSpace cloud machines | Attaches to workspaces, holds working copies, runs the **supervisor** (terminals, services, jobs, environment runs), and executes admitted machine tools. Codemode stays in the cloud. |
 | **Relay** (existing) | Cloudflare | Transport between DOs, browsers, and machines. |
 
@@ -329,7 +329,7 @@ No hashline. Each model gets exactly one edit tool, chosen by the format its ven
 
 ### 8.9 Plan mode, skills, rules, instructions
 
-- **Plan mode:** a read-only phase extension (pi-durable example 27); plan file in `local://`; approval through the question card with an Open plan link.
+- **Plan mode:** a read-only phase extension (pi-durable example 27); plan file in `drive://`; approval through the question card with an Open plan link.
 - **Skills:** discovery, live refresh, `skill://` URLs, skill list as a system-prompt section.
 - **Instructions and phase context:** system-prompt sections from workspace controls.
 - **Titles:** a cheap-model call after the first turn.
@@ -615,7 +615,7 @@ Each milestone ends with its exit criteria demonstrated on Darktop and recorded 
 |---|---|---|
 | **M0** | Decisions and spikes | S0: Codex model and usage request from Cloudflare egress. S1: pi-durable + Chord + `pi-ai` in a DO: one conversation, one tool call over the relay, CPU per turn and per commit, Worker bundle compatibility, provider-aborted stream behaviour, context edits omitting a span, tool set changed mid-conversation. S2: Artifacts import of inkibra-core, fork, clone/push timings, snapshot to a private ref, `readFile` from a DO, LFS answer, WalGit comparison. Go/no-go for option B. |
 | **M1** | Runtime core | Workspace DO hosts a Session; vault-backed providers with the catalog overlay on DO storage; machine attachment and routing for `read`/`write`/`edit`/`apply_patch`/`bash`/`grep`/`find` with the edit-tool rule; relay transport; kill-and-resume tests for DO and machine. |
-| **M2** | Agent parity | `todo`, `ask`, plan mode and approval, skills, rules (tool-call and judged TTSR), `space_*`, MCP via `pi-mcp`, `local://`, cloud WorkerLoader codemode, web search, images, titles, QA reporting, history search. Real-model test suite equivalent to today's `account-omp` suite. |
+| **M2** | Agent parity | `todo`, `ask`, plan mode and approval, skills, rules (tool-call and judged TTSR), `space_*`, MCP via `pi-mcp`, `drive://`, cloud WorkerLoader codemode, web search, images, titles, QA reporting, history search. Real-model test suite equivalent to today's `account-omp` suite. |
 | **M3** | Supervisor and environments | Supervisor replaces the OMP broker for terminals, services, lifecycle runs; `LifecycleRun` tasks; environment definitions from commits; `jobs`/`proc`/`agents` tools; Agent hub panel. |
 | **M4** | Workspace operations | `CreateWorkspace` and `Checkpoint` tasks on Artifacts; continuous snapshots; launch no longer blocks on uploads; crons as tasks. |
 | **M5** | UI on Chord and machineless | Workspace, agent, task, environment, terminal state via Chord; machineless repository read/edit/write and conversation; creation progress streaming. |

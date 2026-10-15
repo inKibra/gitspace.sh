@@ -9,7 +9,7 @@ import type { ArtifactUploadClient } from './artifact-upload.js';
 vi.mock('@pierre/diffs/react', () => ({ FileDiff: () => null }));
 vi.mock('@pierre/trees/react', () => ({ useFileTree: () => ({ model: { resetPaths() {}, setGitStatus() {} } }), FileTree: () => null }));
 
-const url = 'local://workspace/uploads/data.zip';
+const url = 'drive://workspace/uploads/data.zip';
 let root: Root;
 let container: HTMLDivElement;
 let props: InspectorProps;
@@ -40,11 +40,11 @@ async function click(label: string) {
 function client(chunk: ArtifactUploadClient['chunk']) {
   let begun = 0;
   return {
-    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ uploadId: `${fileName}#${begun += 1}`, url: `local://workspace/uploads/${fileName}`, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES })),
+    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ uploadId: `${fileName}#${begun += 1}`, url: `drive://workspace/uploads/${fileName}`, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES })),
     chunk: vi.fn<ArtifactUploadClient['chunk']>(chunk),
     commit: vi.fn<ArtifactUploadClient['commit']>(async (uploadId) => {
       const name = uploadId.split('#')[0]!;
-      return { kind: 'artifact', url: `local://workspace/uploads/${name}`, hash: 'hash', label: `uploads/${name}`, mediaType: null, generation: 1 };
+      return { kind: 'artifact', url: `drive://workspace/uploads/${name}`, hash: 'hash', label: `uploads/${name}`, mediaType: null, generation: 1 };
     }),
     abort: vi.fn<ArtifactUploadClient['abort']>(async () => undefined),
   };
@@ -135,8 +135,8 @@ describe('Inspector artifact uploads', () => {
 
     expect(uploads.chunk).toHaveBeenCalledTimes(4);
     expect(peak).toBe(1);
-    expect(container.querySelector('[data-artifact-url="local://workspace/uploads/a.zip"]')?.hasAttribute('data-selected')).toBe(true);
-    expect(container.querySelector('[data-artifact-url="local://workspace/uploads/b.zip"]')?.hasAttribute('data-selected')).toBe(true);
+    expect(container.querySelector('[data-artifact-url="drive://workspace/uploads/a.zip"]')?.hasAttribute('data-selected')).toBe(true);
+    expect(container.querySelector('[data-artifact-url="drive://workspace/uploads/b.zip"]')?.hasAttribute('data-selected')).toBe(true);
   });
 
   it('rejects files over 16 MiB without beginning an upload', async () => {

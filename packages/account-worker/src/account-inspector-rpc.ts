@@ -58,7 +58,7 @@ import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, type CloudCheckout } from './cloud-repository.js';
 import type { RepositoryMode } from '@gitspace/protocol/inspector-contract';
-import { canonicalLocalResourceUrl, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
+import { canonicalDriveResourceUrl, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import type { InspectorCloudContext } from './account-inspector-data.js';
 
 async function readCloudResource(env: Env, userId: string, source: InspectorCloudContext, url: string) {
@@ -68,7 +68,7 @@ async function readCloudResource(env: Env, userId: string, source: InspectorClou
   if (resource.kind === 'browser-artifact') throw new InspectorStateError('Read browser artifacts through the authorized cloud browser control.');
   // Published local artifacts are workspace-scoped, not session-scoped. An old
   // session ID must neither prevent reading them nor grant access to another scope.
-  const canonicalUrl = canonicalLocalResourceUrl(resource, source.workspace.kind === 'base' ? 'base' : 'workspace');
+  const canonicalUrl = canonicalDriveResourceUrl(resource, source.workspace.kind === 'base' ? 'base' : 'workspace');
   const frames = await new InspectorCloudArtifacts(env, userId, source).read(`${canonicalUrl}${resource.suffix}`);
   return (function* (): Generator<ResourcePreviewFrame> {
     for (const frame of frames) yield frame.type === 'metadata' ? { ...frame, url } : frame;

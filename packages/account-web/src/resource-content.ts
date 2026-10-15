@@ -1,4 +1,4 @@
-import { canonicalLocalResourceUrl, createResourcePreview, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
+import { canonicalDriveResourceUrl, createResourcePreview, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import type { RuntimeBrowserArtifactPage } from '@gitspace/protocol-runtime';
 import type { InspectorArtifactContent } from './inspector/Inspector.js';
 
@@ -78,9 +78,9 @@ export async function loadInspectorResource(transport: ResourceTransport, contex
     })(), uri, signal);
   }
   const request = { spaceId: context.spaceId, expectedGeneration: context.generation };
-  if (resource.kind !== 'local') throw new Error('Machine-session output spills are not retained cloud artifacts. Use a published local:// evidence link.');
+  if (resource.kind !== 'drive') throw new Error('Machine-session output spills are not retained cloud artifacts. Use a published drive:// evidence link.');
   const stream = resource.mount !== null || !context.runtimeAvailable
-    ? transport.readArtifact({ ...request, url: `${canonicalLocalResourceUrl(resource, context.spaceId === context.projectId ? 'base' : 'workspace')}${resource.suffix}`, hash: null }, { signal })
+    ? transport.readArtifact({ ...request, url: `${canonicalDriveResourceUrl(resource, context.spaceId === context.projectId ? 'base' : 'workspace')}${resource.suffix}`, hash: null }, { signal })
     : transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal });
   return loadInspectorContent(stream, uri, signal);
 }

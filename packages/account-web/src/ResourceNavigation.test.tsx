@@ -38,7 +38,7 @@ function Harness({ read }: { read: (uri: string) => Promise<InspectorArtifactCon
   const [request, setRequest] = useState<ResourceRequest>();
   const unavailable = async (): Promise<never> => { throw new Error('Unexpected unrelated action'); };
   return <ResourceNavigation.Provider value={setRequest}>
-    <GitSpaceMarkdown>{'[Plan](local://workspace/PLAN.md) [Output](local://output.txt) [Missing](local://workspace/missing.txt) [Unsafe](javascript:alert(1))'}</GitSpaceMarkdown>
+    <GitSpaceMarkdown>{'[Plan](drive://workspace/PLAN.md) [Output](drive://output.txt) [Missing](drive://workspace/missing.txt) [Unsafe](javascript:alert(1))'}</GitSpaceMarkdown>
     <Inspector
       overview={{ projectId: 'project', spaceId: 'workspace', revision: 0, goal: null, workflow: null, rubric: null, journal: { entries: 0, openPhaseRunId: null, recent: [] }, changeGuide: null, review: { total: 0, unresolved: 0 } }}
       workspaces={[]} onSelectWorkspace={() => { throw new Error('Unexpected workspace change'); }}
@@ -64,7 +64,7 @@ describe('Markdown resource navigation', () => {
     const transport = {
       readArtifact: async function* ({ spaceId, url }: { spaceId: string; url: string }) {
         if (spaceId !== 'workspace') throw new Error('Wrong workspace');
-        if (url !== 'local://workspace/PLAN.md') { yield { status: 'error' as const, error: new Error('Artifact does not exist') }; return; }
+        if (url !== 'drive://workspace/PLAN.md') { yield { status: 'error' as const, error: new Error('Artifact does not exist') }; return; }
         const text = '# Real plan\n\nThe resource body';
         yield { status: 'ok' as const, value: { type: 'metadata' as const, url, text: true, mediaType: 'text/markdown', size: text.length } };
         yield { status: 'ok' as const, value: { type: 'chunk' as const, base64: btoa(text) } };
@@ -84,7 +84,7 @@ describe('Markdown resource navigation', () => {
     expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('Published tool output');
     await clickLink('Missing');
     expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('Artifact does not exist');
-    expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('local://workspace/missing.txt');
+    expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('drive://workspace/missing.txt');
   });
 
   it('does not let a stale resource response replace the latest selection', async () => {
@@ -93,7 +93,7 @@ describe('Markdown resource navigation', () => {
     await act(async () => root.render(<Harness read={(uri) => uri.endsWith('PLAN.md') ? pending.promise : Promise.resolve({ url: uri, source: 'Latest output', mediaType: 'text/plain', previewUrl: '' })} />));
     await clickLink('Plan');
     await clickLink('Output');
-    await act(async () => pending.resolve({ url: 'local://workspace/PLAN.md', source: 'Stale plan', mediaType: 'text/plain', previewUrl: '', dispose }));
+    await act(async () => pending.resolve({ url: 'drive://workspace/PLAN.md', source: 'Stale plan', mediaType: 'text/plain', previewUrl: '', dispose }));
     expect(dispose).toHaveBeenCalledOnce();
     const inspector = container.querySelector('[aria-label="Workspace Inspector"]');
     expect(inspector?.textContent).toContain('Latest output');

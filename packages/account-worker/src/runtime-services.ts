@@ -141,11 +141,11 @@ export async function authorizeCronTool(input: { tool: string; args: Invocation[
   let write = false;
   if (['read', 'write', 'edit', 'grep', 'code_search', 'find', 'ast_grep'].includes(input.tool)) {
     const path = z.string().min(1).parse(args.path ?? (input.tool === 'find' || input.tool === 'grep' || input.tool === 'code_search' ? '.' : undefined));
-    if (path.startsWith('local://')) {
+    if (path.startsWith('drive://')) {
       const uri = new URL(path);
       const segments = decodeURIComponent(uri.pathname).split('/').filter(Boolean);
       if (!['base', 'workspace'].includes(uri.hostname) || segments.some(segment => segment === '..' || segment === '.')) throw new Error('Cron resource escapes its artifact scope');
-      resource = `local://${uri.hostname}/${segments.join('/')}`;
+      resource = `drive://${uri.hostname}/${segments.join('/')}`;
     } else {
       if (path.startsWith('/') || path.includes('\\') || path.split('/').some(segment => segment === '..')) throw new Error('Cron repository paths must stay relative to their checkout');
       resource = `repository/${path.split('/').filter(segment => segment && segment !== '.').join('/')}`;
@@ -154,8 +154,8 @@ export async function authorizeCronTool(input: { tool: string; args: Invocation[
   } else if (input.tool === 'space_artifacts' && args.method === 'read') {
     const uri = new URL(z.string().url().parse(args.url));
     const segments = decodeURIComponent(uri.pathname).split('/').filter(Boolean);
-    if (uri.protocol !== 'local:' || !['base', 'workspace'].includes(uri.hostname) || segments.some(segment => segment === '..' || segment === '.')) throw new Error('Cron resource escapes its artifact scope');
-    resource = `local://${uri.hostname}/${segments.join('/')}`;
+    if (uri.protocol !== 'drive:' || !['base', 'workspace'].includes(uri.hostname) || segments.some(segment => segment === '..' || segment === '.')) throw new Error('Cron resource escapes its artifact scope');
+    resource = `drive://${uri.hostname}/${segments.join('/')}`;
   } else if (input.tool === 'space_artifacts' && args.method === 'readCode') {
     const path = z.string().min(1).parse(args.path);
     if (path.startsWith('/') || path.split('/').some(segment => segment === '..')) throw new Error('Cron code path escapes the repository');
@@ -613,7 +613,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           default: throw new Error('Artifact sharing requires an explicit human action');
         }
       }
-      if ((input.tool === 'read' || input.tool === 'write' || input.tool === 'edit') && typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args) && typeof input.args.path === 'string' && input.args.path.startsWith('local://')) {
+      if ((input.tool === 'read' || input.tool === 'write' || input.tool === 'edit') && typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args) && typeof input.args.path === 'string' && input.args.path.startsWith('drive://')) {
         const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source());
         if (input.tool === 'read') return artifactContent(input, await artifacts.read(input.args.path));
         if (!conversation.root) throw new Error('Only the main workspace conversation can write artifacts');

@@ -124,7 +124,7 @@ describe('GitSpaceShell', () => {
   it('shows a question GitSpace asks itself, such as plan approval, with a link to the plan, even without an ask call in the transcript', () => {
     const rejects = async (): Promise<never> => { throw new Error('not called during server render'); };
     const pendingAsk = {
-      id: 'ask-plan', source: 'gitspace' as const, links: [{ label: 'Open plan', uri: 'local://workspace/music-updates-plan.md' }],
+      id: 'ask-plan', source: 'gitspace' as const, links: [{ label: 'Open plan', uri: 'drive://workspace/music-updates-plan.md' }],
       questions: [{ id: 'plan-approval', question: 'Approve “music-updates” and move this workspace to Code?', header: 'Plan', multi: false, recommended: 0, options: [
         { label: 'Approve and move to Code', description: 'The agent implements the plan with full tools.', preview: null },
         { label: 'Keep planning', description: null, preview: null },
@@ -139,7 +139,7 @@ describe('GitSpaceShell', () => {
     expect(html).toContain('Approve and move to Code');
     expect(html).toContain('Keep planning');
     expect(html).toContain('Open plan');
-    expect(html).toContain(`href="${resourceLinkHref('local://workspace/music-updates-plan.md')}"`);
+    expect(html).toContain(`href="${resourceLinkHref('drive://workspace/music-updates-plan.md')}"`);
     const toolAsk = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={{ ...sessionControls, value: { ...sessionControls.value, pendingAsk: { ...pendingAsk, source: 'ask-tool' } } }} />);
     expect(toolAsk).not.toContain('Approve and move to Code');
   });

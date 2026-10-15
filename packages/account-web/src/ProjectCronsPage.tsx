@@ -229,8 +229,8 @@ function CronEditor({
       <Field label="Description"><TextArea rows={2} maxLength={2_000} value={description} onChange={setDescription} placeholder="What this schedule owns and why it runs" /></Field>
       <Field label="Agent instruction"><TextArea required rows={5} maxLength={16_000} value={prompt} onChange={setPrompt} placeholder="Tell the canonical agent exactly what to do." /></Field>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Read scopes"><TextArea rows={3} value={readScopes} onChange={setReadScopes} placeholder={'repository/**\nlocal://base/reports/**'} className="font-mono" /></Field>
-        <Field label="Write scopes"><TextArea rows={3} value={writeScopes} onChange={setWriteScopes} placeholder="local://base/reports/**" className="font-mono" /></Field>
+        <Field label="Read scopes"><TextArea rows={3} value={readScopes} onChange={setReadScopes} placeholder={'repository/**\ndrive://base/reports/**'} className="font-mono" /></Field>
+        <Field label="Write scopes"><TextArea rows={3} value={writeScopes} onChange={setWriteScopes} placeholder="drive://base/reports/**" className="font-mono" /></Field>
       </div>
       <Switch label="Armed" checked={enabled} onToggle={() => setEnabled((value) => !value)} />
       {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}

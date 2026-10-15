@@ -219,7 +219,7 @@ const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }
   { id: 'agents', label: 'Agent setup' },
   { id: 'subagents', label: 'Subagents' },
   { id: 'files', label: 'Files' },
-  { id: 'artifacts', label: 'Artifacts' },
+  { id: 'artifacts', label: 'Drive' },
   { id: 'services', label: 'Services' },
   { id: 'usage', label: 'Usage' },
   { id: 'guide', label: 'Change Guide' },

@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'bun:test';
-import { canonicalLocalResourceUrl, parseResourceUri, resourceLinkHref, resourceUriFromHref, selectResourceText } from '../src/resource-uri.js';
+import { canonicalDriveResourceUrl, parseResourceUri, resourceLinkHref, resourceUriFromHref, selectResourceText } from '../src/resource-uri.js';
 
 describe('OMP resource URIs', () => {
   it('preserves unqualified filename case and distinguishes artifact IDs from mounted files', () => {
-    const local = parseResourceUri('local://Review%20Notes/PLAN.md');
-    expect(local).toMatchObject({ kind: 'local', mount: null, path: 'Review Notes/PLAN.md' });
-    if (local?.kind !== 'local') throw new Error('Expected local resource');
-    expect(canonicalLocalResourceUrl(local, 'workspace')).toBe('local://workspace/Review%20Notes/PLAN.md');
-    expect(canonicalLocalResourceUrl(local, 'base')).toBe('local://base/Review%20Notes/PLAN.md');
-    expect(parseResourceUri('local://workspaces/work-a/evidence.txt')).toMatchObject({ mount: 'workspaces', workspaceId: 'work-a', path: 'evidence.txt' });
+    const local = parseResourceUri('drive://Review%20Notes/PLAN.md');
+    expect(local).toMatchObject({ kind: 'drive', mount: null, path: 'Review Notes/PLAN.md' });
+    if (local?.kind !== 'drive') throw new Error('Expected local resource');
+    expect(canonicalDriveResourceUrl(local, 'workspace')).toBe('drive://workspace/Review%20Notes/PLAN.md');
+    expect(canonicalDriveResourceUrl(local, 'base')).toBe('drive://base/Review%20Notes/PLAN.md');
+    expect(parseResourceUri('drive://workspaces/work-a/evidence.txt')).toMatchObject({ mount: 'workspaces', workspaceId: 'work-a', path: 'evidence.txt' });
     expect(parseResourceUri('artifact://12')).toMatchObject({ kind: 'artifact', id: '12' });
     expect(parseResourceUri('artifact://report.txt')).toBeNull();
   });
@@ -16,10 +16,10 @@ describe('OMP resource URIs', () => {
   it('rejects traversal before URL normalization and refuses executable or ambiguous URI forms', () => {
     for (const uri of [
       'javascript:alert(1)', 'data:text/html,hello', 'file:///etc/passwd', 'https://example.com', 'agent://12',
-      'local://workspace/../base/secret', 'local://workspace/%2e%2e/secret', 'local://workspace/%2Fetc/passwd',
-      'local://workspace/a%5c..%5csecret', 'local://workspace/a%00.txt', 'local://workspace/a?scope=base',
-      'local://workspace/a#other', 'local://workspace//a', 'artifact://12/../13', 'artifact://12@other',
-      'local://workspace/%FF', 'artifact://12:9-2',
+      'drive://workspace/../base/secret', 'drive://workspace/%2e%2e/secret', 'drive://workspace/%2Fetc/passwd',
+      'drive://workspace/a%5c..%5csecret', 'drive://workspace/a%00.txt', 'drive://workspace/a?scope=base',
+      'drive://workspace/a#other', 'drive://workspace//a', 'artifact://12/../13', 'artifact://12@other',
+      'drive://workspace/%FF', 'artifact://12:9-2',
       'browser-artifact://machine/../secret', 'browser-artifact://machine/%2Fsecret', 'browser-artifact://machine/..', 'browser-artifact://machine/artifact?workspace=other',
     ]) expect(parseResourceUri(uri)).toBeNull();
   });
@@ -37,7 +37,7 @@ describe('OMP resource URIs', () => {
     const resource = parseResourceUri(uri)!;
     expect(resource.url).toBe('artifact://12');
     expect(selectResourceText('a\nb\nc\nd\ne\nf', resource.selector)).toBe('b\nc\ne');
-    expect(selectResourceText('a\nb\nc', parseResourceUri('local://workspace/a.txt:-2')!.selector)).toBe('b\nc');
-    expect(parseResourceUri('local://workspace/name%3Araw.txt')).toMatchObject({ path: 'name:raw.txt', selector: { raw: false, ranges: [] } });
+    expect(selectResourceText('a\nb\nc', parseResourceUri('drive://workspace/a.txt:-2')!.selector)).toBe('b\nc');
+    expect(parseResourceUri('drive://workspace/name%3Araw.txt')).toMatchObject({ path: 'name:raw.txt', selector: { raw: false, ranges: [] } });
   });
 });

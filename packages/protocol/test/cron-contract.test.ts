@@ -33,7 +33,7 @@ describe('project cron wire codecs', () => {
       prompt: 'Review all open failures.',
       target: { scope: 'workspace', projectId: 'project-a', spaceId: 'space-a' },
       readScopes: ['repository/**'],
-      writeScopes: ['local://workspace/reports/**'],
+      writeScopes: ['drive://workspace/reports/**'],
       enabled: true,
     });
     expect(decoded.ok).toBe(true);
@@ -60,7 +60,7 @@ describe('project cron wire codecs', () => {
       cronName: 'project-health', schedule: 'every 6h', description: 'Review health.',
       trigger: 'scheduled' as const, state: 'succeeded' as const,
       target: { scope: 'workspace' as const, projectId: 'project-a', spaceId: 'space-a' },
-      prompt: 'Review repository health.', readScopes: ['repository/**'], writeScopes: ['local://workspace/reports/**'],
+      prompt: 'Review repository health.', readScopes: ['repository/**'], writeScopes: ['drive://workspace/reports/**'],
       resolvedSpaceId: 'space-a', resolvedGeneration: 7,
       scheduledFor: at, claimedAt: at, startedAt: at, completedAt: at, message: null, createdAt: at,
     };

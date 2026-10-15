@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { loadInspectorContent, loadInspectorResource } from './resource-content.js';
 
-const url = 'local://workspace/live-capture.wav';
+const url = 'drive://workspace/live-capture.wav';
 const bytes = Uint8Array.from({ length: 192 * 1024 + 7 }, (_, index) => index % 251);
 async function* frames(body = bytes, text = false) {
   yield { status: 'ok' as const, value: { type: 'metadata', url, text, mediaType: text ? 'text/plain' : 'audio/wav', size: body.length } satisfies ResourcePreviewFrame };
@@ -21,7 +21,7 @@ describe('Inspector bounded resource content', () => {
     const context = { spaceId: 'workspace', projectId: 'project', generation: 3, sessionId: null, runtimeAvailable: true };
     const published = await loadInspectorContent(frames(), url);
     const durable = await loadInspectorResource(transport, context, url);
-    const live = await loadInspectorResource(transport, context, 'local://live-capture.wav');
+    const live = await loadInspectorResource(transport, context, 'drive://live-capture.wav');
     for (const [index, content] of [published, durable, live].entries()) {
       expect(content.source).toBeNull();
       expect(content.mediaType).toBe('audio/wav');

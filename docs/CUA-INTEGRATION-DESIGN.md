@@ -122,7 +122,7 @@ Desktop tools are machine tools routed to the desktop's **host machine**, not to
 | `desktop.observe({ name, window?, include: ['tree' \| 'screenshot'] })` | Accessibility tree with element references, optional screenshot; one compact result | Cua Driver tools via `call_tool` |
 | `desktop.act({ name, observationId, target, action, args })` | Click, type, scroll, key, drag on an element from a specific observation; rejected when the agent does not hold the lease or the observation is stale | Cua Driver tools |
 | `desktop.shell({ name, command })` | Run a command in the guest | `space_bash` / spacesd shell |
-| `desktop.files` (`put`, `get`, `list`) | Move files between the working copy or `local://` and the guest, sha256-checked | spacesd files |
+| `desktop.files` (`put`, `get`, `list`) | Move files between the working copy or `drive://` and the guest, sha256-checked | spacesd files |
 | `desktop.tools({ name })` / `desktop.call({ name, tool, args })` | Pass-through to Cua Driver or declared guest services | `list_tools` / `call_tool` |
 
 Why typed tools instead of mounting `cua daemon mcp` through `pi-mcp`:
@@ -169,7 +169,7 @@ GitSpace's credential vault, Cua's Keyvault, and Aperture's planned credential m
 ## 9. Workspace integration
 
 - **Previews:** a desktop on the workspace's host machine reaches preview services on the host network **[unverified for gVisor networking]**. On another machine it uses the workspace's GitSpace service URL. `desktops.open({ services })` and the workspace `services` list are connected so the agent opens the right URL without guessing ports.
-- **Artifacts:** `desktop.observe` screenshots and recordings go to `local://desktops/<name>/...` and can be attached to goals, journal entries, and QA reports.
+- **Artifacts:** `desktop.observe` screenshots and recordings go to `drive://desktops/<name>/...` and can be attached to goals, journal entries, and QA reports.
 - **History:** every desktop tool call is a normal tool call in the conversation; lease changes and human takeovers are journal entries, so the transcript explains who did what.
 - **Environments:** later, `.gitspace/bundle.json` may declare named desktops (image, services, pin) so `materialize` can open them. Not in V1, matching the "minimal changes to environment scripts" rule.
 
@@ -203,7 +203,7 @@ GitSpace should consume both through the same workspace-level concepts (a worksp
 |---|---|---|
 | **D0** | Spike | On a Linux GitSpace machine: embedded SDK creates `ghcr.io/trycua/linux:24.04`, runs a shell command, returns an accessibility tree and screenshot, streams h264 to a browser over the GitSpace relay with WebCodecs; measure latency and bandwidth. Repeat create on a Mac machine with Lume. |
 | **D1** | Desktops in workspaces | `gitspace.desktops` document; `OpenDesktop`/`CloseDesktop`/`ReattachDesktops` tasks; open vs pinned; machine capabilities; `desktops.*` tools; desktop list in the Inspector with create progress. |
-| **D2** | Agent operation | `desktop.observe`/`act`/`shell`/`files`/`tools`/`call`; observation freshness; audit in history; screenshots to `local://`. Golden test: agent opens a desktop, loads the workspace preview, completes a scripted UI flow. |
+| **D2** | Agent operation | `desktop.observe`/`act`/`shell`/`files`/`tools`/`call`; observation freshness; audit in history; screenshots to `drive://`. Golden test: agent opens a desktop, loads the workspace preview, completes a scripted UI flow. |
 | **D3** | People | Live viewer in the UI, presence cursors, lease and takeover, `ask` deep-link to takeover. |
 | **D4** | Beyond the machine | `direct` placement polish, user cloud accounts (with explicit cost approval), Teleport requests surfaced from the Cua Keyvault. |
 

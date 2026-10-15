@@ -18,7 +18,7 @@ function draft(overrides: Partial<ProjectCronDraft> = {}): ProjectCronDraft {
     prompt: 'Review repository health and summarize blockers.',
     target: { scope: 'project', projectId: 'project-a' },
     readScopes: ['repository/**'],
-    writeScopes: ['local://base/reports/**'],
+    writeScopes: ['drive://base/reports/**'],
     enabled: true,
     ...overrides,
   };
@@ -34,7 +34,7 @@ describe('ProjectCronsDO', () => {
       now: now - 1,
     }))).rejects.toBeInstanceOf(ProjectCronValidationError);
     const created = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.create({ projectId: 'project-a', draft: draft(), now }));
-    expect(created).toMatchObject({ revision: 1, state: 'armed', readScopes: ['repository/**'], writeScopes: ['local://base/reports/**'] });
+    expect(created).toMatchObject({ revision: 1, state: 'armed', readScopes: ['repository/**'], writeScopes: ['drive://base/reports/**'] });
     expect(created.nextRunAt?.getTime()).toBe(now + 300_000);
 
     const updated = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.update({
