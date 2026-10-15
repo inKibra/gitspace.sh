@@ -165,9 +165,7 @@ export class CloudFileStore {
     try { await this.storage.sync(); return await this.finishMachine(id, pending); }
     catch (error) { throw error instanceof CloudPublicationUncertain ? error : new CloudPublicationUncertain({ attemptId: `machine:${id}`, message: error instanceof Error ? error.message : String(error) }); }
   }
-  hasPendingMachine(machineId: string): boolean {
-    return this.storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_machine_publications WHERE pending IS NOT NULL').toArray().some(row => MachinePendingSchema.parse(JSON.parse(row.pending)).machineId === machineId);
-  }
+
   /** Before a machine's attachment is released, settle every publication it admitted: one in flight finishes, one left
    * durably pending resumes, and one the provider proved unpublished is abandoned, so no late finish can advance the
    * canonical snapshot after the release.

@@ -330,13 +330,11 @@ export class CloudFilesProof extends DurableObject {
     const uploaded = { ...beforeMergeRecovery, worktreeCommit: 'd'.repeat(40) };
     failPush = true;
     await assert.rejects(store.commitMachine(uploaded, beforeMergeRecovery.worktreeCommit, 'machine'));
-    assert.equal(store.hasPendingMachine('machine'), true);
     assert(store.lfsRoots().some(root => root.worktreeCommit === uploaded.worktreeCommit));
     failPush = false;
     store = open();
     // The machine retrying the same publication finishes it; durable acceptance needs no second authorization.
     assert.deepEqual(await store.commitMachine(uploaded, beforeMergeRecovery.worktreeCommit, 'machine', () => { throw new Error('Revoked after durable acceptance'); }), uploaded);
-    assert.equal(store.hasPendingMachine('machine'), false);
     assert.equal((await store.snapshot())?.worktreeCommit, uploaded.worktreeCommit);
     const noncanonical = { ...uploaded, worktreeCommit: 'e'.repeat(40), indexTree: '8'.repeat(40), indexCommit: '9'.repeat(40) };
     mergedCheckpoint = { ...uploaded, worktreeCommit: 'f'.repeat(40) };

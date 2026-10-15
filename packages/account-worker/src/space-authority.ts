@@ -747,7 +747,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeDetach(raw: unknown) {
     const input = RuntimeDetachInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
-    if (runtime.cloudFiles.hasPendingMachine(input.machineId)) throw new Error('Pending snapshot publication prevents cache detach');
     const attachment = runtime.attachments.detach(input);
     runtime.publish();
     await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).detachMachineWorkspace(input.machineId, input.workspaceId);
