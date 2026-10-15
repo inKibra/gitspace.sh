@@ -159,8 +159,8 @@ Every item is verified the way the user works, in the browser, before it is repo
 
 **Batch 3 — drive and documents.**
 1. Done. `local://` → `drive://`, hard cutover, no alias (cron artifact scopes rewritten once; links in old transcripts stay text): parser, composer, tools, skills, agent instructions, inspector tab "Drive".
-2. Agents read PDFs and documents: Workers AI `toMarkdown` (`[ai]` binding), result cached in drive storage by content hash; large text paged. Test size limits and scanned PDFs first.
-3. Files tab shows binary files (PDF in the viewer, not base64).
+2. Done (`3aa874b3`, `add8482a`). Agents read PDFs and documents: Workers AI `toMarkdown` (`[ai]` binding), result kept in the workspace object by content hash; pages of at most 2,000 lines / 40,000 characters with an offset note. Measured: a 200-page text PDF (715 KB) converts in 0.6 s to 626 KB of Markdown; a scanned PDF converts to empty pages, so it reports that it has no text layer.
+3. Done (`daebf26d`, `24580074`). Files tab shows binary files (PDF in the viewer, not base64): PDFs embed with a download fallback, images render, other binaries download. The automation browser loses its page when Chrome's PDF viewer attaches, so the PDF view itself was not screenshotted.
 4. Chat: attachments as links; user messages rendered as Markdown.
 5. File names with `:`; abandoned upload chunks cleaned up.
 
