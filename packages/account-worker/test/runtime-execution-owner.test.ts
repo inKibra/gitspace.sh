@@ -240,8 +240,8 @@ test('agents write and edit their own workspace artifacts through drive:// in th
       const log = 'drive://workspace/uploads/log%2010%3A30.txt';
       expect((await invoke('write', { path: log, content: Array.from({ length: 30_000 }, (_, index) => `line ${index + 1}`).join('\n'), message: 'Upload log' })).status).toBe('completed');
       const first = text(await invoke('read', { path: log }));
-      expect(first.split('\n')[1_999]).toBe('line 2000');
-      expect(first).toMatch(/\[28000 more lines; read again with offset 2001\]$/u);
+      expect(first.split('\n')).toHaveLength(2_000);
+      expect(first).toMatch(/line 1998\n\n\[28002 more lines; read again with offset 1999\]$/u);
       expect(text(await invoke('read', { path: log, offset: 29_999 }))).toBe('line 29999\nline 30000');
 
       const base = await invoke('write', { path: 'drive://base/notes/a.md', content: 'shared', message: 'Write project notes' });

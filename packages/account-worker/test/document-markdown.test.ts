@@ -28,9 +28,10 @@ describe('document Markdown', () => {
   it('pages a long document within the tool output limit and names where the rest starts', () => {
     const text = Array.from({ length: 2_500 }, (_, index) => `line ${index + 1}`).join('\n');
     const first = textPage(text);
-    expect(first.split('\n')[1_999]).toBe('line 2000');
-    expect(first).toContain('[500 more lines; read again with offset 2001]');
-    expect(textPage(text, 2_001)).toBe(Array.from({ length: 500 }, (_, index) => `line ${index + 2_001}`).join('\n'));
+    expect(first.split('\n')).toHaveLength(2_000);
+    expect(first.split('\n')[1_997]).toBe('line 1998');
+    expect(first).toContain('[502 more lines; read again with offset 1999]');
+    expect(textPage(text, 1_999)).toBe(Array.from({ length: 502 }, (_, index) => `line ${index + 1_999}`).join('\n'));
     const wide = Array.from({ length: 2_000 }, (_, index) => `${'x'.repeat(99)}${index + 1}`).join('\n');
     const page = textPage(wide);
     expect(page.length).toBeLessThan(41_000);

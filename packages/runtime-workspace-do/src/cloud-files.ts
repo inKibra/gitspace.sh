@@ -29,8 +29,9 @@ function assertValidMutations(mutations: z.infer<typeof PendingSchema>['mutation
 }
 
 const checkpointIdentity = (checkpoint: Checkpoint) => canonicalJson({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(({ oid, size }) => ({ oid, size })) } } : {}) });
-/** A text page without a range: at most this many lines and characters, under the tool output limit. */
-const TEXT_PAGE_LINES = 2_000;
+/** A text page without a range: at most this many lines and characters. With the blank line and note after it, a page
+ * is 2,000 lines, which the agent harness keeps whole. */
+const TEXT_PAGE_LINES = 1_998;
 const TEXT_PAGE_CHARACTERS = 40_000;
 /** The lines a text read asked for; with no limit, one page and a note naming where the rest starts, so a long file or
  * converted document never fills a context. */
