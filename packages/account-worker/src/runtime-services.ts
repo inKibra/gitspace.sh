@@ -2,9 +2,10 @@ import { z } from 'zod';
 import { canonicalJson, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
 import type { WorkspaceEnvironment } from './space-environment.js';
+import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, documentPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
@@ -48,6 +49,7 @@ type ServicesOptions = {
   requestAttachment(machineId: string): Promise<{ attachment: RuntimeAttachment }>;
   /** The workspace object's own environment, called in-process. */
   environment: WorkspaceEnvironment;
+  documentMarkdown: DocumentMarkdown;
 };
 /** What `machines attach` did: requested (or found) an attachment, or asked the user to approve one. */
 type MachineAttachOutcome =
@@ -59,15 +61,18 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const completed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
 const interrupted = (input: Pick<Invocation, 'requestId' | 'attemptId'>, text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text }] });
 const failed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, error: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: message(error) }], error: { code: 'HOST_OPERATION_FAILED', message: message(error) } });
-/** A cloud artifact as tool content: text as text, raster images as images, anything else as its metadata. */
-const artifactContent = (input: Pick<Invocation, 'requestId' | 'attemptId'>, frames: Iterable<ResourcePreviewFrame>): RuntimeToolResult => {
+/** A cloud artifact as tool content: text as text, raster images as images, documents as pages of Markdown, anything
+ * else as its metadata. */
+async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, frames: Iterable<ResourcePreviewFrame>, documentMarkdown: DocumentMarkdown, range: { offset?: number; limit?: number } = {}): Promise<RuntimeToolResult> {
   const [metadata, ...chunks] = frames;
   if (metadata?.type !== 'metadata') throw new Error('Artifact preview is missing its metadata');
   const data = chunks.map(chunk => chunk.type === 'chunk' ? chunk.base64 : '').join('');
   if (metadata.text) return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: Buffer.from(data, 'base64').toString('utf8') }] };
   if (metadata.mediaType?.startsWith('image/')) return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'image', mimeType: metadata.mediaType, data }] };
+  const document = await documentMarkdown(decodeURIComponent(url.split('/').at(-1) ?? url), new Uint8Array(Buffer.from(data, 'base64')));
+  if (document !== null) return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: documentPage(document, range.offset, range.limit) }] };
   return completed(input, metadata);
-};
+}
 const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
 machineTools.browser = true;
 /** Exact search is ripgrep on a machine checkout; the cloud answers code_search from its index instead. */
@@ -603,7 +608,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           case 'list': return completed(input, await artifacts.list());
           case 'listScopes': return completed(input, await authority.listArtifactScopes());
           case 'listPromotions': return completed(input, await authority.listArtifactPromotions());
-          case 'read': return artifactContent(input, await artifacts.read(args.url));
+          case 'read': return artifactContent(input, args.url, await artifacts.read(args.url), options.documentMarkdown);
           case 'readCode': {
             const request = args;
             const blob = await new ArtifactsCodeStore(env.ARTIFACTS).readFile(artifactsWorkspaceRepository(identity.workspaceId), request.commit, request.path);
@@ -615,7 +620,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if ((input.tool === 'read' || input.tool === 'write' || input.tool === 'edit') && typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args) && typeof input.args.path === 'string' && input.args.path.startsWith('drive://')) {
         const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source());
-        if (input.tool === 'read') return artifactContent(input, await artifacts.read(input.args.path));
+        if (input.tool === 'read') return artifactContent(input, input.args.path, await artifacts.read(input.args.path), options.documentMarkdown, RuntimeReadArgumentsSchema.parse(input.args));
         if (!conversation.root) throw new Error('Only the main workspace conversation can write artifacts');
         const change = input.tool === 'write' ? { bytes: new TextEncoder().encode(RuntimeWriteArgumentsSchema.parse(input.args).content) } : RuntimeEditArgumentsSchema.parse(input.args);
         return completed(input, await artifacts.write(input.args.path, change));

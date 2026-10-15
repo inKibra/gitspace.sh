@@ -35,7 +35,8 @@ export class DirectoryPublisher {
   publish(source: DirectorySource): void {
     const cursor = streamCursorSchema.parse(this.ctx.storage.sql.exec<{ cursor: number }>('INSERT INTO directory_version(id,cursor) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET cursor=cursor+1 RETURNING cursor').one().cursor);
     const publication: DirectoryPublication = { ...source, cursor };
-    this.ctx.waitUntil((this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(this.env.ACCOUNT_ID).publishDirectory(publication)
+    // Never fails the source's change: the next change sends the whole entry again.
+    this.ctx.waitUntil(Promise.resolve().then(() => (this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(this.env.ACCOUNT_ID).publishDirectory(publication))
       .then(() => undefined, (error: unknown) => console.error(JSON.stringify({ event: 'directory_publication_failed', source: source.source, message: error instanceof Error ? error.message : String(error) }))));
   }
 }

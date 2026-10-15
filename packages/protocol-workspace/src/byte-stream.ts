@@ -19,7 +19,7 @@ export async function* streamBytes(body: ReadableStream<Uint8Array>, signal?: Ab
 }
 
 /** Only for finite metadata, encrypted chunks, or bounded tool results—not LFS payloads. */
-export async function collectBytes(source: AsyncIterable<Uint8Array>, maxBytes: number): Promise<Uint8Array> {
+export async function collectBytes(source: AsyncIterable<Uint8Array>, maxBytes: number): Promise<Uint8Array<ArrayBuffer>> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new RangeError('Invalid byte limit');
   const chunks: Uint8Array[] = [];
   let size = 0;

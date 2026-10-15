@@ -29,6 +29,17 @@ function assertValidMutations(mutations: z.infer<typeof PendingSchema>['mutation
 }
 
 const checkpointIdentity = (checkpoint: Checkpoint) => canonicalJson({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(({ oid, size }) => ({ oid, size })) } } : {}) });
+/** Lines one document read returns when it names no range. */
+const DOCUMENT_PAGE_LINES = 2_000;
+/** The lines a document read asked for; with no range, the first page and a note naming the rest. Converted documents
+ * are long, so a whole one never fills a context. */
+export function documentPage(text: string, offset?: number, limit?: number): string {
+  const lines = text.split('\n');
+  const start = (offset ?? 1) - 1;
+  const end = start + (limit ?? DOCUMENT_PAGE_LINES);
+  const page = lines.slice(start, end).join('\n');
+  return lines.length > end ? `${page}\n\n[${lines.length - end} more lines; read again with offset ${end + 1}]` : page;
+}
 export class CloudPublicationUncertain extends TaggedError('CloudPublicationUncertain')<{ attemptId: string; message: string }> {}
 /** The provider proved the machine publication never reached the checkpoint ref. */
 export class MachinePublicationRejected extends TaggedError('MachinePublicationRejected')<{ attemptId: string; message: string }> {}
@@ -55,7 +66,7 @@ export class CloudFileStore {
     this.admission = result.then(() => {}, () => {});
     return result;
   }
-  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: (source?: string) => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
+  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: (source?: string) => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>, private readonly documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>) {
     storage.sql.exec('DROP TABLE IF EXISTS runtime_cloud_writer');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
     storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_cloud_files_pending ON runtime_cloud_files(id) WHERE pending IS NOT NULL');
@@ -296,7 +307,7 @@ export class CloudFileStore {
       };
       if (input.tool === 'read') {
         const parsed = RuntimeReadArgumentsSchema.parse(input.args);
-        let bytes: Uint8Array = await read();
+        let bytes: Uint8Array<ArrayBuffer> = await read();
         const pointer = bytes.byteLength <= LFS_POINTER_LIMIT ? parseGitLfsPointer(bytes) : null;
         if (pointer) {
           assertCloudReadSize(pointer.size, path);
@@ -321,9 +332,12 @@ export class CloudFileStore {
         const prefix = new TextDecoder().decode(bytes.subarray(0, 12));
         const mimeType = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 ? 'image/png' : bytes[0] === 0xff && bytes[1] === 0xd8 ? 'image/jpeg' : prefix.startsWith('GIF8') ? 'image/gif' : prefix.startsWith('RIFF') && prefix.slice(8, 12) === 'WEBP' ? 'image/webp' : null;
         let completed: RuntimeToolResult;
+        const document = mimeType ? null : await this.documentMarkdown?.(path.split('/').at(-1) ?? path, bytes);
         if (mimeType) {
           let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
           completed = { ...result('completed', ''), content: [{ type: 'image', mimeType, data: btoa(binary) }] };
+        } else if (document != null) {
+          completed = result('completed', documentPage(document, parsed.offset, parsed.limit));
         } else {
           const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes), start = (parsed.offset ?? 1) - 1;
           completed = result('completed', parsed.offset === undefined && parsed.limit === undefined ? text : text.split('\n').slice(start, parsed.limit === undefined ? undefined : start + parsed.limit).join('\n'));
