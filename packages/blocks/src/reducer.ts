@@ -394,6 +394,10 @@ export class TranscriptProjector {
         return;
       }
       const turn = this.#ensureTurn(event);
+      if (message.role === 'custom' && message.customType === 'gitspace.machine-notice' && message.display === true) {
+        this.#write({ id: `${turn.id}:machine:${event.ordinal}`, type: 'interruption', reason: 'machine', title: 'Machine', detail: contentText(message.content) });
+        return;
+      }
       if (message.role === 'custom' && message.customType === 'gitspace-instructions-changed' && message.display === true) {
         this.#write({ id: `${turn.id}:instructions:${event.ordinal}`, type: 'interruption', reason: 'rule', title: 'Workspace instructions changed', detail: contentText(message.content), recovered: true });
         return;

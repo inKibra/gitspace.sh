@@ -33,6 +33,10 @@ const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicatio
 const PORTABLE_LFS_MAX_ATTEMPTS = 12;
 type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 
+/** How long a machine stays offline before its workspaces' conversations are told. */
+const OFFLINE_NOTICE_MS = 60_000;
+const OfflineMachinesSchema = z.record(z.string(), z.object({ since: z.number(), told: z.boolean() }));
+
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: LiveChanges;
   private readonly environment: SpaceEnvironmentStore;
@@ -112,6 +116,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const startedAt = Date.now();
     const due = this.ctx.storage.sql.exec<{ owner: string; timestamp: number }>("SELECT owner, timestamp FROM runtime_alarms WHERE timestamp <= ? AND owner <> 'runtime'", startedAt).toArray();
     await this.flushPortableLfs();
+    if (due.some(row => row.owner === 'presence-notice')) await this.noticeOfflineMachines();
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
     if (wake && wake.timestamp <= Date.now()) {
       await this.scheduleAlarm('runtime', null);
@@ -190,7 +195,46 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeMachinePresence(machineId: string, connected: boolean): Promise<void> {
     if (!(await this.storedAttachments()).some(item => item.machineId === machineId && item.state !== 'detached' && item.online !== connected)) return;
     const runtime = await this.getRuntime(await this.ctx.storage.get('runtime.identity'));
-    if (runtime.attachments.presence(RuntimeMachineIdSchema.parse(machineId), connected)) runtime.publish();
+    if (!runtime.attachments.presence(RuntimeMachineIdSchema.parse(machineId), connected)) return;
+    runtime.publish();
+    // A deploy or network blip drops a machine for seconds: the conversation hears of an absence only once it lasts a
+    // minute, and of the return only after it heard of the absence.
+    const offline = await this.offlineMachines();
+    if (!connected) {
+      offline[machineId] = { since: Date.now(), told: false };
+      await this.ctx.storage.put('presence.offline', offline);
+      await this.scheduleAlarm('presence-notice', Date.now() + OFFLINE_NOTICE_MS);
+      return;
+    }
+    const told = offline[machineId]?.told;
+    delete offline[machineId];
+    await this.ctx.storage.put('presence.offline', offline);
+    if (told) await runtime.notice(`Machine ${await this.machineLabel(machineId)} is back online; commands can run on it again.`);
+  }
+
+  private async offlineMachines(): Promise<Record<string, { since: number; told: boolean }>> {
+    return OfflineMachinesSchema.catch({}).parse(await this.ctx.storage.get('presence.offline') ?? {});
+  }
+
+  /** Tells the conversation about machines offline for a minute; a later one re-arms the alarm. */
+  private async noticeOfflineMachines(): Promise<void> {
+    const offline = await this.offlineMachines();
+    const now = Date.now();
+    const due = Object.entries(offline).filter(([, entry]) => !entry.told && entry.since + OFFLINE_NOTICE_MS <= now);
+    if (due.length) {
+      const runtime = await this.getRuntime(await this.ctx.storage.get('runtime.identity'));
+      for (const [machineId, entry] of due) {
+        await runtime.notice(`Machine ${await this.machineLabel(machineId)} went offline. Commands on it fail until it reconnects; attach another machine if this work cannot wait.`);
+        entry.told = true;
+      }
+      await this.ctx.storage.put('presence.offline', offline);
+    }
+    const next = Math.min(...Object.values(offline).filter(entry => !entry.told).map(entry => entry.since + OFFLINE_NOTICE_MS));
+    await this.scheduleAlarm('presence-notice', Number.isFinite(next) ? next : null);
+  }
+
+  private async machineLabel(machineId: string): Promise<string> {
+    return (await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId))?.label ?? machineId;
   }
 
   /** Machine removal fan-out: the machine's attachments here are detached before its credentials go. */
@@ -711,9 +755,18 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (input.browserCapabilities && (machine?.kind !== 'physical' || machine.desiredState === 'removed')) input.browserCapabilities = [];
     // A report that only moves timestamps changes nothing anyone sees: no snapshot rebuild.
     const visible = (value: unknown) => JSON.stringify(value, (key, field: unknown) => key.endsWith('At') ? undefined : field);
-    const before = visible(runtime.attachments.list().find(item => item.attachmentId === input.attachmentId));
+    const previous = runtime.attachments.list().find(item => item.attachmentId === input.attachmentId);
+    const before = visible(previous);
     const attachment = runtime.attachments.observe(input);
     if (visible(attachment) !== before) runtime.publish();
+    // What the machine reports going wrong reaches the conversation once, when it first appears.
+    const failedSetup = (attachment.cache?.setup ?? []).filter(step => step.state === 'failed' && !previous?.cache?.setup.some(prior => prior.phase === step.phase && prior.state === 'failed' && prior.runId === step.runId));
+    const syncProblem = attachment.cache?.syncProblem && attachment.cache.syncProblem !== previous?.cache?.syncProblem ? attachment.cache.syncProblem : null;
+    if (failedSetup.length || syncProblem) {
+      const label = await this.machineLabel(input.machineId);
+      for (const step of failedSetup) await runtime.notice(`Setup on ${label} failed at ${step.phase}${step.error ? `: ${step.error}` : ''}. Commands that need it wait until setup runs again.`);
+      if (syncProblem) await runtime.notice(`Sync with ${label} failed: ${syncProblem}`);
+    }
     return { attachment };
   }
 

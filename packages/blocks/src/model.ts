@@ -80,7 +80,7 @@ export const todoBlockSchema = base.extend({
 
 export const interruptionBlockSchema = base.extend({
   type: z.literal('interruption'),
-  reason: z.enum(['aborted', 'compacted', 'replaced', 'connection-lost', 'rule']),
+  reason: z.enum(['aborted', 'compacted', 'replaced', 'connection-lost', 'rule', 'machine']),
   title: z.string(),
   detail: z.string().optional(),
   recovered: z.boolean().optional(),

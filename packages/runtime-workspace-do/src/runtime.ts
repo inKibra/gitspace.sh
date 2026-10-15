@@ -53,6 +53,9 @@ export type WorkspaceRuntime = {
   cacheReady(attachmentId: string, generation: number): Promise<void>;
   /** An agent asked for this attachment: once the machine reports it ready, the conversation is told so it can retry. */
   noticeWhenReady(input: { attachmentId: string; generation: number; conversationId: string; label: string }): void;
+  /** A line in the main conversation about the workspace's machines, read by the agent on its next turn; it does not
+   * start one. A `key` posts it at most once. */
+  notice(text: string, key?: string): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
   /** A human request run once per request id as a tool call of the main conversation: MCP discovery, a sync action,
    * or an environment run dispatched to the cache machine its arguments name. */
@@ -90,7 +93,22 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
    * attached machine except the one whose publication made it. */
   function codeChanged(source?: string) {
     publish(); options.waitUntil(codeSearch.changed());
+    options.waitUntil(cloudFiles.snapshot().then(async checkpoint => {
+      if (!checkpoint?.conflicts?.length) return;
+      await notice(`Sync conflict: ${checkpoint.conflicts.join(', ')} changed both here and on a machine. Resolve it with sync_machine (method resolve) before relying on these files.`, `conflicts:${checkpoint.worktreeCommit}`);
+    }).catch(options.onReport));
     options.snapshotChanged?.(attachments.list().filter(item => item.state !== 'detached' && item.machineId !== source).map(item => item.machineId));
+  }
+  async function notice(text: string, key?: string) {
+    await harness.commit(async tx => {
+      if (key) {
+        const seen = await tx.doc(CacheNoticesDoc);
+        if (seen.seen[key]) return;
+        seen.seen[key] = true;
+      }
+      await tx.appendEntry(runtime.root.id, { kind: 'gitspace.machine-notice', model: [{ role: 'user', content: text, timestamp: Date.now() }] });
+    }, BACKGROUND_CONTEXT);
+    publish(); await line;
   }
   async function flushCloudRetention() {
     try { await cloudFiles.flushRetention(); }
@@ -360,6 +378,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       if (wakesTasks) { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); }
       return result;
     },
+    notice,
     noticeWhenReady(input) {
       options.storage.sql.exec('INSERT OR IGNORE INTO runtime_attach_notices(attachment_id,generation,conversation_id,label) VALUES(?,?,?,?)', input.attachmentId, input.generation, input.conversationId, input.label);
     },
