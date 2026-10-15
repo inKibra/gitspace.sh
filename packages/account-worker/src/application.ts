@@ -233,7 +233,7 @@ function credentialIdentity(credential: StoredVaultCredential): string | null {
   const account = credential.accountId?.trim();
   const email = credential.email?.trim().toLowerCase();
   const project = credential.projectId?.trim();
-  if (credential.provider === 'anthropic' || credential.provider === 'openai-codex') {
+  if (credential.provider === 'anthropic' || credential.provider === 'openai-codex' || credential.provider === 'openai') {
     const base = email ? `email:${email}` : account ? `account:${account}` : project ? `project:${project}` : null;
     const org = credential.orgId?.trim();
     return org ? (base ? `${base}|org:${org}` : `org:${org}`) : base;
@@ -1389,7 +1389,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       return { id: provider, credentialProvider: descriptor?.credentialProvider ?? provider, name: descriptor?.name ?? provider, available: descriptor !== undefined, loginable: oauth || descriptor?.supportsApiKey === true,
         supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
-        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'cursor', 'google-antigravity'].includes(provider),
+        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'openai', 'cursor', 'google-antigravity'].includes(provider),
         accounts: owned.map(account => ({ id: account.id, type: account.type, label: account.identity ?? (account.type === 'api_key' ? 'API key' : `Account ${account.id}`), email: account.email, disabled: account.disabled })) };
     });
   }
