@@ -286,11 +286,10 @@ async function requireReleasedPlacement(env: Env, userId: string, workspaceId: s
 
 /** Archives a workspace. The workspace object turns read-only and stops its runtime (working conversations stop,
  * caches are asked to detach) before it tells its project. */
-export async function archiveCloudWorkspace(env: Env, userId: string, input: { projectId: string; spaceId: string; expectedRevision: number; expectedGeneration: number | null }): Promise<CloudWorkspaceDefinition> {
+export async function archiveCloudWorkspace(env: Env, userId: string, input: { projectId: string; spaceId: string; expectedGeneration: number | null }): Promise<CloudWorkspaceDefinition> {
   const authority = await requireProject(env, userId, input.projectId);
   const definition = await authority.getWorkspace(input.spaceId);
   if (!definition || definition.projectId !== input.projectId || definition.kind !== 'worktree' || definition.lifecycle === 'deleting') throw new CloudLifecycleTargetMissing('workspace', input.spaceId);
-  if (definition.revision !== input.expectedRevision) throw new Error(`Workspace revision conflict: expected ${input.expectedRevision}, actual ${definition.revision}`);
   if (definition.lifecycle === 'archived') return definition;
   if (definition.lifecycle !== 'active' && definition.lifecycle !== 'failed') throw new Error(`Workspace ${definition.name} is ${definition.lifecycle}; retry or delete its creation instead`);
   await requireReleasedPlacement(env, userId, definition.id, input.expectedGeneration, null);
@@ -315,11 +314,11 @@ export async function restoreCloudWorkspace(env: Env, userId: string, input: { s
 export async function deleteCloudWorkspace(env: Env, userId: string, workspaceId: string): Promise<boolean> {
   const { authority, definition } = await requireWorktree(env, userId, workspaceId);
   return runOperation(authority, { projectId: definition.projectId, workspaceId, kind: 'workspace.delete', labels: ['Erase workspace runtime', 'Delete workspace repository', 'Delete workspace authority'] }, async advance => {
-    const deleting = await env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`).deleteWorkspace(definition);
+    await env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`).deleteWorkspace(definition);
     await advance();
     await new ArtifactsCodeStore(env.ARTIFACTS).deleteRepository(artifactsWorkspaceRepository(workspaceId));
     await advance();
-    const removed = await authority.removeWorkspace(workspaceId, deleting.revision);
+    const removed = await authority.removeWorkspace(workspaceId);
     await env.USER_PROJECTS.getByName(userId).removeWorkspaceLocation(workspaceId);
     return removed;
   });

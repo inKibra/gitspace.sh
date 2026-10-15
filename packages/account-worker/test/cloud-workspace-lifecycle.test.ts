@@ -306,8 +306,7 @@ describe('cloud workspace lifecycle with no machines', () => {
       if (!definition) throw new Error('Workspace definition is missing');
       return definition;
     };
-    const archive = async () => client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedRevision: (await current()).revision, expectedGeneration: null });
-    expect(await client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedRevision: 0, expectedGeneration: null })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('revision conflict') } } });
+    const archive = async () => client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedGeneration: null });
     expect(await archive()).toMatchObject({ status: 'ok', value: { id: workspaceId, lifecycle: 'archived' } });
     expect(await space.runtimeAttachments(identity)).toMatchObject([{ attachmentId: 'cache-a', state: 'detached' }]);
     expect((await authority.listOperations()).find(operation => operation.kind === 'workspace.archive' && operation.workspaceId === workspaceId)).toMatchObject({ state: 'succeeded' });
@@ -347,9 +346,9 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await index.locateWorkspace(unfinished.id)).toBeNull();
   });
 
-  it('archives and deletes workspace first: the workspace is fenced before its project records the change', async () => {
+  it('archives and deletes workspace first, and the project records it even after a project-side write the workspace never saw', async () => {
     const { userId, client, project, authority } = await cloudProject('Workspace first');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Fenced', branch: 'fenced', sourceKind: 'base', sourceRef: '' });
+    const created = await client.workspace.create({ projectId: project.id, name: 'Recorded', branch: 'recorded', sourceKind: 'base', sourceRef: '' });
     if (created.status === 'error') throw created.error;
     const workspaceId = created.value.workspace.id;
     const identity = { projectId: project.id, workspaceId };
@@ -360,8 +359,6 @@ describe('cloud workspace lifecycle with no machines', () => {
       if (!current) throw new Error('Workspace definition is missing');
       return current;
     };
-    // A project-side write the workspace never saw makes the project refuse the workspace's record, so the change
-    // fails at its last step, after the workspace applied it.
     const bypass = async () => {
       const { revision, archivedAt: _archivedAt, createdAt: _createdAt, updatedAt: _updatedAt, ...fields } = await definition();
       await authority.putWorkspace({ ...fields, name: `${fields.name}!`, expectedRevision: revision });
@@ -369,19 +366,13 @@ describe('cloud workspace lifecycle with no machines', () => {
 
     const active = await definition();
     await bypass();
-    await expect(runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.archiveWorkspace(active))).rejects.toThrow('revision conflict');
+    expect(await runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.archiveWorkspace(active))).toMatchObject({ lifecycle: 'archived' });
     await expect(runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.runtimeAccess(identity, true))).rejects.toThrow('Archived runtime state is read-only');
-    expect(await definition()).toMatchObject({ lifecycle: 'active' });
-    expect(await client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedRevision: (await definition()).revision, expectedGeneration: null })).toMatchObject({ status: 'ok', value: { lifecycle: 'archived' } });
-
-    const archived = await definition();
-    await bypass();
-    expect(await space.hasCloudRuntime()).toBe(true);
-    await expect(runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.deleteWorkspace(archived))).rejects.toThrow('revision conflict');
-    await expect(runInDurableObject(space, (instance: SpaceAuthorityDO) => instance.runtimeAccess(identity, false))).rejects.toThrow('Runtime workspace is unavailable');
-    expect(await space.hasCloudRuntime()).toBe(false);
     expect(await definition()).toMatchObject({ lifecycle: 'archived' });
+
+    await bypass();
     expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'ok', value: { workspaceId, deleted: true } });
+    expect(await space.hasCloudRuntime()).toBe(false);
     expect(await authority.getWorkspace(workspaceId)).toBeNull();
   });
 

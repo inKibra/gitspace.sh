@@ -1278,16 +1278,13 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  removeWorkspace(workspaceId: string, expectedRevision: number): boolean {
+  removeWorkspace(workspaceId: string): boolean {
     return this.commit('workspace', workspaceId, () => {
     const current = this.ctx.storage.sql.exec<WorkspaceRow>(
       'SELECT * FROM workspaces WHERE workspace_id=?',
       workspaceId,
     ).toArray()[0];
     if (!current) return false;
-    if (current.revision !== expectedRevision) {
-      throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
-    }
     this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleted_workspaces(workspace_id) VALUES(?)', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes WHERE workspace_id=?', workspaceId);
@@ -1318,20 +1315,20 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }
 
   /** Records a lifecycle the workspace object has already applied to itself. Repeating a recorded lifecycle returns it. */
-  commitWorkspaceLifecycle(workspaceId: string, expectedRevision: number, lifecycle: WorkspaceLifecycle): CloudWorkspaceDefinition {
-    return this.commitWorkspaceChange(workspaceId, expectedRevision, { lifecycle });
+  commitWorkspaceLifecycle(workspaceId: string, lifecycle: WorkspaceLifecycle): CloudWorkspaceDefinition {
+    return this.commitWorkspaceChange(workspaceId, { lifecycle });
   }
 
   /** Records a phase the workspace object has already applied to itself. Repeating a recorded phase returns it. */
-  commitWorkspacePhase(workspaceId: string, expectedRevision: number, phase: WorkspacePhase): CloudWorkspaceDefinition {
-    return this.commitWorkspaceChange(workspaceId, expectedRevision, { phase });
+  commitWorkspacePhase(workspaceId: string, phase: WorkspacePhase): CloudWorkspaceDefinition {
+    return this.commitWorkspaceChange(workspaceId, { phase });
   }
 
-  private commitWorkspaceChange(workspaceId: string, expectedRevision: number, change: { lifecycle: WorkspaceLifecycle } | { phase: WorkspacePhase }): CloudWorkspaceDefinition {
+  /** The workspace object owns its lifecycle and phase; this row is the listing's copy, so the newest change wins. */
+  private commitWorkspaceChange(workspaceId: string, change: { lifecycle: WorkspaceLifecycle } | { phase: WorkspacePhase }): CloudWorkspaceDefinition {
     const current = this.getWorkspace(workspaceId);
     if (!current) throw new Error(`Workspace ${workspaceId} does not exist`);
     if ('lifecycle' in change ? current.lifecycle === change.lifecycle : current.phase === change.phase) return current;
-    if (current.revision !== expectedRevision) throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
     return this.commit('workspace', workspaceId, () => {
       const now = new Date().toISOString();
       if ('lifecycle' in change) this.ctx.storage.sql.exec('UPDATE workspaces SET lifecycle=?,archived_at=?,revision=revision+1,updated_at=? WHERE workspace_id=?', change.lifecycle, change.lifecycle === 'archived' ? now : null, now, workspaceId);

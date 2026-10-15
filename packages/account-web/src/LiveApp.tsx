@@ -1169,8 +1169,7 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
       const canonical = await inspectTarget(spaceId);
       if (canonical.workspace.lifecycle === 'active' && !await confirmLeaving(canonical)) return;
       await mutate(rpcClient.workspace.archive({
-        projectId: canonical.workspace.projectId, spaceId,
-        expectedRevision: canonical.workspace.revision, expectedGeneration: canonical.placement?.generation ?? null,
+        projectId: canonical.workspace.projectId, spaceId, expectedGeneration: canonical.placement?.generation ?? null,
       }));
     },
     onArchiveProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.archive({ projectId, expectedRevision })); },

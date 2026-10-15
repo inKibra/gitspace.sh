@@ -334,7 +334,7 @@ describe('ProjectAuthorityDO', () => {
       id: 'workspace-delete', projectId: project.id, kind: 'worktree', name: 'Delete', branch: 'delete',
       phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'archived', goalId: null, expectedRevision: 0,
     }));
-    expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.removeWorkspace(workspace.id, workspace.revision))).toBe(true);
+    expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.removeWorkspace(workspace.id))).toBe(true);
     const tombstone = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.deleteProject(project.revision));
     expect(tombstone).toMatchObject({ id: project.id, lifecycle: 'deleting', revision: 2 });
     expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listWorkspaces())).toEqual([]);

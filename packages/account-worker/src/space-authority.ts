@@ -396,7 +396,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   /** The project records a lifecycle this workspace has already applied to itself. */
   private async recordLifecycle(applied: WorkspaceMetadata, lifecycle: WorkspaceLifecycle): Promise<CloudWorkspaceDefinition> {
-    const recorded = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${applied.projectId}`).commitWorkspaceLifecycle(applied.workspaceId, applied.revision, lifecycle);
+    const recorded = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${applied.projectId}`).commitWorkspaceLifecycle(applied.workspaceId, lifecycle);
     this.adopt(recorded);
     return recorded;
   }
@@ -456,7 +456,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const project = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`);
     assertWorkspacePhase(phase, await project.workspaceDependencies(identity.workspaceId));
     const applied = writeWorkspaceMetadata(this.ctx.storage, { ...current, phase });
-    const recorded = await project.commitWorkspacePhase(identity.workspaceId, applied.revision, phase);
+    const recorded = await project.commitWorkspacePhase(identity.workspaceId, phase);
     this.adopt(recorded);
     return recorded;
   }

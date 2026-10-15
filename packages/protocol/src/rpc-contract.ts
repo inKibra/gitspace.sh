@@ -603,7 +603,7 @@ export const spaceViewContract = gitspaceRpc
 
 export const archiveWorkspaceContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, spaceId: wire.string, expectedRevision: wire.number, expectedGeneration: wire.nullable(wire.number) }))
+  .input(wire.object({ projectId: wire.string, spaceId: wire.string, expectedGeneration: wire.nullable(wire.number) }))
   .output(InspectorWorkspaceCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const restoreWorkspaceContract = gitspaceRpc
