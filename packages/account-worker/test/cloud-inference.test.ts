@@ -98,6 +98,13 @@ describe('Cloud inference credential authority', () => {
     });
   });
 
+  it('labels a ChatGPT sign-in by the email in its token when the sign-in stored none', async () => {
+    const claims = btoa(JSON.stringify({ 'https://api.openai.com/profile': { email: 'chatgpt@example.com' } })).replace(/=+$/u, '');
+    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'chatgpt', provider: 'openai', access: `header.${claims}.signature`, accountId: 'account-chatgpt' }]));
+    const openai = (await vault.cloudProviders('default')).find(provider => provider.id === 'openai');
+    expect(openai).toMatchObject({ hasUsage: true, accounts: [{ label: 'chatgpt@example.com', email: 'chatgpt@example.com' }] });
+  });
+
   it('disables an active account on the first logout and permanently removes it on the second', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([
       { id: 'kept', provider: 'openai-codex', access: 'access-kept', accountId: 'account-kept' },
