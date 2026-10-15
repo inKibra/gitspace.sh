@@ -87,7 +87,12 @@ export async function createMachineExecutor(options: {
     observe(updated);
     return updated;
   };
-  const synced = (local: LocalAttachment) => saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), lastSyncAt: new Date().toISOString(), unsent: 0 });
+  /** A completed sync also ends a sync or publish failure recorded earlier: it is reported only until sync works again. */
+  const synced = (local: LocalAttachment) => {
+    saveCache(local, { ...cacheFor(journal.attachment(local.attachment.attachmentId) ?? local), lastSyncAt: new Date().toISOString(), unsent: 0 });
+    const operation = journal.attachment(local.attachment.attachmentId)?.attachment.failure?.operation;
+    if (operation === 'sync' || operation === 'publish') clearFailure(local.attachment);
+  };
   const stopFollowing = (local: LocalAttachment) => {
     watchers.get(local.rootPath)?.close();
     watchers.delete(local.rootPath);
@@ -157,7 +162,8 @@ export async function createMachineExecutor(options: {
     }
     try {
       const checkpoint = await stream.capture();
-      if (journal.attachment(local.attachment.attachmentId)?.attachment.failure?.operation === 'publish') clearFailure(local.attachment);
+      const operation = journal.attachment(local.attachment.attachmentId)?.attachment.failure?.operation;
+      if (operation === 'sync' || operation === 'publish') clearFailure(local.attachment);
       return checkpoint;
     } catch (error) {
       if (artifactsPublicationRejection(error)) recordFailure(journal.attachment(local.attachment.attachmentId) ?? local, new AttachmentOperationFailure('publish', error));
