@@ -186,15 +186,19 @@ function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAcc
 
 function ApiKeyDialog({ provider, onOpenChange, onSubmit }: { provider: ProviderView | null; onOpenChange(open: boolean): void; onSubmit(providerId: string, key: string): Promise<void> }) {
   const [key, setKey] = useState('');
+  const [accountId, setAccountId] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => { setKey(''); setError(null); }, [provider?.id]);
+  useEffect(() => { setKey(''); setAccountId(''); setError(null); }, [provider?.id]);
+  // Workers AI needs the Cloudflare account id in its URL; the vault stores both as {"token","accountId"}.
+  const workersAi = provider?.id === 'cloudflare-workers-ai';
+  const complete = key.trim().length > 0 && (!workersAi || accountId.trim().length > 0);
   const submit = async (): Promise<void> => {
-    if (!provider || !key.trim()) return;
+    if (!provider || !complete) return;
     setPending(true);
     setError(null);
     try {
-      await onSubmit(provider.id, key.trim());
+      await onSubmit(provider.id, workersAi ? JSON.stringify({ token: key.trim(), accountId: accountId.trim() }) : key.trim());
       onOpenChange(false);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -206,12 +210,13 @@ function ApiKeyDialog({ provider, onOpenChange, onSubmit }: { provider: Provider
     {provider ? <DialogContent>
       <DialogHeader><DialogTitle>{provider.name} API key</DialogTitle><DialogDescription>Encrypted in this inference profile’s cloud credential vault. Machines do not receive provider credentials.</DialogDescription></DialogHeader>
       <form id="provider-api-key-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-        <InputGroup className="w-full"><InputField index={0} label="API key" type="password" value={key} onChange={setKey} autoComplete="off" autoFocus required /></InputGroup>
+        <InputGroup className="w-full"><InputField index={0} label={workersAi ? 'API token' : 'API key'} type="password" value={key} onChange={setKey} autoComplete="off" autoFocus required /></InputGroup>
+        {workersAi ? <InputGroup className="w-full"><InputField index={1} label="Cloudflare account ID" value={accountId} onChange={setAccountId} autoComplete="off" required /></InputGroup> : null}
         {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
       </form>
       <DialogFooter>
         <Button variant="secondary" type="button" onClick={() => onOpenChange(false)}>Cancel</Button>
-        <Button variant="primary" type="submit" form="provider-api-key-form" loading={pending} disabled={!key.trim()}>Save key</Button>
+        <Button variant="primary" type="submit" form="provider-api-key-form" loading={pending} disabled={!complete}>Save key</Button>
       </DialogFooter>
     </DialogContent> : null}
   </Dialog>;
