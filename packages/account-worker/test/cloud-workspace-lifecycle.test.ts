@@ -316,7 +316,6 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await client.workspace.restore({ spaceId: workspaceId, expectedGeneration: 3 })).toMatchObject({ status: 'error' });
     expect(await client.workspace.restore({ spaceId: workspaceId, expectedGeneration: 0 })).toMatchObject({ status: 'ok', value: { id: workspaceId, projectId: project.id, kind: 'worktree', state: 'active', machineId: null, generation: 0 } });
     expect(await current()).toMatchObject({ lifecycle: 'active', archivedAt: null });
-    expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Archive') } } });
     expect(await client.workspace.delete({ workspaceId: project.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('base workspace') } } });
 
     expect(await archive()).toMatchObject({ status: 'ok' });
@@ -326,6 +325,26 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(artifacts.deleted).toEqual([`workspace-${workspaceId}`]);
     expect(await space.hasCloudRuntime()).toBe(false);
     expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
+  });
+
+  it('deletes a workspace in any state: an active one and a creation that never finished', async () => {
+    const { userId, client, project, authority, index } = await cloudProject('Delete in any state');
+    const created = await client.workspace.create({ projectId: project.id, name: 'Active', branch: 'active', sourceKind: 'base', sourceRef: '' });
+    if (created.status === 'error') throw created.error;
+    const active = created.value.workspace.id;
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${active}`);
+    await space.runtimeAttachments({ projectId: project.id, workspaceId: active });
+    expect(await client.workspace.delete({ workspaceId: active })).toMatchObject({ status: 'ok', value: { workspaceId: active, deleted: true } });
+    expect(await authority.getWorkspace(active)).toBeNull();
+    expect(await space.hasCloudRuntime()).toBe(false);
+
+    const unfinished = await authority.putWorkspace({
+      id: 'unfinished-creation', projectId: project.id, kind: 'worktree', name: 'Unfinished', branch: 'unfinished', phase: 'plan',
+      sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'provisioning', goalId: null, expectedRevision: 0,
+    });
+    await index.putWorkspaceLocation(unfinished.id, project.id);
+    expect(await client.workspace.delete({ workspaceId: unfinished.id })).toMatchObject({ status: 'ok', value: { workspaceId: unfinished.id, deleted: true } });
+    expect(await index.locateWorkspace(unfinished.id)).toBeNull();
   });
 
   it('archives and deletes workspace first: the workspace is fenced before its project records the change', async () => {
@@ -559,7 +578,6 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(fromBase).toMatchObject({ status: 'ok' });
     expect(artifacts.setBranch).toHaveBeenLastCalledWith(expect.any(String), 'from-develop', commit('2'));
 
-    expect(await client.project.delete({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Archive') } } });
     expect(await client.project.archive({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok', value: { lifecycle: 'archived', archivedAt: expect.any(Date) } });
     // Each workspace object learned the archive from the worker and refuses writes on its own.
     await expect(runInDurableObject(child, (instance: SpaceAuthorityDO) => instance.runtimeAccess(childIdentity, true))).rejects.toThrow('Archived runtime state is read-only');

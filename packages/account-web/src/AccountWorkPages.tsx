@@ -291,7 +291,8 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
               <CardContent><Badge variant="dot" size="compact" color="gray">{workspacePhaseLabel(workspace.phase)}</Badge></CardContent>
               <CardFooter>
                 {onReleaseMachines && !workspace.creation ? <Tooltip content="Release machine caches; keep the cloud workspace and conversations" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Release machine caches for ${workspace.name}`} disabled={pending} onClick={() => void run(() => onReleaseMachines(workspace.id))}><XClose width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-                {onArchiveWorkspace ? <Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onArchiveWorkspace(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                {onArchiveWorkspace && !workspace.creation ? <Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onArchiveWorkspace(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                {onDeleteWorkspace ? <Tooltip content="Delete workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Delete ${workspace.name}`} disabled={pending} onClick={() => void run(() => onDeleteWorkspace(workspace.id))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
               </CardFooter>
             </Card>)}
             {archived.map((workspace, index) => <Card key={workspace.id} index={open.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>

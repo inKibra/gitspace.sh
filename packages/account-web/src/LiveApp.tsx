@@ -463,6 +463,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
           finally { setReleasePendingSpaceId(null); }
         }}
         onArchive={(spaceId) => runSidebarAction(() => actions.onArchiveWorkspace(spaceId))}
+        onDelete={(spaceId) => runSidebarAction(() => actions.onDeleteWorkspace(spaceId))}
         onRestore={(spaceId) => runSidebarAction(() => actions.onRestoreWorkspace(spaceId))}
         onNewWorkspace={(id) => { setCreateError(null); setNewWorkspaceProject(id); }}
         onOpenProjectSettings={(id) => { setSettingsProjectId(id); navigate('projects'); }}
@@ -1181,9 +1182,15 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     onSetProjectBaseBranch: async (projectId, expectedRevision, baseBranch) => { await mutate(rpcClient.project.setBaseBranch({ projectId, expectedRevision, baseBranch })); },
     onDeleteProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.delete({ projectId, expectedRevision })); },
     onDeleteWorkspace: async (workspaceId) => {
-      const canonical = await inspectTarget(workspaceId);
-      if (!await confirmLeaving(canonical)) return;
+      const listed = account.projects.flatMap((project) => account.directory[project.id]?.workspaces ?? []).find((workspace) => workspace.id === workspaceId);
+      if (!window.confirm(`Delete ${listed?.name ?? workspaceId}? Its conversations, files and cloud records are removed. This cannot be undone.`)) return;
+      // Only a running workspace can hold machine LFS files the cloud has not received.
+      if (listed?.definition?.lifecycle === 'active') {
+        const canonical = await inspectTarget(workspaceId);
+        if (!await confirmLeaving(canonical)) return;
+      }
       await mutate(rpcClient.workspace.delete({ workspaceId }));
+      if (listed && new URL(window.location.href).searchParams.get('workspace') === workspaceId) selectInspection(listed.projectId, null);
     },
     onSetWorkspaceRelations: async (workspaceId, relations) => {
       await mutate(rpcClient.workspace.setRelations({ workspaceId, dependsOn: [...relations.dependsOn], relatedTo: [...relations.relatedTo], stackedOn: relations.stackedOn }));

@@ -137,7 +137,7 @@ Every item is verified the way the user works, in the browser, before it is repo
 **Batch 0 — rules and audit.** Done: rules 8–15 above; audit of every read endpoint and check in `local://audit-*.md` (worker checks: 144 keep, 151 delete, 86 decided by rules 12–15).
 
 **Batch 1 — unblock: workspace state on Pi, no blocking conditions.**
-1. Delete always works, whatever state the workspace is in. A creation that never finishes fails after a timeout and shows Retry and Delete. Then delete the two stuck PR 101 creations in Deedible Info.
+1. Delete always works, whatever state the workspace is in: the lifecycle and "complete cloud/destroy first" refusals are gone, and the sidebar, project cards and creation panel all offer Delete. A creation that never finishes needs no timeout: Retry and Delete are offered while it runs, and the newest action wins. Then delete the two stuck PR 101 creations in Deedible Info.
 2. Environment runs become Pi tasks in the workspace object: a new run aborts the old one, Cancel aborts it, a gone process ends it. Run history moves out of the project object once; the claim/token/slot/recovery code is deleted. A running run's row shows "Running in terminal" with Open terminal and Cancel.
 3. Cloud edits: delete the writer lease, its fence and recovery job; edits run in order inside the object; the git compare-and-swap stays.
 4. Base-branch change becomes a Pi task; the fence that refuses every other call while it runs is deleted.

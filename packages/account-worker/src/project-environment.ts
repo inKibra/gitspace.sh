@@ -1,5 +1,5 @@
 import {
-  EnvironmentError, LifecycleMutationSchema, assertEnvironmentRetired, emptyLifecycleState,
+  EnvironmentError, LifecycleMutationSchema, emptyLifecycleState,
   transitionLifecycle, isLifecycleRunActive, LIFECYCLE_PREVIEW_LIMIT, LifecycleStateSchema, LifecycleRunSchema,
   type LifecycleActor, type LifecycleMutation, type LifecycleRunLog,
   type LifecycleRunRecord, type LifecycleState,
@@ -110,10 +110,6 @@ export class ProjectEnvironmentStore {
     });
     this.changes.wake();
     return values;
-  }
-
-  assertRetired(projectId: string, spaceId: string): void {
-    assertEnvironmentRetired(this.get(projectId, spaceId));
   }
 
   /** Interrupt every claim the lost holder still owns in this workspace: a lost attachment's runs, or all the machine's

@@ -54,3 +54,14 @@ it('offers only Retry and Delete for a failed creation and shows the Retry failu
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('The repository could not be cloned.');
   expect(container.querySelector<HTMLButtonElement>('button')!.disabled).toBe(false);
 });
+
+it('offers Retry and Delete while a creation is still running, so one that never finishes can be removed', async () => {
+  const onDelete = vi.fn(async () => undefined);
+  vi.stubGlobal('confirm', () => true);
+  const running: NonNullable<InspectorView['creation']> = { ...creation, state: 'running', steps: [{ id: 'checkout', label: 'Create worktree', state: 'running', message: null }] };
+  await act(() => root.render(<WorkspaceCreationPanel name="feature" state="provisioning" creation={running} onRetry={async () => undefined} onDelete={onDelete} />));
+  expect(container.textContent).toContain('Creating workspace…');
+  expect(buttons()).toEqual(['Retry', 'Delete']);
+  await act(() => container.querySelectorAll<HTMLButtonElement>('button')[1]!.click());
+  expect(onDelete).toHaveBeenCalledTimes(1);
+});

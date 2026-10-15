@@ -199,10 +199,6 @@ export function assertEnvironmentExecutionReady(input: {
   for (const name of input.effective.values) if (input.bundle.values[name]?.required && !input.values[name]) throw new EnvironmentError('MissingValue', `Required environment value ${name} is missing`, { name });
   for (const name of input.effective.secrets) if (!input.configuredSecrets.includes(name)) throw new EnvironmentError('MissingSecret', `Required environment secret ${name} is missing`, { name });
 }
-export function assertEnvironmentRetired(state: LifecycleState): void {
-  const latest = state.runs.filter((run) => run.phase.startsWith('cloud/')).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
-  if (state.runs.some(isLifecycleRunActive) || ((latest || Object.keys(state.bindings).length) && (latest?.phase !== 'cloud/destroy' || latest.status !== 'succeeded'))) throw new EnvironmentError('PreconditionFailed', 'Complete explicit cloud/destroy before deleting this workspace; partial resources and lifecycle history must remain inspectable');
-}
 export function sanitizeLifecycleOutput(output: string, secrets: readonly string[] = []): string {
   let result = output;
   for (const secret of secrets) if (secret) result = result.replaceAll(secret, '[REDACTED]');

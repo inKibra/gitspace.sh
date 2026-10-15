@@ -2,7 +2,6 @@ import type { z } from 'zod';
 import type { CloudProjectOperation, CloudProjectSummary, CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { cloudResourceId, normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
 import type { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
-import { assertEnvironmentRetired } from '@gitspace/protocol-environment';
 import type { RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
@@ -308,14 +307,10 @@ export async function restoreCloudWorkspace(env: Env, userId: string, input: { s
   return { definition: restored, generation };
 }
 
-/** Permanently deletes an archived or never-finished workspace: its runtime state, caches, repository and definition.
- * The workspace object fences itself out of runtime access and erases its state before its project records it deleting. */
+/** Permanently deletes a workspace in any state: its runtime state, caches, repository and definition. The workspace
+ * object stops its runtime and erases its state before its project records it deleting. */
 export async function deleteCloudWorkspace(env: Env, userId: string, workspaceId: string): Promise<boolean> {
   const { authority, definition } = await requireWorktree(env, userId, workspaceId);
-  if (definition.lifecycle === 'active' || definition.lifecycle === 'archiving' || definition.lifecycle === 'restoring') {
-    throw new Error(`Archive workspace ${definition.name} before deleting it`);
-  }
-  assertEnvironmentRetired(await authority.getLifecycleState(workspaceId));
   return runOperation(authority, { projectId: definition.projectId, workspaceId, kind: 'workspace.delete', labels: ['Erase workspace runtime', 'Delete workspace repository', 'Delete workspace authority'] }, async advance => {
     const deleting = await env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`).deleteWorkspace(definition);
     await advance();
@@ -366,15 +361,12 @@ export async function setCloudProjectBaseBranch(env: Env, userId: string, projec
     () => env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`).runtimeSetBaseBranch({ projectId, workspaceId: projectId }, expectedRevision, baseBranch));
 }
 
-/** Permanently deletes an archived project with every workspace's runtime state and repository, then its directory entry. */
+/** Permanently deletes a project in any state with every workspace's runtime state and repository, then its directory entry. */
 export async function deleteCloudProject(env: Env, userId: string, projectId: string, expectedRevision: number): Promise<void> {
   const authority = await requireProject(env, userId, projectId);
   const project = await authority.getProject();
   if (!project) throw new CloudLifecycleTargetMissing('project', projectId);
-  if (project.lifecycle !== 'archived' && project.lifecycle !== 'deleting') throw new Error(`Archive project ${project.name} before deleting it`);
-  if (project.lifecycle === 'archived' && project.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
   const workspaces = await authority.listWorkspaces();
-  for (const workspace of workspaces) assertEnvironmentRetired(await authority.getLifecycleState(workspace.id));
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   // Each workspace object marks itself unavailable and erases its runtime before the authority tombstone removes its definition.
   for (const workspace of workspaces) {

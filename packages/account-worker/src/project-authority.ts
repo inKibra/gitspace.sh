@@ -1328,7 +1328,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (current.revision !== expectedRevision) {
       throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
     }
-    this.environment.assertRetired(current.project_id, workspaceId);
     this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleted_workspaces(workspace_id) VALUES(?)', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes WHERE workspace_id=?', workspaceId);
@@ -1391,7 +1390,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (project.revision !== expectedRevision) {
       throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
     }
-    for (const workspace of this.listWorkspaces()) this.environment.assertRetired(project.id, workspace.id);
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions');
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes');
     this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE revoked_at IS NULL', new Date().toISOString());

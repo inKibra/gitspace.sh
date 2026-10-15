@@ -28,7 +28,8 @@ export interface WorkspaceCreationPanelProps {
   onDelete(): Promise<void>;
 }
 
-/** A worktree that is still being created or whose creation failed: it has nothing to open, only Retry or Delete. */
+/** A worktree that is still being created or whose creation failed: it has nothing to open. Retry restarts creation
+ * and Delete removes it, in either state. */
 export function WorkspaceCreationPanel({ name, state, creation, onRetry, onDelete }: WorkspaceCreationPanelProps) {
   const shape = useShape();
   const [pending, setPending] = useState<'retry' | 'delete' | null>(null);
@@ -57,10 +58,10 @@ export function WorkspaceCreationPanel({ name, state, creation, onRetry, onDelet
         <Badge variant="dot" size="compact" color={STEP_STATE[step.state].color}>{STEP_STATE[step.state].label}</Badge>
       </li>)}
     </ol> : null}
-    {failed ? <div className="flex flex-wrap items-center gap-2 pt-1">
+    <div className="flex flex-wrap items-center gap-2 pt-1">
       <Button variant="secondary" size="compact" loading={pending === 'retry'} disabled={pending !== null} onClick={() => void run('retry', onRetry)} leadingIcon={glyph(RefreshCcw01)}>{pending === 'retry' ? 'Retrying…' : 'Retry'}</Button>
       <Button variant="ghost" size="compact" loading={pending === 'delete'} disabled={pending !== null} onClick={() => { if (window.confirm(`Delete ${name}? Its partial checkout and cloud records are removed. This cannot be undone.`)) void run('delete', onDelete); }} leadingIcon={glyph(Trash01)}>{pending === 'delete' ? 'Deleting…' : 'Delete'}</Button>
-    </div> : null}
+    </div>
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
   </section>;
 }

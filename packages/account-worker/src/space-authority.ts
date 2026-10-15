@@ -523,11 +523,12 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return this.recordLifecycle(writeWorkspaceMetadata(this.ctx.storage, { ...current, lifecycle: 'active' }), 'active');
   }
 
-  /** Permanently deletes this archived or never-finished workspace's runtime, attachments and placement; the project
-   * records it deleting only after. */
+  /** Permanently deletes this workspace in any state: its runtime stops, its attachments, placement and state are
+   * erased, then the project records it deleting. A workspace of an archived project is deleted too. */
   async deleteWorkspace(definition: CloudWorkspaceDefinition): Promise<CloudWorkspaceDefinition> {
-    const current = await this.worktree(definition);
-    if (current.lifecycle === 'active' || current.lifecycle === 'archiving' || current.lifecycle === 'restoring') throw new Error(`Archive workspace ${definition.name} before deleting it`);
+    await this.metadata(RuntimeIdentitySchema.parse({ projectId: definition.projectId, workspaceId: definition.id }));
+    const current = this.adopt(definition);
+    if (current.kind !== 'worktree') throw new Error('The project base workspace is deleted only with its project');
     const deleting: WorkspaceMetadata = { ...current, lifecycle: 'deleting' };
     await this.erase(deleting);
     return this.recordLifecycle(deleting, 'deleting');
