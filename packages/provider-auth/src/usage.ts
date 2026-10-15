@@ -19,13 +19,6 @@ function percent(id: string, label: string, scope: string, used: number, resetsA
   const remaining = Math.max(0, 100 - used);
   return { id, label, scope, window, unit: 'percent', used, limit: 100, remaining, remainingFraction: Math.min(1, remaining / 100), resetsAt, status: used >= 100 ? 'exhausted' : used >= 90 ? 'warning' : 'ok' };
 }
-/** The ChatGPT account a ChatGPT access token belongs to, from its claims; Pi's OpenAI sign-in does not store it. */
-function chatgptAccountId(access: string): string | undefined {
-  let claims: unknown;
-  try { claims = JSON.parse(atob((access.split('.')[1] ?? '').replace(/-/gu, '+').replace(/_/gu, '/'))); } catch { return undefined; }
-  const parsed = z.object({ 'https://api.openai.com/auth': z.object({ chatgpt_account_id: z.string().min(1) }) }).safeParse(claims);
-  return parsed.success ? parsed.data['https://api.openai.com/auth'].chatgpt_account_id : undefined;
-}
 async function payload<S extends z.ZodType>(credential: StoredOAuthCredential, url: string, schema: S, fetcher: typeof fetch, init: RequestInit = {}): Promise<z.output<S>> {
   let raw: Record<string, unknown> | null;
   try { raw = await request(credential.provider, url, { headers: { Authorization: `Bearer ${credential.access}`, Accept: 'application/json' }, ...init }, fetcher); }
@@ -46,12 +39,10 @@ export async function collectUsage(credential: StoredOAuthCredential, fetcher: t
     for (const [index, limit] of (data.limits ?? []).entries()) {
       if (limit.percent !== undefined) report.limits.push(percent(`limit:${limit.kind}:${index}`, limit.scope?.model?.display_name ?? limit.kind, limit.scope?.model?.display_name ?? 'account', limit.percent, timestamp(limit.resets_at), limit.kind));
     }
-  } else if (credential.provider === 'openai-codex' || credential.provider === 'openai') {
-    // Both are a ChatGPT sign-in (Codex's, or Pi's OpenAI one): the plan's usage is ChatGPT's.
-    const accountId = credential.accountId ?? chatgptAccountId(credential.access);
+  } else if (credential.provider === 'openai-codex') {
     const window = z.object({ used_percent: numeric.optional(), limit_window_seconds: numeric.optional(), reset_after_seconds: numeric.optional(), reset_at: numeric.optional() });
     const rate = z.object({ allowed: z.boolean().optional(), limit_reached: z.boolean().optional(), primary_window: window.nullable().optional(), secondary_window: window.nullable().optional() });
-    const data = await payload(credential, 'https://chatgpt.com/backend-api/wham/usage', z.object({ rate_limit: rate.nullable().optional(), additional_rate_limits: z.array(z.object({ limit_name: z.string().optional(), metered_feature: z.string().optional(), rate_limit: rate.nullable().optional() })).nullable().optional(), credits: z.object({ has_credits: z.boolean().optional(), unlimited: z.boolean().optional(), overage_limit_reached: z.boolean().optional() }).nullable().optional(), spend_control: z.object({ reached: z.boolean().optional() }).nullable().optional() }), fetcher, { headers: { Authorization: `Bearer ${credential.access}`, 'User-Agent': 'gitspace', ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}) } });
+    const data = await payload(credential, 'https://chatgpt.com/backend-api/wham/usage', z.object({ rate_limit: rate.nullable().optional(), additional_rate_limits: z.array(z.object({ limit_name: z.string().optional(), metered_feature: z.string().optional(), rate_limit: rate.nullable().optional() })).nullable().optional(), credits: z.object({ has_credits: z.boolean().optional(), unlimited: z.boolean().optional(), overage_limit_reached: z.boolean().optional() }).nullable().optional(), spend_control: z.object({ reached: z.boolean().optional() }).nullable().optional() }), fetcher, { headers: { Authorization: `Bearer ${credential.access}`, 'User-Agent': 'gitspace', ...(credential.accountId ? { 'ChatGPT-Account-Id': credential.accountId } : {}) } });
     const overage = data.rate_limit?.limit_reached === true && (data.credits?.has_credits || data.credits?.unlimited) && data.credits?.overage_limit_reached !== true && data.spend_control?.reached !== true;
     if (overage) report.notes.push('Plan quota exhausted; paid credits remain available. Plan usage is not an account-wide inference denial.');
     const groups = [{ name: 'Plan', scope: 'account', rate: data.rate_limit }, ...(data.additional_rate_limits ?? []).map(value => ({ name: value.limit_name ?? value.metered_feature ?? 'Additional quota', scope: value.metered_feature ?? value.limit_name ?? 'feature', rate: value.rate_limit }))];

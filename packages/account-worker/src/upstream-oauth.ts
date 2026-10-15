@@ -8,6 +8,7 @@ import { openrouterProvider } from '@earendil-works/pi-ai/providers/openrouter';
 import { xaiProvider } from '@earendil-works/pi-ai/providers/xai';
 import { ProviderRefreshError, upstreamOAuthProviderSchema, type StoredOAuthCredential, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import type { ProviderLoginEvent } from '@gitspace/protocol';
+import { z } from 'zod';
 
 // Pi loads OAuth flows through variable import specifiers that a Worker bundle cannot follow; register the statically bundled flows instead.
 registerBunOAuthFlows();
@@ -48,16 +49,31 @@ export function tokenEmail(access: string): string | undefined {
   }
 }
 
-export function storedUpstreamCredential(provider: UpstreamOAuthProvider, credential: OAuthCredential): StoredOAuthCredential {
+/** The email of an OpenAI sign-in. Its access token carries none and Pi drops the ID token that does, so OpenAI's
+ * OpenID userinfo answers it; undefined when OpenAI does not. */
+export async function openaiAccountEmail(access: string): Promise<string | undefined> {
+  try {
+    const response = await fetch('https://auth.openai.com/api/accounts/oauth/userinfo', { headers: { authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) return undefined;
+    const parsed = z.object({ email: z.string().includes('@') }).safeParse(await response.json());
+    return parsed.success ? parsed.data.email : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `knownEmail` is the account's email from an earlier sign-in, kept when the new tokens do not name one. */
+export async function storedUpstreamCredential(provider: UpstreamOAuthProvider, credential: OAuthCredential, knownEmail?: string): Promise<StoredOAuthCredential> {
   const { type: _type, ...fields } = credential;
-  const email = typeof fields.email === 'string' ? fields.email : tokenEmail(credential.access);
+  const email = (typeof fields.email === 'string' ? fields.email : tokenEmail(credential.access)) ?? knownEmail
+    ?? (provider === 'openai' ? await openaiAccountEmail(credential.access) : undefined);
   return { ...fields, provider, access: credential.access, refresh: credential.refresh, expires: credential.expires, ...(email ? { email } : {}) };
 }
 
 export async function refreshUpstreamCredential(provider: UpstreamOAuthProvider, credential: StoredOAuthCredential): Promise<StoredOAuthCredential> {
   try {
     const refreshed = await upstreamOAuth(provider).refresh(upstreamCredential(credential), AbortSignal.timeout(30_000));
-    return { ...storedUpstreamCredential(provider, refreshed), ...(credential.email && !tokenEmail(refreshed.access) ? { email: credential.email } : {}) };
+    return await storedUpstreamCredential(provider, refreshed, credential.email);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // A provider that answered and refused the grant needs a new sign-in; anything else may succeed on retry.

@@ -10,7 +10,7 @@ import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineD
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
-import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
+import { isUpstreamOAuthProvider, openaiAccountEmail, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
 import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
 import type { CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
@@ -1373,7 +1373,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
       let account = row.account_json === null ? null : SignedInAccountSchema.parse(JSON.parse(row.account_json));
       // A credential stored before accounts were recorded, or recorded without a name, is opened to record its account.
       if (!account || (account.type === 'oauth' && account.email === null && account.identity === null)) {
-        account = credentialAccount(await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key)));
+        const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
+        account = credentialAccount(credential);
+        // An OpenAI sign-in stored before its email was asked for: OpenAI names it now (and again on a later list if not).
+        if (account.email === null && credential.type !== 'api_key' && credential.provider === 'openai') account = { ...account, email: await openaiAccountEmail(credential.access) ?? null };
         this.ctx.storage.sql.exec('UPDATE inference_credentials SET account_json = ? WHERE rowid = ? AND revision = ?', JSON.stringify(account), row.row_id, row.revision);
       }
       return { id: String(row.row_id), provider: row.provider, ...account, disabled: row.state !== 'active' };
@@ -1389,7 +1392,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       return { id: provider, credentialProvider: descriptor?.credentialProvider ?? provider, name: descriptor?.name ?? provider, available: descriptor !== undefined, loginable: oauth || descriptor?.supportsApiKey === true,
         supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
-        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'openai', 'cursor', 'google-antigravity'].includes(provider),
+        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'cursor', 'google-antigravity'].includes(provider),
         accounts: owned.map(account => ({ id: account.id, type: account.type, label: account.email ?? account.identity ?? (account.type === 'api_key' ? 'API key' : `Account ${account.id}`), email: account.email, disabled: account.disabled })) };
     });
   }
@@ -1569,7 +1572,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         }, { getDeviceId: () => deviceId });
         await this.ctx.blockConcurrencyWhile(async () => {
           if (this.loginRow(profileId, flowId).status === 'done') return;
-          await this.uploadCredential(profileId, { provider, credential: { ...storedUpstreamCredential(provider, credential), type: 'oauth' } });
+          await this.uploadCredential(profileId, { provider, credential: { ...await storedUpstreamCredential(provider, credential), type: 'oauth' } });
           const view = (await this.cloudProviders(profileId)).find(candidate => candidate.id === provider);
           finish(view ? { type: 'done', ok: true, provider: view } : { type: 'done', ok: false, error: 'Authorized provider is unavailable' });
         });

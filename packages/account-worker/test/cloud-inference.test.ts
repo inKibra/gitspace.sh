@@ -98,11 +98,18 @@ describe('Cloud inference credential authority', () => {
     });
   });
 
-  it('labels a ChatGPT sign-in by the email in its token when the sign-in stored none', async () => {
-    const claims = btoa(JSON.stringify({ 'https://api.openai.com/profile': { email: 'chatgpt@example.com' } })).replace(/=+$/u, '');
-    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'chatgpt', provider: 'openai', access: `header.${claims}.signature`, accountId: 'account-chatgpt' }]));
-    const openai = (await vault.cloudProviders('default')).find(provider => provider.id === 'openai');
-    expect(openai).toMatchObject({ hasUsage: true, accounts: [{ label: 'chatgpt@example.com', email: 'chatgpt@example.com' }] });
+  it('names an OpenAI sign-in by the email OpenAI gives for its token, and claims no plan usage for it', async () => {
+    const asked: string[] = [];
+    network.use(http.get('https://auth.openai.com/api/accounts/oauth/userinfo', ({ request }) => {
+      asked.push(request.headers.get('authorization') ?? '');
+      return HttpResponse.json({ sub: 'user-1', email: 'chatgpt@example.com' });
+    }));
+    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'chatgpt', provider: 'openai', access: 'opaque-access-token' }]));
+    const openai = async () => (await vault.cloudProviders('default')).find(provider => provider.id === 'openai');
+    expect(await openai()).toMatchObject({ hasUsage: false, accounts: [{ label: 'chatgpt@example.com', email: 'chatgpt@example.com' }] });
+    // Recorded once: a later listing does not ask OpenAI again.
+    await openai();
+    expect(asked).toEqual(['Bearer opaque-access-token']);
   });
 
   it('disables an active account on the first logout and permanently removes it on the second', async () => {
