@@ -76,6 +76,9 @@ export class SynchronizationOwner {
     };
     void (async () => {
       let delay = 250;
+      // A drop right after working delivery (a deploy, a network blip) reconnects quietly; only a reconnect that also
+      // fails is shown as an error.
+      let quietRetry = false;
       while (current()) {
         try {
           const after = channel.snapshotRequested || channel.value.resync ? null : channel.value.cursor;
@@ -86,6 +89,7 @@ export class SynchronizationOwner {
             if (result.status === 'open') {
               if (channel.value.connection !== 'open') publish({ ...channel.value, connection: 'open', transportError: null });
               delay = 250;
+              quietRetry = true;
               continue;
             }
             const next = applyStreamEvent(channel.value, result.value);
@@ -93,6 +97,7 @@ export class SynchronizationOwner {
             publish({ ...next, connection: 'open', transportError: null });
             if (accepted) for (const listener of channel.eventListeners) listener(result.value);
             delay = 250;
+            quietRetry = true;
             // A missing predecessor is not a new state. Request an authoritative
             // snapshot instead of applying a patch across an unavailable range.
             if (next.resync && result.value.type !== 'resync') break;
@@ -101,7 +106,9 @@ export class SynchronizationOwner {
           throw new Error('Synchronization delivery disconnected');
         } catch (error) {
           if (!current()) return;
-          publish({ ...channel.value, connection: 'disconnected', transportError: error instanceof Error ? error : new Error(String(error)) });
+          if (quietRetry) publish({ ...channel.value, connection: 'connecting', transportError: null });
+          else publish({ ...channel.value, connection: 'disconnected', transportError: error instanceof Error ? error : new Error(String(error)) });
+          quietRetry = false;
         }
         // This timer retries transport establishment only. It never queries state.
         const retry = Promise.withResolvers<void>();

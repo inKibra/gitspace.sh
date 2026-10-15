@@ -48,21 +48,27 @@ it('shares delivery and emits every accepted fact even when renders would coales
   expect(stream.connections[0]!.signal.aborted).toBe(true);
 });
 
-it('reconnects from the last accepted cursor without clearing the last good value', async () => {
+it('reconnects quietly from the last accepted cursor after a drop, and shows an error only when the retry fails too', async () => {
   vi.useFakeTimers();
   const stream = controlledSource();
   const channel = owner().channel('state', stream.source);
-  const disconnected = Promise.withResolvers<void>();
-  channel.subscribe(() => { if (channel.snapshot().connection === 'disconnected') disconnected.resolve(); });
+  const reconnecting = Promise.withResolvers<void>();
+  channel.subscribe(() => { if (channel.snapshot().connection === 'connecting' && channel.snapshot().value === 'ready') reconnecting.resolve(); });
   stream.connections[0]!.send(snapshot(8, 'ready'));
   stream.connections[0]!.send({ status: 'error', error: new Error('Connection lost') });
-  await disconnected.promise;
-  expect(channel.snapshot()).toMatchObject({ value: 'ready', cursor: 8, connection: 'disconnected' });
+  await reconnecting.promise;
+  expect(channel.snapshot()).toMatchObject({ value: 'ready', cursor: 8, connection: 'connecting', transportError: null });
   await vi.advanceTimersByTimeAsync(250);
   expect(stream.connections[1]!.after).toBe(8);
+  const disconnected = Promise.withResolvers<void>();
+  channel.subscribe(() => { if (channel.snapshot().connection === 'disconnected') disconnected.resolve(); });
+  stream.connections[1]!.send({ status: 'error', error: new Error('Still down') });
+  await disconnected.promise;
+  expect(channel.snapshot()).toMatchObject({ value: 'ready', cursor: 8, transportError: { message: 'Still down' } });
+  await vi.advanceTimersByTimeAsync(500);
   const recovered = Promise.withResolvers<void>();
   channel.subscribe(() => { if (channel.snapshot().connection === 'open') recovered.resolve(); });
-  stream.connections[1]!.send(change(8, 10, 'working'));
+  stream.connections[2]!.send(change(8, 10, 'working'));
   await recovered.promise;
   expect(channel.snapshot()).toMatchObject({ value: 'working', cursor: 10, transportError: null });
 });

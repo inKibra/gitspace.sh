@@ -90,10 +90,13 @@ export function createAccountDirectorySource(options: {
           notify();
         } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
       };
-      const error = () => finish(new Error('Account directory connection failed'));
+      // A socket error is always followed by its close, which carries the code: 1001/1006/1012 are deploys and
+      // network drops, 1008/1013 come from the server with a reason.
+      const error = () => {};
       const close = (event: CloseEvent) => {
         rejected = event.code === 4401 && event.reason === 'RPC_DEVICE_UNKNOWN';
-        finish(rejected ? new DeviceRejectedError('RPC_DEVICE_UNKNOWN') : new Error('Account directory disconnected'));
+        if (!rejected) console.info(JSON.stringify({ event: 'account_directory_closed', code: event.code, reason: event.reason, opened }));
+        finish(rejected ? new DeviceRejectedError('RPC_DEVICE_UNKNOWN') : new Error(`Account directory disconnected (code ${event.code}${event.reason ? `: ${event.reason}` : ''})`));
       };
       const abort = () => { queue.length = 0; finish(null); detach(); };
       detach = () => {

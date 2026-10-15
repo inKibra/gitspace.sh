@@ -153,9 +153,9 @@ Every item is verified the way the user works, in the browser, before it is repo
 14. Done (`5dc51740`, `31b31d9b`, `f76b7a0f`). Found while staging the demo: a project agent cannot set relations on another workspace ("outside this agent's workspace"); a workspace sourced from another workspace starts from its last commit, so uncommitted cloud edits never reach it; a machine whose unsent changes include a >32 MB file blocks sync, so a new `.gitignore` cannot reach the machine to fix it (the agent had to delete `node_modules`).
 
 **Batch 2 — status and live updates.**
-1. Status as a small message: on change each workspace sends `{ workspaceId, status }`; the socket object keeps one row per workspace and forwards it; the sidebar updates that row; page load reads the rows once. The open workspace's view is unchanged. Done when an agent working, then the user clicking away, leaves the row Working until it stops.
+1. Done (`4245232c`). Status as a small message: on change each workspace sends `{ workspaceId, status }`; the socket object keeps one row per workspace and forwards it; the sidebar updates that row; page load reads the rows once. The open workspace's view is unchanged. Done when an agent working, then the user clicking away, leaves the row Working until it stops.
 2. Remove outboxes, replay streams and snapshots (account-directory outbox and stream, every `*.events` cursor endpoint) for the same pattern.
-3. "Account directory connection failed": record close codes to tell deploys from network drops; brief reconnects are not shown as errors.
+3. Done. "Account directory connection failed": record close codes to tell deploys from network drops; brief reconnects are not shown as errors.
 
 **Batch 3 — drive and documents.**
 1. `local://` → `drive://`, hard cutover, no alias: parser, composer, tools, skills, agent instructions, inspector tab "Drive".
