@@ -417,6 +417,26 @@ function RubricDocument({ rubric, onOpenEvidence, onSubmit }: { rubric: RubricVi
   </div></ScrollArea>;
 }
 
+/** Repository files the Files tab renders instead of showing their bytes as text. */
+const REPOSITORY_FILE_TYPES: Record<string, string> = {
+  pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+};
+
+/** A PDF in the browser's viewer, an image as an image, any other binary file as a download. */
+function RepositoryBinaryFile({ file }: { file: RepositoryFileView }) {
+  const shape = useShape();
+  const name = file.path.split('/').at(-1) ?? file.path;
+  const mediaType = REPOSITORY_FILE_TYPES[name.split('.').at(-1)?.toLowerCase() ?? ''] ?? 'application/octet-stream';
+  const url = useMemo(() => {
+    const bytes = file.encoding === 'base64' ? Uint8Array.from(atob(file.content), (character) => character.charCodeAt(0)) : new TextEncoder().encode(file.content);
+    return URL.createObjectURL(new Blob([bytes], { type: mediaType }));
+  }, [file.content, file.encoding, mediaType]);
+  useEffect(() => () => URL.revokeObjectURL(url), [url]);
+  if (mediaType === 'application/pdf') return <PreviewFrame><iframe src={url} title={name} className={`${shape.container} h-full min-h-90 w-full bg-surface-3 shadow-surface-1`} /></PreviewFrame>;
+  if (mediaType.startsWith('image/')) return <PreviewFrame><img src={url} alt={name} className={`${shape.container} max-h-full max-w-full bg-surface-3 object-contain shadow-surface-1`} /></PreviewFrame>;
+  return <Padded><EmptyState icon={ic(File02, 22)} title="Binary file" description="This file has no inline preview." action={<a href={url} download={name} className="text-body text-primary underline">Download {name}</a>} /></Padded>;
+}
+
 function repositoryPatch(file: RepositoryFileView): string {
   const lines = file.content.split('\n');
   return `diff --git a/${file.path} b/${file.path}\n--- a/${file.path}\n+++ b/${file.path}\n@@ -1,${lines.length} +1,${lines.length} @@\n${lines.map((line) => ` ${line}`).join('\n')}\n`;
@@ -1136,6 +1156,8 @@ export function Inspector(props: InspectorProps) {
       artifactContent={artifactContent}
       onRequest={loadArtifact}
     />;
+  } else if (activeDocument?.kind === 'file' && displayedFile && (displayedFile.binary || REPOSITORY_FILE_TYPES[displayedFile.path.split('.').at(-1)?.toLowerCase() ?? ''])) {
+    documentBody = <RepositoryBinaryFile file={displayedFile} />;
   } else if (activeDocument?.kind === 'file' && (displayedFile || displayedDiff)) {
     const currentIdentity = displayedFile ? { generation: displayedFile.generation, baseCommit: displayedFile.commitId, headCommit: displayedFile.headCommit, blobId: displayedFile.blobId } : null;
     documentBody = <PierreViewer path={activeDocument.target} identities={currentIdentity ? { base: currentIdentity, head: currentIdentity } : diffIdentities(displayedDiff!, activeDocument.target)} patch={displayedFile ? repositoryPatch(displayedFile) : displayedDiff!.patch} threads={props.threads} onSelectThread={(thread) => { setActiveThread(thread); setThreadSelection(null); }} onSelectRange={(selection) => { setThreadSelection(selection); setActiveThread(null); }} />;
