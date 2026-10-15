@@ -1,4 +1,5 @@
-import { createModels, lazyStream, type Api, type Model, type Context, type TranscriptContext, type ApiStreamOptions, type ModelsApiStreamOptions, type AnyModel, type Models, type ModelsStore, type Provider, type ModelAuth, type AssistantMessageEvent, type AssistantMessageEventStream, type AssistantImages, type ClassifierResult } from '@earendil-works/pi-ai';
+import { createModels, lazyStream, type Api, type Model, type Context, type TranscriptContext, type ApiStreamOptions, type ModelsApiStreamOptions, type AnyModel, type Models, type ModelsStore, type Provider, type AuthResult, type AssistantMessageEvent, type AssistantMessageEventStream, type AssistantImages, type ClassifierResult } from '@earendil-works/pi-ai';
+import { z } from 'zod';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { isModelType } from '@earendil-works/pi-ai';
 import type { ProviderResponse } from '@earendil-works/pi-ai';
@@ -44,17 +45,26 @@ function rejectOverrides(options: unknown): void {
   }
 }
 
-function requestAuth(resolved: ResolvedCredential): ModelAuth {
+const cloudflareKeySchema = z.object({ token: z.string().min(1), accountId: z.string().min(1) });
+
+function requestAuth(resolved: ResolvedCredential): AuthResult {
   const credential = resolved.credential;
-  if (credential.type === 'api_key') return { apiKey: credential.key };
+  if (credential.type === 'api_key') {
+    // Workers AI needs the account id in its URL; the key is stored as {"token","accountId"}.
+    if (resolved.provider !== 'cloudflare-workers-ai') return { auth: { apiKey: credential.key } };
+    let parsed: unknown;
+    try { parsed = JSON.parse(credential.key); } catch { throw new Error('Cloudflare Workers AI key must be {"token":"…","accountId":"…"}'); }
+    const key = cloudflareKeySchema.parse(parsed);
+    return { auth: { apiKey: key.token }, env: { CLOUDFLARE_ACCOUNT_ID: key.accountId } };
+  }
   switch (resolved.provider) {
     case 'google-gemini-cli': case 'google-antigravity':
       if (!credential.projectId) throw new Error('Google OAuth account has no authorized project');
-      return { apiKey: JSON.stringify({ access: credential.access, projectId: credential.projectId }) };
+      return { auth: { apiKey: JSON.stringify({ access: credential.access, projectId: credential.projectId }) } };
     case 'openai-codex':
       if (!credential.accountId) throw new Error('Codex OAuth account has no account identity');
-      return { apiKey: credential.access, headers: { 'ChatGPT-Account-ID': credential.accountId } };
-    default: return { apiKey: credential.access, ...(credential.baseUrl ? { baseUrl: credential.baseUrl } : {}), ...(credential.headers ? { headers: credential.headers } : {}) };
+      return { auth: { apiKey: credential.access, headers: { 'ChatGPT-Account-ID': credential.accountId } } };
+    default: return { auth: { apiKey: credential.access, ...(credential.baseUrl ? { baseUrl: credential.baseUrl } : {}), ...(credential.headers ? { headers: credential.headers } : {}) } };
   }
 }
 
@@ -93,9 +103,9 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     if (resolved.id !== credentialId || resolved.provider !== providerId) throw new Error('Vault returned a different account scope');
     const provider = providerById.get(providerId);
     if (!provider) throw new Error(`Unknown provider ${providerId}`);
-    const auth = requestAuth(resolved);
+    const resolvedAuth = requestAuth(resolved);
     const models = createModels({ authContext: noAmbient, modelsStore: options.modelsStore });
-    models.setProvider({ ...(options.fastMode ? fastServingProvider(provider) : provider), auth: { apiKey: { name: 'Profile vault', resolve: async ({ signal }) => { signal.throwIfAborted(); return { auth, source: 'Profile vault' }; } } } });
+    models.setProvider({ ...(options.fastMode ? fastServingProvider(provider) : provider), auth: { apiKey: { name: 'Profile vault', resolve: async ({ signal }) => { signal.throwIfAborted(); return { ...resolvedAuth, source: 'Profile vault' }; } } } });
     return models;
   }
   async function accounts(provider: string, scope: { conversationId: string; pins: CredentialPins } = options) {
