@@ -9,6 +9,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+/** Polls until `done` holds, failing after a second. */
+async function until(done: () => boolean): Promise<void> {
+  for (let waited = 0; !done(); waited += 10) {
+    if (waited > 1_000) throw new Error('Condition not reached');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+
 const context = BACKGROUND_CONTEXT;
 const model: Model<Api> = { id: 'lifecycle-fixture', name: 'Lifecycle fixture', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
 async function fixture(storage: Storage = new MemoryStorage(), blocked = false, failFirst?: Promise<void>) {
@@ -59,11 +67,11 @@ test('events delivered during a run that ends without an answer reach the agent 
     const first: ConversationEvent = { conversationId: String(f.root.id), requestId: 'job-1', kind: 'command-completed', text: 'Background command job:1 completed:\nfirst' };
     await f.lifecycle.deliver(first);
     await f.lifecycle.deliver({ ...first, requestId: 'job-2', text: 'Background command job:2 completed:\nsecond' });
-    await vi.waitFor(() => expect(f.seen).toHaveLength(1));
+    await until(() => f.seen.length === 1);
     await f.root.abort(context);
     await f.root.waitForIdle(context);
     await f.lifecycle.recover();
-    await vi.waitFor(() => expect(f.seen).toHaveLength(2));
+    await until(() => f.seen.length === 2);
     expect(f.seen[1]).toContain('Background command job:2 completed');
     await f.root.abort(context);
   } finally { await f.harness.close(context); }
@@ -74,7 +82,7 @@ test('input queued behind a run that fails without an answer starts on the next 
   const f = await fixture(new MemoryStorage(), false, fail.promise);
   try {
     await f.root.submit({ type: 'input', requestId: 'first', content: 'First request' }, context);
-    await vi.waitFor(() => expect(f.seen).toHaveLength(1));
+    await until(() => f.seen.length === 1);
     await f.root.submit({ type: 'input', requestId: 'second', content: 'Queued request', whenBusy: 'followUp' }, context);
     fail.resolve();
     await f.root.waitForIdle(context);

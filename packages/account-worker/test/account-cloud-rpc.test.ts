@@ -179,8 +179,8 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     const worktree: Record<string, string> = { 'README.md': id('a'), '.gitspace/bundle.json': id('b'), '.gitspace/lifecycle/machine/prepare/10-python.sh': id('c') };
     const blobs: Record<string, string> = { [id('a')]: '# Pantry\n', [id('b')]: JSON.stringify(bundle), [id('c')]: script };
     vi.spyOn(ArtifactsCodeStore.prototype, 'readFile').mockResolvedValue(null);
-    vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotInventories').mockImplementation(async (_repository, requested) => requested.map(tree =>
-      new Map(Object.entries(tree === checkpoint.worktreeTree ? worktree : {}).map(([path, oid]) => [path, { oid, mode: '100644', type: 'blob' as const }]))));
+    const edited = { ...worktree, '.gitspace/lifecycle/machine/prepare/10-python.sh': id('d') };
+    flatTreeReader(tree => tree === checkpoint.worktreeTree ? worktree : tree === id('9') ? edited : undefined, oid => blobs[oid]);
     vi.spyOn(ArtifactsCodeStore.prototype, 'readBlob').mockImplementation(async (_repository, oid) => blobs[oid] === undefined ? null : new Blob([blobs[oid]]));
     await runInDurableObject(placement, (_instance, state) => {
       state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
@@ -199,9 +199,12 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     expect(await rpc('environment.approve', { spaceId, executionHash: hash, scope: 'workspace' })).toMatchObject({ status: 'ok', value: { executions: [{ hash, approval: 'workspace' }] } });
     expect(await claim('after-approval')).toMatchObject({ status: 'ok', state: { claim: { runId: 'after-approval', status: 'claimed' } } });
     // A later checkpoint edit is new content: it surfaces for review rather than inheriting the approval.
-    blobs[id('c')] = `${script}python3 --version\n`;
+    blobs[id('d')] = `${script}python3 --version\n`;
+    await runInDurableObject(placement, (_instance, state) => {
+      state.storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', JSON.stringify({ ...checkpoint, worktreeCommit: id('8'), worktreeTree: id('9') }));
+    });
     expect(await rpc('environment.get', { spaceId })).toMatchObject({ status: 'ok', value: {
-      executions: [{ content: blobs[id('c')], hash: await executionHash({ kind: 'script', command: blobs[id('c')]! }), approval: null }],
+      executions: [{ content: blobs[id('d')], hash: await executionHash({ kind: 'script', command: blobs[id('d')]! }), approval: null }],
     } });
   });
 
@@ -938,6 +941,28 @@ describe('machine-independent Inspector', () => {
 
 });
 
+/** An Artifacts reader over flat path-to-blob maps per root tree; a directory reads as a tree whose id is `root:dir/`. */
+function flatTreeReader(files: (tree: string) => Record<string, string> | undefined, blob: (oid: string) => string | undefined) {
+  vi.spyOn(ArtifactsCodeStore.prototype, 'reader').mockImplementation(() => ({
+    readTree: async oid => {
+      const [root = '', prefix = ''] = oid.split(':');
+      const tree = files(root);
+      if (!tree) return null;
+      const entries = new Map<string, ArtifactsTreeEntry>();
+      for (const [path, hash] of Object.entries(tree)) {
+        if (!path.startsWith(prefix)) continue;
+        const [name = '', ...nested] = path.slice(prefix.length).split('/');
+        entries.set(name, nested.length ? { name, hash: `${root}:${prefix}${name}/`, mode: '40000', type: 'tree' } : { name, hash, mode: '100644', type: 'blob' });
+      }
+      return [...entries.values()];
+    },
+    readBlob: async oid => { const text = blob(oid); return text === undefined ? null : new Blob([text]); },
+    readCommit: async () => null,
+    log: async () => [],
+    close: async () => {},
+  }));
+}
+
 /** A cloud workspace's committed checkout, as its runtime stores it. */
 async function seedCheckpoint(authority: DurableObjectStub<SpaceAuthorityDO>, checkpoint: RuntimeGitCheckpoint) {
   await runInDurableObject(authority, (_instance, state) => {
@@ -964,6 +989,10 @@ function artifactsHistory() {
     }
     return page;
   });
+  vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (repository, hash) => {
+    const entry = commits.get(hash);
+    return entry?.repositories.has(repository) ? { hash, treeHash: hash, message: hash, author: identity, committer: identity, parents: entry.parents, authoredAt: entry.committedAt, committedAt: entry.committedAt } : null;
+  });
   return {
     commit(parents: string[], ...repositories: string[]) {
       const hash = (commits.size + 1).toString(16).padStart(40, '0');
@@ -986,8 +1015,7 @@ describe('workspace environment edits and stack status with no machines', () => 
     const writes: string[][] = [];
     vi.spyOn(ArtifactsCodeStore.prototype, 'readFile').mockResolvedValue(null);
     vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotPaths').mockImplementation(async (_repository, tree) => Object.keys(trees.get(tree) ?? {}));
-    vi.spyOn(ArtifactsCodeStore.prototype, 'listSnapshotInventories').mockImplementation(async (_repository, requested) => requested.map(tree =>
-      new Map(Object.entries(trees.get(tree) ?? {}).map(([path, oid]) => [path, { oid, mode: '100644', type: 'blob' as const }]))));
+    flatTreeReader(tree => trees.get(tree), oid => blobs.get(oid));
     vi.spyOn(ArtifactsCodeStore.prototype, 'readBlob').mockImplementation(async (_repository, oid) => {
       const text = blobs.get(oid);
       return text === undefined ? null : new Blob([text]);

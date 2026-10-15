@@ -18,7 +18,8 @@ const body = JSON.stringify({
 const oauth = { authorization: 'Bearer sk-ant-oat01-x', 'user-agent': 'claude-cli/2.1.280', 'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,thinking-binding-controls-2026-08-01' };
 const identity = { deviceId: 'device', sessionId: 'session' };
 
-afterEach(() => { vi.unstubAllGlobals(); });
+const realFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = realFetch; });
 
 it('matches the reference XXH64', () => {
   expect(xxHash64(new Uint8Array(), 0n)).toBe(0xef46db3751d8e999n);
@@ -51,7 +52,7 @@ it('leaves API-key and other providers untouched', async () => {
 
 it('restores tool names in the streamed response', async () => {
   const stream = 'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t2","name":"_read","input":{}}}\n\n';
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, { headers: { 'content-type': 'text/event-stream' } })));
+  globalThis.fetch = vi.fn(async () => new Response(stream, { headers: { 'content-type': 'text/event-stream' } }));
   const response = await (await claudeCodeFetch('profile'))('https://api.anthropic.com/v1/messages', { method: 'POST', body, headers: oauth });
   expect(await response.text()).toContain('"name":"read"');
 });

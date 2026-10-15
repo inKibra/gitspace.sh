@@ -178,11 +178,11 @@ Every item is verified the way the user works, in the browser, before it is repo
 6. Done (`0a3e66e4`). The release follower logs an old launch failure on every start. It now reports a failure only when the release record does not already show it failed on this machine.
 
 **Batch 6 — inference.**
-1. Claude fast mode sends requests without the Claude Code identity.
-2. Provider errors in plain words with the next step, not raw JSON.
-3. OpenAI usage on the Inference page (port omp's ChatGPT usage reader; check the stored provider id).
+1. Done (`0a4ce0c0`). Claude fast mode sends requests without the Claude Code identity. Fast serving replaced the request's fetch and skipped the Claude Code shaping; it now goes through it. Live: Anthropic answered "Usage credits are required for fast mode" (the subscription has none), not an identity refusal.
+2. Done (`e90c283b`). Provider errors in plain words with the next step, not raw JSON.
+3. OpenAI usage on the Inference page (port omp's ChatGPT usage reader; check the stored provider id). The ChatGPT sign-in is stored as Pi's `openai`, not `openai-codex`; both now read ChatGPT usage, and accounts are labelled by email (`c0d3585f`, `8c37cffc`). Live usage read still reports unavailable; the failure reason is now shown (`e8c2556f`) and needs a look.
 
-**Batch 7 — cleanup.** Old snapshot refs (Golconda ~1,108, PR 101 4); `saved-transcript-*` in the worker; the failing LFS and Artifacts tests.
+**Batch 7 — cleanup.** Done. Old snapshot refs (Golconda ~1,108, PR 101 4): the per-revision capture refs (`refs/gitspace/spaces/*/checkpoints/<n>`, from before captures moved to one `snapshot` ref) deleted in the six repositories Darktop can reach: Golconda 1,113 → 4 refs, PR 101 9 → 5. `saved-transcript-*` in the worker: deleted with `SavedTranscriptIndexDO` (migration `account-v3`; the platform now sends delete-class migrations, `dd483892`, `b7fcd780`). Failing tests: the three Artifacts tests mocked reads the code no longer makes; runtime-core used vitest-only helpers under bun; account-worker now 513/513. The `artifacts-live-protocol` Node test needs `node` on PATH.
 
 **Batch 8 — small UI bugs.** Golconda's mode switcher; Deedible Info's context meter at 264%; empty `system` messages in Validator and PR 101; ~925 "client disconnected" errors on Validator.
 
