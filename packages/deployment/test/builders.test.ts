@@ -8,7 +8,8 @@ describe('worker release metadata', () => {
   it('declares SQL storage for every durable class in the app release', async () => {
     const metadata = await workerMetadataFromWrangler(repositoryRoot);
     const bound = new Set(metadata.durableObjects.map((binding) => binding.className));
-    const introduced = new Set(metadata.migrations.flatMap((migration) => migration.newSqliteClasses));
+    const deleted = new Set(metadata.migrations.flatMap((migration) => migration.deletedClasses));
+    const introduced = new Set(metadata.migrations.flatMap((migration) => migration.newSqliteClasses).filter((name) => !deleted.has(name)));
     expect(introduced).toEqual(bound);
   });
 

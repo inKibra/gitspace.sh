@@ -108,7 +108,7 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
       { name: 'PROVIDER_TOKEN', source: 'provider-token' },
       { name: 'STATIC_FILES', source: 'public-assets' },
     ],
-    migrations: migrationTags.map((tag) => ({ tag, newSqliteClasses: [`Class${tag}`] })),
+    migrations: migrationTags.map((tag) => ({ tag, newSqliteClasses: [`Class${tag}`], deletedClasses: [] })),
   };
 }
 

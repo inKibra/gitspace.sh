@@ -216,7 +216,7 @@ const wranglerSchema = z.object({
   compatibility_date: z.string(),
   compatibility_flags: z.array(z.string()).default([]),
   durable_objects: z.object({ bindings: z.array(z.object({ name: z.string(), class_name: z.string() })).default([]) }).default({ bindings: [] }),
-  migrations: z.array(z.object({ tag: z.string(), new_sqlite_classes: z.array(z.string()).default([]) })).default([]),
+  migrations: z.array(z.object({ tag: z.string(), new_sqlite_classes: z.array(z.string()).default([]), deleted_classes: z.array(z.string()).default([]) })).default([]),
 });
 
 /** Provider upload requirements declared by the account application. */
@@ -230,6 +230,6 @@ export async function workerMetadataFromWrangler(root: string): Promise<WorkerRe
     compatibilityFlags: config.compatibility_flags,
     durableObjects: config.durable_objects.bindings.map((binding) => ({ name: binding.name, className: binding.class_name })),
     resources,
-    migrations: config.migrations.map((migration) => ({ tag: migration.tag, newSqliteClasses: migration.new_sqlite_classes })),
+    migrations: config.migrations.map((migration) => ({ tag: migration.tag, newSqliteClasses: migration.new_sqlite_classes, deletedClasses: migration.deleted_classes })),
   });
 }

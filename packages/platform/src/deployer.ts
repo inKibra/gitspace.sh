@@ -19,7 +19,7 @@ const PROBE_ATTEMPTS = 16;
 export interface MigrationUpload {
   old_tag?: string;
   new_tag: string;
-  steps: Array<{ new_sqlite_classes: string[] }>;
+  steps: Array<{ new_sqlite_classes: string[]; deleted_classes?: string[] }>;
 }
 
 /** The `metadata` multipart part of a Workers for Platforms script upload. */
@@ -79,7 +79,7 @@ export function migrationDelta(migrations: WorkerReleaseMetadata['migrations'], 
   return {
     ...(appliedTag === null ? {} : { old_tag: appliedTag }),
     new_tag: last.tag,
-    steps: pending.map((migration) => ({ new_sqlite_classes: migration.newSqliteClasses })),
+    steps: pending.map((migration) => ({ new_sqlite_classes: migration.newSqliteClasses, ...(migration.deletedClasses.length ? { deleted_classes: migration.deletedClasses } : {}) })),
   };
 }
 export function scriptUploadMetadata(

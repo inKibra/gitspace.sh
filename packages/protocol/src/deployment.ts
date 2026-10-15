@@ -60,7 +60,7 @@ export const workerReleaseMetadataSchema = z.object({
     value: z.string().max(4096).optional(),
   })).max(64),
   /** Ordered migration tags; the platform applies only the ones after the tenant's current tag. */
-  migrations: z.array(z.object({ tag: idSchema, newSqliteClasses: z.array(idSchema).max(32) })).max(64),
+  migrations: z.array(z.object({ tag: idSchema, newSqliteClasses: z.array(idSchema).max(32), deletedClasses: z.array(idSchema).max(32).default([]) })).max(64),
 }).superRefine((metadata, context) => {
   const names = new Set<string>();
   for (const binding of [...metadata.durableObjects, ...metadata.resources]) {
