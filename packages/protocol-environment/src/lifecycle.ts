@@ -296,9 +296,9 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         executionHashes, terminalName: input.terminalName ?? null, results: [], output: '',
         exitCode: skipped ? 0 : null, startedAt: now, finishedAt: skipped ? now : null, deadlineAt, cancelRequestedAt: null, failure: null, incidents: [] };
       record = { run, scope, token: skipped ? null : input.ownershipToken ?? facts.token };
-      // A new run replaces the workspace's running one: that run is cancelled and its machine stops it.
+      // A new run replaces the workspace's running run of the same phase: that run is cancelled and its machine stops it.
       if (!skipped) for (const entry of facts.runs) {
-        if (!entry.token || entry.run.spaceId !== state.spaceId || !isLifecycleRunActive(entry.run) || entry.run.cancelRequestedAt) continue;
+        if (!entry.token || entry.run.spaceId !== state.spaceId || entry.run.phase !== input.phase || !isLifecycleRunActive(entry.run) || entry.run.cancelRequestedAt) continue;
         replaced.push({ ...entry, run: { ...entry.run, status: 'cancelling', cancelRequestedAt: now } });
       }
       state.claim = { runId: run.id, status: skipped ? 'skipped' : 'claimed', reason: skipped ? 'This lifecycle scope already succeeded' : null, token: record.token };

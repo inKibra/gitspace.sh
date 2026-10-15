@@ -83,7 +83,7 @@ describe('isomorphic environment decisions', () => {
     expect(() => context.apply({ op: 'interrupt', runId: 'recover', reason: 'Machine offline' }, { ...client, lifecycleControl: false })).toThrow();
     expect(context.apply({ op: 'interrupt', runId: 'recover', reason: 'Machine offline' }, client).runs[0]).toMatchObject({ status: 'interrupted', failure: { code: 'Interrupted', message: 'Machine offline; the outcome of its scripts is unknown' } });
   });
-  it('a new run replaces the running one: the old run is cancelled for its machine to stop, the new one is accepted', () => {
+  it('a new run replaces the running run of its phase: the old run is cancelled for its machine to stop, the new one is accepted', () => {
     const context = scenario();
     const attachment = { attachmentId: 'cache-a', generation: 3 };
     context.apply(claim('held', { generation: null, phase: 'workspace/materialize', attachment }), { ...machine, attachment });
@@ -91,6 +91,9 @@ describe('isomorphic environment decisions', () => {
     expect(next.claim?.status).toBe('claimed');
     expect(next.runs.find(run => run.id === 'held')).toMatchObject({ status: 'cancelling' });
     expect(next.runs.find(run => run.id === 'next')).toMatchObject({ status: 'accepted' });
+    // Another phase leaves it running.
+    const checks = context.apply(claim('checks', { generation: null, phase: 'checks' }));
+    expect(checks.runs.find(run => run.id === 'next')).toMatchObject({ status: 'accepted' });
   });
   it('rejects unsupported formats with typed identity instead of converting or silently emptying them', () => {
     let failure: unknown;
