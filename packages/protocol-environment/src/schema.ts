@@ -319,7 +319,7 @@ export const LifecycleStateSchema = z.object({
   destroyedAt: z.string().nullable(), runs: z.array(LifecycleRunSchema),
   claim: z.object({
     runId: lifecycleIdSchema, status: z.enum(['claimed', 'existing', 'skipped', 'blocked']),
-    reason: z.string().nullable(), token: z.string().nullable(),
+    reason: z.string().nullable(),
   }).strict().nullable(),
 }).strict();
 export const LifecycleMutationSchema = z.discriminatedUnion('op', [
@@ -334,16 +334,14 @@ export const LifecycleMutationSchema = z.discriminatedUnion('op', [
     attachment: LifecycleAttachmentSchema.optional(),
     rerun: z.boolean(), deadlineAt: z.string().datetime().optional(), terminalName: z.string().max(256).nullable().optional(),
     interactive: z.boolean().optional(),
-    ownershipToken: lifecycleIdSchema.optional(),
   }).strict(),
-  z.object({ op: z.literal('append'), runId: lifecycleIdSchema, token: lifecycleIdSchema, output: z.string().max(524_288), results: lifecycleResultsSchema.optional(), bindings: LifecycleBindingsSchema.optional(), incidents: z.array(LifecycleIncidentSchema).optional() }).strict(),
+  z.object({ op: z.literal('append'), runId: lifecycleIdSchema, output: z.string().max(524_288), results: lifecycleResultsSchema.optional(), bindings: LifecycleBindingsSchema.optional(), incidents: z.array(LifecycleIncidentSchema).optional() }).strict(),
   z.object({
-    op: z.literal('finish'), runId: lifecycleIdSchema, token: lifecycleIdSchema, status: z.enum(['succeeded', 'failed', 'cancelled', 'timed-out', 'interrupted']),
+    op: z.literal('finish'), runId: lifecycleIdSchema, status: z.enum(['succeeded', 'failed', 'cancelled', 'timed-out', 'interrupted']),
     incidents: z.array(LifecycleIncidentSchema).optional(),
     failure: EnvironmentFailureSchema.optional(), exitCode: z.number().int(), results: lifecycleResultsSchema, output: z.string().max(524_288), bindings: LifecycleBindingsSchema,
   }).strict(),
-  z.object({ op: z.literal('start'), runId: lifecycleIdSchema, token: lifecycleIdSchema }).strict(),
-  z.object({ op: z.literal('incidents'), runId: lifecycleIdSchema, incidents: z.array(LifecycleIncidentSchema) }).strict(),
+  z.object({ op: z.literal('start'), runId: lifecycleIdSchema }).strict(),
   z.object({ op: z.literal('cancel'), runId: lifecycleIdSchema }).strict(),
   z.object({ op: z.literal('interrupt'), runId: lifecycleIdSchema, reason: z.string().min(1).max(500) }).strict(),
 ]);
@@ -357,5 +355,4 @@ export interface EnvironmentLifecycleAuthority {
   getLifecycleState(projectId: string, spaceId: string): Promise<LifecycleState>;
   mutateLifecycleState(projectId: string, spaceId: string, input: LifecycleMutation): Promise<LifecycleState>;
   getLifecycleRunLog(projectId: string, spaceId: string, runId: string, offset?: number): Promise<LifecycleRunLog>;
-  watchLifecycleState(projectId: string, spaceId: string, onState: (state: LifecycleState) => void, signal: AbortSignal, onFailure?: (error: unknown) => Promise<void>): Promise<void>;
 }

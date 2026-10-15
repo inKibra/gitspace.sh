@@ -125,9 +125,8 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     if (policy.status === 'error') throw new Error(policy.failure.message);
     const running = await authority.mutateLifecycleState(spaceId, { op: 'claim', runId: 'provision', phase: 'cloud/provision', profile: 'base', executionHashes: [hash], generation: null, rerun: false }, actor);
     if (running.status === 'error') throw new Error(running.failure.message);
-    const token = running.state.claim?.token;
-    if (!token) throw new Error('Expected a lifecycle execution claim');
-    const finished = await authority.mutateLifecycleState(spaceId, { op: 'finish', runId: 'provision', token, status: 'failed', exitCode: 1, results: [], output: 'cloud error', bindings: { database: 'partial-db' } }, actor);
+    expect(running.state.claim?.status).toBe('claimed');
+    const finished = await authority.mutateLifecycleState(spaceId, { op: 'finish', runId: 'provision', status: 'failed', exitCode: 1, results: [], output: 'cloud error', bindings: { database: 'partial-db' } }, actor);
     if (finished.status === 'error') throw new Error(finished.failure.message);
     const state = await SELF.fetch(fixture.request(single('environment.get', { spaceId })));
     expect(state.status, await state.clone().text()).toBe(200);
@@ -168,7 +167,7 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     } });
     const attachment = { attachmentId: 'cache-a', generation: 1 };
     const cache = { machineId: 'machine-a', actorId: 'machine-a', kind: 'machine' as const, lifecycleControl: false, attachment };
-    const claim = (runId: string) => authority.mutateLifecycleState(spaceId, { op: 'claim', runId, ownershipToken: runId, phase: 'machine/prepare', profile: 'base', executionHashes: [hash], generation: null, rerun: true, attachment }, cache);
+    const claim = (runId: string) => authority.mutateLifecycleState(spaceId, { op: 'claim', runId, phase: 'machine/prepare', profile: 'base', executionHashes: [hash], generation: null, rerun: true, attachment }, cache);
     expect(await claim('before-approval')).toMatchObject({ status: 'error', failure: { code: 'ApprovalRequired' } });
     expect(await rpc('environment.approve', { spaceId, executionHash: hash, scope: 'workspace' })).toMatchObject({ status: 'ok', value: { executions: [{ hash, approval: 'workspace' }] } });
     expect(await claim('after-approval')).toMatchObject({ status: 'ok', state: { claim: { runId: 'after-approval', status: 'claimed' } } });

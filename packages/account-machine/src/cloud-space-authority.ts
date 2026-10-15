@@ -28,9 +28,7 @@ import {
 import type { CheckpointBlobStore } from './checkpoint-blobs.js';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol/rpc-contract';
 import { cloudResponseRay, withCloudRequestDiagnostics } from './cloud-request-diagnostics.js';
-import { EnvironmentError, EnvironmentFailureSchema, LifecycleStateSchema, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
-import { applyStreamEvent, initialStreamState } from '@gitspace/protocol-sync';
-import { decodeSseChanges } from '@gitspace/protocol-sync/sse';
+import { EnvironmentError, EnvironmentFailureSchema, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 
 export class CloudSpaceAuthorityError extends Error {
   constructor(readonly code: string, message: string, readonly details: Record<string, unknown> = {}) {
@@ -319,8 +317,6 @@ export interface FleetMachineDefinition {
 
 export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthority {
   private readonly options: CloudControlOptions;
-  /** Lifecycle streams waiting out a reconnect delay, by workspace. */
-  private readonly lifecycleWaits = new Map<string, Set<() => void>>();
 
   constructor(options: SignedCloudRequestOptions) {
     this.options = cloudControlOptions(options);
@@ -337,102 +333,6 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
 
   mutateLifecycleState(projectId: string, spaceId: string, input: LifecycleMutation): Promise<LifecycleState> {
     return this.call('project.environment.mutate', { projectId, spaceId, input });
-  }
-
-  async watchLifecycleState(
-    projectId: string,
-    spaceId: string,
-    onState: (state: LifecycleState) => void,
-    signal: AbortSignal,
-    onFailure?: (error: unknown) => Promise<void>,
-  ): Promise<void> {
-    let state = initialStreamState<LifecycleState>(`environment:${spaceId}`);
-    let retryDelay = 250;
-    let resigned = false;
-    while (!signal.aborted) {
-      const connection = new AbortController();
-      const abort = () => connection.abort(signal.reason);
-      signal.addEventListener('abort', abort, { once: true });
-      if (signal.aborted) abort();
-      let response: Response | undefined;
-      try {
-        const request = signedRequest(this.options, 'project.environment.watch', { projectId, spaceId, after: state.resync ? null : state.cursor });
-        const headerDeadline = setTimeout(() => connection.abort(new Error('Environment stream connection timed out')), 30_000);
-        try {
-          response = await withCloudRequestDiagnostics(request, async (diagnostics) => {
-            const value = await cloudFetch(this.options, new URL('/v1/control', this.options.baseUrl), {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', accept: 'text/event-stream', ...diagnostics.headers },
-              body: JSON.stringify(request),
-              signal: connection.signal,
-            });
-            diagnostics.response = value;
-            return value;
-          });
-        } finally {
-          clearTimeout(headerDeadline);
-        }
-        if (!response.ok) {
-          const error = await readControlError(response);
-          const failure = EnvironmentFailureSchema.safeParse(error);
-          if (failure.success) throw new EnvironmentError(failure.data.code, failure.data.message, failure.data.context);
-          throw new CloudSpaceAuthorityError(error?.code ?? 'STREAM_FAILED', error?.message ?? `Environment stream failed with ${response.status}`, { code: error?.code, status: response.status });
-        }
-        resigned = false;
-        if (!response.body || response.headers.get('content-type')?.split(';')[0]?.trim() !== 'text/event-stream') {
-          throw new CloudSpaceAuthorityError('STREAM_PROTOCOL_INVALID', 'Environment authority did not return an SSE stream', { status: response.status });
-        }
-        for await (const event of decodeSseChanges(response.body, LifecycleStateSchema, signal)) {
-          const previous = state;
-          state = applyStreamEvent(state, event);
-          if (event.type === 'resync') continue;
-          if (state.resync) break;
-          if (state !== previous && state.value) onState(state.value);
-          retryDelay = 250;
-        }
-        if (!signal.aborted) throw new Error('Environment synchronization connection closed');
-      } catch (error) {
-        if (signal.aborted) return;
-        if (!resigned && requestExpired(error)) {
-          resigned = true;
-          continue;
-        }
-        if (error instanceof EnvironmentError
-          || error instanceof CloudSpaceAuthorityError && typeof error.details.status === 'number'
-          && error.details.status < 500 && error.details.status !== 408 && error.details.status !== 429) throw error;
-        await onFailure?.(error);
-      } finally {
-        signal.removeEventListener('abort', abort);
-        connection.abort();
-        await response?.body?.cancel().catch(() => undefined);
-      }
-      if (signal.aborted) return;
-      const woken = await new Promise<boolean>((resolve) => {
-        const waits = this.lifecycleWaits.get(spaceId) ?? new Set<() => void>();
-        this.lifecycleWaits.set(spaceId, waits);
-        const finish = (wake: boolean) => {
-          clearTimeout(timer);
-          signal.removeEventListener('abort', waited);
-          waits.delete(woke);
-          if (!waits.size && this.lifecycleWaits.get(spaceId) === waits) this.lifecycleWaits.delete(spaceId);
-          resolve(wake);
-        };
-        const woke = () => finish(true);
-        const waited = () => finish(false);
-        const timer = setTimeout(waited, retryDelay);
-        waits.add(woke);
-        signal.addEventListener('abort', waited, { once: true });
-        if (signal.aborted) waited();
-      });
-      retryDelay = woken ? 250 : Math.min(10_000, retryDelay * 2);
-    }
-  }
-
-  /** An `environment` notice: lifecycle streams of the workspace (every workspace when null) waiting to reconnect do so now. */
-  wakeLifecycleWatches(spaceId: string | null): void {
-    for (const [space, waits] of this.lifecycleWaits) {
-      if (spaceId === null || space === spaceId) for (const wake of [...waits]) wake();
-    }
   }
 
   getLifecycleRunLog(projectId: string, spaceId: string, runId: string, offset = 0): Promise<LifecycleRunLog> {

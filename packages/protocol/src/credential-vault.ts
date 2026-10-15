@@ -50,7 +50,6 @@ export const controlOperationSchema = z.enum([
   'mcp.audit.append',
   'project.get',
   'project.environment.get',
-  'project.environment.watch',
   'project.environment.mutate',
   'project.environment.runLog',
   'project.workspaces.list',

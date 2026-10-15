@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const EnvironmentFailureCodeSchema = z.enum([
   'InvalidBundle', 'InvalidConfiguration', 'NotFound', 'PermissionDenied', 'PreconditionFailed',
-  'ApprovalRequired', 'RunConflict', 'RunFenced', 'RecoveryRequired', 'MissingValue', 'MissingSecret',
+  'ApprovalRequired', 'RunConflict', 'MissingValue', 'MissingSecret',
   'ContentChanged', 'InteractionRequired', 'RunnerUnavailable', 'ExecutionFailed', 'Cancelled', 'DeadlineExceeded', 'Interrupted',
 ]);
 export const EnvironmentFailureSchema = z.object({

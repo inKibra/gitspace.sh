@@ -18,7 +18,6 @@ class Ledger implements EnvironmentLifecycleAuthority {
   async listProjectWorkspaces() { return structuredClone(this.workspaces); }
   readonly bindingWritten = Promise.withResolvers<void>();
   private readonly records = new Map<string, LifecycleRunRecord>();
-  private readonly listeners = new Set<(state: LifecycleState) => void>();
   readonly state: LifecycleState = {
     revision: 0, projectId: 'project-a', spaceId: 'workspace-a', bundleJson: null, selectedProfile: null,
     values: { global: {}, project: {}, workspace: {} }, approvals: [], policy: { automatic: false },
@@ -35,17 +34,11 @@ class Ledger implements EnvironmentLifecycleAuthority {
     }
     // The account gateway authenticates attachment admission before forwarding a cache claim.
     const actor: LifecycleActor = { actorId: 'machine-a', machineId: 'machine-a', kind: 'machine', lifecycleControl: false, ...(input.op === 'claim' && input.attachment ? { attachment: input.attachment } : {}) };
-    const transition = transitionLifecycle({ state: this.state, runs: [...this.records.values()], actor, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
+    const transition = transitionLifecycle({ state: this.state, runs: [...this.records.values()], actor, now: new Date().toISOString() }, input);
     if (transition.record) this.records.set(transition.record.run.id, transition.record);
     Object.assign(this.state, transition.state);
     if (this.state.bindings.resourceId) this.bindingWritten.resolve();
-    for (const listener of this.listeners) listener(structuredClone(this.state));
     return structuredClone(this.state);
-  }
-  async watchLifecycleState(_projectId: string, _spaceId: string, onState: (state: LifecycleState) => void, signal: AbortSignal): Promise<void> {
-    this.listeners.add(onState);
-    try { await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true })); }
-    finally { this.listeners.delete(onState); }
   }
 }
 

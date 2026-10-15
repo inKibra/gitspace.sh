@@ -21,14 +21,14 @@ export interface LifecycleActor {
   lifecycleControl: boolean;
   attachment?: { attachmentId: string; generation: number };
 }
-export interface LifecycleRunRecord { run: LifecycleRun; token: string | null; scope: string }
+/** `scope` is what a later run must match to count this run's success as already done. */
+export interface LifecycleRunRecord { run: LifecycleRun; scope: string }
 export interface LifecycleTransitionFacts {
   state: LifecycleState;
   /** All runs for this project. */
   runs: readonly LifecycleRunRecord[];
   actor: LifecycleActor;
   now: string;
-  token: string;
 }
 
 export function assertLifecycleCommandAuthorized(phase: LifecycleRunPhase, actor: { lifecycleControl: boolean }): void {
@@ -234,12 +234,18 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
   const replaced: LifecycleRunRecord[] = [];
   let log: LifecycleTransition['log'];
   let sharedChanged = false;
-  const owned = (runId: string, token?: string): LifecycleRunRecord => {
+  const owned = (runId: string): LifecycleRunRecord => {
     const found = facts.runs.find((entry) => entry.run.id === runId && entry.run.spaceId === state.spaceId);
     if (!found) throw new EnvironmentError('NotFound', 'Lifecycle run does not belong to this workspace', { runId });
-    if (token !== undefined && (found.token !== token || found.run.machineId !== actor.machineId || !isLifecycleRunActive(found.run))) throw new EnvironmentError('RunFenced', 'Lifecycle claim is fenced or belongs to another machine', { runId });
     return { ...found, run: { ...found.run } };
   };
+  /** The run's own machine reporting progress. A report on a run that already ended (cancelled while offline, replaced) changes nothing. */
+  const reported = (runId: string): LifecycleRunRecord | null => {
+    const found = owned(runId);
+    if (found.run.machineId !== actor.machineId) throw new EnvironmentError('PermissionDenied', 'Only the run\'s machine reports its progress', { runId });
+    return isLifecycleRunActive(found.run) ? found : null;
+  };
+  const unchanged: LifecycleTransition = { state, changed: false, sharedChanged: false };
   switch (input.op) {
     case 'configure': {
       const bundle = parseEnvironmentBundleJson(input.bundleJson);
@@ -281,7 +287,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         const run = existing.run;
         if (JSON.stringify(run.attachment) !== JSON.stringify(input.attachment)) throw new EnvironmentError('RunConflict', 'Run identity belongs to another attachment');
         if (run.spaceId !== state.spaceId || run.phase !== input.phase || Boolean(run.interactive) !== Boolean(input.interactive) || run.profile !== input.profile || run.generation !== input.generation || !sameHashes(run.executionHashes, executionHashes)) throw new EnvironmentError('RunConflict', 'Run identity already belongs to a different operation', { runId: input.runId });
-        return { state: { ...state, claim: { runId: run.id, status: 'existing', reason: null, token: null } }, changed: false, sharedChanged: false };
+        return { state: { ...state, claim: { runId: run.id, status: 'existing', reason: null } }, changed: false, sharedChanged: false };
       }
       const scope = lifecycleRunScope({ ...input, executionHashes }, actor.machineId, state.spaceId);
       if (executionHashes.some((hash) => !state.approvals.some((approval) => approval.executionHash === hash))) throw new EnvironmentError('ApprovalRequired', 'Awaiting human approval for execution content');
@@ -295,20 +301,21 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         ...(input.attachment ? { attachment: input.attachment } : {}),
         executionHashes, terminalName: input.terminalName ?? null, results: [], output: '',
         exitCode: skipped ? 0 : null, startedAt: now, finishedAt: skipped ? now : null, deadlineAt, cancelRequestedAt: null, failure: null, incidents: [] };
-      record = { run, scope, token: skipped ? null : input.ownershipToken ?? facts.token };
+      record = { run, scope };
       // A new run replaces the workspace's running run of the same phase: that run is cancelled and its machine stops it.
       if (!skipped) for (const entry of facts.runs) {
-        if (!entry.token || entry.run.spaceId !== state.spaceId || entry.run.phase !== input.phase || !isLifecycleRunActive(entry.run) || entry.run.cancelRequestedAt) continue;
+        if (entry.run.spaceId !== state.spaceId || entry.run.phase !== input.phase || !isLifecycleRunActive(entry.run) || entry.run.cancelRequestedAt) continue;
         replaced.push({ ...entry, run: { ...entry.run, status: 'cancelling', cancelRequestedAt: now } });
       }
-      state.claim = { runId: run.id, status: skipped ? 'skipped' : 'claimed', reason: skipped ? 'This lifecycle scope already succeeded' : null, token: record.token };
+      state.claim = { runId: run.id, status: skipped ? 'skipped' : 'claimed', reason: skipped ? 'This lifecycle scope already succeeded' : null };
       break;
     }
     case 'start': {
-      record = owned(input.runId, input.token);
-      if (record.run.status !== 'accepted') throw new EnvironmentError('RunConflict', 'Only an accepted lifecycle run may start', { runId: input.runId });
-      const stop = lifecycleStopReason(record.run, now);
+      const found = reported(input.runId);
+      if (!found || found.run.status !== 'accepted') throw new EnvironmentError('RunConflict', 'Only an accepted lifecycle run may start', { runId: input.runId });
+      const stop = lifecycleStopReason(found.run, now);
       if (stop) throw new EnvironmentError(stop.code, stop.message, stop.context);
+      record = found;
       record.run.status = 'running';
       break;
     }
@@ -319,16 +326,10 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       record.run.cancelRequestedAt = now;
       break;
     }
-    case 'incidents': {
-      record = owned(input.runId);
-      if (!actor.lifecycleControl && (actor.kind !== 'machine' || actor.machineId !== record.run.machineId)) throw new EnvironmentError('PermissionDenied', 'Only lifecycle controllers or the owning runner may synchronize run incidents');
-      const additions = input.incidents.filter((incident) => !record!.run.incidents.some((entry) => entry.id === incident.id));
-      if (!additions.length) return { state, changed: false, sharedChanged: false };
-      record.run.incidents = [...record.run.incidents, ...additions];
-      break;
-    }
     case 'append': {
-      record = owned(input.runId, input.token);
+      const found = reported(input.runId);
+      if (!found) return unchanged;
+      record = found;
       if (input.incidents) record.run.incidents = [...record.run.incidents, ...input.incidents.filter((incident) => !record!.run.incidents.some((entry) => entry.id === incident.id))];
       const output = sanitizeLifecycleOutput(input.output);
       record.run.output = (record.run.output + output).slice(-LIFECYCLE_PREVIEW_LIMIT);
@@ -341,7 +342,9 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       break;
     }
     case 'finish': {
-      record = owned(input.runId, input.token);
+      const found = reported(input.runId);
+      if (!found) return unchanged;
+      record = found;
       if (input.incidents) record.run.incidents = [...record.run.incidents, ...input.incidents.filter((incident) => !record!.run.incidents.some((entry) => entry.id === incident.id))];
       if ((input.status === 'succeeded') !== (input.exitCode === 0)) throw new EnvironmentError('InvalidConfiguration', 'Lifecycle status must agree with its exit code');
       const stop = lifecycleStopReason(record.run, now);
@@ -353,7 +356,6 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       record.run = { ...record.run, status, failure, finishedAt: now, exitCode: failure ? input.exitCode || 1 : 0,
         results: (input.results.length ? input.results : record.run.results).map((result) => ({ ...result, output: sanitizeLifecycleOutput(result.output).slice(-LIFECYCLE_PREVIEW_LIMIT) })), output: output ? output.slice(-LIFECYCLE_PREVIEW_LIMIT) : record.run.output };
       if (failure) record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:failure`, kind: 'domain', occurredAt: now, message: failure.message, failure }];
-      record.token = null;
       if (record.run.attachment) record.run.bindings = { ...record.run.bindings, ...input.bindings };
       else state.bindings = { ...state.bindings, ...input.bindings };
       if (status === 'succeeded' && record.run.phase === 'cloud/provision') {
@@ -372,7 +374,6 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       const message = `${input.reason}; the outcome of its scripts is unknown`;
       record.run = { ...run, status: 'interrupted', finishedAt: now, exitCode: 1, failure: { code: 'Interrupted', message, context: { runId: input.runId } } };
       record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:interrupted`, kind: 'domain', occurredAt: now, message, failure: record.run.failure }];
-      record.token = null;
       break;
     }
   }

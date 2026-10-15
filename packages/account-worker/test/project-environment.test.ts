@@ -165,25 +165,23 @@ describe('durable environment authority', () => {
 
   it('accepts a retry once; a newer run cancels the running one, which records cancellation when its runner stops', async () => {
     const authority = await ledger();
-    const accepted = await mutate(authority, claim('operation'));
-    const token = accepted.claim!.token!;
+    await mutate(authority, claim('operation'));
     const retry = await mutate(authority, claim('operation'));
     expect(retry.claim?.status).toBe('existing');
     expect(retry.runs.filter((run) => run.id === 'operation')).toHaveLength(1);
     const contender = await mutate(authority, claim('contender'), { ...machine, machineId: 'machine-b' });
     expect(contender.claim?.status).toBe('claimed');
     expect(contender.runs.find((run) => run.id === 'operation')?.status).toBe('cancelling');
-    const cancelled = await mutate(authority, { op: 'finish', runId: 'operation', token, status: 'failed', exitCode: 137, results: [], output: 'stopped', bindings: {} });
+    const cancelled = await mutate(authority, { op: 'finish', runId: 'operation', status: 'failed', exitCode: 137, results: [], output: 'stopped', bindings: {} });
     expect(cancelled.runs[0]).toMatchObject({ status: 'cancelled', failure: { code: 'Cancelled' } });
     expect((await authority.getLifecycleState('workspace')).runs.find((run) => run.id === 'operation')?.incidents[0]?.failure?.code).toBe('Cancelled');
   });
 
   it('retains paged redacted logs and partial bindings, and carries permission failures explicitly', async () => {
     const authority = await ledger();
-    const accepted = await mutate(authority, claim('partial'));
-    const token = accepted.claim!.token!;
+    await mutate(authority, claim('partial'));
     const output = `token=do-not-store\n${'line\n'.repeat(20_000)}complete\n`;
-    await mutate(authority, { op: 'append', runId: 'partial', token, output, bindings: { resource: 'allocated-before-crash' } });
+    await mutate(authority, { op: 'append', runId: 'partial', output, bindings: { resource: 'allocated-before-crash' } });
     let offset: number | null = 0;
     let full = '';
     let cursor = 0;
@@ -194,13 +192,14 @@ describe('durable environment authority', () => {
       cursor = page.cursor;
     } while (offset !== null);
     expect(full).toBe(output.replace('do-not-store', '[REDACTED]'));
-    await mutate(authority, { op: 'append', runId: 'partial', token, output: 'later output\n' });
+    await mutate(authority, { op: 'append', runId: 'partial', output: 'later output\n' });
     const resumed = await authority.getLifecycleRunLog('workspace', 'partial', cursor);
     expect(resumed.output).toBe('later output\n');
     expect((await authority.getLifecycleRunLog('workspace', 'partial', resumed.cursor)).output).toBe('');
     const recovered = await mutate(authority, { op: 'interrupt', runId: 'partial', reason: 'Cancelled while its machine was offline' }, human);
     expect(recovered.bindings).toEqual({ resource: 'allocated-before-crash' });
     expect(recovered.runs[0]?.status).toBe('interrupted');
-    await expect(mutate(authority, { op: 'finish', runId: 'partial', token, status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {} })).rejects.toMatchObject({ code: 'RunFenced' });
+    // A late report from the run's machine does not reopen the ended run.
+    expect((await mutate(authority, { op: 'finish', runId: 'partial', status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {} })).runs[0]?.status).toBe('interrupted');
   });
 });

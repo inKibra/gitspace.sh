@@ -213,7 +213,7 @@ export async function startMachineRuntime() {
     release: () => settled('release', releases.nudge()),
     devices: () => devices.invalidate(),
     settings: () => settled('settings', settings.refresh()),
-    environment: (workspaceId) => authority.wakeLifecycleWatches(workspaceId),
+    environment: (workspaceId) => { void environments.environmentChanged(workspaceId).catch((error: unknown) => noticeTargets.failed('environment', error)); },
     failed: (topic, error) => {
       console.error('[gitspace-notice]', topic, error);
       const retry = topic === 'workspace.snapshot' ? 'assignments' : topic;
@@ -379,7 +379,6 @@ export async function startMachineRuntime() {
   });
   console.log(`GitSpace RPC ready at ${http.url}/rpc generation=${process.env.GITSPACE_GENERATION_HASH ?? 'unknown'} machine=${machineReleaseSha ?? 'local'} runtime=cloud`);
   if (startupCommitted) {
-    await environments.recoverInterruptedRuns();
     await serviceManager.rehydrate();
   } else {
     // Health is available to the updater, but no service or user RPC may run
@@ -389,7 +388,6 @@ export async function startMachineRuntime() {
       await Bun.sleep(100);
     }
     if (stopping) return { environmentRoot, settings, http, stop };
-    await environments.recoverInterruptedRuns();
     await serviceManager.rehydrate();
     if ((await browserRelay.status()).installed) {
       void browserRelay.start().catch((error) => console.error('[gitspace-browser-relay]', error));

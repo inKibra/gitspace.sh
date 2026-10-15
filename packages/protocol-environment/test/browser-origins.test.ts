@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { BrowserOriginPatternSchema, EnvironmentBundleSchema, approvedBrowserOrigins, browserOriginHash, browserOriginMatches, emptyLifecycleState, executionHash, transitionLifecycle, type LifecycleMutation, type LifecycleState } from '../src/index.js';
 
 const human = { actorId: 'owner-browser', machineId: 'browser', kind: 'browser' as const, lifecycleControl: true };
-const apply = (state: LifecycleState, input: LifecycleMutation, actor = human) => transitionLifecycle({ state, runs: [], actor, now: '2026-10-04T00:00:00.000Z', token: '' }, input).state;
+const apply = (state: LifecycleState, input: LifecycleMutation, actor = human) => transitionLifecycle({ state, runs: [], actor, now: '2026-10-04T00:00:00.000Z' }, input).state;
 
 describe('browser origin permissions', () => {
   it('rejects URL, path, port, wildcard and hostname boundary tricks', () => {

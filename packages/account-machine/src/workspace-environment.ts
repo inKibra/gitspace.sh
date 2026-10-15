@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { watch, type FSWatcher } from 'node:fs';
 import {
@@ -7,7 +7,7 @@ import {
   resolveExecutionApproval, deriveLifecycleExecutions, isInteractiveLifecycleScript, skippedInteractiveScriptLine,
   effectiveEnvironmentValues, assertEnvironmentExecutionReady, environmentPreparationPhases,
   EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
-  type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleMutation, type LifecycleIncident,
+  type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleIncident,
   type EnvironmentLifecycleAuthority, type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from '@gitspace/protocol-environment';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol';
@@ -51,24 +51,10 @@ export interface EnvironmentLifecycleRunner {
   runLifecyclePlan(spaceId: string, phase: LifecycleRunPhase, steps: readonly WorkspaceLifecyclePlanStep[], env: Record<string, string>, options?: { runId?: string; interactive?: boolean; deadlineAt?: string; redactNames?: readonly string[]; onStarted?: () => Promise<void>; onOutput?: (output: string) => Promise<void>; directory?: string }): Promise<WorkspaceLifecyclePlanResult>;
   cancelLifecycleRun?(spaceId: string, terminalName: string, directory?: string): Promise<void>;
 }
-interface PendingLifecycleRun {
-  projectId: string;
-  spaceId: string;
-  runId: string;
-  token: string;
-  terminalName: string;
-  directory: string;
-  secretNames: string[];
-  workingDirectory?: string;
-  started?: boolean;
-  incidents?: LifecycleIncident[];
-  completion?: Extract<LifecycleMutation, { op: 'finish' }>;
-}
 export class WorkspaceEnvironmentManager {
   private readonly accepting = new Map<string, { phase: LifecycleRunPhase; interactive?: boolean; promise: Promise<LifecycleRun> }>();
-  private readonly active = new Map<string, { projectId: string; spaceId: string; terminalName: string; directory?: string }>();
-  /** Journals written for a claim whose authority response is still pending. */
-  private readonly claiming = new Set<string>();
+  /** Runs executing in this process; `update` hands a run the cloud's current record. */
+  private readonly active = new Map<string, { projectId: string; spaceId: string; terminalName: string; directory?: string; update(run: LifecycleRun): void }>();
   constructor(
     private readonly checkouts: WorkspaceCheckouts,
     private readonly secrets: EnvironmentSecretMaterializer | undefined,
@@ -227,52 +213,28 @@ export class WorkspaceEnvironmentManager {
     }
   }
 
-  /** An interrupted run may be marked failed only after its exact Hub process is confirmed stopped. */
-  async recoverInterruptedRuns(): Promise<void> {
-    const files = await readdir(this.options.stateRoot).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error));
-    for (const file of files.filter((name) => name.endsWith('.json'))) {
-      try {
-        const journal = join(this.options.stateRoot, file);
-        const pending = JSON.parse(await readFile(journal, 'utf8')) as PendingLifecycleRun;
-        if (this.active.has(pending.runId) || this.accepting.has(`${pending.spaceId}:${pending.runId}`)) continue;
-        await this.reconcileJournal(journal, pending);
-      } catch (error) {
-        console.error('[gitspace-lifecycle] interrupted run requires explicit recovery', file, error instanceof Error ? error.message : String(error));
+  /** An `environment` notice for a workspace (every workspace with a run here when null): each of this machine's runs
+   * there takes the cloud's current record, so a cancelled run stops. A run the cloud still shows active that no
+   * process here owns (the runtime restarted) is stopped if its terminal remains and finished as interrupted. */
+  async environmentChanged(spaceId: string | null): Promise<void> {
+    const spaces = new Map<string, string>();
+    for (const run of this.active.values()) if (spaceId === null || run.spaceId === spaceId) spaces.set(run.spaceId, run.projectId);
+    const held = spaceId === null ? null : this.checkouts.projectId(spaceId);
+    if (spaceId !== null && held !== null && !spaces.has(spaceId)) spaces.set(spaceId, held);
+    for (const [space, projectId] of spaces) {
+      const state = await this.authority.getLifecycleState(projectId, space);
+      for (const run of state.runs) {
+        if (run.machineId !== this.options.machineId || !isLifecycleRunActive(run)) continue;
+        const local = this.active.get(run.id);
+        if (local) { local.update(run); continue; }
+        if (!run.cancelRequestedAt || [...this.accepting.keys()].includes(`${space}:${run.id}`)) continue;
+        if (run.terminalName) await this.runner?.cancelLifecycleRun?.(space, run.terminalName).catch(() => undefined);
+        await this.authority.mutateLifecycleState(projectId, space, {
+          op: 'finish', runId: run.id, status: 'interrupted', exitCode: 1, results: [], output: 'The machine runtime restarted during this run.', bindings: {},
+          failure: { code: 'Interrupted', message: 'The machine runtime restarted during this run; the outcome of its scripts is unknown', context: { runId: run.id } },
+        });
       }
     }
-  }
-
-  /** Settles a run journal no live execution here owns. A run the authority never recorded (a refused or lost claim) or
-   * already ended leaves nothing to recover; an active one is stopped if it started, then finished as interrupted.
-   * Returns false while the outcome cannot be confirmed yet; the journal is then retained. */
-  private async reconcileJournal(journal: string, pending: PendingLifecycleRun): Promise<boolean> {
-    const projectId = this.checkouts.projectId(pending.spaceId);
-    if ((projectId !== null && projectId !== pending.projectId) || (projectId === null && !pending.workingDirectory)) throw new EnvironmentError('NotFound', 'Lifecycle recovery space is unavailable');
-    const state = await this.authority.getLifecycleState(pending.projectId, pending.spaceId);
-    const run = state.runs.find((entry) => entry.id === pending.runId);
-    if (!run || !isLifecycleRunActive(run)) {
-      if (run && pending.incidents?.length) await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, { op: 'incidents', runId: run.id, incidents: pending.incidents });
-      await rm(journal);
-      await rm(pending.directory, { recursive: true, force: true });
-      return true;
-    }
-    if (pending.started && !pending.completion) {
-      if (!this.runner?.cancelLifecycleRun) return false;
-      await this.runner.cancelLifecycleRun(pending.spaceId, pending.terminalName, pending.workingDirectory);
-    }
-    const secrets = pending.secretNames.length ? await this.secrets?.materializeProjectSecrets(pending.projectId, pending.secretNames, pending.projectId === pending.spaceId ? null : pending.spaceId) : {};
-    if (!secrets) return false;
-    const bindings = await this.readBindings(pending.directory, Object.values(secrets));
-    await this.syncPendingLog(pending);
-    await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, pending.completion ?? {
-      op: 'finish', runId: pending.runId, token: pending.token, status: 'interrupted', exitCode: 1,
-      results: [], output: 'Interrupted lifecycle runner was confirmed stopped. Explicit retry is required.', bindings,
-      failure: { code: 'Interrupted', message: 'Runner restarted before lifecycle completion', context: { runId: pending.runId } },
-      incidents: pending.incidents,
-    });
-    await rm(journal);
-    await rm(pending.directory, { recursive: true, force: true });
-    return true;
   }
 
   async runLog(spaceId: string, runId: string, offset = 0) {
@@ -306,49 +268,26 @@ export class WorkspaceEnvironmentManager {
       return { id: execution.id, kind: execution.kind, command, ...(execution.kind === 'script' ? { content } : {}) };
     }));
     const runId = request?.runId ?? crypto.randomUUID();
-    const token = crypto.randomUUID();
-    const terminalName = `life-${token}`;
-    const journalId = (await executionHash({ kind: 'check', command: JSON.stringify([spaceId, runId]) })).slice('sha256:'.length);
-    const journal = join(this.options.stateRoot, `${journalId}.json`);
-    await mkdir(this.options.stateRoot, { recursive: true, mode: 0o700 });
-    if (this.claiming.has(journal) || this.active.has(runId)) throw new EnvironmentError('RunConflict', 'Operation is already executing; observe its durable state', { runId });
-    // An earlier attempt of this run that never started left its journal; settle it so the claim can be retried.
-    const stale = await readFile(journal, 'utf8').then((text) => JSON.parse(text) as PendingLifecycleRun, (error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
-    if (stale && (stale.started || !await this.reconcileJournal(journal, stale))) throw new EnvironmentError('RecoveryRequired', 'A previous attempt of this lifecycle run awaits reconciliation', { runId });
-    const directory = await mkdtemp(join(tmpdir(), 'gitspace-lifecycle-'));
-    const pending: PendingLifecycleRun = { projectId: current.projectId, spaceId, runId, token, terminalName, directory, secretNames, ...(workingDirectory ? { workingDirectory } : {}) };
-    let state: LifecycleState;
-    this.claiming.add(journal);
-    try {
-      // Write ownership capability before cloud acceptance; a lost claim response is recoverable.
-      await writeFile(journal, JSON.stringify(pending), { mode: 0o600, flag: 'wx' });
-      state = await this.authority.mutateLifecycleState(current.projectId, spaceId, {
-        op: 'claim', runId, ownershipToken: token, phase, profile: current.selectedProfile, executionHashes: planned.map((execution) => execution.hash),
-        interactive: request?.interactive ?? false,
-        generation: null, rerun, terminalName, ...(request?.deadlineAt ? { deadlineAt: request.deadlineAt } : {}),
-        ...(attachment ? { attachment: { attachmentId: attachment.attachment.attachmentId, generation: attachment.attachment.generation } } : {}),
-      });
-    } catch (error) {
-      // A refusal is the authority's answer: it recorded no run, so this claim leaves nothing to recover.
-      if (error instanceof EnvironmentError) {
-        await rm(journal, { force: true });
-        await rm(directory, { recursive: true, force: true });
-      }
-      throw error;
-    } finally { this.claiming.delete(journal); }
+    // Terminal names are plain identifiers; run ids may contain ':' and '/'.
+    const terminalId = crypto.randomUUID();
+    const terminalName = `life-${terminalId}`;
+    if (this.active.has(runId)) throw new EnvironmentError('RunConflict', 'Operation is already executing; observe its durable state', { runId });
+    const state = await this.authority.mutateLifecycleState(current.projectId, spaceId, {
+      op: 'claim', runId, phase, profile: current.selectedProfile, executionHashes: planned.map((execution) => execution.hash),
+      interactive: request?.interactive ?? false,
+      generation: null, rerun, terminalName, ...(request?.deadlineAt ? { deadlineAt: request.deadlineAt } : {}),
+      ...(attachment ? { attachment: { attachmentId: attachment.attachment.attachmentId, generation: attachment.attachment.generation } } : {}),
+    });
     const acceptedRun = state.runs.find((run) => run.id === runId);
     if (!acceptedRun) throw new EnvironmentError('RunConflict', 'Authority did not persist the accepted lifecycle run', { runId });
     if (state.claim?.status === 'skipped' || state.claim?.status === 'existing') {
-      await rm(journal);
-      await rm(directory, { recursive: true, force: true });
       request?.accepted(acceptedRun);
       if (isLifecycleRunActive(acceptedRun)) throw new EnvironmentError('RunConflict', 'Operation is already executing; observe its durable state', { runId });
       if (acceptedRun.status !== 'succeeded') throw new EnvironmentError(acceptedRun.failure?.code ?? 'ExecutionFailed', acceptedRun.failure?.message ?? 'Previous operation failed; explicit retry requires a new run identity', acceptedRun.failure?.context ?? { runId });
       return acceptedRun.results.flatMap((result) => result.exitCode === null ? [] : [{ id: result.id, hash: planned.find((entry) => entry.id === result.id)?.hash ?? '', exitCode: result.exitCode, stdout: result.output, stderr: '' }]);
     }
-    if (state.claim?.status !== 'claimed' || !state.claim.token) throw new EnvironmentError('RunConflict', state.claim?.reason ?? 'Lifecycle execution is awaiting approval or recovery');
-      this.active.set(runId, { projectId: current.projectId, spaceId, terminalName, ...(workingDirectory ? { directory: workingDirectory } : {}) });
-    request?.accepted(acceptedRun);
+    if (state.claim?.status !== 'claimed') throw new EnvironmentError('RunConflict', state.claim?.reason ?? 'Lifecycle execution is awaiting approval');
+    const directory = await mkdtemp(join(tmpdir(), 'gitspace-lifecycle-'));
     let secretValues: Record<string, string> = {};
     let started = false;
     let stopped = false;
@@ -362,7 +301,7 @@ export class WorkspaceEnvironmentManager {
       const stop = lifecycleStopReason(acceptedRun, new Date().toISOString());
       if (!stop) return;
       failure = new EnvironmentError(stop.code, stop.message, stop.context);
-      if (!this.runner?.cancelLifecycleRun) throw new EnvironmentError('RecoveryRequired', 'The runner cannot confirm cancellation', { runId });
+      if (!this.runner?.cancelLifecycleRun) throw new EnvironmentError('ExecutionFailed', 'The runner cannot stop a lifecycle run', { runId });
       stopping ??= this.runner.cancelLifecycleRun(spaceId, terminalName, workingDirectory);
       await stopping;
     };
@@ -377,28 +316,17 @@ export class WorkspaceEnvironmentManager {
     const scriptLog = new LifecycleLogReader({ ids: planned.map((execution) => execution.id), outputLimit: Math.min(16_000, Math.floor(64_000 / Math.max(1, planned.length))) });
     let redactions: string[] = [];
     let retainedLogCharacters = 256;
-    let incidentWrite: Promise<void> | undefined;
-    const retainTransportFailure = async (error: unknown): Promise<void> => {
+    let incidents: LifecycleIncident[] | undefined;
+    // A failed progress write is reported on the run's next write; refusals end the run.
+    const reportTransportFailure = (error: unknown): void => {
       if (environmentFailure(error)) throw error;
-      if (pending.incidents?.length) { await incidentWrite; return; }
-      pending.incidents = [{ id: `${runId}:transport`, kind: 'transport', occurredAt: new Date().toISOString(), message: sanitizeLifecycleOutput(error instanceof Error ? error.message : String(error), redactions), failure: null }];
-      if (pending.completion) pending.completion.incidents = pending.incidents;
-      incidentWrite = (async () => {
-        await writeFile(`${journal}.incident.tmp`, JSON.stringify(pending), { mode: 0o600 });
-        await rename(`${journal}.incident.tmp`, journal);
-      })();
-      await incidentWrite;
+      incidents ??= [{ id: `${runId}:transport`, kind: 'transport', occurredAt: new Date().toISOString(), message: sanitizeLifecycleOutput(error instanceof Error ? error.message : String(error), redactions), failure: null }];
     };
-    const subscription = new AbortController();
-    const stateUpdates = this.authority.watchLifecycleState(current.projectId, spaceId, (snapshot) => {
-      const authoritative = snapshot.runs.find((run) => run.id === runId);
-      if (authoritative) Object.assign(acceptedRun, authoritative);
-      void enforceStop().catch((error: unknown) => { failure ??= error; });
-    }, subscription.signal, retainTransportFailure).catch(async (error: unknown) => {
-      if (!subscription.signal.aborted) {
-        try { await retainTransportFailure(error); } catch (retentionError) { failure ??= retentionError; }
-      }
+    this.active.set(runId, {
+      projectId: current.projectId, spaceId, terminalName, ...(workingDirectory ? { directory: workingDirectory } : {}),
+      update: (run) => { Object.assign(acceptedRun, run); void enforceStop().catch((error: unknown) => { failure ??= error; }); },
     });
+    request?.accepted(acceptedRun);
     try {
       const definition = (await this.authority.listProjectWorkspaces(current.projectId)).find((workspace) => workspace.id === spaceId && workspace.projectId === current.projectId);
       secretValues = secretNames.length ? await this.secrets?.materializeProjectSecrets(current.projectId, secretNames, space.kind === 'base' ? null : space.id) ?? {} : {};
@@ -422,12 +350,8 @@ export class WorkspaceEnvironmentManager {
         GITSPACE_WORKSPACE_SOURCE_COMMIT: definition?.sourceCommit ?? '',
         GITSPACE_LIFECYCLE_BINDINGS: JSON.stringify(state.bindings), GITSPACE_LIFECYCLE_OUTPUT: join(directory, 'output.json'),
       };
-      await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'start', runId, token });
-      await incidentWrite;
-      pending.started = true;
-      await writeFile(`${journal}.tmp`, JSON.stringify(pending), { mode: 0o600 });
-      await rename(`${journal}.tmp`, journal);
-      if (skippedOutput) await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: skippedOutput, incidents: pending.incidents }).catch(retainTransportFailure);
+      await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'start', runId });
+      if (skippedOutput) await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, output: skippedOutput, incidents }).catch(reportTransportFailure);
       let previous = '{}';
       let dirty = false;
       let syncing = false;
@@ -443,7 +367,7 @@ export class WorkspaceEnvironmentManager {
             try { bindings = await this.readBindings(directory, redactions); } catch { continue; }
             const serialized = JSON.stringify(bindings);
             if (serialized === previous) continue;
-            await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: '', bindings, incidents: pending.incidents }).catch(retainTransportFailure);
+            await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, output: '', bindings, incidents }).catch(reportTransportFailure);
             previous = serialized;
           }
         })().catch((error: unknown) => { failure ??= error; }).finally(() => { syncing = false; });
@@ -454,7 +378,7 @@ export class WorkspaceEnvironmentManager {
       scheduleDeadline();
       started = true;
       const execution = this.runner!.runLifecyclePlan(spaceId, phase, steps, env, {
-        runId: token, deadlineAt: acceptedRun.deadlineAt, redactNames: Object.keys(secretValues), ...(workingDirectory ? { directory: workingDirectory } : {}),
+        runId: terminalId, deadlineAt: acceptedRun.deadlineAt, redactNames: Object.keys(secretValues), ...(workingDirectory ? { directory: workingDirectory } : {}),
         interactive: acceptedRun.interactive ?? false,
         onStarted: async () => { launched = true; await enforceStop(); },
         onOutput: async (output) => {
@@ -465,26 +389,21 @@ export class WorkspaceEnvironmentManager {
           for (let offset = 0; offset < safeLength; offset += 16_000) {
             const chunk = sanitized.slice(offset, Math.min(safeLength, offset + 16_000));
             scriptLog.push(chunk, { at: new Date().toISOString() });
-            await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: chunk, results: scriptLog.results, incidents: pending.incidents }).catch(retainTransportFailure);
+            await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, output: chunk, results: scriptLog.results, incidents }).catch(reportTransportFailure);
           }
         },
       });
       result = await execution;
     } catch (error) {
-      failure = error;
-      if (started && !result) {
-        // A failed Hub/log connection cannot own shell lifetime or prove completion.
-        // Keep the durable claim and local spool for explicit restart reconciliation.
-        await retainTransportFailure(error);
-        throw new EnvironmentError('RecoveryRequired', 'Lifecycle outcome is uncertain; durable run and local log are retained for reconciliation', { runId });
-      }
+      // The runner connection failed after launch: the shell may have run, so its outcome is reported as unknown.
+      failure = started && !result && !environmentFailure(error)
+        ? new EnvironmentError('Interrupted', `The runner connection failed; the outcome of its scripts is unknown: ${error instanceof Error ? error.message : String(error)}`, { runId })
+        : error;
     } finally {
       stopped = true;
       bindingWatcher?.close();
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       await stopping?.catch((error: unknown) => { failure ??= error; });
-      subscription.abort();
-      await stateUpdates;
       await monitor?.catch((error) => { failure ??= error; });
       this.active.delete(runId);
     }
@@ -496,76 +415,24 @@ export class WorkspaceEnvironmentManager {
     for (let offset = 0; offset < finalLog.length; offset += 16_000) {
       const chunk = finalLog.slice(offset, offset + 16_000);
       scriptLog.push(chunk, { at: new Date().toISOString(), final: offset + 16_000 >= finalLog.length });
-      await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: chunk, results: scriptLog.results, incidents: pending.incidents }).catch(retainTransportFailure);
+      await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, output: chunk, results: scriptLog.results, incidents }).catch(reportTransportFailure);
     }
     const exitCode = failure ? 1 : result?.exitCode ?? 1;
     const output = sanitize([skippedOutput + (result?.output ?? ''), failure ? failure instanceof Error ? failure.message : String(failure) : ''].filter(Boolean).join('\n'));
     const results = (scriptLog.results.length ? scriptLog.results : result?.steps ?? []).map((step) => ({ ...step, output: sanitize(step.output) }));
     const domainFailure = environmentFailure(failure);
-    const completion: NonNullable<PendingLifecycleRun['completion']> = {
-      op: 'finish', runId, token, status: domainFailure?.code === 'DeadlineExceeded' ? 'timed-out' : domainFailure?.code === 'Cancelled' ? 'cancelled' : exitCode === 0 ? 'succeeded' : 'failed',
-      exitCode, results, output, bindings, ...(domainFailure ? { failure: domainFailure } : {}),
-      incidents: pending.incidents,
-    };
-    await writeFile(`${journal}.tmp`, JSON.stringify({ ...pending, completion }), { mode: 0o600 });
-    pending.completion = completion;
-    await rename(`${journal}.tmp`, journal);
+    const status = domainFailure?.code === 'DeadlineExceeded' ? 'timed-out' : domainFailure?.code === 'Cancelled' ? 'cancelled' : domainFailure?.code === 'Interrupted' ? 'interrupted' : exitCode === 0 ? 'succeeded' : 'failed';
     let completed: LifecycleState;
     try {
-      if (pending.incidents?.length) await this.syncPendingLog(pending);
-      completed = await this.authority.mutateLifecycleState(current.projectId, spaceId, completion);
-    } catch (error) {
-      await retainTransportFailure(error);
-      const committed = Promise.withResolvers<LifecycleState>();
-      const reconnect = new AbortController();
-      let synchronizing = false;
-      // A fresh stream snapshot proves connectivity; replay the durable local outcome,
-      // never rerun shell effects and never poll the authority while disconnected.
-      const reconnecting = this.authority.watchLifecycleState(current.projectId, spaceId, (snapshot) => {
-        if (synchronizing) return;
-        synchronizing = true;
-        void (async () => {
-          const recorded = snapshot.runs.find((run) => run.id === runId);
-          if (recorded && !isLifecycleRunActive(recorded)) {
-            return pending.incidents?.length
-              ? this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'incidents', runId, incidents: pending.incidents })
-              : snapshot;
-          }
-          await this.syncPendingLog(pending);
-          return this.authority.mutateLifecycleState(current.projectId, spaceId, completion);
-        })().then(committed.resolve).catch(async (syncError: unknown) => {
-          try { await retainTransportFailure(syncError); } catch (domainError) { committed.reject(domainError); }
-        }).finally(() => { synchronizing = false; });
-      }, reconnect.signal, retainTransportFailure).catch(committed.reject);
-      try { completed = await committed.promise; }
-      finally { reconnect.abort(); await reconnecting; }
-    }
+      completed = await this.authority.mutateLifecycleState(current.projectId, spaceId, {
+        op: 'finish', runId, status, exitCode, results, output, bindings, ...(domainFailure ? { failure: domainFailure } : {}), incidents,
+      });
+    } finally { await rm(directory, { recursive: true, force: true }); }
     const finalRun = completed.runs.find((run) => run.id === runId);
-    if (!finalRun) throw new EnvironmentError('RecoveryRequired', 'Authority did not confirm the lifecycle terminal outcome', { runId });
-    await rm(journal);
-    await rm(directory, { recursive: true, force: true });
-    if (finalRun.failure) throw new EnvironmentError(finalRun.failure.code, finalRun.failure.message, finalRun.failure.context);
+    if (finalRun?.failure) throw new EnvironmentError(finalRun.failure.code, finalRun.failure.message, finalRun.failure.context);
     return results.flatMap((step) => step.exitCode === null ? [] : [{ id: step.id, hash: planned.find((execution) => execution.id === step.id)!.hash, exitCode: step.exitCode, stdout: step.output, stderr: '' }]);
   }
 
-
-  private async syncPendingLog(pending: PendingLifecycleRun): Promise<void> {
-    const spool = await open(join(pending.directory, 'runner.log'), 'r').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
-    if (!spool) return;
-    try {
-      await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, { op: 'append', runId: pending.runId, token: pending.token, output: '\n[Recovered local lifecycle log; previously streamed output may repeat]\n', incidents: pending.incidents });
-      const buffer = Buffer.allocUnsafe(16_000);
-      const decoder = new TextDecoder();
-      const scriptLog = new LifecycleLogReader({ outputLimit: 500 });
-      for (;;) {
-        const { bytesRead } = await spool.read(buffer);
-        const output = bytesRead ? decoder.decode(buffer.subarray(0, bytesRead), { stream: true }) : decoder.decode();
-        scriptLog.push(output, { final: bytesRead === 0 });
-        if (output) await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, { op: 'append', runId: pending.runId, token: pending.token, output, results: scriptLog.results });
-        if (bytesRead === 0) break;
-      }
-    } finally { await spool.close(); }
-  }
 
   private async readBindings(directory: string, secrets: readonly string[]): Promise<Record<string, string>> {
     const source = await readFile(join(directory, 'output.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? '{"bindings":{}}' : Promise.reject(error));

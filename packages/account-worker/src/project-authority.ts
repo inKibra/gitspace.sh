@@ -22,7 +22,7 @@ import { ProjectEnvironmentStore, type LostLifecycleHolder } from './project-env
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { LifecycleMutationSchema, environmentFailure, type LifecycleActor, type EnvironmentFailure, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
-import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
+import { DurableChangeLog } from './durable-stream.js';
 import { liveClientMessageSchema, liveKeyId, liveNoticeSchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice, type LiveNoticeMessage } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { AccountDirectoryProjection, DirectoryOutbox, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
@@ -963,11 +963,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   environmentEvents(spaceId: string, after: number | null): StreamEvent<LifecycleState>[] {
     this.requireLifecycleWorkspace(spaceId);
     return this.changes.replay(`environment:${spaceId}`, after, () => this.getLifecycleState(spaceId), false);
-  }
-  /** Machines follow their environment runs over `project.environment.watch`; browsers read `environmentEvents`. */
-  watchEnvironment(spaceId: string, after: number | null): DurableStreamSubscription {
-    this.requireLifecycleWorkspace(spaceId);
-    return this.changes.watch(`environment:${spaceId}`, after, () => this.getLifecycleState(spaceId));
   }
   private committing = false;
   /** Workspace rows of the last committed directory publication. Only `project`/`workspace` commits write those rows,

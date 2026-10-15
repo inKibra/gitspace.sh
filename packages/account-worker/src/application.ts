@@ -68,7 +68,7 @@ import {
 } from '@gitspace/protocol/inference';
 import { LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, type LifecycleState } from '@gitspace/protocol-environment';
 import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
-import { consumeDurableStream, DurableChangeLog } from './durable-stream.js';
+import { DurableChangeLog } from './durable-stream.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import {
@@ -116,7 +116,7 @@ import { SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
 import { AccountStateDO } from './account-state.js';
 import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
-import { accountAccessResponse, accountStatus, activeAccount, authorizeControl, controlSubscriptionActive } from './account-access.js';
+import { accountAccessResponse, accountStatus, activeAccount, authorizeControl } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DeviceVerifier, invalidateDeviceAuthority, withDeviceAuthority, type DeviceRegistrySnapshot, type MachineCredential } from './device-authority.js';
 import { machineProviderFor } from './machine-providers.js';
 import { releaseMachineAttachments } from './runtime-machine-loss.js';
@@ -3394,31 +3394,6 @@ const worker = {
           const authority = authorityNamespace.get(authorityNamespace.idFromName(`${body.userId}:${projectId}`));
           let value: unknown;
           switch (body.operation) {
-            case 'project.environment.watch': {
-              const spaceId = String(body.payload.spaceId ?? '');
-              const after = body.payload.after === null || body.payload.after === undefined ? null : streamCursorSchema.parse(body.payload.after);
-              const generation = authorized.value.generation;
-              const subscription = await authority.watchEnvironment(spaceId, after);
-              const changes = consumeDurableStream(subscription, request.signal);
-              const encoder = new TextEncoder();
-              const stream = new ReadableStream<Uint8Array>({
-                async pull(controller) {
-                  try {
-                    const next = await changes.next();
-                    if (next.done) { controller.close(); return; }
-                    if (!await controlSubscriptionActive(env, body, generation, 'space.control')) {
-                      await changes.return(undefined);
-                      controller.error(new Error('Environment subscription authorization ended'));
-                      return;
-                    }
-                    const event = next.value;
-                    controller.enqueue(encoder.encode(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
-                  } catch (error) { controller.error(error); }
-                },
-                async cancel() { subscription[Symbol.dispose](); await changes.return(undefined); },
-              }, { highWaterMark: 1 });
-              return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' } });
-            }
             case 'project.environment.get':
             case 'project.environment.mutate':
             case 'project.environment.runLog': {

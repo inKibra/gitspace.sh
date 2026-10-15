@@ -15,7 +15,7 @@ function availableState({ browserOriginsAvailable, ...state }: StoredEnvironment
 }
 
 interface JsonRow extends Record<string, SqlStorageValue> { data: string }
-interface RunRow extends JsonRow { scope: string; token: string | null }
+interface RunRow extends JsonRow { scope: string }
 interface SharedEnvironment { values: Record<string, string>; approvals: LifecycleState['approvals'] }
 const LOG_PAGE_SIZE = 4;
 
@@ -33,7 +33,7 @@ export class ProjectEnvironmentStore {
     this.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS environment_state(space_id TEXT PRIMARY KEY,data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS environment_shared(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS lifecycle_runs(id TEXT PRIMARY KEY,space_id TEXT NOT NULL,scope TEXT NOT NULL,token TEXT,data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS lifecycle_runs(id TEXT PRIMARY KEY,space_id TEXT NOT NULL,scope TEXT NOT NULL,data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS lifecycle_runs_space ON lifecycle_runs(space_id);
       CREATE INDEX IF NOT EXISTS lifecycle_runs_scope ON lifecycle_runs(scope);
       CREATE TABLE IF NOT EXISTS lifecycle_logs(run_id TEXT NOT NULL,offset INTEGER NOT NULL,output TEXT NOT NULL,PRIMARY KEY(run_id,offset));
@@ -41,6 +41,10 @@ export class ProjectEnvironmentStore {
     // One-time: runs no longer hold a machine-wide lock.
     if (this.storage.sql.exec("SELECT name FROM pragma_table_info('lifecycle_runs') WHERE name='lock_key'").toArray().length) {
       this.storage.sql.exec('DROP INDEX IF EXISTS lifecycle_runs_lock; ALTER TABLE lifecycle_runs DROP COLUMN lock_key');
+    }
+    // One-time: runs no longer carry an ownership token.
+    if (this.storage.sql.exec("SELECT name FROM pragma_table_info('lifecycle_runs') WHERE name='token'").toArray().length) {
+      this.storage.sql.exec('ALTER TABLE lifecycle_runs DROP COLUMN token');
     }
   }
 
@@ -106,7 +110,7 @@ export class ProjectEnvironmentStore {
       const first = this.storage.sql.exec<JsonRow>('SELECT data FROM environment_state LIMIT 1').toArray()[0];
       const state = first ? availableState(StoredEnvironmentSchema.parse(JSON.parse(first.data))) : emptyLifecycleState('project', 'account-values');
       state.values.project = shared.values;
-      const transition = transitionLifecycle({ state, runs: [], actor: { actorId: 'account-authority', machineId: 'account-authority', kind: 'machine', lifecycleControl: false }, now: new Date().toISOString(), token: '' }, mutation);
+      const transition = transitionLifecycle({ state, runs: [], actor: { actorId: 'account-authority', machineId: 'account-authority', kind: 'machine', lifecycleControl: false }, now: new Date().toISOString() }, mutation);
       this.saveShared({ ...shared, values: transition.state.values.project });
       this.publishShared();
       return transition.state.values.project;
@@ -119,9 +123,9 @@ export class ProjectEnvironmentStore {
    * runs when the machine itself is gone. Returns the interrupted run ids. */
   releaseLostHolder(projectId: string, spaceId: string, holder: LostLifecycleHolder): string[] {
     const actor: LifecycleActor = { actorId: 'cloud:attachment-lease', machineId: 'cloud:attachment-lease', kind: 'client', lifecycleControl: true };
-    const claimed = this.storage.sql.exec<JsonRow>('SELECT data FROM lifecycle_runs WHERE space_id=? AND token IS NOT NULL', spaceId).toArray().map((row) => LifecycleRunSchema.parse(JSON.parse(row.data)));
+    const runs = this.storage.sql.exec<JsonRow>('SELECT data FROM lifecycle_runs WHERE space_id=?', spaceId).toArray().map((row) => LifecycleRunSchema.parse(JSON.parse(row.data)));
     const released: string[] = [];
-    for (const run of claimed) {
+    for (const run of runs) {
       if (run.machineId !== holder.machineId || !isLifecycleRunActive(run)) continue;
       if (holder.attachment && (run.attachment?.attachmentId !== holder.attachment.attachmentId || run.attachment.generation !== holder.attachment.generation)) continue;
       this.mutate(projectId, spaceId, { op: 'interrupt', runId: run.id, reason: `Its ${holder.attachment ? 'attachment' : 'machine'} was lost (${holder.reason})` }, actor);
@@ -142,17 +146,17 @@ export class ProjectEnvironmentStore {
 
   mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor): LifecycleState {
     const result = this.storage.transactionSync(() => {
-      const runs: LifecycleRunRecord[] = this.storage.sql.exec<RunRow>('SELECT scope,token,data FROM lifecycle_runs')
-        .toArray().map((row) => ({ run: LifecycleRunSchema.parse(JSON.parse(row.data)), token: row.token, scope: row.scope }));
+      const runs: LifecycleRunRecord[] = this.storage.sql.exec<RunRow>('SELECT scope,data FROM lifecycle_runs')
+        .toArray().map((row) => ({ run: LifecycleRunSchema.parse(JSON.parse(row.data)), scope: row.scope }));
       const stored = this.stored(projectId, spaceId);
       const current = availableState(stored);
       if (input.op === 'approval' && input.approved && input.scope === 'project' && spaceId !== projectId && current.browserOrigins.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('PermissionDenied', 'Approve browser origins on the base workspace for project-wide access');
-      const transition = transitionLifecycle({ state: current, runs, actor, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
+      const transition = transitionLifecycle({ state: current, runs, actor, now: new Date().toISOString() }, input);
       if (!transition.changed) return transition.state;
       const { state, record, log } = transition;
       for (const entry of [...(record ? [record] : []), ...(transition.replaced ?? [])]) this.storage.sql.exec(
-        'INSERT INTO lifecycle_runs(id,space_id,scope,token,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,data=excluded.data',
-        entry.run.id, spaceId, entry.scope, entry.token, JSON.stringify(entry.run),
+        'INSERT INTO lifecycle_runs(id,space_id,scope,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+        entry.run.id, spaceId, entry.scope, JSON.stringify(entry.run),
       );
       if (log?.output) {
         let offset = this.storage.sql.exec<{ next: number }>('SELECT COALESCE(MAX(offset)+1,0) AS next FROM lifecycle_logs WHERE run_id=?', log.runId).one().next;

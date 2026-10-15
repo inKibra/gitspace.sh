@@ -3,29 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { LiveNotice } from '@gitspace/protocol/live-notice';
 import { DurableChangeLog } from '../src/durable-stream.js';
 
-describe('durable subscription ownership', () => {
-  it('ends an idle producer when its remote owner is disposed, without another mutation', async () => {
-    // The machine environment watch is the one remaining streamed change log.
-    const authority = env.PROJECT_AUTHORITY.getByName('idle-stream-disposal');
-    await authority.bootstrap({ id: 'idle-project', name: 'Idle', repositoryReference: null, baseBranch: 'main', createdBy: 'human' });
-    await authority.putWorkspace({ id: 'idle-space', projectId: 'idle-project', kind: 'worktree', name: 'Idle', branch: 'idle', phase: 'review', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-    const subscription = await authority.watchEnvironment('idle-space', null);
-    const reader = subscription.stream.getReader();
-    try {
-      const initial = await reader.read();
-      expect(initial.done).toBe(false);
-      expect(JSON.parse(new TextDecoder().decode(initial.value))).toMatchObject({ type: 'snapshot', resource: 'environment:idle-space' });
-      const pending = reader.read();
-      subscription[Symbol.dispose]();
-      expect(await pending).toEqual({ done: true, value: undefined });
-    } finally {
-      subscription[Symbol.dispose]();
-      await reader.cancel();
-      reader.releaseLock();
-    }
-  });
-});
-
 describe('change log notices and bounded reads', () => {
   it('notices each changed resource once per committed write, at its newest cursor', async () => {
     await runInDurableObject(env.USER_PROJECTS.getByName('change-log-notices'), (_instance, state) => {

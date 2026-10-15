@@ -13,7 +13,7 @@ function scenario() {
   const records = new Map<string, LifecycleRunRecord>();
   let time = '2026-09-01T00:00:00.000Z';
   const apply = (input: LifecycleMutation, actor = machine): LifecycleState => {
-    const transition = transitionLifecycle({ state, runs: [...records.values()], actor, now: time, token: 'ownership' }, input);
+    const transition = transitionLifecycle({ state, runs: [...records.values()], actor, now: time }, input);
     state = transition.state;
     if (transition.record) records.set(transition.record.run.id, transition.record);
     return state;
@@ -23,7 +23,7 @@ function scenario() {
   return { apply, advance: (now: string) => { time = now; } };
 }
 const claim = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'claim' }>> = {}): LifecycleMutation => ({ op: 'claim', runId, phase: 'machine/prepare', profile: 'base', executionHashes: [hash], generation: 1, rerun: false, ...overrides });
-const finish = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'finish' }>> = {}): LifecycleMutation => ({ op: 'finish', runId, token: 'ownership', status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {}, ...overrides });
+const finish = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'finish' }>> = {}): LifecycleMutation => ({ op: 'finish', runId, status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {}, ...overrides });
 
 describe('isomorphic environment decisions', () => {
   it('requires authenticated attachment admission and keeps copy bindings out of workspace state', () => {
@@ -106,7 +106,7 @@ describe('isomorphic environment decisions', () => {
     const accepted = context.apply(claim('first'));
     expect(accepted.runs[0]?.status).toBe('accepted');
     const retried = context.apply(claim('first'));
-    expect(retried.claim).toMatchObject({ status: 'existing', token: null });
+    expect(retried.claim).toMatchObject({ status: 'existing' });
     expect(retried.runs).toHaveLength(1);
     expect(() => context.apply(claim('first', { phase: 'checks' }))).toThrow();
     expect(() => context.apply(finish('first'), { ...machine, machineId: 'machine-b' })).toThrow();
@@ -154,7 +154,7 @@ describe('isomorphic environment decisions', () => {
     context.apply(claim('steps'));
     const reader = new LifecycleLogReader();
     reader.push(prefix, { at: '2026-09-01T00:00:01.000Z' });
-    const active = context.apply({ op: 'append', runId: 'steps', token: 'ownership', output: prefix, results: reader.results }).runs[0]!;
+    const active = context.apply({ op: 'append', runId: 'steps', output: prefix, results: reader.results }).runs[0]!;
     expect(lifecycleExecutionOutcome(active, first)).toBe('succeeded');
     expect(lifecycleExecutionOutcome(active, second)).toBe('running');
     expect(lifecycleExecutionOutcome(active, third)).toBe('not-started');
