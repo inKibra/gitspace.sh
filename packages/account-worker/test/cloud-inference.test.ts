@@ -98,20 +98,6 @@ describe('Cloud inference credential authority', () => {
     });
   });
 
-  it('names an OpenAI sign-in by the email OpenAI gives for its token, and claims no plan usage for it', async () => {
-    const asked: string[] = [];
-    network.use(http.get('https://auth.openai.com/api/accounts/oauth/userinfo', ({ request }) => {
-      asked.push(request.headers.get('authorization') ?? '');
-      return HttpResponse.json({ sub: 'user-1', email: 'chatgpt@example.com' });
-    }));
-    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'chatgpt', provider: 'openai', access: 'opaque-access-token' }]));
-    const openai = async () => (await vault.cloudProviders('default')).find(provider => provider.id === 'openai');
-    expect(await openai()).toMatchObject({ hasUsage: false, accounts: [{ label: 'chatgpt@example.com', email: 'chatgpt@example.com' }] });
-    // Recorded once: a later listing does not ask OpenAI again.
-    await openai();
-    expect(asked).toEqual(['Bearer opaque-access-token']);
-  });
-
   it('disables an active account on the first logout and permanently removes it on the second', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([
       { id: 'kept', provider: 'openai-codex', access: 'access-kept', accountId: 'account-kept' },
@@ -255,8 +241,10 @@ describe('Cloud inference credential authority', () => {
     network.use(http.post('https://auth.openai.com/api/accounts/oauth/token', async ({ request }) => {
       const body = new URLSearchParams(await request.text());
       exchanged.push({ clientId: body.get('client_id'), code: body.get('code') });
-      const access = `header.${btoa(JSON.stringify({ 'https://api.openai.com/profile': { email } }))}.signature`;
-      return HttpResponse.json({ access_token: access, refresh_token: `${email}-refresh`, id_token: 'id', expires_in: 3600, scope: 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct' });
+      // As OpenAI answers: the access token names no one; the ID token carries the email.
+      const access = `header.${btoa(JSON.stringify({ sub: 'user' }))}.signature`;
+      const idToken = `header.${btoa(JSON.stringify({ email }))}.signature`;
+      return HttpResponse.json({ access_token: access, refresh_token: `${email}-refresh`, id_token: idToken, expires_in: 3600, scope: 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct' });
     }));
     // Chrome's HTTPS-First mode shows the loopback callback as https://; the paste must still work.
     async function signIn(code: string, scheme: 'http' | 'https'): Promise<void> {
