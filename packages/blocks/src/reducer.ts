@@ -383,7 +383,8 @@ export class TranscriptProjector {
     }
     if (event.kind === 'message_end') {
       const message = record(event.payload.message);
-      if (!message || typeof message.role !== 'string') return;
+      // A system entry records the prompt the model saw; it is not part of the conversation.
+      if (!message || typeof message.role !== 'string' || message.role === 'system') return;
       if (message.role === 'user') {
         const text = contentText(message.content);
         const images = contentImages(message.content);
