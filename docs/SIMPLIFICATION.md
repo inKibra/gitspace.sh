@@ -170,12 +170,12 @@ Every item is verified the way the user works, in the browser, before it is repo
 3. Done (`d8e85379`, this commit). `space.view`, `project.list` (writes on every call), `stackStatus` (git merge-base per read), the machines list (runs fleet control), the Providers screen (decrypts every credential, calls every provider). `project.list` creates the GitSpace project only for a new account. The machines list returns catalog rows (`reconcileFleetMachines` deleted; machines change through sleep/resume/destroy). `space.view` lost its serial event-offset read and four constant or unused fields. `stackStatus` keeps its comparison in the project object per child/parent/base commit and recomputes only when one moves. Providers keep each credential's non-secret account (type, identity, email) beside it, so the list decrypts nothing; usage still asks each provider, at most once a minute, because showing live usage is that screen's job.
 
 **Batch 5 — machine and relay.**
-1. Delete old-machine paths: `afterSnapshot` long-poll, `runtime.heartbeat`, echo heartbeat.
-2. Relay drops on Darktop (every connection resets together); a finished command is not reported failed.
+1. Done (`81da4b26`). Delete old-machine paths: `afterSnapshot` long-poll, `runtime.heartbeat`, echo heartbeat. The `afterSnapshot` wait and the echo-v1 relay lease are gone. `runtime.heartbeat` stays under its old name: it is now the machine's on-change observation report (cache state, sync failures, browser capabilities), not a liveness beat; liveness is relay presence.
+2. Done (`0a3e66e4`). Relay drops on Darktop (every connection resets together); a finished command is not reported failed. Darktop's log: 97 relay closes in two days, nearly all 1006 at worker deploys; one socket carries every tunnel, so they all go together. A command now survives the drop: the machine keeps it running and keeps finished results for a day by attempt id; the cloud sends the same signed dispatch again while the machine reconnects and gets the result. Verified by pausing the daemon past the relay lease during `sleep 100`: the agent got `Exit code: 0`.
 3. Machine-wide assignments take ~30 s for 4 workspaces: cache per commit.
 4. Agents attaching machines, tested live.
 5. Conversation notices: machine offline/online, setup failure, sync conflict.
-6. The release follower logs an old launch failure on every start.
+6. Done (`0a3e66e4`). The release follower logs an old launch failure on every start. It now reports a failure only when the release record does not already show it failed on this machine.
 
 **Batch 6 — inference.**
 1. Claude fast mode sends requests without the Claude Code identity.
