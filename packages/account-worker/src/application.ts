@@ -149,7 +149,6 @@ const ENROLLMENT_CLOCK_SKEW_MS = 60_000;
 export const REQUEST_MAX_BYTES = 512 * 1024;
 const DATA_OBJECT_MAX_BYTES = 64 * 1024 * 1024;
 const DATA_REQUEST_HEADER_MAX_BYTES = 8 * 1024;
-const REFRESH_LEASE_MS = 20_000;
 const ACCESS_REFRESH_SKEW_MS = 60_000;
 const SUPPORTED_PROVIDERS = new Set<string>(workerOAuthProviderSchema.options);
 const REMOTE_REFRESH_SENTINEL = '__remote__' as const;
@@ -383,6 +382,9 @@ export class CredentialVaultDO extends DurableObject<Env> {
   private readonly activeLoginAttempts = new Set<string>();
   /** Pi sign-in flows run in this object's memory; a restart abandons them (the row then reports an interruption). */
   private readonly upstreamLogins = new Map<string, UpstreamLogin>();
+  /** Refreshes in flight, one per credential; see `singleFlight`. */
+  private readonly profileRefreshes = new Map<string, Promise<void>>();
+  private readonly legacyRefreshes = new Map<string, Promise<StoredVaultOAuthCredential>>();
   /** A device credential changed: this isolate's registry drops its view, and connected machines refetch their device list. */
   private deviceCredentialsChanged(): void {
     invalidateDeviceAuthority();
@@ -454,12 +456,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
           device_id TEXT, sealed_key TEXT, token_hash TEXT, updated_at TEXT NOT NULL
         );
         DROP TABLE IF EXISTS request_nonces;
-        CREATE TABLE IF NOT EXISTS refresh_leases (
-          credential_id TEXT PRIMARY KEY,
-          owner TEXT NOT NULL,
-          revision INTEGER NOT NULL,
-          expires_at INTEGER NOT NULL
-        );
+        DROP TABLE IF EXISTS refresh_leases;
+        UPDATE oauth_credentials SET state = 'active' WHERE state = 'refresh-uncertain';
         CREATE TABLE IF NOT EXISTS retired_credential_rowid (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           row_id INTEGER NOT NULL
@@ -487,6 +485,9 @@ export class CredentialVaultDO extends DurableObject<Env> {
       if (!columns.some((column) => column.name === 'grant_json')) this.ctx.storage.sql.exec('ALTER TABLE credential_devices ADD COLUMN grant_json TEXT');
       const legacyColumns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(oauth_credentials)').toArray();
       if (!legacyColumns.some(column => column.name === 'profile_id')) this.ctx.storage.sql.exec("ALTER TABLE oauth_credentials ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default'");
+      if (this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inference_credentials'").toArray().length) {
+        this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'active' WHERE state = 'refresh-uncertain'");
+      }
     });
   }
 
@@ -650,7 +651,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
       if (this.ctx.storage.sql.exec('SELECT project_id FROM inference_assignments WHERE profile_id = ? LIMIT 1', profile.id).toArray().length) throw new Error('Reassign this profile’s projects before deleting it');
       this.ctx.storage.sql.exec('UPDATE inference_profiles SET deleted_at = ?, credential_generation = credential_generation + 1 WHERE profile_id = ?', new Date().toISOString(), profile.id);
       this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'disabled' WHERE profile_id = ?", profile.id);
-      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id IN (SELECT id FROM inference_credentials WHERE profile_id = ?)', profile.id);
       this.inferenceChanged();
       return { status: 'ok', value: this.inferenceState() };
     });
@@ -1271,7 +1271,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
           expires_at = excluded.expires_at, state = 'active', updated_at = excluded.updated_at
           WHERE ${table}.profile_id = excluded.profile_id
       `, id, credential.provider, sealed, revision, credential.type === 'api_key' ? 0 : credential.expires, new Date().toISOString(), profileId);
-      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ?', id);
       this.credentialsChanged(profileId);
     });
     return revision;
@@ -1375,7 +1374,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const accounts = await Promise.all(rows.map(async row => {
       const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
       const type = credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const;
-      return { id: String(row.row_id), provider: row.provider, type, identity: credentialIdentity(credential), email: credential.type === 'api_key' ? null : credential.email ?? null, disabled: row.state !== 'active', uncertain: row.state === 'refresh-uncertain' };
+      return { id: String(row.row_id), provider: row.provider, type, identity: credentialIdentity(credential), email: credential.type === 'api_key' ? null : credential.email ?? null, disabled: row.state !== 'active' };
     }));
     this.assertProfileAccess(profileId);
     const descriptors = describeCloudProviders(this.requireInferenceProfile(profileId).settings);
@@ -1389,7 +1388,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
         hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'cursor', 'google-antigravity'].includes(provider),
-        accounts: owned.map(account => ({ id: account.id, type: account.type, label: `${account.identity ?? (account.type === 'api_key' ? 'API key' : `Account ${account.id}`)}${account.uncertain ? ' (refresh uncertain; sign in again)' : ''}`, email: account.email, disabled: account.disabled })) };
+        accounts: owned.map(account => ({ id: account.id, type: account.type, label: account.identity ?? (account.type === 'api_key' ? 'API key' : `Account ${account.id}`), email: account.email, disabled: account.disabled })) };
     });
   }
 
@@ -1731,7 +1730,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
         this.disableCredentialRow(profileId, rowId);
         return;
       }
-      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ?', row.id);
       this.ctx.storage.sql.exec('DELETE FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(rowId));
       this.ctx.storage.sql.exec('DELETE FROM inference_credentials WHERE profile_id = ? AND rowid = ?', profileId, rowId);
       // Account ids are rowids: never hand a removed account's id to a later upload.
@@ -1772,7 +1770,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
       this.requireInferenceProfile(profileId);
       const changed = this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'disabled', updated_at = ? WHERE profile_id = ? AND rowid = ? AND state != 'disabled'", new Date().toISOString(), profileId, rowId).rowsWritten;
       if (changed === 0) return false;
-      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = (SELECT id FROM inference_credentials WHERE rowid = ?)', rowId);
       this.credentialsChanged(profileId);
       return true;
     });
@@ -1788,51 +1785,41 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (this.legacyCredentialConflict()) throw new Error('Legacy credentials were written after inference cutover; protected forward repair is required');
     this.requireInferenceProfile(profileId);
   }
+  /** One refresh per credential at a time: a caller arriving during a refresh shares its outcome instead of starting
+   * another (OAuth refresh tokens rotate). A failure is reported to the caller; the next attempt refreshes again. */
+  private singleFlight<T>(running: Map<string, Promise<T>>, key: string, run: () => Promise<T>): Promise<T> {
+    const current = running.get(key);
+    if (current) return current;
+    const started = run().finally(() => running.delete(key));
+    running.set(key, started);
+    return started;
+  }
 
-
-  private async refreshProfileCredential(profileId: string, rowId: number): Promise<void> {
-    this.assertProfileAccess(profileId);
-    const config = this.config();
-    if (!config || !Number.isSafeInteger(rowId) || rowId <= 0) throw new Error('Credential is unavailable');
-    const row = this.ctx.storage.sql.exec<ProfileCredentialRow>(
-      'SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND rowid = ? AND state = ?',
-      profileId, rowId, 'active',
-    ).toArray()[0];
-    if (!row) throw new Error('Credential is unavailable');
-    const vaultKey = credentialProtocolBase64.decode(config.vault_key);
-    const credential = await openVaultCredential(row, vaultKey);
-    this.assertProfileAccess(profileId);
-    if (credential.type === 'api_key') return;
-    const owner = crypto.randomUUID();
-    if (!this.acquireRefreshLease(row, owner)) throw new Error('Credential refresh is already in progress');
-    let refreshed: StoredVaultOAuthCredential;
-    try {
-      refreshed = isUpstreamOAuthProvider(credential.provider) ? await refreshUpstreamCredential(credential.provider, credential) : await refreshCredential(credential);
-    } catch (error) {
-      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ? AND owner = ?', row.id, owner);
-      if (!(error instanceof ProviderRefreshError) || error.kind !== 'rejected') {
-        const changed = this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'refresh-uncertain', updated_at = ? WHERE profile_id = ? AND id = ? AND revision = ? AND state = 'active'", new Date().toISOString(), profileId, row.id, row.revision).rowsWritten;
-        if (changed) this.credentialsChanged(profileId);
-      }
-      throw error;
-    }
-    const revision = row.revision + 1;
-    const sealed = await sealVaultCredential(refreshed, vaultKey, row.id, revision);
-    const committed = this.ctx.storage.transactionSync(() => {
+  private refreshProfileCredential(profileId: string, rowId: number): Promise<void> {
+    return this.singleFlight(this.profileRefreshes, `${profileId}:${rowId}`, async () => {
+      this.assertProfileAccess(profileId);
+      const config = this.config();
+      if (!config || !Number.isSafeInteger(rowId) || rowId <= 0) throw new Error('Credential is unavailable');
+      const row = this.ctx.storage.sql.exec<ProfileCredentialRow>(
+        'SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND rowid = ? AND state = ?',
+        profileId, rowId, 'active',
+      ).toArray()[0];
+      if (!row) throw new Error('Credential is unavailable');
+      const vaultKey = credentialProtocolBase64.decode(config.vault_key);
+      const credential = await openVaultCredential(row, vaultKey);
+      this.assertProfileAccess(profileId);
+      if (credential.type === 'api_key') return;
+      const refreshed = isUpstreamOAuthProvider(credential.provider) ? await refreshUpstreamCredential(credential.provider, credential) : await refreshCredential(credential);
+      const revision = row.revision + 1;
+      const sealed = await sealVaultCredential(refreshed, vaultKey, row.id, revision);
       const changed = this.ctx.storage.sql.exec(
-        "UPDATE inference_credentials SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ? WHERE profile_id = ? AND rowid = ? AND revision = ? AND state = 'active' AND EXISTS (SELECT 1 FROM refresh_leases WHERE credential_id = ? AND owner = ? AND revision = ? AND expires_at > ?)",
-        sealed, revision, refreshed.expires, new Date().toISOString(), profileId, rowId, row.revision, row.id, owner, row.revision, Date.now(),
+        "UPDATE inference_credentials SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ? WHERE profile_id = ? AND rowid = ? AND revision = ? AND state = 'active'",
+        sealed, revision, refreshed.expires, new Date().toISOString(), profileId, rowId, row.revision,
       ).rowsWritten;
-      this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ? AND owner = ?', row.id, owner);
-      const uncertain = changed === 0 && this.ctx.storage.sql.exec(
-        "UPDATE inference_credentials SET state = 'refresh-uncertain', updated_at = ? WHERE profile_id = ? AND id = ? AND revision = ? AND state = 'active'",
-        new Date().toISOString(), profileId, row.id, row.revision,
-      ).rowsWritten === 1;
-      if (changed === 1 || uncertain) this.credentialsChanged(profileId);
-      return changed === 1;
+      if (changed !== 1) throw new Error('Credential changed during refresh');
+      this.credentialsChanged(profileId);
+      this.assertProfileAccess(profileId);
     });
-    if (!committed) throw new Error('Credential changed during refresh');
-    this.assertProfileAccess(profileId);
   }
 
   async getAccess(request: CredentialAccessRequest): Promise<CredentialVaultResult<{
@@ -1858,8 +1845,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (Math.abs(now - parsed.data.timestamp) > SIGNED_REQUEST_MAX_AGE_MS) return publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE);
 
     let row = this.credential(parsed.data.credentialId);
-    if (!row || row.state === 'disabled') return publicError('CREDENTIAL_NOT_FOUND', 'Credential is unavailable');
-    if (row.state === 'refresh-uncertain') return publicError('REFRESH_UNCERTAIN', 'Credential refresh outcome is uncertain; interactive recovery is required');
+    if (!row || row.state !== 'active') return publicError('CREDENTIAL_NOT_FOUND', 'Credential is unavailable');
     const vaultKey = credentialProtocolBase64.decode(config.vault_key);
     const stored = await openVaultCredential(row, vaultKey);
     if (this.inferenceCutover()) return publicError('INFERENCE_SCOPE_REQUIRED', 'Upgrade to the profile-scoped credential broker');
@@ -1867,35 +1853,23 @@ export class CredentialVaultDO extends DurableObject<Env> {
     let credential: StoredVaultOAuthCredential = stored;
     if (Date.now() + ACCESS_REFRESH_SKEW_MS >= credential.expires) {
       const refreshRow = row;
-      if (!this.acquireRefreshLease(refreshRow, parsed.data.nonce)) {
-        return publicError('REFRESH_BUSY', 'Credential refresh is already in progress', 250);
-      }
+      const expiring = credential;
       try {
-        credential = await refreshCredential(credential);
-        const nextRevision = refreshRow.revision + 1;
-        const sealed = await sealVaultCredential(credential, vaultKey, refreshRow.id, nextRevision);
-        const committed = this.ctx.storage.transactionSync(() => {
+        credential = await this.singleFlight(this.legacyRefreshes, refreshRow.id, async () => {
+          const next = await refreshCredential(expiring);
+          const nextRevision = refreshRow.revision + 1;
+          const sealed = await sealVaultCredential(next, vaultKey, refreshRow.id, nextRevision);
           const table = this.inferenceCutover() ? 'inference_credentials' : 'oauth_credentials';
-          const changed = this.ctx.storage.sql.exec(`
-            UPDATE ${table}
-            SET sealed_json = ?, revision = ?, expires_at = ?, state = 'active', updated_at = ?
-            WHERE profile_id = 'default' AND id = ? AND revision = ? AND state = 'active' AND EXISTS (
-              SELECT 1 FROM refresh_leases WHERE credential_id = ? AND owner = ? AND revision = ? AND expires_at > ?
-            )
-          `, sealed, nextRevision, credential.expires, new Date().toISOString(), refreshRow.id, refreshRow.revision, refreshRow.id, parsed.data.nonce, refreshRow.revision, Date.now()).rowsWritten;
-          this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ? AND owner = ?', refreshRow.id, parsed.data.nonce);
-          if (changed === 1) this.credentialsChanged();
-          return changed === 1;
+          const changed = this.ctx.storage.sql.exec(
+            `UPDATE ${table} SET sealed_json = ?, revision = ?, expires_at = ?, updated_at = ? WHERE profile_id = 'default' AND id = ? AND revision = ? AND state = 'active'`,
+            sealed, nextRevision, next.expires, new Date().toISOString(), refreshRow.id, refreshRow.revision,
+          ).rowsWritten;
+          if (changed !== 1) throw new Error('Credential changed during refresh');
+          this.credentialsChanged();
+          return next;
         });
-        if (!committed) {
-          const table = this.inferenceCutover() ? 'inference_credentials' : 'oauth_credentials';
-          const changed = this.ctx.storage.sql.exec(`UPDATE ${table} SET state = 'refresh-uncertain', updated_at = ? WHERE profile_id = 'default' AND id = ? AND revision = ? AND state = 'active'`, new Date().toISOString(), refreshRow.id, refreshRow.revision).rowsWritten;
-          if (changed === 1) this.credentialsChanged();
-          return publicError('REFRESH_UNCERTAIN', 'Provider refreshed the credential but the vault commit was not confirmed');
-        }
         row = this.credential(refreshRow.id)!;
       } catch (error) {
-        this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ? AND owner = ?', refreshRow.id, parsed.data.nonce);
         if (error instanceof ProviderRefreshError) {
           return publicError(
             error.kind === 'rejected' ? 'REFRESH_REJECTED' : 'REFRESH_FAILED',
@@ -1903,7 +1877,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
             error.kind === 'network' ? 1_000 : undefined,
           );
         }
-        return publicError('REFRESH_FAILED', 'Provider refresh failed', 1_000);
+        return publicError('REFRESH_FAILED', error instanceof Error ? error.message : 'Provider refresh failed', 1_000);
       }
     }
 
@@ -1963,34 +1937,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
     ).toArray()[0];
   }
 
-  private acquireRefreshLease(row: CredentialRow, owner: string): boolean {
-    return this.ctx.storage.transactionSync(() => {
-      const previous = this.ctx.storage.sql.exec<{ expires_at: number; revision: number }>('SELECT expires_at, revision FROM refresh_leases WHERE credential_id = ?', row.id).toArray()[0];
-      if (previous) {
-        if (previous.expires_at > Date.now()) return false;
-        const table = this.inferenceCutover() ? 'inference_credentials' : 'oauth_credentials';
-        const scope = this.ctx.storage.sql.exec<{ profile_id: string }>(`SELECT profile_id FROM ${table} WHERE id = ? AND revision = ? AND state = 'active'`, row.id, previous.revision).toArray()[0];
-        if (scope) {
-          this.ctx.storage.sql.exec(`UPDATE ${table} SET state = 'refresh-uncertain', updated_at = ? WHERE id = ? AND revision = ? AND state = 'active'`, new Date().toISOString(), row.id, previous.revision);
-          this.credentialsChanged(scope.profile_id);
-        }
-        this.ctx.storage.sql.exec('DELETE FROM refresh_leases WHERE credential_id = ?', row.id);
-        return false;
-      }
-      try {
-        this.ctx.storage.sql.exec(
-          'INSERT INTO refresh_leases(credential_id, owner, revision, expires_at) VALUES (?, ?, ?, ?)',
-          row.id,
-          owner,
-          row.revision,
-          Date.now() + REFRESH_LEASE_MS,
-        );
-        return true;
-      } catch {
-        return false;
-      }
-    });
-  }
 }
 
 async function readBoundedJson(request: Request): Promise<unknown> {
@@ -3663,7 +3609,7 @@ const worker = {
       const denied = accountAccessResponse(await activeAccount(env, body.userId));
       if (denied) return denied;
       const result = await credentialVault(env, body.userId).getAccess(body);
-      const status = result.status === 'ok' ? 200 : result.error.code === 'REFRESH_BUSY' ? 409 : result.error.code.includes('UNAUTHORIZED') || result.error.code === 'REQUEST_EXPIRED' || result.error.code === 'INFERENCE_SCOPE_REQUIRED' ? 401 : 400;
+      const status = result.status === 'ok' ? 200 : result.error.code.includes('UNAUTHORIZED') || result.error.code === 'REQUEST_EXPIRED' || result.error.code === 'INFERENCE_SCOPE_REQUIRED' ? 401 : 400;
       return Response.json(result, { status, headers: { 'cache-control': 'no-store' } });
     } catch {
       return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: 'Credential request is invalid' } }, { status: 400 });

@@ -42,7 +42,6 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     let type: 'http' | 'sse';
     let timeout = connection.timeoutMs;
     if (connection.transport.type === 'composio') {
-      if (connection.status !== 'ready') throw new Error('Composio connection is not ready');
       const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID);
       const gateway = new ComposioPluginGateway(env, await vault.getProviderSecret('composio'));
       const materialized = await gateway.materialize(env.ACCOUNT_ID, connection.transport);

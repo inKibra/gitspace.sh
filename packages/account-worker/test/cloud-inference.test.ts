@@ -112,7 +112,6 @@ describe('Cloud inference credential authority', () => {
     await runInDurableObject(vault, async (instance, state) => {
       await expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: removed!.id })).rejects.toThrow();
       expect(state.storage.sql.exec("SELECT state FROM inference_credentials WHERE id = 'removed'").toArray()).toEqual([{ state: 'disabled' }]);
-      state.storage.sql.exec("INSERT INTO refresh_leases(credential_id, owner, revision, expires_at) VALUES ('removed', 'stale', 1, ?)", Date.now() + 60_000);
     });
 
     await vault.logoutBrowserCredentials('default', 'openai-codex', removed!.id);
@@ -120,7 +119,6 @@ describe('Cloud inference credential authority', () => {
     expect((await vault.cloudCredentialAccounts('default')).map(account => account.id)).toEqual([kept!.id]);
     await runInDurableObject(vault, (_instance, state) => {
       expect(state.storage.sql.exec("SELECT id FROM inference_credentials WHERE id = 'removed'").toArray()).toEqual([]);
-      expect(state.storage.sql.exec("SELECT credential_id FROM refresh_leases WHERE credential_id = 'removed'").toArray()).toEqual([]);
       expect(state.storage.sql.exec('SELECT credential_id FROM cloud_account_health WHERE credential_id = ?', removed!.id).toArray()).toEqual([]);
     });
     // The removed account held the highest id; a later upload must not inherit it.
@@ -301,22 +299,23 @@ describe('Cloud inference credential authority', () => {
     expect(seen).toEqual(['rotating-refresh', 'rotated-refresh']);
   });
 
-  it('refuses a second rotating exchange while another owner holds the lease', async () => {
-    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'leased', provider: 'openai-codex', access: 'old' }]));
+  it('shares one rotating exchange between concurrent refreshes of the same account', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'shared', provider: 'openai-codex', access: 'old' }]));
     const account = (await vault.cloudCredentialAccounts('default'))[0]!;
-    await runInDurableObject(vault, (_instance, state) => {
-      state.storage.sql.exec('INSERT INTO refresh_leases(credential_id, owner, revision, expires_at) VALUES (?, ?, 1, ?)', 'leased', 'other-owner', Date.now() + 60_000);
-    });
-    let requests = 0;
-    network.use(http.post('https://auth.openai.com/oauth/token', () => { requests += 1; return HttpResponse.json({ access_token: 'bad', refresh_token: 'bad', expires_in: 3600 }); }));
+    const seen: Array<string | null> = [];
+    network.use(http.post('https://auth.openai.com/oauth/token', async ({ request }) => {
+      seen.push(new URLSearchParams(await request.text()).get('refresh_token'));
+      return HttpResponse.json({ access_token: 'new', refresh_token: 'rotated-refresh', expires_in: 3600 });
+    }));
     await runInDurableObject(vault, async instance => {
-      await expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: account.id, forceRefresh: true })).rejects.toThrow();
+      const resolved = await Promise.all([0, 1].map(() => instance.cloudResolveCredential({ profileId: 'default', credentialId: account.id, forceRefresh: true })));
+      for (const result of resolved) expect(result.credential).toMatchObject({ access: 'new' });
     });
-    expect(requests).toBe(0);
+    expect(seen).toHaveLength(1);
   });
 
-  it('marks an uncertain rotation unavailable rather than replaying its refresh token', async () => {
-    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'uncertain', provider: 'openai-codex', access: 'old' }]));
+  it('reports a failed refresh, keeps the account and refreshes again on the next attempt', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'unreachable', provider: 'openai-codex', access: 'old' }]));
     const account = (await vault.cloudCredentialAccounts('default'))[0]!;
     let requests = 0;
     network.use(http.post('https://auth.openai.com/oauth/token', () => { requests += 1; return HttpResponse.error(); }));
@@ -324,8 +323,8 @@ describe('Cloud inference credential authority', () => {
       await expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: account.id, forceRefresh: true })).rejects.toThrow();
       await expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: account.id, forceRefresh: true })).rejects.toThrow();
     });
-    expect(requests).toBe(1);
-    expect(await vault.cloudCredentialAccounts('default')).toEqual([]);
+    expect(requests).toBe(2);
+    expect((await vault.cloudCredentialAccounts('default')).map(entry => entry.id)).toEqual([account.id]);
   });
 
   it('does not disclose or resurrect a credential revoked during a rotating exchange', async () => {
@@ -371,11 +370,7 @@ describe('Cloud inference credential authority', () => {
       state.storage.sql.exec('INSERT INTO omp_config(id, generation, content, checksum, updated_at, updated_by) VALUES (1, 1, ?, ?, ?, ?)', content, checksum, new Date().toISOString(), 'legacy');
     });
     const before = await runInDurableObject(vault, (_instance, state) => {
-      state.storage.sql.exec('INSERT INTO refresh_leases(credential_id, owner, revision, expires_at) VALUES (?, ?, 1, ?)', 'preserved-oauth', 'existing-refresh', Date.now() + 60_000);
-      return {
-        credentials: state.storage.sql.exec('SELECT rowid, id, sealed_json, revision FROM oauth_credentials').toArray(),
-        leases: state.storage.sql.exec('SELECT * FROM refresh_leases').toArray(),
-      };
+      return { credentials: state.storage.sql.exec('SELECT rowid, id, sealed_json, revision FROM oauth_credentials').toArray() };
     });
     // Interrupted between authorities: settings preparation has committed, vault has not.
     await settings.prepareInferenceMigration();
@@ -387,7 +382,6 @@ describe('Cloud inference credential authority', () => {
     expect(parseYaml(legacySettings)).toEqual({ terminal: { theme: 'dark' } });
     const after = await runInDurableObject(vault, (_instance, state) => ({
       credentials: state.storage.sql.exec('SELECT rowid, id, sealed_json, revision FROM inference_credentials').toArray(),
-      leases: state.storage.sql.exec('SELECT * FROM refresh_leases').toArray(),
     }));
     expect(after).toEqual(before);
     const preserved = (await vault.cloudCredentialAccounts('default'))[0]!;
@@ -424,24 +418,11 @@ describe('Cloud inference credential authority', () => {
     expect(await runInDurableObject(vault, instance => instance.assignInferenceProfile({ projectId: 'foreign-project', profileId: 'default', expectedRevision: 0 }).then(() => 'allowed', () => 'denied'))).toBe('denied');
   });
 
-  it('leaves legacy credential ciphertext and leases untouched until the Worker deployment is committed', async () => {
+  it('migrates legacy credential ciphertext once, out of reach of an older binary', async () => {
     const userId = env.ACCOUNT_ID;
     const vault = env.CREDENTIALS.getByName(userId);
     await vault.bootstrap({ userId, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(2)) });
     await vault.putCredential({ id: 'legacy', credential: { provider: 'openai-codex', access: 'legacy-access', refresh: 'legacy-refresh', expires: Date.now() + 3_600_000 } });
-    const before = await runInDurableObject(vault, (_instance, state) => state.storage.sql.exec('SELECT rowid, * FROM oauth_credentials').toArray());
-    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'previous-worker' } })));
-    await runInDurableObject(vault, async instance => {
-      await expect(instance.ensureInference()).rejects.toThrow();
-    });
-    expect(await vault.inferenceCutover()).toBe(false);
-    const uncommitted = await runInDurableObject(vault, (_instance, state) => ({
-      rows: state.storage.sql.exec('SELECT rowid, * FROM oauth_credentials').toArray(),
-      scoped: state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'inference_credentials'").toArray(),
-    }));
-    expect(uncommitted.rows).toEqual(before);
-    expect(uncommitted.scoped).toEqual([]);
-    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
     await vault.ensureInference();
     const oldReader = await runInDurableObject(vault, (_instance, state) => {
       // A rolled-back binary recreates its old table. Its unfiltered query is empty.
