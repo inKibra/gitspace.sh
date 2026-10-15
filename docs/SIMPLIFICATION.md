@@ -165,7 +165,7 @@ Every item is verified the way the user works, in the browser, before it is repo
 5. Done (`974dfb75`, `7276d1be`, `aa6823bb`). File names with `:`; abandoned upload chunks cleaned up. Drive URLs encode each path segment, so `log 10:30.txt` is `log%2010%3A30.txt` and never reads as a selector; starting an upload removes staged uploads untouched for a day. Found on the way: agents could not read a drive text file over 128 KiB at all; agent reads of drive and repository text now page like documents.
 
 **Batch 4 — reads that rebuild** (from the audit).
-1. `environment.get` returns the workspace's stored environment, derived when its files change (now 3.4 s, five objects).
+1. Done (`31940d75`, `84293b8f`). `environment.get` returns the workspace's stored environment, derived when its files change (was 3.4 s, five objects; now the panel fills in 0.5–0.8 s). The workspace object records the commit and profile it derived from and derives again only when they move; an agent adding a lifecycle script shows in an open panel. Found on the way: a new workspace's first checkpoint ref was created twice when the panel and agent opened together ("stale ref").
 2. Inspector: drop the 3-object preamble on every request; opening the Inspector no longer starts the agent; `inspector.view`, overview, repository tree and artifacts read stored rows.
 3. `space.view`, `project.list` (writes on every call), `stackStatus` (git merge-base per read), the machines list (runs fleet control), the Providers screen (decrypts every credential, calls every provider).
 
