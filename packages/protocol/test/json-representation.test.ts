@@ -83,11 +83,11 @@ describe('RPC JSON representations', () => {
     expect(() => representation.decodeInput({ ...valid, unexpected: true })).toThrow();
   });
 
-  it('composes stream validation with project invalidation JSON representations', () => {
-    const representation = procedureJsonRepresentation('project.events');
+  it('composes stream validation with terminal list JSON representations', () => {
+    const representation = procedureJsonRepresentation('terminals.events');
     const change = {
-      type: 'snapshot', resource: 'project/example', cursor: 1, revision: 1, previous: null,
-      value: { entity: 'workspace', entityId: 'one', eventOffset: 1 },
+      type: 'snapshot', resource: 'terminals:example', cursor: 1, revision: 1, previous: null,
+      value: { terminals: [], output: null },
     };
     const encoded = representation.encodeOutput([change]);
     expect(ajv.compile(representation.outputSchema)(encoded)).toBe(true);

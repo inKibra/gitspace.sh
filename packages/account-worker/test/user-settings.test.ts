@@ -113,30 +113,11 @@ describe('inference settings migration', () => {
     expect(original).toBe(content);
   });
 
-  it('never replays credential-bearing snapshots from before a repaired configuration', async () => {
-    const stub = settingsStub(`replay-${crypto.randomUUID()}`);
-    const content = '{"toolExecution":"parallel"}';
-    await stub.updateRuntime('machine-a', { expectedGeneration: 0, content, checksum: await checksum(content) });
-    const snapshot = await stub.snapshot();
-    await runInDurableObject(stub, (_instance, state) => {
-      const unsafe = { ...snapshot, runtime: { ...snapshot.runtime, content: 'providers: { custom: { apiKey: protected-legacy-secret } }\n' } };
-      state.storage.sql.exec('UPDATE app_changes SET value_json = ? WHERE resource = ?', JSON.stringify(unsafe), 'settings');
-    });
-    const next = '{"toolExecution":"sequential"}';
-    await stub.updateRuntime('machine-a', { expectedGeneration: 1, content: next, checksum: await checksum(next) });
-    const [first, second] = await stub.events(0);
-    expect(first).toMatchObject({ type: 'resync', resource: 'settings' });
-    expect(second).toMatchObject({ type: 'snapshot', value: { runtime: { content: next, generation: 2 } } });
-    expect(JSON.stringify([first, second])).not.toContain('protected-legacy-secret');
-  });
-
-  it('publishes durable inference invalidations without changing settings revisions, and ignores delayed repeats', async () => {
+  it('takes durable inference invalidations without changing settings revisions, and ignores delayed repeats', async () => {
     const stub = settingsStub(`invalidation-${crypto.randomUUID()}`);
     const initial = await stub.snapshot();
-    const [first] = await stub.events(null);
     await stub.inferenceChanged(4);
-    const [changed] = await stub.events(first!.cursor);
-    expect(changed).toMatchObject({ type: 'change', previous: first!.cursor, value: { ...initial, inferenceRevision: 4 } });
+    expect(await stub.snapshot()).toEqual({ ...initial, inferenceRevision: 4 });
     await runInDurableObject(stub, async (_instance, state) => {
       const restarted = new UserSettingsDO(state, env);
       await state.blockConcurrencyWhile(async () => {});
@@ -145,10 +126,7 @@ describe('inference settings migration', () => {
       expect(restarted.snapshot()).toEqual({ ...initial, inferenceRevision: 4 });
       restarted.inferenceChanged(5);
     });
-    // Only what is newer than the reader's cursor: the delayed repeats wrote nothing.
-    const newer = await stub.events(changed!.cursor);
-    expect(newer).toHaveLength(1);
-    expect(newer[0]).toMatchObject({ type: 'change', previous: changed!.cursor, cursor: changed!.cursor + 1, value: { ...initial, inferenceRevision: 5 } });
+    expect(await stub.snapshot()).toEqual({ ...initial, inferenceRevision: 5 });
   });
 
   it('pushes the inference revision to authenticated websocket subscribers without advancing runtime generation', async () => {

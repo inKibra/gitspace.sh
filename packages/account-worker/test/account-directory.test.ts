@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, credentialProtocolBase64, DEVICE_SOCKET_PROTOCOL, RPC_DEVICE_HEADER, signDeviceInvite, signRpcRequest, type CloudProjectSummary, type CloudWorkspaceDefinition, type DeviceInvite } from '@gitspace/protocol';
-import { accountDirectoryEventSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { accountDirectoryEventSchema, workspaceStatusMessageSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import { http, HttpResponse } from 'msw';
 import { UserProjectIndexDO, ProjectAuthorityDO } from '../src/project-authority.js';
@@ -45,7 +45,12 @@ function socketEvents(socket: WebSocket) {
   const events: Event[] = [];
   const waiters: Array<(event: Event) => void> = [];
   const push = (event: Event) => { const waiter = waiters.shift(); if (waiter) waiter(event); else events.push(event); };
-  socket.addEventListener('message', (event) => push({ type: 'message', value: accountDirectoryEventSchema.parse(JSON.parse(String(event.data))) }));
+  socket.addEventListener('message', (event) => {
+    const decoded: unknown = JSON.parse(String(event.data));
+    // Status rows share the socket; these tests follow directory events.
+    if (workspaceStatusMessageSchema.safeParse(decoded).success) return;
+    push({ type: 'message', value: accountDirectoryEventSchema.parse(decoded) });
+  });
   socket.addEventListener('close', (event) => push({ type: 'close', code: event.code }));
   socket.accept();
   return { next: () => { const queued = events.shift(); return queued ? Promise.resolve(queued) : new Promise<Event>((resolve) => waiters.push(resolve)); } };

@@ -67,8 +67,7 @@ import {
   type InferenceProfile, type InferenceState,
 } from '@gitspace/protocol/inference';
 import { LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, type LifecycleState } from '@gitspace/protocol-environment';
-import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
-import { DurableChangeLog } from './durable-stream.js';
+import { LiveChanges } from './live-changes.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import {
@@ -378,7 +377,7 @@ function publicError(code: string, message: string, retryAfterMs?: number): Cred
 
 export class CredentialVaultDO extends DurableObject<Env> {
   private inferenceMigration: Promise<InferenceState> | null = null;
-  private readonly inferenceChanges: DurableChangeLog;
+  private readonly inferenceChanges: LiveChanges;
   private readonly activeLoginAttempts = new Set<string>();
   /** Pi sign-in flows run in this object's memory; a restart abandons them (the row then reports an interruption). */
   private readonly upstreamLogins = new Map<string, UpstreamLogin>();
@@ -392,7 +391,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
   }
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.inferenceChanges = new DurableChangeLog(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
+    this.inferenceChanges = new LiveChanges((notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS vault_config (
@@ -591,16 +590,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return JSON.parse(row.profile_json) as InferenceProfile;
   }
 
-  /** `inference.events`: inference state after `after`, bounded. */
-  async inferenceEvents(after: number | null): Promise<StreamEvent<InferenceState>[]> {
-    await this.ensureInference();
-    return this.inferenceChanges.replay('inference', after, () => this.inferenceState(), false);
-  }
-
   private inferenceChanged(): void {
     this.ctx.storage.sql.exec('UPDATE inference_migration SET revision = revision + 1 WHERE id = 1');
     if (this.ctx.storage.sql.exec<{ version: number }>('SELECT version FROM inference_migration WHERE id = 1').one().version === 1) {
-      this.inferenceChanges.append('inference', this.inferenceState());
+      this.inferenceChanges.mark('inference');
       this.ctx.waitUntil(Promise.resolve().then(() => this.inferenceChanges.wake()));
     }
     const config = this.config();

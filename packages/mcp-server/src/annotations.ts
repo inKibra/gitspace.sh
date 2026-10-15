@@ -21,10 +21,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": true,
     "openWorldHint": false
   },
-  "machine.events": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
   "machine.updateNotes": {
     "readOnlyHint": false,
     "destructiveHint": true,
@@ -62,10 +58,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "openWorldHint": false
   },
   "machine.image.list": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "machine.image.events": {
     "readOnlyHint": true,
     "openWorldHint": false
   },
@@ -165,7 +157,7 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": false,
     "openWorldHint": false
   },
-  "settings.events": {
+  "settings.state": {
     "readOnlyHint": true,
     "openWorldHint": false
   },
@@ -195,10 +187,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": false,
     "destructiveHint": false,
     "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "inference.events": {
-    "readOnlyHint": true,
     "openWorldHint": false
   },
   "providers.list": {
@@ -285,7 +273,7 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
-  "environment.events": {
+  "environment.state": {
     "readOnlyHint": true,
     "openWorldHint": false
   },
@@ -489,14 +477,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
-  "project.events": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "project.directoryEvents": {
-    "readOnlyHint": true,
-    "openWorldHint": false
-  },
   "project.list": {
     "readOnlyHint": true,
     "openWorldHint": false
@@ -535,10 +515,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": false,
     "destructiveHint": true,
     "idempotentHint": true,
-    "openWorldHint": false
-  },
-  "space.events": {
-    "readOnlyHint": true,
     "openWorldHint": false
   },
   "workspace.create": {

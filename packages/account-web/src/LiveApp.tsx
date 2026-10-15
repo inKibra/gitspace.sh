@@ -42,7 +42,7 @@ import { useRepositoryTree } from './useRepositoryTree.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadInspectorContent, loadInspectorResource } from './resource-content.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
-import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useSpaceSynchronization } from './SynchronizationProvider.js';
+import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectChanges } from './SynchronizationProvider.js';
 import { liveTicks } from './live-notices.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
@@ -153,8 +153,8 @@ export function LiveInspector({
     ...(stackedOn !== null ? [stackStatus.refetch()] : []),
   ]));
 
-  const projectSynchronization = useProjectSynchronization(projectId);
-  useEventRefresh(projectSynchronization.cursor, () => artifactCatalog.refetch(), !runtimeAvailable);
+  const projectChanges = useProjectChanges(projectId);
+  useEventRefresh(projectChanges, () => artifactCatalog.refetch(), !runtimeAvailable);
 
   if (!overviewRead.value) {
     return overviewRead.error

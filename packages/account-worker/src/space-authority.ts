@@ -1,7 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { SpaceAuthorityRecordSchema, WorkspaceDomainError, type SpaceAuthorityRecord, type SpaceAuthorityResult } from '@gitspace/protocol-workspace';
-import { DurableChangeLog } from './durable-stream.js';
-import type { StreamEvent } from '@gitspace/protocol-sync';
+import { LiveChanges } from './live-changes.js';
 import type { LiveNotice } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
@@ -34,7 +33,7 @@ const PORTABLE_LFS_MAX_ATTEMPTS = 12;
 type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
-  private changes: DurableChangeLog;
+  private readonly changes: LiveChanges;
   private readonly environment: SpaceEnvironmentStore;
   private directoryOutbox: DirectoryOutbox;
   private runtime: Promise<WorkspaceRuntime> | undefined;
@@ -47,8 +46,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly liveNotify = (notices: LiveNotice[]) => { this.ctx.waitUntil(notifyBrowsers(this.env, notices)); };
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new DurableChangeLog(ctx.storage, this.liveNotify);
-    this.environment = new SpaceEnvironmentStore(ctx.storage, this.liveNotify);
+    this.changes = new LiveChanges(this.liveNotify);
+    this.environment = new SpaceEnvironmentStore(ctx.storage, this.changes);
     this.directoryOutbox = this.openDirectoryOutbox();
     this.createTables();
     ctx.blockConcurrencyWhile(async () => {
@@ -375,7 +374,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     for (const machineId of attached) await fleet.detachMachineWorkspace(machineId, tombstone.workspaceId);
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
-    this.changes = new DurableChangeLog(this.ctx.storage, this.liveNotify);
     this.directoryOutbox = this.openDirectoryOutbox();
     this.createTables();
     writeWorkspaceMetadata(this.ctx.storage, tombstone);
@@ -579,11 +577,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     await this.environmentReady(raw);
     return this.environment.ended(runId, signal);
   }
-  /** `environment.events`: the workspace's lifecycle state after `after`, bounded. */
-  async environmentEvents(raw: unknown, after: number | null): Promise<StreamEvent<LifecycleState>[]> {
-    const { identity, project } = await this.environmentReady(raw);
-    return this.environment.events(identity.projectId, identity.workspaceId, after, await project.environmentShared());
-  }
   async runtimeDraft(raw: unknown, actor: { deviceId: string }) { const input = RuntimeDraftSaveInputSchema.parse(raw); return (await this.getRuntime(input)).saveDraft(input, actor.deviceId); }
   async runtimeSubmit(raw: unknown, actor?: { deviceId: string }) { const input = RuntimeSubmitInputSchema.parse(raw); return (await this.getRuntime(input)).submit(input, actor?.deviceId); }
   async runtimeCancel(raw: unknown) { const input = RuntimeCancelInputSchema.parse(raw); return (await this.getRuntime(input)).cancel(input); }
@@ -771,12 +764,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (this.cloudRuntime !== null) throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_POSSESSION_DENIED', message: 'Legacy writers cannot modify a cloud-owned workspace', context: {} });
   }
 
-  /** `space.events`: the authority record after `after`, bounded. */
-  events(spaceId: string, after: number | null): StreamEvent<SpaceAuthorityRecord | null>[] {
-    const state = this.get();
-    if (state && state.spaceId !== spaceId) throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_IDENTITY_MISMATCH', message: 'Space authority identity mismatch', context: { spaceId } });
-    return this.changes.replay(`space:${spaceId}`, after, () => this.get(), false);
-  }
 
   private commit<T>(mutate: () => T): SpaceAuthorityResult<T> {
     try {
@@ -785,7 +772,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         const value = mutate();
         const state = this.get();
         if (state) {
-          this.changes.append(`space:${state.spaceId}`, state);
+          this.changes.mark(`space:${state.spaceId}`);
           this.directoryOutbox.enqueue({ source: 'space', state, runtime: this.cloudRuntime });
         }
         return value;

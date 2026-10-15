@@ -19,8 +19,7 @@ import {
   type UserSettingsUpdate,
 } from '@gitspace/protocol';
 import { subscriptionIdentity, subscriptionActive } from './account-access.js';
-import { DurableChangeLog } from './durable-stream.js';
-import type { StreamEvent } from '@gitspace/protocol-sync';
+import { LiveChanges } from './live-changes.js';
 import { notifyBrowsers } from './live-notices.js';
 import { notifyMachines } from './machine-notices.js';
 
@@ -75,11 +74,10 @@ interface InferenceMigrationRow extends Record<string, SqlStorageValue> {
 interface SettingsChangedEvent { type: 'settings.changed'; userRevision: number; runtimeGeneration: number; inferenceRevision?: number }
 
 export class UserSettingsDO extends DurableObject<Env> {
-  private readonly changes: DurableChangeLog;
-  private historyChecked = false;
+  private readonly changes: LiveChanges;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new DurableChangeLog(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
+    this.changes = new LiveChanges((notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS user_settings (
@@ -145,7 +143,7 @@ export class UserSettingsDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(`INSERT INTO user_settings(id, revision, settings_json, updated_at, updated_by) VALUES (1, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, settings_json = excluded.settings_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`, revision, JSON.stringify(stored), updatedAt, machineId);
-      this.changes.append('settings', this.snapshot());
+      this.changes.mark('settings');
     });
     const value = { ...stored, revision, updatedAt, updatedBy: machineId };
     this.changes.wake();
@@ -214,7 +212,7 @@ export class UserSettingsDO extends DurableObject<Env> {
         value.generation, value.content, value.checksum, value.updatedAt, value.updatedBy);
       }
       this.ctx.storage.sql.exec(`UPDATE omp_inference_migration SET state = 'complete' WHERE id = 1`);
-      this.changes.append('settings', this.snapshot());
+      this.changes.mark('settings');
       return { changed: true, value };
     });
     if (result.changed) {
@@ -230,7 +228,7 @@ export class UserSettingsDO extends DurableObject<Env> {
       if (revision <= current) return false;
       this.ctx.storage.sql.exec(`INSERT INTO inference_settings_revision(id, revision) VALUES (1, ?)
         ON CONFLICT(id) DO UPDATE SET revision = excluded.revision`, revision);
-      this.changes.append('settings', this.snapshot());
+      this.changes.mark('settings');
       return true;
     });
     if (changed) {
@@ -254,7 +252,7 @@ export class UserSettingsDO extends DurableObject<Env> {
       const updatedAt = new Date().toISOString();
       this.ctx.storage.sql.exec(`INSERT INTO runtime_config(id, generation, content, checksum, updated_at, updated_by) VALUES (1, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET generation = excluded.generation, content = excluded.content, checksum = excluded.checksum, updated_at = excluded.updated_at, updated_by = excluded.updated_by`, generation, parsed.content, parsed.checksum, updatedAt, machineId);
-      this.changes.append('settings', this.snapshot());
+      this.changes.mark('settings');
       return { status: 'ok', value: { generation, content: parsed.content, checksum: parsed.checksum, updatedAt, updatedBy: machineId } };
     });
     if (result.status === 'ok') {
@@ -284,7 +282,7 @@ export class UserSettingsDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(`INSERT INTO git_identity(id, generation, private_key, public_key, fingerprint, updated_at, updated_by) VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET generation = excluded.generation, private_key = excluded.private_key, public_key = excluded.public_key,
           fingerprint = excluded.fingerprint, updated_at = excluded.updated_at, updated_by = excluded.updated_by`, generation, parsed.privateKey, parsed.publicKey, parsed.fingerprint, updatedAt, machineId);
-      this.changes.append('settings', this.snapshot());
+      this.changes.mark('settings');
     });
     const value = { generation, privateKey: parsed.privateKey, publicKey: parsed.publicKey, fingerprint: parsed.fingerprint, updatedAt, updatedBy: machineId };
     this.changes.wake();
@@ -295,25 +293,6 @@ export class UserSettingsDO extends DurableObject<Env> {
     const identity = this.getGitIdentity();
     const git = identity ? { generation: identity.generation, publicKey: identity.publicKey, fingerprint: identity.fingerprint, updatedAt: identity.updatedAt, updatedBy: identity.updatedBy } : null;
     return { user: this.get('uninitialized'), runtime: this.getRuntime(), git, inferenceRevision: this.inferenceRevision() };
-  }
-  /** `settings.events`: the settings snapshot after `after`, bounded. */
-  events(after: number | null): StreamEvent<SettingsSnapshot>[] {
-    if (!this.historyChecked) {
-      // Older releases stored entire OMP documents in their outbox. A repaired current
-      // document must not make credential-bearing historical snapshots replayable.
-      this.snapshot();
-      const rows = this.ctx.storage.sql.exec<{ cursor: number; value_json: string }>("SELECT cursor, value_json FROM app_changes WHERE resource = 'settings' ORDER BY cursor").toArray();
-      let unsafeCursor: number | undefined;
-      for (const row of rows) {
-        try {
-          const value = JSON.parse(row.value_json) as SettingsSnapshot;
-          parseRuntimeSettings(JSON.parse(value.runtime.content || '{}'));
-        } catch { unsafeCursor = row.cursor; }
-      }
-      if (unsafeCursor !== undefined) this.ctx.storage.sql.exec("DELETE FROM app_changes WHERE resource = 'settings' AND cursor <= ?", unsafeCursor);
-      this.historyChecked = true;
-    }
-    return this.changes.replay('settings', after, () => this.snapshot(), false);
   }
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected WebSocket', { status: 426 });

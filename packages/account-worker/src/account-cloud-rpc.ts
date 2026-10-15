@@ -9,18 +9,18 @@ import {
 } from '@gitspace/protocol';
 import {
   gitspaceContract, getUserSettingsContract, updateUserSettingsContract, reserveUserHandleContract,
-  getGitIdentityContract, getRuntimeSettingsContract, setRuntimeSettingContract, settingsEventsContract, listMachinesContract,
-  machineLifecycleEventsContract, createSandboxMachineContract, updateMachineNotesContract, updateMachineAgentAttachContract,
+  getGitIdentityContract, getRuntimeSettingsContract, setRuntimeSettingContract, settingsStateContract, listMachinesContract,
+  createSandboxMachineContract, updateMachineNotesContract, updateMachineAgentAttachContract,
   sleepMachineContract, resumeMachineContract, destroyMachineContract,
-  listCloudImagesContract, cloudImageEventsContract, getCloudImageDefaultContract, setCloudImageDefaultContract,
+  listCloudImagesContract, getCloudImageDefaultContract, setCloudImageDefaultContract,
   setCloudImageContract, retryCloudImageContract, cancelCloudImageContract, recoverCloudImageContract,
   listProjectsContract, listDevicesContract, revokeDeviceContract,
   getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
   ensureGitSpaceProjectContract,
   spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentRevertContract,
-  projectEventsContract, projectDirectoryEventsContract, environmentEventsContract, spaceEventsContract, recordIncidentContract,
+  environmentStateContract, recordIncidentContract,
 } from '@gitspace/protocol/rpc-contract';
-import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract, inferenceEventsContract } from '@gitspace/protocol/rpc-contract';
+import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract } from '@gitspace/protocol/rpc-contract';
 import { stackStatusContract } from '@gitspace/protocol/rpc-contract';
 import { parse } from 'devalue';
 import { contractDigest, err, ok } from 'result-rpc';
@@ -163,18 +163,16 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return result.status === 'conflict' ? err(errors.SettingsConflict(result)) : ok(runtimeView(result.value));
     } catch (error) { return err(errors.OperationFailed({ operation: 'set runtime setting', message: message(error) })); }
   });
-  const settingsEvents = server.implement(settingsEventsContract).handler(async ({ input, errors }) => {
-    try { return ok(await settings.events(input.after)); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'read settings changes', message: message(error) })); }
+  const settingsState = server.implement(settingsStateContract).handler(async ({ errors }) => {
+    try { return ok(await settings.snapshot()); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read settings', message: message(error) })); }
   });
+
   const machines = server.implement(listMachinesContract).handler(async ({ errors }) => {
     try { return ok(await fleet()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list machines', message: message(error) })); }
   });
-  const machineEvents = server.implement(machineLifecycleEventsContract).handler(async ({ input, errors }) => {
-    try { return ok(await catalog.machineEvents(input.after)); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'read machine changes', message: message(error) })); }
-  });
+
   const createSandbox = server.implement(createSandboxMachineContract).handler(async ({ input, errors }) => {
     try {
       return ok(await provisionManagedSandbox(env, userId, env.ACCOUNT_URL, input.image));
@@ -184,10 +182,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     try { return ok(await catalog.listCloudImages()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list cloud images', message: message(error) })); }
   });
-  const imageEvents = server.implement(cloudImageEventsContract).handler(async ({ input, errors }) => {
-    try { return ok(await catalog.cloudImageEvents(input.after)); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'read cloud image changes', message: message(error) })); }
-  });
+
   const imageDefault = server.implement(getCloudImageDefaultContract).handler(async ({ errors }) => {
     try { return ok(await catalog.cloudImageDefault()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'get cloud image default', message: message(error) })); }
@@ -307,30 +302,17 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return status ? ok(status) : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'read stack status', message: message(error) })); }
   });
-  const directoryEvents = server.implement(projectDirectoryEventsContract).handler(async ({ input, errors }) => {
-    try {
-      const events = await projectIndex.events(input.after);
-      return ok(events.map((event) => event.type === 'resync' ? event : { ...event, value: event.value.map((project) => ({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null })) }));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'read project list changes', message: message(error) })); }
-  });
-  const projectEvents = server.implement(projectEventsContract).handler(async ({ input, errors }) => {
-    try { return ok(await (await authorityFor(input.projectId)).events(input.after)); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'read project changes', message: message(error) })); }
-  });
-  const environmentEvents = server.implement(environmentEventsContract).handler(async ({ input, errors }) => {
+
+
+  const environmentState = server.implement(environmentStateContract).handler(async ({ input, errors }) => {
     try {
       const projectId = await projectIndex.locateWorkspace(input.spaceId);
       if (!projectId) throw new Error('Workspace does not belong to this account');
-      return ok(await env.SPACE_AUTHORITY.getByName(`${userId}:${input.spaceId}`).environmentEvents({ projectId, workspaceId: input.spaceId }, input.after));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'read environment changes', message: message(error) })); }
+      return ok(await env.SPACE_AUTHORITY.getByName(`${userId}:${input.spaceId}`).getLifecycleState({ projectId, workspaceId: input.spaceId }));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read environment', message: message(error) })); }
   });
-  const spaceEvents = server.implement(spaceEventsContract).handler(async ({ input, errors }) => {
-    try {
-      const projectId = await projectIndex.locateWorkspace(input.spaceId);
-      if (!projectId) throw new Error('Workspace does not belong to this account');
-      return ok(await env.SPACE_AUTHORITY.getByName(`${userId}:${input.spaceId}`).events(input.spaceId, input.after));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'read workspace placement changes', message: message(error) })); }
-  });
+
+
   const recordIncident = server.implement(recordIncidentContract).handler(async ({ input, errors }) => {
     try {
       const change = AgentIncidentChangeSchema.parse(input.change);
@@ -419,25 +401,20 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return ok(result.value);
     } catch (error) { return err(errors.OperationFailed({ operation: 'assign inference profile', message: message(error) })); }
   });
-  const inferenceEvents = server.implement(inferenceEventsContract).handler(async ({ input, errors }) => {
-    try {
-      await vault.ensureInference();
-      return ok(await vault.inferenceEvents(input.after));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'read inference profile changes', message: message(error) })); }
-  });
+
   const configuration = configurationCloudProcedures(env, userId, deviceId, origin);
   const lifecycle = workspaceLifecycleCloudProcedures(env, userId);
   return server.router({
     runtime: runtimeCloudProcedures(env, userId, deviceId),
-    inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign, events: inferenceEvents },
+    inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
-    settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, events: settingsEvents },
-    machines, machine: { events: machineEvents, createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, events: projectEvents, directoryEvents, ...lifecycle.project },
-    space: { events: spaceEvents, view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
+    settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, state: settingsState },
+    machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, ...lifecycle.project },
+    space: { view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, deployment: { status: deploymentStatus, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
     inspector: inspectorCloudProcedures(env, userId, currentDevice),
-    environment: { ...environmentCloudProcedures(env, userId, deviceId, currentDevice, () => requireAdministration('lifecycle.control')), events: environmentEvents },
+    environment: { ...environmentCloudProcedures(env, userId, deviceId, currentDevice, () => requireAdministration('lifecycle.control')), state: environmentState },
   });
 }
 

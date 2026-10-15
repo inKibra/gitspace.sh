@@ -34,7 +34,7 @@ vi.mock('result-rpc/react', () => ({
 vi.mock('./SynchronizationProvider.js', async () => ({
   SynchronizationProvider: () => null,
   useAccountMachines: () => ({ state: 'pending', refetch: async () => {} }),
-  useProjectSynchronization: () => ({ cursor: null }),
+  useProjectChanges: () => null,
   useEnvironmentSynchronization: () => ({ value: undefined }),
   useEventRefresh: (await vi.importActual<typeof Synchronization>('./SynchronizationProvider.js')).useEventRefresh,
 }));

@@ -747,10 +747,6 @@ export const inferenceDeleteContract = gitspaceRpc.procedure()
 export const inferenceAssignContract = gitspaceRpc.procedure()
   .input(InferenceAssignInputCodec).output(InferenceStateCodec)
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed }).mutation();
-/** Inference state after `after`, bounded; read again on each `inference` live notice. */
-export const inferenceEventsContract = gitspaceRpc.procedure()
-  .input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(wire.array(streamCodec(InferenceStateCodec)))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
 
 export const updateMachineNotesContract = gitspaceRpc
   .procedure()
@@ -1066,8 +1062,6 @@ export const createSandboxMachineContract = gitspaceRpc
   .mutation();
 
 export const listCloudImagesContract = gitspaceRpc.procedure().input(wire.object({})).output(wire.array(CloudImageStateCodec)).errors({ OperationFailed: rpcErrors.operationFailed }).query();
-/** Image states after `after`, bounded; read again on each `cloud-images` live notice. */
-export const cloudImageEventsContract = gitspaceRpc.procedure().input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(wire.array(streamCodec(wire.array(CloudImageStateCodec)))).errors({ OperationFailed: rpcErrors.operationFailed }).query();
 export const getCloudImageDefaultContract = gitspaceRpc.procedure().input(wire.object({})).output(CloudImageChoiceCodec).errors({ OperationFailed: rpcErrors.operationFailed }).query();
 export const setCloudImageDefaultContract = gitspaceRpc.procedure().input(wire.object({ selection: CloudImageSelectionCodec })).output(CloudImageChoiceCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setCloudImageContract = gitspaceRpc.procedure().input(wire.object({ machineId: wire.string, operationId: wire.string, selection: CloudImageSelectionCodec })).output(CloudImageStateCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
@@ -1082,18 +1076,12 @@ export const setRuntimeSettingContract = gitspaceRpc
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-/** Fleet machines after `after`, bounded; read again on each `machines` live notice. */
-export const machineLifecycleEventsContract = gitspaceRpc
-  .procedure()
-  .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
-  .output(wire.array(streamCodec(wire.array(FleetMachineViewCodec))))
-  .errors({ OperationFailed: rpcErrors.operationFailed })
-  .query();
 /** Settings after `after`, bounded; read again on each `settings` live notice. */
-export const settingsEventsContract = gitspaceRpc
+/** The settings a tab shows; read again on each `settings` live notice. */
+export const settingsStateContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
-  .output(wire.array(streamCodec(wire.object({ user: UserSettingsViewCodec, runtime: RuntimeConfigDocumentCodec, git: wire.nullable(GitIdentityViewCodec), inferenceRevision: wire.optional(wire.number) }))))
+  .input(wire.object({}))
+  .output(wire.object({ user: UserSettingsViewCodec, runtime: RuntimeConfigDocumentCodec, git: wire.nullable(GitIdentityViewCodec), inferenceRevision: wire.optional(wire.number) }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
 
@@ -1950,26 +1938,12 @@ export const deploymentRevertContract = gitspaceRpc
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-/** Invalidations of one project's records after `after`, bounded; read again on each `project` live notice. */
-export const projectEventsContract = gitspaceRpc.procedure()
-  .input(wire.object({ projectId: wire.string, after: wire.nullable(StreamCursorCodec) }))
-  .output(wire.array(streamCodec(wire.object({ entity: wire.string, entityId: wire.nullable(wire.string), eventOffset: StreamCursorCodec }))))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
-/** The project list after `after`, bounded; read again on each `projects` live notice. */
-export const projectDirectoryEventsContract = gitspaceRpc.procedure()
-  .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
-  .output(wire.array(streamCodec(wire.array(ProjectLifecycleViewCodec))))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
 /** A workspace's lifecycle state after `after`, bounded; read again on each `environment` live notice. */
-export const environmentEventsContract = gitspaceRpc.procedure()
-  .input(wire.object({ spaceId: wire.string, after: wire.nullable(StreamCursorCodec) }))
-  .output(wire.array(streamCodec(LifecycleStateCodec)))
+/** A workspace's stored lifecycle state; read again on each `environment` live notice. */
+export const environmentStateContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string }))
+  .output(LifecycleStateCodec)
   .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed }).query();
-/** A workspace's authority record after `after`, bounded; read again on each `space` live notice. */
-export const spaceEventsContract = gitspaceRpc.procedure()
-  .input(wire.object({ spaceId: wire.string, after: wire.nullable(StreamCursorCodec) }))
-  .output(wire.array(streamCodec(wire.nullable(wire.serializable((value): value is SpaceAuthorityRecord => SpaceAuthorityRecordSchema.safeParse(value).success, { id: 'gitspace/workspace-authority/v1', jsonSchema: SpaceAuthorityRecordSchema })))))
-  .errors({ WorkspaceFailure: rpcErrors.workspaceFailure, OperationFailed: rpcErrors.operationFailed }).query();
 export const recordIncidentContract = gitspaceRpc.procedure()
   .input(wire.object({ projectId: wire.string, eventId: wire.string, change: wire.serializable((value): value is AgentIncidentChange => AgentIncidentChangeSchema.safeParse(value).success, { id: 'gitspace/agent-incident-change/v1', jsonSchema: AgentIncidentChangeSchema }) }))
   .output(wire.object({ eventId: wire.string }))
@@ -2039,14 +2013,13 @@ export const gitspaceContract = gitspaceRpc.contract({
   },
   machines: listMachinesContract,
   machine: {
-    events: machineLifecycleEventsContract,
     updateNotes: updateMachineNotesContract,
     updateAgentAttach: updateMachineAgentAttachContract,
     createSandbox: createSandboxMachineContract,
     sleep: sleepMachineContract,
     resume: resumeMachineContract,
     destroy: destroyMachineContract,
-    image: { list: listCloudImagesContract, events: cloudImageEventsContract, set: setCloudImageContract, retry: retryCloudImageContract, cancel: cancelCloudImageContract, recover: recoverCloudImageContract, defaults: { get: getCloudImageDefaultContract, set: setCloudImageDefaultContract } },
+    image: { list: listCloudImagesContract, set: setCloudImageContract, retry: retryCloudImageContract, cancel: cancelCloudImageContract, recover: recoverCloudImageContract, defaults: { get: getCloudImageDefaultContract, set: setCloudImageDefaultContract } },
   },
   settings: {
     get: getUserSettingsContract,
@@ -2054,9 +2027,9 @@ export const gitspaceContract = gitspaceRpc.contract({
     update: updateUserSettingsContract,
     reserveHandle: reserveUserHandleContract,
     runtime: { get: getRuntimeSettingsContract, set: setRuntimeSettingContract },
-    events: settingsEventsContract,
+    state: settingsStateContract,
   },
-  inference: { list: inferenceListContract, create: inferenceCreateContract, update: inferenceUpdateContract, delete: inferenceDeleteContract, assign: inferenceAssignContract, events: inferenceEventsContract },
+  inference: { list: inferenceListContract, create: inferenceCreateContract, update: inferenceUpdateContract, delete: inferenceDeleteContract, assign: inferenceAssignContract },
   providers: {
     list: listProvidersContract,
     login: {
@@ -2080,7 +2053,7 @@ export const gitspaceContract = gitspaceRpc.contract({
   },
   configuration: { values: { get: getConfigurationValuesContract, put: putConfigurationValueContract, delete: deleteConfigurationValueContract } },
   environment: {
-    events: environmentEventsContract,
+    state: environmentStateContract,
     get: getWorkspaceEnvironmentContract,
     putBundle: putWorkspaceEnvironmentBundleContract,
     setProfile: setWorkspaceEnvironmentProfileContract,
@@ -2188,8 +2161,6 @@ export const gitspaceContract = gitspaceRpc.contract({
     services: { list: inspectorServicesContract, start: startWorkspaceServiceContract, stop: stopWorkspaceServiceContract },
   },
   project: {
-    events: projectEventsContract,
-    directoryEvents: projectDirectoryEventsContract,
     list: listProjectsContract,
     create: createProjectContract,
     ensureGitSpace: ensureGitSpaceProjectContract,
@@ -2200,7 +2171,6 @@ export const gitspaceContract = gitspaceRpc.contract({
   },
   space: {
     view: spaceViewContract,
-    events: spaceEventsContract,
   },
   workspace: {
     create: createWorkspaceContract,

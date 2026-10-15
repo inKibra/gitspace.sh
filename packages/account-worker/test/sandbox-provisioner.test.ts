@@ -124,10 +124,9 @@ it('acknowledges durable private enrollment before preflight and fences prematur
     const retained = await runInDurableObject(f.catalog, (_instance, state) => {
       const row = state.storage.sql.exec<{ enrollment_json: string }>('SELECT enrollment_json FROM sandbox_enrollments WHERE machine_id=?', machine.id).one();
       const enrollment = JSON.parse(row.enrollment_json) as { choice: { image: string }; environment: Record<string, string> };
-      const observable = JSON.stringify(state.storage.sql.exec('SELECT value_json FROM app_changes').toArray());
-      return { image: enrollment.choice.image, keyRetained: !!enrollment.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY, secretInEvents: Object.entries(enrollment.environment).some(([key, value]) => /PRIVATE_KEY|TOKEN|ARTIFACT_KEY/u.test(key) && observable.includes(value)) };
+      return { image: enrollment.choice.image, keyRetained: !!enrollment.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY };
     });
-    expect(retained).toEqual({ image, keyRetained: true, secretInEvents: false });
+    expect(retained).toEqual({ image, keyRetained: true });
   } finally { gate.resolve(); }
   await expect.poll(() => f.catalog.getMachine(machine.id)).toMatchObject({ state: 'online', error: null });
   expect(await f.catalog.hasPendingSandbox(machine.id)).toBe(false);

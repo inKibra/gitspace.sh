@@ -100,10 +100,7 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     const space = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${spaceId}`);
     const spaceIdentity = { projectId, workspaceId: spaceId };
     const client = inspectorClient(fixture);
-    const initial = await client.environment.events({ spaceId, after: null });
-    if (initial.status !== 'ok') throw initial.error;
-    expect(initial.value).toMatchObject([{ type: 'snapshot', resource: `environment:${spaceId}`, value: { policy: { automatic: false } } }]);
-    const cursor = initial.value[0]!.cursor;
+    expect(await client.environment.state({ spaceId })).toMatchObject({ status: 'ok', value: { policy: { automatic: false } } });
     const watching = await liveSocket(fixture);
     const elsewhere = await liveSocket(fixture);
     try {
@@ -120,9 +117,8 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
       ])).toEqual([1, 1, 0]);
       expect(await watching.next()).toMatchObject({ resource: 'cloud-images' });
       expect(await elsewhere.next()).toMatchObject({ workspace: 'another-space', resource: 'environment' });
-      const newer = await client.environment.events({ spaceId, after: cursor });
-      expect(newer).toMatchObject({ status: 'ok', value: [{ type: 'change', previous: cursor, cursor: notice.version, value: { policy: { automatic: true } } }] });
-      expect(await client.environment.events({ spaceId, after: notice.version })).toMatchObject({ status: 'ok', value: [] });
+      // The notice carries no state: the tab reads the current state again.
+      expect(await client.environment.state({ spaceId })).toMatchObject({ status: 'ok', value: { policy: { automatic: true } } });
     } finally {
       watching.socket.close();
       elsewhere.socket.close();
@@ -357,21 +353,6 @@ describe('account cloud RPC without machines', () => {
     expect(await env.USER_SETTINGS.getByName(fixture.userId).getGitIdentity()).toBeNull();
   });
 
-  it('reads an empty fleet, then only the machine added after its cursor', async () => {
-    const fixture = await account();
-    const client = inspectorClient(fixture);
-    const initial = await client.machine.events({ after: null });
-    expect(initial).toMatchObject({ status: 'ok', value: [{ type: 'snapshot', previous: null, value: [] }] });
-    if (initial.status !== 'ok') throw initial.error;
-    const cursor = initial.value[0]!.cursor;
-    await env.FLEET_CATALOG.getByName(fixture.userId).putMachine({
-      id: 'first-machine', label: 'First machine', state: 'offline', rpcEndpoint: null,
-      kind: 'physical', provider: 'physical', notes: '', desiredState: 'online',
-      lifecycleRevision: 1, operationId: null, error: null,
-    });
-    expect(await client.machine.events({ after: cursor })).toMatchObject({ status: 'ok', value: [{ type: 'change', previous: cursor, value: [{ id: 'first-machine', state: 'offline' }] }] });
-  });
-
   it('keeps missing machine data from failing concurrent account queries for API clients', async () => {
     const fixture = await account(['rpc.read', 'rpc.write'], 'client');
     const content = '{"toolExecution":"sequential"}';
@@ -550,20 +531,15 @@ describe('account cloud RPC without machines', () => {
     });
   });
 
-  it('reads committed profile invalidations after a cursor without broker credentials', async () => {
+  it('reads committed inference profiles without broker credentials', async () => {
     const fixture = await account();
     const client = inspectorClient(fixture);
-    const initial = await client.inference.events({ after: null });
-    if (initial.status !== 'ok') throw initial.error;
-    const cursor = initial.value[0]!.cursor;
-    await fixture.vault.putBrowserApiKey('default', 'openai', 'never-in-events');
-    await fixture.vault.createInferenceProfile({ name: 'Streamed', sourceProfileId: null });
-    const changed = await client.inference.events({ after: cursor });
-    expect(changed).toMatchObject({ status: 'ok', value: [{ type: 'change', previous: cursor, value: { profiles: [{ id: 'default' }, { name: 'Streamed' }] } }] });
-    if (changed.status !== 'ok') throw changed.error;
-    expect(changed.value).toHaveLength(1);
-    expect(JSON.stringify(changed)).not.toContain('never-in-events');
-    expect(JSON.stringify(changed)).not.toContain('broker');
+    await fixture.vault.putBrowserApiKey('default', 'openai', 'never-in-reads');
+    await fixture.vault.createInferenceProfile({ name: 'Read back', sourceProfileId: null });
+    const listed = await client.inference.list({});
+    expect(listed).toMatchObject({ status: 'ok', value: { profiles: [{ id: 'default' }, { name: 'Read back' }] } });
+    expect(JSON.stringify(listed)).not.toContain('never-in-reads');
+    expect(JSON.stringify(listed)).not.toContain('broker');
   });
 
   it('authorizes every batch item before any mutation and rejects tampering and revocation', async () => {

@@ -89,7 +89,7 @@ describe('device grants', () => {
     expect(requiredCapability('runtime.answer', 'mutation')).toBe('session.prompt');
     expect(requiredCapability('runtime.session', 'mutation')).toBe('rpc.read');
     expect(requiredCapability('machine.destroy', 'mutation')).toBe('fleet.control');
-    expect(requiredCapability('machine.events', 'subscription')).toBe('rpc.read');
+    expect(requiredCapability('terminals.events', 'subscription')).toBe('rpc.read');
     expect(requiredCapability('devices.revoke', 'mutation')).toBe('devices.manage');
   });
 

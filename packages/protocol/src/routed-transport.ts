@@ -77,7 +77,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   const resolve = (path: string, input: unknown): ClientTransport => {
     if (path === 'project.create' || path === 'workspace.create' || path === 'workspace.retryCreate' || path === 'machine.createSandbox' ||
         path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' || path === 'environment.runChecks' || path === 'environment.runPhase' || path === 'runtime.sync' ||
-        (path.startsWith('machine.image.') && path !== 'machine.image.list' && path !== 'machine.image.events')) return provisioning;
+        (path.startsWith('machine.image.') && path !== 'machine.image.list')) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
     if (accountRpcAuthority(path) === 'cloud') return account;
     const target = rpcCallTarget(path, input);

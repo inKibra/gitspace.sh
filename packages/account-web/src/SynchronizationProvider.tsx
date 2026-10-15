@@ -5,10 +5,10 @@ import { SynchronizationOwner, type SynchronizationSource, type SynchronizedValu
 import { rpcClient } from './rpc-client.js';
 import { flushIncidentOutbox } from './incident-outbox.js';
 import { accountDirectorySource } from './account-directory-transport.js';
-import { liveSource } from './live-notices.js';
+import { liveState, useLiveChanges } from './live-notices.js';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 
-const settingsSource = liveSource([accountLiveKey('settings')], (after, signal) => rpcClient.settings.events({ after }, { signal }));
+const settingsSource = liveState('settings', [accountLiveKey('settings')], signal => rpcClient.settings.state({}, { signal }));
 
 export const SynchronizationContext = createContext<SynchronizationOwner | null>(null);
 export function useSynchronizationOwner(): SynchronizationOwner {
@@ -23,7 +23,7 @@ export function useSynchronizedResource<T>(resource: string, source: Synchroniza
   return { ...value, refetch: channel.refresh };
 }
 export function useEnvironmentSynchronization(spaceId: string) {
-  return useSynchronizedResource(`environment:${spaceId}`, liveSource([workspaceLiveKey(spaceId, 'environment')], (after, signal) => rpcClient.environment.events({ spaceId, after }, { signal })));
+  return useSynchronizedResource(`environment:${spaceId}`, liveState(`environment:${spaceId}`, [workspaceLiveKey(spaceId, 'environment')], signal => rpcClient.environment.state({ spaceId }, { signal })));
 }
 /** Event consumers see every accepted frame, including frames React batches into one render. */
 export function useSynchronizedEvents<T>(resource: string, source: SynchronizationSource<T>, consume: (event: StreamEvent<T>) => void): void {
@@ -32,11 +32,9 @@ export function useSynchronizedEvents<T>(resource: string, source: Synchronizati
   callback.current = consume;
   useEffect(() => owner.channel(resource, source).events((event) => callback.current(event)), [owner, resource]);
 }
-export function useSpaceSynchronization(spaceId: string) {
-  return useSynchronizedResource(`space:${spaceId}`, liveSource([workspaceLiveKey(spaceId, 'space')], (after, signal) => rpcClient.space.events({ spaceId, after }, { signal })));
-}
-export function useProjectSynchronization(projectId: string) {
-  return useSynchronizedResource(`project:${projectId}`, liveSource([projectLiveKey(projectId, 'project')], (after, signal) => rpcClient.project.events({ projectId, after }, { signal })));
+/** Counts the project's change notices; a consumer refreshes its own reads when the count changes. */
+export function useProjectChanges(projectId: string): number | null {
+  return useLiveChanges(projectLiveKey(projectId, 'project'));
 }
 export function useAccountDirectorySnapshot(source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource) {
   return useSynchronizedResource('account-directory', source);
@@ -60,7 +58,7 @@ export function useAccountRuntimeConfiguration() {
   return readSnapshot(snapshot, (value) => value.runtime);
 }
 export function useAccountInference() {
-  const snapshot = useSynchronizedResource('inference', liveSource([accountLiveKey('inference')], (after, signal) => rpcClient.inference.events({ after }, { signal })));
+  const snapshot = useSynchronizedResource('inference', liveState('inference', [accountLiveKey('inference')], signal => rpcClient.inference.list({}, { signal })));
   return readSnapshot(snapshot, (value) => value);
 }
 export function useAccountMachines() {
@@ -68,7 +66,7 @@ export function useAccountMachines() {
   return readSnapshot(snapshot, (value) => value.machines);
 }
 export function useAccountCloudImages() {
-  const snapshot = useSynchronizedResource('cloud-images', liveSource([accountLiveKey('cloud-images')], (after, signal) => rpcClient.machine.image.events({ after }, { signal })));
+  const snapshot = useSynchronizedResource('cloud-images', liveState('cloud-images', [accountLiveKey('cloud-images')], signal => rpcClient.machine.image.list({}, { signal })));
   return readSnapshot(snapshot, (value) => value);
 }
 export function useAccountProjects() {

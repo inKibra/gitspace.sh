@@ -22,11 +22,12 @@ import type { ExportedEnvironment, ExportedLogs, SharedEnvironment, SharedEnviro
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { LifecycleMutationSchema, LifecycleStateSchema } from '@gitspace/protocol-environment';
 import { DurableChangeLog } from './durable-stream.js';
+import { LiveChanges } from './live-changes.js';
 import { liveClientMessageSchema, liveKeyId, liveNoticeSchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice, type LiveNoticeMessage } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { AccountDirectoryProjection, DirectoryOutbox, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
 import { workspaceStatusRowSchema, type AccountDirectorySnapshot, type WorkspaceStatusRow } from '@gitspace/protocol/account-directory';
-import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
+import { streamCursorSchema } from '@gitspace/protocol-sync';
 import { activeAccount, accountAccessResponse, accountStatus } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import type { CredentialVaultDO } from './application.js';
@@ -40,8 +41,6 @@ import { z } from 'zod';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 
-/** A `project.events` change: which record to refetch, never its state. */
-export interface ProjectChange { entity: string; entityId: string | null; eventOffset: number }
 
 /** The admitted device and generation; any change to that grant ends the socket. */
 const directorySocketAttachmentSchema = z.object({
@@ -363,10 +362,6 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     });
   }
 
-  /** `project.directoryEvents`: the project list after `after`, bounded. */
-  events(after: number | null): StreamEvent<CloudProjectSummary[]>[] {
-    return this.changes.replay('projects', after, () => this.list(), false);
-  }
 
   /** A workspace's status changed: keep its one row and send it to every open tab. */
   setWorkspaceStatus(row: WorkspaceStatusRow): void {
@@ -430,7 +425,6 @@ export class UserProjectIndexDO extends DurableObject<Env> {
       this.committing = true;
       try {
         const value = mutate();
-        this.changes.append('projects', this.list());
         this.changes.append('account-directory', this.directory.snapshot(this.list()));
         return value;
       } finally { this.committing = false; }
@@ -460,7 +454,6 @@ export class UserProjectIndexDO extends DurableObject<Env> {
                 this.putWorkspaceLocation(workspace.id, project.id);
               }
             }
-            this.changes.append('projects', this.list());
           }
         }
         this.changes.append('account-directory', this.directory.snapshot(this.list()));
@@ -748,13 +741,13 @@ export class UserProjectIndexDO extends DurableObject<Env> {
 }
 
 export class ProjectAuthorityDO extends DurableObject<Env> {
-  private readonly changes: DurableChangeLog;
+  private readonly changes: LiveChanges;
   private readonly directoryOutbox: DirectoryOutbox;
   private readonly lfs: GitLfsRetention;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const notify = (notices: LiveNotice[]) => { ctx.waitUntil(notifyBrowsers(env, notices)); };
-    this.changes = new DurableChangeLog(ctx.storage, notify);
+    this.changes = new LiveChanges(notify);
     this.directoryOutbox = new DirectoryOutbox(ctx, env);
     this.lfs = new GitLfsRetention(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
@@ -987,10 +980,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     }
   }
 
-  /** `project.events`: invalidations of this project's records after `after`, bounded. */
-  events(after: number | null): StreamEvent<ProjectChange>[] {
-    return this.changes.replay(`project:${this.requireProject().id}`, after, () => ({ entity: 'snapshot', entityId: null, eventOffset: this.latestEventOffset() }), false);
-  }
   private committing = false;
   /** Workspace rows of the last committed directory publication. Only `project`/`workspace` commits write those rows,
    * so every other commit republishes (bumping the directory revision) without re-reading the whole table. */
@@ -1003,7 +992,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
         this.committing = true;
         try {
           const value = mutate();
-          this.changes.append(`project:${this.requireProject().id}`, { entity, entityId, eventOffset: this.latestEventOffset() });
+          this.changes.mark(`project:${this.requireProject().id}`);
           if (entity === 'project' || entity === 'workspace' || !this.publishedWorkspaces) this.publishedWorkspaces = this.listWorkspaces();
           this.directoryOutbox.enqueue({ source: 'project', project: this.requireProject(), workspaces: this.publishedWorkspaces });
           return value;

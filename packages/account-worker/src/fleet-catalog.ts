@@ -1,6 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DurableChangeLog } from './durable-stream.js';
-import type { StreamEvent } from '@gitspace/protocol-sync';
+import { LiveChanges } from './live-changes.js';
 import { notifyBrowsers } from './live-notices.js';
 import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
@@ -66,7 +65,7 @@ const pendingMachineDiscardSchema = z.object({
 });
 
 export class FleetCatalogDO extends DurableObject<Env> {
-  private readonly changes: DurableChangeLog;
+  private readonly changes: LiveChanges;
   private readonly directoryOutbox: DirectoryOutbox;
   private readonly imageRuns = new Map<string, { run: Promise<void>; current: boolean }>();
   private readonly provisioningRuns = new Map<string, Promise<void>>();
@@ -76,7 +75,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
   private workspaceIndexing: Promise<void> | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new DurableChangeLog(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
+    this.changes = new LiveChanges((notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS fleet_alarms(owner TEXT PRIMARY KEY, timestamp INTEGER NOT NULL)');
     this.directoryOutbox = new DirectoryOutbox(ctx, env, { set: timestamp => this.scheduleAlarm('directory', timestamp), clear: () => this.scheduleAlarm('directory', null) });
     ctx.blockConcurrencyWhile(async () => {
@@ -250,10 +249,6 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ state_json: string }>('SELECT state_json FROM cloud_images ORDER BY machine_id').toArray().map(row => cloudImageStateSchema.parse(JSON.parse(row.state_json)));
   }
 
-  /** `machine.image.events`: image states after `after`, bounded. */
-  cloudImageEvents(after: number | null): StreamEvent<CloudImageState[]>[] {
-    return this.changes.replay('cloud-images', after, () => this.listCloudImages(), false);
-  }
 
   saveCloudImage(input: CloudImageState): CloudImageState {
     if (this.hasPendingSandbox(input.machineId)) throw new Error('Finish sandbox provisioning before changing its image');
@@ -265,7 +260,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       if (state.operation) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO cloud_image_operation_ids(operation_id,machine_id) VALUES(?,?)', state.operation.id, state.machineId);
       this.ctx.storage.sql.exec('INSERT INTO cloud_images(machine_id,state_json) VALUES(?,?) ON CONFLICT(machine_id) DO UPDATE SET state_json=excluded.state_json', state.machineId, JSON.stringify(state));
-      this.changes.append('cloud-images', this.listCloudImages());
+      this.changes.mark('cloud-images');
     });
     this.changes.wake();
     this.ctx.waitUntil(this.armImageDeadlines());
@@ -719,7 +714,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
       if (input.operationId === null || this.hasPendingSandbox(input.id)) this.ctx.storage.sql.exec('DELETE FROM machine_operations WHERE machine_id=?', input.id);
       else this.ctx.storage.sql.exec('INSERT INTO machine_operations(machine_id,operation_id,deadline_at) VALUES(?,?,?) ON CONFLICT(machine_id) DO UPDATE SET operation_id=excluded.operation_id,deadline_at=excluded.deadline_at WHERE operation_id<>excluded.operation_id', input.id, input.operationId, Date.now() + MACHINE_OPERATION_LEASE_MS);
       const machines = this.listMachines();
-      this.changes.append('machines', machines);
+      this.changes.mark('machines');
       this.directoryOutbox.enqueue({ source: 'fleet', machines });
     });
     this.directoryOutbox.kick();
@@ -756,9 +751,9 @@ export class FleetCatalogDO extends DurableObject<Env> {
       const removed = this.ctx.storage.sql.exec('DELETE FROM fleet_machines WHERE machine_id = ?', machineId).rowsWritten > 0;
       if (removed) {
         const machines = this.listMachines();
-        this.changes.append('machines', machines);
+        this.changes.mark('machines');
         this.ctx.storage.sql.exec('DELETE FROM cloud_images WHERE machine_id=?', machineId);
-        this.changes.append('cloud-images', this.listCloudImages());
+        this.changes.mark('cloud-images');
         this.directoryOutbox.enqueue({ source: 'fleet', machines });
       }
       return removed;
@@ -779,10 +774,6 @@ export class FleetCatalogDO extends DurableObject<Env> {
         const value = JSON.parse(row.definition_json) as Partial<FleetMachineDefinition> & Pick<FleetMachineDefinition, 'id' | 'label' | 'state' | 'rpcEndpoint'>;
         return normalizeMachine(value);
       });
-  }
-  /** `machine.events`: fleet machines after `after`, bounded. */
-  machineEvents(after: number | null): StreamEvent<FleetMachineDefinition[]>[] {
-    return this.changes.replay('machines', after, () => this.listMachines(), false);
   }
 }
 

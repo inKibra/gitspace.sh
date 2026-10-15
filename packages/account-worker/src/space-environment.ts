@@ -2,10 +2,8 @@ import {
   EnvironmentError, emptyLifecycleState, transitionLifecycle, isLifecycleRunActive, LIFECYCLE_PREVIEW_LIMIT, LifecycleStateSchema, LifecycleRunSchema,
   type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleRunRecord, type LifecycleState,
 } from '@gitspace/protocol-environment';
-import type { StreamEvent } from '@gitspace/protocol-sync';
-import type { LiveNotice } from '@gitspace/protocol/live-notice';
 import { z } from 'zod';
-import { DurableChangeLog } from './durable-stream.js';
+import type { LiveChanges } from './live-changes.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 
 /** The workspace object's environment operations its own runtime calls in-process. */
@@ -44,10 +42,9 @@ function sharedChange(before: SharedEnvironment, after: SharedEnvironment): Shar
 /** One workspace's environment: its configuration, runs and run logs, stored in the workspace object. Shared project
  * values and approvals are passed in by the caller, which writes back the change a transition makes to them. */
 export class SpaceEnvironmentStore {
-  private readonly changes: DurableChangeLog;
   private readonly settled = new Map<string, Set<(run: LifecycleRun) => void>>();
-  constructor(private readonly storage: Pick<DurableObjectStorage, 'sql' | 'transactionSync'>, notify?: (notices: LiveNotice[]) => void) {
-    this.changes = new DurableChangeLog(storage, notify);
+  /** `changes` is the workspace object's: environment changes reach watching tabs with its other changes. */
+  constructor(private readonly storage: Pick<DurableObjectStorage, 'sql' | 'transactionSync'>, private readonly changes: LiveChanges) {
     storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS environment_state(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS lifecycle_runs(id TEXT PRIMARY KEY,scope TEXT NOT NULL,data TEXT NOT NULL);
@@ -106,7 +103,7 @@ export class SpaceEnvironmentStore {
       state.browserOriginsAvailable = true;
       state.revision += 1;
       this.persist(state);
-      this.changes.append(`environment:${spaceId}`, availableState(state));
+      this.changes.mark(`environment:${spaceId}`);
       return { state: availableState(state), shared: sharedChange(shared, { values: shared.values, approvals: state.approvals.filter((entry) => entry.scope === 'project') }) };
     });
     this.changes.wake();
@@ -120,7 +117,7 @@ export class SpaceEnvironmentStore {
       state.browserOriginsAvailable = false;
       state.revision += 1;
       this.persist(state);
-      this.changes.append(`environment:${spaceId}`, availableState(state));
+      this.changes.mark(`environment:${spaceId}`);
     });
     this.changes.wake();
   }
@@ -143,9 +140,6 @@ export class SpaceEnvironmentStore {
     return { output: page.map((row) => row.output).join(''), nextOffset: rows[LOG_PAGE_SIZE]?.offset ?? null, cursor: page.length ? page[page.length - 1]!.offset + 1 : offset };
   }
 
-  events(projectId: string, spaceId: string, after: number | null, shared: SharedEnvironment): StreamEvent<LifecycleState>[] {
-    return this.changes.replay(`environment:${spaceId}`, after, () => this.get(projectId, spaceId, shared), false);
-  }
 
   mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor, shared: SharedEnvironment): { state: LifecycleState; shared: SharedEnvironmentChange | null } {
     const ended: LifecycleRun[] = [];
@@ -169,7 +163,7 @@ export class SpaceEnvironmentStore {
         );
       }
       this.persist({ ...state, browserOrigins: stored.browserOriginsAvailable ? state.browserOrigins : stored.browserOrigins, browserOriginsAvailable: stored.browserOriginsAvailable });
-      this.changes.append(`environment:${spaceId}`, { ...state, claim: null });
+      this.changes.mark(`environment:${spaceId}`);
       return { state, shared: transition.sharedChanged ? sharedChange(shared, { values: state.values.project, approvals: state.approvals.filter((entry) => entry.scope === 'project') }) : null };
     });
     this.changes.wake();

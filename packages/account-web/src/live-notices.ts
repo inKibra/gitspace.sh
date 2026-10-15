@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { liveKeyId, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice } from '@gitspace/protocol/live-notice';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import type { SynchronizationSource } from './synchronization.js';
@@ -77,6 +78,32 @@ export async function* liveTicks(keys: readonly LiveKey[], signal: AbortSignal, 
     signal.removeEventListener('abort', notify);
     for (const stop of stops) stop();
   }
+}
+
+/** Cursors for state reads: increasing across every source, so a newer read always replaces an older one. */
+let stateCursor = 0;
+/** A resource whose current state is read again on every notice burst for `keys`; nothing is replayed. */
+export function liveState<T>(resource: string, keys: readonly LiveKey[], read: (signal: AbortSignal) => Promise<{ status: 'ok'; value: T } | { status: 'error'; error: Error }>, notices: LiveNotices = liveNotices): SynchronizationSource<T> {
+  return async function* (_after, signal) {
+    for await (const _tick of liveTicks(keys, signal, notices)) {
+      const result = await read(signal);
+      if (signal.aborted) return;
+      if (result.status === 'error') {
+        yield result;
+        return;
+      }
+      const cursor = ++stateCursor;
+      yield { status: 'ok', value: { type: 'snapshot', resource, cursor, revision: cursor, previous: null, value: result.value } };
+    }
+  };
+}
+
+/** A count of `key`'s notices (and socket reopens) since mount; `null` until the first. */
+export function useLiveChanges(key: LiveKey, notices: LiveNotices = liveNotices): number | null {
+  const [count, setCount] = useState<number | null>(null);
+  const id = liveKeyId(key);
+  useEffect(() => notices.watch(key, () => setCount(previous => (previous ?? 0) + 1)), [id, notices]);
+  return count;
 }
 
 /** A synchronized resource read with a cursor query: refetched after its cursor on every notice burst for `keys`. */
