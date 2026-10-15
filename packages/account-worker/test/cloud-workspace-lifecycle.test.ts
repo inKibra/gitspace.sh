@@ -95,7 +95,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const workspaceId = created.value.workspace.id;
     expect(created.value).toMatchObject({
       workspace: { projectId: project.id, name: 'Cloud feature', branch: 'feature/cloud', phase: 'plan', possessedBy: null, closedAt: null },
-      operation: { projectId: project.id, workspaceId, kind: 'workspace.create', state: 'succeeded', targetMachines: [], error: null },
+      operation: { projectId: project.id, workspaceId, kind: 'workspace.create', state: 'succeeded', error: null },
     });
     expect((await authority.listWorkspaces()).find(workspace => workspace.id === workspaceId)).toMatchObject({ lifecycle: 'active', sourceKind: 'base', sourceRef: 'main', sourceCommit: commit('1') });
     expect((await authority.listOperations()).find(operation => operation.workspaceId === workspaceId)?.steps.map(step => step.state)).toEqual(['succeeded', 'succeeded', 'succeeded', 'succeeded']);
@@ -282,7 +282,7 @@ describe('cloud workspace lifecycle with no machines', () => {
       steps: [{ id: 'source', state: 'succeeded' }, { id: 'repository', state: 'succeeded' }, { id: 'branch', state: 'failed', message: 'Artifacts push unavailable' }, { id: 'activate', state: 'queued' }],
     });
     const retried = await client.workspace.retryCreate({ workspaceId: definition.id });
-    expect(retried).toMatchObject({ status: 'ok', value: { workspace: { id: definition.id, branch: 'retried' }, operation: { kind: 'workspace.create', state: 'succeeded', targetMachines: [] } } });
+    expect(retried).toMatchObject({ status: 'ok', value: { workspace: { id: definition.id, branch: 'retried' }, operation: { kind: 'workspace.create', state: 'succeeded' } } });
     expect((await authority.listWorkspaces()).find(workspace => workspace.id === definition.id)).toMatchObject({ lifecycle: 'active', sourceCommit: commit('1') });
     expect(await client.workspace.retryCreate({ workspaceId: definition.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('only a failed or unfinished creation can be retried') } } });
     expect(await client.workspace.retryCreate({ workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
@@ -310,7 +310,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedRevision: 0, expectedGeneration: null })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('revision conflict') } } });
     expect(await archive()).toMatchObject({ status: 'ok', value: { id: workspaceId, lifecycle: 'archived' } });
     expect(await space.runtimeAttachments(identity)).toMatchObject([{ attachmentId: 'cache-a', state: 'detached' }]);
-    expect((await authority.listOperations()).find(operation => operation.kind === 'workspace.archive' && operation.workspaceId === workspaceId)).toMatchObject({ state: 'succeeded', targetMachines: [] });
+    expect((await authority.listOperations()).find(operation => operation.kind === 'workspace.archive' && operation.workspaceId === workspaceId)).toMatchObject({ state: 'succeeded' });
     expect(await client.space.view({ projectId: project.id, workspaceId })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, closedAt: expect.any(Date) }] } });
 
     expect(await client.workspace.restore({ spaceId: workspaceId, expectedGeneration: 3 })).toMatchObject({ status: 'error' });

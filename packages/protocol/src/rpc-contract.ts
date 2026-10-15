@@ -182,7 +182,6 @@ export const ProjectOperationViewCodec = wire.object({
   workspaceId: wire.nullable(wire.string),
   kind: wire.string,
   state: wire.enum(['queued', 'claimed', 'running', 'blocked', 'failed', 'succeeded', 'canceled']),
-  targetMachines: wire.array(wire.string),
   error: wire.nullable(wire.string),
   revision: wire.number,
   createdAt: wire.date,

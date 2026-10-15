@@ -19,7 +19,7 @@ export function workspaceLifecycleCloudProcedures(env: Env, userId: string) {
   const projectView = (project: CloudProjectSummary) => ({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null });
   const operationView = (operation: CloudProjectOperation) => ({
     id: operation.id, projectId: operation.projectId, workspaceId: operation.workspaceId, kind: operation.kind, state: operation.state,
-    targetMachines: operation.targetMachines, error: operation.error, revision: operation.revision,
+    error: operation.error, revision: operation.revision,
     createdAt: new Date(operation.createdAt), updatedAt: new Date(operation.updatedAt),
   });
   const workspaceView = async (definition: CloudWorkspaceDefinition) => {

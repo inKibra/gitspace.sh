@@ -107,10 +107,7 @@ interface OperationRow extends Record<string, SqlStorageValue> {
   workspace_id: string | null;
   kind: string;
   state: ProjectOperationState;
-  target_machines_json: string;
   steps_json: string;
-  claim_token: string | null;
-  lease_expires_at: string | null;
   error: string | null;
   revision: number;
   created_by: string;
@@ -247,10 +244,7 @@ function projectOperation(row: OperationRow): CloudProjectOperation {
     workspaceId: row.workspace_id,
     kind: row.kind,
     state: row.state,
-    targetMachines: JSON.parse(row.target_machines_json) as string[],
     steps: JSON.parse(row.steps_json) as CloudProjectOperation['steps'],
-    claimToken: row.claim_token,
-    leaseExpiresAt: row.lease_expires_at,
     error: row.error,
     revision: row.revision,
     createdBy: row.created_by,
@@ -757,10 +751,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
           workspace_id TEXT,
           kind TEXT NOT NULL,
           state TEXT NOT NULL,
-          target_machines_json TEXT NOT NULL,
           steps_json TEXT NOT NULL,
-          claim_token TEXT,
-          lease_expires_at TEXT,
           error TEXT,
           revision INTEGER NOT NULL,
           created_by TEXT NOT NULL,
@@ -851,6 +842,9 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
           PRIMARY KEY(project_id, connection_id)
         );
       `);
+      // One-time: operations no longer record target machines, a claim token or a lease.
+      const operationColumns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(operations)').toArray().map(column => column.name);
+      for (const column of ['target_machines_json', 'claim_token', 'lease_expires_at']) if (operationColumns.includes(column)) this.ctx.storage.sql.exec(`ALTER TABLE operations DROP COLUMN ${column}`);
       // Conversation numbers belong to a space. Older authorities enforced a
       // project-wide UNIQUE column, whose SQLite autoindex cannot be dropped.
       const sessionIndexes = this.ctx.storage.sql.exec<{ name: string; unique: number }>('PRAGMA index_list(canonical_sessions)').toArray();
@@ -1379,7 +1373,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     projectId: string;
     workspaceId: string | null;
     kind: string;
-    targetMachines: string[];
     steps: Array<{ id: string; label: string }>;
     createdBy: string;
   }): CloudProjectOperation {
@@ -1393,16 +1386,13 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       updatedAt: now,
     }));
     this.ctx.storage.sql.exec(
-      'INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO operations(operation_id,project_id,workspace_id,kind,state,steps_json,error,revision,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
       id,
       input.projectId,
       input.workspaceId,
       input.kind,
       'queued',
-      JSON.stringify(input.targetMachines),
       JSON.stringify(steps),
-      null,
-      null,
       null,
       1,
       input.createdBy,
@@ -1432,31 +1422,20 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     ).toArray().map(projectOperation);
   }
 
+  /** One request owns an operation and records its progress; the newest write wins. */
   updateOperation(input: {
     id: string;
-    expectedRevision: number;
     state: ProjectOperationState;
     steps: CloudProjectOperation['steps'];
     error: string | null;
-    claimToken?: string | null;
-    leaseExpiresAt?: string | null;
   }): CloudProjectOperation {
     return this.commit('operation', input.id, () => {
-    const current = this.getOperation(input.id);
-    if (current.revision !== input.expectedRevision) {
-      throw new Error(`Operation revision conflict: expected ${input.expectedRevision}, actual ${current.revision}`);
-    }
-    const now = new Date().toISOString();
     this.ctx.storage.sql.exec(
-      `UPDATE operations SET
-         state=?,steps_json=?,error=?,claim_token=?,lease_expires_at=?,revision=revision+1,updated_at=?
-       WHERE operation_id=?`,
+      'UPDATE operations SET state=?,steps_json=?,error=?,revision=revision+1,updated_at=? WHERE operation_id=?',
       input.state,
       JSON.stringify(input.steps),
       input.error,
-      input.claimToken ?? current.claimToken,
-      input.leaseExpiresAt ?? current.leaseExpiresAt,
-      now,
+      new Date().toISOString(),
       input.id,
     );
     return this.getOperation(input.id);

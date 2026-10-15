@@ -764,7 +764,7 @@ describe('cloud projects and workspace relations with no machines', () => {
     if (created.status === 'error') throw created.error;
     expect(created.value).toMatchObject({
       project: { name: 'Pantry tracker', lifecycle: 'active', repositoryReference: null, baseBranch: 'main' },
-      operation: { kind: 'project.create', state: 'succeeded', targetMachines: [] },
+      operation: { kind: 'project.create', state: 'succeeded' },
     });
     const projectId = created.value.project.id;
     expect(projectId).toMatch(/^pantry-tracker-[0-9a-f]{8}$/u);
@@ -803,7 +803,7 @@ describe('cloud projects and workspace relations with no machines', () => {
     );
     expect(await client.project.create({ name: 'Public', baseBranch: null, repositoryUrl: 'example/public' })).toMatchObject({ status: 'ok', value: {
       project: { repositoryReference: 'https://github.com/example/public.git', baseBranch: 'trunk', lifecycle: 'active' },
-      operation: { kind: 'project.import', state: 'succeeded', targetMachines: [] },
+      operation: { kind: 'project.import', state: 'succeeded' },
     } });
     expect(await client.project.create({ name: 'Private', baseBranch: null, repositoryUrl: 'git@github.com:example/private.git' }))
       .toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Enter its base branch') } } });

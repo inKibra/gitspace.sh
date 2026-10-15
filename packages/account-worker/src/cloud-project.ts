@@ -58,14 +58,14 @@ export async function createCloudProject(env: Env, userId: string, input: { name
   if (provisioning.lifecycle !== 'provisioning' || provisioning.revision !== 1) throw new Error(`Project ${projectId} already exists`);
   try {
     const created = await authority.createOperation({
-      projectId, workspaceId: null, kind: repositoryReference ? 'project.import' : 'project.create', targetMachines: [],
+      projectId, workspaceId: null, kind: repositoryReference ? 'project.import' : 'project.create',
       steps: [{ id: 'project', label: repositoryReference ? 'Record repository' : 'Create project' }], createdBy: 'account',
     });
     const base = await authority.ensureBaseWorkspace({ userId, projectId });
     await index.putWorkspaceLocation(projectId, projectId);
     const finishedAt = new Date().toISOString();
     const operation = await authority.updateOperation({
-      id: created.id, expectedRevision: created.revision, state: 'succeeded', error: null,
+      id: created.id, state: 'succeeded', error: null,
       steps: created.steps.map(step => ({ ...step, state: 'succeeded', updatedAt: finishedAt })),
     });
     const active = await authority.setProjectLifecycle(provisioning.revision, 'active');

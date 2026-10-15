@@ -7,13 +7,12 @@ import { DEFAULT_INFERENCE_PROFILE_ID, inferenceSettingMetadata } from '@gitspac
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
-import type { CloudProjectOperation } from '@gitspace/protocol/project-authority';
 import type { MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type ContextType, type ReactNode } from 'react';
 import { ResultRpcProvider, useResultMutation, useResultQuery, useResultRuntime } from 'result-rpc/react';
-import { CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, ProjectCreationNotice, type GitSpaceShellProps } from './GitSpaceShell.js';
+import { CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, type GitSpaceShellProps } from './GitSpaceShell.js';
 import { AccountWorkPages } from './AccountWorkPages.js';
 import { appUpdate, rpcClient } from './rpc-client.js';
 import { currentDevice, DEVICE_REJECTED_EVENT, deviceRejected, setCurrentDevice } from './device-session.js';
@@ -439,8 +438,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
     refresh: refreshInspection,
   }), [projectValues, directory, acceptRuntime, projects.state]);
   const lfsTransition = useLfsTransition();
-  const [createdProjectMachines, setCreatedProjectMachines] = useState<Readonly<CloudProjectOperation['targetMachines']> | null>(null);
-  const actions = useAccountWorkActions(accountDirectory, lfsTransition.confirm, setCreatedProjectMachines);
+  const actions = useAccountWorkActions(accountDirectory, lfsTransition.confirm);
   const runSidebarAction = async (operation: () => void | Promise<void>): Promise<void> => {
     setSidebarActionError(null);
     try { await operation(); }
@@ -472,7 +470,6 @@ function AccountFrame({ children }: { children: ReactNode }) {
         {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
         {projects.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>{rpcErrorMessage(projects.error, 'Load project directory')}</span><Button variant="ghost" size="compact" onClick={() => void projects.refetch()}>Retry</Button></div> : null}
         {sidebarActionError ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>Workspace action: {sidebarActionError}</span><Button variant="ghost" size="compact" onClick={() => setSidebarActionError(null)}>Dismiss</Button></div> : null}
-        {createdProjectMachines ? <ProjectCreationNotice targetMachines={createdProjectMachines} onDismiss={() => setCreatedProjectMachines(null)} /> : null}
         {children}
         {lfsTransition.dialog}
       </SidebarInset>
@@ -1122,7 +1119,7 @@ const accountSecretsApi: Omit<ProjectSecretsProps, 'projects'> = {
   deleteValue: async (target, name) => { await configurationResult(rpcClient.configuration.values.delete({ ...target, name })); },
 };
 
-function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDirectoryContext>>, confirmLfs: ConfirmLfsTransition, onProjectCreated: (targetMachines: Readonly<CloudProjectOperation['targetMachines']>) => void): AccountWorkActions {
+function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDirectoryContext>>, confirmLfs: ConfirmLfsTransition): AccountWorkActions {
   const inspectTarget = async (spaceId: string): Promise<InspectorView> => {
     const project = account.projects.find((candidate) => candidate.id === spaceId || account.directory[candidate.id]?.workspaces.some((workspace) => workspace.id === spaceId));
     if (!project) throw new Error('This workspace is no longer in the account directory. Refresh before retrying.');
@@ -1148,7 +1145,6 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
   const actions = {
     onCreateProject: async (input) => {
       const result = await mutate(rpcClient.project.create(input));
-      onProjectCreated(result.operation.targetMachines);
       selectInspection(result.project.id, null);
     },
     onCreateWorkspace: async (input) => {

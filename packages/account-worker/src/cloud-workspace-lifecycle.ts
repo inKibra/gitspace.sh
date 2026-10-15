@@ -92,7 +92,7 @@ function operationProgress(authority: ProjectAuthority, created: CloudProjectOpe
   const write = async (failure: string | null) => {
     const now = new Date().toISOString();
     operation = await authority.updateOperation({
-      id: operation.id, expectedRevision: operation.revision, error: failure,
+      id: operation.id, error: failure,
       state: failure !== null ? 'failed' : completed >= operation.steps.length ? 'succeeded' : 'running',
       steps: operation.steps.map((step, index) => ({
         ...step, updatedAt: now, message: index === completed ? failure : null,
@@ -114,7 +114,7 @@ function operationProgress(authority: ProjectAuthority, created: CloudProjectOpe
 /** Runs a lifecycle change as a recorded operation with one step per label. */
 async function runOperation<T>(authority: ProjectAuthority, input: { projectId: string; workspaceId: string | null; kind: string; labels: readonly string[] }, run: (advance: () => Promise<unknown>) => Promise<T>): Promise<T> {
   const progress = operationProgress(authority, await authority.createOperation({
-    projectId: input.projectId, workspaceId: input.workspaceId, kind: input.kind, targetMachines: [],
+    projectId: input.projectId, workspaceId: input.workspaceId, kind: input.kind,
     steps: input.labels.map((label, index) => ({ id: `step-${index + 1}`, label })), createdBy: 'account',
   }));
   await progress.start(0);
@@ -247,7 +247,7 @@ export async function createCloudWorkspace(env: Env, userId: string, input: Clou
     const related = await authority.setWorkspaceRelations(workspaceId, { dependsOn: dependencies.map(dependency => dependency.id), relatedTo: [], stackedOn: sourceWorkspace?.id ?? null });
     if (related.status === 'error') throw new Error(related.failure.message);
   }
-  const operation = await authority.createOperation({ projectId: project.id, workspaceId, kind: 'workspace.create', targetMachines: [], steps: WORKSPACE_CREATE_STEPS, createdBy: 'account' });
+  const operation = await authority.createOperation({ projectId: project.id, workspaceId, kind: 'workspace.create', steps: WORKSPACE_CREATE_STEPS, createdBy: 'account' });
   return provisionWorkspace(authority, env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), project, code, definition, source, operation);
 }
 
@@ -270,7 +270,7 @@ export async function retryCloudWorkspaceCreation(env: Env, userId: string, work
     source = { sourceRef: definition.sourceRef, sourceCommit: definition.sourceCommit, repository: artifactsProjectRepository(project.id), checkpoint: null };
   }
   const provisioning = await authority.putWorkspace(revise(definition, { lifecycle: 'provisioning', sourceCommit: source.sourceCommit }));
-  const operation = await authority.createOperation({ projectId: project.id, workspaceId, kind: 'workspace.create', targetMachines: [], steps: WORKSPACE_CREATE_STEPS, createdBy: 'account' });
+  const operation = await authority.createOperation({ projectId: project.id, workspaceId, kind: 'workspace.create', steps: WORKSPACE_CREATE_STEPS, createdBy: 'account' });
   return provisionWorkspace(authority, env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), project, code, provisioning, source, operation);
 }
 

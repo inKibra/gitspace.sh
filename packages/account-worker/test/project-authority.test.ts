@@ -232,21 +232,17 @@ describe('ProjectAuthorityDO', () => {
       projectId: 'project-b',
       workspaceId: null,
       kind: 'project.create',
-      targetMachines: ['machine-a'],
       steps: [{ id: 'materialize', label: 'Materialize project' }],
       createdBy: 'machine-a',
     }));
     expect(operation).toMatchObject({ state: 'queued', revision: 1, steps: [{ state: 'queued' }] });
     const running = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.updateOperation({
       id: operation.id,
-      expectedRevision: 1,
       state: 'running',
       steps: operation.steps.map((step) => ({ ...step, state: 'running' as const })),
       error: null,
-      claimToken: 'claim-a',
-      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
     }));
-    expect(running).toMatchObject({ state: 'running', revision: 2, claimToken: 'claim-a' });
+    expect(running).toMatchObject({ state: 'running', revision: 2 });
 
     const first = projectEventSchema.parse(await (await stub.appendEvent({
       eventId: 'project-created',
