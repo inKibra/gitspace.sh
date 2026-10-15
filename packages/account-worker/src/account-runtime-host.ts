@@ -9,7 +9,7 @@ import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
 import { setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
-import { readWorkspaceMetadata, storeWorkspaceStatus } from './workspace-metadata.js';
+import { readSourceCheckpoint, readWorkspaceMetadata, storeWorkspaceStatus } from './workspace-metadata.js';
 import { notifyMachines } from './machine-notices.js';
 import { notifyBrowsers } from './live-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
@@ -106,7 +106,7 @@ export async function createAccountWorkspaceRuntime(
     },
     initialCheckpoint: async () => {
       const branchRef = await ref();
-      return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length));
+      return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length), readSourceCheckpoint(ctx.storage));
     },
     settings,
     retainedRules: createRuntimeRuleServices({ code, repository, ref, judge, async matchAst(conversationId, content, paths, patterns) {

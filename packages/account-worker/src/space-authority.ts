@@ -6,7 +6,7 @@ import type { LiveNotice } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
-import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
@@ -20,7 +20,7 @@ import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, Runti
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
 import { notifyMachines } from './machine-notices.js';
-import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceStatus, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
+import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceStatus, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
 import { z } from 'zod';
 import { normalizeRemoteRepositoryUrl, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle, type WorkspaceLifecycle } from '@gitspace/protocol';
 import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
@@ -203,9 +203,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return authorizeWorkspaceRuntime(await this.metadata(identity), identity, write);
   }
 
-  /** Creation seeds the workspace with the definition it starts from. Idempotent: an older definition or project
-   * state never replaces a newer one. */
-  seedWorkspace(workspace: CloudWorkspaceDefinition, project: Pick<CloudProjectSummary, 'id' | 'lifecycle' | 'revision'>): WorkspaceMetadata {
+  /** Creation seeds the workspace with the definition it starts from, and with a source workspace's checkpoint when it
+   * starts from one. Idempotent: an older definition or project state never replaces a newer one. */
+  seedWorkspace(workspace: CloudWorkspaceDefinition, project: Pick<CloudProjectSummary, 'id' | 'lifecycle' | 'revision'>, sourceCheckpoint: RuntimeGitCheckpoint | null = null): WorkspaceMetadata {
+    if (sourceCheckpoint) writeSourceCheckpoint(this.ctx.storage, sourceCheckpoint);
     return writeWorkspaceMetadata(this.ctx.storage, adoptWorkspaceMetadata(readWorkspaceMetadata(this.ctx.storage), workspace, project));
   }
 

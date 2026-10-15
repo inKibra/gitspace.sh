@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import type { CloudProjectOperation, CloudProjectSummary, CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { cloudResourceId, normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
 import type { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
-import type { RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import type { RuntimeGitCheckpoint, RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { ensureProjectCodeRepository } from './account-runtime-host.js';
@@ -46,6 +46,8 @@ interface ResolvedSource {
   sourceCommit: string | null;
   /** The repository the workspace forks; it holds `sourceCommit`. */
   repository: string;
+  /** A source workspace's whole checkpoint, uncommitted edits included; the new workspace starts from it. */
+  checkpoint: RuntimeGitCheckpoint | null;
 }
 
 /** A dependency without a phase (one written before phases existed) is at the first phase. */
@@ -130,16 +132,17 @@ async function runOperation<T>(authority: ProjectAuthority, input: { projectId: 
 async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore, project: CloudProjectSummary, sourceWorkspace: CloudWorkspaceDefinition | null, input: Pick<CloudWorkspaceRequest, 'sourceKind' | 'sourceRef'>): Promise<ResolvedSource> {
   if (sourceWorkspace) {
     const sourceRepository = artifactsWorkspaceRepository(sourceWorkspace.id);
-    // The source workspace's committed HEAD as its runtime last checkpointed it; its own repository holds that commit.
-    // A legacy workspace whose migration is staged but not activated has no runtime yet; its uploaded repository
-    // already holds the verified closed branch, which a new workspace may start from without touching the migration.
-    const headCommit = await env.SPACE_AUTHORITY.getByName(`${userId}:${sourceWorkspace.id}`).runtimeRepositoryCheckpoint({ projectId: project.id, workspaceId: sourceWorkspace.id })
-      .then(checkpoint => checkpoint.headCommit, async (error: unknown) => {
+    // The source workspace's checkpoint as its runtime holds it, uncommitted edits included; its own repository holds
+    // those commits. A legacy workspace whose migration is staged but not activated has no runtime yet; its uploaded
+    // repository already holds the verified closed branch, which a new workspace may start from.
+    const checkpoint = await env.SPACE_AUTHORITY.getByName(`${userId}:${sourceWorkspace.id}`).runtimeRepositoryCheckpoint({ projectId: project.id, workspaceId: sourceWorkspace.id })
+      .catch((error: unknown) => {
         if (!(error instanceof Error) || !error.message.startsWith('Legacy migration is staged but not activated')) throw error;
-        return code.resolveRef(sourceRepository, `refs/heads/${sourceWorkspace.branch}`);
+        return null;
       });
+    const headCommit = checkpoint ? checkpoint.headCommit : await code.resolveRef(sourceRepository, `refs/heads/${sourceWorkspace.branch}`);
     if (!headCommit) throw new Error(`Source workspace ${sourceWorkspace.name} has no commit to start from yet`);
-    return { sourceRef: sourceWorkspace.id, sourceCommit: headCommit, repository: sourceRepository };
+    return { sourceRef: sourceWorkspace.id, sourceCommit: headCommit, repository: sourceRepository, checkpoint };
   }
   const repository = artifactsProjectRepository(project.id);
   await ensureProjectCodeRepository(code, project);
@@ -147,7 +150,7 @@ async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore,
     case 'base': {
       const commit = await code.resolveRef(repository, project.baseBranch === 'HEAD' ? 'HEAD' : `refs/heads/${project.baseBranch}`);
       if (commit === null && await code.resolveRef(repository, 'HEAD') !== null) throw new Error(`Base branch ${project.baseBranch} does not exist in the project repository`);
-      return { sourceRef: project.baseBranch, sourceCommit: commit, repository };
+      return { sourceRef: project.baseBranch, sourceCommit: commit, repository, checkpoint: null };
     }
     case 'branch': {
       // The cloud repository is the project's origin: `origin/` and remote-tracking forms name its branches.
@@ -156,12 +159,12 @@ async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore,
       const commit = await code.resolveRef(repository, `refs/heads/${branch}`)
         ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/heads/${branch}`) : null);
       if (commit === null) throw new Error(`Branch ${branch} does not exist in the project repository`);
-      return { sourceRef: branch, sourceCommit: commit, repository };
+      return { sourceRef: branch, sourceCommit: commit, repository, checkpoint: null };
     }
     case 'commit': {
       if (!/^[0-9a-f]{40}$/u.test(input.sourceRef)) throw new Error('Enter the full 40-character commit ID');
       if (!await code.readCommit(repository, input.sourceRef)) throw new Error(`Commit ${input.sourceRef} does not exist in the project repository`);
-      return { sourceRef: input.sourceRef, sourceCommit: input.sourceRef, repository };
+      return { sourceRef: input.sourceRef, sourceCommit: input.sourceRef, repository, checkpoint: null };
     }
     case 'tag': {
       const tag = input.sourceRef.replace(/^refs\/tags\//u, '');
@@ -169,14 +172,14 @@ async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore,
       const commit = await code.resolveAdvertisedRef(repository, `refs/tags/${tag}`)
         ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/tags/${tag}`) : null);
       if (commit === null) throw new Error(`Tag ${tag} does not exist in the project repository`);
-      return { sourceRef: tag, sourceCommit: commit, repository };
+      return { sourceRef: tag, sourceCommit: commit, repository, checkpoint: null };
     }
     case 'pull-request': {
       if (!/^[1-9][0-9]*$/u.test(input.sourceRef)) throw new Error('Pull request source must be a positive pull request number');
       const commit = await code.resolveAdvertisedRef(repository, `refs/pull/${input.sourceRef}/head`)
         ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/pull/${input.sourceRef}/head`) : null);
       if (commit === null) throw new Error(`Pull request #${input.sourceRef} has no head in the project repository`);
-      return { sourceRef: input.sourceRef, sourceCommit: commit, repository };
+      return { sourceRef: input.sourceRef, sourceCommit: commit, repository, checkpoint: null };
     }
     case 'workspace': throw new Error(`Source workspace ${input.sourceRef} does not exist`);
   }
@@ -192,17 +195,17 @@ function findSourceWorkspace(worktrees: readonly CloudWorkspaceDefinition[], inp
 
 /** Runs creation from the repository step: fork, branch at the source commit, activate. Activation seeds the workspace
  * object with its definition, so it never reads its project to learn what it is. */
-async function provisionWorkspace(authority: ProjectAuthority, space: SpaceAuthority, project: CloudProjectSummary, code: ArtifactsCodeStore, definition: CloudWorkspaceDefinition, sourceRepository: string, created: CloudProjectOperation): Promise<{ workspace: CloudWorkspaceDefinition; operation: CloudProjectOperation }> {
+async function provisionWorkspace(authority: ProjectAuthority, space: SpaceAuthority, project: CloudProjectSummary, code: ArtifactsCodeStore, definition: CloudWorkspaceDefinition, source: ResolvedSource, created: CloudProjectOperation): Promise<{ workspace: CloudWorkspaceDefinition; operation: CloudProjectOperation }> {
   const progress = operationProgress(authority, created);
   try {
     await progress.start(1);
-    await code.forkWorkspace(definition.projectId, definition.id, sourceRepository);
+    await code.forkWorkspace(definition.projectId, definition.id, source.repository);
     await progress.advance();
     // A fork can carry a same-named branch from its source; the workspace branch starts at its own source commit.
     if (definition.sourceCommit !== null) await code.setBranch(artifactsWorkspaceRepository(definition.id), definition.branch, definition.sourceCommit);
     await progress.advance();
     const workspace = await authority.putWorkspace(revise(definition, { lifecycle: 'active' }));
-    await space.seedWorkspace(workspace, project);
+    await space.seedWorkspace(workspace, project, source.checkpoint);
     return { workspace, operation: await progress.advance() };
   } catch (error) {
     // Completed steps stay in place; Retry resumes, Delete discards.
@@ -245,11 +248,12 @@ export async function createCloudWorkspace(env: Env, userId: string, input: Clou
     if (related.status === 'error') throw new Error(related.failure.message);
   }
   const operation = await authority.createOperation({ projectId: project.id, workspaceId, kind: 'workspace.create', targetMachines: [], steps: WORKSPACE_CREATE_STEPS, createdBy: 'account' });
-  return provisionWorkspace(authority, env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), project, code, definition, source.repository, operation);
+  return provisionWorkspace(authority, env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), project, code, definition, source, operation);
 }
 
-/** Resumes a failed or interrupted creation. A recorded source commit is immutable and reused; only a definition
- * written before its source resolved resolves it now. */
+/** Resumes a failed or interrupted creation. A recorded source commit is reused, except that a workspace source is
+ * read again so the retry starts from that workspace's current state; a definition written before its source
+ * resolved resolves it now. */
 export async function retryCloudWorkspaceCreation(env: Env, userId: string, workspaceId: string): Promise<{ workspace: CloudWorkspaceDefinition; operation: CloudProjectOperation }> {
   const { authority, definition } = await requireWorktree(env, userId, workspaceId);
   if (definition.lifecycle !== 'failed' && definition.lifecycle !== 'provisioning') {
@@ -260,15 +264,14 @@ export async function retryCloudWorkspaceCreation(env: Env, userId: string, work
   const sourceWorkspace = findSourceWorkspace(worktrees, definition);
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   let source: ResolvedSource;
-  if (definition.sourceCommit === null) source = await resolveSource(env, userId, code, project, sourceWorkspace, definition);
-  else if (sourceWorkspace) source = { sourceRef: definition.sourceRef, sourceCommit: definition.sourceCommit, repository: artifactsWorkspaceRepository(sourceWorkspace.id) };
+  if (definition.sourceCommit === null || sourceWorkspace) source = await resolveSource(env, userId, code, project, sourceWorkspace, definition);
   else {
     await ensureProjectCodeRepository(code, project);
-    source = { sourceRef: definition.sourceRef, sourceCommit: definition.sourceCommit, repository: artifactsProjectRepository(project.id) };
+    source = { sourceRef: definition.sourceRef, sourceCommit: definition.sourceCommit, repository: artifactsProjectRepository(project.id), checkpoint: null };
   }
   const provisioning = await authority.putWorkspace(revise(definition, { lifecycle: 'provisioning', sourceCommit: source.sourceCommit }));
   const operation = await authority.createOperation({ projectId: project.id, workspaceId, kind: 'workspace.create', targetMachines: [], steps: WORKSPACE_CREATE_STEPS, createdBy: 'account' });
-  return provisionWorkspace(authority, env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), project, code, provisioning, source.repository, operation);
+  return provisionWorkspace(authority, env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), project, code, provisioning, source, operation);
 }
 
 /** A legacy space held open by a machine is the only placement that can fence a cloud workspace lifecycle change. */
@@ -385,9 +388,8 @@ export async function setCloudWorkspacePhase(env: Env, userId: string, identity:
 }
 
 /** The agent's `space_workspace` changes. `create` adds a workspace to the agent's project with its first instruction
- * records; the others act on the agent's own workspace. */
+ * records; the others act on `workspaceId`, or the agent's own workspace, within the agent's project. */
 export async function changeAgentWorkspace(env: Env, identity: RuntimeIdentity, request: z.infer<typeof RuntimeWorkspaceMutationArgumentsSchema>): Promise<unknown> {
-  if (request.workspaceId !== undefined && request.workspaceId !== identity.workspaceId) throw new Error('Workspace target is outside this agent workspace');
   const userId = env.ACCOUNT_ID;
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${identity.projectId}`);
   if (request.method === 'create') {
@@ -415,7 +417,7 @@ export async function changeAgentWorkspace(env: Env, identity: RuntimeIdentity, 
     }
   }
   const workspaces = await authority.listWorkspaces();
-  const definition = workspaces.find(workspace => workspace.id === identity.workspaceId && workspace.kind === 'worktree');
+  const definition = workspaces.find(workspace => workspace.id === (request.workspaceId ?? identity.workspaceId) && workspace.kind === 'worktree');
   if (!definition) throw new Error('Workspace changes require a workspace in the current project');
   switch (request.method) {
     case 'restore': return restoreCloudWorkspace(env, userId, { spaceId: definition.id, expectedGeneration: request.expectedGeneration });

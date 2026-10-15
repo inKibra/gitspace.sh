@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { cloudWorkspaceDefinitionSchema, projectLifecycleSchema, workspaceLifecycleSchema, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle } from '@gitspace/protocol';
-import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { WorkspaceStatusSummarySchema, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 
 /** What a workspace object knows about itself: its identity, lifecycle, branch and phase, and the project lifecycle its
@@ -24,6 +24,17 @@ export type WorkspaceMetadata = z.infer<typeof WorkspaceMetadataSchema>;
 export function createWorkspaceMetadataTables(storage: DurableObjectStorage): void {
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_metadata(id INTEGER PRIMARY KEY CHECK (id = 1), record TEXT NOT NULL)');
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_status(id INTEGER PRIMARY KEY CHECK (id = 1), summary TEXT NOT NULL)');
+  storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_source_checkpoint(id INTEGER PRIMARY KEY CHECK (id = 1), checkpoint TEXT NOT NULL)');
+}
+
+/** A workspace created from another workspace starts from that workspace's whole checkpoint, uncommitted edits included. */
+export function writeSourceCheckpoint(storage: DurableObjectStorage, checkpoint: RuntimeGitCheckpoint): void {
+  storage.sql.exec('INSERT INTO workspace_source_checkpoint(id,checkpoint) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET checkpoint=excluded.checkpoint', JSON.stringify(RuntimeGitCheckpointSchema.parse(checkpoint)));
+}
+
+export function readSourceCheckpoint(storage: DurableObjectStorage): RuntimeGitCheckpoint | null {
+  const row = storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM workspace_source_checkpoint WHERE id=1').toArray()[0];
+  return row ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)) : null;
 }
 
 export function readWorkspaceMetadata(storage: DurableObjectStorage): WorkspaceMetadata | null {

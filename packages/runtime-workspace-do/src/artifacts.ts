@@ -124,10 +124,21 @@ export class ArtifactsCodeStore {
     finally { await disposeArtifactsRepository(repo); }
   }
 
-  async initialCheckpoint(repository: string, workspaceId: string, branch: string) {
+  /** The first checkpoint of a workspace: its branch tip, or `source`, another workspace's checkpoint (uncommitted
+   * edits included) whose objects its fork holds. */
+  async initialCheckpoint(repository: string, workspaceId: string, branch: string, source: RuntimeGitCheckpoint | null = null) {
     const commit = await this.resolveRef(repository, `refs/heads/${branch}`);
     const repo = await this.binding.get(repositorySchema.parse(repository));
     try {
+      if (source) {
+        if (!await repo.readCommit(source.worktreeCommit)) throw new Error(`The source workspace's working copy ${source.worktreeCommit} is not in ${repository}`);
+        const checkpointRef = `refs/gitspace/spaces/${workspaceId}/checkpoints`;
+        const info = await repo.info();
+        const token = await repo.createToken('write', 60);
+        try { await publishRef({ remote: info.remote, token: token.plaintext, ref: checkpointRef, previous: null, commit: source.worktreeCommit }); }
+        finally { await repo.revokeToken(token.id); }
+        return { ...source, checkpointRef, branch };
+      }
       if (commit === null) {
         // A missing destination branch in a populated fork is not an empty import.
         // HEAD is represented by omitting ref, not by the literal string "HEAD".
