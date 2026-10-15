@@ -10,7 +10,7 @@ import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineD
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
-import { isUpstreamOAuthProvider, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
+import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
 import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
 import type { CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
@@ -225,7 +225,7 @@ const SignedInAccountSchema = z.object({ type: z.enum(['api_key', 'oauth']), ide
 function credentialAccount(credential: StoredVaultCredential): z.infer<typeof SignedInAccountSchema> {
   return credential.type === 'api_key'
     ? { type: 'api_key', identity: null, email: null }
-    : { type: 'oauth', identity: credentialIdentity(credential), email: credential.email ?? null };
+    : { type: 'oauth', identity: credentialIdentity(credential), email: credential.email ?? tokenEmail(credential.access) ?? null };
 }
 
 function credentialIdentity(credential: StoredVaultCredential): string | null {
@@ -1371,8 +1371,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
     const rows = this.ctx.storage.sql.exec<ProfileCredentialRow & { account_json: string | null }>('SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at, account_json FROM inference_credentials WHERE profile_id = ? ORDER BY rowid', profileId).toArray();
     const accounts = await Promise.all(rows.map(async row => {
       let account = row.account_json === null ? null : SignedInAccountSchema.parse(JSON.parse(row.account_json));
-      if (!account) {
-        // A credential stored before accounts were recorded is opened once to record its account.
+      // A credential stored before accounts were recorded, or recorded without a name, is opened to record its account.
+      if (!account || (account.type === 'oauth' && account.email === null && account.identity === null)) {
         account = credentialAccount(await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key)));
         this.ctx.storage.sql.exec('UPDATE inference_credentials SET account_json = ? WHERE rowid = ? AND revision = ?', JSON.stringify(account), row.row_id, row.revision);
       }
@@ -1390,7 +1390,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
         hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'openai', 'cursor', 'google-antigravity'].includes(provider),
-        accounts: owned.map(account => ({ id: account.id, type: account.type, label: account.identity ?? (account.type === 'api_key' ? 'API key' : `Account ${account.id}`), email: account.email, disabled: account.disabled })) };
+        accounts: owned.map(account => ({ id: account.id, type: account.type, label: account.email ?? account.identity ?? (account.type === 'api_key' ? 'API key' : `Account ${account.id}`), email: account.email, disabled: account.disabled })) };
     });
   }
 

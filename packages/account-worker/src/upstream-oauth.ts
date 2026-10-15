@@ -33,7 +33,7 @@ function upstreamCredential(credential: StoredOAuthCredential): OAuthCredential 
 }
 
 /** Best-effort account label from a JWT access token; Pi's flows don't return one. */
-function tokenEmail(access: string): string | undefined {
+export function tokenEmail(access: string): string | undefined {
   const payload = access.split('.')[1];
   if (!payload) return undefined;
   try {
