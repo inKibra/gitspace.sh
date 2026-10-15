@@ -578,7 +578,13 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (input.tool === 'space_workspace') {
         const args = RuntimeWorkspaceArgumentsSchema.parse(input.args);
         switch (args.method) {
-          case 'get': case 'current': return completed(input, identity.workspaceId === baseWorkspaceId ? await authority.getProject() : (await source()).workspace);
+          case 'get': case 'current': {
+            if (args.workspaceId === undefined || args.workspaceId === identity.workspaceId) return completed(input, identity.workspaceId === baseWorkspaceId ? await authority.getProject() : (await source()).workspace);
+            // Another workspace in this project, with the relations an agent needs to change them.
+            const workspace = await authority.getWorkspace(args.workspaceId);
+            if (!workspace) throw new Error(`Workspace ${args.workspaceId} is not in this project`);
+            return completed(input, { ...workspace, relations: (await authority.listWorkspaceRelations())[workspace.id] ?? null });
+          }
           case 'list': return completed(input, await authority.listWorkspaces());
           case 'operations': return completed(input, await authority.listOperations());
           default: return completed(input, await changeAgentWorkspace(env, identity, args));
