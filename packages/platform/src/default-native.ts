@@ -65,13 +65,14 @@ export async function defaultMachineResponse(request: Request, env: Env, tenant:
     if (url.pathname.endsWith('/blob')) {
       if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method not allowed', { status: 405 });
       const key = url.searchParams.get('key') ?? '';
-      const bytes = await defaultMachineObject(reader, release, key);
       let sha256: string | undefined;
       for (const native of release.machines) {
         const object = native.artifact.key === key ? native.artifact : native.chunks.find(chunk => chunk.key === key || key === `objects/sha256/${chunk.sha256}`);
         if (object) { sha256 = object.sha256; break; }
       }
-      if (!sha256) throw new Error('Verified native object descriptor disappeared');
+      // Any other key (a tenant's own build uploading new objects) is simply not here.
+      if (!sha256) return new Response(null, { status: 404 });
+      const bytes = await defaultMachineObject(reader, release, key);
       return new Response(request.method === 'HEAD' ? null : new Uint8Array(bytes), { headers: { 'content-type': 'application/octet-stream', 'content-length': String(bytes.byteLength), 'x-gitspace-sha256': `sha256:${sha256}` } });
     }
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
