@@ -596,10 +596,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeEnvironmentRun(raw: unknown): Promise<{ status: 'ok'; run: LifecycleRun } | { status: 'error'; failure: EnvironmentFailure }> {
     const input = RuntimeIdentitySchema.extend({ machineId: z.string().min(1), request: LifecycleRunRequestSchema }).parse(raw);
     const context = { spaceId: input.workspaceId, machineId: input.machineId, runId: input.request.runId };
-    const detached: EnvironmentFailure = { code: 'RunnerUnavailable', message: `Machine ${input.machineId} is not a ready cache of this workspace; attach it to run environment phases there`, context };
+    const detached: EnvironmentFailure = { code: 'RunnerUnavailable', message: `Machine ${input.machineId} is not attached to this workspace; attach it to run environment phases there`, context };
     if (await this.ctx.storage.get('runtime.identity') === undefined) return { status: 'error', failure: detached };
     const runtime = await this.getRuntime(input);
-    if (!runtime.attachments.list().some(item => item.machineId === input.machineId && isAttachmentReady(item))) return { status: 'error', failure: detached };
+    // Setup runs are what make a checkout ready, so an attaching one accepts them too.
+    if (!runtime.attachments.list().some(item => item.machineId === input.machineId && (isAttachmentReady(item) || item.state === 'attaching'))) return { status: 'error', failure: detached };
     // Absent optional fields cross Worker RPC as undefined, which is not JSON.
     const args = RuntimeJsonSchema.parse(Object.fromEntries(Object.entries({ ...input.request, on: input.machineId }).filter(([, value]) => value !== undefined)));
     const result = await runtime.manage({ tool: 'lifecycle', requestId: `environment:${input.request.runId}:${crypto.randomUUID()}`, args });

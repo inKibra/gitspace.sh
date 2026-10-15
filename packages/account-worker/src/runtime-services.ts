@@ -322,7 +322,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     try {
       if (!dispatch) {
         const runtime = options.runtime();
-        const selected = await selections.cache(input.args);
+        const selected = await selections.cache(input.args, undefined, input.tool === 'lifecycle');
         const snapshot = await runtime.cloudFiles.initializeSnapshot();
         if (!snapshot) throw new Error('Cloud working copy is unavailable');
         const tool = input.tool === 'checkpoint_code' ? 'checkpoint' : input.tool;

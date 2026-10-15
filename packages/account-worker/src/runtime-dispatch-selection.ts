@@ -14,10 +14,10 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
   };
   const save = (id: string, state: DispatchSelectionState) => storage.sql.exec('INSERT INTO runtime_host_selection(id,state) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state', id, JSON.stringify(state));
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
-  /** The ready attachment the selection names, or null when none is ready. */
-  async function find(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment | null> {
+  /** The ready attachment the selection names, or null when none is ready. A setup run may also use an attaching one. */
+  async function find(args: unknown, eligible?: readonly RuntimeAttachment[], setup = false): Promise<RuntimeAttachment | null> {
     const selection = RuntimeDispatchSelectionSchema.parse(args);
-    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => isAttachmentReady(item));
+    let candidates = (eligible ?? options.runtime().attachments.list()).filter(item => isAttachmentReady(item) || (setup && item.state === 'attaching'));
     const selector = selection.on;
     if (typeof selector === 'string') {
       let machineId = candidates.find(item => item.machineId === selector)?.machineId;
@@ -42,8 +42,8 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
     }
     return candidates[0] ?? null;
   }
-  async function cache(args: unknown, eligible?: readonly RuntimeAttachment[]): Promise<RuntimeAttachment> {
-    const selected = await find(args, eligible);
+  async function cache(args: unknown, eligible?: readonly RuntimeAttachment[], setup = false): Promise<RuntimeAttachment> {
+    const selected = await find(args, eligible, setup);
     if (!selected) throw new Error('No ready machine: start GitSpace on an attached machine and wait for its checkout to sync, or attach another machine.');
     return selected;
   }

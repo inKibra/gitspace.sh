@@ -156,7 +156,8 @@ export class AttachmentStore {
     const attachment = this.list().find(item => item.attachmentId === dispatch.attachmentId);
     if (!attachment || attachment.generation !== dispatch.generation || attachment.machineId !== dispatch.machineId || attachment.projectId !== dispatch.projectId || attachment.workspaceId !== dispatch.workspaceId || attachment.state === 'detached') return failed(dispatch, `Machine ${dispatch.machineId} is no longer attached to this workspace; attach it again or use another machine`);
     if (!isAttachmentOnline(attachment)) return failed(dispatch, `Machine ${dispatch.machineId} is offline; start GitSpace on it or attach another machine`);
-    if (attachment.state !== 'ready') return failed(dispatch, `Machine ${dispatch.machineId} is still setting up this workspace's checkout; wait for it to become ready`);
+    // Setup runs are what make a checkout ready, so they run while it is attaching too.
+    if (attachment.state !== 'ready' && !(dispatch.tool === 'lifecycle' && attachment.state === 'attaching')) return failed(dispatch, `Machine ${dispatch.machineId} is still setting up this workspace's checkout; wait for it to become ready`);
     const { executionSecret } = await this.grant(attachment);
     const body = JSON.stringify(dispatch);
     const key = await crypto.subtle.importKey('raw', Uint8Array.from(atob(executionSecret.replaceAll('-', '+').replaceAll('_', '/')), character => character.charCodeAt(0)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);

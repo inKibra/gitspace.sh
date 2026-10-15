@@ -37,7 +37,9 @@ export class MachineExecutor {
     if (dispatch.conversationKind === 'subagent' && !isSubagentToolCallAllowed(dispatch.tool, dispatch.args)) throw new Error('Subagent execution is read-only');
     const local = this.options.journal.attachment(dispatch.attachmentId);
     if (!local || dispatch.machineId !== this.options.machineId || local.attachment.machineId !== dispatch.machineId || local.attachment.workspaceId !== dispatch.workspaceId || local.attachment.projectId !== dispatch.projectId || local.attachment.generation !== dispatch.generation) throw new Error('Execution attachment is stale or unauthorized');
-    if (local.attachment.state !== 'ready' || !local.prerequisitesComplete) throw new Error('Attachment is not ready');
+    // Setup runs are what make a checkout ready, so they run while it is attaching too.
+    const setup = dispatch.tool === 'lifecycle' && local.attachment.state === 'attaching';
+    if (!setup && (local.attachment.state !== 'ready' || !local.prerequisitesComplete)) throw new Error('Attachment is not ready');
     return local;
   }
 
