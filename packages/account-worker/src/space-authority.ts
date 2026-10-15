@@ -772,8 +772,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   }
 
   async runtimeCronCancel(raw: unknown) {
-    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), confirmStopWorkspaceAgent: z.boolean() }).parse(raw);
-    return (await this.getRuntime(input)).cronCancel(input.requestId, input.confirmStopWorkspaceAgent);
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1) }).parse(raw);
+    return (await this.getRuntime(input)).cronCancel(input.requestId);
   }
 
   async runtimeCronNotifyOverdue(raw: unknown) {

@@ -105,10 +105,6 @@ export const projectCronErrors = defineErrors('gitspace-project-crons', {
     data: wire.object({ projectId: wire.string, cronId: wire.string }),
     httpStatus: 404,
   },
-  cronRevisionConflict: {
-    data: wire.object({ cronId: wire.string, expected: wire.number, actual: wire.number }),
-    httpStatus: 409,
-  },
   cronAlreadyRunning: {
     data: wire.object({ cronId: wire.string, runId: wire.string, state: wire.enum(['pending', 'running']) }),
     httpStatus: 409,

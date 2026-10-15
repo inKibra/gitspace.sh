@@ -1351,11 +1351,11 @@ function AccountCrons({ projects, projectsLoading }: { projects: readonly Config
     loading={projectsLoading || (loading && !loaded)}
     loadError={error}
     onCreateCron={(draft) => configurationResult(rpcClient.crons.create({ projectId: draft.target.projectId, draft }))}
-    onUpdateCron={(projectId, cronId, expectedRevision, draft) => configurationResult(rpcClient.crons.update({ projectId, cronId, expectedRevision, draft }))}
-    onDeleteCron={async (projectId, cronId, expectedRevision) => { await configurationResult(rpcClient.crons.delete({ projectId, cronId, expectedRevision })); }}
+    onUpdateCron={(projectId, cronId, draft) => configurationResult(rpcClient.crons.update({ projectId, cronId, draft }))}
+    onDeleteCron={async (projectId, cronId) => { await configurationResult(rpcClient.crons.delete({ projectId, cronId })); }}
     onRunNow={(projectId, cronId) => configurationResult(rpcClient.crons.runNow({ projectId, cronId }))}
     onListRuns={(projectId, cronId) => configurationResult(rpcClient.crons.history({ projectId, cronId }))}
-    onCancelRun={(projectId, runId, confirmStopWorkspaceAgent) => configurationResult(rpcClient.crons.cancelRun({ projectId, runId, confirmStopWorkspaceAgent }))}
+    onCancelRun={(projectId, runId) => configurationResult(rpcClient.crons.cancelRun({ projectId, runId }))}
   /></>;
 }
 

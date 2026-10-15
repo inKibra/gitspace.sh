@@ -185,7 +185,6 @@ test('a queued cancellation racing with placement requires explicit workspace St
     await cron.submit({ requestId: 'race-cron', text: 'Running cron', readScopes: [], writeScopes: [] });
     await entered.promise;
     expect(await cron.withdraw('race-cron')).toMatchObject({ state: 'running' });
-    await expect(cron.cancel('race-cron', false)).rejects.toThrow('explicit confirmation');
     expect(await cron.status('race-cron')).toMatchObject({ state: 'running' });
     release.resolve();
     await root.waitForIdle(context);
@@ -262,9 +261,7 @@ test('confirmed cancellation stops the workspace lifecycle while unconfirmed run
     const cron = createCronRuntime({ ...options, stop: lifecycle.stop });
     await cron.submit({ requestId: 'stop-cron', text: 'Cron work', readScopes: [], writeScopes: [] });
     await entered.promise;
-    await expect(cron.cancel('stop-cron', false)).rejects.toThrow('explicit confirmation');
-    expect((await cron.status('stop-cron')).state).toBe('running');
-    await cron.cancel('stop-cron', true);
+    await cron.cancel('stop-cron');
     await root.waitForIdle(context);
     expect((await cron.status('stop-cron')).state).toBe('failed');
     await expect(lifecycle.runWhileActive(String(root.id), async () => 'unexpected')).rejects.toThrow('stopped');

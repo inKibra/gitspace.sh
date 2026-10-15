@@ -42,7 +42,7 @@ import { ProjectAuthorityDO, UserProjectIndexDO, ProjectMcpGrantNotFoundError, P
 import { ProjectSecretsDO } from './project-secrets.js';
 import { UserSkillsDO, SkillRevisionConflict } from './user-skills.js';
 import { UserMcpConnectionsDO, McpConnectionNotFoundError, McpConnectionRevisionConflictError, McpConnectionValidationError, validateComposioToolPolicy } from './local-mcp.js';
-import { ProjectCronsDO, ProjectCronValidationError, ProjectCronNotFoundError, ProjectCronRevisionConflictError, ProjectCronAlreadyRunningError } from './project-crons.js';
+import { ProjectCronsDO, ProjectCronValidationError, ProjectCronNotFoundError, ProjectCronAlreadyRunningError } from './project-crons.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import { signComposioState, type CredentialVaultDO } from './application.js';
 import { requireRuntimeAccess } from './account-runtime-rpc.js';
@@ -89,7 +89,6 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
   };
   const gateway = async () => new ComposioPluginGateway(env, await vault.getProviderSecret('composio'));
   const validateCronTarget = async (projectId: string, draft: ProjectCronDraft) => {
-    if (draft.target.projectId !== projectId) throw new ProjectCronValidationError('target', 'Cron target must belong to its owning project');
     if (draft.target.scope === 'workspace' && await projects.locateWorkspace(draft.target.spaceId) !== projectId) throw new ProjectCronValidationError('target', 'Cron workspace does not belong to its owning project');
   };
   const listSecrets = server.implement(listProjectSecretsContract).handler(async ({ input, errors }) => {
@@ -347,7 +346,6 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     } catch (error) {
       if (error instanceof ProjectCronValidationError) return err(errors.CronInvalid({ field: error.field, message: error.message }));
       if (error instanceof ProjectCronNotFoundError) return err(errors.CronNotFound({ projectId: error.projectId, cronId: error.cronId }));
-      if (error instanceof ProjectCronRevisionConflictError) return err(errors.CronRevisionConflict({ cronId: error.cronId, expected: error.expected, actual: error.actual }));
       return err(errors.OperationFailed({ operation: 'updateCron', message: error instanceof Error ? error.message : String(error) }));
     }
   });
@@ -356,8 +354,6 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       await project(input.projectId); return ok(await (env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>).getByName(JSON.stringify([userId, input.projectId])).delete(input));
     } catch (error) {
       if (error instanceof ProjectCronNotFoundError) return err(errors.CronNotFound({ projectId: error.projectId, cronId: error.cronId }));
-      if (error instanceof ProjectCronRevisionConflictError) return err(errors.CronRevisionConflict({ cronId: error.cronId, expected: error.expected, actual: error.actual }));
-      if (error instanceof ProjectCronAlreadyRunningError) return err(errors.CronAlreadyRunning({ cronId: error.cronId, runId: error.runId, state: error.state }));
       return err(errors.OperationFailed({ operation: 'deleteCron', message: error instanceof Error ? error.message : String(error) }));
     }
   });

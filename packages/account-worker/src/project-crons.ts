@@ -90,20 +90,6 @@ export class ProjectCronNotFoundError extends Error {
   }
 }
 
-export class ProjectCronRevisionConflictError extends Error {
-  readonly cronId: string;
-  readonly expected: number;
-  readonly actual: number;
-
-  constructor(cronId: string, expected: number, actual: number) {
-    super(`Project cron ${cronId} revision changed from ${expected} to ${actual}`);
-    this.name = 'ProjectCronRevisionConflictError';
-    this.cronId = cronId;
-    this.expected = expected;
-    this.actual = actual;
-  }
-}
-
 export class ProjectCronAlreadyRunningError extends Error {
   readonly cronId: string;
   readonly runId: string;
@@ -310,53 +296,39 @@ export class ProjectCronsDO extends DurableObject<Env> {
     return this.cronView(this.requiredRow(projectId, id));
   }
 
-  async update(input: { projectId: string; cronId: string; expectedRevision: number; draft: ProjectCronDraft; now?: number }): Promise<ProjectCronView> {
+  async update(input: { projectId: string; cronId: string; draft: ProjectCronDraft; now?: number }): Promise<ProjectCronView> {
     const projectId = this.ensureProject(input.projectId);
     const cronId = identifier(input.cronId, 'cronId');
     const draft = normalizeDraft(projectId, input.draft);
     const now = timestamp(input.now);
     this.ctx.storage.transactionSync(() => {
       const current = this.requiredRow(projectId, cronId);
-      if (current.revision !== input.expectedRevision) throw new ProjectCronRevisionConflictError(cronId, input.expectedRevision, current.revision);
       const duplicate = this.rowByName(projectId, draft.name);
       if (duplicate && duplicate.id !== cronId) throw new ProjectCronValidationError('name', `A cron named '${draft.name}' already exists`);
       const scheduleChanged = current.schedule !== draft.schedule;
       const enabledChanged = current.enabled !== (draft.enabled ? 1 : 0);
       const nextRunAt = !draft.enabled ? null
         : scheduleChanged || enabledChanged || current.next_run_at === null ? nextProjectCronRunAt(draft.schedule, now, now) : current.next_run_at;
-      const changed = this.ctx.storage.sql.exec<{ revision: number }>(`
+      this.ctx.storage.sql.exec(`
         UPDATE project_crons SET revision = revision + 1, name = ?, schedule = ?, description = ?, prompt = ?,
           target_json = ?, read_scopes_json = ?, write_scopes_json = ?, enabled = ?, next_run_at = ?, updated_at = ?
-        WHERE project_id = ? AND id = ? AND revision = ?
-        RETURNING revision
+        WHERE project_id = ? AND id = ?
       `, draft.name, draft.schedule, draft.description, draft.prompt, JSON.stringify(draft.target), JSON.stringify(draft.readScopes),
-      JSON.stringify(draft.writeScopes), draft.enabled ? 1 : 0, nextRunAt, now, projectId, cronId, input.expectedRevision).toArray();
-      if (changed.length !== 1) {
-        const actual = this.requiredRow(projectId, cronId).revision;
-        throw new ProjectCronRevisionConflictError(cronId, input.expectedRevision, actual);
-      }
+      JSON.stringify(draft.writeScopes), draft.enabled ? 1 : 0, nextRunAt, now, projectId, cronId);
     });
     await this.refreshAlarm(now);
     return this.cronView(this.requiredRow(projectId, cronId));
   }
 
-  async delete(input: { projectId: string; cronId: string; expectedRevision: number; now?: number }): Promise<{ projectId: string; cronId: string; deleted: true }> {
+  /** Deletes a cron whatever it is doing: an active run is cancelled first. */
+  async delete(input: { projectId: string; cronId: string; now?: number }): Promise<{ projectId: string; cronId: string; deleted: true }> {
     const projectId = this.ensureProject(input.projectId);
     const cronId = identifier(input.cronId, 'cronId');
     const now = timestamp(input.now);
-    this.ctx.storage.transactionSync(() => {
-      const current = this.requiredRow(projectId, cronId);
-      if (current.revision !== input.expectedRevision) throw new ProjectCronRevisionConflictError(cronId, input.expectedRevision, current.revision);
-      const active = this.activeRun(cronId);
-      if (active) throw new ProjectCronAlreadyRunningError(cronId, active.id, active.state as 'pending' | 'running');
-      const changed = this.ctx.storage.sql.exec<{ id: string }>(
-        'DELETE FROM project_crons WHERE project_id = ? AND id = ? AND revision = ? RETURNING id',
-        projectId,
-        cronId,
-        input.expectedRevision,
-      ).toArray();
-      if (changed.length !== 1) throw new ProjectCronRevisionConflictError(cronId, input.expectedRevision, this.requiredRow(projectId, cronId).revision);
-    });
+    this.requiredRow(projectId, cronId);
+    const active = this.activeRun(cronId);
+    if (active) await this.cancelRun({ projectId, runId: active.id });
+    this.ctx.storage.sql.exec('DELETE FROM project_crons WHERE project_id = ? AND id = ?', projectId, cronId);
     await this.refreshAlarm(now);
     return { projectId, cronId, deleted: true };
   }
@@ -539,7 +511,7 @@ export class ProjectCronsDO extends DurableObject<Env> {
     await this.refreshAlarm(Date.now());
   }
 
-  async cancelRun(input: { projectId: string; runId: string; confirmStopWorkspaceAgent: boolean }): Promise<ProjectCronRunView> {
+  async cancelRun(input: { projectId: string; runId: string }): Promise<ProjectCronRunView> {
     const projectId = this.ensureProject(input.projectId);
     const row = this.requiredRun(projectId, input.runId);
     if (row.state !== 'pending' && row.state !== 'running') return runView(row);
@@ -553,8 +525,7 @@ export class ProjectCronsDO extends DurableObject<Env> {
     let receipt = await runtime.runtimeCronWithdraw({ ...identity, requestId: `cron:${row.id}` });
     if (receipt.state === 'running') {
       this.ctx.storage.sql.exec('UPDATE project_cron_runs SET started_at=? WHERE id=? AND claim_token=? AND started_at IS NULL', receipt.startedAt ?? Date.now(), row.id, row.claim_token);
-      if (input.confirmStopWorkspaceAgent !== true) throw new ProjectCronValidationError('confirmStopWorkspaceAgent', 'This cron is running. Explicit confirmation is required to Stop workspace agent and its child agents.');
-      receipt = await runtime.runtimeCronCancel({ ...identity, requestId: `cron:${row.id}`, confirmStopWorkspaceAgent: true });
+      receipt = await runtime.runtimeCronCancel({ ...identity, requestId: `cron:${row.id}` });
     }
     if (receipt.state === 'withdrawn' && row.claim_token) {
       return this.completeRun({ projectId, runId: row.id, claimToken: row.claim_token, state: 'blocked', message: 'Cancelled: queued submission withdrawn' });

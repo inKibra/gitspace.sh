@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROJECT_CRON_OVERDUE_MS, type ProjectCronDraft } from '@gitspace/protocol/cron-contract';
 import {
   ProjectCronAlreadyRunningError,
-  ProjectCronRevisionConflictError,
   ProjectCronValidationError,
   ProjectCronsDO,
 } from '../src/project-crons.js';
@@ -41,14 +40,10 @@ describe('ProjectCronsDO', () => {
     const updated = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.update({
       projectId: 'project-a',
       cronId: created.id,
-      expectedRevision: 1,
       draft: draft({ description: 'Updated authority description.' }),
       now: now + 1,
     }));
     expect(updated).toMatchObject({ revision: 2, description: 'Updated authority description.' });
-    await expect(runInDurableObject(stub, (instance: ProjectCronsDO) => instance.update({
-      projectId: 'project-a', cronId: created.id, expectedRevision: 1, draft: draft(), now: now + 2,
-    }))).rejects.toBeInstanceOf(ProjectCronRevisionConflictError);
   });
 
   it('deduplicates a retried manual request without admitting another run', async () => {
@@ -165,14 +160,14 @@ describe('ProjectCronsDO', () => {
       const cron = await runInDurableObject(stub, instance => instance.create({ projectId: 'project-a', draft: draft(), now }));
       const run = await runInDurableObject(stub, instance => instance.runNow({ projectId: 'project-a', cronId: cron.id, now }));
       await runInDurableObject(stub, instance => instance.alarm());
-      expect(await runInDurableObject(stub, instance => instance.cancelRun({ projectId: 'project-a', runId: run.id, confirmStopWorkspaceAgent: false }))).toMatchObject({ id: run.id, state: 'blocked', startedAt: null });
+      expect(await runInDurableObject(stub, instance => instance.cancelRun({ projectId: 'project-a', runId: run.id }))).toMatchObject({ id: run.id, state: 'blocked', startedAt: null });
       expect(withdraw).toHaveBeenCalledWith({ projectId: 'project-a', workspaceId: 'project-a', requestId: `cron:${run.id}` });
       expect(cancel).not.toHaveBeenCalled();
       expect(stop).not.toHaveBeenCalled();
     } finally { status.mockRestore(); withdraw.mockRestore(); cancel.mockRestore(); stop.mockRestore(); }
   });
 
-  it('refuses a queued-to-running cancellation race until the user explicitly confirms Stop', async () => {
+  it('cancelling a run that already started stops it, and deleting its cron cancels it first', async () => {
     const now = Date.now() + 120_000;
     const status = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeRequestStatus').mockResolvedValue({ state: 'queued', conversationId: 'shared-root', message: null });
     const withdraw = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeCronWithdraw').mockResolvedValue({ state: 'running', conversationId: 'shared-root', message: null, startedAt: now });
@@ -182,11 +177,15 @@ describe('ProjectCronsDO', () => {
       const cron = await runInDurableObject(stub, instance => instance.create({ projectId: 'project-a', draft: draft(), now }));
       const run = await runInDurableObject(stub, instance => instance.runNow({ projectId: 'project-a', cronId: cron.id, now }));
       await runInDurableObject(stub, instance => instance.alarm());
-      await expect(runInDurableObject(stub, instance => instance.cancelRun({ projectId: 'project-a', runId: run.id, confirmStopWorkspaceAgent: false }))).rejects.toThrow('Explicit confirmation');
-      expect(cancel).not.toHaveBeenCalled();
+      await runInDurableObject(stub, instance => instance.cancelRun({ projectId: 'project-a', runId: run.id }));
+      expect(cancel).toHaveBeenCalledWith({ projectId: 'project-a', workspaceId: 'project-a', requestId: `cron:${run.id}` });
       expect((await runInDurableObject(stub, instance => instance.history({ projectId: 'project-a', cronId: cron.id })))[0]?.startedAt?.getTime()).toBe(now);
-      await runInDurableObject(stub, instance => instance.cancelRun({ projectId: 'project-a', runId: run.id, confirmStopWorkspaceAgent: true }));
-      expect(cancel).toHaveBeenCalledWith({ projectId: 'project-a', workspaceId: 'project-a', requestId: `cron:${run.id}`, confirmStopWorkspaceAgent: true });
+
+      // The run is still active until its outcome is read; deleting the cron cancels it again instead of refusing.
+      cancel.mockClear();
+      expect(await runInDurableObject(stub, instance => instance.delete({ projectId: 'project-a', cronId: cron.id }))).toMatchObject({ deleted: true });
+      expect(cancel).toHaveBeenCalledWith({ projectId: 'project-a', workspaceId: 'project-a', requestId: `cron:${run.id}` });
+      expect(await runInDurableObject(stub, instance => instance.list('project-a'))).toEqual([]);
     } finally { status.mockRestore(); withdraw.mockRestore(); cancel.mockRestore(); }
   });
 
@@ -234,7 +233,7 @@ describe('ProjectCronsDO', () => {
     const cron = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.create({ projectId: 'project-a', draft: draft({ enabled: false }), now }));
     await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.runNow({ projectId: 'project-a', cronId: cron.id, now: now + 1 }));
     await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.processDue({ projectId: 'project-a', now: now + PROJECT_CRON_OVERDUE_MS + 2 }));
-    await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.delete({ projectId: 'project-a', cronId: cron.id, expectedRevision: 1, now: now + PROJECT_CRON_OVERDUE_MS + 3 }));
+    await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.delete({ projectId: 'project-a', cronId: cron.id, now: now + PROJECT_CRON_OVERDUE_MS + 3 }));
     expect(await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.list('project-a'))).toEqual([]);
     const history = await runInDurableObject(stub, (instance: ProjectCronsDO) => instance.history({ projectId: 'project-a', cronId: cron.id }));
     expect(history).toHaveLength(1);

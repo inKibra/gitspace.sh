@@ -68,11 +68,11 @@ export interface ProjectCronsPageProps {
   loading?: boolean;
   loadError?: string | null;
   onCreateCron(draft: ProjectCronDraft): Promise<ProjectCronView>;
-  onUpdateCron(projectId: string, cronId: string, expectedRevision: number, draft: ProjectCronDraft): Promise<ProjectCronView>;
-  onDeleteCron(projectId: string, cronId: string, expectedRevision: number): Promise<void>;
+  onUpdateCron(projectId: string, cronId: string, draft: ProjectCronDraft): Promise<ProjectCronView>;
+  onDeleteCron(projectId: string, cronId: string): Promise<void>;
   onRunNow(projectId: string, cronId: string): Promise<ProjectCronRunView>;
   onListRuns(projectId: string, cronId: string): Promise<readonly ProjectCronRunView[]>;
-  onCancelRun(projectId: string, runId: string, confirmStopWorkspaceAgent: boolean): Promise<ProjectCronRunView>;
+  onCancelRun(projectId: string, runId: string): Promise<ProjectCronRunView>;
 }
 
 export function projectCronTargetKey(target: ProjectCronTarget): string {
@@ -285,11 +285,11 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
   const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmStop, setConfirmStop] = useState<ProjectCronRunView | null>(null);
-  const cancelRun = async (run: ProjectCronRunView, confirmed: boolean): Promise<void> => {
+  const cancelRun = async (run: ProjectCronRunView): Promise<void> => {
     setBusyId(run.cronId);
     setActionError(null);
     try {
-      await props.onCancelRun(run.projectId, run.id, confirmed);
+      await props.onCancelRun(run.projectId, run.id);
       const runs = await props.onListRuns(run.projectId, run.cronId);
       setHistoryByCron(current => new Map(current).set(run.cronId, runs));
       setConfirmStop(null);
@@ -328,7 +328,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
     setBusyId(cron.id);
     setActionError(null);
     try {
-      const updated = await props.onUpdateCron(cron.projectId, cron.id, cron.revision, draft);
+      const updated = await props.onUpdateCron(cron.projectId, cron.id, draft);
       setItems((current) => current.map((item) => item.id === updated.id ? updated : item));
     } catch (cause) {
       handleError(cause);
@@ -394,7 +394,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
     setBusyId(cron.id);
     setActionError(null);
     try {
-      await props.onDeleteCron(cron.projectId, cron.id, cron.revision);
+      await props.onDeleteCron(cron.projectId, cron.id);
       setItems((current) => current.filter((item) => item.id !== cron.id));
       setConfirmDeleteId(null);
       if (openHistoryId === cron.id) setOpenHistoryId(null);
@@ -494,7 +494,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
               </CardFooter>
               {historyOpen ? <section aria-label={`${cron.name} run history`} className="flex flex-col gap-2 px-4 pt-3">
                 <div className="flex items-center justify-between gap-3"><strong className="text-body font-semibold text-foreground">Run history</strong><span className="text-caption text-muted-foreground">Append-only project authority</span></div>
-                {historyLoadingId === cron.id ? <p className="py-3 text-caption text-muted-foreground">Loading run history…</p> : <CronRunHistory runs={historyByCron.get(cron.id) ?? []} busy={busy} onCancel={run => { if (run.startedAt === null) void cancelRun(run, false); else setConfirmStop(run); }} />}
+                {historyLoadingId === cron.id ? <p className="py-3 text-caption text-muted-foreground">Loading run history…</p> : <CronRunHistory runs={historyByCron.get(cron.id) ?? []} busy={busy} onCancel={run => { if (run.startedAt === null) void cancelRun(run); else setConfirmStop(run); }} />}
               </section> : null}
             </Card>;
           })}
@@ -509,7 +509,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
         </DialogHeader>
         <DialogFooter>
           <Button variant="secondary" onClick={() => setConfirmStop(null)}>Keep running</Button>
-          <Button variant="primary" loading={busyId !== null} onClick={() => { if (confirmStop) void cancelRun(confirmStop, true); }}>Confirm Stop workspace agent</Button>
+          <Button variant="primary" loading={busyId !== null} onClick={() => { if (confirmStop) void cancelRun(confirmStop); }}>Confirm Stop workspace agent</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -524,7 +524,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
           onCancel={() => setEditor(null)}
           onSave={async (draft) => {
             if (editorView.kind === 'edit') {
-              const updated = await props.onUpdateCron(editorView.cron.projectId, editorView.cron.id, editorView.cron.revision, draft);
+              const updated = await props.onUpdateCron(editorView.cron.projectId, editorView.cron.id, draft);
               setItems((current) => current.map((item) => item.id === updated.id ? updated : item));
             } else {
               const created = await props.onCreateCron(draft);

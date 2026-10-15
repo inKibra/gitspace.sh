@@ -53,13 +53,14 @@ export function adoptWorkspaceMetadata(current: WorkspaceMetadata | null, worksp
   return WorkspaceMetadataSchema.parse({ projectId: workspace.projectId, workspaceId: workspace.id, kind: workspace.kind, ...definition, ...projectState });
 }
 
-/** Opening a cloud-only project or provisioning a new one bootstraps runtime state before the project turns active. */
+/** Only an archived project is read-only; a project that is provisioning, archiving, restoring or failed keeps
+ * accepting writes, so a stuck or failed project operation never locks its workspaces. */
 export function projectAcceptsWrites(lifecycle: ProjectLifecycle): boolean {
-  return lifecycle === 'active' || lifecycle === 'cloud-only' || lifecycle === 'provisioning';
+  return lifecycle !== 'archived';
 }
 
-/** Runtime access rules: a deleting project or workspace is unavailable; an archived or archiving workspace, or a
- * project that is not writable, is read-only. */
+/** Runtime access rules: a deleting project or workspace is unavailable; an archived or archiving workspace, or an
+ * archived project, is read-only. */
 export function authorizeWorkspaceRuntime(metadata: WorkspaceMetadata, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, write: boolean): WorkspaceMetadata {
   if (metadata.projectId !== identity.projectId || metadata.workspaceId !== identity.workspaceId) throw new Error('Workspace does not belong to the requested project');
   if (metadata.projectLifecycle === 'deleting') throw new Error('Runtime project is unavailable');

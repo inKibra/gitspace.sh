@@ -80,7 +80,7 @@ it('withdraws queued runs directly but requires a separate confirmed action to s
   const cron = cronFixture();
   const base: ProjectCronRunView = { id: 'queued', projectId: cron.projectId, cronId: cron.id, cronRevision: cron.revision, cronName: cron.name, schedule: cron.schedule, description: cron.description, trigger: 'manual', state: 'running', target: cron.target, prompt: cron.prompt, readScopes: cron.readScopes, writeScopes: cron.writeScopes, resolvedSpaceId: null, resolvedGeneration: null, scheduledFor: new Date(), claimedAt: new Date(), startedAt: null, completedAt: null, message: null, createdAt: new Date() };
   let runs: ProjectCronRunView[] = [base, { ...base, id: 'running', startedAt: new Date() }];
-  const cancelled: Array<{ id: string; confirmed: boolean }> = [];
+  const cancelled: string[] = [];
   const button = (label: string) => {
     const value = [...document.querySelectorAll('button')].find(element => element.textContent?.trim() === label);
     if (!value) throw new Error(`Missing button ${label}`);
@@ -89,8 +89,8 @@ it('withdraws queued runs directly but requires a separate confirmed action to s
   try {
     await act(() => root.render(<ProjectCronsPage projects={[{ id: cron.projectId, name: 'Project' }]} crons={[cron]} targetOptions={[]} {...callbacks}
       onListRuns={async () => runs}
-      onCancelRun={async (_projectId, id, confirmed) => {
-        cancelled.push({ id, confirmed });
+      onCancelRun={async (_projectId, id) => {
+        cancelled.push(id);
         const run = runs.find(run => run.id === id)!;
         const complete = { ...run, state: 'blocked' as const, completedAt: new Date(), message: 'Cancelled' };
         runs = runs.map(run => run.id === id ? complete : run);
@@ -99,7 +99,7 @@ it('withdraws queued runs directly but requires a separate confirmed action to s
     />));
     await act(() => button('Run history').click());
     await act(() => button('Cancel queued run').click());
-    expect(cancelled).toEqual([{ id: 'queued', confirmed: false }]);
+    expect(cancelled).toEqual(['queued']);
     await act(() => button('Stop workspace agent').click());
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain('other work in progress');
     expect(cancelled).toHaveLength(1);
@@ -107,7 +107,7 @@ it('withdraws queued runs directly but requires a separate confirmed action to s
     expect(cancelled).toHaveLength(1);
     await act(() => button('Stop workspace agent').click());
     await act(() => button('Confirm Stop workspace agent').click());
-    expect(cancelled).toEqual([{ id: 'queued', confirmed: false }, { id: 'running', confirmed: true }]);
+    expect(cancelled).toEqual(['queued', 'running']);
   } finally {
     await act(() => root.unmount());
     container.remove();

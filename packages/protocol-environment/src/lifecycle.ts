@@ -286,9 +286,6 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       const scope = lifecycleRunScope({ ...input, executionHashes }, actor.machineId, state.spaceId);
       const active = facts.runs.find((entry) => entry.token && entry.run.spaceId === state.spaceId);
       if (active) throw new EnvironmentError('RunConflict', `Environment ${active.run.phase} is already running in this workspace; open its terminal or cancel it`, { runId: active.run.id });
-      if (state.destroyedAt && input.phase !== 'cloud/destroy' && !(input.phase === 'cloud/provision' && input.rerun)) throw new EnvironmentError('PreconditionFailed', 'This workspace lifecycle was explicitly destroyed');
-      if (input.phase.startsWith('cloud/') && !input.rerun && facts.runs.some((entry) => entry.scope === scope && entry.run.phase === input.phase && !isLifecycleRunActive(entry.run) && entry.run.status !== 'succeeded')) throw new EnvironmentError('RecoveryRequired', 'Previous cloud effects require inspection and an explicit rerun');
-      if (input.phase === 'cloud/provision' && !state.policy.automatic) throw new EnvironmentError('PreconditionFailed', 'Explicit workspace setup must enable lifecycle policy first');
       if (executionHashes.some((hash) => !state.approvals.some((approval) => approval.executionHash === hash))) throw new EnvironmentError('ApprovalRequired', 'Awaiting human approval for execution content');
       if (input.phase === 'checks' && input.interactive) throw new EnvironmentError('InvalidConfiguration', 'Environment checks cannot run interactively');
       const deadlineAt = new Date(input.deadlineAt === undefined ? Date.parse(now) + DEFAULT_LIFECYCLE_TIMEOUT_MS : Date.parse(input.deadlineAt)).toISOString();

@@ -65,7 +65,7 @@ export type WorkspaceRuntime = {
   cronSubmit(input: RuntimeCronInput): Promise<{ conversationId: string }>;
   requestStatus(requestId: string): Promise<RuntimeRequestStatus>;
   cronWithdraw(requestId: string): Promise<RuntimeRequestStatus>;
-  cronCancel(requestId: string, confirmStopWorkspaceAgent: boolean): Promise<RuntimeRequestStatus>;
+  cronCancel(requestId: string): Promise<RuntimeRequestStatus>;
   cronNotifyOverdue(requestId: string): Promise<void>;
   transcript(conversationId?: string, format?: RuntimeTranscriptFormat, range?: RuntimeTranscriptRange): Promise<Response>;
   publish(): void;

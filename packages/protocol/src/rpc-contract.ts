@@ -1417,16 +1417,16 @@ export const createProjectCronContract = gitspaceRpc
 
 export const updateProjectCronContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, cronId: wire.string, expectedRevision: wire.integer({ min: 1 }), draft: ProjectCronDraftCodec }))
+  .input(wire.object({ projectId: wire.string, cronId: wire.string, draft: ProjectCronDraftCodec }))
   .output(ProjectCronViewCodec)
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, CronRevisionConflict: projectCronErrors.cronRevisionConflict, CronInvalid: projectCronErrors.cronInvalid, OperationFailed: rpcErrors.operationFailed })
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, CronInvalid: projectCronErrors.cronInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const deleteProjectCronContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, cronId: wire.string, expectedRevision: wire.integer({ min: 1 }) }))
+  .input(wire.object({ projectId: wire.string, cronId: wire.string }))
   .output(wire.object({ projectId: wire.string, cronId: wire.string, deleted: wire.boolean }))
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, CronRevisionConflict: projectCronErrors.cronRevisionConflict, CronAlreadyRunning: projectCronErrors.cronAlreadyRunning, OperationFailed: rpcErrors.operationFailed })
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const runProjectCronNowContract = gitspaceRpc
@@ -1438,7 +1438,7 @@ export const runProjectCronNowContract = gitspaceRpc
 
 export const cancelProjectCronRunContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, runId: wire.string, confirmStopWorkspaceAgent: wire.boolean }))
+  .input(wire.object({ projectId: wire.string, runId: wire.string }))
   .output(ProjectCronRunViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();

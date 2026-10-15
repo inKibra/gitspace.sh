@@ -140,12 +140,11 @@ export function createCronRuntime(options: Pick<RuntimeHarnessOptions, 'admitInf
       }, context);
       return api.status(requestId);
     }); },
-    async cancel(requestId: string, confirmStopWorkspaceAgent: boolean): Promise<RuntimeRequestStatus> {
+    async cancel(requestId: string): Promise<RuntimeRequestStatus> {
       const receipt = await api.withdraw(requestId);
       if (receipt.state !== 'running') return receipt;
-      if (confirmStopWorkspaceAgent !== true) throw new Error('Running cron requires explicit confirmation to Stop workspace agent');
       if (!options.stop || receipt.conversationId === null) throw new Error('Workspace Stop is unavailable');
-      // Only this explicit user action can stop the shared agent; scheduler uses withdraw.
+      // Only a user's cancel stops the shared agent; the scheduler uses withdraw.
       await options.stop(receipt.conversationId);
       return api.status(requestId);
     },
