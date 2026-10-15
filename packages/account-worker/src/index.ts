@@ -3,7 +3,6 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, dev
 import { machineProtocolInputSchema } from '@gitspace/protocol/deployment';
 import { DurableObject } from 'cloudflare:workers';
 import {
-  RELAY_ECHO_HEARTBEAT_MODE,
   RELAY_HEARTBEAT_LEASE_MS,
   RELAY_HEARTBEAT_MODE,
   RELAY_NOTICE_MODE,
@@ -529,9 +528,6 @@ export class UserRelayDO extends DurableObject<Env> {
       return;
     }
     if (!await this.authorizeSocket(socket)) return;
-    if (attachment.role === 'machine' && attachment.heartbeatExpiresAt !== undefined) {
-      socket.serializeAttachment({ ...this.socketAttachment(socket), heartbeatExpiresAt: Date.now() + RELAY_HEARTBEAT_LEASE_MS });
-    }
 
     const message = parsed.value;
     if (message.type === 'frame') {
@@ -684,7 +680,7 @@ export class UserRelayDO extends DurableObject<Env> {
     const attachment: RelaySocketAttachment = {
       ...parsed.data,
       ...(machineGrant ? { machineGrant, authorizedUntil } : {}),
-      ...(machineGrant && (heartbeat === RELAY_HEARTBEAT_MODE || heartbeat === RELAY_ECHO_HEARTBEAT_MODE)
+      ...(machineGrant && heartbeat === RELAY_HEARTBEAT_MODE
         ? { heartbeatExpiresAt: Date.now() + RELAY_HEARTBEAT_LEASE_MS }
         : {}),
       ...(machineGrant && query.get('notices') === RELAY_NOTICE_MODE ? { notices: true } : {}),
@@ -923,8 +919,8 @@ export class UserRelayDO extends DurableObject<Env> {
     this.ctx.waitUntil(this.socketGone(socket));
   }
 
-  /** Echo-mode machines renew `heartbeatExpiresAt` with each message they send; ping-mode machines are answered by the
-   * auto-response, whose last time extends the same lease. Undefined for pre-heartbeat hosts. */
+  /** A machine's pings are answered by the auto-response, whose last time extends its lease. Undefined for a machine
+   * that sends no pings. */
   private heartbeatExpiresAt(socket: WebSocket, attachment: RelaySocketAttachment): number | undefined {
     if (attachment.heartbeatExpiresAt === undefined) return undefined;
     const answered = this.ctx.getWebSocketAutoResponseTimestamp(socket);

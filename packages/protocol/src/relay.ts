@@ -7,8 +7,6 @@ import { SIGNED_REQUEST_EXPIRED_MESSAGE } from './server-clock.js';
 export const RELAY_PROTOCOL_VERSION = 1 as const;
 /** Liveness rides the relay's WebSocket auto-response: the fixed ping is answered without waking the relay. */
 export const RELAY_HEARTBEAT_MODE = 'ping-v1';
-/** Machines on the previous release echo an opaque v1 frame to themselves instead. */
-export const RELAY_ECHO_HEARTBEAT_MODE = 'echo-v1';
 export const RELAY_PING_MESSAGE = '{"version":1,"type":"ping"}';
 export const RELAY_PONG_MESSAGE = '{"version":1,"type":"pong"}';
 /** A machine sending `notices=notice-v1` understands `notice` messages; older machines never receive one. */

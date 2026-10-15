@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
   RELAY_HEARTBEAT_LEASE_MS,
-  RELAY_ECHO_HEARTBEAT_MODE,
+  RELAY_HEARTBEAT_MODE,
   RELAY_PROTOCOL_VERSION,
   createRelayAuthorization,
   createDeviceBinding,
@@ -92,7 +92,7 @@ async function enrollServiceBrowser() {
 async function openSocket(role: 'machine' | 'client', id: string, heartbeat = false): Promise<WebSocket> {
   const request = role === 'machine' ? machineAuthorizedRequest : authorizedRequest;
   const response = await exports.default.fetch(request(
-    `https://relay.test/ws?role=${role}&id=${id}${heartbeat ? `&heartbeat=${RELAY_ECHO_HEARTBEAT_MODE}` : ''}`,
+    `https://relay.test/ws?role=${role}&id=${id}${heartbeat ? `&heartbeat=${RELAY_HEARTBEAT_MODE}` : ''}`,
     { headers: { upgrade: 'websocket' } },
   ));
   expect(response.status).toBe(101);
@@ -292,19 +292,9 @@ describe('portable RelayDO', () => {
     expect(await response.json()).toMatchObject({ error: { code: 'TUNNEL_TRANSPORT_FAILED' } });
   });
 
-  it('keeps renewed heartbeat leases alive and leaves pre-heartbeat hosts compatible', async () => {
-    const machine = await openSocket('machine', 'darktop', true);
+  it('leaves a machine that sends no pings connected past the heartbeat lease', async () => {
     const clock = vi.spyOn(Date, 'now');
     const start = Date.now();
-    for (const elapsed of [20_000, 40_000]) {
-      clock.mockReturnValue(start + elapsed);
-      const echoed = nextMessage(machine);
-      machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:darktop', payload: crypto.randomUUID() }));
-      await echoed;
-      await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME));
-      expect(machine.readyState).toBe(WebSocket.OPEN);
-    }
-    machine.close(1000, 'done');
     const legacy = await openSocket('machine', 'darktop');
     clock.mockReturnValue(start + 100_000);
     await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME));

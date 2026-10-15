@@ -162,7 +162,7 @@ describe('relay presence', () => {
 
 describe('relay notices', () => {
   it('reach only machines that negotiated them, and carry no state', async () => {
-    const legacy = await connect({ heartbeat: 'echo-v1' });
+    const legacy = await connect({ heartbeat: RELAY_HEARTBEAT_MODE });
     const legacyMessages: string[] = [];
     legacy.addEventListener('message', event => legacyMessages.push(String(event.data)));
     await env.RELAY.getByName(env.RELAY_NAME).notifyMachines([machineId], { topics: ['assignments'], workspaceId: 'presence-a' });

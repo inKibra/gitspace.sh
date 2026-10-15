@@ -9,7 +9,7 @@ export const RuntimeCacheAttachmentRequestInputSchema = RuntimeIdentitySchema.ex
 export const RuntimeAttachmentDetachRequestInputSchema = RuntimeIdentitySchema.extend({
   machineId: RuntimeMachineIdSchema, attachmentId: z.string().min(1), generation: z.number().int().nonnegative(),
 });
-export const RuntimeAssignmentsInputSchema = z.object({ machineId: RuntimeMachineIdSchema, workspace: RuntimeIdentitySchema.optional(), afterSnapshot: commit.optional() }).refine(input => input.afterSnapshot === undefined || input.workspace !== undefined, 'Snapshot wait requires a workspace');
+export const RuntimeAssignmentsInputSchema = z.object({ machineId: RuntimeMachineIdSchema, workspace: RuntimeIdentitySchema.optional() });
 export const RuntimeAssignmentSchema = z.object({
   grant: RuntimeAttachResultSchema,
   source: RuntimeAttachmentSourceSchema.extend({ remote: z.url().optional(), origin: z.string().nullable() }).nullable(),

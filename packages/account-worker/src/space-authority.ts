@@ -688,12 +688,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const identity = RuntimeIdentitySchema.parse(raw);
     const input = RuntimeAssignmentsInputSchema.parse(raw);
     if (await this.ctx.storage.get('runtime.identity') === undefined) return { assignments: [] };
-    // Only machines released before 9f5bbae long-poll with `afterSnapshot`; delete this once lightbeam's machines have updated.
-    if (input.afterSnapshot !== undefined) {
-      const runtime = await this.getRuntime(identity);
-      if (!runtime.attachments.list().some(item => item.machineId === input.machineId && item.state !== 'detached')) throw new Error('Snapshot wait requires an active cache');
-      await runtime.waitForSnapshot(input.afterSnapshot);
-    }
     return (await this.attachmentController(identity)).assignments(input);
   }
 

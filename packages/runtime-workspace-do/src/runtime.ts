@@ -50,7 +50,6 @@ export type WorkspaceRuntime = {
   session(conversationId: string | undefined, command: RuntimeSessionCommand, canApprove?: boolean, deviceId?: string): Promise<RuntimeSessionResult>;
   /** The one status summary of this workspace. */
   status(): Promise<RuntimeWorkspaceStatus>;
-  waitForSnapshot(commit: string): Promise<void>;
   cacheReady(attachmentId: string, generation: number): Promise<void>;
   /** An agent asked for this attachment: once the machine reports it ready, the conversation is told so it can retry. */
   noticeWhenReady(input: { attachmentId: string; generation: number; conversationId: string; label: string }): void;
@@ -125,7 +124,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   await drafts.initialize();
   options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_management(request_id TEXT PRIMARY KEY, input TEXT NOT NULL, result TEXT)');
   options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attach_notices(attachment_id TEXT NOT NULL, generation INTEGER NOT NULL, conversation_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY(attachment_id, generation, conversation_id))');
-  const snapshotWaiters = new Set<() => void>();
   let line = Promise.resolve();
   let publicationPending = false;
   const stored: unknown = (() => { const current = replica.snapshot(); return current ? JSON.parse(current) : undefined; })();
@@ -263,13 +261,12 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.status': status, 'gitspace.draft': drafts.snapshot() } });
     const ops = diffRevisions(snapshot, next);
     // An unchanged projection publishes nothing: no replica rewrite, no cursor advance, no browser notice.
-    if (ops.length === 0) { for (const notify of snapshotWaiters) notify(); return; }
+    if (ops.length === 0) return;
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
     options.published?.(next, status.summary);
     snapshot = next;
-    for (const notify of snapshotWaiters) notify();
   }
   function publish() {
     // Keep at most one rebuild queued behind the active one. Commits during a rebuild
@@ -385,20 +382,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         seen.seen[key] = true;
       }, BACKGROUND_CONTEXT);
       publish(); await line;
-    },
-    async waitForSnapshot(commit) {
-      await line;
-      if ((await cloudFiles.snapshot())?.worktreeCommit !== commit) return;
-      await new Promise<void>(resolve => {
-        const finish = () => { clearTimeout(timeout); snapshotWaiters.delete(changed); resolve(); };
-        const changed = () => {
-          const code = snapshot.documents['gitspace.code'];
-          if (code && typeof code === 'object' && !Array.isArray(code) && code.worktreeCommit !== commit) finish();
-        };
-        const timeout = setTimeout(finish, 25_000);
-        snapshotWaiters.add(changed);
-        changed();
-      });
     },
     async status() { return workspaceStatus(await cloudFiles.snapshot() ?? null); },
     async snapshot() { await line; return snapshot; },
