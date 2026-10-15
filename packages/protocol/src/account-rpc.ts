@@ -90,7 +90,6 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'environment.runChecks': 'cloud',
   'environment.runPhase': 'cloud',
   'environment.cancelRun': 'cloud',
-  'environment.recoverRun': 'cloud',
   'environment.runLog': 'cloud',
   'mcp.connections.list': 'cloud',
   'mcp.connections.create': 'cloud',

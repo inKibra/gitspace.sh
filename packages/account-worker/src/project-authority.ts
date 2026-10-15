@@ -18,7 +18,7 @@ import type {
   WorkspaceLifecycle,
   ProjectOperationState,
 } from '@gitspace/protocol';
-import { ProjectEnvironmentStore } from './project-environment.js';
+import { ProjectEnvironmentStore, type LostLifecycleHolder } from './project-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { LifecycleMutationSchema, environmentFailure, type LifecycleActor, type EnvironmentFailure, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
@@ -1153,7 +1153,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
 
   /** Called only by the cloud once it forced the holder to `lost` (lease expiry, destroy or revoke): no human
    * abandon is needed to free a workspace whose runner can never report again. */
-  releaseLostLifecycleClaims(spaceId: string, holder: NonNullable<LifecycleActor['lostHolder']>): string[] {
+  releaseLostLifecycleClaims(spaceId: string, holder: LostLifecycleHolder): string[] {
     return this.environment.releaseLostHolder(this.requireLifecycleWorkspace(spaceId).id, spaceId, holder);
   }
 

@@ -1,11 +1,11 @@
 import {
   executionHash, browserOriginHash, projectEnvironmentState, EnvironmentError, environmentFailure, parseEnvironmentBundleJson, LifecycleMutationSchema,
-  assertLifecycleCommandAuthorized, parseLifecycleRunRequest, type LifecycleMutation, type LifecycleRunRequest, type LifecycleState,
+  assertLifecycleCommandAuthorized, isLifecycleRunActive, parseLifecycleRunRequest, type LifecycleMutation, type LifecycleRunRequest, type LifecycleState,
 } from '@gitspace/protocol-environment';
 import { deviceCanAdminister, type GitSpaceRpcContext, type VerifiedDevice } from '@gitspace/protocol';
 import {
   getWorkspaceEnvironmentContract, approveWorkspaceEnvironmentExecutionContract,
-  revokeWorkspaceEnvironmentApprovalContract, recoverWorkspaceEnvironmentRunContract,
+  revokeWorkspaceEnvironmentApprovalContract,
   getWorkspaceEnvironmentRunLogContract, cancelWorkspaceEnvironmentRunContract, type WorkspaceEnvironmentView,
   putWorkspaceEnvironmentBundleContract, setWorkspaceEnvironmentProfileContract,
   putWorkspaceEnvironmentValueContract, deleteWorkspaceEnvironmentValueContract,
@@ -17,7 +17,6 @@ import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { serverRpc } from 'result-rpc/server';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
-import type { FleetCatalogDO } from './fleet-catalog.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 
 /** Cloud reads do not possess, materialize, or start an agent in the workspace; edits land in cloud state alone. */
@@ -143,23 +142,6 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'revoke lifecycle approval', message: error instanceof Error ? error.message : String(error) }));
     }
   });
-  const recoverRun = server.implement(recoverWorkspaceEnvironmentRunContract).handler(async ({ input, errors }) => {
-    try {
-      const device = await requireLifecycleControl();
-      const { authority } = await authorityFor(input.spaceId);
-      const state = await authority.getLifecycleState(input.spaceId);
-      const run = state.runs.find((entry) => entry.id === input.runId);
-      if (!run) throw new EnvironmentError('NotFound', 'Lifecycle run does not belong to this workspace', { runId: input.runId });
-      const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
-      const destroyed = await catalog.wasMachineDestroyed(run.machineId);
-      const result = await authority.mutateLifecycleState(input.spaceId, { op: 'abandon', runId: run.id }, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true, ...(destroyed ? { destroyedMachineId: run.machineId } : {}) });
-      if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);
-      return ok(await view(input.spaceId, result.state));
-    } catch (error) {
-      const failure = environmentFailure(error);
-      return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'recover lifecycle claim', message: error instanceof Error ? error.message : String(error) }));
-    }
-  });
   const runLog = server.implement(getWorkspaceEnvironmentRunLogContract).handler(async ({ input, errors }) => {
     try {
       const { authority } = await authorityFor(input.spaceId);
@@ -173,10 +155,17 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     try {
       const device = await requireLifecycleControl();
       const { authority } = await authorityFor(input.spaceId);
-      const result = await authority.mutateLifecycleState(input.spaceId, { op: 'cancel', runId: input.runId }, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true });
+      const actor = { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true };
+      let result = await authority.mutateLifecycleState(input.spaceId, { op: 'cancel', runId: input.runId }, actor);
       if (result.status === 'error') return err(errors.EnvironmentFailure(result.failure));
-      const run = result.state.runs.find((entry) => entry.id === input.runId);
+      let run = result.state.runs.find((entry) => entry.id === input.runId);
       if (!run) throw new EnvironmentError('NotFound', 'Lifecycle run does not belong to this workspace', { runId: input.runId });
+      // Cancel always ends a run: one whose machine is not connected cannot be stopped there, so it ends now.
+      if (isLifecycleRunActive(run) && !await env.FLEET_CATALOG.getByName(userId).machineConnected(run.machineId)) {
+        result = await authority.mutateLifecycleState(input.spaceId, { op: 'interrupt', runId: run.id, reason: 'Cancelled while its machine was offline' }, actor);
+        if (result.status === 'error') return err(errors.EnvironmentFailure(result.failure));
+        run = result.state.runs.find((entry) => entry.id === input.runId) ?? run;
+      }
       return ok(run);
     } catch (error) {
       const failure = environmentFailure(error);
@@ -207,5 +196,5 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: `run workspace environment ${input.phase}`, message: error instanceof Error ? error.message : String(error) }));
     }
   });
-  return { get, putBundle, setProfile, putValue, deleteValue, approve: approveExecution, revokeApproval, recoverRun, cancelRun, runLog, runChecks, runPhase };
+  return { get, putBundle, setProfile, putValue, deleteValue, approve: approveExecution, revokeApproval, cancelRun, runLog, runChecks, runPhase };
 }

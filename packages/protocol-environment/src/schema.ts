@@ -345,7 +345,7 @@ export const LifecycleMutationSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('start'), runId: lifecycleIdSchema, token: lifecycleIdSchema }).strict(),
   z.object({ op: z.literal('incidents'), runId: lifecycleIdSchema, incidents: z.array(LifecycleIncidentSchema) }).strict(),
   z.object({ op: z.literal('cancel'), runId: lifecycleIdSchema }).strict(),
-  z.object({ op: z.literal('abandon'), runId: lifecycleIdSchema }).strict(),
+  z.object({ op: z.literal('interrupt'), runId: lifecycleIdSchema, reason: z.string().min(1).max(500) }).strict(),
 ]);
 export type LifecycleMutation = z.infer<typeof LifecycleMutationSchema>;
 export type LifecycleState = z.infer<typeof LifecycleStateSchema>;

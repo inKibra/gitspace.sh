@@ -373,7 +373,7 @@ export function requireDeviceAdministration<T extends { deviceId: string; kind: 
 /** Additional authorization; ordinary mutation capability is still required. */
 export function requiredAdministrativeCapability(path: string, input?: unknown): 'account.admin' | 'lifecycle.control' | null {
   if (['providers.apiKey.set', 'providers.logout', 'providers.login.start', 'providers.login.respond', 'providers.login.cancel', 'inference.create', 'inference.update', 'inference.delete', 'inference.assign', 'inspector.workflow.waiveGate', 'inspector.guide.setApproval', 'inspector.rubric.appendJudgment'].includes(path)) return 'account.admin';
-  if (['environment.approve', 'environment.revokeApproval', 'environment.recoverRun', 'environment.cancelRun'].includes(path)) return 'lifecycle.control';
+  if (['environment.approve', 'environment.revokeApproval', 'environment.cancelRun'].includes(path)) return 'lifecycle.control';
   if (path === 'environment.runPhase' && input && typeof input === 'object' && (input as Record<string, unknown>).phase === 'cloud/destroy') return 'lifecycle.control';
   return null;
 }

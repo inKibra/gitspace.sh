@@ -347,12 +347,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": true
   },
-  "environment.recoverRun": {
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": false
-  },
   "environment.runLog": {
     "readOnlyHint": true,
     "openWorldHint": false

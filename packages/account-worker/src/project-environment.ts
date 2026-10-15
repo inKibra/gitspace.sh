@@ -20,6 +20,9 @@ interface SharedEnvironment { values: Record<string, string>; approvals: Lifecyc
 const LOG_PAGE_SIZE = 4;
 
 /** Owns persistence only; the same transition executes in browser, Bun and Worker. */
+/** A machine, or one attachment of it, the cloud knows is gone. */
+export interface LostLifecycleHolder { machineId: string; attachment?: { attachmentId: string; generation: number }; reason: string }
+
 export class ProjectEnvironmentStore {
   private readonly changes: DurableChangeLog;
   constructor(private readonly storage: Pick<DurableObjectStorage, 'sql' | 'transactionSync'>, notify?: (notices: LiveNotice[]) => void) {
@@ -112,16 +115,16 @@ export class ProjectEnvironmentStore {
     return values;
   }
 
-  /** Interrupt every claim the lost holder still owns in this workspace: a lost attachment's runs, or all the machine's
-   * runs when the machine itself is gone. The abandon transition re-proves ownership; returns the released run ids. */
-  releaseLostHolder(projectId: string, spaceId: string, holder: NonNullable<LifecycleActor['lostHolder']>): string[] {
-    const actor: LifecycleActor = { actorId: 'cloud:attachment-lease', machineId: 'cloud:attachment-lease', kind: 'client', lifecycleControl: true, lostHolder: holder };
+  /** Interrupt every run the lost holder still owns in this workspace: a lost attachment's runs, or all the machine's
+   * runs when the machine itself is gone. Returns the interrupted run ids. */
+  releaseLostHolder(projectId: string, spaceId: string, holder: LostLifecycleHolder): string[] {
+    const actor: LifecycleActor = { actorId: 'cloud:attachment-lease', machineId: 'cloud:attachment-lease', kind: 'client', lifecycleControl: true };
     const claimed = this.storage.sql.exec<JsonRow>('SELECT data FROM lifecycle_runs WHERE space_id=? AND token IS NOT NULL', spaceId).toArray().map((row) => LifecycleRunSchema.parse(JSON.parse(row.data)));
     const released: string[] = [];
     for (const run of claimed) {
       if (run.machineId !== holder.machineId || !isLifecycleRunActive(run)) continue;
       if (holder.attachment && (run.attachment?.attachmentId !== holder.attachment.attachmentId || run.attachment.generation !== holder.attachment.generation)) continue;
-      this.mutate(projectId, spaceId, { op: 'abandon', runId: run.id }, actor);
+      this.mutate(projectId, spaceId, { op: 'interrupt', runId: run.id, reason: `Its ${holder.attachment ? 'attachment' : 'machine'} was lost (${holder.reason})` }, actor);
       released.push(run.id);
     }
     return released;
@@ -147,9 +150,9 @@ export class ProjectEnvironmentStore {
       const transition = transitionLifecycle({ state: current, runs, actor, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
       if (!transition.changed) return transition.state;
       const { state, record, log } = transition;
-      if (record) this.storage.sql.exec(
+      for (const entry of [...(record ? [record] : []), ...(transition.replaced ?? [])]) this.storage.sql.exec(
         'INSERT INTO lifecycle_runs(id,space_id,scope,token,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,data=excluded.data',
-        record.run.id, spaceId, record.scope, record.token, JSON.stringify(record.run),
+        entry.run.id, spaceId, entry.scope, entry.token, JSON.stringify(entry.run),
       );
       if (log?.output) {
         let offset = this.storage.sql.exec<{ next: number }>('SELECT COALESCE(MAX(offset)+1,0) AS next FROM lifecycle_logs WHERE run_id=?', log.runId).one().next;

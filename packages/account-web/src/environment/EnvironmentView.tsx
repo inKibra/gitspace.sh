@@ -68,7 +68,7 @@ function StepBlock({ step, machineId, busy, onRetire, ...actions }: { step: Envi
   </div>;
 }
 
-function MachineCard({ machine, index, busy, props, onRecover }: { machine: EnvironmentMachine; index: number; busy: boolean; props: EnvironmentViewProps; onRecover(runId: string): void }) {
+function MachineCard({ machine, index, busy, props }: { machine: EnvironmentMachine; index: number; busy: boolean; props: EnvironmentViewProps }) {
   const failed = machine.setup.find(step => step.state === 'failed');
   const running = machine.setup.some(step => step.state === 'running');
   const { sync } = machine;
@@ -110,7 +110,7 @@ function MachineCard({ machine, index, busy, props, onRecover }: { machine: Envi
             <span className="flex-1">{STEP_LABEL[run.phase]} · {run.status}</span>
             <span className="tabular-nums text-muted-foreground">{new Date(run.startedAt).toLocaleString()}</span>
             <Button variant="ghost" size="compact" onClick={() => props.onOpenLog(run.id, { id: run.phase, label: STEP_LABEL[run.phase] })}>Logs</Button>
-            {run.active ? <><Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onCancelRun(run.id)}>Cancel</Button><Button variant="ghost" size="compact" disabled={busy} onClick={() => onRecover(run.id)}>Recover…</Button></> : null}
+            {run.active ? <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onCancelRun(run.id)}>Cancel</Button> : null}
           </li>)}</ul>
         </details> : null}
       </div>
@@ -134,7 +134,6 @@ export function EnvironmentView(props: EnvironmentViewProps) {
   const { model, busy = false } = props;
   const [editing, setEditing] = useState<{ name: string; value: string } | null>(null);
   const [retiring, setRetiring] = useState(false);
-  const [recovering, setRecovering] = useState<string | null>(null);
   const setupMachine = model.machines.find(machine => machine.id === model.setupMachineId) ?? null;
   const approvals = model.steps.flatMap(step => step.scripts).filter(script => !script.approval.approved).length + model.browserOrigins.filter(origin => !origin.approved).length;
   const ready = model.machines.filter(machine => machine.ready).length;
@@ -173,7 +172,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
         </DropdownContent>
       </DropdownMenu>}>
         {model.machines.length
-          ? <div className="flex flex-col gap-3">{model.machines.map((machine, index) => <MachineCard key={machine.id} machine={machine} index={index} busy={busy} props={props} onRecover={setRecovering} />)}</div>
+          ? <div className="flex flex-col gap-3">{model.machines.map((machine, index) => <MachineCard key={machine.id} machine={machine} index={index} busy={busy} props={props} />)}</div>
           : <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><StatusDot color="dim" />No machine. Attach one so setup and commands can run.</p>}
         {props.machinesFooter}
         {model.conflicts.length ? <div role="alert" aria-label="Sync conflicts" className="flex flex-col gap-1 text-caption">
@@ -223,12 +222,6 @@ export function EnvironmentView(props: EnvironmentViewProps) {
         <DialogContent size="sm">
           <DialogHeader><DialogTitle>Retire this workspace’s cloud resources?</DialogTitle><DialogDescription>Runs the approved cloud/destroy scripts to delete the resources recorded for this workspace. Check the bindings and script content first; deletion may be irreversible.</DialogDescription></DialogHeader>
           <DialogFooter><Button variant="secondary" onClick={() => setRetiring(false)}>Cancel</Button><Button variant="primary" disabled={busy || !model.setupMachineId} onClick={() => { if (model.setupMachineId) props.onRunPhase(model.setupMachineId, 'cloud/destroy', { retire: true }); setRetiring(false); }}>Retire resources</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={recovering !== null} onOpenChange={open => { if (!open) setRecovering(null); }}>
-        <DialogContent size="sm">
-          <DialogHeader><DialogTitle>Recover an abandoned run?</DialogTitle><DialogDescription>Recovery releases this run’s claim without rerunning it. The cloud accepts it only when the machine that owns the run is confirmed gone; an offline machine could still be running it. Check external resources before running again.</DialogDescription></DialogHeader>
-          <DialogFooter><Button variant="secondary" onClick={() => setRecovering(null)}>Cancel</Button><Button variant="primary" disabled={busy} onClick={() => { if (recovering) props.onRecoverRun(recovering); setRecovering(null); }}>Mark run abandoned</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

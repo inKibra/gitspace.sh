@@ -621,7 +621,8 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return this.machineWorkspaces(machineId);
   }
 
-  private machineConnected(machineId: string): boolean {
+  /** Whether the machine's relay connection is up now. */
+  machineConnected(machineId: string): boolean {
     return this.ctx.storage.sql.exec<{ connected: number }>('SELECT connected FROM machine_presence WHERE machine_id=?', machineId).toArray()[0]?.connected === 1;
   }
 

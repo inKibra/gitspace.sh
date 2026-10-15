@@ -76,7 +76,6 @@ export interface EnvironmentViewProps {
   onOpenScript(scriptId: string): void;
   onOpenLog(runId: string, script: { id: string; label: string }): void;
   onCancelRun(runId: string): void;
-  onRecoverRun(runId: string): void;
   onSyncNow(machineId: string): void;
   onShowUnsent(machineId: string): void;
   onResolveConflict(path: string, keep: 'cloud' | 'machine'): void;

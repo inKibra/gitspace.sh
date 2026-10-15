@@ -163,20 +163,19 @@ describe('durable environment authority', () => {
     });
   });
 
-  it('accepts a retry once, fences contenders, and keeps cancellation unresolved until the runner stops', async () => {
+  it('accepts a retry once; a newer run cancels the running one, which records cancellation when its runner stops', async () => {
     const authority = await ledger();
     const accepted = await mutate(authority, claim('operation'));
     const token = accepted.claim!.token!;
     const retry = await mutate(authority, claim('operation'));
     expect(retry.claim?.status).toBe('existing');
     expect(retry.runs.filter((run) => run.id === 'operation')).toHaveLength(1);
-    await expect(mutate(authority, claim('contender'), { ...machine, machineId: 'machine-b' })).rejects.toMatchObject({ code: 'RunConflict' });
-    const cancelling = await mutate(authority, { op: 'cancel', runId: 'operation' }, human);
-    expect(cancelling.runs[0]?.status).toBe('cancelling');
-    await expect(mutate(authority, claim('still-fenced'))).rejects.toMatchObject({ code: 'RunConflict' });
+    const contender = await mutate(authority, claim('contender'), { ...machine, machineId: 'machine-b' });
+    expect(contender.claim?.status).toBe('claimed');
+    expect(contender.runs.find((run) => run.id === 'operation')?.status).toBe('cancelling');
     const cancelled = await mutate(authority, { op: 'finish', runId: 'operation', token, status: 'failed', exitCode: 137, results: [], output: 'stopped', bindings: {} });
     expect(cancelled.runs[0]).toMatchObject({ status: 'cancelled', failure: { code: 'Cancelled' } });
-    expect((await authority.getLifecycleState('workspace')).runs[0]?.incidents[0]?.failure?.code).toBe('Cancelled');
+    expect((await authority.getLifecycleState('workspace')).runs.find((run) => run.id === 'operation')?.incidents[0]?.failure?.code).toBe('Cancelled');
   });
 
   it('retains paged redacted logs and partial bindings, and carries permission failures explicitly', async () => {
@@ -199,9 +198,7 @@ describe('durable environment authority', () => {
     const resumed = await authority.getLifecycleRunLog('workspace', 'partial', cursor);
     expect(resumed.output).toBe('later output\n');
     expect((await authority.getLifecycleRunLog('workspace', 'partial', resumed.cursor)).output).toBe('');
-    const denied = await authority.mutateLifecycleState('workspace', { op: 'abandon', runId: 'partial' }, human);
-    expect(denied).toMatchObject({ status: 'error', failure: { code: 'PermissionDenied' } });
-    const recovered = await mutate(authority, { op: 'abandon', runId: 'partial' }, { ...human, destroyedMachineId: machine.machineId });
+    const recovered = await mutate(authority, { op: 'interrupt', runId: 'partial', reason: 'Cancelled while its machine was offline' }, human);
     expect(recovered.bindings).toEqual({ resource: 'allocated-before-crash' });
     expect(recovered.runs[0]?.status).toBe('interrupted');
     await expect(mutate(authority, { op: 'finish', runId: 'partial', token, status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {} })).rejects.toMatchObject({ code: 'RunFenced' });

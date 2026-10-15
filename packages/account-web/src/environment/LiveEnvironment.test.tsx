@@ -11,13 +11,13 @@ import { LiveEnvironment } from './LiveEnvironment.js';
 
 const rpc = vi.hoisted(() => ({
   sync: vi.fn(), approve: vi.fn(), revokeApproval: vi.fn(), runChecks: vi.fn(), runPhase: vi.fn(), putValue: vi.fn(),
-  setProfile: vi.fn(), cancelRun: vi.fn(), recoverRun: vi.fn(), runLog: vi.fn(), cache: vi.fn(), detach: vi.fn(), createTerminal: vi.fn(),
+  setProfile: vi.fn(), cancelRun: vi.fn(), runLog: vi.fn(), cache: vi.fn(), detach: vi.fn(), createTerminal: vi.fn(),
 }));
 const reads = vi.hoisted(() => new Map<string, unknown>());
 const fleet = vi.hoisted(() => ({ machines: [] as { id: string; label: string; state: string; kind: string }[] }));
 vi.mock('../rpc-client.js', () => ({
   rpcClient: {
-    environment: { get: 'environment', approve: rpc.approve, revokeApproval: rpc.revokeApproval, runChecks: rpc.runChecks, runPhase: rpc.runPhase, putValue: rpc.putValue, setProfile: rpc.setProfile, cancelRun: rpc.cancelRun, recoverRun: rpc.recoverRun, runLog: rpc.runLog },
+    environment: { get: 'environment', approve: rpc.approve, revokeApproval: rpc.revokeApproval, runChecks: rpc.runChecks, runPhase: rpc.runPhase, putValue: rpc.putValue, setProfile: rpc.setProfile, cancelRun: rpc.cancelRun, runLog: rpc.runLog },
     runtime: { snapshot: 'snapshot', sync: rpc.sync, attachment: { cache: { request: rpc.cache }, detach: rpc.detach } },
     terminals: { create: rpc.createTerminal },
   },

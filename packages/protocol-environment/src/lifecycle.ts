@@ -19,9 +19,6 @@ export interface LifecycleActor {
   actorId: string;
   kind: 'browser' | 'client' | 'machine';
   lifecycleControl: boolean;
-  destroyedMachineId?: string;
-  /** The cloud proved the run's holder is gone for good: the whole machine, or one attachment of it. */
-  lostHolder?: { machineId: string; attachment?: { attachmentId: string; generation: number }; reason: string };
   attachment?: { attachmentId: string; generation: number };
 }
 export interface LifecycleRunRecord { run: LifecycleRun; token: string | null; scope: string }
@@ -61,7 +58,7 @@ export function authorizeLifecycleMachineMutation(input: LifecycleMutation, fact
   machineId: string; projectId: string; machineOnline: boolean;
   attachment?: { attachmentId: string; generation: number; machineId: string; projectId: string; workspaceId: string; state: string } | null;
 }): void {
-  if (input.op === 'approval' || input.op === 'abandon') throw new EnvironmentError('PermissionDenied', 'Execution approval and destruction-confirmed recovery require account lifecycle control');
+  if (input.op === 'approval' || input.op === 'interrupt') throw new EnvironmentError('PermissionDenied', 'Execution approval and interrupting a run require account lifecycle control');
   if (input.op !== 'claim') return;
   if (!facts.machineOnline) throw new EnvironmentError('RunnerUnavailable', 'Lifecycle execution requires an online authorized machine', { machineId: facts.machineId });
   if (input.attachment) {
@@ -79,6 +76,8 @@ export interface LifecycleTransition {
   state: LifecycleState;
   changed: boolean;
   record?: LifecycleRunRecord;
+  /** Runs a new claim cancelled: the newest run wins. */
+  replaced?: LifecycleRunRecord[];
   log?: { runId: string; output: string };
   sharedChanged: boolean;
 }
@@ -232,6 +231,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
   if (!actor.actorId || !actor.machineId) throw new EnvironmentError('PermissionDenied', 'A verified lifecycle actor is required');
   const state: LifecycleState = { ...facts.state, claim: null };
   let record: LifecycleRunRecord | undefined;
+  const replaced: LifecycleRunRecord[] = [];
   let log: LifecycleTransition['log'];
   let sharedChanged = false;
   const owned = (runId: string, token?: string): LifecycleRunRecord => {
@@ -284,8 +284,6 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         return { state: { ...state, claim: { runId: run.id, status: 'existing', reason: null, token: null } }, changed: false, sharedChanged: false };
       }
       const scope = lifecycleRunScope({ ...input, executionHashes }, actor.machineId, state.spaceId);
-      const active = facts.runs.find((entry) => entry.token && entry.run.spaceId === state.spaceId);
-      if (active) throw new EnvironmentError('RunConflict', `Environment ${active.run.phase} is already running in this workspace; open its terminal or cancel it`, { runId: active.run.id });
       if (executionHashes.some((hash) => !state.approvals.some((approval) => approval.executionHash === hash))) throw new EnvironmentError('ApprovalRequired', 'Awaiting human approval for execution content');
       if (input.phase === 'checks' && input.interactive) throw new EnvironmentError('InvalidConfiguration', 'Environment checks cannot run interactively');
       const deadlineAt = new Date(input.deadlineAt === undefined ? Date.parse(now) + DEFAULT_LIFECYCLE_TIMEOUT_MS : Date.parse(input.deadlineAt)).toISOString();
@@ -298,6 +296,11 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
         executionHashes, terminalName: input.terminalName ?? null, results: [], output: '',
         exitCode: skipped ? 0 : null, startedAt: now, finishedAt: skipped ? now : null, deadlineAt, cancelRequestedAt: null, failure: null, incidents: [] };
       record = { run, scope, token: skipped ? null : input.ownershipToken ?? facts.token };
+      // A new run replaces the workspace's running one: that run is cancelled and its machine stops it.
+      if (!skipped) for (const entry of facts.runs) {
+        if (!entry.token || entry.run.spaceId !== state.spaceId || !isLifecycleRunActive(entry.run) || entry.run.cancelRequestedAt) continue;
+        replaced.push({ ...entry, run: { ...entry.run, status: 'cancelling', cancelRequestedAt: now } });
+      }
       state.claim = { runId: run.id, status: skipped ? 'skipped' : 'claimed', reason: skipped ? 'This lifecycle scope already succeeded' : null, token: record.token };
       break;
     }
@@ -360,14 +363,13 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       if (status === 'succeeded' && record.run.phase === 'cloud/destroy') { state.destroyedAt = now; state.policy = { automatic: false }; }
       break;
     }
-    case 'abandon': {
+    case 'interrupt': {
+      // The run's machine is gone or unreachable: the run ends here and its effects are reported as unknown.
       record = owned(input.runId);
       const run = record.run;
-      const lost = actor.lostHolder;
-      const holderLost = lost !== undefined && lost.machineId === run.machineId && (lost.attachment === undefined || (run.attachment?.attachmentId === lost.attachment.attachmentId && run.attachment.generation === lost.attachment.generation));
-      if (!actor.lifecycleControl || (actor.destroyedMachineId !== run.machineId && !holderLost)) throw new EnvironmentError('PermissionDenied', 'Recovery requires lifecycle control and confirmed destruction of the owning machine');
-      if (!isLifecycleRunActive(run)) throw new EnvironmentError('PreconditionFailed', 'Only an unresolved lifecycle claim can be recovered');
-      const message = holderLost ? `Owning ${lost.attachment ? 'attachment' : 'machine'} was lost (${lost.reason}) before run completion; inspect effects before retrying` : 'Owning machine was destroyed before run completion; inspect effects before retrying';
+      if (!actor.lifecycleControl) throw new EnvironmentError('PermissionDenied', 'Interrupting a run requires lifecycle control');
+      if (!isLifecycleRunActive(run)) return { state, changed: false, sharedChanged: false };
+      const message = `${input.reason}; the outcome of its scripts is unknown`;
       record.run = { ...run, status: 'interrupted', finishedAt: now, exitCode: 1, failure: { code: 'Interrupted', message, context: { runId: input.runId } } };
       record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:interrupted`, kind: 'domain', occurredAt: now, message, failure: record.run.failure }];
       record.token = null;
@@ -375,6 +377,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
   }
   if (record) state.runs = [record.run, ...state.runs.filter((run) => run.id !== record.run.id)];
+  for (const entry of replaced) state.runs = state.runs.map((run) => run.id === entry.run.id ? entry.run : run);
   state.revision += 1;
-  return { state, changed: true, record, log, sharedChanged };
+  return { state, changed: true, record, replaced, log, sharedChanged };
 }

@@ -179,7 +179,6 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
         setLogSelection({ runId, script: step && step.id !== target.id ? { id: step.id, label: step.id } : target });
       }}
       onCancelRun={runId => mutate(async () => { const result = await rpcClient.environment.cancelRun({ spaceId, runId }); if (result.status === 'error') throw result.error; })}
-      onRecoverRun={runId => mutate(async () => { const result = await rpcClient.environment.recoverRun({ spaceId, runId }); if (result.status === 'error') throw result.error; })}
       onSyncNow={id => mutate(async () => {
         const result = await sync({ method: 'now', on: RuntimeMachineIdSchema.parse(id) });
         if (result.method === 'now') setNotice(`Sent ${directory?.find(entry => entry.id === id)?.label ?? id}'s changes${result.conflicts.length ? `; ${result.conflicts.length} ${result.conflicts.length === 1 ? 'conflict needs' : 'conflicts need'} a choice` : ''}.`);

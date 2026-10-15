@@ -908,13 +908,6 @@ export const cancelWorkspaceEnvironmentRunContract = gitspaceRpc
   .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-export const recoverWorkspaceEnvironmentRunContract = gitspaceRpc
-  .procedure()
-  .input(wire.object({ spaceId: wire.string, runId: wire.string }))
-  .output(WorkspaceEnvironmentViewCodec)
-  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
-
 export const getWorkspaceEnvironmentRunLogContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, runId: wire.string, offset: wire.nullable(wire.number) }))
@@ -2099,7 +2092,6 @@ export const gitspaceContract = gitspaceRpc.contract({
     runChecks: runWorkspaceEnvironmentChecksContract,
     runPhase: runWorkspaceEnvironmentPhaseContract,
     cancelRun: cancelWorkspaceEnvironmentRunContract,
-    recoverRun: recoverWorkspaceEnvironmentRunContract,
     runLog: getWorkspaceEnvironmentRunLogContract,
   },
   mcp: {

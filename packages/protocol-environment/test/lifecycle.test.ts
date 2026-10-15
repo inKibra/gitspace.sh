@@ -72,7 +72,7 @@ describe('isomorphic environment decisions', () => {
     context.apply(finish('automatic'));
     expect(context.apply(claim('manual', { interactive: true })).runs[0]).toMatchObject({ status: 'accepted', interactive: true, executionHashes: [hash] });
   });
-  it('authorizes explicit client lifecycle control without impersonating a browser or bypassing recovery proof', () => {
+  it('authorizes explicit client lifecycle control without impersonating a browser', () => {
     const context = scenario();
     const client: LifecycleActor = { actorId: 'api-client', machineId: 'api-client', kind: 'client', lifecycleControl: true };
     expect(() => context.apply({ op: 'approval', scope: 'project', executionHash: hash, approved: false }, { ...client, lifecycleControl: false })).toThrow();
@@ -80,23 +80,17 @@ describe('isomorphic environment decisions', () => {
     expect(approved.approvals[0]?.approvedBy).toBe('api-client');
     context.apply(claim('recover'));
     expect(context.apply({ op: 'cancel', runId: 'recover' }, { ...client, lifecycleControl: false }).runs[0]?.status).toBe('cancelling');
-    expect(() => context.apply({ op: 'abandon', runId: 'recover' }, client)).toThrow();
-    expect(context.apply({ op: 'abandon', runId: 'recover' }, { ...client, destroyedMachineId: machine.machineId }).runs[0]?.status).toBe('interrupted');
+    expect(() => context.apply({ op: 'interrupt', runId: 'recover', reason: 'Machine offline' }, { ...client, lifecycleControl: false })).toThrow();
+    expect(context.apply({ op: 'interrupt', runId: 'recover', reason: 'Machine offline' }, client).runs[0]).toMatchObject({ status: 'interrupted', failure: { code: 'Interrupted', message: 'Machine offline; the outcome of its scripts is unknown' } });
   });
-  it('lets the cloud release a claim only when it proves that exact holder lost', () => {
+  it('a new run replaces the running one: the old run is cancelled for its machine to stop, the new one is accepted', () => {
     const context = scenario();
     const attachment = { attachmentId: 'cache-a', generation: 3 };
     context.apply(claim('held', { generation: null, phase: 'workspace/materialize', attachment }), { ...machine, attachment });
-    const cloud: LifecycleActor = { actorId: 'cloud:attachment-lease', machineId: 'cloud:attachment-lease', kind: 'client', lifecycleControl: true };
-    expect(() => context.apply({ op: 'abandon', runId: 'held' }, { ...cloud, lostHolder: { machineId: machine.machineId, attachment: { ...attachment, generation: 4 }, reason: 'deadline' } })).toThrow();
-    expect(() => context.apply({ op: 'abandon', runId: 'held' }, { ...cloud, lostHolder: { machineId: 'machine-b', reason: 'machine-destroyed' } })).toThrow();
-    expect(() => context.apply({ op: 'abandon', runId: 'held' }, { ...cloud, lifecycleControl: false, lostHolder: { machineId: machine.machineId, attachment, reason: 'deadline' } })).toThrow();
-    const released = context.apply({ op: 'abandon', runId: 'held' }, { ...cloud, lostHolder: { machineId: machine.machineId, attachment, reason: 'deadline' } });
-    expect(released.runs[0]).toMatchObject({ status: 'interrupted', failure: { code: 'Interrupted', message: 'Owning attachment was lost (deadline) before run completion; inspect effects before retrying' } });
-    expect(context.apply(claim('next', { generation: null, phase: 'workspace/materialize' })).claim?.status).toBe('claimed');
-    const machineWide = scenario();
-    machineWide.apply(claim('prepare'));
-    expect(machineWide.apply({ op: 'abandon', runId: 'prepare' }, { ...cloud, lostHolder: { machineId: machine.machineId, reason: 'machine-revoked' } }).runs[0]?.failure?.message).toContain('Owning machine was lost (machine-revoked)');
+    const next = context.apply(claim('next', { generation: null, phase: 'workspace/materialize' }));
+    expect(next.claim?.status).toBe('claimed');
+    expect(next.runs.find(run => run.id === 'held')).toMatchObject({ status: 'cancelling' });
+    expect(next.runs.find(run => run.id === 'next')).toMatchObject({ status: 'accepted' });
   });
   it('rejects unsupported formats with typed identity instead of converting or silently emptying them', () => {
     let failure: unknown;
@@ -118,12 +112,11 @@ describe('isomorphic environment decisions', () => {
     expect(context.apply(claim('new-machine'), { ...machine, machineId: 'machine-b' }).claim?.status).toBe('claimed');
   });
 
-  it('keeps a cancelled operation fenced until effects stop and retains its incident after a successful retry', () => {
+  it('records a cancelled operation as cancelled once it stops and retains its incident after a successful retry', () => {
     const context = scenario();
     context.apply(claim('cancelled'));
     const cancelling = context.apply({ op: 'cancel', runId: 'cancelled' });
     expect(isLifecycleRunActive(cancelling.runs[0]!)).toBe(true);
-    expect(() => context.apply(claim('too-early'))).toThrow();
     const stopped = context.apply(finish('cancelled', { status: 'failed', exitCode: 137 }));
     expect(stopped.runs[0]).toMatchObject({ status: 'cancelled', failure: { code: 'Cancelled' } });
     context.advance('2026-09-01T00:00:01.000Z');
