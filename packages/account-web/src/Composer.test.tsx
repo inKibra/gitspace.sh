@@ -49,7 +49,7 @@ async function draftWithAttachment(text: string, file: File) {
 
 it('uploads attachments that are not sent inline and links them in the prompt', async () => {
   const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
-  const uploads = client(async (uploadId) => ({ kind: 'artifact', url: `drive://workspace/uploads/${uploadId}`, hash: 'hash', label: `uploads/${uploadId}`, mediaType: 'application/pdf', generation: 1 }));
+  const uploads = client(async (uploadId) => ({ kind: 'artifact', url: `drive://workspace/uploads/${encodeURIComponent(uploadId)}`, hash: 'hash', label: `uploads/${uploadId}`, mediaType: 'application/pdf', generation: 1 }));
   await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={uploads} running={false} pending={false} onSend={onSend} />));
 
   const textarea = await draftWithAttachment('Summarize this', new File([new Uint8Array(10)], 'report (1).pdf', { type: 'application/pdf' }));

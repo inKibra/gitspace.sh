@@ -47,10 +47,15 @@ export function markdownImageSources(source: string): string[] {
 
 /** The artifact URL an image source names, relative to the Markdown artifact; null for web, data, and anchor sources. */
 export function artifactImageUrl(src: string, documentUrl: string): string | null {
-  if (src.startsWith('drive://')) return decodeURI(src);
+  if (src.startsWith('drive://')) return canonicalDriveUrl(src.slice('drive://'.length));
   if (/^[a-z][a-z0-9+.-]*:/iu.test(src) || src.startsWith('//') || src.startsWith('#') || !documentUrl.startsWith('drive://')) return null;
   const directory = documentUrl.slice('drive://'.length, documentUrl.lastIndexOf('/') + 1);
   let resolved: URL;
   try { resolved = new URL(src, `https://artifact.invalid/${directory}`); } catch { return null; }
-  return `drive://${decodeURIComponent(resolved.pathname.slice(1))}`;
+  return canonicalDriveUrl(resolved.pathname.slice(1));
+}
+
+/** Drive URLs as the catalog lists them: each path segment encoded once. */
+function canonicalDriveUrl(path: string): string | null {
+  try { return `drive://${path.split('/').map((segment) => encodeURIComponent(decodeURIComponent(segment))).join('/')}`; } catch { return null; }
 }

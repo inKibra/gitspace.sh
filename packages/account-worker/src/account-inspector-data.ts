@@ -103,6 +103,11 @@ async function boundedArtifactBytes(env: Env, userId: string, hash: string, key:
 }
 
 /** Reads the same encrypted, content-addressed objects as CloudArtifactObjectStore. */
+/** A drive URL with each path segment encoded, so names with ':' or '%' read back as written. */
+function driveUrl(mount: string, path: string): string {
+  return `drive://${mount}/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
+
 export class InspectorCloudArtifacts {
   private keyRequest: Promise<Uint8Array> | undefined;
   constructor(private readonly env: Env, private readonly userId: string, private readonly source: InspectorCloudContext) {}
@@ -184,7 +189,7 @@ export class InspectorCloudArtifacts {
     const groups = await Promise.all(selected.map(async (scope) => {
       const base = scope.workspaceId === this.source.project.id;
       return (await this.entries(scope)).map((entry) => ({
-        url: `drive://${base ? 'base' : 'workspace'}/${entry.path}`, path: entry.path, hash: entry.blobHash,
+        url: driveUrl(base ? 'base' : 'workspace', entry.path), path: entry.path, hash: entry.blobHash,
         size: entry.size, mediaType: entry.mediaType, scope: base ? 'base' as const : 'workspace' as const,
         workspaceId: base ? null : scope.workspaceId,
       }));
@@ -304,13 +309,17 @@ export class InspectorCloudArtifacts {
     const generation = scope.generation + 1;
     const manifestHash = await this.sealManifest(scope, generation, entries.values(), scopeKey);
     await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation });
-    return { url: `drive://${mount}/${path}`, path, hash: entry.blobHash, size: entry.size, mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
+    return { url: driveUrl(mount, path), path, hash: entry.blobHash, size: entry.size, mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
   }
 
   /** Staged upload objects live under the account prefix until commit or abort removes them. */
   private uploadKey(uploadId: string, part: string): string {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(uploadId)) throw new Error('Upload does not exist');
-    return `users/${this.userId}/accounts/${Buffer.from(this.userId).toString('base64url')}/artifact-uploads/${uploadId}/${part}`;
+    return `${this.uploadsPrefix()}${uploadId}/${part}`;
+  }
+
+  private uploadsPrefix(): string {
+    return `users/${this.userId}/accounts/${Buffer.from(this.userId).toString('base64url')}/artifact-uploads/`;
   }
 
   private async uploadState(uploadId: string): Promise<ArtifactUploadState | null> {
@@ -331,10 +340,26 @@ export class InspectorCloudArtifacts {
   async beginUpload(fileName: string, size: number, mediaType: string | null) {
     const name = (fileName.split(/[\\/]/u).at(-1) ?? '').replace(/[\u0000-\u001f\u007f]/gu, '').trim();
     if (!name || name === '.' || name === '..' || name.length > 255) throw new Error('Choose a file with a valid name');
+    await this.deleteAbandonedUploads();
     const uploadId = crypto.randomUUID();
     const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation: this.source.placement?.generation ?? 0, path: `uploads/${name}`, size, mediaType, received: 0, last: null };
     await this.env.DATA.put(this.uploadKey(uploadId, 'state'), JSON.stringify(state));
-    return { uploadId, url: `drive://${this.writable().mount}/${state.path}`, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES };
+    return { uploadId, url: driveUrl(this.writable().mount, state.path), chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES };
+  }
+
+  /** Staged uploads untouched for a day were abandoned (a closed tab, a failed send); a new upload removes them. */
+  private async deleteAbandonedUploads(): Promise<void> {
+    const prefix = this.uploadsPrefix();
+    const listed = await this.env.DATA.list({ prefix, limit: 1000 });
+    const newest = new Map<string, number>();
+    for (const object of listed.objects) {
+      const uploadId = object.key.slice(prefix.length).split('/')[0]!;
+      newest.set(uploadId, Math.max(newest.get(uploadId) ?? 0, object.uploaded.getTime()));
+    }
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const abandoned = new Set([...newest].filter(([, uploaded]) => uploaded < cutoff).map(([uploadId]) => uploadId));
+    const keys = listed.objects.filter(object => abandoned.has(object.key.slice(prefix.length).split('/')[0]!)).map(object => object.key);
+    if (keys.length) await this.env.DATA.delete(keys);
   }
 
   /** Stores the chunk at the next offset; resending the last stored chunk is acknowledged without rewriting it. */

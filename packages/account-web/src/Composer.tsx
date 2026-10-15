@@ -123,8 +123,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         for (const file of uploads) {
           setUploading(file.name);
           const artifact = await uploadArtifactFile(artifactUpload, file, { signal: new AbortController().signal, onSession: () => undefined });
-          // Catalog URLs carry raw names ("report (1).pdf"); the agent's `read` takes encoded resource URIs.
-          uploaded.set(file, `drive://${artifact.url.slice('drive://'.length).split('/').map(encodeURIComponent).join('/')}`);
+          uploaded.set(file, artifact.url);
         }
       }
       const images = await Promise.all(draftAttachments.filter((file) => file.type.startsWith('image/')).map(imageAttachment));

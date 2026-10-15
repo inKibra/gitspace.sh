@@ -340,9 +340,9 @@ describe('user artifact flows', () => {
       const part = bytes.subarray(offset, offset + ARTIFACT_UPLOAD_CHUNK_BYTES);
       return { offset, sha256: createHash('sha256').update(part).digest('hex'), data: Buffer.from(part).toString('base64') };
     };
-    const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'capture (1).bin', size: bytes.length, mediaType: 'application/octet-stream' });
+    const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'capture 10:30.bin', size: bytes.length, mediaType: 'application/octet-stream' });
     if (begun.status === 'error') throw begun.error;
-    expect(begun.value).toMatchObject({ url: 'drive://workspace/uploads/capture (1).bin', chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES });
+    expect(begun.value).toMatchObject({ url: 'drive://workspace/uploads/capture%2010%3A30.bin', chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES });
     const upload = { ...request, uploadId: begun.value.uploadId };
 
     expect(await client.inspector.artifacts.uploadChunk({ ...upload, ...chunk(ARTIFACT_UPLOAD_CHUNK_BYTES) })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
@@ -355,8 +355,9 @@ describe('user artifact flows', () => {
 
     const committed = await client.inspector.artifacts.uploadCommit(upload);
     if (committed.status === 'error') throw committed.error;
-    expect(committed.value).toMatchObject({ url: 'drive://workspace/uploads/capture (1).bin', path: 'uploads/capture (1).bin', size: bytes.length, mediaType: 'application/octet-stream', scope: 'workspace', workspaceId });
-    const stored = await readBytes(client.inspector.artifacts.read({ ...request, url: 'drive://workspace/uploads/capture%20(1).bin', hash: committed.value.hash }));
+    expect(committed.value).toMatchObject({ url: 'drive://workspace/uploads/capture%2010%3A30.bin', path: 'uploads/capture 10:30.bin', size: bytes.length, mediaType: 'application/octet-stream', scope: 'workspace', workspaceId });
+    // A ':' in the name is encoded, so it is not read as a `:raw` or line selector.
+    const stored = await readBytes(client.inspector.artifacts.read({ ...request, url: committed.value.url, hash: committed.value.hash }));
     expect(stored).toEqual(Buffer.from(bytes));
     expect(await client.inspector.artifacts.uploadAbort(upload)).toMatchObject({ status: 'ok', value: { aborted: false } });
 
