@@ -1,3 +1,4 @@
+import { providerErrorText } from './provider-error.js';
 import type { AskBlock, MessageImage, RichContentBlock, ToolCallBlock, TransportBlock, TurnBlock } from './model.js';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
@@ -487,7 +488,7 @@ export class TranscriptProjector {
     }
     if (event.kind === 'error') {
       const turn = this.#ensureTurn(event);
-      this.#write({ id: `${turn.id}:error:${event.ordinal}`, type: 'interruption', reason: 'aborted', title: 'Agent turn failed', detail: typeof event.payload.message === 'string' ? event.payload.message : undefined });
+      this.#write({ id: `${turn.id}:error:${event.ordinal}`, type: 'interruption', reason: 'aborted', title: 'Agent turn failed', detail: typeof event.payload.message === 'string' ? providerErrorText(event.payload.message) : undefined });
       turn.failed = true;
       this.store.turn(turn.id, 'error');
     }

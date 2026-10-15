@@ -1,3 +1,4 @@
+import { providerErrorText } from '@gitspace/blocks';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import type { ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication } from '@earendil-works/pi-durable';
 import { defineDoc } from '@earendil-works/pi-durable';
@@ -177,7 +178,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     return {
       id: String(record.id), parentId: parentId === undefined ? null : String(parentId),
       title: child ? child.name : record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`,
-      failure: latest?.role === 'assistant' && latest.stopReason === 'error' ? latest.errorMessage ?? 'The model request failed' : null,
+      failure: latest?.role === 'assistant' && latest.stopReason === 'error' ? providerErrorText(latest.errorMessage ?? 'The model request failed') : null,
       subagent: child ? { conversationId: String(record.id), ...child } : null,
       messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))),
     };
