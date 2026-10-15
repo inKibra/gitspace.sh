@@ -1,6 +1,10 @@
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeSnapshotCommitInput } from '@gitspace/protocol-runtime';
 import type { AttachmentStore, ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { z } from 'zod';
+
+export const CheckoutSourceFactsSchema = z.object({ commit: z.string(), remote: z.string(), requiresFiltersOrSubmodules: z.boolean() });
+export type CheckoutSourceFacts = z.infer<typeof CheckoutSourceFactsSchema>;
 
 export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser', 'sync_machine'];
 
@@ -15,6 +19,8 @@ export class RuntimeAttachmentController {
     origin(projectId: string): Promise<string | null>;
     /** Enrollment/trust checks are required even when the target is offline. */
     authorizeMachine(machineId: RuntimeAttachment['machineId']): Promise<void>;
+    /** What the last assignment read learned about a commit's checkout: computed once per commit, not per read. */
+    sourceFacts: { read(): Promise<CheckoutSourceFacts | null>; write(facts: CheckoutSourceFacts): Promise<void> };
   }) {}
 
   private async requiresFiltersOrSubmodules(repository: string, commit: string) {
@@ -42,9 +48,14 @@ export class RuntimeAttachmentController {
       const checkpoint = await this.options.snapshot();
       if (!checkpoint) return { grant, source: null, checkpoint };
       const repository = `workspace-${grant.attachment.workspaceId}`;
-      const info = await this.options.code.info(repository);
-      const requiresFiltersOrSubmodules = await this.requiresFiltersOrSubmodules(repository, checkpoint.worktreeCommit);
-      return { grant, source: { ref: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit, requiresFiltersOrSubmodules, remote: info.remote, origin: await this.options.origin(grant.attachment.projectId), checkpoint }, checkpoint };
+      let facts = await this.options.sourceFacts.read();
+      if (facts?.commit !== checkpoint.worktreeCommit) {
+        const [info, requiresFiltersOrSubmodules] = await Promise.all([this.options.code.info(repository), this.requiresFiltersOrSubmodules(repository, checkpoint.worktreeCommit)]);
+        facts = { commit: checkpoint.worktreeCommit, remote: info.remote, requiresFiltersOrSubmodules };
+        await this.options.sourceFacts.write(facts);
+      }
+      const { remote, requiresFiltersOrSubmodules } = facts;
+      return { grant, source: { ref: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit, requiresFiltersOrSubmodules, remote, origin: await this.options.origin(grant.attachment.projectId), checkpoint }, checkpoint };
     }));
     return { assignments };
   }

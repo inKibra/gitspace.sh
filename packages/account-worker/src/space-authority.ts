@@ -18,7 +18,7 @@ import { runtimeServiceControl } from './runtime-service-control.js';
 import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
-import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
+import { CheckoutSourceFactsSchema, RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
 import { notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
 import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environment.js';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
@@ -659,6 +659,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       authorizeMachine: async machineId => {
         const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId);
         if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
+      },
+      sourceFacts: {
+        read: async () => CheckoutSourceFactsSchema.nullable().catch(null).parse(await this.ctx.storage.get('assignment.source') ?? null),
+        write: facts => this.ctx.storage.put('assignment.source', facts),
       },
     });
   }
