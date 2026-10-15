@@ -1,6 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { InferenceAssignment, InferenceProfile, InferenceState } from '@gitspace/protocol/inference';
-import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { useAccountInference } from './SynchronizationProvider.js';
@@ -9,7 +8,6 @@ export interface InferenceController {
   state: InferenceState | null;
   loading: boolean;
   pending: boolean;
-  activationPending: boolean;
   error: string | null;
   refresh(): Promise<void>;
   create(name: string, sourceProfileId: string | null): Promise<InferenceState>;
@@ -62,13 +60,11 @@ export function InferenceProvider({ children }: { children: ReactNode }) {
       setPending(false);
     }
   };
-  const activationPending = query.state === 'failure' && rpcErrors.inferenceActivationPending.is(query.error);
   const value: InferenceController = {
     state,
     loading: query.state === 'pending',
     pending,
-    activationPending,
-    error: query.state === 'failure' ? activationPending ? null : rpcErrorMessage(query.error, 'Load inference profiles') : mutationError,
+    error: query.state === 'failure' ? rpcErrorMessage(query.error, 'Load inference profiles') : mutationError,
     refresh: async () => { setMutationError(null); await query.refetch(); },
     create: (name, sourceProfileId) => run(() => rpcClient.inference.create({ name, sourceProfileId })),
     update: (profile, name, settings) => run(() => rpcClient.inference.update({ profileId: profile.id, expectedRevision: profile.revision, name, settings })),

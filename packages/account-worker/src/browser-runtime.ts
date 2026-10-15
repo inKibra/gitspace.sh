@@ -51,7 +51,7 @@ export class AccountBrowserRuntime {
           if (!stored || await this.options.storage.get(`browser.account.revoked:${groupId}`)) continue;
           const grant = RuntimeAccountBrowserGrantSchema.parse(stored);
           if (canonicalBrowserAuthorization(grant.placement) !== canonicalBrowserAuthorization(scope.placement)) continue;
-          groups.push({ ...grant, state: Date.parse(grant.expiresAt) <= Date.now() ? 'expired' : await this.options.storage.get(`browser.account.fence:${groupId}`) || [...this.tabs.values()].some(tab => tab.grant.groupId === groupId && tab.stale) ? 'fenced' : 'active' });
+          groups.push({ ...grant, state: Date.parse(grant.expiresAt) <= Date.now() ? 'expired' : [...this.tabs.values()].some(tab => tab.grant.groupId === groupId && tab.stale) ? 'fenced' : 'active' });
         }
         return json({ groups, records: [] });
       }
@@ -117,9 +117,6 @@ export class AccountBrowserRuntime {
     const active = tab;
     const frame = z.object({ frameTree: z.object({ frame: z.object({ id: z.string(), url: z.string() }) }) }).parse(await active.channel.send('Page.getFrameTree', {}, active.sessionId)).frameTree.frame;
     const effect = ['act', 'evaluate', 'navigate'].includes(args.action);
-    const fence = `browser.account.fence:${grant.groupId}`;
-    if (await this.options.storage.get(fence)) throw new Error('Browser effect uncertain; revoke group before continuing');
-    if (effect) await this.options.storage.put(fence, scope.attemptId);
     try {
       const content = await performBrowserAction({ tab: active, args, frame, signal, send: async (method, params) => {
         signal.throwIfAborted(); if (active.stale || Date.parse(active.grant.expiresAt) <= Date.now()) throw new Error('Browser disconnected or expired');
@@ -127,9 +124,13 @@ export class AccountBrowserRuntime {
         try { return await active.channel.send(method, params, active.sessionId); }
         finally { if (method === 'Page.navigate') active.servicePolicy?.endNavigation(); }
       }, close: () => this.closeTab(active), allows: url => grant.source === 'headless' || url === 'about:blank' || grant.origins.some(origin => browserOriginMatches(origin, new URL(url).hostname)), artifact: text => this.outputs.put(JSON.stringify([scope.projectId, scope.workspaceId]), text, scope.placement.accountId), selectAllModifier: 2 });
-      if (effect) await this.options.storage.delete(fence);
       return result(content);
-    } catch (error) { if (effect) { active.stale = true; active.refs.clear(); } throw error; }
+    } catch (error) {
+      if (!effect) throw error;
+      // The page may or may not have changed; the agent is told so and decides, nothing is locked.
+      active.refs.clear();
+      throw new Error(`Browser ${args.action} outcome unknown: ${error instanceof Error ? error.message : String(error)}. Observe the page before repeating it.`);
+    }
   }
   private async closeTab(tab: Tab) {
     tab.stale = true; tab.refs.clear();

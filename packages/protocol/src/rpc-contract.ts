@@ -111,11 +111,6 @@ export const rpcErrors = defineErrors('gitspace', {
     data: wire.object({ operation: wire.string, message: wire.string }),
     httpStatus: 500,
   },
-  inferenceActivationPending: {
-    data: wire.object({}),
-    httpStatus: 409,
-    retry: 'transient',
-  },
   environmentFailure: {
     data: wire.serializable((value): value is EnvironmentFailure => EnvironmentFailureSchema.safeParse(value).success, { id: 'gitspace/environment-failure/v1', jsonSchema: EnvironmentFailureSchema }),
     httpStatus: 409,
@@ -741,7 +736,7 @@ export const getRuntimeSettingsContract = gitspaceRpc
 
 export const inferenceListContract = gitspaceRpc.procedure()
   .input(wire.object({})).output(InferenceStateCodec)
-  .errors({ InferenceActivationPending: rpcErrors.inferenceActivationPending, OperationFailed: rpcErrors.operationFailed }).query();
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
 export const inferenceCreateContract = gitspaceRpc.procedure()
   .input(InferenceCreateInputCodec).output(InferenceStateCodec)
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed }).mutation();
@@ -757,7 +752,7 @@ export const inferenceAssignContract = gitspaceRpc.procedure()
 /** Inference state after `after`, bounded; read again on each `inference` live notice. */
 export const inferenceEventsContract = gitspaceRpc.procedure()
   .input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(wire.array(streamCodec(InferenceStateCodec)))
-  .errors({ InferenceActivationPending: rpcErrors.inferenceActivationPending, OperationFailed: rpcErrors.operationFailed }).query();
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
 
 export const updateMachineNotesContract = gitspaceRpc
   .procedure()

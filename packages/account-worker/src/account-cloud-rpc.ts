@@ -396,10 +396,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     catch (error) { return err(errors.OperationFailed({ operation: 'delete Composio setup', message: message(error) })); }
   });
   const inferenceList = server.implement(inferenceListContract).handler(async ({ errors }) => {
-    try {
-      const readiness = await vault.inferenceReadiness();
-      return readiness.status === 'waiting' ? err(errors.InferenceActivationPending({})) : ok(readiness.value);
-    }
+    try { return ok(await vault.ensureInference()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list inference profiles', message: message(error) })); }
   });
   const inferenceCreate = server.implement(inferenceCreateContract).handler(async ({ input, errors }) => {
@@ -432,7 +429,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   });
   const inferenceEvents = server.implement(inferenceEventsContract).handler(async ({ input, errors }) => {
     try {
-      if ((await vault.inferenceReadiness()).status === 'waiting') return err(errors.InferenceActivationPending({}));
+      await vault.ensureInference();
       return ok(await vault.inferenceEvents(input.after));
     } catch (error) { return err(errors.OperationFailed({ operation: 'read inference profile changes', message: message(error) })); }
   });

@@ -535,15 +535,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
     try { return await this.inferenceMigration; } finally { this.inferenceMigration = null; }
   }
 
-  /** Preserve expected readiness across Durable Object RPC's Error serialization. */
-  async inferenceReadiness(): Promise<{ status: 'ready'; value: InferenceState } | { status: 'waiting' }> {
-    try { return { status: 'ready', value: await this.ensureInference() }; }
-    catch (cause) {
-      if (rpcErrors.inferenceActivationPending.is(cause)) return { status: 'waiting' };
-      throw cause;
-    }
-  }
-
   private async migrateInference(): Promise<InferenceState> {
     const config = this.config();
     if (!config) throw new Error('Account credential vault is unavailable');
