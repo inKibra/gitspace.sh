@@ -53,7 +53,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
       if (!runtime) throw new Error('Runtime not initialized');
       attachRequests.push(machineId);
       return runtime.attachments.requestCache({ ...identity, machineId, checkout: { kind: 'shared', branch: 'main' }, capabilities: [...executorCapabilities] }, true);
-    } });
+    }, documentMarkdown: async () => null });
     services.tools.instructions = async () => 'Local codemode fixture instructions.';
     const models = createModels();
     const calls: ToolCall[] = [];
@@ -236,12 +236,20 @@ test('agents write and edit their own workspace artifacts through drive:// in th
       expect(missed.status).toBe('failed');
       expect(text(await invoke('read', { path: url }))).toBe('final draft\n');
 
+      // A text file far over one page reads in pages, and a ':' in its name is encoded rather than read as a selector.
+      const log = 'drive://workspace/uploads/log%2010%3A30.txt';
+      expect((await invoke('write', { path: log, content: Array.from({ length: 30_000 }, (_, index) => `line ${index + 1}`).join('\n'), message: 'Upload log' })).status).toBe('completed');
+      const first = text(await invoke('read', { path: log }));
+      expect(first.split('\n')[1_999]).toBe('line 2000');
+      expect(first).toMatch(/\[28000 more lines; read again with offset 2001\]$/u);
+      expect(text(await invoke('read', { path: log, offset: 29_999 }))).toBe('line 29999\nline 30000');
+
       const base = await invoke('write', { path: 'drive://base/notes/a.md', content: 'shared', message: 'Write project notes' });
       expect(base.status).toBe('failed');
       expect(text(base)).toBe('This workspace can write drive://workspace/<path>; drive://base/ is written from the project session');
     } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
-  expect((await authority.listArtifactScopes()).map(scope => [scope.workspaceId, scope.generation])).toEqual([[workspaceId, 2]]);
+  expect((await authority.listArtifactScopes()).map(scope => [scope.workspaceId, scope.generation])).toEqual([[workspaceId, 3]]);
 });
 
 test('shell, structural reads, and lifecycle runs fail without an available machine', async () => {

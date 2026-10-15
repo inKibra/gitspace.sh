@@ -30,7 +30,7 @@ export async function encryptArtifactBytes(
   return sealed;
 }
 
-export async function decryptArtifactBytes(sealed: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
+export async function decryptArtifactBytes(sealed: Uint8Array, key: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
   if (key.byteLength !== 32) throw new RangeError('Artifact encryption key must be 32 bytes');
   if (sealed.byteLength <= 1 + ARTIFACT_NONCE_BYTES || sealed[0] !== ARTIFACT_ENCRYPTION_VERSION) {
     throw new Error('Unsupported or malformed encrypted artifact');

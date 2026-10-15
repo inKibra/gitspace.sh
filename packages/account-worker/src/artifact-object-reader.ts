@@ -24,7 +24,7 @@ async function readSealedBytes(object: R2ObjectBody, hash: string, maximum: numb
  * Keep only the output plus bounded R2/decipher chunks, not a full ciphertext copy.
  * No plaintext escapes until both the content address and GCM tag are verified.
  */
-async function readLargeLegacyArtifact(env: Env, object: R2ObjectBody, hash: string, key: Uint8Array, expectedSize?: number): Promise<Uint8Array> {
+async function readLargeLegacyArtifact(env: Env, object: R2ObjectBody, hash: string, key: Uint8Array, expectedSize?: number): Promise<Uint8Array<ArrayBuffer>> {
   const reader = object.body.getReader();
   try {
     if (key.byteLength !== 32) throw new RangeError('Artifact encryption key must be 32 bytes');
@@ -40,7 +40,7 @@ async function readLargeLegacyArtifact(env: Env, object: R2ObjectBody, hash: str
     const tag = new Uint8Array(16);
     const digest = createHash('sha256');
     let decipher: DecipherGCM | undefined;
-    let plaintext: Uint8Array | undefined;
+    let plaintext: Uint8Array<ArrayBuffer> | undefined;
     let offset = 0;
     let written = 0;
     while (true) {
@@ -83,7 +83,7 @@ async function readLargeLegacyArtifact(env: Env, object: R2ObjectBody, hash: str
   }
 }
 
-async function readPart(env: Env, userId: string, hash: string, size: number, key: Uint8Array): Promise<Uint8Array> {
+async function readPart(env: Env, userId: string, hash: string, size: number, key: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
   const sealed = await readSealedBytes(await openSealedArtifact(env, userId, hash), hash, size + ENCRYPTION_OVERHEAD);
   if (sealed.byteLength !== size + ENCRYPTION_OVERHEAD) throw new Error('Artifact part size mismatch');
   const plaintext = await decryptArtifactBytes(sealed, key);
@@ -92,7 +92,7 @@ async function readPart(env: Env, userId: string, hash: string, size: number, ke
 }
 
 /** Authenticates one part at a time. Exhaust the iterable to verify the complete object. */
-export async function readArtifactObject(env: Env, userId: string, hash: string, key: Uint8Array, expectedSize?: number): Promise<AsyncIterable<Uint8Array>> {
+export async function readArtifactObject(env: Env, userId: string, hash: string, key: Uint8Array, expectedSize?: number): Promise<AsyncIterable<Uint8Array<ArrayBuffer>>> {
   if (expectedSize !== undefined && (!Number.isSafeInteger(expectedSize) || expectedSize < 0)) throw new Error('Artifact size is invalid');
   const maximum = expectedSize === undefined ? CHECKPOINT_CHUNK_BYTES + ENCRYPTION_OVERHEAD + 1
     : expectedSize <= CHECKPOINT_CHUNK_BYTES ? expectedSize + ENCRYPTION_OVERHEAD

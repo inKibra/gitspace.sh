@@ -92,12 +92,17 @@ const MEDIA_TYPES: Readonly<Record<string, string>> = {
   mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/mp4',
 };
 
+/** A drive file's media type by extension; null when the extension is not a known one. */
+export function resourceMediaType(path: string): string | null {
+  return MEDIA_TYPES[path.split('.').at(-1)?.toLowerCase() ?? ''] ?? null;
+}
+
 /** Finite byte stream: callers accept the preview only after clean completion. */
 export function* createResourcePreview(url: string, bytes: Uint8Array, mediaType: string | null = null): Generator<ResourcePreviewFrame> {
   const resource = parseResourceUri(url);
   if (!resource) throw new Error('Unsupported or unsafe resource URI');
   if (bytes.byteLength > 16 * 1024 * 1024) throw new Error('Resource reads are limited to 16 MiB');
-  mediaType ??= resource.kind === 'drive' ? MEDIA_TYPES[resource.path.split('.').at(-1)?.toLowerCase() ?? ''] ?? null : 'text/plain';
+  mediaType ??= resource.kind === 'drive' ? resourceMediaType(resource.path) : 'text/plain';
   const binary = mediaType !== null && (/^(audio|video|image)\//u.test(mediaType) && mediaType !== 'image/svg+xml' || mediaType === 'application/pdf');
   let text: string | null = null;
   if (!binary) {

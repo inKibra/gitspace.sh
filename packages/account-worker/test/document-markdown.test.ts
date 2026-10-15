@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
-import { documentPage } from '@gitspace/runtime-workspace-do';
+import { textPage } from '@gitspace/runtime-workspace-do';
 import { createDocumentMarkdown } from '../src/document-markdown.js';
 
 const converted = (data: string) => [{ id: 'x', name: 'file', mimeType: 'application/pdf', format: 'markdown' as const, tokens: 1, data }];
@@ -27,14 +27,14 @@ describe('document Markdown', () => {
 
   it('pages a long document within the tool output limit and names where the rest starts', () => {
     const text = Array.from({ length: 2_500 }, (_, index) => `line ${index + 1}`).join('\n');
-    const first = documentPage(text);
+    const first = textPage(text);
     expect(first.split('\n')[1_999]).toBe('line 2000');
     expect(first).toContain('[500 more lines; read again with offset 2001]');
-    expect(documentPage(text, 2_001)).toBe(Array.from({ length: 500 }, (_, index) => `line ${index + 2_001}`).join('\n'));
+    expect(textPage(text, 2_001)).toBe(Array.from({ length: 500 }, (_, index) => `line ${index + 2_001}`).join('\n'));
     const wide = Array.from({ length: 2_000 }, (_, index) => `${'x'.repeat(99)}${index + 1}`).join('\n');
-    const page = documentPage(wide);
+    const page = textPage(wide);
     expect(page.length).toBeLessThan(41_000);
     expect(page).toMatch(/\[\d+ more lines; read again with offset \d+\]$/u);
-    expect(documentPage(wide, 1, 2_000).split('\n')).toHaveLength(2_000);
+    expect(textPage(wide, 1, 2_000).split('\n')).toHaveLength(2_000);
   });
 });

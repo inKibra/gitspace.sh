@@ -29,20 +29,20 @@ function assertValidMutations(mutations: z.infer<typeof PendingSchema>['mutation
 }
 
 const checkpointIdentity = (checkpoint: Checkpoint) => canonicalJson({ ...checkpoint, ...(checkpoint.lfs ? { lfs: { ...checkpoint.lfs, objects: checkpoint.lfs.objects.map(({ oid, size }) => ({ oid, size })) } } : {}) });
-/** A document page without a range: at most this many lines and characters, under the tool output limit. */
-const DOCUMENT_PAGE_LINES = 2_000;
-const DOCUMENT_PAGE_CHARACTERS = 40_000;
-/** The lines a document read asked for; with no limit, one page and a note naming where the rest starts. Converted
- * documents are long, so a whole one never fills a context. */
-export function documentPage(text: string, offset?: number, limit?: number): string {
+/** A text page without a range: at most this many lines and characters, under the tool output limit. */
+const TEXT_PAGE_LINES = 2_000;
+const TEXT_PAGE_CHARACTERS = 40_000;
+/** The lines a text read asked for; with no limit, one page and a note naming where the rest starts, so a long file or
+ * converted document never fills a context. */
+export function textPage(text: string, offset?: number, limit?: number): string {
   const lines = text.split('\n');
   const start = (offset ?? 1) - 1;
-  let end = start + (limit ?? DOCUMENT_PAGE_LINES);
+  let end = start + (limit ?? TEXT_PAGE_LINES);
   if (limit === undefined) {
     let characters = 0;
     for (let index = start; index < Math.min(end, lines.length); index++) {
       characters += lines[index]!.length + 1;
-      if (characters > DOCUMENT_PAGE_CHARACTERS) { end = Math.max(index, start + 1); break; }
+      if (characters > TEXT_PAGE_CHARACTERS) { end = Math.max(index, start + 1); break; }
     }
   }
   const page = lines.slice(start, end).join('\n');
@@ -344,11 +344,8 @@ export class CloudFileStore {
         if (mimeType) {
           let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
           completed = { ...result('completed', ''), content: [{ type: 'image', mimeType, data: btoa(binary) }] };
-        } else if (document != null) {
-          completed = result('completed', documentPage(document, parsed.offset, parsed.limit));
         } else {
-          const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes), start = (parsed.offset ?? 1) - 1;
-          completed = result('completed', parsed.offset === undefined && parsed.limit === undefined ? text : text.split('\n').slice(start, parsed.limit === undefined ? undefined : start + parsed.limit).join('\n'));
+          completed = result('completed', textPage(document ?? new TextDecoder('utf-8', { fatal: true }).decode(bytes), parsed.offset, parsed.limit));
         }
         this.complete(input, completed); return completed;
       }

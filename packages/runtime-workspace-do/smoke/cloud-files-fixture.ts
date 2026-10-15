@@ -87,7 +87,7 @@ export class CloudFilesProof extends DurableObject {
     const invoke = (tool: 'read' | 'write' | 'edit' | 'find' | 'apply_patch', args: unknown, id: string = crypto.randomUUID()) => store.execute({ tool, args, requestId: id, attemptId: id });
     assert.equal((await invoke('read', { path: 'file.txt' })).status, 'failed');
     await this.ctx.storage.put('runtime.code', checkpoint);
-    assert.deepEqual((await invoke('read', { path: 'file.txt', offset: 2, limit: 1 })).content, [{ type: 'text', text: 'two' }]);
+    assert.deepEqual((await invoke('read', { path: 'file.txt', offset: 2, limit: 1 })).content, [{ type: 'text', text: 'two\n\n[1 more lines; read again with offset 3]' }]);
     assert.equal((await invoke('read', { path: 'absent' })).status, 'failed');
     assert.equal((await invoke('edit', { path: 'repeat.txt', edits: [{ oldText: 'same', newText: 'other' }] })).status, 'failed');
     assert.equal((await invoke('edit', { path: 'file.txt', edits: [{ oldText: 'one\ntwo', newText: 'other' }, { oldText: 'two', newText: 'overlap' }] })).status, 'failed');

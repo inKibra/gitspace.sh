@@ -5,14 +5,14 @@ import type { WorkspaceEnvironment } from './space-environment.js';
 import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, documentPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
 import { createCloudRuntimeMcp } from './runtime-mcp.js';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
-import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
+import { parseResourceUri, selectResourceText } from '@gitspace/protocol/resource-uri';
 import { searchHistory, type RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { readRuntimeTranscript, readRuntimeHistory } from './runtime-transcript-reader.js';
 import type { RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
@@ -61,17 +61,18 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const completed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
 const interrupted = (input: Pick<Invocation, 'requestId' | 'attemptId'>, text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text }] });
 const failed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, error: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: message(error) }], error: { code: 'HOST_OPERATION_FAILED', message: message(error) } });
-/** A cloud artifact as tool content: text as text, raster images as images, documents as pages of Markdown, anything
- * else as its metadata. */
-async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, frames: Iterable<ResourcePreviewFrame>, documentMarkdown: DocumentMarkdown, range: { offset?: number; limit?: number } = {}): Promise<RuntimeToolResult> {
-  const [metadata, ...chunks] = frames;
-  if (metadata?.type !== 'metadata') throw new Error('Artifact preview is missing its metadata');
-  const data = chunks.map(chunk => chunk.type === 'chunk' ? chunk.base64 : '').join('');
-  if (metadata.text) return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: Buffer.from(data, 'base64').toString('utf8') }] };
-  if (metadata.mediaType?.startsWith('image/')) return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'image', mimeType: metadata.mediaType, data }] };
-  const document = await documentMarkdown(decodeURIComponent(url.split('/').at(-1) ?? url), new Uint8Array(Buffer.from(data, 'base64')));
-  if (document !== null) return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: documentPage(document, range.offset, range.limit) }] };
-  return completed(input, metadata);
+/** A cloud artifact as tool content: raster images as images, documents as pages of Markdown, text as pages of text
+ * (after any line selector in the URL), anything else as its metadata. */
+async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, artifact: { bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }, documentMarkdown: DocumentMarkdown, range: { offset?: number; limit?: number } = {}): Promise<RuntimeToolResult> {
+  const { bytes, mediaType } = artifact;
+  const page = (text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: textPage(text, range.offset, range.limit) }] });
+  if (mediaType?.startsWith('image/') && mediaType !== 'image/svg+xml') return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'image', mimeType: mediaType, data: Buffer.from(bytes).toString('base64') }] };
+  const resource = parseResourceUri(url);
+  const document = await documentMarkdown(decodeURIComponent(resource?.kind === 'drive' ? resource.path.split('/').at(-1) ?? url : url), bytes);
+  if (document !== null) return page(document);
+  let text: string;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return completed(input, { url, mediaType, size: bytes.byteLength }); }
+  return page(resource ? selectResourceText(text, resource.selector) : text);
 }
 const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
 machineTools.browser = true;
@@ -608,7 +609,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           case 'list': return completed(input, await artifacts.list());
           case 'listScopes': return completed(input, await authority.listArtifactScopes());
           case 'listPromotions': return completed(input, await authority.listArtifactPromotions());
-          case 'read': return artifactContent(input, args.url, await artifacts.read(args.url), options.documentMarkdown);
+          case 'read': return artifactContent(input, args.url, await artifacts.bytes(args.url), options.documentMarkdown);
           case 'readCode': {
             const request = args;
             const blob = await new ArtifactsCodeStore(env.ARTIFACTS).readFile(artifactsWorkspaceRepository(identity.workspaceId), request.commit, request.path);
@@ -620,7 +621,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if ((input.tool === 'read' || input.tool === 'write' || input.tool === 'edit') && typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args) && typeof input.args.path === 'string' && input.args.path.startsWith('drive://')) {
         const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source());
-        if (input.tool === 'read') return artifactContent(input, input.args.path, await artifacts.read(input.args.path), options.documentMarkdown, RuntimeReadArgumentsSchema.parse(input.args));
+        if (input.tool === 'read') return artifactContent(input, input.args.path, await artifacts.bytes(input.args.path), options.documentMarkdown, RuntimeReadArgumentsSchema.parse(input.args));
         if (!conversation.root) throw new Error('Only the main workspace conversation can write artifacts');
         const change = input.tool === 'write' ? { bytes: new TextEncoder().encode(RuntimeWriteArgumentsSchema.parse(input.args).content) } : RuntimeEditArgumentsSchema.parse(input.args);
         return completed(input, await artifacts.write(input.args.path, change));

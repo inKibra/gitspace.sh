@@ -6,7 +6,7 @@ import {
   type InspectorView, type InspectorIdentity,
 } from '@gitspace/protocol';
 import type { TranscriptEvent } from '@gitspace/protocol/transcript';
-import { createResourcePreview, parseResourceUri } from '@gitspace/protocol/resource-uri';
+import { createResourcePreview, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import type { CredentialVaultDO } from './application.js';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
@@ -86,9 +86,9 @@ async function readObject(env: Env, userId: string, key: string, hash: string): 
   return bytes;
 }
 
-async function boundedArtifactBytes(env: Env, userId: string, hash: string, key: Uint8Array, expectedSize: number | undefined, limit: number): Promise<Uint8Array> {
+async function boundedArtifactBytes(env: Env, userId: string, hash: string, key: Uint8Array, expectedSize: number | undefined, limit: number): Promise<Uint8Array<ArrayBuffer>> {
   if (expectedSize !== undefined && expectedSize > limit) throw new Error(`Resource reads are limited to ${limit / 1024 / 1024} MiB`);
-  const parts: Uint8Array[] = [];
+  const parts: Uint8Array<ArrayBuffer>[] = [];
   let size = 0;
   for await (const part of await readArtifactObject(env, userId, hash, key, expectedSize)) {
     size += part.byteLength;
@@ -102,12 +102,12 @@ async function boundedArtifactBytes(env: Env, userId: string, hash: string, key:
   return bytes;
 }
 
-/** Reads the same encrypted, content-addressed objects as CloudArtifactObjectStore. */
 /** A drive URL with each path segment encoded, so names with ':' or '%' read back as written. */
 function driveUrl(mount: string, path: string): string {
   return `drive://${mount}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
+/** Reads the same encrypted, content-addressed objects as CloudArtifactObjectStore. */
 export class InspectorCloudArtifacts {
   private keyRequest: Promise<Uint8Array> | undefined;
   constructor(private readonly env: Env, private readonly userId: string, private readonly source: InspectorCloudContext) {}
@@ -198,6 +198,12 @@ export class InspectorCloudArtifacts {
   }
 
   async read(url: string, hash?: string | null) {
+    const { bytes, mediaType } = await this.bytes(url, hash);
+    return createResourcePreview(url, bytes, mediaType);
+  }
+
+  /** A drive file's stored bytes, at most 16 MiB, and its media type. */
+  async bytes(url: string, hash?: string | null): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }> {
     const resource = parseResourceUri(url);
     if (resource?.kind !== 'drive' || !resource.mount) throw new Error('Inspector artifacts require a canonical drive resource URI');
     const resolved = await this.resolve(resource.url);
@@ -205,7 +211,7 @@ export class InspectorCloudArtifacts {
     const entry = hash ? { blobHash: hash, mediaType: current?.mediaType ?? null, size: current?.blobHash === hash ? current.size : undefined } : current;
     if (!entry) throw new Error('Artifact does not exist');
     const bytes = await boundedArtifactBytes(this.env, this.userId, entry.blobHash, await deriveArtifactScopeKey(await this.key, resolved.scope.id), entry.size, 16 * 1024 * 1024);
-    return createResourcePreview(url, bytes, entry.mediaType);
+    return { bytes, mediaType: entry.mediaType ?? resourceMediaType(resource.path) };
   }
 
   async catalog() {
