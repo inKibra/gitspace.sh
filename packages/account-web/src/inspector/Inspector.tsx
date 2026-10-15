@@ -422,6 +422,14 @@ const REPOSITORY_FILE_TYPES: Record<string, string> = {
   pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
 };
 
+/** A PDF in the browser's viewer; a browser set to download PDFs shows a download link instead of navigating away. */
+function PdfPreview({ url, name }: { url: string; name: string }) {
+  const shape = useShape();
+  return <PreviewFrame><object data={url} type="application/pdf" aria-label={name} className={`${shape.container} h-full min-h-90 w-full bg-surface-3 shadow-surface-1`}>
+    <a href={url} download={name} className="text-body text-primary underline">Download {name}</a>
+  </object></PreviewFrame>;
+}
+
 /** A PDF in the browser's viewer, an image as an image, any other binary file as a download. */
 function RepositoryBinaryFile({ file }: { file: RepositoryFileView }) {
   const shape = useShape();
@@ -432,7 +440,7 @@ function RepositoryBinaryFile({ file }: { file: RepositoryFileView }) {
     return URL.createObjectURL(new Blob([bytes], { type: mediaType }));
   }, [file.content, file.encoding, mediaType]);
   useEffect(() => () => URL.revokeObjectURL(url), [url]);
-  if (mediaType === 'application/pdf') return <PreviewFrame><iframe src={url} title={name} className={`${shape.container} h-full min-h-90 w-full bg-surface-3 shadow-surface-1`} /></PreviewFrame>;
+  if (mediaType === 'application/pdf') return <PdfPreview url={url} name={name} />;
   if (mediaType.startsWith('image/')) return <PreviewFrame><img src={url} alt={name} className={`${shape.container} max-h-full max-w-full bg-surface-3 object-contain shadow-surface-1`} /></PreviewFrame>;
   return <Padded><EmptyState icon={ic(File02, 22)} title="Binary file" description="This file has no inline preview." action={<a href={url} download={name} className="text-body text-primary underline">Download {name}</a>} /></Padded>;
 }
@@ -615,7 +623,7 @@ function ArtifactPreview({ reference, content, mode, artifactReferences, artifac
   const mediaType = content.mediaType ?? reference.mediaType;
   if (mediaType?.startsWith('image/')) return <PreviewFrame><img src={content.previewUrl} alt={reference.label} className={`${shape.container} max-h-full max-w-full bg-surface-3 object-contain shadow-surface-1`} /></PreviewFrame>;
   if ((reference.url.endsWith('.gssh.html') || mediaType === 'text/html') && content.source !== null) return <MiniAppArtifact source={content.source} dataReferences={artifactReferences.filter((candidate) => candidate.url.endsWith('.data.json'))} content={artifactContent} onLoad={onRequest} />;
-  if (mediaType === 'application/pdf') return <PreviewFrame><iframe src={content.previewUrl} title={reference.label} className={`${shape.container} h-full min-h-90 w-full bg-surface-3 shadow-surface-1`} /></PreviewFrame>;
+  if (mediaType === 'application/pdf') return <PdfPreview url={content.previewUrl} name={reference.label} />;
   if (mediaType?.startsWith('audio/')) return <PreviewFrame><audio controls src={content.previewUrl} /></PreviewFrame>;
   if (mediaType?.startsWith('video/')) return <PreviewFrame><video controls src={content.previewUrl} className="max-h-full max-w-full" /></PreviewFrame>;
   if ((mediaType === 'application/json' || reference.url.endsWith('.json')) && content.source !== null) {
