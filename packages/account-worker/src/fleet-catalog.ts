@@ -10,7 +10,7 @@ import { controlFleetMachine, ownedWorkspaceScopes, type CredentialVaultDO } fro
 import { listMachineAttachments } from './runtime-machine-loss.js';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
-import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
+import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 export type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 
@@ -66,7 +66,7 @@ const pendingMachineDiscardSchema = z.object({
 
 export class FleetCatalogDO extends DurableObject<Env> {
   private readonly changes: LiveChanges;
-  private readonly directoryOutbox: DirectoryOutbox;
+  private readonly directory: DirectoryPublisher;
   private readonly imageRuns = new Map<string, { run: Promise<void>; current: boolean }>();
   private readonly provisioningRuns = new Map<string, Promise<void>>();
   private alarmLine: Promise<void> = Promise.resolve();
@@ -75,9 +75,9 @@ export class FleetCatalogDO extends DurableObject<Env> {
   private workspaceIndexing: Promise<void> | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new LiveChanges((notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
+    this.changes = new LiveChanges(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS fleet_alarms(owner TEXT PRIMARY KEY, timestamp INTEGER NOT NULL)');
-    this.directoryOutbox = new DirectoryOutbox(ctx, env, { set: timestamp => this.scheduleAlarm('directory', timestamp), clear: () => this.scheduleAlarm('directory', null) });
+    this.directory = new DirectoryPublisher(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS space_definitions (
@@ -118,7 +118,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
           error: 'Sandbox provisioning was interrupted; retrying automatically.',
         });
       }
-      this.directoryOutbox.kick();
+      this.ctx.storage.sql.exec("DELETE FROM fleet_alarms WHERE owner='directory'");
       await this.armProvisioning();
       await this.armImageDeadlines();
       await this.armOperations();
@@ -143,10 +143,10 @@ export class FleetCatalogDO extends DurableObject<Env> {
   }
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'fleet' }> {
-    return { source: 'fleet', cursor: this.directoryOutbox.head(), machines: this.listMachines() };
+    return { source: 'fleet', cursor: this.directory.version(), machines: this.listMachines() };
   }
 
-  private scheduleAlarm(owner: 'directory' | 'provisioning' | 'images' | 'idle' | 'operations', timestamp: number | null): Promise<void> {
+  private scheduleAlarm(owner: 'provisioning' | 'images' | 'idle' | 'operations', timestamp: number | null): Promise<void> {
     if (timestamp === null) this.ctx.storage.sql.exec('DELETE FROM fleet_alarms WHERE owner=?', owner);
     else this.ctx.storage.sql.exec('INSERT INTO fleet_alarms(owner,timestamp) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp WHERE timestamp IS NOT excluded.timestamp', owner, timestamp);
     const operation = this.alarmLine.then(async () => {
@@ -162,9 +162,8 @@ export class FleetCatalogDO extends DurableObject<Env> {
 
   /** Every resource-holding fleet state is a lease the cloud forces to a terminal state when it lapses. */
   async alarm(): Promise<void> {
-    await this.directoryOutbox.flush();
     const now = Date.now();
-    const due = new Set(this.ctx.storage.sql.exec<{ owner: string }>("SELECT owner FROM fleet_alarms WHERE owner<>'directory' AND timestamp<=?", now).toArray().map(row => row.owner));
+    const due = new Set(this.ctx.storage.sql.exec<{ owner: string }>('SELECT owner FROM fleet_alarms WHERE timestamp<=?', now).toArray().map(row => row.owner));
     if (due.has('provisioning')) await this.expireProvisioningLeases(now);
     if (due.has('images')) await this.expireCloudImageOperations(now);
     if (due.has('idle')) await this.stopIdleSandboxes(now);
@@ -713,11 +712,9 @@ export class FleetCatalogDO extends DurableObject<Env> {
       // Provisioning keeps its own lease; every other operation id is a power transition lease.
       if (input.operationId === null || this.hasPendingSandbox(input.id)) this.ctx.storage.sql.exec('DELETE FROM machine_operations WHERE machine_id=?', input.id);
       else this.ctx.storage.sql.exec('INSERT INTO machine_operations(machine_id,operation_id,deadline_at) VALUES(?,?,?) ON CONFLICT(machine_id) DO UPDATE SET operation_id=excluded.operation_id,deadline_at=excluded.deadline_at WHERE operation_id<>excluded.operation_id', input.id, input.operationId, Date.now() + MACHINE_OPERATION_LEASE_MS);
-      const machines = this.listMachines();
       this.changes.mark('machines');
-      this.directoryOutbox.enqueue({ source: 'fleet', machines });
     });
-    this.directoryOutbox.kick();
+    this.directory.publish({ source: 'fleet', machines: this.listMachines() });
     this.changes.wake();
     this.ctx.waitUntil(this.armOperations());
     if (input.provider === 'cloudflare-sandbox' && input.state === 'online' && input.desiredState === 'online'
@@ -750,16 +747,16 @@ export class FleetCatalogDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
       const removed = this.ctx.storage.sql.exec('DELETE FROM fleet_machines WHERE machine_id = ?', machineId).rowsWritten > 0;
       if (removed) {
-        const machines = this.listMachines();
         this.changes.mark('machines');
         this.ctx.storage.sql.exec('DELETE FROM cloud_images WHERE machine_id=?', machineId);
         this.changes.mark('cloud-images');
-        this.directoryOutbox.enqueue({ source: 'fleet', machines });
       }
       return removed;
     });
-    this.directoryOutbox.kick();
-    if (removed) this.changes.wake();
+    if (removed) {
+      this.directory.publish({ source: 'fleet', machines: this.listMachines() });
+      this.changes.wake();
+    }
     return removed;
   }
 

@@ -77,7 +77,7 @@ export class UserSettingsDO extends DurableObject<Env> {
   private readonly changes: LiveChanges;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new LiveChanges((notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
+    this.changes = new LiveChanges(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS user_settings (

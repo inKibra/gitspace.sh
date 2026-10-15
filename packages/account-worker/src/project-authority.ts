@@ -21,12 +21,11 @@ import type {
 import type { ExportedEnvironment, ExportedLogs, SharedEnvironment, SharedEnvironmentChange } from './space-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { LifecycleMutationSchema, LifecycleStateSchema } from '@gitspace/protocol-environment';
-import { DurableChangeLog } from './durable-stream.js';
 import { LiveChanges } from './live-changes.js';
 import { liveClientMessageSchema, liveKeyId, liveNoticeSchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice, type LiveNoticeMessage } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
-import { AccountDirectoryProjection, DirectoryOutbox, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
-import { workspaceStatusRowSchema, type AccountDirectorySnapshot, type WorkspaceStatusRow } from '@gitspace/protocol/account-directory';
+import { AccountDirectoryProjection, DirectoryPublisher, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
+import { accountDirectorySlices, workspaceStatusRowSchema, type AccountDirectoryMessage, type AccountDirectorySnapshot, type WorkspaceStatusRow } from '@gitspace/protocol/account-directory';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
 import { activeAccount, accountAccessResponse, accountStatus } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
@@ -48,8 +47,6 @@ const directorySocketAttachmentSchema = z.object({
   userId: z.string(),
   deviceId: z.string(),
   generation: z.number(),
-  cursor: z.number().nullable(),
-  initial: z.boolean(),
   /** Hashes of the live keys this tab watches (`liveKeyHash`). */
   live: z.array(z.number()).default([]),
 });
@@ -324,14 +321,12 @@ function projectMcpGrant(row: ProjectMcpGrantRow): ProjectMcpGrant {
 }
 
 export class UserProjectIndexDO extends DurableObject<Env> {
-  private readonly changes: DurableChangeLog;
   private readonly directory: AccountDirectoryProjection;
   private hydration: Promise<void> | null = null;
   private committing = false;
   private readonly socketDeliveries = new WeakMap<WebSocket, Promise<void>>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new DurableChangeLog(ctx.storage, (notices) => { this.liveNotices(notices); });
     this.directory = new AccountDirectoryProjection(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
@@ -359,6 +354,9 @@ export class UserProjectIndexDO extends DurableObject<Env> {
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
       this.ctx.storage.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS user_project_role ON user_projects(role) WHERE role IS NOT NULL');
+      // One-time: the directory was once a stored change log replayed by cursor, redelivered by alarm.
+      this.ctx.storage.sql.exec('DROP TABLE IF EXISTS app_changes; DROP TABLE IF EXISTS app_change_heads');
+      if (await this.ctx.storage.getAlarm() !== null) await this.ctx.storage.deleteAlarm();
     });
   }
 
@@ -424,12 +422,9 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const result = this.ctx.storage.transactionSync(() => {
       this.committing = true;
       try {
-        const value = mutate();
-        this.changes.append('account-directory', this.directory.snapshot(this.list()));
-        return value;
+        return mutate();
       } finally { this.committing = false; }
     });
-    this.changes.wake();
     this.broadcastDirectory();
     return result;
   }
@@ -456,11 +451,10 @@ export class UserProjectIndexDO extends DurableObject<Env> {
             }
           }
         }
-        this.changes.append('account-directory', this.directory.snapshot(this.list()));
         return true;
       } finally { this.committing = false; }
     });
-    if (accepted) { this.changes.wake(); this.broadcastDirectory(); }
+    if (accepted) this.broadcastDirectory();
     return accepted;
   }
 
@@ -502,10 +496,6 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const upgrading = request.headers.get('upgrade')?.toLowerCase() === 'websocket';
     const origin = request.headers.get('origin');
     if ((upgrading || origin !== null) && origin !== new URL(this.env.ACCOUNT_URL).origin) return error('ORIGIN_REJECTED', 'Directory origin does not own this tenant', 403);
-    const after = url.searchParams.get('after');
-    if ((after !== null && (!/^(0|[1-9][0-9]*)$/u.test(after) || !streamCursorSchema.safeParse(Number(after)).success)) || url.searchParams.getAll('after').length > 1) {
-      return error('INVALID_DIRECTORY_REQUEST', 'Directory cursor is invalid', 400);
-    }
     // A socket's signed GET rides in `Sec-WebSocket-Protocol`; a plain GET (the client's rejection probe) uses the header.
     const offered = upgrading ? socketProtocolProof(request.headers.get('sec-websocket-protocol'), DEVICE_SOCKET_PROTOCOL) : null;
     if (upgrading && !offered) return error('INVALID_DIRECTORY_REQUEST', 'Directory authorization is missing', 400);
@@ -521,8 +511,9 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
     const { device } = authorized.value;
-    server.serializeAttachment({ version: 2, userId: this.env.ACCOUNT_ID, deviceId: device.deviceId, generation: device.generation, cursor: after === null ? null : Number(after), initial: true, live: [] } satisfies DirectorySocketAttachment);
-    await this.deliverDirectory(server);
+    server.serializeAttachment({ version: 2, userId: this.env.ACCOUNT_ID, deviceId: device.deviceId, generation: device.generation, live: [] } satisfies DirectorySocketAttachment);
+    // The whole directory once per socket; later changes arrive one slice at a time.
+    await this.sendDirectory(server, [JSON.stringify({ type: 'directory', snapshot: this.directory.snapshot(this.list()) } satisfies AccountDirectoryMessage)]);
     await this.seedWorkspaceStatuses();
     // Every status row once per socket; later changes arrive one row at a time.
     server.send(JSON.stringify({ type: 'statuses', rows: this.workspaceStatuses() }));
@@ -530,8 +521,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    // Client messages are wake/replay requests and live subscriptions; identity and cursor are server-owned.
-    if (message === 'ping') { await this.deliverDirectory(socket); return; }
+    // Client messages are live subscriptions; identity is server-owned.
     let decoded: unknown = null;
     try { if (typeof message === 'string') decoded = JSON.parse(message); } catch { /* Rejected below. */ }
     const request = liveClientMessageSchema.safeParse(decoded);
@@ -549,29 +539,32 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   webSocketClose(socket: WebSocket): void { socket.close(); }
   webSocketError(socket: WebSocket): void { socket.close(1011, 'Directory socket failed'); }
 
+  /** The directory slices last sent, by key: a change sends only the slices whose content differs. */
+  private readonly sentSlices = new Map<string, string>();
   private broadcastDirectory(): void {
-    if (!this.ctx.getWebSockets().length) return;
-    // This write is coalesced with the projection commit, before any network await.
-    const armed = this.ctx.storage.setAlarm(Date.now() + 1_000);
-    this.ctx.waitUntil(armed.then(() => this.alarm()));
+    const slices = accountDirectorySlices(this.directory.snapshot(this.list()));
+    const messages: string[] = [];
+    for (const [key, slice] of slices) {
+      const message = JSON.stringify(slice);
+      if (this.sentSlices.get(key) === message) continue;
+      this.sentSlices.set(key, message);
+      messages.push(message);
+    }
+    for (const key of [...this.sentSlices.keys()]) {
+      if (slices.has(key)) continue;
+      this.sentSlices.delete(key);
+      messages.push(JSON.stringify({ type: 'directory.project', projectId: key.slice('project:'.length), revision: null, workspaces: [], placements: [] } satisfies AccountDirectoryMessage));
+    }
+    if (messages.length === 0) return;
+    for (const socket of this.ctx.getWebSockets()) this.ctx.waitUntil(this.sendDirectory(socket, messages));
   }
 
-  async alarm(): Promise<void> {
-    await Promise.all(this.ctx.getWebSockets().map((socket) => this.deliverDirectory(socket)));
-    const head = this.changes.head('account-directory');
-    const pending = this.ctx.getWebSockets().some((socket) => {
-      if (socket.readyState !== WebSocket.OPEN) return false;
-      const attachment = directoryAttachment(socket);
-      return attachment?.initial || attachment?.cursor !== head;
-    });
-    if (pending) await this.ctx.storage.setAlarm(Date.now() + 1_000);
-    else await this.ctx.storage.deleteAlarm();
-  }
-
-  private deliverDirectory(socket: WebSocket): Promise<void> {
+  /** Sends to one socket in order, after checking its device grant is still current; a revoked grant ends the socket. */
+  private sendDirectory(socket: WebSocket, messages: readonly string[]): Promise<void> {
     const previous = this.socketDeliveries.get(socket) ?? Promise.resolve();
     const delivery = previous.then(async () => {
       try {
+        if (socket.readyState !== WebSocket.OPEN) return;
         const attachment = directoryAttachment(socket);
         if (!attachment || attachment.userId !== this.env.ACCOUNT_ID) { socket.close(4401, 'RPC_DEVICE_UNKNOWN'); return; }
         // Sockets admitted before device grants were cached reconnect with a current proof.
@@ -588,13 +581,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
           socket.close(4401, 'RPC_DEVICE_UNKNOWN');
           return;
         }
-        const events = this.changes.replay('account-directory', attachment.cursor, () => this.directory.snapshot(this.list()), attachment.initial);
-        for (const event of events) {
-          socket.send(JSON.stringify(event));
-          // Read again: live subscriptions may have changed while device authority loaded.
-          const current = directoryAttachment(socket);
-          if (current) socket.serializeAttachment({ ...current, cursor: event.cursor, initial: false });
-        }
+        for (const message of messages) socket.send(message);
       } catch {
         try { socket.close(1013, 'Directory authority unavailable'); } catch { /* Already closed. */ }
       }
@@ -742,13 +729,13 @@ export class UserProjectIndexDO extends DurableObject<Env> {
 
 export class ProjectAuthorityDO extends DurableObject<Env> {
   private readonly changes: LiveChanges;
-  private readonly directoryOutbox: DirectoryOutbox;
+  private readonly directory: DirectoryPublisher;
   private readonly lfs: GitLfsRetention;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const notify = (notices: LiveNotice[]) => { ctx.waitUntil(notifyBrowsers(env, notices)); };
-    this.changes = new LiveChanges(notify);
-    this.directoryOutbox = new DirectoryOutbox(ctx, env);
+    this.changes = new LiveChanges(ctx.storage, notify);
+    this.directory = new DirectoryPublisher(ctx, env);
     this.lfs = new GitLfsRetention(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS environment_shared(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)');
@@ -927,7 +914,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_relations(workspace_id TEXT PRIMARY KEY,relations_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('DROP TABLE IF EXISTS lfs_origin_confirmations');
       if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length && await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
-      this.directoryOutbox.kick();
     });
   }
 
@@ -966,11 +952,10 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'project' }> | null {
     const project = this.getProject();
-    return project ? { source: 'project', cursor: this.directoryOutbox.head(), project, workspaces: this.listWorkspaces() } : null;
+    return project ? { source: 'project', cursor: this.directory.version(), project, workspaces: this.listWorkspaces() } : null;
   }
 
   async alarm(): Promise<void> {
-    await this.directoryOutbox.flush();
     // Legacy machines mirrored every local fact (streamed transcript updates, agent activity, generations) into this
     // log; the cloud runtime reads none of it. Delete it in bounded batches so no single invocation scans or locks it all.
     if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length) {
@@ -981,28 +966,18 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }
 
   private committing = false;
-  /** Workspace rows of the last committed directory publication. Only `project`/`workspace` commits write those rows,
-   * so every other commit republishes (bumping the directory revision) without re-reading the whole table. */
-  private publishedWorkspaces: CloudWorkspaceDefinition[] | undefined;
   private commit<T>(entity: string, entityId: string | null, mutate: () => T): T {
     if (this.committing) return mutate();
-    let result: T;
-    try {
-      result = this.ctx.storage.transactionSync(() => {
-        this.committing = true;
-        try {
-          const value = mutate();
-          this.changes.mark(`project:${this.requireProject().id}`);
-          if (entity === 'project' || entity === 'workspace' || !this.publishedWorkspaces) this.publishedWorkspaces = this.listWorkspaces();
-          this.directoryOutbox.enqueue({ source: 'project', project: this.requireProject(), workspaces: this.publishedWorkspaces });
-          return value;
-        } finally { this.committing = false; }
-      });
-    } catch (error) {
-      this.publishedWorkspaces = undefined;
-      throw error;
-    }
-    this.directoryOutbox.kick();
+    const result = this.ctx.storage.transactionSync(() => {
+      this.committing = true;
+      try {
+        const value = mutate();
+        this.changes.mark(`project:${this.requireProject().id}`);
+        return value;
+      } finally { this.committing = false; }
+    });
+    // Only project and workspace records are in the directory.
+    if (entity === 'project' || entity === 'workspace') this.directory.publish({ source: 'project', project: this.requireProject(), workspaces: this.listWorkspaces() });
     this.changes.wake();
     return result;
   }

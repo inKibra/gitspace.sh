@@ -391,7 +391,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
   }
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.inferenceChanges = new LiveChanges((notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
+    this.inferenceChanges = new LiveChanges(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS vault_config (

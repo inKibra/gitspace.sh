@@ -44,30 +44,32 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it('signs the resume cursor and accepts only validated directory frames', async () => {
+it('signs the directory request and accepts only validated directory messages, merging each slice', async () => {
   const scene = fixture();
   const controller = new AbortController();
   controllers.push(controller);
-  const stream = scene.source(37, controller.signal)[Symbol.asyncIterator]();
+  const stream = scene.source(null, controller.signal)[Symbol.asyncIterator]();
   const next = stream.next();
   await vi.waitFor(() => expect(scene.sockets).toHaveLength(1));
   const socket = scene.sockets[0]!;
   const url = new URL(socket.url);
   expect(url.protocol).toBe('wss:');
   // The proof is never part of the URL; it rides as the one offered subprotocol.
-  expect([...url.searchParams.keys()]).toEqual(['after']);
+  expect([...url.searchParams.keys()]).toEqual([]);
   expect(socket.protocols).toHaveLength(1);
   expect(socket.protocols[0]!.startsWith(DEVICE_SOCKET_PROTOCOL)).toBe(true);
   const auth = decodeSignedRpcHeader(socket.protocols[0]!.slice(DEVICE_SOCKET_PROTOCOL.length));
   expect(auth).not.toBeNull();
   const payload = rpcSignaturePayload({ ...auth!, method: 'GET', path: `${url.pathname}${url.search}` });
   expect(await crypto.subtle.verify('Ed25519', keyPair.publicKey, Uint8Array.from(deviceProtocolBase64.decode(auth!.signature)).buffer, Uint8Array.from(payload).buffer)).toBe(true);
-  expect(url.searchParams.get('after')).toBe('37');
   socket.open();
-  socket.message(JSON.stringify({ type: 'change', resource: 'account-directory', cursor: 38, revision: 38, previous: 37, value }));
-  expect(await next).toMatchObject({ done: false, value: { status: 'ok', value: { cursor: 38, previous: 37, value } } });
+  socket.message(JSON.stringify({ type: 'directory', snapshot: value }));
+  expect(await next).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'snapshot', value } } });
+  const merged = stream.next();
+  socket.message(JSON.stringify({ type: 'directory.project', projectId: 'p', revision: 3, workspaces: [], placements: [] }));
+  expect(await merged).toMatchObject({ done: false, value: { status: 'ok', value: { type: 'snapshot', value: { ...value, projectRevisions: { p: 3 } } } } });
   const invalid = stream.next();
-  socket.message(JSON.stringify({ type: 'snapshot', resource: 'account-directory', cursor: 39, revision: 39, previous: null, value: { ...value, workspaces: [{ id: 'incomplete' }] } }));
+  socket.message(JSON.stringify({ type: 'directory', snapshot: { ...value, workspaces: [{ id: 'incomplete' }] } }));
   expect(await invalid).toMatchObject({ done: false, value: { status: 'error', error: expect.any(Error) } });
   expect(socket.close).toHaveBeenCalledOnce();
   await stream.return?.();
@@ -99,11 +101,11 @@ it('closes an opening socket on unmount and discards late delivery', async () =>
   controller.abort();
   expect(await next).toMatchObject({ done: true });
   expect(scene.sockets[0]!.close).toHaveBeenCalledOnce();
-  scene.sockets[0]!.message(JSON.stringify({ type: 'snapshot', resource: 'account-directory', cursor: 1, revision: 1, previous: null, value }));
+  scene.sockets[0]!.message(JSON.stringify({ type: 'directory', snapshot: value }));
   expect(await stream.next()).toMatchObject({ done: true });
 });
 
-it('shares a single socket, resumes its durable cursor, and accepts an explicit authority reset', async () => {
+it('shares a single socket and takes the whole directory again after a reconnect', async () => {
   const scene = fixture();
   const owner = new SynchronizationOwner();
   owners.push(owner);
@@ -113,8 +115,8 @@ it('shares a single socket, resumes its durable cursor, and accepts an explicit 
   const stopSecond = second.subscribe(() => {});
   await vi.waitFor(() => expect(scene.sockets).toHaveLength(1));
   scene.sockets[0]!.open();
-  scene.sockets[0]!.message(JSON.stringify({ type: 'snapshot', resource: 'account-directory', cursor: 8, revision: 8, previous: null, value }));
-  await vi.waitFor(() => expect(second.snapshot().cursor).toBe(8));
+  scene.sockets[0]!.message(JSON.stringify({ type: 'directory', snapshot: value }));
+  await vi.waitFor(() => expect(second.snapshot().value).toEqual(value));
   stopFirst();
   expect(scene.sockets[0]!.close).not.toHaveBeenCalled();
   vi.useFakeTimers();
@@ -123,11 +125,9 @@ it('shares a single socket, resumes its durable cursor, and accepts an explicit 
   vi.useRealTimers();
   await vi.waitFor(() => expect(scene.sockets).toHaveLength(2));
   const resumed = scene.sockets[1]!;
-  expect(new URL(resumed.url).searchParams.get('after')).toBe('8');
   resumed.open();
-  resumed.message(JSON.stringify({ type: 'resync', resource: 'account-directory', cursor: 2, revision: 2, reason: 'cursor-ahead' }));
-  resumed.message(JSON.stringify({ type: 'snapshot', resource: 'account-directory', cursor: 2, revision: 2, previous: null, value: { ...value, projectRevisions: { reset: 2 } } }));
-  await vi.waitFor(() => expect(second.snapshot()).toMatchObject({ cursor: 2, resync: false, value: { projectRevisions: { reset: 2 } } }));
+  resumed.message(JSON.stringify({ type: 'directory', snapshot: { ...value, projectRevisions: { reset: 2 } } }));
+  await vi.waitFor(() => expect(second.snapshot()).toMatchObject({ resync: false, value: { projectRevisions: { reset: 2 } } }));
   stopSecond();
   expect(resumed.close).toHaveBeenCalledOnce();
 });
@@ -154,7 +154,7 @@ it('carries live subscriptions on the directory socket and hands each tab only t
   socket.message(JSON.stringify({ type: 'notice', ...workspaceLiveKey('workspace-b', 'runtime'), version: 8 }));
   expect(heard).toEqual([null, 7]);
   // A notice is not a directory frame: the directory channel stays open.
-  socket.message(JSON.stringify({ type: 'snapshot', resource: 'account-directory', cursor: 3, revision: 3, previous: null, value }));
+  socket.message(JSON.stringify({ type: 'directory', snapshot: value }));
   stopRuntime();
   expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'unsubscribe', keys: [runtime] }));
   socket.message(JSON.stringify({ type: 'notice', ...runtime, version: 9 }));

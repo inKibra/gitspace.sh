@@ -41,7 +41,7 @@ async function project() {
     const { stub, identity } = await space(name);
     await stub.getLifecycleState(identity);
     const shared = await authority.environmentShared();
-    const result = await runInDurableObject(stub, (_instance, context) => new SpaceEnvironmentStore(context.storage, new LiveChanges(() => {})).setBrowserOrigins(projectId, identity.workspaceId, origins, shared));
+    const result = await runInDurableObject(stub, (_instance, context) => new SpaceEnvironmentStore(context.storage, new LiveChanges(context.storage, () => {})).setBrowserOrigins(projectId, identity.workspaceId, origins, shared));
     if (result.shared) await authority.applyEnvironmentShared(result.shared);
   };
   await mutate('workspace', { op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'prepare', kind: 'script', phase: 'machine/prepare', label: 'Prepare', command: '01-prepare.sh', fileName: '01-prepare.sh', content: 'echo prepare', hash }] });
@@ -62,7 +62,7 @@ describe('workspace environment', () => {
       const committed = vi.spyOn(committedOrigins, 'committedBrowserOrigins').mockResolvedValue({ commit: 'a'.repeat(40), origins: [origin] });
       // Stubs are per object context: this one is used from inside the workspace object.
       const projectAuthority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${p.projectId}`);
-      const stored = async () => new SpaceEnvironmentStore(context.storage, new LiveChanges(() => {})).get(p.projectId, identity.workspaceId, await projectAuthority.environmentShared()).approvals;
+      const stored = async () => new SpaceEnvironmentStore(context.storage, new LiveChanges(context.storage, () => {})).get(p.projectId, identity.workspaceId, await projectAuthority.environmentShared()).approvals;
       try {
         await instance.refreshBrowserOrigins(identity);
         expect(await instance.mutateLifecycleState(identity, { op: 'approval', scope, executionHash: origin.hash, approved: true }, human)).toMatchObject({ status: 'ok' });

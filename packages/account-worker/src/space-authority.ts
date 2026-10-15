@@ -4,7 +4,7 @@ import { LiveChanges } from './live-changes.js';
 import type { LiveNotice } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
-import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
+import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
@@ -35,7 +35,7 @@ type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: LiveChanges;
   private readonly environment: SpaceEnvironmentStore;
-  private directoryOutbox: DirectoryOutbox;
+  private directory: DirectoryPublisher;
   private runtime: Promise<WorkspaceRuntime> | undefined;
   /** Loaded before any request; set once the space has cloud runtime state (see `hasCloudRuntime`). */
   private cloudRuntime: z.infer<typeof RuntimeIdentitySchema> | null = null;
@@ -46,10 +46,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly liveNotify = (notices: LiveNotice[]) => { this.ctx.waitUntil(notifyBrowsers(this.env, notices)); };
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.changes = new LiveChanges(this.liveNotify);
+    this.changes = new LiveChanges(ctx.storage, this.liveNotify);
     this.environment = new SpaceEnvironmentStore(ctx.storage, this.changes);
-    this.directoryOutbox = this.openDirectoryOutbox();
     this.createTables();
+    this.directory = new DirectoryPublisher(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       const state = this.get();
       const identity = await this.ctx.storage.get('runtime.identity') ?? (state ? { projectId: state.projectId, workspaceId: state.spaceId } : null);
@@ -58,12 +58,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       // Base-branch changes no longer keep a step list: a pending one is dropped once and is retried by its caller.
       await this.ctx.storage.delete('runtime.baseBranchChange');
       this.ctx.waitUntil(this.flushPortableLfs());
-      this.directoryOutbox.kick();
     });
-  }
-
-  private openDirectoryOutbox(): DirectoryOutbox {
-    return new DirectoryOutbox(this.ctx, this.env, { set: timestamp => this.scheduleAlarm('directory', timestamp), clear: () => this.scheduleAlarm('directory', null) });
   }
 
   private createTables(): void {
@@ -79,13 +74,13 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS portable_lfs_outbox(snapshot_id TEXT PRIMARY KEY,inventory TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0)');
     if (!this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(portable_lfs_outbox)').toArray().some(column => column.name === 'attempts')) this.ctx.storage.sql.exec('ALTER TABLE portable_lfs_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
     this.ctx.storage.sql.exec('DROP TABLE IF EXISTS base_branch_steps');
-    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner='baseBranch'");
+    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner IN ('baseBranch','directory')");
     createWorkspaceMetadataTables(this.ctx.storage);
   }
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'space' }> | null {
     const state = this.get();
-    return state || this.cloudRuntime ? { source: 'space', cursor: this.directoryOutbox.head(), state, runtime: this.cloudRuntime } : null;
+    return state || this.cloudRuntime ? { source: 'space', cursor: this.directory.version(), state, runtime: this.cloudRuntime } : null;
   }
 
   /** The account directory learns once that this space is a cloud workspace; it then ignores the legacy placement. */
@@ -93,9 +88,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     this.cloudRuntime = identity;
     if (this.cloudRuntimePublished) return;
     this.cloudRuntimePublished = true;
-    this.ctx.storage.transactionSync(() => this.directoryOutbox.enqueue({ source: 'space', state: this.get(), runtime: identity }));
+    this.directory.publish({ source: 'space', state: this.get(), runtime: identity });
     void this.ctx.storage.put('directory.runtimePublished', true);
-    this.directoryOutbox.kick();
   }
 
   private scheduleAlarm(owner: string, timestamp: number | null): Promise<void> {
@@ -116,7 +110,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const startedAt = Date.now();
     const due = this.ctx.storage.sql.exec<{ owner: string; timestamp: number }>("SELECT owner, timestamp FROM runtime_alarms WHERE timestamp <= ? AND owner <> 'runtime'", startedAt).toArray();
-    await this.directoryOutbox.flush();
     await this.flushPortableLfs();
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
     if (wake && wake.timestamp <= Date.now()) {
@@ -374,8 +367,8 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     for (const machineId of attached) await fleet.detachMachineWorkspace(machineId, tombstone.workspaceId);
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
-    this.directoryOutbox = this.openDirectoryOutbox();
     this.createTables();
+    this.directory = new DirectoryPublisher(this.ctx, this.env);
     writeWorkspaceMetadata(this.ctx.storage, tombstone);
     this.cloudRuntime = null;
     this.cloudRuntimePublished = false;
@@ -771,13 +764,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         this.assertLegacyWriter();
         const value = mutate();
         const state = this.get();
-        if (state) {
-          this.changes.mark(`space:${state.spaceId}`);
-          this.directoryOutbox.enqueue({ source: 'space', state, runtime: this.cloudRuntime });
-        }
+        if (state) this.changes.mark(`space:${state.spaceId}`);
         return value;
       });
-      this.directoryOutbox.kick();
+      const state = this.get();
+      if (state) this.directory.publish({ source: 'space', state, runtime: this.cloudRuntime });
       this.changes.wake();
       return { status: 'ok', value };
     } catch (error) {

@@ -2,13 +2,10 @@ import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, credentialProtocolBase64, DEVICE_SOCKET_PROTOCOL, RPC_DEVICE_HEADER, signDeviceInvite, signRpcRequest, type CloudProjectSummary, type CloudWorkspaceDefinition, type DeviceInvite } from '@gitspace/protocol';
-import { accountDirectoryEventSchema, workspaceStatusMessageSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
-import type { StreamEvent } from '@gitspace/protocol-sync';
+import { accountDirectoryMessageSchema, workspaceStatusMessageSchema, type AccountDirectoryMessage } from '@gitspace/protocol/account-directory';
 import { http, HttpResponse } from 'msw';
 import { UserProjectIndexDO, ProjectAuthorityDO } from '../src/project-authority.js';
-import type { FleetCatalogDO } from '../src/fleet-catalog.js';
-import { DIRECTORY_OUTBOX_MAX_ATTEMPTS, DirectoryOutbox, type DirectoryPublication, type DirectorySource } from '../src/account-directory.js';
-import { DurableChangeLog } from '../src/durable-stream.js';
+import { DirectoryPublisher, type DirectorySource } from '../src/account-directory.js';
 import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
@@ -41,7 +38,7 @@ async function browserDevice(rights: Partial<Pick<DeviceInvite, 'scope' | 'capab
 
 /** Attach before accept so the already-queued initial snapshot cannot be lost. */
 function socketEvents(socket: WebSocket) {
-  type Event = { type: 'message'; value: StreamEvent<AccountDirectorySnapshot> } | { type: 'close'; code: number };
+  type Event = { type: 'message'; value: AccountDirectoryMessage } | { type: 'close'; code: number };
   const events: Event[] = [];
   const waiters: Array<(event: Event) => void> = [];
   const push = (event: Event) => { const waiter = waiters.shift(); if (waiter) waiter(event); else events.push(event); };
@@ -49,7 +46,7 @@ function socketEvents(socket: WebSocket) {
     const decoded: unknown = JSON.parse(String(event.data));
     // Status rows share the socket; these tests follow directory events.
     if (workspaceStatusMessageSchema.safeParse(decoded).success) return;
-    push({ type: 'message', value: accountDirectoryEventSchema.parse(decoded) });
+    push({ type: 'message', value: accountDirectoryMessageSchema.parse(decoded) });
   });
   socket.addEventListener('close', (event) => push({ type: 'close', code: event.code }));
   socket.accept();
@@ -81,58 +78,7 @@ describe('account directory projection', () => {
     expect(await index.locateWorkspace(workspace.id)).toBeNull();
   });
 
-  it('retries durable unacknowledged publication after reconstruction and stops alarms when drained', async () => {
-    const receiver = env.USER_PROJECTS.getByName('outbox-receiver');
-    const sender = env.USER_PROJECTS.getByName('outbox-sender');
-    await runInDurableObject(sender, async (_instance, state) => {
-      const failAfterAcceptance = { ...env, USER_PROJECTS: { getByName: () => ({ publishDirectory: async (publication: DirectoryPublication) => { await env.USER_PROJECTS.getByName('outbox-receiver').publishDirectory(publication); throw new Error('Acknowledgement lost'); } }) } } as unknown as Env;
-      const outbox = new DirectoryOutbox(state, failAfterAcceptance);
-      state.storage.transactionSync(() => outbox.enqueue(source));
-      await outbox.flush();
-      expect(await state.storage.getAlarm()).not.toBeNull();
-    });
-    expect((await receiver.directorySnapshot()).workspaces).toEqual([{ ...workspace, cloudRuntime: false }]);
-    await runInDurableObject(sender, async (_instance, state) => {
-      const recovered = new DirectoryOutbox(state, { ...env, USER_PROJECTS: { getByName: () => env.USER_PROJECTS.getByName('outbox-receiver') } } as unknown as Env);
-      await recovered.flush();
-      expect(await state.storage.getAlarm()).toBeNull();
-      await recovered.flush();
-      expect(await state.storage.getAlarm()).toBeNull();
-    });
-    expect((await receiver.directorySnapshot()).projectRevisions[project.id]).toBe(1);
-  });
-
-  it('parks a publication the directory keeps refusing until a new enqueue resumes delivery', async () => {
-    const sender = env.USER_PROJECTS.getByName('outbox-refused-sender');
-    await runInDurableObject(sender, async (_instance, state) => {
-      // The directory rejects a workspace claimed for a different project, on every attempt.
-      const refused: DirectorySource = { ...source, workspaces: [{ ...workspace, projectId: 'another-project' }] };
-      const outbox = new DirectoryOutbox(state, env);
-      state.storage.transactionSync(() => outbox.enqueue(refused));
-      for (let attempt = 1; attempt < DIRECTORY_OUTBOX_MAX_ATTEMPTS; attempt++) {
-        await outbox.flush();
-        expect(await state.storage.getAlarm()).toBeLessThanOrEqual(Date.now() + 3_600_000);
-      }
-      await outbox.flush();
-      expect(await state.storage.getAlarm()).toBeNull();
-      state.storage.transactionSync(() => outbox.enqueue(refused));
-      await outbox.flush();
-      expect(await state.storage.getAlarm()).not.toBeNull();
-      await state.storage.deleteAlarm();
-    });
-  });
-
-  it('releases a due outbox wake that has nothing left to deliver instead of re-arming it', async () => {
-    await runInDurableObject(env.FLEET_CATALOG.getByName('outbox-idle-fleet'), async (instance: FleetCatalogDO, state) => {
-      // A directory wake left due after its publication was already delivered by a request-time flush.
-      state.storage.sql.exec("INSERT INTO fleet_alarms(owner,timestamp) VALUES('directory',?) ON CONFLICT(owner) DO UPDATE SET timestamp=excluded.timestamp", Date.now() - 1_000);
-      await instance.alarm();
-      expect(state.storage.sql.exec("SELECT owner FROM fleet_alarms WHERE owner='directory'").toArray()).toEqual([]);
-      expect(await state.storage.getAlarm()).toBeNull();
-    });
-  });
-
-  it('recovers a source commit that lost publication before the directory accepted it', async () => {
+  it('publishes a source entry after each change with a newer version, and a failed send heals on the next change', async () => {
     const receiver = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
     const sender = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${project.id}`);
     await runInDurableObject(sender, async (_instance, state) => {
@@ -140,40 +86,24 @@ describe('account directory projection', () => {
       const authority = new ProjectAuthorityDO(state, unavailable);
       await state.blockConcurrencyWhile(async () => {});
       await authority.bootstrap({ ...project, createdBy: machine.id });
-      authority.putWorkspace({ ...workspace, expectedRevision: 0 });
-      await authority.alarm();
-      expect(await state.storage.getAlarm()).not.toBeNull();
     });
     expect(await receiver.list()).toEqual([]);
     await runInDurableObject(sender, async (_instance, state) => {
       const restarted = new ProjectAuthorityDO(state, env);
       await state.blockConcurrencyWhile(async () => {});
-      await restarted.alarm();
+      restarted.putWorkspace({ ...workspace, expectedRevision: 0 });
     });
-    expect(await receiver.directorySnapshot()).toMatchObject({ projects: [{ id: project.id }], workspaces: [{ id: workspace.id }] });
+    await expect.poll(() => receiver.directorySnapshot()).toMatchObject({ projects: [{ id: project.id }], workspaces: [{ id: workspace.id }] });
   });
 
-  it('does not let an in-flight acknowledgement discard a newer committed publication', async () => {
-    const receiver = env.USER_PROJECTS.getByName('outbox-newer-receiver');
-    const sender = env.USER_PROJECTS.getByName('outbox-newer-sender');
-    await runInDurableObject(sender, async (_instance, state) => {
-      const accepted = Promise.withResolvers<void>();
-      const acknowledge = Promise.withResolvers<void>();
-      const outbox = new DirectoryOutbox(state, { ...env, USER_PROJECTS: { getByName: () => ({ publishDirectory: async (publication: DirectoryPublication) => {
-        await env.USER_PROJECTS.getByName('outbox-newer-receiver').publishDirectory(publication);
-        if (publication.cursor === 1) { accepted.resolve(); await acknowledge.promise; }
-        return true;
-      } }) } } as unknown as Env);
-      state.storage.transactionSync(() => outbox.enqueue(source));
-      const first = outbox.flush();
-      await accepted.promise;
-      state.storage.transactionSync(() => outbox.enqueue({ ...source, workspaces: [] }));
-      acknowledge.resolve();
-      await first;
-      await outbox.flush();
-      expect(await state.storage.getAlarm()).toBeNull();
+  it('continues a source version from its retired outbox, so the directory keeps accepting it', async () => {
+    await runInDurableObject(env.USER_PROJECTS.getByName('retired-outbox'), (_instance, state) => {
+      state.storage.sql.exec('CREATE TABLE directory_outbox(singleton INTEGER PRIMARY KEY CHECK(singleton=1), cursor INTEGER NOT NULL, value_json TEXT, attempts INTEGER NOT NULL DEFAULT 0)');
+      state.storage.sql.exec('INSERT INTO directory_outbox(singleton,cursor) VALUES(1,7)');
+      const publisher = new DirectoryPublisher(state, env);
+      expect(publisher.version()).toBe(7);
+      expect(state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='directory_outbox'").toArray()).toEqual([]);
     });
-    expect(await receiver.directorySnapshot()).toMatchObject({ workspaces: [], projectRevisions: { [project.id]: 2 } });
   });
 });
 
@@ -228,52 +158,39 @@ describe('directory WebSocket authentication', () => {
     expect(await opened.events.next()).toEqual({ type: 'close', code: 4401 });
   });
 
-  it('replays durable changes after reconnect and explicitly resyncs ahead and expired cursors', async () => {
-    const device = await browserDevice();
-    const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
-    const first = await openDirectory(device.request());
-    const initial = await first.events.next();
-    expect(initial.type).toBe('message');
-    if (initial.type !== 'message') throw new Error('No snapshot');
-    const cursor = initial.value.cursor;
-    first.socket.close(1000, 'reconnect');
-    await index.publishDirectory({ ...source, cursor: 1 });
-    const resumed = await openDirectory(device.request(cursor));
-    expect(await resumed.events.next()).toMatchObject({ type: 'message', value: { type: 'change', previous: cursor, value: { workspaces: [workspace] } } });
-    resumed.socket.close(1000, 'done');
-    const ahead = await openDirectory(device.request(Number.MAX_SAFE_INTEGER));
-    expect(await ahead.events.next()).toMatchObject({ type: 'message', value: { type: 'resync', reason: 'cursor-ahead' } });
-    expect(await ahead.events.next()).toMatchObject({ type: 'message', value: { type: 'snapshot', value: { workspaces: [workspace] } } });
-    ahead.socket.close(1000, 'done');
-    await runInDurableObject(index, (instance, state) => {
-      // Fill the actual bounded log without hundreds of network round trips.
-      for (let revision = 2; revision <= 514; revision++) instance.publishDirectory({ ...source, cursor: revision });
-      expect(new DurableChangeLog(state.storage).head('account-directory')).toBeGreaterThan(cursor);
-    });
-    const expired = await openDirectory(device.request(cursor));
-    expect(await expired.events.next()).toMatchObject({ type: 'message', value: { type: 'resync', reason: 'cursor-expired' } });
-    expect(await expired.events.next()).toMatchObject({ type: 'message', value: { type: 'snapshot', value: { projectRevisions: { [project.id]: 514 } } } });
-    expired.socket.close(1000, 'done');
-  });
-
-  it('reconstructs delivery from attachments and durable state, then fences revocation', async () => {
+  it('sends the whole directory when a socket opens, then only the slice that changed', async () => {
     const device = await browserDevice();
     const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
     const opened = await openDirectory(device.request());
-    const initial = await opened.events.next();
-    if (initial.type !== 'message') throw new Error('No snapshot');
+    expect(await opened.events.next()).toMatchObject({ type: 'message', value: { type: 'directory', snapshot: { projects: [], workspaces: [] } } });
+    await index.publishDirectory({ ...source, cursor: 1 });
+    const messages = [await opened.events.next(), await opened.events.next()];
+    expect(messages).toEqual(expect.arrayContaining([
+      { type: 'message', value: { type: 'directory.projects', projects: [{ ...project, updatedAt: expect.any(String) }] } },
+      { type: 'message', value: { type: 'directory.project', projectId: project.id, revision: 1, workspaces: [{ ...workspace, cloudRuntime: false }], placements: [] } },
+    ]));
+    await index.publishDirectory({ ...source, cursor: 2, workspaces: [] });
+    // The project list did not change: only the project's slice is sent.
+    expect(await opened.events.next()).toEqual({ type: 'message', value: { type: 'directory.project', projectId: project.id, revision: 2, workspaces: [], placements: [] } });
+    opened.socket.close(1000, 'done');
+  });
+
+  it('reaches an open socket after the object restarts, then closes it when its device is revoked', async () => {
+    const device = await browserDevice();
+    const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
+    const opened = await openDirectory(device.request());
+    await opened.events.next();
     await runInDurableObject(index, async (_instance, state) => {
       const restarted = new UserProjectIndexDO(state, env);
       await state.blockConcurrencyWhile(async () => {});
-      const snapshot: AccountDirectorySnapshot = { projects: [project], workspaces: [{ ...workspace, cloudRuntime: false }], placements: [], machines: [], projectRevisions: { [project.id]: 1 } };
-      // A commit survived eviction immediately before its socket notification.
-      state.storage.transactionSync(() => new DurableChangeLog(state.storage).append('account-directory', snapshot));
-      await restarted.alarm();
+      restarted.publishDirectory({ ...source, cursor: 1 });
     });
-    expect(await opened.events.next()).toMatchObject({ type: 'message', value: { type: 'change', previous: initial.value.cursor, value: { workspaces: [workspace] } } });
+    expect(await opened.events.next()).toMatchObject({ type: 'message', value: { type: expect.stringMatching(/^directory\./) } });
     await device.vault.revokeDeviceGrant(device.deviceId);
-    await index.publishDirectory({ ...source, cursor: 1 });
-    expect(await opened.events.next()).toEqual({ type: 'close', code: 4401 });
+    await index.publishDirectory({ ...source, cursor: 2, workspaces: [] });
+    let next = await opened.events.next();
+    while (next.type === 'message') next = await opened.events.next();
+    expect(next).toEqual({ type: 'close', code: 4401 });
     expect(await (await SELF.fetch(device.request(undefined, false))).json()).toMatchObject({ error: { code: 'RPC_DEVICE_UNKNOWN' } });
   });
 
@@ -285,11 +202,12 @@ describe('directory WebSocket authentication', () => {
     await opened.events.next();
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => new HttpResponse(null, { status: 503 })));
     await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 1 });
-    expect(await opened.events.next()).toMatchObject({ type: 'message', value: { type: 'change', value: { workspaces: [workspace] } } });
+    expect(await opened.events.next()).toMatchObject({ type: 'message', value: { type: expect.stringMatching(/^directory\./) } });
+    await opened.events.next();
     clock.mockReturnValue(now + 60_001);
     // The next refresh carries the lapsed platform observation.
     invalidateDeviceAuthority();
-    await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 2 });
+    await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 2, workspaces: [] });
     expect(await opened.events.next()).toEqual({ type: 'close', code: 1013 });
   });
 });

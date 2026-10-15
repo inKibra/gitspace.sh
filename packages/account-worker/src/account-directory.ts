@@ -16,69 +16,27 @@ export const directoryPublicationSchema = z.discriminatedUnion('source', [
 export type DirectoryPublication = z.infer<typeof directoryPublicationSchema>;
 export type DirectorySource = DirectoryPublication extends infer P ? P extends DirectoryPublication ? Omit<P, 'cursor'> : never : never;
 interface SourceRow extends Record<string, SqlStorageValue> { cursor: number; value_json: string }
-interface OutboxRow extends SourceRow { attempts: number }
-/** A publication refused this many times parks until the next enqueue or object start instead of retrying forever. */
-export const DIRECTORY_OUTBOX_MAX_ATTEMPTS = 16;
 
-/** One coalescing outbox per authority. Full source snapshots make supersession safe. */
-export class DirectoryOutbox {
-  private running: Promise<void> | null = null;
-  constructor(private readonly ctx: DurableObjectState, private readonly env: Env, private readonly alarm?: { set(timestamp: number): Promise<void>; clear(): Promise<void> }) {
-    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS directory_outbox(
-      singleton INTEGER PRIMARY KEY CHECK(singleton=1), cursor INTEGER NOT NULL, value_json TEXT, attempts INTEGER NOT NULL DEFAULT 0
-    )`);
-  }
-  head(): number {
-    return this.ctx.storage.sql.exec<{ cursor: number }>('SELECT cursor FROM directory_outbox WHERE singleton=1').toArray()[0]?.cursor ?? 0;
-  }
-  /** Must be called inside the authoritative mutation's transaction. */
-  enqueue(value: DirectorySource): void {
-    const cursor = streamCursorSchema.parse(this.head() + 1);
-    this.ctx.storage.sql.exec('INSERT INTO directory_outbox(singleton,cursor,value_json,attempts) VALUES(1,?,?,0) ON CONFLICT(singleton) DO UPDATE SET cursor=excluded.cursor,value_json=excluded.value_json,attempts=0', cursor, JSON.stringify({ ...value, cursor }));
-  }
-  private pending(): OutboxRow | undefined {
-    return this.ctx.storage.sql.exec<OutboxRow>('SELECT cursor,value_json,attempts FROM directory_outbox WHERE singleton=1 AND value_json IS NOT NULL').toArray()[0];
-  }
-  /** No await between the source commit and this alarm write: storage coalesces both atomically. */
-  kick(): void {
-    if (!this.pending()) return;
-    const armed = this.alarm ? this.alarm.set(Date.now() + 1_000) : this.ctx.storage.setAlarm(Date.now() + 1_000);
-    this.ctx.waitUntil(armed.then(() => this.flush()));
-  }
-  async flush(): Promise<void> {
-    if (this.running) return this.running;
-    this.running = (async () => {
-      // Drain a coalesced burst, but yield sustained writers to the durable alarm.
-      for (let delivered = 0; delivered < 8; delivered++) {
-        const pending = this.pending();
-        if (!pending) {
-          // A wake with nothing left to deliver releases this outbox's alarm; left armed it stays due and fires again at once.
-          if (delivered === 0) await this.alarm?.clear();
-          return;
-        }
-        if (!await this.deliver(pending)) return;
-      }
-    })().finally(() => { this.running = null; });
-    return this.running;
-  }
-  private async deliver(pending: OutboxRow): Promise<boolean> {
-    try {
-      await (this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(this.env.ACCOUNT_ID)
-        .publishDirectory(JSON.parse(pending.value_json) as DirectoryPublication);
-      // A delayed acknowledgement may only clear the publication it acknowledged.
-      this.ctx.storage.sql.exec('UPDATE directory_outbox SET value_json=NULL,attempts=0 WHERE singleton=1 AND cursor=?', pending.cursor);
-      if (this.pending()) await (this.alarm ? this.alarm.set(Date.now() + 1_000) : this.ctx.storage.setAlarm(Date.now() + 1_000));
-      else await (this.alarm ? this.alarm.clear() : this.ctx.storage.deleteAlarm());
-      return true;
-    } catch {
-      this.ctx.storage.sql.exec('UPDATE directory_outbox SET attempts=attempts+1 WHERE singleton=1 AND cursor=?', pending.cursor);
-      const current = this.pending();
-      if (current && current.attempts < DIRECTORY_OUTBOX_MAX_ATTEMPTS) {
-        const timestamp = Date.now() + Math.min(3_600_000, 1_000 * 2 ** current.attempts);
-        await (this.alarm ? this.alarm.set(timestamp) : this.ctx.storage.setAlarm(timestamp));
-      } else if (current) await (this.alarm ? this.alarm.clear() : this.ctx.storage.deleteAlarm());
-      return false;
+/** Sends this source's current directory entry to the account's socket object after each change. A failed send is
+ * logged; the source's next change sends its whole entry again. */
+export class DirectoryPublisher {
+  constructor(private readonly ctx: DurableObjectState, private readonly env: Env) {
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS directory_version(id INTEGER PRIMARY KEY CHECK(id=1), cursor INTEGER NOT NULL)');
+    // One-time: the version continues from the retired outbox's, so the directory keeps accepting this source.
+    if (ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='directory_outbox'").toArray().length) {
+      ctx.storage.sql.exec('INSERT OR IGNORE INTO directory_version(id,cursor) SELECT 1,cursor FROM directory_outbox WHERE singleton=1');
+      ctx.storage.sql.exec('DROP TABLE directory_outbox');
     }
+  }
+  version(): number {
+    return this.ctx.storage.sql.exec<{ cursor: number }>('SELECT cursor FROM directory_version WHERE id=1').toArray()[0]?.cursor ?? 0;
+  }
+  /** After the source's change committed. */
+  publish(source: DirectorySource): void {
+    const cursor = streamCursorSchema.parse(this.ctx.storage.sql.exec<{ cursor: number }>('INSERT INTO directory_version(id,cursor) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET cursor=cursor+1 RETURNING cursor').one().cursor);
+    const publication: DirectoryPublication = { ...source, cursor };
+    this.ctx.waitUntil((this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(this.env.ACCOUNT_ID).publishDirectory(publication)
+      .then(() => undefined, (error: unknown) => console.error(JSON.stringify({ event: 'directory_publication_failed', source: source.source, message: error instanceof Error ? error.message : String(error) }))));
   }
 }
 

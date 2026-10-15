@@ -1,4 +1,4 @@
-import { accountDirectoryEventSchema, workspaceStatusMessageSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { accountDirectoryMessageSchema, applyAccountDirectoryMessage, workspaceStatusMessageSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import { liveNoticeMessageSchema } from '@gitspace/protocol/live-notice';
 import { DEVICE_SOCKET_PROTOCOL } from '@gitspace/protocol/socket-auth';
 import type { StreamEvent } from '@gitspace/protocol-sync';
@@ -9,6 +9,8 @@ import { workspaceStatuses, type WorkspaceStatuses } from './workspace-statuses.
 import type { SynchronizationSource } from './synchronization.js';
 
 const MAX_FRAME_SIZE = 8 * 1024 * 1024;
+/** Cursors for directory states: increasing across sockets, so a newer state always replaces an older one. */
+let directoryCursor = 0;
 
 /** WebCrypto and IndexedDB cannot be cancelled, but their late completions must not open a socket. */
 function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -32,13 +34,11 @@ export function createAccountDirectorySource(options: {
   const notices = options.notices ?? liveNotices;
   const statuses = options.statuses ?? workspaceStatuses;
   const signedFetch = createDeviceSignedFetch(options.currentDevice, options.onRejected);
-  return async function* (after, signal) {
+  return async function* (_after, signal) {
     if (signal.aborted) return;
     const url = new URL('/v1/directory/events', options.origin());
-    if (after !== null) {
-      if (!Number.isSafeInteger(after) || after < 0) throw new Error('Invalid account-directory cursor');
-      url.searchParams.set('after', String(after));
-    }
+    // The whole directory arrives first on every socket, then the slices that change.
+    let directory: AccountDirectorySnapshot | null = null;
     let socket: WebSocket | undefined;
     let detach = () => {};
     try {
@@ -83,9 +83,10 @@ export function createAccountDirectorySource(options: {
             statuses.receive(status.data);
             return;
           }
-          const value = accountDirectoryEventSchema.parse(decoded);
-          if (value.resource !== 'account-directory') throw new Error(`Unexpected stream resource: ${value.resource}`);
-          queue.push({ value, size: event.data.length });
+          directory = applyAccountDirectoryMessage(directory, accountDirectoryMessageSchema.parse(decoded));
+          if (!directory) return;
+          const cursor = ++directoryCursor;
+          queue.push({ value: { type: 'snapshot', resource: 'account-directory', cursor, revision: cursor, previous: null, value: directory }, size: event.data.length });
           queuedBytes += event.data.length;
           notify();
         } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }

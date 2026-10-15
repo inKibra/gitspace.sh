@@ -17,7 +17,10 @@ function liveKeyOfResource(resource: string): LiveKey {
 export class LiveChanges {
   private readonly changed = new Set<string>();
   /** `notify` receives one notice per changed resource after each committed write; it must not block the writer. */
-  constructor(private readonly notify: (notices: LiveNotice[]) => void) {}
+  constructor(storage: Pick<DurableObjectStorage, 'sql'>, private readonly notify: (notices: LiveNotice[]) => void) {
+    // One-time: changes were once stored for cursor replay.
+    storage.sql.exec('DROP TABLE IF EXISTS app_changes; DROP TABLE IF EXISTS app_change_heads');
+  }
   /** Inside the writing transaction; tabs hear of it at `wake`, after the commit. */
   mark(resource: string): void {
     this.changed.add(resource);
