@@ -1,11 +1,12 @@
 import { z } from 'zod';
 import { RuntimeDispatchSelectionSchema, RuntimeMachineIdSchema, type RuntimeAttachment } from '@gitspace/protocol-runtime';
 import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import type { WorkspaceEnvironment } from './space-environment.js';
 
 const selectionState = z.object({ fingerprint: z.string(), deadline: z.string(), result: z.unknown().optional() });
 export type DispatchSelectionState = z.infer<typeof selectionState>;
 
-export function createDispatchSelector(options: { storage: DurableObjectStorage; env: Env; identity: { projectId: string; workspaceId: string }; runtime(): WorkspaceRuntime }) {
+export function createDispatchSelector(options: { storage: DurableObjectStorage; env: Env; identity: { projectId: string; workspaceId: string }; runtime(): WorkspaceRuntime; environment: Pick<WorkspaceEnvironment, 'getLifecycleState'> }) {
   const { storage, env, identity } = options;
   storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_host_selection (id TEXT PRIMARY KEY, state TEXT NOT NULL)');
   const load = (id: string) => {
@@ -13,7 +14,6 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
     return row ? selectionState.parse(JSON.parse(row.state)) : null;
   };
   const save = (id: string, state: DispatchSelectionState) => storage.sql.exec('INSERT INTO runtime_host_selection(id,state) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state', id, JSON.stringify(state));
-  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   /** The ready attachment the selection names, or null when none is ready. A setup run may also use an attaching one. */
   async function find(args: unknown, eligible?: readonly RuntimeAttachment[], setup = false): Promise<RuntimeAttachment | null> {
     const selection = RuntimeDispatchSelectionSchema.parse(args);
@@ -31,7 +31,7 @@ export function createDispatchSelector(options: { storage: DurableObjectStorage;
     } else if (selector) {
       if (selector.needs) candidates = candidates.filter(item => selector.needs!.every(need => item.capabilities.includes(need)));
       if (selector.profile) {
-        const lifecycle = await authority.getLifecycleState(identity.workspaceId);
+        const lifecycle = await options.environment.getLifecycleState(identity);
         candidates = candidates.filter(item => ['machine/prepare', 'checks'].every(phase => lifecycle.runs.some(run => run.machineId === item.machineId && run.profile === selector.profile && run.phase === phase && run.status === 'succeeded')));
       }
       if (selector.prefer === 'idle') {

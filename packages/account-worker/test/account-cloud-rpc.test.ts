@@ -71,7 +71,9 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
 
   it('sends a watching tab one notice per committed change, and its read after the cursor returns only newer changes', async () => {
     const fixture = await account();
-    const { spaceId, authority } = await inspectorWorkspace(fixture.userId);
+    const { projectId, spaceId } = await inspectorWorkspace(fixture.userId);
+    const space = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${spaceId}`);
+    const spaceIdentity = { projectId, workspaceId: spaceId };
     const client = inspectorClient(fixture);
     const initial = await client.environment.events({ spaceId, after: null });
     if (initial.status !== 'ok') throw initial.error;
@@ -84,7 +86,7 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
       await elsewhere.subscribe(workspaceLiveKey('another-space', 'environment'));
       // Listed by `getWebSockets`: accepted for hibernation, so open tabs never pin the live object.
       expect(await runInDurableObject(env.USER_PROJECTS.getByName(fixture.userId), (_instance, state) => state.getWebSockets().length)).toBeGreaterThanOrEqual(2);
-      expect(await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true })).toMatchObject({ status: 'ok' });
+      expect(await space.mutateLifecycleState(spaceIdentity, { op: 'policy', automatic: true }, { machineId: 'machine', actorId: 'human', kind: 'browser', lifecycleControl: true })).toMatchObject({ status: 'ok' });
       const notice = await watching.next();
       expect(notice).toEqual({ project: null, workspace: spaceId, resource: 'environment', version: expect.any(Number) });
       // Each socket's next notice is this marker: no second notice for the change, none for a key a tab does not watch.
@@ -108,6 +110,8 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     const projectId = 'lifecycle-project';
     const spaceId = 'lifecycle-space';
     const authority = env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projectId}`);
+    const space = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${spaceId}`);
+    const spaceIdentity = { projectId, workspaceId: spaceId };
     await authority.bootstrap({ id: projectId, name: 'Lifecycle', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
     await authority.putWorkspace({ id: spaceId, projectId, kind: 'worktree', name: 'Lifecycle', branch: 'feature', phase: null, sourceKind: 'branch', sourceRef: 'feature', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(spaceId, projectId);
@@ -115,18 +119,18 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     const hash = await executionHash({ kind: 'script', command: content });
     const actor = { machineId: 'removed-machine', actorId: 'removed-machine', kind: 'machine' as const, lifecycleControl: false };
     const configure = { op: 'configure' as const, bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'provision', kind: 'script' as const, label: 'Provision', command: 'bash provision.sh', content, hash, phase: 'cloud/provision' as const, fileName: '10-provision.sh' }] };
-    const configured = await authority.mutateLifecycleState(spaceId, configure, actor);
+    const configured = await space.mutateLifecycleState(spaceIdentity, configure, actor);
     if (configured.status === 'error') throw new Error(configured.failure.message);
     const approved = await SELF.fetch(fixture.request(single('environment.approve', { spaceId, executionHash: hash, scope: 'workspace' })));
     expect(approved.status, await approved.clone().text()).toBe(200);
     expect(parse(await approved.text())).toMatchObject({ status: 'ok', value: { executions: [{ content, approval: 'workspace' }] } });
-    expect((await authority.getLifecycleState(spaceId)).approvals[0]?.approvedBy).toBe(fixture.deviceId);
-    const policy = await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, actor);
+    expect((await space.getLifecycleState(spaceIdentity)).approvals[0]?.approvedBy).toBe(fixture.deviceId);
+    const policy = await space.mutateLifecycleState(spaceIdentity, { op: 'policy', automatic: true }, actor);
     if (policy.status === 'error') throw new Error(policy.failure.message);
-    const running = await authority.mutateLifecycleState(spaceId, { op: 'claim', runId: 'provision', phase: 'cloud/provision', profile: 'base', executionHashes: [hash], generation: null, rerun: false }, actor);
+    const running = await space.mutateLifecycleState(spaceIdentity, { op: 'claim', runId: 'provision', phase: 'cloud/provision', profile: 'base', executionHashes: [hash], generation: null, rerun: false }, actor);
     if (running.status === 'error') throw new Error(running.failure.message);
     expect(running.state.claim?.status).toBe('claimed');
-    const finished = await authority.mutateLifecycleState(spaceId, { op: 'finish', runId: 'provision', status: 'failed', exitCode: 1, results: [], output: 'cloud error', bindings: { database: 'partial-db' } }, actor);
+    const finished = await space.mutateLifecycleState(spaceIdentity, { op: 'finish', runId: 'provision', status: 'failed', exitCode: 1, results: [], output: 'cloud error', bindings: { database: 'partial-db' } }, actor);
     if (finished.status === 'error') throw new Error(finished.failure.message);
     const state = await SELF.fetch(fixture.request(single('environment.get', { spaceId })));
     expect(state.status, await state.clone().text()).toBe(200);
@@ -134,7 +138,7 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
     const log = await SELF.fetch(fixture.request(single('environment.runLog', { spaceId, runId: 'provision', offset: null })));
     expect(parse(await log.text())).toMatchObject({ status: 'ok', value: { output: 'cloud error', nextOffset: null } });
-    const changed = await authority.mutateLifecycleState(spaceId, { ...configure, executions: [{ ...configure.executions[0]!, content: 'different displayed content' }] }, actor);
+    const changed = await space.mutateLifecycleState(spaceIdentity, { ...configure, executions: [{ ...configure.executions[0]!, content: 'different displayed content' }] }, actor);
     if (changed.status === 'error') throw new Error(changed.failure.message);
     const forged = await SELF.fetch(fixture.request(single('environment.approve', { spaceId, executionHash: hash, scope: 'project' })));
     expect(parse(await forged.text())).toMatchObject({ status: 'error' });
@@ -143,7 +147,9 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
   it('derives a cloud workspace environment from its uncommitted checkpoint worktree and lets a cache claim the approved script', async () => {
     emptyCommittedSource();
     const fixture = await account(['rpc.read', 'rpc.write']);
-    const { spaceId, authority, placement } = await inspectorWorkspace(fixture.userId);
+    const { projectId, spaceId, placement } = await inspectorWorkspace(fixture.userId);
+    const space = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${spaceId}`);
+    const spaceIdentity = { projectId, workspaceId: spaceId };
     const id = (digit: string) => digit.repeat(40);
     // HEAD has neither file: the agent wrote both into the cloud worktree without committing.
     const checkpoint = { checkpointRef: `refs/gitspace/spaces/${spaceId}/checkpoints`, headCommit: id('1'), branch: 'review', indexCommit: id('2'), trackedWorktreeCommit: id('3'), worktreeCommit: id('4'), indexTree: id('5'), worktreeTree: id('6') };
@@ -167,7 +173,7 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     } });
     const attachment = { attachmentId: 'cache-a', generation: 1 };
     const cache = { machineId: 'machine-a', actorId: 'machine-a', kind: 'machine' as const, lifecycleControl: false, attachment };
-    const claim = (runId: string) => authority.mutateLifecycleState(spaceId, { op: 'claim', runId, phase: 'machine/prepare', profile: 'base', executionHashes: [hash], generation: null, rerun: true, attachment }, cache);
+    const claim = (runId: string) => space.mutateLifecycleState(spaceIdentity, { op: 'claim', runId, phase: 'machine/prepare', profile: 'base', executionHashes: [hash], generation: null, rerun: true, attachment }, cache);
     expect(await claim('before-approval')).toMatchObject({ status: 'error', failure: { code: 'ApprovalRequired' } });
     expect(await rpc('environment.approve', { spaceId, executionHash: hash, scope: 'workspace' })).toMatchObject({ status: 'ok', value: { executions: [{ hash, approval: 'workspace' }] } });
     expect(await claim('after-approval')).toMatchObject({ status: 'ok', state: { claim: { runId: 'after-approval', status: 'claimed' } } });
@@ -216,7 +222,9 @@ describe('account cloud RPC without machines', () => {
     emptyCommittedSource();
     const fixture = await account();
     const { projectId, spaceId, authority } = await inspectorWorkspace(fixture.userId);
-    const configured = await authority.mutateLifecycleState(spaceId, {
+    const space = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${spaceId}`);
+    const spaceIdentity = { projectId, workspaceId: spaceId };
+    const configured = await space.mutateLifecycleState(spaceIdentity, {
       op: 'configure',
       bundleJson: JSON.stringify({ version: 1, profiles: { base: { values: ['REGION'] } }, values: { REGION: {} } }),
     }, { machineId: 'removed-machine', actorId: 'removed-machine', kind: 'machine', lifecycleControl: false });

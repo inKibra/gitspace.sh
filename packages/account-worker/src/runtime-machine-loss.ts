@@ -7,8 +7,9 @@ import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
 export async function releaseMachineAttachments(env: Env, userId: string, machineId: string, reason: 'machine-destroyed' | 'machine-revoked'): Promise<void> {
   for (const space of await env.FLEET_CATALOG.getByName(userId).listSpaces()) {
     try {
-      await env.SPACE_AUTHORITY.getByName(`${userId}:${space.spaceId}`).runtimeRemoveMachine(machineId);
-      await env.PROJECT_AUTHORITY.getByName(`${userId}:${space.projectId}`).releaseLostLifecycleClaims(space.spaceId, { machineId, reason });
+      const authority = env.SPACE_AUTHORITY.getByName(`${userId}:${space.spaceId}`);
+      await authority.runtimeRemoveMachine(machineId);
+      await authority.releaseLostLifecycleClaims({ projectId: space.projectId, workspaceId: space.spaceId }, { machineId, reason });
     } catch (error) {
       console.error('Machine attachment release failed for a workspace', { spaceId: space.spaceId, machineId, error });
     }

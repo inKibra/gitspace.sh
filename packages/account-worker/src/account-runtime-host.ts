@@ -1,3 +1,4 @@
+import type { WorkspaceEnvironment } from './space-environment.js';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { RuntimeAttachment, RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
@@ -53,6 +54,7 @@ export async function createAccountWorkspaceRuntime(
   identity: RuntimeIdentity,
   schedule: (timestamp: number) => Promise<void>,
   requestAttachment: (machineId: string) => Promise<{ attachment: RuntimeAttachment }>,
+  environment: WorkspaceEnvironment,
 ): Promise<WorkspaceRuntime> {
   const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   // The workspace's own metadata, read per use: a base branch change moves the branch this runtime reads code from.
@@ -83,7 +85,7 @@ export async function createAccountWorkspaceRuntime(
   const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   let runtime: WorkspaceRuntime | undefined;
-  const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
+  const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, environment, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });

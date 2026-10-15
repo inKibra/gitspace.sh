@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import type { RuntimeGitCheckpoint, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { EnvironmentError, deriveLifecycleExecutions, loadEnvironmentBundle, parseEnvironmentBundleJson, type LifecycleState } from '@gitspace/protocol-environment';
-import type { ProjectAuthorityDO } from './project-authority.js';
+import type { SpaceAuthorityDO } from './space-authority.js';
 
 const LIFECYCLE_ROOT = '.gitspace/lifecycle';
 
@@ -13,12 +13,12 @@ const LIFECYCLE_ROOT = '.gitspace/lifecycle';
  */
 export async function refreshCloudEnvironment(input: {
   code: ArtifactsCodeStore;
-  authority: DurableObjectStub<ProjectAuthorityDO>;
+  environment: Pick<SpaceAuthorityDO, 'refreshBrowserOrigins' | 'mutateLifecycleState'>;
   identity: z.infer<typeof RuntimeIdentitySchema>;
   checkpoint: RuntimeGitCheckpoint;
 }): Promise<LifecycleState> {
-  const { code, authority, identity, checkpoint } = input;
-  const state = await authority.refreshBrowserOrigins(identity.workspaceId);
+  const { code, environment, identity, checkpoint } = input;
+  const state = await environment.refreshBrowserOrigins(identity);
   // Only the `.gitspace` paths are read, one tree per path segment; never the whole worktree.
   const reader = code.reader(artifactsWorkspaceRepository(identity.workspaceId));
   const trees = new Map<string, Promise<ArtifactsTreeEntry[] | null>>();
@@ -68,7 +68,7 @@ export async function refreshCloudEnvironment(input: {
   const bundleJson = JSON.stringify(bundle);
   if (source === null && executions.length === 0 && state.bundleJson === null && state.executions.length === 0) return state;
   if (bundleJson === state.bundleJson && JSON.stringify(executions) === JSON.stringify(state.executions)) return state;
-  const result = await authority.mutateLifecycleState(identity.workspaceId, { op: 'configure', bundleJson, executions }, {
+  const result = await environment.mutateLifecycleState(identity, { op: 'configure', bundleJson, executions }, {
     machineId: `cloud:${identity.workspaceId}`, actorId: `checkpoint:${checkpoint.worktreeCommit}`, kind: 'client', lifecycleControl: false,
   });
   if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);

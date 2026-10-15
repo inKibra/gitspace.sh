@@ -18,10 +18,9 @@ import type {
   WorkspaceLifecycle,
   ProjectOperationState,
 } from '@gitspace/protocol';
-import { ProjectEnvironmentStore, type LostLifecycleHolder } from './project-environment.js';
+import type { ExportedEnvironment, ExportedLogs, SharedEnvironment, SharedEnvironmentChange } from './space-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
-import { committedBrowserOrigins } from './committed-browser-origins.js';
-import { LifecycleMutationSchema, environmentFailure, type LifecycleActor, type EnvironmentFailure, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
+import { LifecycleMutationSchema, LifecycleStateSchema } from '@gitspace/protocol-environment';
 import { DurableChangeLog } from './durable-stream.js';
 import { liveClientMessageSchema, liveKeyId, liveNoticeSchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice, type LiveNoticeMessage } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
@@ -38,7 +37,6 @@ import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.j
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
 import { z } from 'zod';
-import { notifyLifecycleHolders } from './machine-notices.js';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 
@@ -716,17 +714,15 @@ export class UserProjectIndexDO extends DurableObject<Env> {
 export class ProjectAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
   private readonly directoryOutbox: DirectoryOutbox;
-  private readonly environment: ProjectEnvironmentStore;
   private readonly lfs: GitLfsRetention;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const notify = (notices: LiveNotice[]) => { ctx.waitUntil(notifyBrowsers(env, notices)); };
     this.changes = new DurableChangeLog(ctx.storage, notify);
     this.directoryOutbox = new DirectoryOutbox(ctx, env);
-    this.environment = new ProjectEnvironmentStore(ctx.storage, notify);
     this.lfs = new GitLfsRetention(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
-      this.environment.initialize();
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS environment_shared(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)');
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS project(
           project_id TEXT PRIMARY KEY,
@@ -959,11 +955,6 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   events(after: number | null): StreamEvent<ProjectChange>[] {
     return this.changes.replay(`project:${this.requireProject().id}`, after, () => ({ entity: 'snapshot', entityId: null, eventOffset: this.latestEventOffset() }), false);
   }
-  /** `environment.events`: the workspace's lifecycle state after `after`, bounded. */
-  environmentEvents(spaceId: string, after: number | null): StreamEvent<LifecycleState>[] {
-    this.requireLifecycleWorkspace(spaceId);
-    return this.changes.replay(`environment:${spaceId}`, after, () => this.getLifecycleState(spaceId), false);
-  }
   private committing = false;
   /** Workspace rows of the last committed directory publication. Only `project`/`workspace` commits write those rows,
    * so every other commit republishes (bumping the directory revision) without re-reading the whole table. */
@@ -1083,79 +1074,72 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }
 
 
-  private requireLifecycleWorkspace(spaceId: string): CloudProjectSummary {
-    const project = this.requireProject();
-    const workspace = this.ctx.storage.sql.exec<WorkspaceRow>('SELECT * FROM workspaces WHERE workspace_id=?', spaceId).toArray()[0];
-    if (!workspace || workspace.project_id !== project.id) throw new Error('Lifecycle workspace does not belong to this project');
-    return project;
+  /** Values and approvals every workspace of this project shares. */
+  environmentShared(): SharedEnvironment {
+    this.requireProject();
+    const row = this.ctx.storage.sql.exec<{ data: string }>('SELECT data FROM environment_shared WHERE id=1').toArray()[0];
+    return row ? z.object({ values: z.record(z.string(), z.string()), approvals: LifecycleStateSchema.shape.approvals }).parse(JSON.parse(row.data)) : { values: {}, approvals: [] };
+  }
+
+  /** Applies the change one workspace's environment transition made to the shared part. */
+  applyEnvironmentShared(change: SharedEnvironmentChange): SharedEnvironment {
+    const shared = this.environmentShared();
+    for (const [name, value] of Object.entries(change.values)) {
+      if (value === null) delete shared.values[name]; else shared.values[name] = value;
+    }
+    const replaced = new Set([...change.revoked, ...change.approvals.map(approval => approval.executionHash)]);
+    shared.approvals = [...shared.approvals.filter(approval => !replaced.has(approval.executionHash)), ...change.approvals];
+    this.ctx.storage.sql.exec('INSERT INTO environment_shared(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data', JSON.stringify(shared));
+    return shared;
   }
 
   getEnvironmentValues(): Record<string, string> {
-    this.requireProject();
-    return this.environment.getValues();
+    return this.environmentShared().values;
   }
 
   setEnvironmentValue(name: string, value: string | null): Record<string, string> {
-    this.requireProject();
-    return this.environment.setValue(name, value);
+    LifecycleMutationSchema.parse({ op: 'value', scope: 'project', name, value });
+    return this.applyEnvironmentShared({ values: { [name]: value }, approvals: [], revoked: [] }).values;
   }
 
-  getLifecycleState(spaceId: string): LifecycleState {
-    return this.environment.get(this.requireLifecycleWorkspace(spaceId).id, spaceId);
+  /** One-time move of a workspace's environment into its workspace object: the rows this project still holds. */
+  exportEnvironment(spaceId: string): ExportedEnvironment {
+    if (!this.legacyEnvironment()) return { state: null, runs: [] };
+    return {
+      state: this.ctx.storage.sql.exec<{ data: string }>('SELECT data FROM environment_state WHERE space_id=?', spaceId).toArray()[0]?.data ?? null,
+      runs: this.ctx.storage.sql.exec<{ id: string; scope: string; data: string }>('SELECT id,scope,data FROM lifecycle_runs WHERE space_id=? ORDER BY rowid', spaceId).toArray(),
+    };
   }
 
-  async refreshBrowserOrigins(spaceId: string): Promise<LifecycleState> {
-    const project = this.requireLifecycleWorkspace(spaceId);
-    const workspace = this.getWorkspace(spaceId);
-    if (!workspace) throw new Error('Committed environment workspace is unavailable');
-    const identity = { projectId: project.id, workspaceId: spaceId };
-    const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
-    try {
-      // Use the already-authorized local metadata: the generic initializer calls
-      // this authority back and must not run inside an authority RPC.
-      if (project.repositoryReference === null) {
-        await code.ensureEmptyProject(project.id, project.baseBranch);
-      } else {
-        const url = project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/');
-        await code.importProject(project.id, { url, branch: project.baseBranch });
+  exportEnvironmentLogs(spaceId: string, after: ExportedLogs['next']): ExportedLogs {
+    if (!this.legacyEnvironment()) return { rows: [], next: null };
+    const limit = 64;
+    const rows = this.ctx.storage.sql.exec<{ runId: string; offset: number; output: string }>(
+      'SELECT l.run_id AS runId,l.offset AS offset,l.output AS output FROM lifecycle_logs l JOIN lifecycle_runs r ON r.id=l.run_id WHERE r.space_id=? AND (l.run_id,l.offset)>(?,?) ORDER BY l.run_id,l.offset LIMIT ?',
+      spaceId, after?.runId ?? '', after?.offset ?? -1, limit + 1,
+    ).toArray();
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+    return { rows: page, next: rows.length > limit && last ? { runId: last.runId, offset: last.offset } : null };
+  }
+
+  /** After the workspace object imported them; the tables go once no workspace is left in them. */
+  forgetEnvironment(spaceId: string): void {
+    if (!this.legacyEnvironment()) return;
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('DELETE FROM lifecycle_logs WHERE run_id IN (SELECT id FROM lifecycle_runs WHERE space_id=?)', spaceId);
+      this.ctx.storage.sql.exec('DELETE FROM lifecycle_runs WHERE space_id=?', spaceId);
+      this.ctx.storage.sql.exec('DELETE FROM environment_state WHERE space_id=?', spaceId);
+      if (!this.ctx.storage.sql.exec('SELECT 1 FROM environment_state LIMIT 1').toArray().length && !this.ctx.storage.sql.exec('SELECT 1 FROM lifecycle_runs LIMIT 1').toArray().length) {
+        this.ctx.storage.sql.exec('DROP TABLE IF EXISTS lifecycle_logs; DROP TABLE IF EXISTS lifecycle_runs; DROP TABLE IF EXISTS environment_state');
       }
-      await code.forkWorkspace(project.id, spaceId);
-      const { origins } = await committedBrowserOrigins({
-        code,
-        repository: artifactsWorkspaceRepository(spaceId),
-        branch: workspace.branch,
-        checkpoint: () => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${spaceId}`).runtimeCodeCheckpoint(identity),
-      });
-      return this.environment.setBrowserOrigins(project.id, spaceId, origins);
-    } catch (error) {
-      // Unavailable is not an observed removal: retain membership and approvals.
-      this.environment.markBrowserOriginsUnavailable(project.id, spaceId);
-      throw error;
-    }
+    });
   }
 
-  mutateLifecycleState(spaceId: string, input: LifecycleMutation, actor: LifecycleActor): { status: 'ok'; state: LifecycleState } | { status: 'error'; failure: EnvironmentFailure } {
-    try {
-      const state = this.environment.mutate(this.requireLifecycleWorkspace(spaceId).id, spaceId, input, actor);
-      this.ctx.waitUntil(notifyLifecycleHolders(this.env, spaceId, state, actor.machineId));
-      return { status: 'ok', state };
-    } catch (error) {
-      const failure = environmentFailure(error);
-      if (failure) return { status: 'error', failure };
-      throw error;
-    }
+  private legacyEnvironment(): boolean {
+    return this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='lifecycle_runs'").toArray().length > 0;
   }
 
-  /** Called only by the cloud once it forced the holder to `lost` (lease expiry, destroy or revoke): no human
-   * abandon is needed to free a workspace whose runner can never report again. */
-  releaseLostLifecycleClaims(spaceId: string, holder: LostLifecycleHolder): string[] {
-    return this.environment.releaseLostHolder(this.requireLifecycleWorkspace(spaceId).id, spaceId, holder);
-  }
-
-  getLifecycleRunLog(spaceId: string, runId: string, offset = 0): LifecycleRunLog {
-    this.requireLifecycleWorkspace(spaceId);
-    return this.environment.runLog(spaceId, runId, offset);
-  }
   async setProjectLifecycle(expectedRevision: number, lifecycle: ProjectLifecycle): Promise<CloudProjectSummary> {
     if (lifecycle === 'deleting') return this.deleteProject(expectedRevision);
     return this.commit('project', null, () => {

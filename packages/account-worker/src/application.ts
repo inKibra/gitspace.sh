@@ -3398,23 +3398,23 @@ const worker = {
             case 'project.environment.mutate':
             case 'project.environment.runLog': {
               const spaceId = String(body.payload.spaceId ?? '');
-              const current = body.operation === 'project.environment.get'
-                ? await authority.refreshBrowserOrigins(spaceId)
-                : await authority.getLifecycleState(spaceId);
-              if (current.projectId !== projectId) throw new Error('Lifecycle project identity mismatch');
+              // The workspace object owns the environment and checks the workspace belongs to the project.
+              const space = env.SPACE_AUTHORITY.getByName(`${body.userId}:${spaceId}`);
+              const identity = { projectId, workspaceId: spaceId };
               const projects = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(body.userId);
               if (body.operation === 'project.environment.runLog') {
-                value = await authority.getLifecycleRunLog(spaceId, String(body.payload.runId ?? ''), Number(body.payload.offset ?? 0));
+                value = await space.getLifecycleRunLog(identity, String(body.payload.runId ?? ''), Number(body.payload.offset ?? 0));
                 break;
               }
-              let state: LifecycleState = current;
-              if (body.operation === 'project.environment.mutate') {
+              let state: LifecycleState;
+              if (body.operation === 'project.environment.get') state = await space.refreshBrowserOrigins(identity);
+              else {
                 const input = LifecycleMutationSchema.parse(body.payload.input);
                 const machine = input.op === 'claim'
                   ? await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).getMachine(body.machineId)
                   : null;
                 const attachment = input.op === 'claim' && input.attachment
-                  ? (await env.SPACE_AUTHORITY.getByName(`${body.userId}:${spaceId}`).runtimeAttachments({ projectId, workspaceId: spaceId })).find(item => item.attachmentId === input.attachment?.attachmentId && item.generation === input.attachment.generation && item.workspaceId === spaceId)
+                  ? (await space.runtimeAttachments(identity)).find(item => item.attachmentId === input.attachment?.attachmentId && item.generation === input.attachment.generation && item.workspaceId === spaceId)
                   : undefined;
                 authorizeLifecycleMachineMutation(input, {
                   machineId: body.machineId,
@@ -3422,9 +3422,11 @@ const worker = {
                   machineOnline: machine?.state === 'online' && machine.desiredState === 'online',
                   attachment,
                 });
-                if (input.op === 'value' && input.scope === 'global') await projects.setEnvironmentValue(input.name, input.value);
-                else {
-                  const result = await authority.mutateLifecycleState(spaceId, input, { machineId: body.machineId, actorId: body.machineId, kind: 'machine', lifecycleControl: false, ...(input.op === 'claim' && input.attachment && attachment ? { attachment: input.attachment } : {}) });
+                if (input.op === 'value' && input.scope === 'global') {
+                  await projects.setEnvironmentValue(input.name, input.value);
+                  state = await space.getLifecycleState(identity);
+                } else {
+                  const result = await space.mutateLifecycleState(identity, input, { machineId: body.machineId, actorId: body.machineId, kind: 'machine', lifecycleControl: false, ...(input.op === 'claim' && input.attachment && attachment ? { attachment: input.attachment } : {}) });
                   if (result.status === 'error') return Response.json({ status: 'error', error: result.failure }, { status: 409 });
                   state = result.state;
                 }

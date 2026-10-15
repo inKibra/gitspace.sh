@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { canonicalJson, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
-import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState } from '@gitspace/protocol-environment';
+import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
+import type { WorkspaceEnvironment } from './space-environment.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
@@ -45,6 +46,8 @@ type ServicesOptions = {
   instructionLoader: RuntimeInstructionLoader;
   /** Requests a workspace attachment of the machine through the human cache-request path; returns before setup. */
   requestAttachment(machineId: string): Promise<{ attachment: RuntimeAttachment }>;
+  /** The workspace object's own environment, called in-process. */
+  environment: WorkspaceEnvironment;
 };
 /** What `machines attach` did: requested (or found) an attachment, or asked the user to approve one. */
 type MachineAttachOutcome =
@@ -185,7 +188,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       return !!route && route.tenant === env.ACCOUNT_ID && route.workspaceId === scope.workspaceId && Date.parse(route.leaseExpiresAt) > Date.now();
     },
     selectExecution: (args, candidates) => selections.cache(args, candidates),
-    approvedOrigins: async () => approvedBrowserOrigins(await authority.refreshBrowserOrigins(identity.workspaceId)),
+    approvedOrigins: async () => approvedBrowserOrigins(await options.environment.refreshBrowserOrigins(identity)),
     groupName: async () => {
       const project = await authority.getProject();
       if (!project) throw new Error('Browser workspace project is unavailable');
@@ -214,7 +217,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   // These are request envelopes, not a second lifecycle/job authority. The executor and
   // existing project ledgers remain the owners of effect outcomes and claim tokens.
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_host_dispatch (id TEXT PRIMARY KEY, dispatch TEXT NOT NULL)');
-  const selections = createDispatchSelector({ storage: ctx.storage, env, identity, runtime: options.runtime });
+  const selections = createDispatchSelector({ storage: ctx.storage, env, identity, runtime: options.runtime, environment: options.environment });
   const savedDispatch = (attemptId: string) => {
     const row = ctx.storage.sql.exec<{ dispatch: string }>('SELECT dispatch FROM runtime_host_dispatch WHERE id=?', attemptId).toArray()[0];
     return row ? RuntimeToolDispatchSchema.parse(JSON.parse(row.dispatch)) : null;
@@ -352,7 +355,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   async function cancelLifecycle(dispatch: RuntimeToolDispatch) {
     const request = RuntimeLifecycleDispatchArgumentsSchema.parse(dispatch.args);
-    const result = await authority.mutateLifecycleState(identity.workspaceId, { op: 'cancel', runId: request.runId }, { machineId: dispatch.machineId, actorId: `task:${dispatch.attemptId}`, kind: 'client', lifecycleControl: false });
+    const result = await options.environment.mutateLifecycleState(identity, { op: 'cancel', runId: request.runId }, { machineId: dispatch.machineId, actorId: `task:${dispatch.attemptId}`, kind: 'client', lifecycleControl: false });
     if (result.status === 'error') throw new Error(result.failure.message);
   }
   async function awaitLifecycle(dispatch: RuntimeToolDispatch, signal?: AbortSignal): Promise<RuntimeToolResult> {
@@ -363,24 +366,21 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     if (signal?.aborted) abort();
     active.set(dispatch.attemptId, controller);
     try {
-      for (;;) {
-        const state = await authority.getLifecycleState(identity.workspaceId);
-        const run = state.runs.find(item => item.id === request.runId);
-        if (!run) return interrupted(dispatch, 'Lifecycle dispatch has no canonical admission receipt; effects will not be replayed.');
-        if (run.phase !== request.phase || run.machineId !== dispatch.machineId || (run.attachment && (run.attachment.attachmentId !== dispatch.attachmentId || run.attachment.generation !== dispatch.generation))) throw new Error('Lifecycle receipt does not match its admitted execution identity');
-        if (run.status === 'succeeded') return completed(dispatch, run);
-        if (run.status === 'failed') return failed(dispatch, run.failure?.message ?? `Lifecycle exited with ${run.exitCode}`);
-        if (run.status === 'cancelled' || run.status === 'timed-out' || run.status === 'interrupted') return interrupted(dispatch, run.failure?.message ?? `Lifecycle ${run.status}`);
-        if (controller.signal.aborted || Date.now() >= Math.min(Date.parse(dispatch.deadlineAt), Date.parse(run.deadlineAt))) {
-          await cancelLifecycle(dispatch);
-          return interrupted(dispatch, 'Lifecycle cancellation requested; the canonical claim remains fenced until terminal execution evidence arrives.');
-        }
-        await new Promise<void>(resolve => {
-          const stop = () => { clearTimeout(timer); resolve(); };
-          const timer = setTimeout(() => { controller.signal.removeEventListener('abort', stop); resolve(); }, 1000);
-          controller.signal.addEventListener('abort', stop, { once: true });
-        });
+      const run = (await options.environment.getLifecycleState(identity)).runs.find(item => item.id === request.runId);
+      if (!run) return interrupted(dispatch, 'Lifecycle dispatch has no canonical admission receipt; effects will not be replayed.');
+      if (run.phase !== request.phase || run.machineId !== dispatch.machineId || (run.attachment && (run.attachment.attachmentId !== dispatch.attachmentId || run.attachment.generation !== dispatch.generation))) throw new Error('Lifecycle receipt does not match its admitted execution identity');
+      // The run's machine reports its end to this object, which resolves the wait; no polling.
+      const wait = AbortSignal.any([controller.signal, AbortSignal.timeout(Math.max(0, Math.min(Date.parse(dispatch.deadlineAt), Date.parse(run.deadlineAt)) - Date.now()))]);
+      let ended: LifecycleRun;
+      try { ended = await options.environment.lifecycleRunEnded(identity, run.id, wait); }
+      catch (error) {
+        if (!wait.aborted) throw error;
+        await cancelLifecycle(dispatch);
+        return interrupted(dispatch, 'Lifecycle cancellation requested; the run ends when its machine stops it.');
       }
+      if (ended.status === 'succeeded') return completed(dispatch, ended);
+      if (ended.status === 'failed') return failed(dispatch, ended.failure?.message ?? `Lifecycle exited with ${ended.exitCode}`);
+      return interrupted(dispatch, ended.failure?.message ?? `Lifecycle ${ended.status}`);
     } finally { signal?.removeEventListener('abort', abort); active.delete(dispatch.attemptId); }
   }
   async function environment(input: Invocation) {
@@ -389,17 +389,16 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     if (method === 'get') {
       const checkpoint = await options.runtime().cloudFiles.initializeSnapshot();
       if (!checkpoint) throw new Error('Cloud working copy is unavailable');
-      const lifecycle = await refreshCloudEnvironment({ code: new ArtifactsCodeStore(env.ARTIFACTS), authority, identity, checkpoint });
+      const lifecycle = await refreshCloudEnvironment({ code: new ArtifactsCodeStore(env.ARTIFACTS), environment: options.environment, identity, checkpoint });
       lifecycle.values.global = await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).getEnvironmentValues();
       return completed(input, projectEnvironmentState(lifecycle));
     }
     if (method === 'runLog' || method === 'log') {
       const request = args;
-      const state = await authority.getLifecycleState(identity.workspaceId);
-      const run = state.runs.find(entry => entry.id === request.runId);
+      const run = (await options.environment.getLifecycleState(identity)).runs.find(entry => entry.id === request.runId);
       if (!run) throw new Error('Run does not belong to this workspace');
       if (run.interactive) throw new Error('Protected interactive output is not agent-readable');
-      return completed(input, await authority.getLifecycleRunLog(identity.workspaceId, request.runId, request.offset));
+      return completed(input, await options.environment.getLifecycleRunLog(identity, request.runId, request.offset));
     }
     if (method === 'runPhase' || method === 'runChecks') {
       const { method: ignored, ...candidate } = args;
@@ -409,7 +408,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     if (method === 'setProfile' || method === 'putValue' || method === 'deleteValue' || method === 'cancelRun') {
       const mutation = LifecycleMutationSchema.parse(args.method === 'setProfile' ? { op: 'profile', profile: args.profile } : args.method === 'cancelRun' ? { op: 'cancel', runId: args.runId } : { op: 'value', scope: args.scope, name: args.name, value: args.method === 'deleteValue' ? null : args.value });
       // A cloud actor has no machine claim and cannot approve, abandon or recover runs.
-      const result = await authority.mutateLifecycleState(identity.workspaceId, mutation, { machineId: `cloud:${identity.workspaceId}`, actorId: `conversation:${input.conversationId}`, kind: 'client', lifecycleControl: false });
+      const result = await options.environment.mutateLifecycleState(identity, mutation, { machineId: `cloud:${identity.workspaceId}`, actorId: `conversation:${input.conversationId}`, kind: 'client', lifecycleControl: false });
       if (result.status === 'error') throw new Error(result.failure.message);
       return completed(input, projectEnvironmentState(result.state));
     }

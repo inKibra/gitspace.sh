@@ -19,13 +19,15 @@ import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshot
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
-import { notifyMachines } from './machine-notices.js';
+import { notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
+import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environment.js';
+import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceStatus, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
 import { z } from 'zod';
 import { normalizeRemoteRepositoryUrl, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle, type WorkspaceLifecycle } from '@gitspace/protocol';
 import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
-import { LifecycleRunRequestSchema, LifecycleRunSchema, type EnvironmentFailure, type LifecycleRun } from '@gitspace/protocol-environment';
+import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type EnvironmentFailure, type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleState } from '@gitspace/protocol-environment';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
 /** A legacy LFS retention that keeps failing stays pending (its objects stay retained) and stops retrying here. */
 const PORTABLE_LFS_MAX_ATTEMPTS = 12;
@@ -33,6 +35,7 @@ type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private changes: DurableChangeLog;
+  private readonly environment: SpaceEnvironmentStore;
   private directoryOutbox: DirectoryOutbox;
   private runtime: Promise<WorkspaceRuntime> | undefined;
   /** Loaded before any request; set once the space has cloud runtime state (see `hasCloudRuntime`). */
@@ -45,6 +48,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage, this.liveNotify);
+    this.environment = new SpaceEnvironmentStore(ctx.storage, this.liveNotify);
     this.directoryOutbox = this.openDirectoryOutbox();
     this.createTables();
     ctx.blockConcurrencyWhile(async () => {
@@ -240,7 +244,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   /** Agents request attachments through the same path a person's cache request takes. */
   private openRuntime(identity: RuntimeIdentity): Promise<WorkspaceRuntime> {
-    return createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp), machineId => this.runtimeCacheAttachmentRequest({ ...identity, machineId }));
+    return createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp), machineId => this.runtimeCacheAttachmentRequest({ ...identity, machineId }), this);
   }
 
   async runtimeSnapshot(raw: unknown): Promise<Response> { return Response.json(await (await this.getRuntime(raw)).snapshot()); }
@@ -499,6 +503,86 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     return { status: 'error', failure: result.status === 'failed'
       ? { code: 'ExecutionFailed', message: result.error.message, context }
       : { code: 'Interrupted', message: text || 'The environment run was interrupted before its machine accepted it', context } };
+  }
+  private environmentImport: Promise<void> | undefined;
+  /** Checks access, then on the first access imports the rows the project object held for this workspace before
+   * environments moved into workspace objects (one-time). */
+  private async environmentReady(raw: unknown) {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    await this.runtimeAccess(identity, false);
+    const project = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`);
+    if (!this.environment.present()) {
+      this.environmentImport ??= (async () => {
+        await this.environment.import(identity.projectId, identity.workspaceId, await project.exportEnvironment(identity.workspaceId), after => project.exportEnvironmentLogs(identity.workspaceId, after));
+        await project.forgetEnvironment(identity.workspaceId);
+      })().finally(() => { this.environmentImport = undefined; });
+      await this.environmentImport;
+    }
+    return { identity, project };
+  }
+  async getLifecycleState(raw: unknown): Promise<LifecycleState> {
+    const { identity, project } = await this.environmentReady(raw);
+    return this.environment.get(identity.projectId, identity.workspaceId, await project.environmentShared());
+  }
+  /** Re-derives the browser origins the workspace's committed HEAD declares. */
+  async refreshBrowserOrigins(raw: unknown): Promise<LifecycleState> {
+    const { identity, project } = await this.environmentReady(raw);
+    const shared = await project.environmentShared();
+    const summary = await project.getProject();
+    const metadata = readWorkspaceMetadata(this.ctx.storage);
+    if (!summary || !metadata) throw new Error('Committed environment workspace is unavailable');
+    const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
+    try {
+      if (summary.repositoryReference === null) await code.ensureEmptyProject(summary.id, summary.baseBranch);
+      else await code.importProject(summary.id, { url: summary.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/'), branch: summary.baseBranch });
+      await code.forkWorkspace(summary.id, identity.workspaceId);
+      const { origins } = await committedBrowserOrigins({
+        code, repository: artifactsWorkspaceRepository(identity.workspaceId), branch: metadata.branch,
+        checkpoint: () => this.runtimeCodeCheckpoint(identity),
+      });
+      const result = this.environment.setBrowserOrigins(identity.projectId, identity.workspaceId, origins, shared);
+      if (result.shared) await project.applyEnvironmentShared(result.shared);
+      return result.state;
+    } catch (error) {
+      // Unavailable is not an observed removal: retain membership and approvals.
+      this.environment.markBrowserOriginsUnavailable(identity.projectId, identity.workspaceId, shared);
+      throw error;
+    }
+  }
+  async mutateLifecycleState(raw: unknown, input: LifecycleMutation, actor: LifecycleActor): Promise<{ status: 'ok'; state: LifecycleState } | { status: 'error'; failure: EnvironmentFailure }> {
+    const { identity, project } = await this.environmentReady(raw);
+    try {
+      const result = this.environment.mutate(identity.projectId, identity.workspaceId, input, actor, await project.environmentShared());
+      if (result.shared) await project.applyEnvironmentShared(result.shared);
+      this.ctx.waitUntil(notifyLifecycleHolders(this.env, identity.workspaceId, result.state, actor.machineId));
+      return { status: 'ok', state: result.state };
+    } catch (error) {
+      const failure = environmentFailure(error);
+      if (failure) return { status: 'error', failure };
+      throw error;
+    }
+  }
+  /** Called once the cloud knows the holder is gone (destroyed or revoked): its runs end as interrupted. */
+  async releaseLostLifecycleClaims(raw: unknown, holder: LostLifecycleHolder): Promise<string[]> {
+    const { identity } = await this.environmentReady(raw);
+    const actor: LifecycleActor = { actorId: 'cloud:attachment-lease', machineId: 'cloud:attachment-lease', kind: 'client', lifecycleControl: true };
+    const runs = this.environment.lostRuns(holder);
+    for (const runId of runs) await this.mutateLifecycleState(identity, { op: 'interrupt', runId, reason: `Its ${holder.attachment ? 'attachment' : 'machine'} was lost (${holder.reason})` }, actor);
+    return runs;
+  }
+  async getLifecycleRunLog(raw: unknown, runId: string, offset = 0): Promise<LifecycleRunLog> {
+    await this.environmentReady(raw);
+    return this.environment.runLog(runId, offset);
+  }
+  /** Resolves when the run ends; the workspace's own runtime waits on it in-process. */
+  async lifecycleRunEnded(raw: unknown, runId: string, signal?: AbortSignal): Promise<LifecycleRun> {
+    await this.environmentReady(raw);
+    return this.environment.ended(runId, signal);
+  }
+  /** `environment.events`: the workspace's lifecycle state after `after`, bounded. */
+  async environmentEvents(raw: unknown, after: number | null): Promise<StreamEvent<LifecycleState>[]> {
+    const { identity, project } = await this.environmentReady(raw);
+    return this.environment.events(identity.projectId, identity.workspaceId, after, await project.environmentShared());
   }
   async runtimeDraft(raw: unknown, actor: { deviceId: string }) { const input = RuntimeDraftSaveInputSchema.parse(raw); return (await this.getRuntime(input)).saveDraft(input, actor.deviceId); }
   async runtimeSubmit(raw: unknown, actor?: { deviceId: string }) { const input = RuntimeSubmitInputSchema.parse(raw); return (await this.getRuntime(input)).submit(input, actor?.deviceId); }

@@ -27,15 +27,15 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     const projectId = await projects.locateWorkspace(spaceId);
     if (!projectId) throw new EnvironmentError('NotFound', 'Workspace does not belong to this account', { spaceId });
     const authority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${userId}:${projectId}`);
-    return { projectId, authority };
+    // The workspace object owns the workspace's environment.
+    return { projectId, authority, space: env.SPACE_AUTHORITY.getByName(`${userId}:${spaceId}`), identity: { projectId, workspaceId: spaceId } };
   };
   /** Cloud workspaces derive configuration from their checkpoint; legacy holders configure it from their checkout. */
   const currentState = async (spaceId: string) => {
-    const { projectId, authority } = await authorityFor(spaceId);
-    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${spaceId}`);
-    if (!await space.hasCloudRuntime()) return authority.refreshBrowserOrigins(spaceId);
+    const { projectId, space } = await authorityFor(spaceId);
     const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: spaceId });
-    return refreshCloudEnvironment({ code: new ArtifactsCodeStore(env.ARTIFACTS), authority, identity, checkpoint: await space.runtimeRepositoryCheckpoint(identity) });
+    if (!await space.hasCloudRuntime()) return space.refreshBrowserOrigins(identity);
+    return refreshCloudEnvironment({ code: new ArtifactsCodeStore(env.ARTIFACTS), environment: space, identity, checkpoint: await space.runtimeRepositoryCheckpoint(identity) });
   };
   const view = async (spaceId: string, lifecycle: LifecycleState): Promise<WorkspaceEnvironmentView> => {
     lifecycle.values.global = await projects.getEnvironmentValues();
@@ -74,7 +74,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   const edit = async (spaceId: string, candidate: Extract<LifecycleMutation, { op: 'profile' | 'value' }>) => {
     const parsed = LifecycleMutationSchema.safeParse(candidate);
     if (!parsed.success) throw new EnvironmentError('InvalidConfiguration', 'Invalid lifecycle mutation', { detail: parsed.error.message });
-    const { authority } = await authorityFor(spaceId);
+    const { space, identity } = await authorityFor(spaceId);
     // The checkpoint's bundle decides which profiles exist, as a machine's checkout did.
     const state = await currentState(spaceId);
     const mutation = parsed.data;
@@ -83,7 +83,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
       return view(spaceId, state);
     }
     const device = await currentDevice();
-    const result = await authority.mutateLifecycleState(spaceId, mutation, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: false });
+    const result = await space.mutateLifecycleState(identity, mutation, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: false });
     if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);
     return view(spaceId, result.state);
   };
@@ -110,7 +110,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   });
   const approve = async (spaceId: string, input: Extract<LifecycleMutation, { op: 'approval' }>) => {
     const device = await requireLifecycleControl();
-    const { authority } = await authorityFor(spaceId);
+    const { authority, space, identity } = await authorityFor(spaceId);
     if (input.approved) {
       const state = await currentState(spaceId);
       const origin = state.browserOrigins.find((entry) => entry.hash === input.executionHash);
@@ -124,7 +124,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
         if (await executionHash({ kind: execution.kind, command: execution.content }) !== execution.hash) throw new EnvironmentError('ContentChanged', 'Execution preview does not match its content hash');
       }
     }
-    const result = await authority.mutateLifecycleState(spaceId, input, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true });
+    const result = await space.mutateLifecycleState(identity, input, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true });
     if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);
     return view(spaceId, result.state);
   };
@@ -144,8 +144,8 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   });
   const runLog = server.implement(getWorkspaceEnvironmentRunLogContract).handler(async ({ input, errors }) => {
     try {
-      const { authority } = await authorityFor(input.spaceId);
-      return ok(await authority.getLifecycleRunLog(input.spaceId, input.runId, input.offset ?? 0));
+      const { space, identity } = await authorityFor(input.spaceId);
+      return ok(await space.getLifecycleRunLog(identity, input.runId, input.offset ?? 0));
     } catch (error) {
       const failure = environmentFailure(error);
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'read lifecycle log', message: error instanceof Error ? error.message : String(error) }));
@@ -154,15 +154,15 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   const cancelRun = server.implement(cancelWorkspaceEnvironmentRunContract).handler(async ({ input, errors }) => {
     try {
       const device = await requireLifecycleControl();
-      const { authority } = await authorityFor(input.spaceId);
+      const { space, identity } = await authorityFor(input.spaceId);
       const actor = { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true };
-      let result = await authority.mutateLifecycleState(input.spaceId, { op: 'cancel', runId: input.runId }, actor);
+      let result = await space.mutateLifecycleState(identity, { op: 'cancel', runId: input.runId }, actor);
       if (result.status === 'error') return err(errors.EnvironmentFailure(result.failure));
       let run = result.state.runs.find((entry) => entry.id === input.runId);
       if (!run) throw new EnvironmentError('NotFound', 'Lifecycle run does not belong to this workspace', { runId: input.runId });
       // Cancel always ends a run: one whose machine is not connected cannot be stopped there, so it ends now.
       if (isLifecycleRunActive(run) && !await env.FLEET_CATALOG.getByName(userId).machineConnected(run.machineId)) {
-        result = await authority.mutateLifecycleState(input.spaceId, { op: 'interrupt', runId: run.id, reason: 'Cancelled while its machine was offline' }, actor);
+        result = await space.mutateLifecycleState(identity, { op: 'interrupt', runId: run.id, reason: 'Cancelled while its machine was offline' }, actor);
         if (result.status === 'error') return err(errors.EnvironmentFailure(result.failure));
         run = result.state.runs.find((entry) => entry.id === input.runId) ?? run;
       }

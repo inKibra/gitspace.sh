@@ -321,7 +321,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     try {
       const projectId = await projectIndex.locateWorkspace(input.spaceId);
       if (!projectId) throw new Error('Workspace does not belong to this account');
-      return ok(await (await authorityFor(projectId)).environmentEvents(input.spaceId, input.after));
+      return ok(await env.SPACE_AUTHORITY.getByName(`${userId}:${input.spaceId}`).environmentEvents({ projectId, workspaceId: input.spaceId }, input.after));
     } catch (error) { return err(errors.OperationFailed({ operation: 'read environment changes', message: message(error) })); }
   });
   const spaceEvents = server.implement(spaceEventsContract).handler(async ({ input, errors }) => {
