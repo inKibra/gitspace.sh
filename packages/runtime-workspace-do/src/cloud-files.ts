@@ -13,7 +13,7 @@ const InvocationSchema = z.object({ tool: z.enum(['read', 'edit', 'write', 'find
 const PathSchema = z.object({ path: z.string().min(1) });
 type Checkpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 type Invocation = z.infer<typeof InvocationSchema>;
-const PendingSchema = z.object({ input: InvocationSchema, previous: RuntimeGitCheckpointSchema, mutations: z.array(z.object({ path: z.string(), content: z.string().nullable() })), fence: z.number().int().positive() });
+const PendingSchema = z.object({ input: InvocationSchema, previous: RuntimeGitCheckpointSchema, mutations: z.array(z.object({ path: z.string(), content: z.string().nullable() })) });
 const MachinePendingSchema = z.object({ checkpoint: RuntimeGitCheckpointSchema, previous: z.string().nullable(), current: RuntimeGitCheckpointSchema.nullable(), base: RuntimeGitCheckpointSchema.nullable(), machineId: z.string() });
 const RetentionCheckpointSchema = RuntimeGitCheckpointSchema.extend({ publicationId: z.string().optional(), acceptedPublicationIds: z.array(z.string()).optional() });
 const CLOUD_FILE_READ_LIMIT = 8 * 1024 * 1024;
@@ -56,8 +56,7 @@ export class CloudFileStore {
     return result;
   }
   constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: (source?: string) => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>) {
-    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_writer(singleton INTEGER PRIMARY KEY CHECK(singleton=1), fence INTEGER NOT NULL, attempt TEXT)');
-    storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_writer(singleton,fence,attempt) VALUES(1,0,NULL)');
+    storage.sql.exec('DROP TABLE IF EXISTS runtime_cloud_writer');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
     storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_cloud_files_pending ON runtime_cloud_files(id) WHERE pending IS NOT NULL');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
@@ -79,8 +78,7 @@ export class CloudFileStore {
     }
     return null;
   }
-  /** A base-branch change holds the same queue as cloud edits and cache publications. Its durable
-   * writer fence survives failures until the lifecycle operation retries its idempotent effects. */
+  /** A base-branch change runs in the same queue as cloud edits and cache publications. */
   changeBranch<T>(input: {
     checkpoint: Checkpoint;
     validate(current: Checkpoint): Promise<void>;
@@ -91,13 +89,8 @@ export class CloudFileStore {
     return this.serialize(async () => {
       const current = await this.initializeSnapshot();
       if (!current) throw new Error('Base workspace has no committed checkout');
-      const attempt = 'project.setBaseBranch';
-      const writer = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt;
-      if (writer && writer !== attempt) throw new Error('Canonical publication is busy or awaiting recovery');
       await input.validate(current);
       await input.prepare(current);
-      this.storage.sql.exec('UPDATE runtime_cloud_writer SET fence=fence+1,attempt=? WHERE singleton=1', attempt);
-      await this.storage.sync();
       await input.publish(current);
       if (checkpointIdentity(current) !== checkpointIdentity(input.checkpoint)) this.storage.transactionSync(() => {
         this.recordCommit(input.checkpoint, current.worktreeCommit);
@@ -106,7 +99,6 @@ export class CloudFileStore {
       });
       await this.flushRetention();
       const result = await input.commit();
-      this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1 AND attempt=?', attempt);
       this.publish();
       return result;
     });
@@ -125,7 +117,6 @@ export class CloudFileStore {
     const accepted = this.storage.transactionSync(() => {
       const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
       if (row) return { checkpoint: RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)), created: false };
-      if (this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt) return null;
       this.recordCommit(checkpoint, null);
       this.enqueueRetention(checkpoint, null);
       this.storage.sql.exec('INSERT INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
@@ -168,9 +159,6 @@ export class CloudFileStore {
         authorize?.();
         const latest = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
         if ((latest ? checkpointIdentity(RuntimeGitCheckpointSchema.parse(JSON.parse(latest.checkpoint))) : null) !== (current ? checkpointIdentity(current) : null)) throw new Error('Canonical snapshot changed before machine publication');
-        const active = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt;
-        if (active) throw new Error('Canonical publication is busy or awaiting recovery');
-        this.storage.sql.exec('UPDATE runtime_cloud_writer SET fence=fence+1,attempt=? WHERE singleton=1', `machine:${id}`);
         this.storage.sql.exec('INSERT INTO runtime_machine_publications(id,input,pending) VALUES(?,?,?)', id, identity, JSON.stringify(pending));
       });
     }
@@ -182,7 +170,7 @@ export class CloudFileStore {
   }
   /** Before a machine's attachment is released, settle every publication it admitted: one in flight finishes, one left
    * durably pending resumes, and one the provider proved unpublished is abandoned, so no late finish can advance the
-   * canonical snapshot after the release. One of unknown outcome keeps the writer fenced and keeps recovering.
+   * canonical snapshot after the release.
    * Returns why a publication did not settle, for the released attachment's record. */
   async settleMachine(machineId: string): Promise<string | null> {
     await Promise.allSettled([...this.machineRunning].filter(([id]) => id.startsWith(`${machineId}:refs/`)).map(([, publication]) => publication));
@@ -197,10 +185,7 @@ export class CloudFileStore {
           continue;
         }
         failure = `Snapshot publication ${row.id} was abandoned: ${error.message}`;
-        this.storage.transactionSync(() => {
-          this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,abandoned=? WHERE id=? AND pending IS NOT NULL', error.message, row.id);
-          this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1 AND attempt=?', `machine:${row.id}`);
-        });
+        this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,abandoned=? WHERE id=? AND pending IS NOT NULL', error.message, row.id);
         await this.storage.sync();
       }
     }
@@ -220,8 +205,6 @@ export class CloudFileStore {
     const accepted = merged.value;
     const paths = await this.code.listSnapshotPaths(artifactsWorkspaceRepository(this.workspaceId), accepted.worktreeTree);
     this.storage.transactionSync(() => {
-      const active = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0]?.attempt;
-      if (active !== `machine:${id}`) throw new Error('Machine publication serialization changed');
       if (current && !this.storage.sql.exec('SELECT commit_id FROM runtime_code_commits WHERE commit_id=?', current.worktreeCommit).toArray().length) this.recordCommit(current, null);
       if (accepted.worktreeCommit !== current?.worktreeCommit) this.recordCommit(accepted, current?.worktreeCommit ?? previous);
       if (accepted.worktreeCommit !== checkpoint.worktreeCommit && checkpoint.worktreeCommit !== current?.worktreeCommit) this.recordCommit(checkpoint, previous);
@@ -230,34 +213,17 @@ export class CloudFileStore {
       this.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(accepted));
       this.storage.sql.exec('INSERT INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?) ON CONFLICT(commit_id) DO UPDATE SET paths=excluded.paths WHERE paths IS NOT excluded.paths', accepted.worktreeCommit, JSON.stringify(paths));
       this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,checkpoint=? WHERE id=?', JSON.stringify(accepted), id);
-      this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1');
     });
     // The publishing machine installs the accepted snapshot from this answer.
     await this.storage.sync(); await this.flushRetention(); this.publish(machineId); return accepted;
-  }
-  /** Resume a crashed lease before attachment admission; a failed provider remains fenced. */
-  async recover(): Promise<void> {
-    await this.flushRetention();
-    const lease = this.storage.sql.exec<{ attempt: string | null }>('SELECT attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
-    if (!lease?.attempt) return;
-    if (lease.attempt === 'project.setBaseBranch') throw new Error('Base branch change is awaiting recovery; retry project.setBaseBranch with the same branch');
-    if (lease.attempt.startsWith('machine:')) {
-      const id = lease.attempt.slice('machine:'.length);
-      const machine = this.storage.sql.exec<{ pending: string }>('SELECT pending FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
-      if (!machine) throw new Error('Missing pending machine publication');
-      await this.resumeMachine(id, MachinePendingSchema.parse(JSON.parse(machine.pending)));
-      return;
-    }
-    const row = this.storage.sql.exec<{ input: string }>('SELECT input FROM runtime_cloud_files WHERE id=?', lease.attempt).toArray()[0];
-    if (!row) throw new Error('Cloud writer lost its durable operation');
-    await this.execute(InvocationSchema.parse(JSON.parse(row.input)));
   }
   execute(raw: Invocation, signal?: AbortSignal): Promise<RuntimeToolResult> {
     const input = InvocationSchema.parse(raw);
     const active = this.running.get(input.attemptId);
     if (active) return active.then(result => { this.assertIdentity(input); return result; });
     const operation = () => this.run(input, signal);
-    const promise = (input.tool === 'read' || input.tool === 'find' ? operation() : this.serialize(operation)).catch(error => {
+    // Reads wait for every mutation admitted before them, so an agent reads its own writes; they never hold the queue.
+    const promise = (input.tool === 'read' || input.tool === 'find' ? this.admission.then(operation) : this.serialize(operation)).catch(error => {
       const saved = this.assertIdentity(input);
       if (saved?.pending && !(error instanceof CloudPublicationUncertain)) throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: error instanceof Error ? error.message : String(error) });
       throw error;
@@ -288,20 +254,7 @@ export class CloudFileStore {
       if (!previous) throw new Error('Workspace has no committed source snapshot');
       const path = input.tool === 'find' || input.tool === 'apply_patch' ? '' : PathSchema.parse(input.args).path.replace(/^\.\//u, '');
       if (path) validateSnapshotPath(path);
-      const fence = this.storage.transactionSync(() => {
-        if (readOnly) {
-          this.storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_files(id,input) VALUES(?,?)', input.attemptId, canonicalJson(input));
-          return 0;
-        }
-        const lease = this.storage.sql.exec<{ fence: number; attempt: string | null }>('SELECT fence,attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
-        if (!lease || (lease.attempt && lease.attempt !== input.attemptId)) throw new Error('Cloud writer is busy or awaiting publication recovery');
-        const current = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
-        if (!current || canonicalJson(RuntimeGitCheckpointSchema.parse(JSON.parse(current.checkpoint))) !== canonicalJson(previous)) throw new Error('Cloud snapshot predecessor changed before lease acquisition');
-        this.storage.sql.exec('UPDATE runtime_cloud_writer SET fence=fence+1,attempt=? WHERE singleton=1', input.attemptId);
-        this.storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_files(id,input) VALUES(?,?)', input.attemptId, canonicalJson(input));
-        return lease.fence + 1;
-      });
-      await this.storage.sync();
+      this.storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_files(id,input) VALUES(?,?)', input.attemptId, canonicalJson(input));
       if (input.tool === 'find') {
         const args = RuntimeFindArgumentsSchema.parse(input.args);
         const root = args.path.replace(/^\.\//u, '').replace(/\/$/u, '');
@@ -309,7 +262,7 @@ export class CloudFileStore {
         const paths = await this.paths(previous);
         const matches = paths.filter(candidate => (!root || root === '.' || candidate === root || candidate.startsWith(`${root}/`)) && attributeMatches(args.pattern, candidate));
         const completed = result('completed', matches.join('\n'));
-        this.complete(input, completed, fence); return completed;
+        this.complete(input, completed); return completed;
       }
       if (input.tool === 'apply_patch') {
         const args = ApplyPatchArgumentsSchema.parse(input.args);
@@ -333,7 +286,7 @@ export class CloudFileStore {
           mutations.push({ path: change.destination ?? change.path, content: change.after });
         }
         assertValidMutations(mutations);
-        pending = { input, previous, mutations, fence };
+        pending = { input, previous, mutations };
         this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
         await this.storage.sync();
         return this.finish(pending);
@@ -379,7 +332,7 @@ export class CloudFileStore {
           const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes), start = (parsed.offset ?? 1) - 1;
           completed = result('completed', parsed.offset === undefined && parsed.limit === undefined ? text : text.split('\n').slice(start, parsed.limit === undefined ? undefined : start + parsed.limit).join('\n'));
         }
-        this.complete(input, completed, fence); return completed;
+        this.complete(input, completed); return completed;
       }
       if (trackedLfs || await this.hasLfsPointer(previous, path) || previous.lfs?.heldBack.some(entry => entry.path === path)) throw new Error(`LFS file ${path} cannot be ${input.tool === 'write' ? 'written' : 'edited'} in the cloud; use a machine and commit the LFS change.`);
       let content: string;
@@ -390,7 +343,7 @@ export class CloudFileStore {
       }
       const mutations = [{ path, content }];
       assertValidMutations(mutations);
-      pending = { input, previous, mutations, fence };
+      pending = { input, previous, mutations };
       this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
       await this.storage.sync();
     } catch (error) {
@@ -400,16 +353,13 @@ export class CloudFileStore {
         if (row?.pending) throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: 'Cloud publication is durably pending after a storage failure' });
         this.storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_files(id,input,result) VALUES(?,?,?)', input.attemptId, canonicalJson(input), JSON.stringify(failed));
         this.storage.sql.exec('UPDATE runtime_cloud_files SET result=? WHERE id=? AND pending IS NULL', JSON.stringify(failed), input.attemptId);
-        this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1 AND attempt=?', input.attemptId);
       });
       return failed;
     }
     return this.finish(pending);
   }
   private async finish(pending: z.infer<typeof PendingSchema>): Promise<RuntimeToolResult> {
-    const { input, fence, previous } = pending;
-    const lease = this.storage.sql.exec<{ fence: number; attempt: string | null }>('SELECT fence,attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
-    if (lease?.attempt !== input.attemptId || lease.fence !== fence) throw new Error('Cloud writer fence is stale');
+    const { input, previous } = pending;
     // Derived only from the durable pending record, so a recovered publication reproduces the same commit.
     const supplied = input.tool === 'write' ? RuntimeWriteArgumentsSchema.parse(input.args).message : input.tool === 'edit' ? RuntimeEditArgumentsSchema.parse(input.args).message : input.tool === 'apply_patch' ? ApplyPatchArgumentsSchema.parse(input.args).message : undefined;
     const changed = [...new Set(pending.mutations.map(mutation => mutation.path))];
@@ -418,7 +368,7 @@ export class CloudFileStore {
     if (written.isErr()) {
       if (written.error.certainty === 'unknown') throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: written.error.message });
       const failed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: written.error.message }], error: { code: 'HOST_OPERATION_FAILED', message: written.error.message } };
-      this.complete(input, failed, fence);
+      this.complete(input, failed);
       await this.storage.sync();
       return failed;
     }
@@ -433,7 +383,7 @@ export class CloudFileStore {
       const accepted = { ...written.value, ...(written.value.lfs ? { lfs: { ...written.value.lfs, objects: written.value.lfs.objects.map(object => { const confirmed = origin.get(object.oid); return confirmed?.size === object.size ? confirmed : object; }) } } : {}) };
       if (checkpointIdentity(accepted) !== checkpointIdentity(previous)) this.recordCommit(accepted, previous.worktreeCommit);
       this.enqueueRetention(accepted, current);
-      this.complete(input, completed, fence);
+      this.complete(input, completed);
       this.storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', JSON.stringify(accepted));
       this.storage.sql.exec('INSERT INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?) ON CONFLICT(commit_id) DO UPDATE SET paths=excluded.paths WHERE paths IS NOT excluded.paths', accepted.worktreeCommit, JSON.stringify([...paths].sort()));
     });
@@ -512,17 +462,8 @@ export class CloudFileStore {
   }
   lfsRoots(): Checkpoint[] { return readRuntimeLfsRoots(this.storage); }
   reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void> { return reconcileRuntimeLfsSources(this.storage, objects); }
-  private complete(input: Invocation, result: RuntimeToolResult, fence: number): void {
-    this.storage.transactionSync(() => {
-      if (fence === 0) {
-        this.storage.sql.exec('UPDATE runtime_cloud_files SET result=? WHERE id=?', JSON.stringify(result), input.attemptId);
-        return;
-      }
-      const lease = this.storage.sql.exec<{ fence: number; attempt: string | null }>('SELECT fence,attempt FROM runtime_cloud_writer WHERE singleton=1').toArray()[0];
-      if (lease?.attempt !== input.attemptId || lease.fence !== fence) throw new Error('Cloud writer fence is stale');
-      this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=NULL,result=? WHERE id=?', JSON.stringify(result), input.attemptId);
-      this.storage.sql.exec('UPDATE runtime_cloud_writer SET attempt=NULL WHERE singleton=1');
-    });
+  private complete(input: Invocation, result: RuntimeToolResult): void {
+    this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=NULL,result=? WHERE id=?', JSON.stringify(result), input.attemptId);
   }
 }
 

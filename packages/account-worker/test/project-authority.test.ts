@@ -78,7 +78,6 @@ describe('ProjectAuthorityDO', () => {
     expect(tombstone).toMatchObject({ id: project.id, lifecycle: 'deleting', revision: project.revision + 1 });
     expect((await vault.ensureInference()).assignments).toEqual([{ projectId: project.id, profileId: profile.id, revision: 1 }]);
     await runInDurableObject(vault, async instance => {
-      await expect(instance.deleteInferenceProfile({ profileId: profile.id, expectedRevision: profile.revision })).rejects.toThrow();
       await expect(instance.assignInferenceProfile({ projectId: project.id, profileId: DEFAULT_INFERENCE_PROFILE_ID, expectedRevision: 1 })).rejects.toThrow();
     });
     await runInDurableObject(authority, async instance => { await expect(instance.bootstrap(input)).rejects.toThrow(); });

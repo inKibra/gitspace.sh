@@ -693,7 +693,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     // Indexed before the attachment exists, so a machine-wide assignment read never misses it.
     const { connected } = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).attachMachineWorkspace(input.machineId, { projectId: input.projectId, workspaceId: input.workspaceId });
     const runtime = await this.getRuntime(input);
-    await runtime.cloudFiles.recover();
     await runtime.cloudFiles.initializeSnapshot();
     const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace.branch }, capabilities: executorCapabilities }, connected);
     runtime.publish();
@@ -725,7 +724,6 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeAttachmentReady(raw: unknown) {
     const input = RuntimeAttachmentReadyInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
-    await runtime.cloudFiles.recover();
     const result = await (await this.attachmentController(input)).ready(input);
     await runtime.cacheReady(input.attachmentId, input.generation);
     return result;

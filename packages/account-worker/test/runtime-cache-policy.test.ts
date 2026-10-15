@@ -36,7 +36,7 @@ async function cacheFixture() {
   return { userId, projectId, workspaceId, machineId, authority, attachment };
 }
 
-it('lists an existing cache while a failed publication stays fenced against readiness', async () => {
+it('lists an existing cache after a failed publication', async () => {
   const { projectId, workspaceId, machineId, authority, attachment } = await cacheFixture();
   const checkpoint = RuntimeGitCheckpointSchema.parse({
     checkpointRef: 'refs/gitspace/spaces/cache-policy-workspace/native/1', branch: 'main',
@@ -55,7 +55,4 @@ it('lists an existing cache while a failed publication stays fenced against read
   });
   const assignments = await authority.runtimeAssignments({ projectId, workspaceId, machineId });
   expect(assignments.assignments.map(item => item.grant.attachment.attachmentId)).toEqual([attachment.attachmentId]);
-  await runInDurableObject(authority, async instance => {
-    await expect(instance.runtimeAttachmentReady({ projectId, workspaceId, machineId, attachmentId: attachment.attachmentId, generation: attachment.generation, commit: checkpoint.worktreeCommit, prerequisitesComplete: true, capabilities: attachment.capabilities })).rejects.toThrow('Snapshot provider unavailable');
-  });
 });

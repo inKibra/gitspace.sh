@@ -93,8 +93,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     publish(); options.waitUntil(codeSearch.changed());
     options.snapshotChanged?.(attachments.list().filter(item => item.state !== 'detached' && item.machineId !== source).map(item => item.machineId));
   }
-  async function recoverCloudFiles() {
-    try { await cloudFiles.recover(); }
+  async function flushCloudRetention() {
+    try { await cloudFiles.flushRetention(); }
     catch (error) { options.onReport(error); await options.schedule(Date.now() + 5_000); }
   }
   let definitionFiles: { commit: string; files: Array<{ path: string; content: string }> } | undefined;
@@ -292,7 +292,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     }
     publish();
   });
-  await recoverCloudFiles();
+  await flushCloudRetention();
   await rebuild();
   async function conversation(id?: string) {
     if (id === undefined) return runtime.root;
@@ -458,7 +458,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     async wake() {
       // Indexing runs beside recovery: a failing recovery step must not keep code_search from being built.
       const indexing = codeSearch.drive();
-      try { await recoverCloudFiles(); await runtime.lifecycle.recover(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); }
+      try { await flushCloudRetention(); await runtime.lifecycle.recover(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); }
       finally { await indexing; }
     },
     publish,

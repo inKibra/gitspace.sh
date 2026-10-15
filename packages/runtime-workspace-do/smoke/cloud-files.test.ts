@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Miniflare } from 'miniflare';
 import { searchWasmModule } from './search-wasm.js';
 
-test('cloud files preserve durable writer fences and replay across recovery and machine handoff', async () => {
+test('cloud files run in order, replay attempts and hand off between machines', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gitspace-cloud-files-'));
   let worker: Miniflare | undefined;
   try {
