@@ -98,7 +98,6 @@ interface PendingTunnel {
   cleanup: () => void;
   uploadReader?: ReadableStreamDefaultReader<Uint8Array>;
   writer?: WritableStreamDefaultWriter<Uint8Array>;
-  timeout: number | NodeJS.Timeout;
 }
 
 interface RelaySocketAttachment extends SocketAttachment {
@@ -596,13 +595,11 @@ export class UserRelayDO extends DurableObject<Env> {
           const response = this.tunnelCors(new Response(stream?.readable ?? null, { status: message.status, headers }), pending.origin);
           pending.responseStarted = true;
           pending.resolve(response);
-          this.refreshTunnelTimeout(message.requestId, pending);
           return;
         }
         case 'tunnel.response.chunk':
           if (!pending.responseStarted) throw new Error('Tunnel body arrived before response headers');
           if (pending.writer) await pending.writer.write(decodeTunnelChunk(message.data));
-          this.refreshTunnelTimeout(message.requestId, pending);
           return;
         case 'tunnel.response.end':
           if (!pending.responseStarted) throw new Error('Tunnel ended before response headers');
@@ -748,10 +745,6 @@ export class UserRelayDO extends DurableObject<Env> {
       responseStarted: false,
       dispatched: false,
       cleanup: () => request.signal.removeEventListener('abort', abort),
-      timeout: setTimeout(
-        () => this.failTunnel(requestId, new Error('Timed out waiting for machine response headers'), 504, 'TUNNEL_TIMEOUT'),
-        Number(this.env.TUNNEL_HEADER_TIMEOUT_MS),
-      ),
     };
     this.pendingTunnels.set(requestId, pending);
     request.signal.addEventListener('abort', abort, { once: true });
@@ -811,19 +804,9 @@ export class UserRelayDO extends DurableObject<Env> {
     await send({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.request.end', requestId });
   }
 
-  private refreshTunnelTimeout(requestId: string, pending: PendingTunnel): void {
-    if (this.pendingTunnels.get(requestId) !== pending) return;
-    clearTimeout(pending.timeout);
-    pending.timeout = setTimeout(
-      () => this.failTunnel(requestId, new Error('Machine response stalled'), 504, 'TUNNEL_TIMEOUT'),
-      Number(this.env.TUNNEL_IDLE_TIMEOUT_MS),
-    );
-  }
-
   private async finishTunnel(requestId: string): Promise<void> {
     const pending = this.pendingTunnels.get(requestId);
     if (!pending) return;
-    clearTimeout(pending.timeout);
     this.pendingTunnels.delete(requestId);
     pending.cleanup();
     if (pending.uploadReader) await pending.uploadReader.cancel().catch(() => {});

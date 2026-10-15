@@ -54,8 +54,6 @@ function stageInput(sha: string): StageReleaseInput {
         { name: 'PLATFORM_TOKEN', source: 'provider-token' },
         { name: 'GITSPACE_OMP_BROKER_TOKEN', source: 'provider-token' },
         { name: 'ASSETS', source: 'public-assets' },
-        { name: 'TUNNEL_HEADER_TIMEOUT_MS', source: 'literal', value: '300000' },
-        { name: 'TUNNEL_IDLE_TIMEOUT_MS', source: 'literal', value: '300000' },
         { name: 'STORAGE_BUCKET', source: 'object-storage-name' },
       ],
       migrations: [{ tag: 'v1', newSqliteClasses: ['CredentialVaultDO'] }],

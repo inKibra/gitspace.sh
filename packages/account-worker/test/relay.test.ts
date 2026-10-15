@@ -344,30 +344,6 @@ describe('portable RelayDO', () => {
     replacement.close(1000, 'done');
   });
 
-  it('returns a bounded header timeout and cancels the partial machine request rather than replaying it', async () => {
-    const machine = await openSocket('machine', 'darktop', true);
-    const cancelled = Promise.withResolvers<TunnelRequestMessage>();
-    const uploadCancelled = Promise.withResolvers<void>();
-    machine.addEventListener('message', (event) => {
-      if (typeof event.data !== 'string') return;
-      const message = parseTunnelRequest(event.data);
-      if (message.type === 'tunnel.request.cancel') cancelled.resolve(message);
-    });
-    // Invoke the HTTP handler directly so cancellation is observable on the incoming
-    // upload, rather than hidden behind an additional test service-binding boundary.
-    const response = await relayWorker.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', {
-      method: 'POST',
-      headers: { origin: `https://${env.RELAY_NAME}.gitspace.sh` },
-      body: new ReadableStream<Uint8Array>({ cancel: () => uploadCancelled.resolve() }),
-    }), env);
-    expect(response.status).toBe(504);
-    expect(response.headers.get('access-control-allow-origin')).toBe(`https://${env.RELAY_NAME}.gitspace.sh`);
-    expect(await response.json()).toMatchObject({ error: { code: 'TUNNEL_TIMEOUT' } });
-    expect((await cancelled.promise).type).toBe('tunnel.request.cancel');
-    await uploadCancelled.promise;
-    machine.close(1000, 'done');
-  });
-
   it('turns a synchronous socket send failure into a CORS transport response', async () => {
     const machine = await openSocket('machine', 'darktop');
     await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (_instance, state) => {

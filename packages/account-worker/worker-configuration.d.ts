@@ -33,8 +33,6 @@ interface Env {
   PLATFORM_SERVICE?: Fetcher;
   PLATFORM_TOKEN: string;
   STORAGE_BUCKET: string;
-  TUNNEL_HEADER_TIMEOUT_MS: string | number;
-  TUNNEL_IDLE_TIMEOUT_MS: string | number;
   GITSPACE_OMP_BROKER_TOKEN: string;
   COMPOSIO_API_KEY?: string;
   GITSPACE_DEV_BOOTSTRAP_TOKEN?: string;

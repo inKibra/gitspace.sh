@@ -26,8 +26,6 @@ export default defineConfig({
           PLATFORM_TOKEN: 'test-platform-token',
           GITSPACE_OMP_BROKER_TOKEN: 'test-credential-broker-token',
           RELAY_NAME: 'test',
-          TUNNEL_HEADER_TIMEOUT_MS: 2_000,
-          TUNNEL_IDLE_TIMEOUT_MS: 2_000,
         },
       },
     }),
