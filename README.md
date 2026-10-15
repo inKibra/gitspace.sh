@@ -285,6 +285,6 @@ Both machine and Worker releases must include these diagnostics for cross-side c
 - [User documentation](https://gitspace.sh/docs)
 - [Agent workflow](https://gitspace.sh/docs/agent-workflow)
 - [Fleet architecture](docs/FLEET.md)
-- [License](LICENSE), including its non-compete clause
+- [License](LICENSE.md): Functional Source License 1.1, MIT Future License (FSL-1.1-MIT). Each release becomes MIT two years after publication.
 
 Contributions are welcome through pull requests.

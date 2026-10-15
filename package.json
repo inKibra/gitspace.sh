@@ -44,7 +44,7 @@
     "url": "https://github.com/inKibra/gitspace.sh.git"
   },
   "author": "inKibra, Inc.",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "FSL-1.1-MIT",
   "dependencies": {
     "@inquirer/prompts": "^7.10.1",
     "@noble/curves": "^2.2.0",
