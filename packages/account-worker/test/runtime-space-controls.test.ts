@@ -13,7 +13,6 @@ async function fixture() {
   }
   const context = env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, identity.projectId, identity.workspaceId]));
   const owned = { projectId: identity.projectId, spaceId: identity.workspaceId };
-  await context.bootstrap(owned);
   const call = (tool: string, args: Parameters<typeof invokeRuntimeSpaceTool>[2]['args']) => invokeRuntimeSpaceTool(env, identity, { tool, args, conversationId: 'agent-a', attemptId: crypto.randomUUID() });
   return { call, context, owned, authority };
 }

@@ -52,7 +52,7 @@ import { encodeTranscriptEventChunks } from '@gitspace/protocol/transcript';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 import { InspectorConflictError, InspectorStateError } from './space-context.js';
-import { InspectorCloudArtifacts, InspectorGenerationConflict, InspectorWorkspaceMissing, readInspectorContext, readSavedInspectorMetadata, readSavedInspectorTranscript } from './account-inspector-data.js';
+import { InspectorCloudArtifacts, InspectorGenerationConflict, InspectorWorkspaceMissing, readInspectorContext, readSavedInspectorTranscript } from './account-inspector-data.js';
 import { readSavedInspectorTranscriptContent, readSavedInspectorTranscriptPage } from './account-inspector-data.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
@@ -91,16 +91,15 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const view = server.implement(inspectorViewContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.workspaceId ?? input.projectId, input.projectId);
-      const [overview, artifacts, saved, machines, created] = await Promise.all([
+      const [overview, artifacts, machines, created] = await Promise.all([
         source.context.getOverview(source.identity),
         new InspectorCloudArtifacts(env, userId, source).list(),
-        readSavedInspectorMetadata(env, userId, source),
         catalog.listMachines(),
         source.workspace.kind === 'worktree' ? source.authority.latestWorkspaceOperation(source.workspace.id, 'workspace.create') : null,
       ]);
       return ok({ identity: source.identity, project: source.project, workspace: source.workspace, workspaces: source.workspaces,
         placement: source.placement ? { state: source.placement.state, machineId: source.placement.machineId, generation: source.placement.generation, updatedAt: source.placement.updatedAt } : null,
-        overview, artifacts, machines, ...saved,
+        overview, artifacts, machines,
         creation: created ? {
           operationId: created.id, state: created.state, error: created.error, updatedAt: created.updatedAt,
           steps: created.steps.map((step) => ({ id: step.id, label: step.label, state: step.state, message: step.message })),

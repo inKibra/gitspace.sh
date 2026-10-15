@@ -1474,17 +1474,6 @@ export const InspectorViewCodec = wire.object({
   })),
   overview: InspectorOverviewCodec,
   artifacts: wire.array(ArtifactViewCodec),
-  checkpoint: wire.nullable(wire.object({
-    sessionId: wire.string,
-    generation: wire.number,
-    revision: wire.number,
-    lastMachineId: wire.nullable(wire.string),
-    createdAt: wire.string,
-  })),
-  savedTranscript: wire.object({
-    status: wire.enum(['available', 'unavailable', 'none']),
-    reason: wire.nullable(wire.string),
-  }),
   /** The latest creation operation of a worktree; null for a base space or a workspace without one. */
   creation: wire.nullable(wire.object({
     operationId: wire.string,

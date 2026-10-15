@@ -181,7 +181,7 @@ export class SpaceContextDO extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => this.migrate());
   }
 
-  bootstrap(input: InspectorIdentity): InspectorIdentity {
+  private bootstrap(input: InspectorIdentity): InspectorIdentity {
     const identity = inspectorIdentitySchema.parse(input);
     const row = this.meta();
     if (row) {
@@ -719,11 +719,9 @@ export class SpaceContextDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<MetaRow>('SELECT project_id, space_id, revision FROM inspector_meta WHERE id = 1').toArray()[0];
   }
 
+  /** The first call names the object's workspace; every later call must name the same one. */
   private requireIdentity(input: InspectorIdentity): InspectorIdentity {
-    const identity = inspectorIdentitySchema.parse({ projectId: input.projectId, spaceId: input.spaceId });
-    const row = this.meta();
-    if (!row || row.project_id !== identity.projectId || row.space_id !== identity.spaceId) throw new InspectorStateError('Inspector authority identity does not match');
-    return identity;
+    return this.bootstrap({ projectId: input.projectId, spaceId: input.spaceId });
   }
 
   private bump(): void {

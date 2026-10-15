@@ -748,7 +748,6 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       const owned = { projectId: identity.projectId, spaceId: identity.workspaceId };
       const context = env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, identity.projectId, identity.workspaceId]));
-      await context.bootstrap(owned);
       const [committed, skills, goal, workflow, rubric] = await Promise.all([
         options.instructionLoader.loadInstructions(), enabledSkills(), context.getGoal(owned), context.getWorkflow(owned), context.getRubric(owned),
       ]);

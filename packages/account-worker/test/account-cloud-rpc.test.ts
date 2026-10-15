@@ -926,8 +926,6 @@ describe('machine-independent Inspector', () => {
     const workspace = (await space.authority.listWorkspaces()).find(candidate => candidate.id === space.spaceId)!;
     await space.authority.putWorkspace({ ...workspace, lifecycle, expectedRevision: workspace.revision });
     expect(await space.authority.listCanonicalSessions()).toEqual([]);
-    const published = await worker.fetch(fixture.request(single('inspector.view', { projectId: space.projectId, workspaceId: space.spaceId })), cloudEnv);
-    expect(parse(await published.text())).toMatchObject({ status: 'ok', value: { checkpoint: null, savedTranscript: { status: 'available' } } });
     const transcript = await collectInspectorTranscript(inspectorClient(fixture, (request) => worker.fetch(request, cloudEnv)), space.projectId, space.spaceId);
     expect(transcript).toEqual([]);
     expect(await space.placement.get()).toBeNull();

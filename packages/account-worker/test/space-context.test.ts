@@ -24,7 +24,6 @@ async function inside<T>(name: string, operation: (context: SpaceContextDO) => T
 
 describe('SpaceContextDO', () => {
   it('keeps goal, workflow gates, judgments, and journal deltas canonical with optimistic revisions', async () => {
-    await inside('inspector-domain', (context) => context.bootstrap(identity));
     const goal = await inside('inspector-domain', (context) => context.putGoal({
       ...identity,
       expectedRevision: 0,
@@ -82,7 +81,6 @@ describe('SpaceContextDO', () => {
   });
 
   it('bounds evidence and judgments, appends review messages, and pins guide approval to revision plus HEAD', async () => {
-    await inside('inspector-review', (context) => context.bootstrap(identity));
     let goal = await inside('inspector-review', (context) => context.putGoal({
       ...identity,
       expectedRevision: 0,

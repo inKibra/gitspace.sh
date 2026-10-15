@@ -44,7 +44,6 @@ export async function invokeRuntimeSpaceTool(env: Env, identity: z.infer<typeof 
     const { projectId: ignoredProject, spaceId: ignoredSpace, ...properties } = json.properties ?? {};
     return { ...json, properties: { ...properties, workspaceId: { type: 'string' } }, required: json.required?.filter(field => field !== 'projectId' && field !== 'spaceId') };
   }
-  await context.bootstrap(owned);
   const reviewContext = rawContext === undefined ? undefined : reviewAnchorContextSchema.parse(rawContext);
   const actorId = `conversation:${input.conversationId}`;
   const publish = async <T extends { id?: string; revision?: number; sequence?: number }>(entity: string, value: T, operation: 'updated' | 'append' | 'created' = 'updated') => {

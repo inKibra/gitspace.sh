@@ -30,8 +30,7 @@ const inspection: InspectorView = {
     journal: { entries: 0, openPhaseRunId: null, recent: [] },
     review: { total: 0, unresolved: 0 },
   },
-  artifacts: [], checkpoint: null, creation: null,
-  savedTranscript: { status: 'none', reason: null },
+  artifacts: [], creation: null,
 };
 const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 0, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
 const listedBase = { id: project.id, status: emptyWorkspaceStatus };

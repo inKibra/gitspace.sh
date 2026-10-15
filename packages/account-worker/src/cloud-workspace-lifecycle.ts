@@ -403,7 +403,6 @@ export async function changeAgentWorkspace(env: Env, identity: RuntimeIdentity, 
       initialized.push(entity);
     };
     try {
-      await context.bootstrap(owned);
       if (goal) await publish('goal', await context.putGoal({ ...owned, expectedRevision: 0, goal }));
       initializing = 'workflow';
       if (workflow) await publish('workflow', await context.putWorkflow({ ...owned, expectedRevision: 0, workflow }));
