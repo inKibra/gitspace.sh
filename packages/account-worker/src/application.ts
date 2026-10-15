@@ -11,7 +11,7 @@ import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import { isUpstreamOAuthProvider, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
-import { collectUsage, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
+import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
 import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
 import type { CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
 import type { ProviderView, ProviderLoginEvent, ProviderUsage } from '@gitspace/protocol';
@@ -1417,8 +1417,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
         if (this.credential(row.id, profileId)?.state !== 'active') return;
         this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, ?, NULL) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = excluded.report_json, error = NULL', profileId, account.id, Date.now(), JSON.stringify(report));
         result.reports.push(report);
-      } catch {
-        const message = 'Usage reporting is unavailable; inference remains enabled';
+      } catch (error) {
+        // Which way the provider's usage read failed, so the screen says what is wrong; inference is unaffected.
+        const reason = error instanceof ProviderUsageError ? `the provider's usage read was ${error.kind}${error.status ? ` (HTTP ${error.status})` : ''}` : error instanceof Error ? error.message : String(error);
+        const message = `Usage reporting is unavailable: ${reason}; inference remains enabled`;
         this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, NULL, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = NULL, error = excluded.error', profileId, account.id, Date.now(), message);
         result.accountsWithoutUsage.push(account.identity ?? `${account.provider}:${account.id}`);
         result.errors.push({ provider: account.provider, message });

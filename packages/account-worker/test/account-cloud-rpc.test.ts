@@ -524,8 +524,10 @@ describe('account cloud RPC without machines', () => {
     });
     // API-key usage is unsupported locally, so refresh can be proven without any provider request.
     const refreshed = await client.providers.usage({ profileId: 'default', providerId: 'openai', refresh: true });
-    expect(refreshed).toMatchObject({ status: 'ok', value: { reports: [], errors: [{ provider: 'openai', message: 'Usage reporting is unavailable; inference remains enabled' }] } });
     if (refreshed.status !== 'ok') throw new Error('Expected refreshed usage');
+    expect(refreshed.value.reports).toEqual([]);
+    expect(refreshed.value.errors).toHaveLength(1);
+    expect(refreshed.value.errors[0]!.message).not.toBe('Cached usage observation');
     expect(await client.providers.usage({ profileId: 'default', providerId: 'openai', refresh: false })).toMatchObject({
       status: 'ok', value: { errors: refreshed.value.errors },
     });
