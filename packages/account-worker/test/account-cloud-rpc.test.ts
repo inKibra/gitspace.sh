@@ -69,18 +69,6 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     expect(body).not.toContain(privateCause);
   });
 
-  it('reports pending inference activation until the platform health probe commits this Worker', async () => {
-    const fixture = await account();
-    const client = inspectorClient(fixture);
-    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'previous-worker' } })));
-    expect(await client.inference.list({})).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inference-activation-pending' } });
-    expect(await fixture.vault.inferenceCutover()).toBe(false);
-    expect(await client.inference.events({ after: null })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inference-activation-pending' } });
-    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
-    expect(await client.inference.list({})).toMatchObject({ status: 'ok', value: { profiles: [{ id: 'default' }] } });
-    expect(await fixture.vault.inferenceCutover()).toBe(true);
-  });
-
   it('sends a watching tab one notice per committed change, and its read after the cursor returns only newer changes', async () => {
     const fixture = await account();
     const { spaceId, authority } = await inspectorWorkspace(fixture.userId);

@@ -546,15 +546,12 @@ export class CredentialVaultDO extends DurableObject<Env> {
   private async migrateInference(): Promise<InferenceState> {
     const config = this.config();
     if (!config) throw new Error('Account credential vault is unavailable');
-    const platform = await tenantPlatformJson<{ deployment: { active: string | null } }>(this.env, '/state');
-    if (!WORKER_VERSION || platform.deployment?.active !== WORKER_VERSION) throw rpcErrors.inferenceActivationPending({});
     const settings = (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id);
     const prepared = await settings.prepareInferenceMigration();
     const projects = await (this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(config.user_id).list();
     this.ctx.storage.transactionSync(() => {
       const scoped = this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inference_credentials'").toArray().length > 0;
       if (!scoped) {
-        // Irreversible isolation only after the platform committed this healthy Worker.
         // Renaming preserves rowids, encrypted AAD and every existing refresh lease.
         this.ctx.storage.sql.exec('ALTER TABLE oauth_credentials RENAME TO inference_credentials');
         this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS credentials_profile ON inference_credentials(profile_id, provider, state)');
