@@ -2,7 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
-import { controlFleetMachine, reconcileFleetMachines } from '../src/application.js';
+import { controlFleetMachine } from '../src/application.js';
 import { CLOUD_IMAGE_OPERATION_DEADLINE_MS, type FleetCatalogDO, type FleetMachineDefinition } from '../src/fleet-catalog.js';
 import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 

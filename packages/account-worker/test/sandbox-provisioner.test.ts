@@ -8,7 +8,7 @@ import { network } from './network.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createRelayAuthorization, createSignedControlRequest, credentialProtocolBase64, RELAY_HEARTBEAT_MODE, signDeviceInvite, signedCredentialAuthorityGrantSchema } from '@gitspace/protocol';
 import { tenantRootPrivateKey } from './setup.js';
-import { controlFleetMachine, provisionManagedSandbox, reconcileFleetMachines } from '../src/application.js';
+import { controlFleetMachine, provisionManagedSandbox } from '../src/application.js';
 import { CLOUD_MACHINE_LIMIT, FleetCatalogDO, SANDBOX_PROVISIONING_ATTEMPT_MS, SANDBOX_PROVISIONING_ATTEMPTS } from '../src/fleet-catalog.js';
 
 const image = `docker.io/example/runtime@sha256:${'a'.repeat(64)}`;
@@ -119,7 +119,7 @@ it('acknowledges durable private enrollment before preflight and fences prematur
     expect(registered.state).toBe('provisioning');
     await expect(Promise.resolve(f.catalog.startCloudImage({ userId: f.userId, machineId: machine.id, operationId: crypto.randomUUID(), selection: { kind: 'custom', image } }))).rejects.toThrow();
     await expect(controlFleetMachine(env, f.userId, machine.id, 'sleep')).rejects.toThrow();
-    expect((await reconcileFleetMachines(env, f.userId, f.catalog))[0]?.state).toBe('provisioning');
+    expect((await f.catalog.getMachine(machine.id))?.state).toBe('provisioning');
     expect(f.enrollments.length).toBe(0);
     const retained = await runInDurableObject(f.catalog, (_instance, state) => {
       const row = state.storage.sql.exec<{ enrollment_json: string }>('SELECT enrollment_json FROM sandbox_enrollments WHERE machine_id=?', machine.id).one();
@@ -159,7 +159,6 @@ it('keeps provider-accepted failures durable and explicit Start reuses the same 
   const first = f.enrollments[0]!;
   const visible = JSON.stringify(await f.catalog.listMachines());
   expect(visible.includes(first.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY!)).toBe(false);
-  await reconcileFleetMachines(env, f.userId, f.catalog);
   expect(f.enrollments.length).toBe(1);
   f.faults.lostResponse = false;
   f.faults.status = false;

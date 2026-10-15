@@ -2500,50 +2500,6 @@ async function confirmProvisionedCloudImage(env: Env, userId: string, machine: F
   await catalog.saveCloudImage({ ...image, currentImage: provider.image });
 }
 
-export async function reconcileFleetMachines(env: Env, userId: string, catalog: {
-  listMachines(): Promise<FleetMachineDefinition[]>;
-  listSpaces(): Promise<PortableSpaceDefinition[]>;
-  putMachine(machine: FleetMachineDefinition): Promise<FleetMachineDefinition>;
-  removeMachine(machineId: string, destroyed?: boolean): Promise<boolean>;
-}): Promise<FleetMachineDefinition[]> {
-  for (const current of await catalog.listMachines()) {
-    if (current.provider === 'physical') continue;
-    const durableCatalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
-    if (await durableCatalog.hasPendingSandbox(current.id) || await durableCatalog.abandonedSandbox(current.id)) continue;
-    if (cloudImageOperationActive(await durableCatalog.cloudImage(current.id))) continue;
-    const provider = machineProviderFor(env, userId, current);
-    let stopping = false;
-    try {
-      if (await durableCatalog.pendingMachineDiscard(current.id)) {
-        stopping = true;
-        await checkpointAndStopFleetMachine(env, userId, catalog, current);
-        continue;
-      }
-      if (current.desiredState === 'removed') {
-        await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
-        await releaseMachineAttachments(env, userId, current.id, 'machine-destroyed');
-        await credentialVault(env, userId).removeManagedDevice(current.id);
-        await provider.destroy(current);
-        await catalog.removeMachine(current.id, true);
-        continue;
-      }
-      let observed = await provider.status(current);
-      if (current.desiredState === 'online' && observed.state !== 'online') observed = await provider.resume(current);
-      else if (current.desiredState === 'offline' && (observed.state !== 'offline' || observed.desiredState !== 'offline')) {
-        stopping = true;
-        await checkpointAndStopFleetMachine(env, userId, catalog, current, observed);
-        continue;
-      }
-      if (observed.state === 'online') await confirmProvisionedCloudImage(env, userId, observed);
-      if (current.state !== observed.state || current.rpcEndpoint !== observed.rpcEndpoint || current.operationId !== null || current.error !== null) {
-        await catalog.putMachine({ ...observed, desiredState: current.desiredState, lifecycleRevision: Math.max(current.lifecycleRevision, observed.lifecycleRevision) + 1, operationId: null, error: null });
-      }
-    } catch (error) {
-      if (!stopping) await catalog.putMachine({ ...current, state: 'error', lifecycleRevision: current.lifecycleRevision + 1, operationId: null, error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  return catalog.listMachines();
-}
 
 
 export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume', discardConfirmation?: MachineDiscardConfirmation): Promise<FleetMachineDefinition>;

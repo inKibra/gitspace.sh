@@ -1,8 +1,7 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { controlFleetMachine, reconcileFleetMachines } from '../src/application.js';
+import { controlFleetMachine } from '../src/application.js';
 import { PhysicalMachineProvider } from '../src/machine-providers.js';
-import type { FleetMachineDefinition } from '../src/fleet-catalog.js';
 import { http } from 'msw';
 import { network } from './network.js';
 import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
@@ -22,30 +21,6 @@ describe('machine provider lifecycle contract', () => {
     await expect(provider.resume(physical)).rejects.toThrow(/not remotely managed/u);
     await expect(provider.destroy(physical)).rejects.toThrow(/must be unenrolled/u);
   });
-});
-
-it('recovers an externally stopped sandbox to its desired online state', async () => {
-  let current: FleetMachineDefinition = { ...sandbox, state: 'resuming', operationId: 'interrupted-resume', lifecycleRevision: 4 };
-  const actions: string[] = [];
-  const service = {
-    fetch: async (request: Pick<Request, 'url'>) => {
-      const action = new URL(request.url).pathname.split('/').at(-1)!;
-      actions.push(action);
-      if (action === 'cancel-replacement') return Response.json({ prepared: false });
-      return Response.json({ status: 'ok', value: { ...sandbox, state: action === 'status' ? (current.state === 'resuming' ? 'offline' : current.state) : 'online', lifecycleRevision: 5 } });
-    },
-  };
-  const catalog = {
-    listMachines: async () => [current],
-    listSpaces: async () => [],
-    putMachine: async (machine: FleetMachineDefinition) => (current = machine),
-    removeMachine: async () => true,
-  };
-  mockProvider(service.fetch);
-  await reconcileFleetMachines(env, env.ACCOUNT_ID, catalog);
-  const result = await reconcileFleetMachines(env, env.ACCOUNT_ID, catalog);
-  expect(actions.filter(action => action === 'resume')).toEqual(['resume']);
-  expect(result[0]).toMatchObject({ state: 'online', desiredState: 'online', lifecycleRevision: 6, operationId: null, error: null });
 });
 
 async function openSpaceMachine(desiredState: 'online' | 'offline' = 'online') {
@@ -111,7 +86,6 @@ it('rejects a missing checkpoint acknowledgement without stopping', async () => 
   mockProvider(service.fetch);
   const environment = env;
   await expect(controlFleetMachine(environment, userId, sandbox.id, 'sleep')).rejects.toThrow();
-  await reconcileFleetMachines(environment, userId, catalog);
   expect(stopped).toBe(false);
   expect(cancelled).toBe(true);
   expect(await catalog.getMachine(sandbox.id)).toMatchObject({ state: 'online', desiredState: 'online' });

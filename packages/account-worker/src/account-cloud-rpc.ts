@@ -4,7 +4,7 @@ import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import { MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import {
   credentialProtocolBase64, deviceCanAdminister, requiredCapability, requiresImageSelectionControl, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
-  parseRuntimeSettings, runtimeSettingsView, type RuntimeConfigDocument,
+  parseRuntimeSettings, runtimeSettingsView, GITSPACE_SOURCE_PROJECT_ROLE, type RuntimeConfigDocument,
   type DeviceCapability, type GitSpaceRpcContext,
 } from '@gitspace/protocol';
 import {
@@ -28,7 +28,7 @@ import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js';
-import { controlFleetMachine, provisionManagedSandbox, readTenantDeployment, reconcileFleetMachines, revertTenantRelease, type CredentialVaultDO } from './application.js';
+import { controlFleetMachine, provisionManagedSandbox, readTenantDeployment, revertTenantRelease, type CredentialVaultDO } from './application.js';
 import type { DeploymentStatus } from '@gitspace/protocol/deployment';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { UserSettingsDO } from './user-settings.js';
@@ -104,7 +104,6 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     if (!deviceCanAdminister(device, capability)) throw new Error(`Account scope, rpc.write and ${capability} authorization are required`);
     return device;
   };
-  const fleet = async () => reconcileFleetMachines(env, userId, catalog);
   const composioSetup = async () => {
     const metadata = await vault.providerSecretMetadata('composio');
     const platform = Boolean(env.COMPOSIO_API_KEY?.trim());
@@ -169,7 +168,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   });
 
   const machines = server.implement(listMachinesContract).handler(async ({ errors }) => {
-    try { return ok(await fleet()); }
+    try { return ok(await catalog.listMachines()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list machines', message: message(error) })); }
   });
 
@@ -241,9 +240,15 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   });
   const projects = server.implement(listProjectsContract).handler(async ({ input, errors }) => {
     try {
-      await ensureAccountGitSpaceProject(env, userId);
       const index = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(userId);
-      return ok((await index.list(input.lifecycle === 'all' ? undefined : input.lifecycle)).map((project) => ({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null })));
+      const lifecycle = input.lifecycle === 'all' ? undefined : input.lifecycle;
+      let listed = await index.list(lifecycle);
+      // A new account's first listing creates the built-in GitSpace project, which is never archived; later listings only read.
+      if (input.lifecycle !== 'archived' && !listed.some((project) => project.role === GITSPACE_SOURCE_PROJECT_ROLE)) {
+        await ensureAccountGitSpaceProject(env, userId);
+        listed = await index.list(lifecycle);
+      }
+      return ok(listed.map((project) => ({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null })));
     } catch (error) { return err(errors.OperationFailed({ operation: 'list projects', message: message(error) })); }
   });
   const projectIndex = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(userId);
