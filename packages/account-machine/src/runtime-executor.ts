@@ -8,8 +8,8 @@ import { RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignments
 import { z } from 'zod';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
-import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase, gitCheckpointRejectionError } from './git-checkpoint.js';
-import type { GitIntermediateCheckpoint, GitCheckpointRejection } from './git-checkpoint.js';
+import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase } from './git-checkpoint.js';
+import type { GitIntermediateCheckpoint } from './git-checkpoint.js';
 import { artifactsPublicationRejection, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { spaceGitCheckpointRef } from '@gitspace/protocol-workspace';
 import type { LocalAttachment, ExecutorOperationHandler, ExecutorContent } from '@gitspace/runtime-machine';
@@ -59,26 +59,13 @@ export async function createMachineExecutor(options: {
   const stopping = new AbortController();
   const snapshots = new Database(join(directory, 'snapshots.sqlite'));
   snapshots.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS snapshots (attachment TEXT PRIMARY KEY, revision INTEGER NOT NULL, pending TEXT, committed TEXT)');
-  snapshots.exec('CREATE TABLE IF NOT EXISTS snapshot_rejections (attachment TEXT PRIMARY KEY, rejection TEXT NOT NULL); DROP TABLE IF EXISTS attachment_failures');
+  snapshots.exec('DROP TABLE IF EXISTS snapshot_rejections; DROP TABLE IF EXISTS attachment_failures');
   const keyOf = (attachment: RuntimeAttachment) => `${attachment.attachmentId}:${attachment.generation}`;
   const snapshotRow = (key: string) => snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
   const committedOf = (key: string) => {
     const row = snapshotRow(key);
     return row?.committed ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)) : null;
   };
-  const rejectedSnapshot = (key: string): GitCheckpointRejection | null => {
-    const row = snapshots.query<{ rejection: string }, [string]>('SELECT rejection FROM snapshot_rejections WHERE attachment=?').get(key);
-    return row ? JSON.parse(row.rejection) as GitCheckpointRejection : null;
-  };
-  const saveRejectedSnapshot = (key: string, rejection: GitCheckpointRejection | null) => {
-    snapshots.transaction(() => {
-      if (rejection) {
-        snapshots.query('INSERT OR REPLACE INTO snapshot_rejections(attachment,rejection) VALUES(?,?)').run(key, JSON.stringify(rejection));
-        snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
-      } else snapshots.query('DELETE FROM snapshot_rejections WHERE attachment=?').run(key);
-    })();
-  };
-  const retryRejected = new Set<string>();
   const captures = new Map<string, IncrementalGitSnapshots>();
   const captureAborts = new Map<string, AbortController>();
   /** Drops a capture stream without waiting, since a stuck upload never settles. What it has in flight can no longer
@@ -145,8 +132,7 @@ export async function createMachineExecutor(options: {
         },
         loadCommitted: async () => committedOf(key),
         savePending: async pending => { snapshots.query('UPDATE snapshots SET pending=? WHERE attachment=?').run(JSON.stringify(pending), key); },
-        loadRejected: async () => rejectedSnapshot(key),
-        saveRejected: async rejection => { saveRejectedSnapshot(key, rejection); },
+        clearPending: async () => { snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key); },
         publish: (checkpoint, committed) => options.gitRemote.publishCheckpoint({
           binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` },
           repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: committed?.headCommit ?? null,
@@ -170,7 +156,7 @@ export async function createMachineExecutor(options: {
       captures.set(key, stream);
     }
     try {
-      const checkpoint = await stream.capture({ retryRejected: retryRejected.delete(key) });
+      const checkpoint = await stream.capture();
       if (journal.attachment(local.attachment.attachmentId)?.attachment.failure?.operation === 'publish') clearFailure(local.attachment);
       return checkpoint;
     } catch (error) {
@@ -334,7 +320,6 @@ export async function createMachineExecutor(options: {
         // The backup exists in the cloud either way; report it so it is recorded.
         return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: [], backup, machineId: options.machineId, error: message(error) }));
       }
-      saveRejectedSnapshot(key, null);
       // A capture that started while the checkout was being reset may hold part of the discarded changes.
       abandonCapture(key);
       return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: changes, backup, machineId: options.machineId }));
@@ -380,7 +365,7 @@ export async function createMachineExecutor(options: {
     if (!entry || !local || stopped || local.attachment.state === 'detached') return;
     const key = keyOf(local.attachment);
     const row = snapshotRow(key);
-    const materializedCommit = row?.committed && !row.pending && !rejectedSnapshot(key) ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)).worktreeCommit : null;
+    const materializedCommit = row?.committed && !row.pending ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.committed)).worktreeCommit : null;
     const failure = local.attachment.failure ?? null;
     const observation = {
       projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
@@ -441,13 +426,6 @@ export async function createMachineExecutor(options: {
     journal.installAttachment(cleared);
     observe(cleared);
   };
-  // A rejected snapshot is a standing publish failure until its input changes.
-  for (const local of journal.attachments()) {
-    const rejection = rejectedSnapshot(keyOf(local.attachment));
-    if (rejection && local.attachment.state !== 'detached' && local.attachment.failure?.operation !== 'publish') {
-      journal.installAttachment({ ...local, attachment: { ...local.attachment, failure: { operation: 'publish', message: gitCheckpointRejectionError(rejection).message.slice(0, 2000), at: new Date().toISOString() } } });
-    }
-  }
   /** Stops sync and commands for an attachment the cloud released. The checkout stays on disk. */
   const release = async (local: LocalAttachment) => {
     stopFollowing(local);
@@ -634,7 +612,6 @@ export async function createMachineExecutor(options: {
       await settled(workspaceId);
       const local = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.state !== 'detached');
       if (!local) throw new Error('This machine is not attached to the workspace');
-      retryRejected.add(keyOf(local.attachment));
       if (local.attachment.state !== 'ready') {
         await options.cloud.call('runtime.attachment.cache.request', { projectId: local.attachment.projectId, workspaceId, machineId: options.machineId }, RuntimeJsonSchema, stopping.signal);
         await sync(workspaceId);

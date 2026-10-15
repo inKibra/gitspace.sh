@@ -143,7 +143,7 @@ Every item is verified the way the user works, in the browser, before it is repo
 4. Base-branch change becomes a Pi task; the fence that refuses every other call while it runs is deleted.
 5. Workspace creation and machine snapshot publication become Pi tasks; "pending" and "abandoned" publication states and the detach refusal are deleted.
 6. Workspace lifecycle lives only in the workspace object; the project lists workspaces and keeps no copy (ends the archive/delete loop).
-7. Stuck states become reported failures: Composio "not ready", uncertain logins, browser fences (the agent is told the action's outcome is unknown), cached checkpoint rejections. Done except cached checkpoint rejections (`87a9814`, `f88e7c9`, `3857237`).
+7. Stuck states become reported failures: Composio "not ready", uncertain logins, browser fences (the agent is told the action's outcome is unknown), cached checkpoint rejections. Done (`87a9814`, `f88e7c9`, `3857237`; checkpoint rejections are no longer stored, every capture retries and reports).
 8. Done (`c508260`, `2cef3d8`). State refusals removed: a failed project making workspaces read-only, "lifecycle was destroyed", delete waiting for cloud destroy, provision requiring automatic setup, cron delete while running, journal gates.
 9. Done (`0e15e79`). Duplicate authorization removed: membership scans, the hostname settings hop, the capability map, repeated subagent/approval/generation checks.
 10. Done. Approval mode, approval cards and the approval queue removed. Plan approval and the per-machine "Agents may attach" question stay.

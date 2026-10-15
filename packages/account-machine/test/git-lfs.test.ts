@@ -91,7 +91,7 @@ it('only uploads committed objects, dedupes oids and retains history across dele
 
 it('publishes heldBack transitions even when sanitized trees are identical', async () => {
   const f = fixture(); let revision = 0; let committed: GitIntermediateCheckpoint | null = null; const publications: GitIntermediateCheckpoint[] = [];
-  const snapshots = new IncrementalGitSnapshots({ repositoryPath: f.root, spaceId: 'space', lfs: async () => f.lfs, allocateRevision: async () => ++revision, loadPending: async () => null, loadCommitted: async () => committed, loadRejected: async () => null, saveRejected: async () => {}, savePending: async () => {}, publish: async value => { publications.push(value); }, commit: async value => { committed = value; return value; } });
+  const snapshots = new IncrementalGitSnapshots({ repositoryPath: f.root, spaceId: 'space', lfs: async () => f.lfs, allocateRevision: async () => ++revision, loadPending: async () => null, loadCommitted: async () => committed, clearPending: async () => {}, savePending: async () => {}, publish: async value => { publications.push(value); }, commit: async value => { committed = value; return value; } });
   const clean = await snapshots.capture(); writeFileSync(join(f.root, 'asset.bin'), 'held edit'); const held = await snapshots.capture();
   expect(held.indexTree).toBe(clean.indexTree); expect(held.worktreeTree).toBe(clean.worktreeTree); expect(publications).toEqual([clean, held]);
 });

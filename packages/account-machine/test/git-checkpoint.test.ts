@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, readGitCacheBase, IncrementalGitSnapshots } from '../src/git-checkpoint.js';
-import type { GitIntermediateCheckpoint, GitCheckpointRejection, PendingGitSnapshot } from '../src/git-checkpoint.js';
+import type { GitIntermediateCheckpoint, PendingGitSnapshot } from '../src/git-checkpoint.js';
 import { ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError } from '../src/artifacts-git-remote.js';
 
 const roots: string[] = [];
@@ -94,7 +94,7 @@ describe('Git intermediate checkpoint', () => {
     const snapshots = new IncrementalGitSnapshots({
       repositoryPath: source, spaceId: 'branch', allocateRevision: async () => ++revision,
       loadPending: async () => null, loadCommitted: async () => committed, savePending: async () => {},
-      loadRejected: async () => null, saveRejected: async () => {},
+      clearPending: async () => {},
       normalizeBranch: (branch, prior) => branch === 'private-cache' ? prior?.branch ?? branch : branch,
       publish: async checkpoint => { publications.push(checkpoint); },
       commit: async checkpoint => { committed = checkpoint; return checkpoint; },
@@ -216,7 +216,7 @@ describe('Git intermediate checkpoint', () => {
       allocateRevision: async () => ++revision,
       loadPending: async () => pending, loadCommitted: async () => committed,
       savePending: async checkpoint => { pending = checkpoint; },
-      loadRejected: async () => null, saveRejected: async () => {},
+      clearPending: async () => {},
       publish: async checkpoint => { publications.push(checkpoint); },
       commit: async checkpoint => { committed = checkpoint; pending = null; return checkpoint; },
     });
@@ -290,7 +290,7 @@ describe('Git intermediate checkpoint', () => {
       loadPending: async () => pending,
       loadCommitted: async () => null,
       savePending: async (checkpoint) => { pending = checkpoint; },
-      loadRejected: async () => null, saveRejected: async () => {},
+      clearPending: async () => {},
       spaceId: 'space-a',
       allocateRevision: async () => ++revision,
       publish: async (checkpoint) => {
@@ -307,11 +307,11 @@ describe('Git intermediate checkpoint', () => {
     expect(revision).toBe(1);
   });
 
-  it('retains the last good snapshot and local edits while a preflight rejection survives restart and input repair', async () => {
+  it('retains the last good snapshot and local edits, retrying a preflight rejection on every capture until the input is repaired', async () => {
     const { source, remote } = fixture();
     git(source, 'config', `url.${remote}.insteadOf`, 'https://artifacts.invalid/repository');
     let revision = 0, publications = 0, credentials = 0;
-    const journal: { pending: PendingGitSnapshot | null; committed: GitIntermediateCheckpoint | null; rejected: GitCheckpointRejection | null } = { pending: null, committed: null, rejected: null };
+    const journal: { pending: PendingGitSnapshot | null; committed: GitIntermediateCheckpoint | null } = { pending: null, committed: null };
     const gitRemote = new ArtifactsGitRemote({ credentials: async () => {
       credentials++;
       return { remote: 'https://artifacts.invalid/repository', plaintext: 'local-proof', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
@@ -319,8 +319,7 @@ describe('Git intermediate checkpoint', () => {
     const create = () => new IncrementalGitSnapshots({
       repositoryPath: source, spaceId: 'blocked', allocateRevision: async () => ++revision,
       loadPending: async () => journal.pending, loadCommitted: async () => journal.committed,
-      loadRejected: async () => journal.rejected,
-      saveRejected: async rejection => { journal.rejected = rejection; if (rejection) journal.pending = null; },
+      clearPending: async () => { journal.pending = null; },
       savePending: async checkpoint => { journal.pending = checkpoint; },
       publish: async (checkpoint, committed) => { publications++; await gitRemote.publishCheckpoint({ binding: { projectId: 'project', repository: 'workspace' }, repositoryPath: source, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: committed?.headCommit ?? null }); },
       commit: async checkpoint => { journal.committed = checkpoint; journal.pending = null; return checkpoint; },
@@ -344,10 +343,9 @@ describe('Git intermediate checkpoint', () => {
     await expect(snapshots.capture()).rejects.toBeInstanceOf(ArtifactsRepositoryIncompatibleError);
     utimesSync(oversized, new Date(0), new Date(0));
     await expect(snapshots.capture()).rejects.toBeInstanceOf(ArtifactsRepositoryIncompatibleError);
-    expect(publications).toBe(rejectedPublications);
+    expect(publications).toBe(rejectedPublications + 2);
     rmSync(oversized);
     expect(await snapshots.capture()).toEqual(good);
-    expect(journal.rejected).toBeNull();
     writeFileSync(join(source, 'new-small.txt'), 'portable repair\n');
     const repaired = await snapshots.capture();
     expect(git(source, 'show', `${repaired.worktreeCommit}:new-small.txt`)).toBe('portable repair');
@@ -359,12 +357,11 @@ describe('Git intermediate checkpoint', () => {
     const { source } = fixture();
     let revision = 0;
     let failure: 'commit' | 'publication' | null = 'commit';
-    const journal: { pending: PendingGitSnapshot | null; rejected: GitCheckpointRejection | null } = { pending: null, rejected: null };
+    const journal: { pending: PendingGitSnapshot | null } = { pending: null };
     const create = () => new IncrementalGitSnapshots({
       repositoryPath: source, spaceId: 'uncertain', allocateRevision: async () => ++revision,
       loadPending: async () => journal.pending, loadCommitted: async () => null,
-      loadRejected: async () => journal.rejected,
-      saveRejected: async rejection => { journal.rejected = rejection; if (rejection) journal.pending = null; },
+      clearPending: async () => { journal.pending = null; },
       savePending: async checkpoint => { journal.pending = checkpoint; },
       publish: async () => { if (failure === 'publication') throw new ArtifactsRepositoryIncompatibleError([{ oid: 'a'.repeat(40), path: 'portable.txt', size: 32_000_001, location: 'current' }]); },
       commit: async checkpoint => { if (failure === 'commit') throw new ArtifactsRepositoryIncompatibleError([{ oid: 'b'.repeat(40), path: 'admission.txt', size: 32_000_001, location: 'current' }]); journal.pending = null; return checkpoint; },
@@ -372,12 +369,10 @@ describe('Git intermediate checkpoint', () => {
     await expect(create().capture()).rejects.toBeInstanceOf(ArtifactsRepositoryIncompatibleError);
     const uncertain = journal.pending;
     if (!uncertain) throw new Error('Expected a pending checkpoint after uncertain canonical admission');
-    expect(journal.rejected).toBeNull();
     writeFileSync(join(source, 'portable.txt'), 'later edit\n');
     failure = 'publication';
     await expect(create().capture()).rejects.toBeInstanceOf(ArtifactsRepositoryIncompatibleError);
     expect(journal.pending).toEqual(uncertain);
-    expect(journal.rejected).toBeNull();
     failure = null;
     expect(await create().capture()).toEqual(uncertain.checkpoint);
     expect(revision).toBe(1);
@@ -394,7 +389,7 @@ describe('Git intermediate checkpoint', () => {
     const create = () => new IncrementalGitSnapshots({
       repositoryPath: source, spaceId: 'stale', allocateRevision: async () => ++revision,
       loadPending: async () => journal.pending, loadCommitted: async () => committed,
-      loadRejected: async () => null, saveRejected: async () => {},
+      clearPending: async () => {},
       savePending: async pending => { journal.pending = pending; },
       publish: async () => {},
       commit: async (checkpoint, base) => {

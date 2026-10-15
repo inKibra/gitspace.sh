@@ -6,7 +6,7 @@ import type { z } from 'zod';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
 import { captureGitLfs, checkoutGitLfs, gitLfsRestoreReceipt, gitLfsWorktreeTree, hydrateGitLfs, restoredGitLfsPaths, type MachineGitLfs, type MachineGitLfsPublication } from './git-lfs.js';
 import { gitWorktreeClock, gitWorktreeDelay, type GitWorktreeClock } from './git-worktree-watch.js';
-import { ArtifactsRepositoryIncompatibleError, artifactsPublicationRejection, type ArtifactsRepositoryIssue } from './artifacts-git-remote.js';
+import { artifactsPublicationRejection } from './artifacts-git-remote.js';
 
 export type GitIntermediateCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 
@@ -318,19 +318,6 @@ export async function gitCheckpointIncludes(repositoryPath: string, checkpoint: 
   return (await runGit(repositoryPath, ['merge-base', '--is-ancestor', previous.worktreeCommit, checkpoint.worktreeCommit], { allowMissingRef: true })).exitCode === 0;
 }
 
-/** A proven local preflight rejection is not an uncertain remote write. */
-export type GitCheckpointRejection = { stamp: string; checkpoint: GitIntermediateCheckpoint; message: string; issues: ArtifactsRepositoryIssue[] | null };
-
-/** Rejections from removed policies are revalidated: ancestors (old history policy) and `issues: null`
- * (the old upload-size limit). Current-file failures and uncertain writes stay fenced. */
-export function gitCheckpointRejectionNeedsRevalidation(rejection: GitCheckpointRejection): boolean {
-  return rejection.issues === null || (rejection.issues.length > 0 && rejection.issues.every(issue => issue.location === 'history'));
-}
-
-export function gitCheckpointRejectionError(rejection: GitCheckpointRejection): ArtifactsRepositoryIncompatibleError {
-  return new ArtifactsRepositoryIncompatibleError(rejection.issues ?? []);
-}
-
 /** A captured snapshot and the committed worktree it was taken against. */
 export interface PendingGitSnapshot { checkpoint: GitIntermediateCheckpoint; base: string | null }
 
@@ -355,18 +342,16 @@ export class IncrementalGitSnapshots {
     loadPending(): Promise<PendingGitSnapshot | null>;
     loadCommitted(): Promise<GitIntermediateCheckpoint | null>;
     savePending(pending: PendingGitSnapshot): Promise<void>;
-    loadRejected(): Promise<GitCheckpointRejection | null>;
-    /** A rejection atomically clears pending, never committed. */
-    saveRejected(rejection: GitCheckpointRejection | null): Promise<void>;
+    clearPending(): Promise<void>;
     /** `committed` is the last accepted checkpoint, whose HEAD the remote holds. */
     publish(checkpoint: GitIntermediateCheckpoint, committed: GitIntermediateCheckpoint | null): Promise<void>;
     /** `base` is the committed worktree the snapshot was taken against, never the current one. */
     commit(checkpoint: GitIntermediateCheckpoint, base: string | null): Promise<GitIntermediateCheckpoint>;
   }) {}
 
-  capture(options: { retryRejected?: boolean } = {}): Promise<GitIntermediateCheckpoint> {
+  capture(): Promise<GitIntermediateCheckpoint> {
     if (this.pending) return this.pending;
-    const operation = this.captureNext(options.retryRejected === true);
+    const operation = this.captureNext();
     this.pending = operation;
     void operation.finally(() => { this.pending = undefined; }).catch(() => {});
     return operation;
@@ -376,10 +361,7 @@ export class IncrementalGitSnapshots {
     await this.pending;
   }
 
-  private async captureNext(retryRejected: boolean): Promise<GitIntermediateCheckpoint> {
-    const storedRejection = await this.options.loadRejected();
-    const rejected = storedRejection && !gitCheckpointRejectionNeedsRevalidation(storedRejection) ? storedRejection : null;
-    if (rejected && !retryRejected && rejected.stamp === await readGitCheckpointInputStamp(this.options.repositoryPath)) throw gitCheckpointRejectionError(rejected);
+  private async captureNext(): Promise<GitIntermediateCheckpoint> {
     const committed = await this.options.loadCommitted();
     const base = committed?.worktreeCommit ?? null;
     let stored = this.unpublished ?? await this.options.loadPending();
@@ -393,7 +375,8 @@ export class IncrementalGitSnapshots {
       stored = null;
     }
     let checkpoint = stored?.checkpoint ?? null;
-    let capturedStamp: string | undefined;
+    // Only a snapshot this call captured may be dropped on rejection; a reused pending one may already be on the remote.
+    const fresh = !checkpoint;
     if (!checkpoint) {
       for (;;) {
         this.options.signal?.throwIfAborted();
@@ -430,39 +413,24 @@ export class IncrementalGitSnapshots {
         }
         this.options.signal?.throwIfAborted();
         checkpoint.branch = this.options.normalizeBranch?.(checkpoint.branch, committed) ?? checkpoint.branch;
-        capturedStamp = stable;
         break;
       }
     }
     if (committed && committed.headCommit === checkpoint.headCommit && committed.branch === checkpoint.branch && committed.indexTree === checkpoint.indexTree && committed.worktreeTree === checkpoint.worktreeTree && JSON.stringify(committed.lfs) === JSON.stringify(checkpoint.lfs)) {
       if (committed.checkpointRef !== checkpoint.checkpointRef) await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit]);
       await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();
-      if (storedRejection) await this.options.saveRejected(null);
       return committed;
-    }
-    if (!retryRejected && rejected && capturedStamp !== undefined && rejected.checkpoint.headCommit === checkpoint.headCommit && rejected.checkpoint.branch === checkpoint.branch && rejected.checkpoint.indexTree === checkpoint.indexTree && rejected.checkpoint.worktreeTree === checkpoint.worktreeTree && JSON.stringify(rejected.checkpoint.lfs) === JSON.stringify(checkpoint.lfs)) {
-      // Index refreshes and metadata-only events do not retry the rejected graph.
-      await this.options.saveRejected({ ...rejected, stamp: capturedStamp });
-      await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();
-      throw gitCheckpointRejectionError(rejected);
     }
     this.options.signal?.throwIfAborted();
     this.unpublished = { checkpoint, base };
     await this.options.savePending({ checkpoint, base });
-    if (storedRejection) await this.options.saveRejected(null);
     try { await this.options.publish(checkpoint, committed); }
     catch (error) {
-      const rejection = artifactsPublicationRejection(error);
-      if (rejection && capturedStamp !== undefined) {
-        // Publication preflight guarantees these bytes never reached the remote.
+      if (fresh && artifactsPublicationRejection(error)) {
+        // Publication preflight guarantees these bytes never reached the remote; the next capture tries again.
         // Uncertain publication/commit failures must never take this branch.
-        await this.options.saveRejected({
-          stamp: capturedStamp,
-          checkpoint,
-          message: rejection.message,
-          issues: rejection.issues,
-        });
         this.unpublished = undefined;
+        await this.options.clearPending();
         await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();
       }
       throw error;
