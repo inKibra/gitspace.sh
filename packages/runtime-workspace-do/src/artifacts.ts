@@ -129,14 +129,19 @@ export class ArtifactsCodeStore {
   async initialCheckpoint(repository: string, workspaceId: string, branch: string, source: RuntimeGitCheckpoint | null = null) {
     const commit = await this.resolveRef(repository, `refs/heads/${branch}`);
     const repo = await this.binding.get(repositorySchema.parse(repository));
+    const checkpointRef = `refs/gitspace/spaces/${workspaceId}/checkpoints`;
+    // Creation is replayable at the same tip (a concurrent first read creates it too), but never rewinds an advanced ref.
+    const createCheckpointRef = async (target: string) => {
+      const info = await repo.info();
+      const token = await repo.createToken('write', 60);
+      try { await publishRef({ remote: info.remote, token: token.plaintext, ref: checkpointRef, previous: null, commit: target }); }
+      catch (error) { if (await this.resolveRef(repository, checkpointRef) !== target) throw error; }
+      finally { await repo.revokeToken(token.id); }
+    };
     try {
       if (source) {
         if (!await repo.readCommit(source.worktreeCommit)) throw new Error(`The source workspace's working copy ${source.worktreeCommit} is not in ${repository}`);
-        const checkpointRef = `refs/gitspace/spaces/${workspaceId}/checkpoints`;
-        const info = await repo.info();
-        const token = await repo.createToken('write', 60);
-        try { await publishRef({ remote: info.remote, token: token.plaintext, ref: checkpointRef, previous: null, commit: source.worktreeCommit }); }
-        finally { await repo.revokeToken(token.id); }
+        await createCheckpointRef(source.worktreeCommit);
         return { ...source, checkpointRef, branch };
       }
       if (commit === null) {
@@ -144,18 +149,13 @@ export class ArtifactsCodeStore {
         // HEAD is represented by omitting ref, not by the literal string "HEAD".
         if ((await repo.log({ limit: 1 })).length > 0) return null;
         const initial = await initializeArtifactsRepository(repo, { workspaceId, branch });
-        return { checkpointRef: `refs/gitspace/spaces/${workspaceId}/checkpoints`, headCommit: null, branch, indexCommit: initial.indexCommit, trackedWorktreeCommit: initial.trackedWorktreeCommit, worktreeCommit: initial.worktreeCommit, indexTree: initial.tree, worktreeTree: initial.tree };
+        return { checkpointRef, headCommit: null, branch, indexCommit: initial.indexCommit, trackedWorktreeCommit: initial.trackedWorktreeCommit, worktreeCommit: initial.worktreeCommit, indexTree: initial.tree, worktreeTree: initial.tree };
       }
       const metadata = await repo.readCommit(commit);
       if (!metadata) throw new Error('Initial workspace commit is unavailable');
       // A fork holds the source objects and branches, not this workspace's checkpoint
       // ref. Publish that ref before the runtime can persist or hand out its checkpoint.
-      // Creation is replayable at the same tip, but must never rewind an advanced ref.
-      const checkpointRef = `refs/gitspace/spaces/${workspaceId}/checkpoints`;
-      const info = await repo.info();
-      const token = await repo.createToken('write', 60);
-      try { await publishRef({ remote: info.remote, token: token.plaintext, ref: checkpointRef, previous: null, commit }); }
-      finally { await repo.revokeToken(token.id); }
+      await createCheckpointRef(commit);
       return { checkpointRef, headCommit: commit, branch, indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: metadata.treeHash, worktreeTree: metadata.treeHash };
     } finally { await disposeArtifactsRepository(repo); }
   }
