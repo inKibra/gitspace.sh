@@ -4,13 +4,13 @@ import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, Runtime
 import type { ToolServices } from './tools.js';
 import { CronScopeDoc } from './documents.js';
 import { cronTaskScopes } from './cron.js';
-import { SessionControlsDoc, parseCloudAgentDefinition, resolveAgentDefinitions, type SessionControlServices } from './session-controls.js';
+import { SessionControlsDoc, definitionRoleChain, parseCloudAgentDefinition, resolveAgentDefinitions, type SessionControlServices } from './session-controls.js';
 import { BackgroundAgentsDoc, type BackgroundAgentTask } from './background-agents.js';
 import { AgentDefinitionContextDoc, type SubagentMetadata } from './subagent-state.js';
 import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
 import { modelRoleThinkingSchema } from '@gitspace/protocol/inference';
 const Anchors = defineDoc<{ entries: Record<string, string>; children: Record<string, string> }>({ kind: 'gitspace.context-anchors', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ entries: {}, children: {} }) });
-export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask; refreshDefinitions?(target: Conversation): Promise<void> } & Pick<SessionControlServices, 'admitInference' | 'configureModel' | 'catalog'>;
+export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask; refreshDefinitions?(target: Conversation): Promise<void> } & Pick<SessionControlServices, 'admitInference' | 'configureModel'>;
 export function createConversationTools(options: ConversationToolOptions) {
   const { harness, storage } = options;
   const context = BACKGROUND_CONTEXT;
@@ -52,19 +52,18 @@ export function createConversationTools(options: ConversationToolOptions) {
         const previousId = (await harness.snapshot(Anchors, target.id, context))?.children[input.attemptId];
         const previous = previousId ? (await harness.snapshot(AgentDefinitionContextDoc, (await resolve(previousId)).id, context))?.child : null;
         const definitions = await harness.snapshot(SessionControlsDoc, target.id, context);
-        const agentSelector = 'agent' in args ? args.agent : undefined;
-        const definition = previous ? previous.definition : agentSelector ? resolveAgentDefinitions(definitions?.definitions ?? []).agents.find(value => value.name === agentSelector || value.path === agentSelector) : undefined;
-        if (!previous && agentSelector && !definition) throw new Error('Requested agent definition not found');
+        const definition = previous ? previous.definition : args.agent ? resolveAgentDefinitions(definitions?.definitions ?? []).agents.find(value => value.name === args.agent || value.path === args.agent) : undefined;
+        if (!previous && args.agent && !definition) throw new Error('Requested agent definition not found');
         const parsed = definition ? parseCloudAgentDefinition(definition.path, definition.content) : null;
-        const catalog = await options.catalog();
-        const roleId = 'role' in args ? args.role : definition?.role;
-        const role = roleId ? catalog.roles.find(value => value.id === roleId) : undefined;
-        if (!previous && roleId && !role) throw new Error('Requested inference role not found');
-        const selection: ModelSelectionIntent = previous?.selection ?? (role ? { kind: 'role', role: role.id } : definition?.provider && definition.model ? { kind: 'explicit', provider: definition.provider, modelId: definition.model } : { kind: 'default' });
+        // A named role wins; a definition's roles are tried in order; a worker (no definition) prefers Fast. Admission
+        // resolves the chain against the profile and fails for an unknown or unavailable role.
+        const chain = args.role ? [args.role] : parsed ? definitionRoleChain(parsed.modelSelectors) : ['fast', 'default'];
+        const selection: ModelSelectionIntent = previous?.selection ?? (chain ? { kind: 'role', role: chain[0]!, ...(chain.length > 1 ? { fallback: chain.slice(1) } : {}) } : definition?.provider && definition.model ? { kind: 'explicit', provider: definition.provider, modelId: definition.model } : { kind: 'default' });
+        const roleId = selection.kind === 'role' ? selection.role : null;
         const thinking = previous ? previous.thinking : modelRoleThinkingSchema.parse(parsed?.thinking ?? definition?.thinking ?? null);
         const narrowedTools = parsed?.toolsSpecified ? parsed.tools : [...SUBAGENT_READONLY_TOOLS];
         const tools = previous?.tools ?? (narrowedTools.includes('agents') ? narrowedTools : [...narrowedTools, 'agents']);
-        const name = previous?.name ?? args.name ?? `${definition?.name ?? role?.id}-${input.attemptId}`;
+        const name = previous?.name ?? args.name ?? `${definition?.name ?? 'worker'}-${input.attemptId}`;
         if (name === 'parent') throw new Error('The parent address is reserved');
         const childId = await target.commit(async tx => {
           if ((await tx.doc(ConversationLifecycleDoc, target.id)).stopped) throw new Error('Conversation is stopped; only an explicit user message may resume it');
@@ -90,10 +89,10 @@ export function createConversationTools(options: ConversationToolOptions) {
           if (args.background) (await tx.doc(BackgroundAgentsDoc, target.id)).children[input.attemptId] = { conversationId: created.id, owner: anchorTask };
           (await tx.doc(CronScopeDoc, created.id)).inherited = inheritedScopes;
           const childControls = await tx.doc(SessionControlsDoc, created.id);
-          childControls.role = role?.id ?? null;
+          childControls.role = roleId;
           childControls.selection = selection;
           const definitionContext = await tx.doc(AgentDefinitionContextDoc, created.id);
-          definitionContext.child = { parentId: input.conversationId, name, requestedName: args.name ?? null, attemptId: input.attemptId, definition: definition ?? null, selection, role: role?.id ?? null, thinking, tools, model: null };
+          definitionContext.child = { parentId: input.conversationId, name, requestedName: args.name ?? null, attemptId: input.attemptId, definition: definition ?? null, selection, role: roleId, thinking, tools, model: null };
           anchors.children[input.attemptId] = String(created.id);
           return String(created.id);
         }, context);
@@ -107,7 +106,7 @@ export function createConversationTools(options: ConversationToolOptions) {
           await child.commit(async tx => { const childState = await tx.doc(AgentDefinitionContextDoc, child.id); if (childState.child && !childState.child.model) { childState.child.model = { provider: model.provider, modelId: model.modelId }; childState.child.thinking = thinking; } }, context);
           await options.configureModel(child.id, model);
           const instructions = metadata.definition ? parseCloudAgentDefinition(metadata.definition.path, metadata.definition.content).instructions : '';
-          await child.configure({ thinkingLevel: thinking, instructions: `${instructions}\n\nYou are ${metadata.name} (${childId}), a read-only subagent. Your parent is available at parent (${metadata.parentId}). Use agents list to discover sibling names and ids, agents send to message parent or siblings, and agents wait for events. You cannot spawn or stop agents.` }, context);
+          await child.configure({ thinkingLevel: thinking, instructions: `${instructions}\n\nYou are ${metadata.name} (${childId}), ${metadata.tools.every(tool => SUBAGENT_READONLY_TOOLS.some(readOnly => readOnly === tool)) ? 'a read-only' : 'a'} subagent. Your parent is available at parent (${metadata.parentId}). Use agents list to discover sibling names and ids, agents send to message parent or siblings, and agents wait for events. You cannot spawn or stop agents.` }, context);
           input.signal?.throwIfAborted();
           return child.submit({ type: 'input', content: args.task, requestId: input.attemptId }, context);
         });

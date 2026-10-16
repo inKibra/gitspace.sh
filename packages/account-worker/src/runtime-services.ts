@@ -306,7 +306,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   async function executeMachineOnce(input: Invocation, deadlineAt?: string): Promise<RuntimeToolResult> {
     const conversation = await options.runtime().browserConversation(input.conversationId);
-    if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args)) return failed(input, new Error('Subagent machine dispatch is read-only'));
+    if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args, conversation.tools ?? [])) return failed(input, new Error(`This subagent cannot use ${input.tool} this way`));
     let dispatch = savedDispatch(input.attemptId);
     const fingerprint = canonicalJson({ requestId: input.requestId, conversationId: input.conversationId, taskId: input.taskId, tool: input.tool, args: input.args, replay: input.replay });
     let selection = selections.load(input.attemptId);
@@ -525,7 +525,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   async function invoke(input: Invocation): Promise<RuntimeToolResult> {
     try {
       const conversation = await options.runtime().browserConversation(input.conversationId);
-      if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args)) throw new Error('Subagent tools are read-only');
+      if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args, conversation.tools ?? [])) throw new Error(`This subagent cannot use ${input.tool} this way`);
       input.signal?.throwIfAborted();
       if (input.tool === 'grep') {
         requireGrepMachine(input.attemptId);

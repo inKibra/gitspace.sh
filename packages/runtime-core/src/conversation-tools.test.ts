@@ -52,7 +52,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   };
   const configureModel = async (id: ConversationId, selected: ModelRef) => { const child = await harness.conversation(id, context); if (!child) throw new Error('Missing child'); const metadata = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child; await child.configure({ model: { provider: selected.provider, modelId: selected.modelId }, tools: metadata ? tools.filter(tool => metadata.tools.includes(tool.name)) : tools }, context); };
   const lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, wake: async () => {} }); ready.resolve(lifecycle);
-  const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog, refreshDefinitions: target => controls.loadDefinitions(target) });
+  const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, refreshDefinitions: target => controls.loadDefinitions(target) });
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };
   const controls = createSessionControls({
@@ -104,8 +104,9 @@ test.each([false, true])('canonical agent name wins discovery and spawn regardle
   const f = await fixture('spawns', files);
   try {
     const report = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup;
-    expect(report?.agents.map(agent => agent.path)).toEqual([canonical.path]);
-    expect(report).toMatchObject({ diagnostics: [{ name: 'reviewer', winnerPath: canonical.path, ignoredPath: legacy.path }] });
+    expect(report?.agents.map(agent => agent.path)).toEqual([canonical.path, 'gitspace/agents/tester.md']);
+    // The repository's reviewer replaces both the legacy file and the shipped Reviewer.
+    expect(report?.diagnostics).toEqual(expect.arrayContaining([{ name: 'reviewer', winnerPath: canonical.path, ignoredPath: legacy.path }, { name: 'reviewer', winnerPath: canonical.path, ignoredPath: 'gitspace/agents/reviewer.md' }]));
     const { child } = await f.spawned({ op: 'spawn', agent: 'reviewer', task: 'Inspect' });
     expect((await child.agent(context)).instructions).toContain('CANONICAL PERSONA');
     expect((await child.agent(context)).instructions).not.toContain('LEGACY PERSONA');
@@ -120,7 +121,7 @@ test.each([false, true])('canonical agent name wins discovery and spawn regardle
 });
 
 test.each([
-  { metadata: 'tools: read, write', error: /disallowed non-read-only tools/u },
+  { metadata: 'tools: read, write', error: /subagents cannot use: write/u },
   { metadata: 'model: test/unadmitted-model', error: /not admitted/u },
   { metadata: 'tools: [', error: /sequence/iu },
 ])('invalid repository definitions do not block root prompts and clear on correction or removal ($metadata)', async ({ metadata, error }) => {
@@ -133,7 +134,7 @@ test.each([
     await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Proceed despite unavailable definitions' });
     await f.root.waitForIdle(context);
     const report = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup!;
-    expect(report.agents.map(agent => agent.path)).toEqual([valid.path]);
+    expect(report.agents.filter(agent => agent.source !== 'builtin').map(agent => agent.path)).toEqual([valid.path]);
     expect(report.definitionErrors).toEqual([{ path: invalid.path, message: expect.stringMatching(error) }]);
     expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.definitionErrors).toEqual(report.definitionErrors);
     const rootTurn = JSON.parse(f.seen[0]!);
@@ -159,7 +160,7 @@ test.each([
     expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.definitionErrors).toEqual(report.definitionErrors);
     files.splice(0, 1);
     const removed = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup!;
-    expect(removed.agents.map(agent => agent.path)).toEqual([valid.path]);
+    expect(removed.agents.filter(agent => agent.source !== 'builtin').map(agent => agent.path)).toEqual([valid.path]);
     expect(removed.definitionErrors).toEqual([]);
     expect((await f.harness.snapshot(SessionControlsDoc, f.root.id, context))?.definitionErrors).toEqual([]);
     await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Proceed after removal' });
@@ -172,11 +173,11 @@ test('strict cloud saves replace unavailable repository definitions and mask sam
   const file = { path: '.omp/agents/reviewer.md', content: '---\nname: reviewer\ntools: write\n---\nINVALID PERSONA' };
   const f = await fixture('spawns', [file]);
   try {
-    await expect(f.controls.execute(String(f.root.id), { type: 'saveAgentDefinition', path: file.path, expectedRevision: null, content: file.content })).rejects.toThrow(/disallowed non-read-only tools/u);
+    await expect(f.controls.execute(String(f.root.id), { type: 'saveAgentDefinition', path: file.path, expectedRevision: null, content: file.content })).rejects.toThrow(/subagents cannot use: write/u);
     await expect(f.controls.execute(String(f.root.id), { type: 'saveAgentDefinition', path: file.path, expectedRevision: null, content: '---\nmodel: test/unadmitted-model\n---\nInspect' })).rejects.toThrow(/not admitted/u);
     const saved = (await f.controls.execute(String(f.root.id), { type: 'saveAgentDefinition', path: file.path, expectedRevision: null, content: '---\nname: reviewer\ntools: read\n---\nCLOUD PERSONA' })).setup!;
     expect(saved.definitionErrors).toEqual([]);
-    expect(saved.agents).toEqual([expect.objectContaining({ path: file.path, source: 'cloud', tools: ['read'] })]);
+    expect(saved.agents.filter(agent => agent.source !== 'builtin')).toEqual([expect.objectContaining({ path: file.path, source: 'cloud', tools: ['read'] })]);
     file.content = '---\nmodel: test/unadmitted-model\n---\nCHANGED INVALID PERSONA';
     const refreshed = (await f.controls.execute(String(f.root.id), { type: 'agentSetup' })).setup!;
     expect(refreshed.definitionErrors).toEqual([]);
@@ -221,6 +222,22 @@ test('role and file children independently resolve selection, persona, thinking 
     }
     await f.root.commit(async tx => { (await tx.doc(SessionControlsDoc, f.root.id)).definitions = [{ ...definition, content: 'Changed later', revision: 'next' }]; }, context);
     expect((await f.harness.snapshot(AgentDefinitionContextDoc, file.child.id, context))?.child?.definition).toEqual(definition);
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
+test('shipped agents and workers take their roles unless a role is named', async () => {
+  const f = await fixture('spawns', []);
+  try {
+    // Taste and Fast are unset in this profile, so the Tester's chain and a worker both end at Default.
+    const tester = await f.spawned({ op: 'spawn', agent: 'tester', task: 'Use the product' });
+    const worker = await f.spawned({ op: 'spawn', task: 'Summarize the logs' });
+    const named = await f.spawned({ op: 'spawn', agent: 'tester', role: 'reviewer', task: 'Judge the layout' });
+    expect((await tester.child.agent(context)).model?.modelId).toBe('default-model');
+    expect((await worker.child.agent(context)).model?.modelId).toBe('default-model');
+    expect((await named.child.agent(context)).model?.modelId).toBe('role-model');
+    expect((await f.harness.snapshot(AgentDefinitionContextDoc, tester.child.id, context))?.child?.tools).toEqual(expect.arrayContaining(['bash', 'proc', 'mcp_discover', 'mcp_invoke']));
+    expect((await f.harness.snapshot(AgentDefinitionContextDoc, worker.child.id, context))?.child?.tools).not.toContain('bash');
+    await expect(f.call({ op: 'spawn', agent: 'tester', role: 'tast', task: 'Typo' })).rejects.toThrow('tast is not defined');
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 });
 

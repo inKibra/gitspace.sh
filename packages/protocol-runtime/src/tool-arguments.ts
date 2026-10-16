@@ -54,8 +54,8 @@ const agentMessagingOptions = [
 ] as const;
 export const RuntimeChildAgentsArgumentsSchema = z.discriminatedUnion('op', agentMessagingOptions);
 export const RuntimeAgentsArgumentsSchema = z.union([
-  z.strictObject({ op: z.literal('spawn'), task: path, name: path.optional(), agent: path, background: z.boolean().default(false) }),
-  z.strictObject({ op: z.literal('spawn'), task: path, name: path.optional(), role: path, background: z.boolean().default(false) }),
+  /** `agent` names a definition (omitted: a worker); `role` overrides the definition's model roles. */
+  z.strictObject({ op: z.literal('spawn'), task: path, name: path.optional(), agent: path.optional(), role: path.optional(), background: z.boolean().default(false) }),
   z.strictObject({ op: z.literal('stop'), id: path }),
   RuntimeChildAgentsArgumentsSchema,
 ]);

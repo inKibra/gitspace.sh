@@ -9,7 +9,8 @@ import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.j
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage } from '@gitspace/protocol-runtime';
-import { isSubagentReadonlyTool } from '@gitspace/protocol-runtime';
+import { isSubagentTool } from '@gitspace/protocol-runtime';
+import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { cronHasOutstanding } from './cron.js';
@@ -36,20 +37,28 @@ export const SessionSelectionDoc = defineDoc<{ conversationId: string | null }>(
 const GoalClockDoc = defineDoc<{ startedAt: number | null; elapsedSeconds: number; tokensAtStart: number }>({ kind: 'gitspace.goal-clock', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ startedAt: null, elapsedSeconds: 0, tokensAtStart: 0 }) });
 const DefinitionMetadataSchema = z.object({ name: z.string().min(1).optional(), description: z.string().default(''), model: z.union([z.string(), z.array(z.string())]).optional(), thinking: ThinkingSchema.nullable().optional(), tools: z.union([z.string(), z.array(z.string())]).optional(), spawns: z.union([z.string(), z.array(z.string())]).optional() });
 export function parseCloudAgentDefinition(path: string, content: string) {
-  if (!/^(?:\.omp|\.agents)\/agents\/[A-Za-z0-9._-]+\.md$/u.test(path)) throw new Error('Agent definitions must be workspace .agents/agents/*.md or .omp/agents/*.md files');
+  if (!/^(?:\.omp|\.agents|gitspace)\/agents\/[A-Za-z0-9._-]+\.md$/u.test(path)) throw new Error('Agent definitions must be workspace .agents/agents/*.md or .omp/agents/*.md files');
   if (new TextEncoder().encode(content).byteLength > 262144) throw new Error('Agent definition exceeds 256 KiB');
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(content);
   const metadata = DefinitionMetadataSchema.parse(match ? parseYaml(match[1]!) : {});
   const list = (value: string | string[] | undefined) => typeof value === 'string' ? value.split(',').map(item => item.trim()).filter(Boolean) : value ?? [];
   const tools = list(metadata.tools);
-  const disallowed = tools.filter(tool => !isSubagentReadonlyTool(tool));
-  if (disallowed.length) throw new Error(`Agent definition requests disallowed non-read-only tools: ${disallowed.join(', ')}`);
+  const disallowed = tools.filter(tool => !isSubagentTool(tool));
+  if (disallowed.length) throw new Error(`Agent definition requests tools subagents cannot use: ${disallowed.join(', ')}`);
   return { name: metadata.name ?? path.split('/').at(-1)!.replace(/\.md$/u, ''), description: metadata.description, modelSelectors: list(metadata.model), thinking: metadata.thinking ?? null, tools, toolsSpecified: metadata.tools !== undefined, spawns: metadata.spawns === undefined ? null : list(metadata.spawns).join(','), instructions: content.slice(match?.[0].length ?? 0).trim() };
 }
 
+/** Role names when every model selector is a `pi/role` or `@role` alias; undefined for explicit models or none. */
+export function definitionRoleChain(selectors: readonly string[]): string[] | undefined {
+  const roles = selectors.map(value => { const { selector } = parseModelRoleSelector(value); return selector.startsWith('pi/') ? selector.slice(3) : selector.startsWith('@') ? selector.slice(1) : undefined; });
+  return roles.length && roles.every((role): role is string => role !== undefined) ? roles : undefined;
+}
+
 export function resolveAgentDefinitions(definitions: readonly z.infer<typeof AgentDefinitionSchema>[]) {
+  // Workspace and cloud definitions replace a shipped one of the same name.
   const ordered = [...definitions].sort((left, right) =>
-    Number(right.path.startsWith('.agents/agents/')) - Number(left.path.startsWith('.agents/agents/'))
+    Number(left.source === 'builtin') - Number(right.source === 'builtin')
+    || Number(right.path.startsWith('.agents/agents/')) - Number(left.path.startsWith('.agents/agents/'))
     || Number(right.source === 'cloud') - Number(left.source === 'cloud')
     || (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   const winners = new Map<string, z.infer<typeof AgentDefinitionSchema>>();
@@ -64,7 +73,7 @@ export function resolveAgentDefinitions(definitions: readonly z.infer<typeof Age
 export const sessionControlsExtension = defineExtension({ name: 'gitspace.session-controls', sections: [{ key: 'session-controls', async render(input, context) {
   const controls = await input.read.snapshot(SessionControlsDoc, input.conversationId, context);
   if (!controls) return '';
-  return [controls.goal?.status === 'active' ? `Active goal: ${controls.goal.objective}` : '', ...(controls.definitionErrors ?? []).map(error => `Unavailable agent definition ${error.path}: ${error.message}`), ...resolveAgentDefinitions(controls.definitions).agents.map(definition => `Available agent ${definition.name}: ${definition.description}; model ${definition.modelSelectors.join(', ') || 'workspace default (independent of parent)'}; tools ${definition.tools.join(', ') || 'fixed read-only defaults'}. Invoke agents spawn with agent: "${definition.name}" and task; name is a separate optional address. This child uses only its saved instructions and retained repository rules.`)].filter(Boolean).join('\n\n');
+  return [controls.goal?.status === 'active' ? `Active goal: ${controls.goal.objective}` : '', ...(controls.definitionErrors ?? []).map(error => `Unavailable agent definition ${error.path}: ${error.message}`), ...resolveAgentDefinitions(controls.definitions).agents.map(definition => `Available agent ${definition.name}: ${definition.description}; model ${definition.modelSelectors.join(', ') || 'Default role'}; tools ${definition.tools.join(', ') || 'read-only defaults'}. Invoke agents spawn with agent: "${definition.name}" and task, plus role to choose its model role; name is a separate optional address. This child uses only its saved instructions and retained repository rules.`)].filter(Boolean).join('\n\n');
 } }] });
 export interface SessionHistoryService {
   conversation(id: string): Promise<ConversationId>;
@@ -98,8 +107,15 @@ export function createSessionControls(services: SessionControlServices) {
     if (!value) throw new Error('Conversation not found');
     return value;
   }
-  async function definition(path: string, content: string, source: 'workspace' | 'cloud', catalog: SessionCatalog, previous?: z.infer<typeof AgentDefinitionSchema>): Promise<z.infer<typeof AgentDefinitionSchema>> {
+  async function definition(path: string, content: string, source: 'workspace' | 'cloud' | 'builtin', catalog: SessionCatalog, previous?: z.infer<typeof AgentDefinitionSchema>): Promise<z.infer<typeof AgentDefinitionSchema>> {
     const parsed = parseCloudAgentDefinition(path, content);
+    const revision = previous?.content === content ? previous.revision : Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content))), value => value.toString(16).padStart(2, '0')).join('');
+    const chain = definitionRoleChain(parsed.modelSelectors);
+    // A role chain resolves at spawn against the profile, so an unset role is not an error; show the first one set here.
+    if (chain) {
+      const shown = chain.map(role => catalog.roles.find(value => value.id === role)).find(value => value !== undefined);
+      return { name: parsed.name, description: parsed.description, source, path, editable: source !== 'builtin', content, revision, modelSelectors: parsed.modelSelectors, role: chain[0]!, provider: shown?.provider ?? null, model: shown?.model ?? null, thinking: parsed.thinking ?? null, selection: 'definition', tools: parsed.tools, spawns: parsed.spawns };
+    }
     const selections = parsed.modelSelectors.map(value => {
       const { selector, thinking } = parseModelRoleSelector(value);
       const alias = selector.startsWith('pi/') ? selector.slice(3) : selector.startsWith('@') ? selector.slice(1) : undefined;
@@ -109,14 +125,14 @@ export function createSessionControls(services: SessionControlServices) {
     });
     const selected = selections.find(value => value.model !== undefined);
     if (parsed.modelSelectors.length && !selected) throw new Error(`Agent model selector for ${path} is not admitted by the inference profile`);
-    const revision = previous?.content === content ? previous.revision : Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content))), value => value.toString(16).padStart(2, '0')).join('');
-    return { name: parsed.name, description: parsed.description, source, path, editable: true, content, revision, modelSelectors: parsed.modelSelectors, role: selected?.role?.id ?? null, provider: selected?.model?.provider ?? null, model: selected?.model?.id ?? null, thinking: parsed.thinking ?? selected?.thinking ?? selected?.role?.thinking ?? null, selection: parsed.modelSelectors.length ? 'definition' : 'settings', tools: parsed.tools, spawns: parsed.spawns };
+    return { name: parsed.name, description: parsed.description, source, path, editable: source !== 'builtin', content, revision, modelSelectors: parsed.modelSelectors, role: selected?.role?.id ?? null, provider: selected?.model?.provider ?? null, model: selected?.model?.id ?? null, thinking: parsed.thinking ?? selected?.thinking ?? selected?.role?.thinking ?? null, selection: parsed.modelSelectors.length ? 'definition' : 'settings', tools: parsed.tools, spawns: parsed.spawns };
   }
   async function loadDefinitions(target: Conversation) {
-    if (!services.loadAgentDefinitions || (await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child) return;
-    const [files, catalog, state] = await Promise.all([services.loadAgentDefinitions(), services.catalog(), harness.snapshot(SessionControlsDoc, target.id, ctx)]);
+    if ((await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child) return;
+    const [workspaceFiles, catalog, state] = await Promise.all([services.loadAgentDefinitions?.() ?? [], services.catalog(), harness.snapshot(SessionControlsDoc, target.id, ctx)]);
+    const files = [...BUILT_IN_AGENT_DEFINITIONS.map(file => ({ ...file, source: 'builtin' as const })), ...workspaceFiles.map(file => ({ ...file, source: 'workspace' as const }))];
     const previous = state?.definitions ?? [];
-    const results = await Promise.allSettled(files.map(file => definition(file.path, file.content, 'workspace', catalog, previous.find(item => item.path === file.path))));
+    const results = await Promise.allSettled(files.map(file => definition(file.path, file.content, file.source, catalog, previous.find(item => item.path === file.path))));
     await target.commit(async tx => {
       const draft = await tx.doc(SessionControlsDoc, target.id);
       const overrides = draft.definitions.filter(item => item.source === 'cloud');

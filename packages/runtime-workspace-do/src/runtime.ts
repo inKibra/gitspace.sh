@@ -39,7 +39,8 @@ export type WorkspaceRuntime = {
   /** Indexed search of the canonical snapshot; needs no machine. */
   codeSearch: CodeSearchIndex;
   snapshot(): Promise<RuntimeSnapshot>;
-  browserConversation(conversationId: string): Promise<{ id: ConversationId; root: boolean }>;
+  /** `tools` is a subagent's own tool list; null for the main conversation. */
+  browserConversation(conversationId: string): Promise<{ id: ConversationId; root: boolean; tools: readonly string[] | null }>;
   submit(input: RuntimeSubmitInput, deviceId?: string): Promise<RuntimeAccepted>;
   saveDraft(input: WorkspaceDraftSave, deviceId: string): Promise<WorkspaceDraftSaveResult>;
   cancel(input: RuntimeCancelInput): Promise<RuntimeAccepted>;
@@ -133,7 +134,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   };
   const history = createSessionHistory(options.storage, storage);
   const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference });
-  const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
+  const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, refreshDefinitions: controls.loadDefinitions });
   const cron = createCronRuntime({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { await options.schedule(Date.now() + 1000); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
   const drafts = new WorkspaceDraftStore({
@@ -324,7 +325,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       const target = await conversation(conversationId);
       const record = await storage.conversation(target.id, BACKGROUND_CONTEXT);
       if (!record) throw new Error('Browser conversation no longer exists');
-      return { id: record.id, root: record.id === runtime.root.id && record.owner === undefined };
+      const root = record.id === runtime.root.id && record.owner === undefined;
+      return { id: record.id, root, tools: root ? null : (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child?.tools ?? [] };
     },
     async manage(input) {
       const fingerprint = JSON.stringify([input.tool, input.args]);

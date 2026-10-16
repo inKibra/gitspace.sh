@@ -10,7 +10,7 @@ import { createBackgroundAgentTask } from './background-agents.js';
 import { admitRuntimeCodemodeTool, createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
 import { ruleGenerationRegistry } from './rule-generations.js';
 import { createJobTask, createProcessExitTask, type JobServices } from './jobs.js';
-import { RuntimeBrowserArgumentsSchema, RuntimeChildAgentsArgumentsSchema, isSubagentReadonlyTool, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserArgumentsSchema, RuntimeChildAgentsArgumentsSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
 import { z } from 'zod';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
@@ -133,8 +133,8 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
     if (!conversation) throw new Error('Conversation not found');
     const child = (await harness.snapshot(AgentDefinitionContextDoc, conversationId, BACKGROUND_CONTEXT))?.child;
-    // Definitions and the read-only ceiling name the browser by its dispatch name, not the model alias.
-    const selected = child ? modelTools(model).filter(tool => { const name = tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name; return isSubagentReadonlyTool(name) && child.tools.includes(name); }) : modelTools(model);
+    // Definitions name the browser by its dispatch name, not the model alias.
+    const selected = child ? modelTools(model).filter(tool => child.tools.includes(tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name)) : modelTools(model);
     await conversation.configure({ model: { provider: model.provider, modelId: model.modelId }, tools: selected, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
   };
   const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, async wake() { await options.operations.wakeAt(Date.now() + 1000); harness.resume(); } });

@@ -131,7 +131,7 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
       const child = await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT);
       const denied = await services.tools.invoke({ tool: 'codemode', args: { code: 'return 1' }, conversationId: String(child), taskId: 'subagent', requestId: 'subagent', attemptId: 'subagent', replay: 'unsafe' });
       expect(denied.status).toBe('failed');
-      expect(text(denied)).toContain('Subagent');
+      expect(text(denied)).toContain('subagent cannot use codemode');
     } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
