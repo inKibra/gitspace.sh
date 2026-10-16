@@ -120,9 +120,25 @@ Rows change through small messages from the extension and the runtime; the UI re
 - whole-browser cookie and storage commands stay blocked (`Network.getAllCookies`, `Storage.getCookies`, `Storage.setCookies`, cache clears), as Playwriter does even for trusted agents;
 - target discovery returns only the grant's tabs.
 
-### 6.3 Browsing agent
+### 6.3 Scripts: `browser.run`
 
-`use(task)` runs a shipped browsing subagent (a leaf like the Tester, on the Fast or Taste role) that works through §6.1 and returns a result. AI Constructs, which can't drive a browser themselves, use this.
+`browser.run({ session, script })` runs Playwright code against the grant's CDP endpoint, as Playwriter's `execute` does. Most of the speed comes from fewer model turns: one call fills a form, loops over rows, waits on the network. Sessions keep a `state` object between calls.
+
+| Browser | Script runs in |
+|---|---|
+| Cloud Chrome | The session's `BrowserSessionDO`, next to Browser Run (Cloudflare's Workers build of Playwright; **[unverified]** against our endpoint) |
+| Your Chrome, GitSpace machine on the same computer | That machine (Node Playwright), no relay detour |
+| Your Chrome, otherwise | The session object, through the relay (each step is a network round trip) |
+
+Enforcement is in the relay's CDP proxy, never in reading the script: grant tabs and origins only, whole-browser cookie and cache commands blocked. Recorded skills replay through `browser.run`. `observe`/`act` stays the default for unknown pages and judgment calls.
+
+### 6.4 Browsing tasks from Constructs
+
+A Construct never drives a browser. It gives GitSpace an instruction: `use(task, outputSchema?)` sends it to a GitSpace agent (`runtime.submit`) and returns its reply (`runtime.watch`), validated against the schema when one is given.
+
+- **Layout:** one browsing project per Construct; one workspace per task, archived when the task ends. The project holds the Construct's instructions, skills (recordings accumulate there) and credentials (`agent/<construct>` realm); each workspace has its own conversation, cloud browser context and history.
+- **Browser:** the Construct's cloud Chrome profile by default, never a person's Chrome. Takeover requests go to the Construct's operator.
+- **Prerequisite:** creating a workspace must be fast and reliable. On 2026-10-16 the first message in each new workspace timed out (three of three).
 
 ## 7. People: remote view and remote control
 
@@ -137,8 +153,8 @@ Any session can be watched and driven from any signed-in GitSpace device: anothe
 
 ### 7.2 Lease and takeover
 
-- Taking control moves the lease to you and **mechanically** stops agent input (`browser.act`, Playwright input methods). The agent sees `lease_held_by_user` and waits.
-- Handing back invalidates old observation IDs; the agent must `observe` again.
+- Taking control moves the lease to you and the relay holds back **all** of the agent's CDP traffic for that tab, not only input: a script can click through `Runtime.evaluate`, and Playwright runs most of its work through `evaluate`. An `act` call waits; a running `browser.run` script ends at its next command.
+- Handing back invalidates old observation IDs; the agent must `observe` again, and decides whether to rerun an interrupted script.
 - Takeover is also available without an agent asking. Lease changes are journal entries.
 
 ### 7.3 Presence
@@ -153,13 +169,18 @@ Modeled on Playwriter's remote control.
 - A share is one session (a tab, or a cloud page) with capabilities chosen at creation: `view`, `control` (takes the lease), `comment`. An expiry is required.
 - Created from the extension toolbar or the UI; revocable from either. The link dies when revoked, expired, or when the tab closes or leaves the workspace group.
 - Recipients without a GitSpace account get the viewer only; no credentials, no Playwright endpoint, no other tabs.
+- With `comment`, people on the share comment on the same live tab the agent is using (§9); their comments land in the workspace under the name they give.
 - Every redemption and lease change is audited.
 
 ## 9. Comments on pages
 
 - A comment mode in the extension's in-page toolbar: point at an element or draw a region, write a comment, reply in a thread.
 - Each comment stores enough to find its target again: URL, selector candidates, accessible role and name, visible text, bounds, a screenshot crop, page revision. On GitSpace previews it also stores workspace, commit and, later, React component and source location.
-- Stored in the workspace (`gitspace.page-comments`); shown as an overlay when the page is open in a workspace group or a share.
+- **Comments belong to the workspace** (`gitspace.page-comments`), on any site. A tab outside every workspace group has no workspace, so comment mode asks which workspace to file into.
+- Shown as an overlay in your Chrome and in the session viewer, so people on a share and the agent see the same thread on the same live tab.
+- From the viewer (a phone, a share), a tap on the page image is resolved on the live tab (`DOM.getNodeForLocation`) into the same anchor a comment made in Chrome gets.
+- Anchors on other sites rely on quoted text plus context (as Hypothesis does), with selectors and bounds as fallbacks; a comment whose target disappeared is flagged, not dropped.
+- Screenshot crops can show private, logged-in content: they stay as private as the workspace and appear in a share only when that share includes `comment`.
 - Agents list, read and resolve comments with a tool, so "fix what I commented" works end to end. Resolving records the commit that fixed it.
 
 ## 10. Identity
@@ -229,7 +250,7 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 
 | ID | Milestone | Exit criteria |
 |---|---|---|
-| **B0** | Grants, groups, Playwright, mesh fixes | Stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.observe`/`act` with `aria-ref` snapshots and freshness; per-grant CDP endpoint used by Playwright from a machine; the Tester uses your Chrome through a grant; cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
+| **B0** | Grants, groups, Playwright, mesh fixes | Stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.observe`/`act` with `aria-ref` snapshots and freshness; `browser.run` with session state; per-grant CDP endpoint used by Playwright from a machine; the Tester uses your Chrome through a grant; cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
 | **B1** | Remote view, control, takeover, share links | Session viewer on desktop and phone; lease and mechanical suspension; `browser.ask_takeover` deep link; share links with view/control/comment, fragment secret, revocation and audit. Golden test: an agent hits a sign-in, you take over from your phone, sign in, hand back, the agent finishes. |
 | **B2** | Comments | Comment mode, threads, overlays on workspace and shared sessions; agent tool to list and resolve; preview comments carry workspace and commit. |
 | **B3** | Skill recording | Recorder, timeline and frames; agent writes `SKILL.md` plus replay script and replays it successfully; recordings in `drive://`. |
@@ -249,11 +270,10 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 ## 16. Open questions
 
 1. Does the session viewer need pointer presence for several people at once in V1, or one controller plus observers?
-2. Should comments work on any site from the start, or GitSpace previews first?
-3. Is the 20-minute recording cap right, and where do recordings count against storage?
-4. Should a share's `control` capability ever allow filling a credential (it does not in this draft)?
-5. Machine-hosted headless Chromium: which milestone, now that the cloud browser can reach services directly?
-6. When does Aperture's API become public for Zerbly, and does the relay move to its own Worker then?
+2. Is the 20-minute recording cap right, and where do recordings count against storage?
+3. Should a share's `control` capability ever allow filling a credential (it does not in this draft)?
+4. Machine-hosted headless Chromium: which milestone, now that the cloud browser can reach services directly?
+5. When does Aperture's API become public for Zerbly, and does the relay move to its own Worker then?
 
 ## 17. References
 
