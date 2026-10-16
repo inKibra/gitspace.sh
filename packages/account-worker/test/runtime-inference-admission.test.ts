@@ -36,7 +36,7 @@ const stamp = '2026-01-01T00:00:00.000Z';
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('durable inference selection intent', () => {
-  it('resolves new admissions with current revisions while retaining admitted models and fallback notices across recovery', async () => {
+  it('resolves new admissions with current revisions, refuses a removed model, and retains admitted models across recovery', async () => {
     let now = Date.now();
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     const bodies = new Map<string, unknown>();
@@ -75,12 +75,9 @@ describe('durable inference selection intent', () => {
     expect(next).toEqual({ provider: 'openai', modelId: second.id, thinking: 'medium' });
     expect(await runtime.admitInference({ conversationId: 'child', requestId: 'child', parentConversationId: 'conversation' })).toEqual(admitted);
     expect(await runtime.admitInference({ conversationId: 'conversation', requestId: 'first' })).toEqual(admitted);
-    const fallback = await runtime.admitInference({ conversationId: 'conversation', requestId: 'removed', selection: { kind: 'explicit', provider: 'openai', modelId: 'removed' } });
-    expect(fallback).toEqual({ provider: 'openai', modelId: second.id, thinking: 'high' });
+    await expect(runtime.admitInference({ conversationId: 'conversation', requestId: 'removed', selection: { kind: 'explicit', provider: 'openai', modelId: 'removed' } })).rejects.toThrow('openai/removed is not available');
     const recovered = await createCloudRuntimeInference(state, environment, identity);
     expect(await recovered.admitInference({ conversationId: 'conversation', requestId: 'first' })).toEqual(admitted);
-    const notices = await recovered.bindInferenceConversation('conversation', new AbortController().signal, [], ['removed'], { fastMode: false });
-    expect(notices).toEqual([{ requestId: 'removed', message: expect.stringContaining('openai/removed') }]);
     const recoveredCatalog = await recovered.session.catalog();
     expect('inference' in recoveredCatalog ? recoveredCatalog.inference?.profileRevision : undefined).toBe(2);
     expect(fetcher).toHaveBeenCalledTimes(1);

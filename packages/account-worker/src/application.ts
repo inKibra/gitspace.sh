@@ -60,6 +60,7 @@ import {
   type CredentialAuthorityGrant,
   type DeviceCapability,
   type VerifiedDevice,
+  runtimeSettingValueSchema,
 } from '@gitspace/protocol';
 import {
   DEFAULT_INFERENCE_PROFILE_ID, inferenceCreateInputSchema, inferenceUpdateInputSchema,
@@ -68,6 +69,7 @@ import {
 } from '@gitspace/protocol/inference';
 import { LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, type LifecycleState } from '@gitspace/protocol-environment';
 import { LiveChanges } from './live-changes.js';
+import { migratedRoleSettings } from './inference-role-migration.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import {
@@ -504,6 +506,13 @@ export class CredentialVaultDO extends DurableObject<Env> {
         const profile = z.looseObject({ settings: z.record(z.string(), z.json()) }).parse(JSON.parse(row.profile_json));
         profile.settings = Object.fromEntries(Object.entries(profile.settings).filter(([path]) => path !== 'approval' && !path.startsWith('approval.')));
         this.ctx.storage.sql.exec('UPDATE inference_profiles SET profile_json = ? WHERE profile_id = ?', JSON.stringify(profile), row.profile_id);
+      }
+      // OMP-era settings no profile reads were removed and Thinking/Fast became Deep/Fast; profiles are rewritten once.
+      for (const row of this.ctx.storage.sql.exec<InferenceProfileRow>('SELECT * FROM inference_profiles').toArray()) {
+        const profile = z.looseObject({ revision: z.number(), settings: z.record(z.string(), runtimeSettingValueSchema) }).parse(JSON.parse(row.profile_json));
+        const settings = migratedRoleSettings(profile.settings);
+        if (JSON.stringify(settings) === JSON.stringify(profile.settings)) continue;
+        this.ctx.storage.sql.exec('UPDATE inference_profiles SET profile_json = ? WHERE profile_id = ?', JSON.stringify({ ...profile, settings, revision: profile.revision + 1, updatedAt: new Date().toISOString() }), row.profile_id);
       }
     });
   }

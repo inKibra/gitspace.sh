@@ -57,7 +57,6 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },
       bindInferenceConversation: async (conversationId, _signal, _submissions, requests) => {
         for (const id of requests) check(await ctx.storage.get(`admission:${id}`) === conversationId, 'Missing durable admission');
-        return requests.filter(id => id.startsWith('fallback-')).map(requestId => ({ requestId, message: 'Selected model fixture/removed disappeared; using fixture/fixture.' }));
       },
       session: { catalog: async () => ({ inference: { profileId: 'fixture-profile', profileName: 'Fixture', profileRevision: 1, assignmentRevision: 1 }, models: [{ provider: 'fixture', id: 'fixture', name: 'Smoke', contextWindow: 8192 }], roles: [{ id: 'scout', label: 'Scout', provider: 'fixture', model: 'fixture', thinking: null, current: false }] }), reload: unsupported },
       qa: { list: async () => [], act: unsupported },
@@ -123,11 +122,6 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       }
       if (url.pathname === '/submit') {
         await runtime.submit({ ...identity, requestId: url.searchParams.get('requestId') ?? crypto.randomUUID(), text: url.searchParams.get('text') ?? '', conversationId: url.searchParams.get('conversationId') ?? undefined, ...(url.searchParams.has('draftRevision') ? { draftRevision: Number(url.searchParams.get('draftRevision')) } : {}), draftText: url.searchParams.get('draftText') ?? undefined }, 'fixture-browser');
-      }
-      if (url.pathname === '/fallback-notices') {
-        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
-        const entries = await root.entries({}, 100, undefined, BACKGROUND_CONTEXT);
-        return Response.json(entries.items.filter(entry => entry.kind === 'gitspace.model-fallback').map(entry => entry.data));
       }
       if (url.pathname === '/burst') {
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);

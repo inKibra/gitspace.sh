@@ -5,7 +5,10 @@ import { RuntimeSubagentRecordSchema } from '@gitspace/protocol-runtime/session-
 
 export const DEFAULT_INFERENCE_PROFILE_ID = 'default';
 export const INFERENCE_PROFILE_VERSION = 1 as const;
-export type InferenceSettingSection = 'Models' | 'Agents' | 'Providers';
+export type InferenceSettingSection = 'Models' | 'Providers';
+/** Roles every profile offers; a profile may add its own. An unset role resolves to Default. */
+export const BUILT_IN_MODEL_ROLES = ['default', 'deep', 'fast', 'taste'] as const;
+export const MODEL_ROLE_LABELS: Readonly<Record<string, string>> = { default: 'Default', deep: 'Deep', fast: 'Fast', taste: 'Taste' };
 export const modelRoleThinkingSchema = RuntimeSubagentRecordSchema.shape.thinking;
 export type ModelRoleSelector = { selector: string; thinking: z.infer<typeof modelRoleThinkingSchema> };
 /** Only a recognized terminal effort is syntax; provider model IDs may contain literal colons. */
@@ -25,23 +28,17 @@ const credentialFields: Record<string, true> = {
   oauth: true, auth: true, cookie: true, authheaders: true,
 };
 const namedEntryMaps: Record<string, true> = {
-  modelRoles: true, modelTags: true, 'task.agentModelOverrides': true,
-  'task.agentPrewalk': true, 'task.agentAdvisor': true, agents: true,
-  'providers.models': true, 'providers.maxInFlightRequests': true,
+  modelRoles: true, 'providers.models': true, 'providers.maxInFlightRequests': true,
 };
 
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
-  modelRoles: 'Models', cycleOrder: 'Models', modelTags: 'Models', enabledModels: 'Models',
-  modelProviderOrder: 'Models', modelRoleStorage: 'Models',
-  providers: 'Providers', agents: 'Agents',
+  modelRoles: 'Models', enabledModels: 'Models', providers: 'Providers',
 };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
   const dot = path.indexOf('.');
   const root = dot < 0 ? path : path.slice(0, dot);
-  if (Object.hasOwn(inferenceRootSections, root)) return inferenceRootSections[root]!;
-  if (path.startsWith('task.agent')) return 'Agents';
-  return null;
+  return Object.hasOwn(inferenceRootSections, root) ? inferenceRootSections[root]! : null;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -131,10 +128,7 @@ export function applyInferenceSettings(config: Record<string, unknown>, settings
 /** Profile editor metadata is independent of any machine-installed runtime schema. */
 export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'modelRoles', tab: 'Models', label: 'Model roles', kind: 'record', value: {}, defaultJson: '{}', credential: false },
-  { path: 'cycleOrder', tab: 'Models', label: 'Quick cycle', kind: 'array', value: [], defaultJson: '[]', credential: false },
-  { path: 'modelTags', tab: 'Models', label: 'Model tags', kind: 'record', value: {}, defaultJson: '{}', credential: false },
   { path: 'enabledModels', tab: 'Models', label: 'Enabled models', kind: 'array', value: [], defaultJson: '[]', credential: false },
-  { path: 'agents', tab: 'Agents', label: 'Agent definitions', kind: 'record', value: {}, defaultJson: '{}', credential: false },
   { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },
 ];
 

@@ -1,6 +1,6 @@
 import { createProvider, isModelType, type Api, type AnyModel, type Model, type Models, type Provider, type ProviderStreams } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
-import { applyInferenceSettings, inferenceSettingsSchema, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, applyInferenceSettings, inferenceSettingsSchema, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { z } from 'zod';
 import { applyProviderCatalog } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
@@ -217,25 +217,21 @@ export async function resolveAvailableProfileModel(settings: InferenceProfile['s
   return resolveProfileModel(settings, snapshot, role);
 }
 
-/** Selection is intent; only an admission turns it into an immutable model identity. */
-export async function resolveModelSelection(settings: InferenceProfile['settings'], models: Models, selection: ModelSelectionIntent): Promise<{ model: Model<Api>; thinking?: ModelRoleSelector['thinking']; notice?: string }> {
+/** Selection is intent; only an admission turns it into an immutable model identity. A role chain takes its first
+ * role the profile sets (an unset chain ends at Default); a set role whose model is unavailable fails, never substitutes. */
+export async function resolveModelSelection(settings: InferenceProfile['settings'], models: Models, selection: ModelSelectionIntent): Promise<ResolvedProfileModel> {
   const available = await models.getAvailable();
-  const snapshot: Models = { ...models, getModels: provider => available.filter(model => provider === undefined || model.provider === provider) };
   if (selection.kind === 'explicit') {
     const model = available.find(model => model.provider === selection.provider && model.id === selection.modelId);
-    if (model) return { model };
-  } else {
-    const role = selection.kind === 'role' ? selection.role : 'default';
-    try {
-      if (selection.kind === 'role' && !profileModelRoles(settings).includes(role)) throw new Error(`Inference role ${role} was removed`);
-      return resolveProfileModel(settings, snapshot, role);
-    } catch (error) { if (!available.length) throw error; }
+    if (!model) throw new Error(`Model ${selection.provider}/${selection.modelId} is not available in this inference profile; choose another model.`);
+    return { model, thinking: null };
   }
-  let selected: ResolvedProfileModel;
-  try { selected = resolveProfileModel(settings, snapshot); }
-  catch { if (!available[0]) throw new Error('Inference profile has no available model'); selected = { model: available[0], thinking: null }; }
-  const requested = selection.kind === 'explicit' ? `${selection.provider}/${selection.modelId}` : `${selection.kind === 'role' ? selection.role : 'default'} role`;
-  return { ...selected, notice: `Model selection ${requested} is no longer available. Using ${selected.model.provider}/${selected.model.id} for this run.` };
+  const configured = profileModelRoles(settings);
+  const chain = selection.kind === 'role' ? [selection.role, ...(selection.fallback ?? [])] : ['default'];
+  const unknown = chain.find(role => !configured.includes(role) && !BUILT_IN_MODEL_ROLES.some(builtIn => builtIn === role));
+  if (unknown) throw new Error(`Inference role ${unknown} is not defined in this profile`);
+  const snapshot: Models = { ...models, getModels: provider => available.filter(model => provider === undefined || model.provider === provider) };
+  return resolveProfileModel(settings, snapshot, chain.find(role => configured.includes(role)) ?? 'default');
 }
 
 export function profileModelRoles(settings: InferenceProfile['settings']): string[] {

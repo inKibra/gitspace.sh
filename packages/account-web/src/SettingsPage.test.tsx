@@ -22,12 +22,11 @@ it('recognizes Bedrock model revisions and separates only supported effort suffi
 
 it('keeps inference-owned runtime controls out of shared Advanced', () => {
   const item = (path: string, label: string): RuntimeSettingView => ({ path, label, tab: 'runtime', description: null, kind: 'boolean', valueJson: 'true', options: [], credential: false });
-  const html = renderToStaticMarkup(<RuntimeSettingsEditor sections={['Advanced']} tab="Advanced" runtimeGeneration={1} saving={false} onSetRuntimeSetting={async () => undefined} runtimeSettings={[item('agents.enabled', 'Profile agent control'), item('task.agentFoo', 'Profile task control'), item('providers.custom', 'Profile provider control'), item('modelTags', 'Profile model tags'), item('compaction.enabled', 'Automatic compaction')]} />);
+  const html = renderToStaticMarkup(<RuntimeSettingsEditor sections={['Advanced']} tab="Advanced" runtimeGeneration={1} saving={false} onSetRuntimeSetting={async () => undefined} runtimeSettings={[item('modelRoles', 'Profile model roles'), item('enabledModels', 'Profile enabled models'), item('providers.custom', 'Profile provider control'), item('compaction.enabled', 'Automatic compaction')]} />);
   expect(html).toContain('Automatic compaction');
-  expect(html).not.toContain('Profile agent control');
-  expect(html).not.toContain('Profile task control');
+  expect(html).not.toContain('Profile model roles');
+  expect(html).not.toContain('Profile enabled models');
   expect(html).not.toContain('Profile provider control');
-  expect(html).not.toContain('Profile model tags');
 });
 
 describe('SourceSettings', () => {

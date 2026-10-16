@@ -1,4 +1,4 @@
-import { Harness, createRegistry, defineDoc, defineExtension, hook, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessOptions, type ModelRef, type Storage, type ConversationId, type Cursor } from '@earendil-works/pi-durable';
+import { Harness, createRegistry, defineExtension, hook, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessOptions, type ModelRef, type Storage, type ConversationId, type Cursor } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord';
 import { BROWSER_TOOL_NAME, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
@@ -18,7 +18,6 @@ import { bindCronGeneration } from './cron.js';
 import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls';
 import type { ModelRoleSelector } from '@gitspace/protocol/inference';
 export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking'] };
-const ModelNoticesDoc = defineDoc<{ delivered: string[] }>({ kind: 'gitspace.model-notices', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ delivered: [] }) });
 export type RuntimeHarnessOptions = {
   identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
   storage: Storage;
@@ -36,7 +35,7 @@ export type RuntimeHarnessOptions = {
   editTool(model: ModelRef): 'edit' | 'apply_patch';
   onReport(error: unknown): void;
   admitInference(input: { conversationId: string; requestId: string; parentConversationId?: string; selection?: ModelSelectionIntent }): Promise<InferenceModelAdmission>;
-  bindInferenceConversation(conversationId: string, signal: AbortSignal, submissionIds: readonly string[], requestIds: readonly string[], flags: { fastMode: boolean }): Promise<void | Array<{ requestId: string; message: string }>>;
+  bindInferenceConversation(conversationId: string, signal: AbortSignal, submissionIds: readonly string[], requestIds: readonly string[], flags: { fastMode: boolean }): Promise<void>;
 };
 export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const lifecycleReady = Promise.withResolvers<ConversationLifecycle>();
@@ -79,14 +78,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     if (ids.some(id => !requests.has(String(id)))) throw new Error('Generation input lacks durable inference admission request identity');
     if (!context.abortSignal) throw new Error('Generation hook requires an invocation abort signal');
     const controls = await runtime.snapshot(SessionControlsDoc, runtime.conversationId, context);
-    const notices = await options.bindInferenceConversation(String(runtime.conversationId), context.abortSignal, ids.map(String), ids.flatMap(id => { const request = requests.get(String(id)); return request === undefined ? [] : [request]; }), { fastMode: controls?.fastMode ?? false });
-    if (notices?.length) await harness.commit(async tx => {
-      const delivered = await tx.doc(ModelNoticesDoc, runtime.conversationId);
-      for (const notice of notices) if (!delivered.delivered.includes(notice.requestId)) {
-        await tx.appendEntry(runtime.conversationId, { kind: 'gitspace.model-fallback', data: notice });
-        delivered.delivered.push(notice.requestId);
-      }
-    }, context);
+    await options.bindInferenceConversation(String(runtime.conversationId), context.abortSignal, ids.map(String), ids.flatMap(id => { const request = requests.get(String(id)); return request === undefined ? [] : [request]; }), { fastMode: controls?.fastMode ?? false });
     // Anthropic rejects an error tool result with no content; older entries recorded failures as empty or blank text.
     const empty = (message: (typeof input.messages)[number]) => message.role === 'toolResult' && message.isError && !message.content.some(item => item.type !== 'text' || item.text.trim() !== '');
     if (!input.messages.some(empty)) return undefined;

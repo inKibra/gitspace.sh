@@ -1,9 +1,9 @@
 import type { ClassifierQuestion, Models, ModelTypeMap, JsonObject } from '@earendil-works/pi-ai';
-import { applyInferenceSettings, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, applyInferenceSettings, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { Check } from 'typebox/schema';
 import { z } from 'zod';
-import { resolveAvailableProfileModel, type ResolvedProfileModel } from './admission.js';
+import { profileModelRoles, resolveAvailableProfileModel, resolveModelSelection, type ResolvedProfileModel } from './admission.js';
 
 export type RuntimeJson = z.infer<typeof RuntimeJsonSchema>;
 const jsonObject = z.record(z.string(), RuntimeJsonSchema);
@@ -48,7 +48,8 @@ function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: rea
 }
 
 async function chatModel(models: Models, settings: InferenceProfile['settings'], selection: string | undefined): Promise<ResolvedProfileModel> {
-  if (selection === undefined || ['default', 'smol', 'slow'].includes(selection)) return resolveAvailableProfileModel(settings, models, selection ?? 'default');
+  if (selection === undefined) return resolveAvailableProfileModel(settings, models);
+  if (BUILT_IN_MODEL_ROLES.some(role => role === selection) || profileModelRoles(settings).includes(selection)) return resolveModelSelection(settings, models, { kind: 'role', role: selection });
   const model = chooseModel(await models.getAvailable(), settings, selection, 'default');
   if (!model) throw new Error(`No authenticated admitted chat model matches ${selection}`);
   return model;
@@ -138,7 +139,7 @@ export async function runProfileModelHelper(models: Models, operation: 'completi
   }
   // A registry without an applicable classifier still has a real cloud inference
   // path: the admitted chat model must return the same checked answer schema.
-  const model = await chatModel(models, settings, input.model ?? 'smol');
+  const model = await chatModel(models, settings, input.model ?? 'fast');
   const text = await completeText(models, model, JSON.stringify({ state: input.state, questions: input.questions }), `Evaluate each question independently against the supplied state. Return only JSON matching this JSON Schema:\n${JSON.stringify(schema)}\nProbabilities for choice and score questions must sum to one. Score is the probability-weighted zero-based criterion index. Confidence is your confidence in the judgment.`, signal);
   return validateJudgments(parseStructured(text, schema), input.questions);
 }

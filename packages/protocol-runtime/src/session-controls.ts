@@ -9,7 +9,8 @@ export { SessionUsageReportSchema, UsageTotalsSchema, type SessionUsageReport, t
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('default') }),
-  z.object({ kind: z.literal('role'), role: z.string().min(1) }),
+  /** `fallback` roles are tried in order when `role` is not set in the profile; an unset chain ends at Default. */
+  z.object({ kind: z.literal('role'), role: z.string().min(1), fallback: z.array(z.string().min(1)).optional() }),
   z.object({ kind: z.literal('explicit'), provider: z.string().min(1), modelId: z.string().min(1) }),
 ]);
 export type ModelSelectionIntent = z.infer<typeof ModelSelectionIntentSchema>;

@@ -108,7 +108,7 @@ try {
   // Both public answer surfaces must restart a persisted suspended Pi task by themselves.
   for (const surface of ['session', 'answer'] as const) {
     const before = assistantReplies(RuntimeSnapshotSchema.parse(await request('/')));
-    await request(`/submit?text=ask%20for%20a%20color&requestId=fallback-${surface}`);
+    await request(`/submit?text=ask%20for%20a%20color&requestId=ask-${surface}`);
     const pending = await until(snapshot => snapshot.questions.some(question => question.kind === 'ask' && question.answer === null));
     const question = pending.questions.find(item => item.kind === 'ask' && item.answer === null)!;
     assert.equal(summary(pending).primaryColor, 'blue', 'A question for the user is not blue');
@@ -120,10 +120,6 @@ try {
     else await request('/answer', { ...identity, questionId: question.id, answer: 'green' });
     await until(snapshot => assistantReplies(snapshot) > before && snapshot.questions.find(item => item.id === question.id)?.answer !== null);
     assert.equal((await session({ type: 'control' })).control.pendingAsk, null);
-    const notices = z.array(z.object({ requestId: z.string(), message: z.string() })).parse(await request('/fallback-notices'));
-    const notice = notices.filter(item => item.requestId === `fallback-${surface}`);
-    assert.equal(notice.length, 1, 'Model fallback notice must survive cold tool continuation without duplication');
-    assert(notice[0]!.message.includes('fixture/removed'));
   }
 
   for (const answer of [false, true]) {

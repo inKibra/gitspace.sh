@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
-import { inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, MODEL_ROLE_LABELS, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
@@ -57,7 +57,7 @@ import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBr
 
 // Onboarding embeds the same Default profile surface used by Inference.
 type Section = 'profile' | 'runtime' | 'runtime-providers' | 'git' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
-const SETTINGS_TABS = ['Models', 'Agents', 'Providers', 'Advanced'] as const;
+const SETTINGS_TABS = ['Models', 'Providers', 'Advanced'] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 export interface SettingsMachineView { id: string; label: string; state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error'; kind: 'physical' | 'sandbox'; provider: 'physical' | 'cloudflare-sandbox'; notes: string; desiredState: 'online' | 'offline' | 'removed'; lifecycleRevision: number; operationId: string | null; error: string | null; agentsMayAttach?: boolean }
 export interface RuntimeSettingView {
@@ -223,7 +223,7 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
   return <span className="flex items-center gap-2">
     {modelKey && !known && modelsReady ? <span role="alert" className="max-w-64 text-caption text-destructive">This model is unavailable in this profile. Connect its provider or choose an available model.</span> : null}
     <ModelCombobox options={options} value={modelKey} disabled={disabled || !modelsReady} clearable ariaLabel={`Model for ${label}`}
-      placeholder={role === 'task' ? 'Current session model' : 'Not set'}
+      placeholder={role === 'default' ? 'Not set' : 'Uses Default'}
       onValueChange={(next) => onChange(next ? (thinking === 'auto' ? next : `${next}:${thinking}`) : '')} />
     <Select size="compact" value={thinking} disabled={disabled || !modelKey} onValueChange={(next) => onChange(next === 'auto' ? modelKey : `${modelKey}:${next}`)}>
       <SelectTrigger variant="borderless" aria-label={`Thinking for ${label}`} />
@@ -233,48 +233,39 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
 }
 export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], modelsReady = false, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
   const rolesItem = runtimeSettings.find((item) => item.path === 'modelRoles');
-  const cycleItem = runtimeSettings.find((item) => item.path === 'cycleOrder');
-  const overridesItem = runtimeSettings.find((item) => item.path === 'task.agentModelOverrides');
   const roles = rolesItem ? parseValue(rolesItem) as Record<string, string> : {};
-  const cycle = cycleItem ? parseValue(cycleItem) as string[] : [];
-  const overrides = overridesItem ? parseValue(overridesItem) as Record<string, string | string[]> : {};
-  const roleLabels: Readonly<Record<string, string>> = { default: 'Default', task: 'Task', slow: 'Thinking', smol: 'Fast', plan: 'Architect', designer: 'Designer', vision: 'Vision', commit: 'Commit', tiny: 'Tiny', advisor: 'Advisor' };
-  const roleIds = [...new Set([...Object.keys(roleLabels), ...Object.keys(roles)])];
-  const agentDefaults: Readonly<Record<string, string>> = { scout: 'smol', reviewer: 'slow', 'security-reviewer': 'slow', librarian: 'slow', task: 'task', designer: 'designer', sonic: 'tiny' };
-  const agentNames = [...new Set([...Object.keys(agentDefaults), ...Object.keys(overrides)])];
+  // A role added here shows once named and is stored when a model is chosen for it.
+  const [addedRoles, setAddedRoles] = useState<readonly string[]>([]);
+  const [newRole, setNewRole] = useState('');
+  const roleIds = [...new Set([...BUILT_IN_MODEL_ROLES, ...Object.keys(roles), ...addedRoles])];
+  const newRoleName = newRole.trim().toLowerCase();
+  const newRoleError = !newRoleName ? null : !/^[a-z][a-z0-9-]{0,39}$/u.test(newRoleName) ? 'Use lowercase letters, digits and dashes.' : roleIds.includes(newRoleName) ? 'That role already exists.' : null;
   const advanced = runtimeSettings.filter((item) => inferenceSettingSection(item.path) === null && !item.credential);
   const advancedGroups = useMemo(() => Map.groupBy(advanced, (item) => item.tab), [advanced]);
   const advancedTabs = [...advancedGroups.keys()].sort();
   const [advancedTab, setAdvancedTab] = useState(advancedTabs[0] ?? 'other');
   const visibleAdvancedTab = advancedGroups.has(advancedTab) ? advancedTab : advancedTabs[0] ?? 'other';
   const providerSettings = runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Providers' && !item.credential);
-  const agentSettings = runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Agents' && item.path !== 'task.agentModelOverrides' && !item.credential);
+  // Clearing a model unsets the role: a built-in one then uses Default, an added one is removed.
   const setRole = async (role: string, model: string): Promise<void> => {
-    if (rolesItem) await onSetRuntimeSetting(rolesItem.path, { ...roles, [role]: model });
-  };
-  const toggleCycle = async (role: string): Promise<void> => {
-    if (!cycleItem) return;
-    const next = cycle.includes(role) ? cycle.filter((candidate) => candidate !== role) : [...cycle, role];
-    if (next.length) await onSetRuntimeSetting(cycleItem.path, next);
-  };
-  const setAgentRole = async (agent: string, role: string): Promise<void> => {
-    if (overridesItem) await onSetRuntimeSetting(overridesItem.path, { ...overrides, [agent]: `pi/${role}` });
+    if (!rolesItem) return;
+    const { [role]: _previous, ...others } = roles;
+    await onSetRuntimeSetting(rolesItem.path, model ? { ...others, [role]: model } : others);
+    if (!model) setAddedRoles((current) => current.filter((candidate) => candidate !== role));
   };
   let content: ReactNode;
   if (tab === 'Models') {
     content = <Group title={<>Model roles · <span className="tabular-nums">generation {runtimeGeneration}</span></>}>
-      <SettingRows>{roleIds.map((role) => <SettingRow key={role} title={roleLabels[role] ?? role} description={role}>
-        <Switch label="Quick cycle" checked={cycle.includes(role)} disabled={saving || !cycleItem} onToggle={() => settle(toggleCycle(role))} />
-        <RoleModelPicker role={role} label={roleLabels[role] ?? role} value={roles[role] ?? ''} models={models} modelsReady={modelsReady} disabled={saving || !rolesItem} onChange={(value) => settle(setRole(role, value))} />
-      </SettingRow>)}</SettingRows>
-      <p className="text-caption text-muted-foreground">Quick cycle controls one-click cycling. At least one role remains selected. Role names match the workspace composer.</p>
-      <SettingRowsEditor items={runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && item.path !== 'cycleOrder' && !item.credential)} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} />
+      <SettingRows>{roleIds.map((role) => <SettingRow key={role} title={MODEL_ROLE_LABELS[role] ?? role} description={role}>
+        <RoleModelPicker role={role} label={MODEL_ROLE_LABELS[role] ?? role} value={roles[role] ?? ''} models={models} modelsReady={modelsReady} disabled={saving || !rolesItem} onChange={(value) => settle(setRole(role, value))} />
+      </SettingRow>)}
+        <SettingRow title="Add role" description={newRoleError ?? 'Agents and the agents tool can name any role. An unset role uses Default.'}>
+          <TextField label="New role name" value={newRole} placeholder="role name" disabled={saving || !rolesItem} onChange={setNewRole} />
+          <Button variant="secondary" size="compact" disabled={saving || !rolesItem || !newRoleName || newRoleError !== null} onClick={() => { setAddedRoles((current) => [...current, newRoleName]); setNewRole(''); }}>Add role</Button>
+        </SettingRow>
+      </SettingRows>
+      <SettingRowsEditor items={runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && !item.credential)} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} />
     </Group>;
-  } else if (tab === 'Agents') {
-    content = <>
-      <Group title="Agent model roles"><SettingRows>{agentNames.map((agent) => { const raw = overrides[agent]; const selected = String(raw ?? `pi/${agentDefaults[agent] ?? 'task'}`).replace(/^pi\//u, ''); const known = roleIds.includes(selected); return <SettingRow key={agent} title={agent} description={known ? roleLabels[selected] ?? selected : `Custom selector: ${Array.isArray(raw) ? raw.join(', ') : selected}`}><Select value={selected} disabled={!overridesItem || saving} onValueChange={(value) => settle(setAgentRole(agent, value))}><SelectTrigger aria-label={`Role for ${agent}`} />{selectOptions([...(known ? [] : [{ value: selected, label: `Custom: ${selected}` }]), ...roleIds.map((role) => ({ value: role, label: roleLabels[role] ?? role }))])}</Select></SettingRow>; })}</SettingRows></Group>
-      <Group title="Agent runtime settings"><SettingRowsEditor items={agentSettings} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} /></Group>
-    </>;
   } else if (tab === 'Providers') {
     content = <>
       {providers ? <ProvidersSection {...providers} /> : null}

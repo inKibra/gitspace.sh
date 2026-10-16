@@ -20,28 +20,28 @@ afterEach(async () => {
 
 it('preserves an unsaved configuration draft and rejects its stale revision instead of overwriting a remote edit', async () => {
   let currentRevision = 1;
-  let stored = { client: 'private/original-model' };
+  let stored = ['private/original-model'];
   const render = async (revision: number) => {
-    const item: RuntimeSettingView = { path: 'modelTags', label: 'Model tags', tab: 'models', description: null, kind: 'record', valueJson: JSON.stringify(stored), options: [], credential: false };
+    const item: RuntimeSettingView = { path: 'enabledModels', label: 'Enabled models', tab: 'models', description: null, kind: 'array', valueJson: JSON.stringify(stored), options: [], credential: false };
     await act(() => root.render(<RuntimeSettingsEditor sections={['Models']} tab="Models" runtimeSettings={[item]} runtimeGeneration={revision} saving={false} onSetRuntimeSetting={async (_path, value) => {
       if (revision !== currentRevision) throw new Error('Concurrent edit: refresh before saving');
       stored = value as typeof stored;
     }} />));
   };
   await render(1);
-  const input = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Model tags"]')!;
-  const draft = '{"client":"private/my-draft"}';
+  const input = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Enabled models"]')!;
+  const draft = '["private/my-draft"]';
   await act(() => {
     input.focus();
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, draft);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   currentRevision = 2;
-  stored = { client: 'private/remote-edit' };
+  stored = ['private/remote-edit'];
   await render(2);
   expect(input.value).toBe(draft);
   await act(async () => input.blur());
-  expect(stored).toEqual({ client: 'private/remote-edit' });
+  expect(stored).toEqual(['private/remote-edit']);
   expect(input.value).toBe(draft);
   expect(input.getAttribute('aria-invalid')).toBe('true');
   expect(container.querySelector('[role="alert"]')).not.toBeNull();

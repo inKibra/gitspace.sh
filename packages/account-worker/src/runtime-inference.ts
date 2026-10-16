@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, type InferenceProfile } from '@gitspace/protocol/inference';
+import { MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
@@ -10,7 +10,7 @@ import {
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
 export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
-const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, thinking: modelRoleThinkingSchema.optional(), notice: z.string().optional() });
+const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, thinking: modelRoleThinkingSchema.optional() });
 type Admission = z.infer<typeof admissionSchema>;
 const pinSchema = z.object({ credentialId: z.string(), lastUsedAt: z.number() });
 const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stringify([kind, ...parts])}`;
@@ -58,7 +58,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     if (value === undefined) throw new Error('Conversation has no admitted inference run');
     return admissionSchema.parse(value);
   }
-  async function bindInferenceConversation(conversationId: string, signal: AbortSignal, _submissionIds: readonly string[], requestIds: readonly string[], serving: { fastMode: boolean }): Promise<Array<{ requestId: string; message: string }>> {
+  async function bindInferenceConversation(conversationId: string, signal: AbortSignal, _submissionIds: readonly string[], requestIds: readonly string[], serving: { fastMode: boolean }): Promise<void> {
     signal.throwIfAborted();
     const admitted: Admission[] = [];
     for (const requestId of requestIds) {
@@ -72,7 +72,6 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     scopes.set(signal, { admission, models });
     router.register(models);
     await ctx.storage.put(key('active', conversationId), admission);
-    return admitted.flatMap(candidate => candidate.notice ? [{ requestId: candidate.requestId, message: candidate.notice }] : []);
   }
   return {
     models: router.models,
@@ -138,7 +137,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         for (const role of Object.keys(configured ?? {})) {
           try {
             const selected = resolveProfileModel(currentProfile.settings, availableModels, role);
-            roles.push({ id: role, label: role, provider: selected.model.provider, model: selected.model.id, thinking: selected.thinking, current: role === 'default' });
+            roles.push({ id: role, label: MODEL_ROLE_LABELS[role] ?? role, provider: selected.model.provider, model: selected.model.id, thinking: selected.thinking, current: role === 'default' });
           } catch (error) {
             // A historical role may name a retired transport/model. It is not a
             // request to pick a replacement or a reason to block history.

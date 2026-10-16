@@ -12,7 +12,7 @@ describe('inference profile configuration boundaries', () => {
     const source = {
       modelRoles: { default: 'old/main', reviewer: 'old/reviewer' },
       providers: { models: { old: { baseUrl: 'https://old.example' } } },
-      task: { agentModelOverrides: { reviewer: 'old/reviewer' }, maxConcurrency: 3 },
+      task: { maxConcurrency: 3 },
       terminal: { rows: 40 },
     };
     const settings = { modelRoles: { default: 'new/main' } };
@@ -41,12 +41,10 @@ describe('inference profile configuration boundaries', () => {
   it('preserves custom role, agent and provider names during migration without mistaking names for credentials', () => {
     const source = {
       modelRoles: { auth: 'provider/model-a', token: 'provider/model-b' },
-      modelTags: { token: 'provider/model-a' },
       providers: {
         models: { token: { baseUrl: 'https://provider.example/v1', models: [{ id: 'model-a', name: 'Custom' }] } },
         maxInFlightRequests: { token: 2 },
       },
-      task: { agentModelOverrides: { auth: 'provider/model-b' }, maxConcurrency: 4 },
     };
     const settings = extractInferenceSettings(source);
     expect(inferenceSettingsSchema.parse(settings)).toEqual(settings);

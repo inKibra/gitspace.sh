@@ -366,7 +366,7 @@ describe('Cloud inference credential authority', () => {
     await vault.bootstrap({ userId, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(2)) });
     await vault.putCredential({ id: 'preserved-oauth', credential: { provider: 'openai-codex', access: 'preserved-access', refresh: 'preserved-refresh', accountId: 'existing-account', expires: Date.now() + 3_600_000 } });
     const settings = env.USER_SETTINGS.getByName(userId);
-    const content = JSON.stringify({ modelRoles: { default: 'openai/gpt-4.1', custom: 'anthropic/claude' }, agents: { custom: { modelRole: 'custom' } }, terminal: { theme: 'dark' } });
+    const content = JSON.stringify({ modelRoles: { default: 'openai/gpt-4.1', custom: 'anthropic/claude' }, terminal: { theme: 'dark' } });
     const checksum = `sha256:${[...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content)))].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
     await runInDurableObject(settings, (_instance, state) => {
       state.storage.sql.exec('INSERT INTO omp_config(id, generation, content, checksum, updated_at, updated_by) VALUES (1, 1, ?, ?, ?, ?)', content, checksum, new Date().toISOString(), 'legacy');
@@ -379,7 +379,7 @@ describe('Cloud inference credential authority', () => {
     const first = await vault.ensureInference();
     const second = await vault.ensureInference();
     expect(second).toEqual(first);
-    expect(first.profiles[0]!.settings).toMatchObject({ modelRoles: { default: 'openai/gpt-4.1', custom: 'anthropic/claude' }, agents: { custom: { modelRole: 'custom' } } });
+    expect(first.profiles[0]!.settings).toMatchObject({ modelRoles: { default: 'openai/gpt-4.1', custom: 'anthropic/claude' } });
     const legacySettings = await runInDurableObject(settings, (_instance, state) => state.storage.sql.exec<{ content: string }>('SELECT content FROM omp_config WHERE id = 1').one().content);
     expect(parseYaml(legacySettings)).toEqual({ terminal: { theme: 'dark' } });
     const after = await runInDurableObject(vault, (_instance, state) => ({

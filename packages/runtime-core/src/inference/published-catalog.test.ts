@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createModels, InMemoryModelsStore, type Api, type Model, type Provider } from '@earendil-works/pi-ai';
 import { CATALOG_TTL_MS, withPublishedCatalog } from './published-catalog.js';
 import { resolveAvailableProfileModel, resolveModelSelection, resolveProfileModel } from './admission.js';
+import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
 
 const floor: Model<Api> = { provider: 'test', id: 'floor', name: 'Floor', api: 'openai-responses', baseUrl: 'https://provider.invalid', reasoning: false, input: ['text'], contextWindow: 8192, maxTokens: 1024, cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } };
 const provider: Provider = {
@@ -43,9 +44,7 @@ describe('published catalog admission data', () => {
     response = Response.json([], { headers: { etag: 'revision-2' } });
     await restarted.refresh();
     expect(restarted.getModel('test', 'new')).toBeUndefined();
-    const removed = await resolveModelSelection({}, restarted, { kind: 'explicit', provider: 'test', modelId: 'new' });
-    expect(removed.model.id).toBe('floor');
-    expect(removed.notice).toContain('test/new');
+    await expect(resolveModelSelection({}, restarted, { kind: 'explicit', provider: 'test', modelId: 'new' })).rejects.toThrow('test/new is not available');
   });
 
   it('keeps a usable bundled floor when the first download fails and rejects a bodyless 304', async () => {
@@ -55,15 +54,16 @@ describe('published catalog admission data', () => {
     expect(models.getModel('test', 'floor')).toEqual(floor);
   });
 
-  it('resolves roles from current settings and reports removed explicit models or roles', async () => {
+  it('resolves a role chain to its first set role and never substitutes an unavailable model', async () => {
     const models = createModels(); models.setProvider({ ...provider, getModels: () => [floor, { ...floor, id: 'next' }] });
-    const selection = { kind: 'role', role: 'fast' } as const;
-    expect((await resolveModelSelection({ 'modelRoles.fast': 'test/floor' }, models, selection)).model.id).toBe('floor');
-    expect((await resolveModelSelection({ 'modelRoles.fast': 'test/next' }, models, selection)).model.id).toBe('next');
-    const fallback = await resolveModelSelection({ 'modelRoles.default': 'test/next' }, models, { kind: 'explicit', provider: 'test', modelId: 'removed' });
-    expect(fallback.model.id).toBe('next');
-    expect(fallback.notice).toContain('test/removed');
-    expect((await resolveModelSelection({}, models, selection)).notice).toContain('fast');
+    const tester: ModelSelectionIntent = { kind: 'role', role: 'taste', fallback: ['fast', 'default'] };
+    expect((await resolveModelSelection({ 'modelRoles.fast': 'test/next', 'modelRoles.default': 'test/floor' }, models, tester)).model.id).toBe('next');
+    expect((await resolveModelSelection({ 'modelRoles.taste': 'test/floor', 'modelRoles.fast': 'test/next' }, models, tester)).model.id).toBe('floor');
+    expect((await resolveModelSelection({ 'modelRoles.default': 'test/next' }, models, tester)).model.id).toBe('next');
+    await expect(resolveModelSelection({ 'modelRoles.taste': 'test/gone', 'modelRoles.fast': 'test/next' }, models, tester)).rejects.toThrow('no admitted model for role taste');
+    await expect(resolveModelSelection({ 'modelRoles.default': 'test/next' }, models, { kind: 'explicit', provider: 'test', modelId: 'removed' })).rejects.toThrow('test/removed is not available');
+    await expect(resolveModelSelection({}, models, { kind: 'role', role: 'tast' })).rejects.toThrow('tast is not defined');
+    expect((await resolveModelSelection({ 'modelRoles.reviewer': 'test/next' }, models, { kind: 'role', role: 'reviewer' })).model.id).toBe('next');
   });
 
   it('resolves effort suffixes without losing literal model colons', async () => {
@@ -79,7 +79,6 @@ describe('published catalog admission data', () => {
     const settings = { modelRoles: { default: ['other/floor:high', 'pi/review'], review: ['test/missing:low', '@available'], available: 'test/floor:medium', override: 'pi/review:low' } };
     expect(resolveProfileModel(settings, models)).toEqual({ model: floor, thinking: 'medium' });
     expect(await resolveModelSelection(settings, models, { kind: 'role', role: 'override' })).toEqual({ model: floor, thinking: 'low' });
-    expect(await resolveModelSelection(settings, models, { kind: 'role', role: 'removed' })).toMatchObject({ model: floor, thinking: 'medium', notice: expect.stringContaining('removed') });
     expect(() => resolveProfileModel({ modelRoles: { default: 'pi/review:high', review: '@default:low' } }, models)).toThrow('Circular profile model role');
   });
 });
