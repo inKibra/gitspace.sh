@@ -64,6 +64,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'devices.revoke': 'cloud',
   'deployment.status': 'cloud',
   'deployment.launch': 'machine',
+  'deployment.checkCanonical': 'cloud',
   'deployment.revert': 'cloud',
   'secrets.list': 'cloud',
   'secrets.put': 'cloud',

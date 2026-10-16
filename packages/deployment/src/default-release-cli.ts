@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import { buildWorkerBundle, buildFrontendTree, workerMetadataFromWrangler, workspaceSha } from './builders.js';
+import { buildWorkerBundle, buildFrontendTree, workerMetadataFromWrangler, workspaceRevision } from './builders.js';
 import { releaseStorageClient } from './release.js';
 import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from './default-release.js';
 import { defaultNativeArtifactSchema } from '@gitspace/protocol/default-release';
@@ -92,7 +92,7 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
   const temporary = await mkdtemp(join(tmpdir(), 'gitspace-default-release-'));
   try {
     const built = await buildDefaultRelease(commit, {
-      verifyCommit: () => workspaceSha(root),
+      verifyCommit: async () => (await workspaceRevision(root)).key,
       machines: async () => machines,
       async worker() {
         const artifact = await buildWorkerBundle(root, commit, join(temporary, 'worker'));

@@ -48,11 +48,13 @@ export async function ensureAccountGitSpaceProject(
     } else {
       const status = await releasesNamespace.get(releasesNamespace.idFromName(userId)).status(userId, { sha: null, version: null });
       const record = status.releases.find((candidate) => candidate.sha === frontend.sha);
-      if (record?.workspaceId) {
-        const projectId = await index.locateWorkspace(record.workspaceId);
+      const origin = record?.source ?? null;
+      if (origin?.kind === 'canonical') source = { ...source, branch: origin.branch ?? source.branch, commit: origin.commit };
+      if (origin?.kind === 'workspace') {
+        const projectId = await index.locateWorkspace(origin.workspaceId);
         if (projectId) {
           const workspaces = await authorityNamespace.get(authorityNamespace.idFromName(`${userId}:${projectId}`)).listWorkspaces();
-          source.branch = workspaces.find((workspace) => workspace.id === record.workspaceId)?.branch ?? source.branch;
+          source.branch = workspaces.find((workspace) => workspace.id === origin.workspaceId)?.branch ?? source.branch;
         }
       }
     }

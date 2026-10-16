@@ -61,8 +61,10 @@ export interface SidebarDeploymentProps {
   launch: LaunchTrack | null;
   /** Launch actions are offered only inside the GitSpace project itself. */
   isGitSpaceProject: boolean;
-  /** Launch every target from the workspace. */
+  /** Launch every target from the workspace, or from the project's base space by its project id. */
   onLaunch(workspaceId: string): void | Promise<void>;
+  /** Check the canonical branch head, then launch every target from that commit. */
+  onLaunchCanonical(): void | Promise<void>;
   /** Point the account back at the channel build. */
   onRevert(): void | Promise<void>;
 }
@@ -195,7 +197,7 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
   };
   const archived = !!summary?.closedAt;
   const held = !!runtime && !archived && summary?.holder.kind === 'held';
-  const launchable = (held || (!archived && summary?.holder.kind === 'cloud')) && kind === 'workspace' && deployment?.isGitSpaceProject === true;
+  const launchable = (held || (!archived && summary?.holder.kind === 'cloud')) && deployment?.isGitSpaceProject === true;
   const canRelease = !archived && !summary?.creation && !!onReleaseMachines;
   const canRestore = kind === 'workspace' && archived && !!onRestore;
   const canArchive = kind === 'workspace' && !archived && !summary?.creation && !!onArchive;
@@ -216,6 +218,7 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
       {canDelete ? <MenuItem index={index++} icon={DeleteGlyph} label="Delete workspace" onSelect={() => void onDelete?.(space.id)} /> : null}
       {canMove ? machines.map((machine) => <MenuItem key={machine.id} index={index++} icon={MachineGlyph} label={`Move to ${machine.label}`} disabled={movePending} onSelect={() => void move(machine)} />) : null}
       {launchable && deployment ? <MenuItem index={index++} icon={LaunchGlyph} label="Launch GitSpace from here" disabled={launching} onSelect={() => void deployment.onLaunch(space.id)} /> : null}
+      {kind === 'project' && deployment?.isGitSpaceProject ? <MenuItem index={index++} icon={LaunchGlyph} label="Launch canonical develop" disabled={launching} onSelect={() => void deployment.onLaunchCanonical()} /> : null}
       {launchable && deployment && launchedFrom(deployment, space.id) ? <MenuItem index={index++} icon={ReopenGlyph} label="Back to stable" disabled={launching} onSelect={() => void deployment.onRevert()} /> : null}
     </DropdownContent>
   </DropdownMenu></>;

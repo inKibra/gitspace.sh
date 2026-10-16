@@ -58,7 +58,7 @@ describe('account GitSpace source provenance', () => {
     const key = `releases/${sha}/frontend`;
     const releases = env.TENANT_RELEASES.getByName(userId);
     await releases.stage({
-      sha, label: 'Account frontend', workspaceId: null,
+      sha, label: 'Account frontend', source: null,
       artifacts: { worker: null, machine: null, frontend: { key, hash: `sha256:${'a'.repeat(64)}`, size: 1 } },
       worker: null,
     }, 'human');

@@ -1,11 +1,12 @@
-import { readdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ExecutorJournal, LocalAttachment } from '@gitspace/runtime-machine';
 import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/deployment/manifest';
-import { hashArtifactPath, workspaceSha } from '@gitspace/deployment';
+import { hashArtifactPath, workspaceRevision } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
-import { releaseTargetSchema, workerReleaseMetadataSchema, type LaunchProgress, type ReleaseArtifact, type ReleaseRecord, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_REPOSITORY, launchSourceSchema, releaseTargetSchema, workerReleaseMetadataSchema, type LaunchProgress, type LaunchSource, type ReleaseArtifact, type ReleaseRecord, type ReleaseSource, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-objects.js';
 import { z } from 'zod';
 
@@ -27,7 +28,7 @@ export async function requireInferenceCapableSource(root: string, targets: reado
 
 /** Build code belongs to the selected source tree, not the currently running machine generation. */
 export async function buildWorkspaceTarget<T extends BuiltArtifact>(
-  root: string, sha: string, target: ReleaseTarget, output: string,
+  root: string, sha: string, target: ReleaseTarget, output: string, environment: Record<string, string> = {},
 ): Promise<T & { worker?: WorkerReleaseMetadata }> {
   releaseTargetSchema.parse(target);
   const resultPath = `${output}.build.json`;
@@ -46,7 +47,7 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
   `;
   // A fresh process prevents module-cache reuse after source edits and isolates builder globals.
   // Bun caches its implicit child environment before the runtime resolves its native selection.
-  const child = Bun.spawn([process.execPath, '--eval', script], { cwd: root, env: { ...process.env }, stdout: 'inherit', stderr: 'inherit' });
+  const child = Bun.spawn([process.execPath, '--eval', script], { cwd: root, env: { ...process.env, ...environment }, stdout: 'inherit', stderr: 'inherit' });
   if (await child.exited !== 0) throw new Error(`Workspace-owned ${target} build failed; inspect the deployment build output`);
   try {
     return JSON.parse(await readFile(resultPath, 'utf8')) as T & { worker?: WorkerReleaseMetadata };
@@ -54,8 +55,20 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
     await rm(resultPath, { force: true });
   }
 }
+async function git(cwd: string, args: string[]): Promise<string> {
+  const child = Bun.spawn(['git', ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 10 * 60_000, killSignal: 'SIGKILL' });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  if (code !== 0) throw new Error(`git ${args[0]} failed: ${stderr.trim() || `exited with ${code}`}`);
+  return stdout.trim();
+}
+
+/** What a launch builds: an attached workspace cache, or a canonical commit. */
+type BuildSource = { kind: 'workspace'; workspace: DeploymentSource } | { kind: 'canonical'; commit: string };
+/** The tree a launch builds, its release key and recorded source, and how to dispose of it afterwards. */
+interface PreparedSource { root: string; key: string; label: string; source: ReleaseSource; environment: Record<string, string>; remove(): Promise<void> }
+
 /**
- * "Launch into": build GitSpace from a ready workspace cache on this machine, put the
+ * "Launch into": build GitSpace from a ready workspace cache, or a clean commit of the canonical repository, on this machine, put the
  * bundles in the tenant's data bucket, stage the release, and point the
  * tenant's `desired` at it. Progress is logged and reported to the account.
  */
@@ -107,7 +120,7 @@ export interface DeploymentLauncherOptions {
 }
 
 export interface DeploymentLaunchInput {
-  workspaceId: string;
+  source: LaunchSource;
   targets: ReleaseTarget[];
 }
 
@@ -142,13 +155,14 @@ export class DeploymentLauncher {
    */
   launch(input: DeploymentLaunchInput): LaunchProgress {
     if (this.active) throw new DeploymentLaunchError('BUSY', 'A release is already being built on this machine');
-    const workspace = deploymentSource(this.options.attachments(), this.options.machineId, input.workspaceId);
+    const source = launchSourceSchema.parse(input.source);
+    const build: BuildSource = source.kind === 'workspace' ? { kind: 'workspace', workspace: deploymentSource(this.options.attachments(), this.options.machineId, source.workspaceId) } : source;
     const targets = [...new Set(z.array(releaseTargetSchema).parse(input.targets))];
     if (targets.length === 0) throw new DeploymentLaunchError('NOT_GITSPACE', 'A release needs at least one target');
     const now = new Date().toISOString();
-    this.progress = { launchId: crypto.randomUUID(), workspaceId: workspace.workspaceId, targets, sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: now, updatedAt: now };
+    this.progress = { launchId: crypto.randomUUID(), source, targets, sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: now, updatedAt: now };
     this.report(this.progress);
-    this.active = this.run(workspace, targets).finally(() => { this.active = null; });
+    this.active = this.run(build, targets).finally(() => { this.active = null; });
     this.active.catch(() => undefined);
     return this.progress;
   }
@@ -159,13 +173,39 @@ export class DeploymentLauncher {
     return this.active!;
   }
 
-  private async run(workspace: DeploymentSource, targets: ReleaseTarget[]): Promise<ReleaseRecord> {
-    const root = workspace.rootPath;
-    const protocolPackage = await readFile(join(root, 'packages/protocol/package.json'), 'utf8').then(
-      (source) => JSON.parse(source) as unknown,
-      () => null,
-    );
-    const isGitSpace = typeof protocolPackage === 'object' && protocolPackage !== null && 'name' in protocolPackage && protocolPackage.name === '@gitspace/protocol';
+  /** A workspace cache builds where it is; its key and label name its commit and uncommitted files. */
+  private async workspaceSource(workspace: DeploymentSource): Promise<PreparedSource> {
+    const revision = await workspaceRevision(workspace.rootPath);
+    const changes = revision.uncommittedFiles === 0 ? '' : ` + ${revision.uncommittedFiles} uncommitted`;
+    return {
+      root: workspace.rootPath, key: revision.key, label: `${workspace.name} @ ${revision.commit.slice(0, 12)}${changes}`.slice(0, 160), environment: {},
+      source: { kind: 'workspace', workspaceId: workspace.workspaceId, commit: revision.commit, uncommittedFiles: revision.uncommittedFiles },
+      remove: async () => {},
+    };
+  }
+
+  /** One canonical commit, fetched into a cached repository and checked out detached into its own worktree. */
+  private async canonicalSource(commit: string): Promise<PreparedSource> {
+    const repository = join(this.options.buildRoot, 'canonical.git');
+    if (!existsSync(join(repository, 'HEAD'))) {
+      await mkdir(repository, { recursive: true });
+      await git(repository, ['init', '--bare', '--quiet']);
+    }
+    await git(repository, ['fetch', '--quiet', '--no-tags', '--depth', '1', GITSPACE_SOURCE_REPOSITORY, commit]);
+    const root = join(this.options.buildRoot, `canonical-${commit}`);
+    await git(repository, ['worktree', 'prune']);
+    await rm(root, { recursive: true, force: true });
+    await git(repository, ['worktree', 'add', '--detach', '--force', root, commit]);
+    const revision = await workspaceRevision(root);
+    if (revision.key !== commit) throw new Error(`The canonical checkout of ${commit} is not clean`);
+    return {
+      root, key: commit, label: `${GITSPACE_CANONICAL_BRANCH} @ ${commit.slice(0, 12)}`, environment: { GITSPACE_SOURCE_BRANCH: GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_COMMIT: commit },
+      source: { kind: 'canonical', repository: GITSPACE_SOURCE_REPOSITORY, branch: GITSPACE_CANONICAL_BRANCH, commit },
+      remove: async () => { await git(repository, ['worktree', 'remove', '--force', root]).catch(() => rm(root, { recursive: true, force: true })); },
+    };
+  }
+
+  private async run(build: BuildSource, targets: ReleaseTarget[]): Promise<ReleaseRecord> {
     const current = this.progress!;
     const progress = (phase: string, message: string, status: LaunchProgress['status'] = 'running'): void => {
       const sha = current.sha ?? 'pending';
@@ -177,15 +217,22 @@ export class DeploymentLauncher {
       if (status === 'failed') current.error = message;
       this.report(current);
     };
-    if (!isGitSpace) {
-      progress('failed', `Workspace ${workspace.workspaceId} is not a GitSpace checkout`, 'failed');
-      throw new DeploymentLaunchError('NOT_GITSPACE', `Workspace ${workspace.workspaceId} is not a GitSpace checkout`);
-    }
-
-    const sha = await workspaceSha(root);
-    current.sha = sha;
-    const buildRoot = join(this.options.buildRoot, sha);
+    let prepared: PreparedSource | null = null;
+    let buildRoot: string | null = null;
     try {
+      if (build.kind === 'canonical') progress('checkout', `fetching ${GITSPACE_CANONICAL_BRANCH} @ ${build.commit.slice(0, 12)} from ${GITSPACE_SOURCE_REPOSITORY}`);
+      prepared = build.kind === 'workspace' ? await this.workspaceSource(build.workspace) : await this.canonicalSource(build.commit);
+      const { root, environment } = prepared;
+      const protocolPackage = await readFile(join(root, 'packages/protocol/package.json'), 'utf8').then(
+        (source) => JSON.parse(source) as unknown,
+        () => null,
+      );
+      if (!(typeof protocolPackage === 'object' && protocolPackage !== null && 'name' in protocolPackage && protocolPackage.name === '@gitspace/protocol')) {
+        throw new DeploymentLaunchError('NOT_GITSPACE', `${prepared.label} is not a GitSpace checkout`);
+      }
+      const sha = prepared.key;
+      current.sha = sha;
+      buildRoot = join(this.options.buildRoot, sha);
       progress('install', `bun install --frozen-lockfile in ${root}`);
       const install = Bun.spawn([process.execPath, 'install', '--frozen-lockfile'], {
         cwd: root,
@@ -205,20 +252,20 @@ export class DeploymentLauncher {
 
       if (targets.includes('worker')) {
         progress('build', 'building tenant worker');
-        const built = await buildWorkspaceTarget<BuiltArtifact>(root, sha, 'worker', join(buildRoot, 'worker'));
+        const built = await buildWorkspaceTarget<BuiltArtifact>(root, sha, 'worker', join(buildRoot, 'worker'), environment);
         worker = workerReleaseMetadataSchema.parse(built.worker);
         progress('upload', `uploading ${keys.worker}`);
         artifacts.worker = await this.putFile(keys.worker, built.path);
       }
       if (targets.includes('machine')) {
         progress('build', 'building machine daemon');
-        const built = await buildWorkspaceTarget<BuiltExecutableArtifact>(root, sha, 'machine', join(buildRoot, 'machine'));
+        const built = await buildWorkspaceTarget<BuiltExecutableArtifact>(root, sha, 'machine', join(buildRoot, 'machine'), environment);
         progress('upload', `uploading ${keys.machine}`);
         artifacts.machine = await this.putExecutable(keys.machine, built);
       }
       if (targets.includes('frontend')) {
         progress('build', 'building frontend');
-        const built = await buildWorkspaceTarget<BuiltArtifact>(root, sha, 'frontend', join(buildRoot, 'frontend'));
+        const built = await buildWorkspaceTarget<BuiltArtifact>(root, sha, 'frontend', join(buildRoot, 'frontend'), environment);
         const hash = await hashArtifactPath(built.path);
         const files = await filesUnder(built.path);
         progress('upload', `uploading ${files.length} frontend files under ${keys.frontend}`);
@@ -238,8 +285,8 @@ export class DeploymentLauncher {
       await this.options.authority.stageRelease({
         sha,
         inferenceVersion: 1,
-        label: `${workspace.name} @ ${sha.slice(0, 12)}`,
-        workspaceId: workspace.workspaceId,
+        label: prepared.label,
+        source: prepared.source,
         artifacts,
         worker,
       });
@@ -256,7 +303,8 @@ export class DeploymentLauncher {
       progress('failed', error instanceof Error ? error.message : String(error), 'failed');
       throw error;
     } finally {
-      await rm(buildRoot, { recursive: true, force: true });
+      if (buildRoot) await rm(buildRoot, { recursive: true, force: true });
+      await prepared?.remove();
     }
   }
 

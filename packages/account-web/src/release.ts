@@ -1,4 +1,4 @@
-import type { DeploymentStatusView, LaunchProgressView, ReleaseStatus, ReleaseTarget } from '@gitspace/protocol';
+import type { DeploymentStatusView, LaunchProgressView, LaunchSourceView, ReleaseStatus, ReleaseTarget } from '@gitspace/protocol';
 import type { BadgeProps } from '@gitspace/ui';
 
 /** One release as the machine reports it; the wire shape, not the zod one. */
@@ -20,11 +20,19 @@ export function desiredLabel(status: DeploymentStatusView, target: ReleaseTarget
   return status.releases.find((release) => release.sha === sha)?.label ?? shortSha(sha);
 }
 
+/** Where a release came from, in words: its workspace commit and uncommitted files, or its canonical commit. */
+export function releaseSourceText(source: ReleaseRecordView['source']): string {
+  if (!source) return 'source not recorded';
+  if (source.kind === 'canonical') return `${source.branch ?? 'canonical'} @ ${shortSha(source.commit)}`;
+  const changes = source.uncommittedFiles === null ? '' : source.uncommittedFiles === 0 ? ', no uncommitted changes' : ` + ${source.uncommittedFiles} uncommitted`;
+  return `workspace ${source.workspaceId} @ ${shortSha(source.commit)}${changes}`;
+}
+
 /** Newest release built from a workspace, or null when it never launched. */
 export function workspaceRelease(status: DeploymentStatusView, workspaceId: string): ReleaseRecordView | null {
   let newest: ReleaseRecordView | null = null;
   for (const release of status.releases) {
-    if (release.workspaceId !== workspaceId) continue;
+    if (release.source?.kind !== 'workspace' || release.source.workspaceId !== workspaceId) continue;
     if (!newest || release.createdAt > newest.createdAt) newest = release;
   }
   return newest;
@@ -80,7 +88,7 @@ export interface LaunchLogEntry { phase: string; message: string; at: string }
  */
 export interface LaunchTrack {
   launchId: string;
-  workspaceId: string;
+  source: LaunchSourceView;
   targets: readonly ReleaseTarget[];
   sha: string | null;
   status: LaunchProgressView['status'];
@@ -89,7 +97,7 @@ export interface LaunchTrack {
 }
 
 export function launchTrackFrom(launch: LaunchProgressView): LaunchTrack {
-  return { launchId: launch.launchId, workspaceId: launch.workspaceId, targets: launch.targets, sha: launch.sha, status: launch.status, error: launch.error, log: [{ phase: launch.phase, message: launch.message, at: launch.updatedAt }] };
+  return { launchId: launch.launchId, source: launch.source, targets: launch.targets, sha: launch.sha, status: launch.status, error: launch.error, log: [{ phase: launch.phase, message: launch.message, at: launch.updatedAt }] };
 }
 
 /** Launcher phases in the order they happen; build and upload interleave per target and share a rank. `restart` / `reload` are appended by the browser. */

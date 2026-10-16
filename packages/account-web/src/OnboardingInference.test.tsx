@@ -37,7 +37,7 @@ function Onboarding({ providers, models, modelsReady, defaultModel }: Scenario) 
     composioSetup={null} onPutComposioSetup={noop} onDeleteComposioSetup={noop} browserRelay={null} onSetupBrowserRelay={noop} onStartBrowserRelay={noop} onUnpairBrowserRelay={noop} onTestBrowserRelay={noop}
     canManageMcp={false} canEnableMcp={false} onMcpStatus={unused} onMcpEnable={unused} onMcpRotate={unused} onMcpDisable={unused}
     canConnectBrowser={false} onCreateBrowserInvitation={unused} onBrowserInvitationStatus={unused} onCancelBrowserInvitation={unused} onBrowserConnected={noop}
-    projects={[]} onBack={() => undefined} onComplete={noop} runtimeSync={{ status: 'synced', message: null }} deployment={null} onRevertDeployment={noop} saving={false} error={null}
+    projects={[]} onBack={() => undefined} onComplete={noop} runtimeSync={{ status: 'synced', message: null }} deployment={null} onRevertDeployment={noop} onCheckCanonical={noop} saving={false} error={null}
   />;
 }
 

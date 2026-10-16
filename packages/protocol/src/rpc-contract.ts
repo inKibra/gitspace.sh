@@ -1852,10 +1852,20 @@ export const OmpReleaseMetadataWireCodec = wire.object({
   packages: wire.record(wire.string),
   patches: wire.array(wire.object({ path: wire.string, hash: wire.string })),
 });
+export const ReleaseSourceWireCodec = wire.union([
+  wire.object({ kind: wire.literal('workspace'), workspaceId: wire.string, commit: wire.string, uncommittedFiles: wire.nullable(wire.number) }),
+  wire.object({ kind: wire.literal('canonical'), repository: wire.string, branch: wire.nullable(wire.string), commit: wire.string }),
+]);
+export const LaunchSourceWireCodec = wire.union([
+  wire.object({ kind: wire.literal('workspace'), workspaceId: wire.string }),
+  wire.object({ kind: wire.literal('canonical'), commit: wire.string }),
+]);
+export type LaunchSourceView = InputOf<typeof LaunchSourceWireCodec>;
+export const CanonicalHeadWireCodec = wire.object({ repository: wire.string, branch: wire.string, commit: wire.string, checkedAt: wire.string });
 export const ReleaseRecordWireCodec = wire.object({
   sha: wire.string,
   label: wire.string,
-  workspaceId: wire.nullable(wire.string),
+  source: wire.nullable(ReleaseSourceWireCodec),
   builtBy: wire.string,
   createdAt: wire.string,
   inferenceVersion: wire.optional(wire.literal(1)),
@@ -1867,7 +1877,7 @@ export const ReleaseRecordWireCodec = wire.object({
 /** The account's latest launch, as the building machine reported it; phases also arrive as `deployment` fact events. */
 export const LaunchProgressWireCodec = wire.object({
   launchId: wire.string,
-  workspaceId: wire.string,
+  source: LaunchSourceWireCodec,
   targets: wire.array(ReleaseTargetWireCodec),
   sha: wire.nullable(wire.string),
   phase: wire.string,
@@ -1892,6 +1902,7 @@ export const DeploymentStatusWireCodec = wire.object({
     releaseSha: wire.nullable(wire.string), error: wire.nullable(wire.string),
   }))),
   launch: wire.nullable(LaunchProgressWireCodec),
+  canonical: wire.nullable(CanonicalHeadWireCodec),
 });
 export type DeploymentStatusView = InputOf<typeof DeploymentStatusWireCodec>;
 export const deploymentStatusContract = gitspaceRpc
@@ -1900,12 +1911,19 @@ export const deploymentStatusContract = gitspaceRpc
   .output(DeploymentStatusWireCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
-/** Build the workspace into a release on `machineId`, an online enrolled machine; returns at once, progress streams as `deployment` fact events and `deployment.status.launch`. */
+/** Build a workspace checkout, or a clean commit of the canonical repository, into a release on `machineId`, an online enrolled machine; returns at once, progress streams as `deployment` fact events and `deployment.status.launch`. */
 export const deploymentLaunchContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ workspaceId: wire.string, machineId: wire.string, targets: wire.array(ReleaseTargetWireCodec) }))
+  .input(wire.object({ source: LaunchSourceWireCodec, machineId: wire.string, targets: wire.array(ReleaseTargetWireCodec) }))
   .output(LaunchProgressWireCodec)
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+/** Read the canonical branch head from the canonical repository now and store it; status serves the stored head. */
+export const deploymentCheckCanonicalContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({}))
+  .output(DeploymentStatusWireCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
 export const deploymentRevertContract = gitspaceRpc
   .procedure()
@@ -2020,7 +2038,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     models: listAvailableModelsContract,
   },
   devices: { list: listDevicesContract, revoke: revokeDeviceContract },
-  deployment: { status: deploymentStatusContract, launch: deploymentLaunchContract, revert: deploymentRevertContract },
+  deployment: { status: deploymentStatusContract, launch: deploymentLaunchContract, checkCanonical: deploymentCheckCanonicalContract, revert: deploymentRevertContract },
   secrets: {
     list: listProjectSecretsContract,
     put: putProjectSecretContract,

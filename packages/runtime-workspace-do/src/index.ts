@@ -4,5 +4,5 @@ export * from './attachments.js';
 export * from './artifacts.js';
 export * from './cloud-files.js';
 export * from './cloud-search-index.js';
-export { GitDiscoveryError } from './artifacts-snapshot.js';
+export { GitDiscoveryError, readAdvertisedRefs } from './artifacts-snapshot.js';
 export { snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText } from './artifacts-merge.js';

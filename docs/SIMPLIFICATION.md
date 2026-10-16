@@ -204,12 +204,12 @@ Every item is verified the way the user works, in the browser, before it is repo
 6. New workspaces showed no model until their first message (the agent is configured at admission). The picker now shows the role and model the selection resolves to, and warns when it resolves to none.
 
 **Batch 10 — releases from canonical.** Releases since the cutover were built by a workaround script from a workspace checkout (`fc88e4a "Initialize project"` plus copied files), so release ids name no `develop` commit; that workspace's project has since been deleted.
-1. **Launch from canonical:** Settings → Source → launch `develop` at a commit of `github.com/inKibra/gitspace.sh`; the release is recorded under the real commit. Clean builds only.
-2. **Launch from the GitSpace project's base space**, not only its workspaces (`AppSidebar.tsx:198` limits launch to `kind === 'workspace'`).
-3. **Honest ids for workspace launches:** the workspace's commit plus "N uncommitted changes".
+1. **Launch from canonical:** Done. The GitSpace project's menu → Launch canonical develop checks the branch head and builds that commit on any online account machine, in a clean detached checkout of `github.com/inKibra/gitspace.sh` (cached bare repository, depth 1); the release key is the commit and its source records repository, branch and commit.
+2. **Launch from the GitSpace project's base space**: Done; the base space's menu offers Launch GitSpace from here like a workspace.
+3. **Honest ids for workspace launches:** Done. Release records carry `source` (workspace and commit plus uncommitted file count, or canonical commit) in place of `workspaceId`; labels read `<branch> @ <commit> + N uncommitted`. A one-time migration gave stored records their source.
 4. **Promote a canonical release to the default for new accounts** (replaces the hand-published `b355af77`).
 5. **Retire the workaround script**; ship through the product from then on.
-6. The GitSpace project knows when canonical `develop` is ahead of the running release (`docs/GITHUB-INTEGRATION-DESIGN.md` §7).
+6. The GitSpace project knows when canonical `develop` is ahead of the running release: Done for the account. Settings → Source shows the stored `develop` head (Check reads it from GitHub; launching reads it too) and whether the selected releases run it; push-driven updates come with the GitHub App (`docs/GITHUB-INTEGRATION-DESIGN.md` §7).
 
 **Later.** Machine CLI (`gitspace status`, `setup`, `sync`, `env --`).
 

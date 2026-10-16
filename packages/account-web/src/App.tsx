@@ -51,8 +51,8 @@ export const deploymentStatusFixture: DeploymentStatusView = {
   },
   releases: [{
     sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
-    label: 'agent-blame @ a1b2c3d',
-    workspaceId: 'workspace-a',
+    label: 'agent-blame @ a1b2c3d4e5f6 + 3 uncommitted',
+    source: { kind: 'workspace', workspaceId: 'workspace-a', commit: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', uncommittedFiles: 3 },
     builtBy: 'darktop',
     createdAt: '2026-08-30T09:58:00.000Z',
     artifacts: {
@@ -67,7 +67,7 @@ export const deploymentStatusFixture: DeploymentStatusView = {
   }],
   launch: {
     launchId: 'launch-7',
-    workspaceId: 'workspace-b',
+    source: { kind: 'workspace', workspaceId: 'workspace-b' },
     targets: ['worker', 'machine', 'frontend'],
     sha: 'b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6',
     phase: 'build',
@@ -77,6 +77,7 @@ export const deploymentStatusFixture: DeploymentStatusView = {
     startedAt: '2026-08-30T10:04:00.000Z',
     updatedAt: '2026-08-30T10:05:10.000Z',
   },
+  canonical: { repository: 'https://github.com/inKibra/gitspace.sh.git', branch: 'develop', commit: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00', checkedAt: '2026-08-30T10:01:00.000Z' },
 };
 
 /** The running launch above as this browser followed it: install done, worker built and uploaded, machine building. */
@@ -95,6 +96,7 @@ export const sidebarDeploymentFixture: SidebarDeploymentProps = {
   launch: launchTrackFixture,
   isGitSpaceProject: true,
   onLaunch: () => undefined,
+  onLaunchCanonical: () => undefined,
   onRevert: () => undefined,
 };
 

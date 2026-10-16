@@ -10,7 +10,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
-import { buildInitialRuntime, workspaceSha } from './builders.js';
+import { buildInitialRuntime, workspaceRevision } from './builders.js';
 import { createDefaultNativeArtifact } from './default-native.js';
 import { readExecutableFile } from './executable-manifest.js';
 import { defaultNativeArtifactSchema, defaultNativeProvenanceSchema, verifyDefaultNativeArtifact } from '@gitspace/protocol/default-release';
@@ -144,7 +144,7 @@ export async function buildDistribution(options: { release: string; output: stri
   }
   if (platform.startsWith('linux-')) currentGlibcVersion();
   const release = distributionReleaseSchema.parse(options.release);
-  const revision = await workspaceSha(ROOT);
+  const revision = (await workspaceRevision(ROOT)).key;
   const output = resolve(options.output);
   await mkdir(dirname(output), { recursive: true });
   const staging = await mkdtemp(join(dirname(output), '.distribution-build-'));
@@ -204,7 +204,7 @@ export async function buildDistribution(options: { release: string; output: stri
     await writeFile(join(artifacts, 'channel.txt'), `gitspace-distribution-v1\n${release}\n${manifest.client.sha256}\n`);
     // Existing releases are immutable. All output becomes visible together only after the complete native build.
     if (await Bun.file(join(output, 'manifest.json')).exists()) throw new Error(`Release output already exists: ${output}. Use a new release/output, do not overwrite published artifacts.`);
-    if (await workspaceSha(ROOT) !== revision) throw new Error('Native build checkout changed during build');
+    if ((await workspaceRevision(ROOT)).key !== revision) throw new Error('Native build checkout changed during build');
     await rename(artifacts, output);
     return output;
   } finally {

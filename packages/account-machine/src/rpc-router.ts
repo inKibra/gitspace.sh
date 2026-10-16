@@ -32,9 +32,9 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     // The account forwards a launch to the machine it names; no other machine builds it.
     if (input.machineId !== options.machineId) return err(errors.OperationFailed({ operation: 'launch release', message: `Launch for machine ${input.machineId} reached machine ${options.machineId}` }));
     try {
-      return ok(options.deployment.launch({ workspaceId: input.workspaceId, targets: [...input.targets] }));
+      return ok(options.deployment.launch({ source: input.source, targets: [...input.targets] }));
     } catch (error) {
-      if (error instanceof DeploymentLaunchError && error.code === 'WORKSPACE_NOT_FOUND') return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+      if (error instanceof DeploymentLaunchError && error.code === 'WORKSPACE_NOT_FOUND' && input.source.kind === 'workspace') return err(errors.WorkspaceNotFound({ workspaceId: input.source.workspaceId }));
       return err(errors.OperationFailed({ operation: 'launch release', message: error instanceof Error ? error.message : 'Unable to launch release' }));
     }
   });

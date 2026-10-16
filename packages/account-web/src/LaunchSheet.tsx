@@ -46,6 +46,37 @@ export function LaunchMachineDialog({ projectId, workspaceId, machines, onClose,
   </Dialog>;
 }
 
+/** A canonical commit builds in a fresh checkout, so any online account machine can build it; no workspace is attached. */
+export function CanonicalLaunchDialog({ commit, machines, onClose, onLaunch }: {
+  commit: string;
+  machines: InspectorView['machines'];
+  onClose(): void;
+  onLaunch(machineId: string): Promise<void>;
+}) {
+  const online = machines.filter(machine => machine.state === 'online');
+  const [machineId, setMachineId] = useState(online[0]?.id ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose(); }}>
+    <DialogContent size="sm">
+      <DialogHeader><DialogTitle>Launch develop @ {shortSha(commit)}</DialogTitle><DialogDescription>The machine fetches this commit of github.com/inKibra/gitspace.sh into a clean checkout, builds it, and records the release under the commit.</DialogDescription></DialogHeader>
+      <label className="flex flex-col gap-2 text-caption">Build machine<select aria-label="Build machine" className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={machineId} disabled={busy} onChange={event => setMachineId(event.target.value)}>
+        <option value="">Choose a machine</option>
+        {online.map(machine => <option key={machine.id} value={machine.id}>{machine.label}</option>)}
+      </select></label>
+      {online.length === 0 ? <p role="status" className="text-caption text-muted-foreground">No account machine is online.</p> : null}
+      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+      <DialogFooter>
+        <Button variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
+        <Button variant="primary" disabled={busy || !machineId} onClick={() => void (async () => {
+          setBusy(true); setError(null);
+          try { await onLaunch(machineId); } catch (cause) { setError(rpcErrorMessage(cause, 'Launch develop')); } finally { setBusy(false); }
+        })()}>Launch</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>;
+}
+
 export type LaunchStepState = 'done' | 'active' | 'pending' | 'failed';
 export interface LaunchStep {
   id: string;

@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
-import type { InspectorView } from '@gitspace/protocol';
+import type { InspectorView, LaunchSourceView } from '@gitspace/protocol';
 import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
@@ -17,7 +17,7 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
 import { workspaceMachines, workspaceMachinesSummary, workspaceStatus } from './workspace-status.js';
 import { RELEASE_TARGETS } from './release.js';
-import { LaunchMachineDialog, LaunchSheet, LaunchedBanner, RevertSheet } from './LaunchSheet.js';
+import { CanonicalLaunchDialog, LaunchMachineDialog, LaunchSheet, LaunchedBanner, RevertSheet } from './LaunchSheet.js';
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
@@ -70,7 +70,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const deployment = useResultQuery(rpcClient.deployment.status, {}, { enabled: inspection.project.role === 'gitspace-source' });
   const deploymentValue = useRetainedQueryValue(deployment, inspection.project.id);
   const launch = useRuntimeLaunch(deploymentValue, deployment.refetch);
-  const [launchRequest, setLaunchRequest] = useState<{ workspaceId: string; targets: typeof RELEASE_TARGETS } | null>(null);
+  const [launchRequest, setLaunchRequest] = useState<{ source: LaunchSourceView; targets: typeof RELEASE_TARGETS } | null>(null);
   const relationQuery = useResultQuery(rpcClient.space.view, { projectId: props.projectId, workspaceId: inspection.workspace.kind === 'base' ? null : props.workspaceId });
   const relationValue = useRetainedQueryValue(relationQuery, JSON.stringify([props.projectId, props.workspaceId]));
   const [actionError, setActionError] = useState<string | null>(null);
@@ -162,7 +162,12 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
       onSetWorkspacePhase={async (_id, phase) => { await perform(async () => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }); }}
       onSetWorkspaceRelations={relationsEditable ? setRelations : undefined}
-      deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', onLaunch: workspaceId => setLaunchRequest({ workspaceId, targets: RELEASE_TARGETS }), onRevert: () => perform(launch.revert) } : null}
+      deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', onLaunch: workspaceId => setLaunchRequest({ source: { kind: 'workspace', workspaceId }, targets: RELEASE_TARGETS }), onLaunchCanonical: () => perform(async () => {
+        const checked = await rpcClient.deployment.checkCanonical({});
+        if (checked.status === 'error') throw checked.error;
+        if (!checked.value.canonical) throw new Error('The canonical branch head is unavailable');
+        setLaunchRequest({ source: { kind: 'canonical', commit: checked.value.canonical.commit }, targets: RELEASE_TARGETS });
+      }), onRevert: () => perform(launch.revert) } : null}
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onRevert={() => perform(launch.revert)} onDismiss={launch.dismiss} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
@@ -177,8 +182,9 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       }}
       renderInspector={(onClose, initialView, resourceRequest, openTerminal) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
     />
-    {launchRequest ? <LaunchMachineDialog key={launchRequest.workspaceId} projectId={props.projectId} workspaceId={launchRequest.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.workspaceId, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
-    {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => setLaunchRequest({ workspaceId: launch.launch!.workspaceId, targets: launch.launch!.targets })} /> : null}
+    {launchRequest?.source.kind === 'workspace' ? <LaunchMachineDialog key={launchRequest.source.workspaceId} projectId={props.projectId} workspaceId={launchRequest.source.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
+    {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog commit={launchRequest.source.commit} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
+    {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => setLaunchRequest({ source: launch.launch!.source, targets: launch.launch!.targets })} /> : null}
     {launch.revertProgress ? <RevertSheet progress={launch.revertProgress} open={launch.open} onOpenChange={launch.setOpen} onRetry={() => perform(launch.revert)} /> : null}
   </>;
 }

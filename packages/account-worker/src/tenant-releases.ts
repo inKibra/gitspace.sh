@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
+  canonicalHeadSchema,
   deploymentStatusSchema,
   launchProgressSchema,
   releaseRecordSchema,
@@ -11,6 +12,7 @@ import {
   machineProtocolInputSchema,
   type LaunchProgress,
   type MachineExecutionAdmission,
+  type CanonicalHead,
   type DeploymentStatus,
   type ReleaseRecord,
   type ReleaseStatus,
@@ -23,6 +25,7 @@ import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { CredentialVaultDO } from './application.js';
 import { defaultMachineReleaseSchema } from '@gitspace/protocol/default-release';
 import { tenantPlatformJson } from './tenant-platform.js';
+import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { notifyMachines } from './machine-notices.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
@@ -90,6 +93,25 @@ export class ReleaseNotFoundError extends Error {
 }
 
 
+/** One-time migration to release sources: a record's `workspaceId` becomes a workspace source at the commit its key
+ * names (uncommitted count unknown), a platform default becomes a canonical source at its commit, and anything else keeps
+ * no source. A latest launch recorded before launch sources is finished history and is dropped. */
+function migrateReleaseSources(storage: DurableObjectStorage): void {
+  const legacy = z.object({ workspaceId: z.string().nullable() }).passthrough();
+  for (const row of storage.sql.exec<{ sha: string; record_json: string }>('SELECT sha, record_json FROM releases').toArray()) {
+    const parsed = legacy.safeParse(JSON.parse(row.record_json));
+    if (!parsed.success || !('workspaceId' in parsed.data)) continue;
+    const { workspaceId, ...record } = parsed.data;
+    const defaultCommit = workspaceId === null ? /^Default ([a-f0-9]{40})$/u.exec(String(record.label))?.[1] : undefined;
+    const workspaceCommit = workspaceId === null ? undefined : /^[a-f0-9]{40}/u.exec(row.sha)?.[0];
+    const source = defaultCommit ? { kind: 'canonical', repository: GITSPACE_SOURCE_REPOSITORY, branch: null, commit: defaultCommit }
+      : workspaceId !== null && workspaceCommit ? { kind: 'workspace', workspaceId, commit: workspaceCommit, uncommittedFiles: null } : null;
+    storage.sql.exec('UPDATE releases SET record_json = ? WHERE sha = ?', JSON.stringify(releaseRecordSchema.parse({ ...record, source })), row.sha);
+  }
+  const launch = storage.sql.exec<{ record_json: string }>('SELECT record_json FROM latest_launch WHERE id = 1').toArray()[0];
+  if (launch && !launchProgressSchema.safeParse(JSON.parse(launch.record_json)).success) storage.sql.exec('DELETE FROM latest_launch WHERE id = 1');
+}
+
 export class TenantReleasesDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -120,7 +142,23 @@ export class TenantReleasesDO extends DurableObject<Env> {
         machine_id TEXT NOT NULL,
         record_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS canonical_head (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        record_json TEXT NOT NULL
+      );
     `);
+    migrateReleaseSources(ctx.storage);
+  }
+
+  /** The canonical branch head this account last read; status serves it and never reaches the canonical repository. */
+  canonicalHead(): CanonicalHead | null {
+    const row = this.ctx.storage.sql.exec<{ record_json: string }>('SELECT record_json FROM canonical_head WHERE id = 1').toArray()[0];
+    return row ? canonicalHeadSchema.parse(JSON.parse(row.record_json)) : null;
+  }
+
+  recordCanonicalHead(value: CanonicalHead): void {
+    const head = canonicalHeadSchema.parse(value);
+    this.ctx.storage.sql.exec('INSERT INTO canonical_head(id, record_json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET record_json = excluded.record_json', JSON.stringify(head));
   }
 
   /** Keeps the account's latest launch as its building machine reports it; an older report of the same launch never
@@ -155,7 +193,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
       ...input,
       inferenceVersion,
       label: previous?.label ?? input.label,
-      workspaceId: previous ? previous.workspaceId : input.workspaceId,
+      source: previous ? previous.source : input.source,
       // Targets are independently staged; null must not erase a serving sibling.
       artifacts: {
         worker: input.artifacts.worker ?? previous?.artifacts.worker ?? null,
@@ -261,7 +299,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
         method: 'POST', body: JSON.stringify(protocol?.platform ? { platform: protocol.platform } : { generation }),
       }));
       await this.stage({
-        sha: selected.sha, label: `Default ${selected.commit}`, workspaceId: null,
+        sha: selected.sha, label: `Default ${selected.commit}`, source: { kind: 'canonical', repository: GITSPACE_SOURCE_REPOSITORY, branch: null, commit: selected.commit },
         artifacts: { worker: null, machine: selected.artifact, frontend: null }, worker: null,
       }, 'platform-default');
       await this.ctx.storage.put(`machine-default:${machineId}`, selected.sha);
@@ -346,7 +384,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
     const version = WORKER_VERSION ?? null;
     const worker = { sha: version === 'channel' || version?.startsWith('channel:') ? null : version, version };
     return deploymentStatusSchema.parse({
-      desired, current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution, launch: this.latestLaunch(),
+      desired, current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution, launch: this.latestLaunch(), canonical: this.canonicalHead(),
     });
   }
 

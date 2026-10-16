@@ -16,7 +16,7 @@ import {
   type StageReleaseInput,
   type TenantDesired,
 } from '@gitspace/protocol/deployment';
-import worker from '../src/index.js';
+import worker, { TenantReleasesDO } from '../src/index.js';
 import { revertTenantRelease } from '../src/application.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
@@ -30,7 +30,7 @@ function stageInput(sha: string): StageReleaseInput {
     sha,
     inferenceVersion: 1,
     label: `workspace build ${sha}`,
-    workspaceId: 'workspace-a',
+    source: { kind: 'workspace', workspaceId: 'workspace-a', commit: 'a'.repeat(40), uncommittedFiles: 0 },
     artifacts: {
       worker: { key: `releases/${sha}/worker.mjs`, hash: HASH, size: 1024 },
       machine: { key: `releases/${sha}/machine.js`, hash: HASH, size: 2048 },
@@ -60,6 +60,35 @@ function stageInput(sha: string): StageReleaseInput {
     },
   };
 }
+
+describe('release sources migration', () => {
+  it('gives stored records their source once and drops a launch recorded before launch sources', async () => {
+    const commit = 'c'.repeat(40);
+    const base = { inferenceVersion: 1, builtBy: 'darktop', createdAt: '2026-10-01T00:00:00.000Z', artifacts: { worker: null, machine: null, frontend: null }, worker: null, status: { worker: 'pending', frontend: 'pending', machines: {} }, error: null };
+    await runInDurableObject(env.TENANT_RELEASES.getByName(`migration-${crypto.randomUUID()}`), async (_instance, state) => {
+      const legacy = [
+        { ...base, sha: `${commit}-dirty.0123456789ab`, label: 'feature @ cccccccccccc', workspaceId: 'workspace-a' },
+        { ...base, sha: 'd'.repeat(64), label: `Default ${commit}`, workspaceId: null },
+        { ...base, sha: 'channel:12', label: 'Channel build', workspaceId: null },
+      ];
+      for (const record of legacy) state.storage.sql.exec('INSERT OR REPLACE INTO releases(sha, created_at, record_json) VALUES (?, ?, ?)', record.sha, record.createdAt, JSON.stringify(record));
+      state.storage.sql.exec('INSERT OR REPLACE INTO latest_launch(id, machine_id, record_json) VALUES (1, ?, ?)', 'darktop', JSON.stringify({ launchId: crypto.randomUUID(), workspaceId: 'workspace-a', targets: ['worker'], sha: null, phase: 'queued', message: '', status: 'running', error: null, startedAt: base.createdAt, updatedAt: base.createdAt }));
+      // A new instance runs the constructor's migration over what an older release stored.
+      new TenantReleasesDO(state, env);
+      const stored = state.storage.sql.exec<{ sha: string; record_json: string }>('SELECT sha, record_json FROM releases').toArray();
+      const sources = Object.fromEntries(stored.map(row => [row.sha, releaseRecordSchema.parse(JSON.parse(row.record_json)).source]));
+      expect(sources).toEqual({
+        [`${commit}-dirty.0123456789ab`]: { kind: 'workspace', workspaceId: 'workspace-a', commit, uncommittedFiles: null },
+        ['d'.repeat(64)]: { kind: 'canonical', repository: 'https://github.com/inKibra/gitspace.sh.git', branch: null, commit },
+        'channel:12': null,
+      });
+      expect(state.storage.sql.exec('SELECT id FROM latest_launch').toArray()).toEqual([]);
+      // Running it again changes nothing.
+      new TenantReleasesDO(state, env);
+      expect(state.storage.sql.exec<{ record_json: string }>('SELECT record_json FROM releases ORDER BY sha').toArray().map(row => row.record_json)).toEqual(stored.sort((left, right) => left.sha.localeCompare(right.sha)).map(row => row.record_json));
+    });
+  });
+});
 
 async function tenant() {
   const userId = env.ACCOUNT_ID;
@@ -113,7 +142,7 @@ describe('tenant releases', () => {
   it('keeps the latest launch its building machine reports and ignores an older report of the same launch', async () => {
     const { control } = await tenant();
     expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toBeNull();
-    const queued = { launchId: crypto.randomUUID(), workspaceId: 'workspace-a', targets: ['frontend'], sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: '2026-10-09T10:00:00.000Z', updatedAt: '2026-10-09T10:00:00.000Z' };
+    const queued = { launchId: crypto.randomUUID(), source: { kind: 'workspace', workspaceId: 'workspace-a' }, targets: ['frontend'], sha: null, phase: 'queued', message: 'Preparing the build', status: 'running', error: null, startedAt: '2026-10-09T10:00:00.000Z', updatedAt: '2026-10-09T10:00:00.000Z' };
     const building = { ...queued, sha: 'b'.repeat(40), phase: 'build', message: 'building frontend', updatedAt: '2026-10-09T10:01:00.000Z' };
     await control('deploy.launchProgress', queued);
     await control('deploy.launchProgress', building);

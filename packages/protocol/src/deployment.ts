@@ -159,11 +159,32 @@ export type WorkerReleaseMetadata = z.infer<typeof workerReleaseMetadataSchema>;
 export const releaseStatusSchema = z.enum(['pending', 'applied', 'failed', 'skipped']);
 export type ReleaseStatus = z.infer<typeof releaseStatusSchema>;
 
+const commitSchema = z.string().regex(/^[a-f0-9]{40}$/u);
+/** The branch GitSpace's canonical repository (`GITSPACE_SOURCE_REPOSITORY`) releases from. */
+export const GITSPACE_CANONICAL_BRANCH = 'develop';
+/** Where a release was built from: a workspace checkout at its branch commit plus uncommitted files (unknown for
+ * releases recorded before counts were kept), or a clean commit of the canonical repository (no branch for defaults). */
+export const releaseSourceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('workspace'), workspaceId: idSchema, commit: commitSchema, uncommittedFiles: z.number().int().nonnegative().nullable() }).strict(),
+  z.object({ kind: z.literal('canonical'), repository: z.string().min(1), branch: z.string().min(1).nullable(), commit: commitSchema }).strict(),
+]);
+export type ReleaseSource = z.infer<typeof releaseSourceSchema>;
+/** What a launch builds: a workspace checkout, or one commit of the canonical repository. */
+export const launchSourceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('workspace'), workspaceId: idSchema }).strict(),
+  z.object({ kind: z.literal('canonical'), commit: commitSchema }).strict(),
+]);
+export type LaunchSource = z.infer<typeof launchSourceSchema>;
+/** The canonical branch head the account last read from the canonical repository. */
+export const canonicalHeadSchema = z.object({ repository: z.string().min(1), branch: z.string().min(1), commit: commitSchema, checkedAt: z.string().datetime() }).strict();
+export type CanonicalHead = z.infer<typeof canonicalHeadSchema>;
+
 export const releaseRecordSchema = z.object({
-  /** Git sha of the workspace build, or `channel:<version>` for our builds. */
+  /** The release key: a canonical commit, or a workspace commit with `-dirty.<fingerprint>` for uncommitted changes. */
   sha: z.string().min(1).max(160),
   label: z.string().min(1).max(160),
-  workspaceId: idSchema.nullable(),
+  /** Null only for releases recorded before sources were kept whose origin cannot be derived. */
+  source: releaseSourceSchema.nullable(),
   builtBy: idSchema,
   createdAt: z.string().datetime(),
   /** Capability of every included target, not inferred from a tenant's current selection. */
@@ -188,7 +209,7 @@ export const releaseRecordSchema = z.object({
 });
 export type ReleaseRecord = z.infer<typeof releaseRecordSchema>;
 
-export const stageReleaseInputSchema = releaseRecordSchema.pick({ sha: true, label: true, workspaceId: true, worker: true, inferenceVersion: true }).extend({
+export const stageReleaseInputSchema = releaseRecordSchema.pick({ sha: true, label: true, source: true, worker: true, inferenceVersion: true }).extend({
   artifacts: releaseRecordSchema.shape.artifacts.omit({ omp: true }).strict(),
 }).strict();
 export type StageReleaseInput = z.infer<typeof stageReleaseInputSchema>;
@@ -222,7 +243,7 @@ export type MachineExecutionAdmission = z.infer<typeof machineExecutionAdmission
 /** The latest launch, reported phase by phase by the machine that builds it and kept by the account. */
 export const launchProgressSchema = z.object({
   launchId: z.string().uuid(),
-  workspaceId: z.string().min(1).max(160),
+  source: launchSourceSchema,
   targets: z.array(releaseTargetSchema).min(1),
   sha: z.string().min(1).max(160).nullable(),
   phase: z.string().min(1).max(64),
@@ -247,6 +268,7 @@ export const deploymentStatusSchema = z.object({
   releases: z.array(releaseRecordSchema),
   machineExecution: z.record(idSchema, machineExecutionAdmissionSchema).optional(),
   launch: launchProgressSchema.nullable(),
+  canonical: canonicalHeadSchema.nullable(),
 });
 export type DeploymentStatus = z.infer<typeof deploymentStatusSchema>;
 

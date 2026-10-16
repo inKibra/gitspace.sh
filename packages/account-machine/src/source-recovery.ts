@@ -33,7 +33,7 @@ export async function recoverReleaseFromSource(sourceRoot: string, workspaceId: 
     machineId, authority, blobs: new CloudDataCheckpointBlobStore(control),
     buildRoot: join(environmentRoot, 'recovery-builds'),
   });
-  const record = await launcher.launchAndWait({ workspaceId, targets });
+  const record = await launcher.launchAndWait({ source: { kind: 'workspace', workspaceId }, targets });
   console.log(`Recovery staged tenant release ${record.sha}; waiting for ${targets.join(', ')} activation.`);
   const deadline = Date.now() + 10 * 60_000;
   while (Date.now() < deadline) {

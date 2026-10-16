@@ -38,7 +38,7 @@ describe('SourceSettings', () => {
       worker: { sha: 'answering-worker', version: 'answering-worker' },
       platformWorker: { sha: 'platform-record', version: 'platform-record' },
     } };
-    const html = renderToStaticMarkup(<SourceSettings deployment={deployment} onRevertDeployment={noop} saving={false} />);
+    const html = renderToStaticMarkup(<SourceSettings deployment={deployment} onRevertDeployment={noop} onCheckCanonical={noop} saving={false} />);
     expect(html).toContain('answering-worker');
     expect(html).toContain('Platform record');
     expect(html).toContain('platform-record');
@@ -47,10 +47,10 @@ describe('SourceSettings', () => {
 
   it('allows reset while any independently selected target remains', () => {
     const channel = { ...deploymentStatusFixture, desired: { worker: null, machine: null, frontend: null, updatedAt: deploymentStatusFixture.desired.updatedAt } };
-    const html = renderToStaticMarkup(<SourceSettings deployment={channel} onRevertDeployment={noop} saving={false} />);
+    const html = renderToStaticMarkup(<SourceSettings deployment={channel} onRevertDeployment={noop} onCheckCanonical={noop} saving={false} />);
     expect(html).toMatch(/<button[^>]*\sdisabled=""/u);
     const frontendOnly = { ...channel, desired: { ...channel.desired, frontend: 'frontend-release' } };
-    const active = renderToStaticMarkup(<SourceSettings deployment={frontendOnly} onRevertDeployment={noop} saving={false} />);
+    const active = renderToStaticMarkup(<SourceSettings deployment={frontendOnly} onRevertDeployment={noop} onCheckCanonical={noop} saving={false} />);
     expect(active).not.toMatch(/<button[^>]*\sdisabled=""/u);
   });
 

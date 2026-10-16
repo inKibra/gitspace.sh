@@ -19,9 +19,9 @@ test('refuses a launch addressed to another machine before running the builder',
   const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
     url: 'https://machine.test/rpc', fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => rpc.handler(new Request(input, init)), { preconnect: fetch.preconnect }),
   }) });
-  expect(await client.deployment.launch({ workspaceId: 'space', machineId: 'machine-b', targets: ['worker'] })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
+  expect(await client.deployment.launch({ source: { kind: 'workspace', workspaceId: 'space' }, machineId: 'machine-b', targets: ['worker'] })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
   expect(builds).toBe(0);
-  expect(await client.deployment.launch({ workspaceId: 'space', machineId: 'machine-a', targets: ['worker'] })).toMatchObject({ status: 'error', error: { data: { message: 'Build source unavailable' } } });
+  expect(await client.deployment.launch({ source: { kind: 'workspace', workspaceId: 'space' }, machineId: 'machine-a', targets: ['worker'] })).toMatchObject({ status: 'error', error: { data: { message: 'Build source unavailable' } } });
   expect(builds).toBe(1);
   expect(await client.settings.get({})).toMatchObject({ status: 'error' });
   expect(builds).toBe(1);

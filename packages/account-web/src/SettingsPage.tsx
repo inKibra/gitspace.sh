@@ -50,7 +50,7 @@ import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
 import { ModelCombobox, modelOptions } from './ModelCombobox.js';
-import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_TARGET_LABEL, RELEASE_TARGETS, shortSha, type ReleaseRecordView } from './release.js';
+import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_TARGET_LABEL, RELEASE_TARGETS, releaseSourceText, shortSha, type ReleaseRecordView } from './release.js';
 import { AddMachinePanel } from './AddMachinePanel.js';
 import { navigateProductUrl } from './routes.js';
 import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBrowserDialog.js';
@@ -120,6 +120,8 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   deployment: DeploymentStatusView | null;
   /** Point the account back at our channel build; every target converges on it. */
   onRevertDeployment: () => Promise<void>;
+  /** Read the canonical branch head now; status otherwise shows the stored one. */
+  onCheckCanonical: () => Promise<void>;
   saving: boolean;
   error: string | null;
 }
@@ -855,7 +857,7 @@ function ReleaseRow({ release, desired, index }: { release: ReleaseRecordView; d
   return <Card size="compact" index={index}>
     <CardHeader>
       <CardTitle>{release.label}{desired ? <Badge color="blue">Desired</Badge> : null}</CardTitle>
-      <CardDescription><span className="font-mono">{shortSha(release.sha)}</span> · built {new Date(release.createdAt).toLocaleString()}{release.workspaceId ? ` · from workspace ${release.workspaceId}` : ''}</CardDescription>
+      <CardDescription><span className="font-mono">{shortSha(release.sha)}</span> · built {new Date(release.createdAt).toLocaleString()} · {releaseSourceText(release.source)}</CardDescription>
       {release.error ? <p role="alert" className="text-caption text-destructive">{release.error}</p> : null}
     </CardHeader>
     <CardFooter>
@@ -866,10 +868,22 @@ function ReleaseRow({ release, desired, index }: { release: ReleaseRecordView; d
     </CardFooter>
   </Card>;
 }
-export function SourceSettings({ deployment, onRevertDeployment, saving }: Pick<SettingsPageProps, 'deployment' | 'onRevertDeployment' | 'saving'>) {
+export function SourceSettings({ deployment, onRevertDeployment, onCheckCanonical, saving }: Pick<SettingsPageProps, 'deployment' | 'onRevertDeployment' | 'onCheckCanonical' | 'saving'>) {
   if (!deployment) return <Group title="Running"><EmptyState icon={icon(Rocket02, 20)} title="Loading source status…" description="Asking GitSpace Cloud what your account runs." /></Group>;
   const releases = [...deployment.releases].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   const channel = RELEASE_TARGETS.every((target) => deployment.desired[target] === null);
+  const head = deployment.canonical;
+  // The sources of the releases this account selected, target by target; none means the stable channel.
+  const selected = RELEASE_TARGETS.flatMap((target) => {
+    const source = deployment.releases.find((release) => release.sha === deployment.desired[target])?.source;
+    return source ? [source] : [];
+  });
+  const runsHead = !!head && selected.length > 0 && selected.every((source) => source.kind === 'canonical' && source.commit === head.commit);
+  const canonicalDescription = !head ? 'Not checked yet. Check reads the branch head from GitHub; launch a commit from the GitSpace project\'s menu.'
+    : `${head.branch} is at ${shortSha(head.commit)} (checked ${new Date(head.checkedAt).toLocaleString()}). ${runsHead ? 'You run it.'
+      : selected.length === 0 ? 'You run the stable channel.'
+      : selected.some((source) => source.kind === 'canonical') ? `You run an older ${head.branch} commit; launch canonical develop from the GitSpace project's menu.`
+      : 'You run a workspace build.'}`;
   return <>
     <Group title="Running"><SettingRows>
       <SettingRow title="Worker" description="The tenant worker answering this account, by its own version stamp."><Badge color={deployment.current.worker.sha === null ? 'gray' : 'blue'}><span className="font-mono">{deployment.current.worker.version ?? 'unknown'}</span></Badge></SettingRow>
@@ -883,6 +897,12 @@ export function SourceSettings({ deployment, onRevertDeployment, saving }: Pick<
       {RELEASE_TARGETS.map((target) => <SettingRow key={target} title={RELEASE_TARGET_LABEL[target]} description={desiredLabel(deployment, target)}><Badge color={deployment.desired[target] === null ? 'gray' : 'blue'}>{deployment.desired[target] === null ? 'Channel' : 'Release'}</Badge></SettingRow>)}
       <SettingRow title="All targets" description={`Selections updated ${new Date(deployment.desired.updatedAt).toLocaleString()}`}>
         <Button variant="secondary" size="compact" disabled={channel || saving} onClick={() => { if (window.confirm('Go back to the stable GitSpace build? The worker swaps now; machines and the frontend follow.')) settle(onRevertDeployment()); }}>Back to stable</Button>
+      </SettingRow>
+    </SettingRows></Group>
+    <Group title="Canonical source"><SettingRows>
+      <SettingRow title={head ? `${head.branch} · github.com/inKibra/gitspace.sh` : 'develop · github.com/inKibra/gitspace.sh'} description={canonicalDescription}>
+        {head ? <Badge color={runsHead ? 'green' : 'gray'}><span className="font-mono">{shortSha(head.commit)}</span></Badge> : null}
+        <Button variant="secondary" size="compact" disabled={saving} onClick={() => settle(onCheckCanonical())}>Check</Button>
       </SettingRow>
     </SettingRows></Group>
     <Group title="Releases">{releases.length

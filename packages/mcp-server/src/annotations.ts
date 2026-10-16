@@ -115,6 +115,12 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": false,
     "openWorldHint": false
   },
+  "deployment.checkCanonical": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+  },
   "deployment.revert": {
     "readOnlyHint": false,
     "destructiveHint": true,

@@ -729,7 +729,7 @@ describe('account routing of machine work', () => {
   it('launches a release only on the named online enrolled machine, never the holder or any online machine', async () => {
     const { fixture, catalog, held, reached } = await fleet();
     await catalog.putMachine({ ...machine('machine-d'), state: 'offline' });
-    const launch = (input: Record<string, unknown>) => SELF.fetch(fixture.request(single('deployment.launch', { workspaceId: held.spaceId, targets: ['worker'], ...input })));
+    const launch = (input: Record<string, unknown>) => SELF.fetch(fixture.request(single('deployment.launch', { source: { kind: 'workspace', workspaceId: held.spaceId }, targets: ['worker'], ...input })));
     expect(await (await launch({ machineId: 'machine-c' })).json()).toEqual({ machine: 'machine-c' });
     const refusals: Array<[Record<string, unknown>, number, string]> = [[{}, 400, 'LAUNCH_MACHINE_REQUIRED'], [{ machineId: 'machine-d' }, 503, 'LAUNCH_MACHINE_OFFLINE'], [{ machineId: 'machine-z' }, 409, 'LAUNCH_MACHINE_NOT_ENROLLED']];
     for (const [input, status, code] of refusals) {
@@ -744,7 +744,7 @@ describe('account routing of machine work', () => {
     const { fixture, held, reached } = await fleet();
     const response = await SELF.fetch(fixture.request({ v: 1, batch: [
       { ...single('settings.get', {}), id: 'cloud' },
-      { ...single('deployment.launch', { workspaceId: held.spaceId, machineId: 'machine-c', targets: ['worker'] }), id: 'machine' },
+      { ...single('deployment.launch', { source: { kind: 'workspace', workspaceId: held.spaceId }, machineId: 'machine-c', targets: ['worker'] }), id: 'machine' },
     ] }));
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: { code: 'RPC_MIXED_AUTHORITY_BATCH' } });

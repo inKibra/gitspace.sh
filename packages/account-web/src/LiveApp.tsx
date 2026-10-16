@@ -596,6 +596,7 @@ function GitSpaceProduct() {
   const settingsDeploymentQuery = useResultQuery(rpcClient.deployment.status, {}, { enabled: runtimeMetadataEnabled });
   const settingsDeploymentValue = useRetainedQueryValue(settingsDeploymentQuery, 'deployment');
   const revertDeployment = useResultMutation(rpcClient.deployment.revert);
+  const checkCanonicalSource = useResultMutation(rpcClient.deployment.checkCanonical);
   const composioSetupQuery = useResultQuery(rpcClient.mcp.composio.setup.get, {});
   const composioSetupValue = useRetainedQueryValue(composioSetupQuery, 'composio-setup');
   const putComposioSetup = useResultMutation(rpcClient.mcp.composio.setup.put);
@@ -785,6 +786,15 @@ function GitSpaceProduct() {
     const result = await revertDeployment.mutateAsync({});
     if (result.status === 'error') {
       setSettingsError(rpcErrorMessage(result.error, 'Revert release'));
+      throw result.error;
+    }
+    await settingsDeploymentQuery.refetch();
+  };
+  const checkCanonical = async (): Promise<void> => {
+    setSettingsError(null);
+    const result = await checkCanonicalSource.mutateAsync({});
+    if (result.status === 'error') {
+      setSettingsError(rpcErrorMessage(result.error, 'Check canonical source'));
       throw result.error;
     }
     await settingsDeploymentQuery.refetch();
@@ -983,6 +993,7 @@ function GitSpaceProduct() {
     onDestroyMachine={removeMachine}
     deployment={settingsDeploymentValue ?? null}
     onRevertDeployment={revertToChannel}
+    onCheckCanonical={checkCanonical}
     devices={devicesValue ?? null}
     onRevokeDevice={revokeDeviceAndRefresh}
     onSignOut={signOutThisBrowser}

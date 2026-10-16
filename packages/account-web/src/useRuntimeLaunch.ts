@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { DeploymentStatusView, LaunchProgressView, ReleaseTarget } from '@gitspace/protocol';
+import type { DeploymentStatusView, LaunchProgressView, LaunchSourceView, ReleaseTarget } from '@gitspace/protocol';
 import { appendLaunchProgress, launchTrackFrom, shortSha, type LaunchTrack } from './release.js';
 import { LAUNCHED_STORAGE_KEY, readLaunchedMark, type LaunchedMark, type RevertProgress } from './LaunchSheet.js';
 import { rpcClient } from './rpc-client.js';
@@ -14,7 +14,7 @@ export interface RuntimeLaunch {
   setOpen(open: boolean): void;
   mark: LaunchedMark | null;
   dismiss(): void;
-  start(workspaceId: string, machineId: string, targets: readonly ReleaseTarget[]): Promise<void>;
+  start(source: LaunchSourceView, machineId: string, targets: readonly ReleaseTarget[]): Promise<void>;
   revert(): Promise<void>;
 }
 
@@ -101,7 +101,7 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
     setMark(null);
     reload();
   }, [status, reverting, reload]);
-  const start = async (workspaceId: string, machineId: string, targets: readonly ReleaseTarget[]) => {
+  const start = async (source: LaunchSourceView, machineId: string, targets: readonly ReleaseTarget[]) => {
     const token = ++operation.current;
     setReverting(null);
     setRevertProgress(null);
@@ -110,7 +110,7 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
     setOpen(true);
     try {
       if (!machineId.trim()) throw new Error('Attach and choose a machine to launch GitSpace.');
-      const result = await rpcClient.deployment.launch({ workspaceId, machineId, targets: [...targets] });
+      const result = await rpcClient.deployment.launch({ source, machineId, targets: [...targets] });
       if (result.status === 'error') throw result.error;
       if (operation.current !== token) return;
       followed.current = result.value.launchId;
@@ -118,7 +118,7 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
     } catch (error) {
       if (operation.current === token) {
         const message = rpcErrorMessage(error, 'Launch workspace');
-        setLaunch({ launchId: `rejected:${token}`, workspaceId, targets: [...targets], sha: null, status: 'failed', error: message, log: [{ phase: 'failed', message, at: new Date().toISOString() }] });
+        setLaunch({ launchId: `rejected:${token}`, source, targets: [...targets], sha: null, status: 'failed', error: message, log: [{ phase: 'failed', message, at: new Date().toISOString() }] });
       }
       throw error;
     }

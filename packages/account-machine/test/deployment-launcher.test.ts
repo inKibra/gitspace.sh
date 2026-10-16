@@ -111,7 +111,7 @@ describe('canonical cache deployment sources', () => {
       },
     });
     try {
-      const launched = launcher.launchAndWait({ workspaceId: 'workspace', targets: ['frontend'] });
+      const launched = launcher.launchAndWait({ source: { kind: 'workspace', workspaceId: 'workspace' }, targets: ['frontend'] });
       if (activation === 'failed') {
         await expect(launched).rejects.toThrow();
         await completed.promise;
@@ -120,7 +120,7 @@ describe('canonical cache deployment sources', () => {
       } else {
         const record = await launched;
         await completed.promise;
-        expect(record.workspaceId).toBe('workspace');
+        expect(record.source).toMatchObject({ kind: 'workspace', workspaceId: 'workspace', uncommittedFiles: 0 });
         expect(progress.at(-1)).toMatchObject({ status: 'succeeded', error: null });
       }
       expect([...uploaded.entries()].find(([key]) => key.endsWith('/index.html'))?.[1]).toBe('built from the cloud cache');

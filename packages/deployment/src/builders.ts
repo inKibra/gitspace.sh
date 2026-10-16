@@ -25,23 +25,25 @@ function processEnvironment(): Record<string, string> {
 }
 
 /**
- * `git rev-parse HEAD`; a tree with uncommitted changes gets
- * `-dirty.<12 hex>` from sha256 over `git diff HEAD` plus every untracked
- * (non-ignored) file, so two launches of different uncommitted states never
- * share a release key (release objects are immutable).
+ * A checkout's release identity. `commit` is `git rev-parse HEAD`; `key` is that commit, or for a tree with
+ * uncommitted changes `<commit>-dirty.<12 hex>` from sha256 over `git diff HEAD` plus every untracked (non-ignored)
+ * file, so two launches of different uncommitted states never share a release key (release objects are immutable).
+ * `uncommittedFiles` counts changed tracked paths and untracked source files.
  */
-export async function workspaceSha(root: string): Promise<string> {
+export async function workspaceRevision(root: string): Promise<{ key: string; commit: string; uncommittedFiles: number }> {
   const head = Bun.spawn(['git', 'rev-parse', 'HEAD'], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
   const sha = (await new Response(head.stdout).text()).trim();
   if (await head.exited !== 0 || !/^[a-f0-9]{40}$/u.test(sha)) throw new Error(`${root} is not a git checkout`);
   const diff = Bun.spawn(['git', 'diff', 'HEAD', '--no-color', '--no-ext-diff'], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+  const changed = Bun.spawn(['git', 'diff', 'HEAD', '--name-only', '-z'], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
   // Untracked files only under the source roots: environment sandboxes live untracked in the checkout and would take a minute to walk.
   const untracked = Bun.spawn(['git', 'ls-files', '--others', '--exclude-standard', '-z', '--', 'packages', 'scripts'], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
-  const [changes, others] = await Promise.all([new Response(diff.stdout).arrayBuffer(), new Response(untracked.stdout).text()]);
-  await Promise.all([diff.exited, untracked.exited]);
+  const [changes, changedPaths, others] = await Promise.all([new Response(diff.stdout).arrayBuffer(), new Response(changed.stdout).text(), new Response(untracked.stdout).text()]);
+  await Promise.all([diff.exited, changed.exited, untracked.exited]);
   // Vite drops `vite.config.ts.timestamp-*.mjs` beside the config while a build runs; a concurrent build must not change the fingerprint.
   const paths = others.split('\0').filter((path) => path.length > 0 && !/\.timestamp-[^/]*\.mjs$/u.test(path));
-  if (changes.byteLength === 0 && paths.length === 0) return sha;
+  const uncommittedFiles = changedPaths.split('\0').filter(path => path.length > 0).length + paths.length;
+  if (changes.byteLength === 0 && paths.length === 0) return { key: sha, commit: sha, uncommittedFiles: 0 };
   const fingerprint = new Bun.CryptoHasher('sha256').update(new Uint8Array(changes));
   for (const path of paths) {
     // Nested checkouts and directory symlinks list as one entry; only regular files carry bytes worth fingerprinting.
@@ -49,7 +51,7 @@ export async function workspaceSha(root: string): Promise<string> {
     if (!entry?.isFile()) continue;
     fingerprint.update(`\0${path}\0`).update(new Uint8Array(await Bun.file(join(root, path)).arrayBuffer()));
   }
-  return `${sha}-dirty.${fingerprint.digest('hex').slice(0, 12)}`;
+  return { key: `${sha}-dirty.${fingerprint.digest('hex').slice(0, 12)}`, commit: sha, uncommittedFiles };
 }
 
 async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: string): Promise<BuiltArtifact> {

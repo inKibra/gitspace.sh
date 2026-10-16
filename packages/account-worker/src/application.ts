@@ -8,7 +8,8 @@ import { z } from 'zod';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
-import { hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
+import { GITSPACE_SOURCE_REPOSITORY, hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
+import { readAdvertisedRefs } from '@gitspace/runtime-workspace-do';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
@@ -78,6 +79,7 @@ import {
   machineProtocolInputSchema,
   launchProgressSchema,
   WORKER_VERSION_HEADER,
+  GITSPACE_CANONICAL_BRANCH,
   type DeploymentStatus,
   type PlatformDeployRequest,
   type ReleaseStatus,
@@ -2060,6 +2062,15 @@ export async function revertTenantRelease(env: Env, userId: string): Promise<Dep
     if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Platform revert failed');
   }
   await releases.revert();
+  return readTenantDeployment(env, userId);
+}
+/** Reads the canonical branch head from the public canonical repository (one ref advertisement, no clone) and stores
+ * it; status serves the stored head. */
+export async function checkCanonicalHead(env: Env, userId: string): Promise<DeploymentStatus> {
+  const ref = `refs/heads/${GITSPACE_CANONICAL_BRANCH}`;
+  const commit = (await readAdvertisedRefs({ remote: GITSPACE_SOURCE_REPOSITORY, token: null, refPrefix: ref })).get(ref);
+  if (!commit) throw new Error(`${GITSPACE_SOURCE_REPOSITORY} has no ${GITSPACE_CANONICAL_BRANCH} branch`);
+  await tenantReleases(env, userId).recordCanonicalHead({ repository: GITSPACE_SOURCE_REPOSITORY, branch: GITSPACE_CANONICAL_BRANCH, commit, checkedAt: new Date().toISOString() });
   return readTenantDeployment(env, userId);
 }
 async function platformCall(env: Env, userId: string, action: 'deploy' | 'revert', body: PlatformDeployRequest | { to: 'previous' | 'channel' }): Promise<{ status: ReleaseStatus; error: string | null }> {

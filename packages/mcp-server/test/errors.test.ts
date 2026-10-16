@@ -85,11 +85,11 @@ describe('MCP tool failure detail', () => {
         expect(result instanceof Error || result.isError === true).toBe(true);
       }
       for (const machineId of [undefined, '']) {
-        const result = await client.callTool({ name: 'gitspace_deployment_launch', arguments: { workspaceId: 'space', targets: ['worker'], ...(machineId === undefined ? {} : { machineId }) } }).catch(error => error);
+        const result = await client.callTool({ name: 'gitspace_deployment_launch', arguments: { source: { kind: 'workspace', workspaceId: 'space' }, targets: ['worker'], ...(machineId === undefined ? {} : { machineId }) } }).catch(error => error);
         expect(result instanceof Error || result.isError === true).toBe(true);
       }
       expect(requests).toEqual([]);
-      await client.callTool({ name: 'gitspace_deployment_launch', arguments: { workspaceId: 'space', machineId: 'named-cache', targets: ['worker'] } });
+      await client.callTool({ name: 'gitspace_deployment_launch', arguments: { source: { kind: 'workspace', workspaceId: 'space' }, machineId: 'named-cache', targets: ['worker'] } });
       const envelope = z.object({ batch: z.array(z.object({ path: z.string(), input: z.object({ machineId: z.string() }) })) }).parse(requests[0]);
       expect(envelope.batch).toEqual([{ path: 'deployment.launch', input: { machineId: 'named-cache' } }]);
     } finally { await client.close(); }
