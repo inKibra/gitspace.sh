@@ -195,6 +195,14 @@ Every item is verified the way the user works, in the browser, before it is repo
 6. Open, found while verifying: the first message in a new workspace times out ("Cloud session control" and "Send message: The request timed out") on three of three new workspaces; the message usually lands, a resend queues a duplicate. Cause not investigated.
 7. Open: the Tester on the logged-in Chrome relay needs the relay check changed in the cloud and in the installed Chrome extension (a reinstall). Reading `.omp/` stays until inkibra core moves `.omp/agents/Tester.md` and `.omp/rules/*` to `.agents/`.
 
+**Batch 10 — releases from canonical.** Releases since the cutover were built by a workaround script from a workspace checkout (`fc88e4a "Initialize project"` plus copied files), so release ids name no `develop` commit; that workspace's project has since been deleted.
+1. **Launch from canonical:** Settings → Source → launch `develop` at a commit of `github.com/inKibra/gitspace.sh`; the release is recorded under the real commit. Clean builds only.
+2. **Launch from the GitSpace project's base space**, not only its workspaces (`AppSidebar.tsx:198` limits launch to `kind === 'workspace'`).
+3. **Honest ids for workspace launches:** the workspace's commit plus "N uncommitted changes".
+4. **Promote a canonical release to the default for new accounts** (replaces the hand-published `b355af77`).
+5. **Retire the workaround script**; ship through the product from then on.
+6. The GitSpace project knows when canonical `develop` is ahead of the running release (`docs/GITHUB-INTEGRATION-DESIGN.md` §7).
+
 **Later.** Machine CLI (`gitspace status`, `setup`, `sync`, `env --`).
 
 **Parked.** Cloud browser: its CDP socket keeps the workspace object awake while a browser is open. Planned in `docs/APERTURE-DESIGN.md` (B0): one `BrowserSessionDO` per cloud session holds the socket.

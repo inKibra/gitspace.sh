@@ -1,0 +1,91 @@
+# GitHub Integration: an App per Tenant
+
+> **Status: Draft for planning (2026-10-16).** Claims marked **[unverified]** need a spike before they become decisions.
+
+## 1. Summary
+
+Each GitSpace account (tenant) creates its own GitHub App from GitSpace in one click and installs it on the organizations and repositories it works with. The App gives GitSpace three things:
+
+1. **Events:** GitHub tells the tenant what happened (pull requests, comments, issues, pushes, checks), and project automations turn events into agent work.
+2. **Access:** short-lived installation tokens for reading, fetching and pushing private repositories, including checking whether a project is behind its remote, all without a machine.
+3. **Write-back:** Change Guides, review threads and workspace status posted to pull requests.
+
+## 2. Why one App per tenant
+
+| Concern | One shared GitSpace App | One App per tenant (chosen) |
+|---|---|---|
+| Which GitSpace handles an event | Lookup from installation id to tenant in the platform | Built in: the App's webhook points at its own tenant |
+| Two tenants on one repository | One installation shared; a link step; `@gitspace` is ambiguous | Each tenant installs its own App; `@gitspace-<handle>` names the target |
+| Adding a permission | Every installation of every tenant is asked | Only that tenant's App changes; each tenant upgrades on its own |
+| Secrets | One private key for everyone, held by the platform | Each tenant's private key and webhook secret in its own vault |
+
+## 3. Creating and installing the App
+
+- **Create:** Settings → GitHub → **Create GitHub App** runs GitHub's App manifest flow. GitSpace fills in the name (`GitSpace <handle>`), the webhook URL (`https://<tenant-host>/github/webhook`), the callback and setup URLs, the permissions and events for the features the tenant turned on, and **public** installability. GitHub returns the App id, private key, webhook secret and client credentials; they go into the tenant's vault.
+- **Public, but only GitSpace-started installs count.** A public App can be installed on any account, which is what lets one App serve your personal repositories and every organization (Deedible, Golconda, Inkibra) across all your projects. To keep strangers from pointing your App at their repositories:
+  - every install starts from GitSpace with a signed, expiring `state`;
+  - the setup callback records the installation only when the `state` verifies;
+  - any installation GitSpace did not start is ignored, and GitSpace uninstalls it through the API;
+  - webhooks from unknown installations are dropped after the signature check.
+- **Installation records** (tenant storage): installation id, account (user or org), repository selection, permissions granted, who installed it, when.
+- **Upgrading:** GitSpace lists features with the permissions each needs and whether the App has them. Changing an existing App's permissions happens on the App's GitHub settings page (GitSpace links there); each installation then accepts the new permissions on GitHub. **[unverified]** whether an App's permissions can be updated through the API rather than the settings page.
+
+Default permissions: `metadata: read`, `contents: read`, `pull_requests: write`, `issues: write`, `checks: write`, `statuses: write`. `contents: write` (pushing branches) is an upgrade the tenant turns on. Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `issues`, `push`, `check_suite`, `installation`, `installation_repositories`.
+
+## 4. Routing inside a tenant
+
+- Webhook → verify `X-Hub-Signature-256` with the tenant's secret → record the delivery id once (duplicates are dropped) → route by repository.
+- A repository maps to every project in the tenant whose remote is that repository (several projects may share one, as Deedible's did).
+- **Mentions:** a comment acts on the tenant only when it mentions `@gitspace-<handle>` (the App's bot name). Target: the workspace already attached to that pull request or issue; otherwise the project marked as the default for the repository; otherwise GitSpace replies asking which project.
+- An event no automation matches is recorded and dropped.
+
+## 5. Project automations
+
+Automations work like project crons (`ProjectCronsDO`, scoped runs) with an event in place of a schedule. Each one is a trigger, a filter, an instruction, and where it runs:
+
+| Trigger | Example |
+|---|---|
+| PR opened or updated | Create a review workspace from the PR (`workspace.create` from a PR exists), run the Reviewer, post the Change Guide as a check |
+| `@gitspace-<handle>` comment on a PR or issue | Send the comment as an instruction to that workspace's agent |
+| Issue labeled `gitspace` | Create a workspace with the issue as its goal |
+| Push to the base branch | Mark the project behind its remote and offer **Update base** (§7) |
+| Check failed on a PR | The PR's workspace agent investigates and reports |
+
+Rules (from `docs/SIMPLIFICATION.md`): a delivery is recorded once and becomes one run; failures are reported on the run, never retried in a loop; nothing polls GitHub when webhooks are available.
+
+## 6. Write-back to GitHub
+
+- **Change Guide:** a check run whose summary is the guide (Markdown; GitHub limits the summary to about 65 KB, so long guides link to the full version), updated in place when the guide changes. A PR comment is the alternative for repositories where checks are noisy.
+- **Review threads:** posted as review comments on the exact lines; resolving on either side resolves both.
+- **Status:** a commit status or check showing "GitSpace: reviewing / ready / needs you".
+- **Read-only share link** for people without GitSpace: the full Change Guide and evidence, using the same capability-link model as Aperture's tab shares (`docs/APERTURE-DESIGN.md` §8).
+- **Default:** write-back is per project and starts off. When on, posts are automatic; when off, each workspace has a **Post to GitHub** action.
+
+## 7. Behind the remote
+
+- **Check without a machine:** the remote's branch heads come from one HTTPS request (`GET <repo>.git/info/refs?service=git-upload-pack`), the same request `remoteDefaultBranch` already makes (`account-worker/src/cloud-project.ts:14-18`). Private repositories use an installation token.
+- **Push-driven:** with the App installed, a `push` webhook updates the stored remote head immediately; without it, the check runs when someone opens the project or presses refresh. No background polling.
+- **Stored per project:** remote head of the base branch, when it was checked, and whether the project's copy contains it. **Per workspace:** behind its base (already in `stackStatus`), and behind its own remote branch when one exists (for example a PR branch others pushed to).
+- **Shown** as a small marker beside the existing status, with **Update base** using the existing base-branch import.
+- **The GitSpace project:** "behind" also means canonical `develop` is ahead of the release the tenant runs, which offers **Launch from canonical** (`docs/SIMPLIFICATION.md`, Batch 10).
+
+## 8. Milestones
+
+| ID | Milestone | Exit criteria |
+|---|---|---|
+| **G0** | App creation and install | Manifest flow creates `GitSpace <handle>`; keys in the vault; installs started from GitSpace are recorded; an install GitSpace did not start is uninstalled; webhooks verified and recorded once. |
+| **G1** | Remote tracking | Remote heads from `info/refs` with installation tokens; push webhooks update them; behind markers on projects and workspaces; **Update base**. |
+| **G2** | PR review automation | PR opened → review workspace → Reviewer → Change Guide check, updated on new pushes; `@gitspace-<handle>` comments reach the workspace agent. |
+| **G3** | Write-back and sharing | Review threads both ways, status checks, read-only share link, per-project write-back switch. |
+| **G4** | More triggers | Issues to workspaces, failed checks investigated. |
+
+## 9. Open questions
+
+1. Should a tenant be able to turn on `contents: write` per project, or only for the whole App?
+2. Does the share link for a Change Guide need an expiry, or live as long as the workspace?
+3. When two projects in one tenant share a repository and no default is set, should a PR create a workspace in each, or ask?
+
+## 10. References
+
+- GitHub Docs: Registering a GitHub App from a manifest; Webhook events and payloads; Authenticating as a GitHub App installation; Check runs.
+- `docs/APERTURE-DESIGN.md` (share links), `docs/SIMPLIFICATION.md` (rules; Batch 10).
