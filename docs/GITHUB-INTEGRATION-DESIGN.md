@@ -58,8 +58,18 @@ Rules (from `docs/SIMPLIFICATION.md`): a delivery is recorded once and becomes o
 - **Change Guide:** a check run whose summary is the guide (Markdown; GitHub limits the summary to about 65 KB, so long guides link to the full version), updated in place when the guide changes. A PR comment is the alternative for repositories where checks are noisy.
 - **Review threads:** posted as review comments on the exact lines; resolving on either side resolves both.
 - **Status:** a commit status or check showing "GitSpace: reviewing / ready / needs you".
-- **Read-only share link** for people without GitSpace: the full Change Guide and evidence, using the same capability-link model as Aperture's tab shares (`docs/APERTURE-DESIGN.md` §8).
+- **Change Guide viewer link:** GitSpace comments on the PR with a short summary and a link to the guide rendered by GitSpace; updating the guide edits that comment rather than posting a new one. See §6.1.
 - **Default:** write-back is per project and starts off. When on, posts are automatic; when off, each workspace has a **Post to GitHub** action.
+
+### 6.1 Change Guide viewer and comments from readers
+
+- **Viewing:** on public repositories anyone with the link can read the guide. On private repositories the reader signs in with GitHub and GitSpace checks, with the reader's token, that they can read the repository; a copied link alone shows nothing.
+- **Commenting:** readers **sign in with GitHub** (the tenant App's user authorization) and comment on a section, a step or a file range in the guide. GitSpace posts the comment to the PR **as the reader**, through GitHub's API with their user token:
+  - a note on a diff range becomes a review comment on those lines;
+  - any other note becomes a PR comment that quotes the guide passage, with file references as permalinks at the PR's commit;
+  - each posted comment carries a hidden marker (`<!-- gitspace-guide v1 guide=<id> section=<id> -->`).
+- **Read-back:** the App's webhook delivers the comment like any other; the marker files it as a thread on the matching guide section, attributed to the reader's GitHub account, where the workspace agent can answer or act. Comments people write directly on GitHub (no marker) still reach the workspace through the normal PR events.
+- **What GitSpace keeps:** the reader's GitHub token lives only in their viewer session (expiring, encrypted cookie), never in the tenant's vault. GitSpace never accepts a comment that GitHub did not accept: identity, permissions and moderation stay with GitHub.
 
 ## 7. Behind the remote
 
@@ -76,13 +86,13 @@ Rules (from `docs/SIMPLIFICATION.md`): a delivery is recorded once and becomes o
 | **G0** | App creation and install | Manifest flow creates `GitSpace <handle>`; keys in the vault; installs started from GitSpace are recorded; an install GitSpace did not start is uninstalled; webhooks verified and recorded once. |
 | **G1** | Remote tracking | Remote heads from `info/refs` with installation tokens; push webhooks update them; behind markers on projects and workspaces; **Update base**. |
 | **G2** | PR review automation | PR opened → review workspace → Reviewer → Change Guide check, updated on new pushes; `@gitspace-<handle>` comments reach the workspace agent. |
-| **G3** | Write-back and sharing | Review threads both ways, status checks, read-only share link, per-project write-back switch. |
+| **G3** | Write-back and sharing | Review threads both ways, status checks, per-project write-back switch; Change Guide viewer link on the PR; sign in with GitHub to comment, posted as the reader and read back into guide threads; private repositories require sign-in and repository access. |
 | **G4** | More triggers | Issues to workspaces, failed checks investigated. |
 
 ## 9. Open questions
 
 1. Should a tenant be able to turn on `contents: write` per project, or only for the whole App?
-2. Does the share link for a Change Guide need an expiry, or live as long as the workspace?
+2. Should the viewer stay available after the PR merges or the workspace is archived, and for how long?
 3. When two projects in one tenant share a repository and no default is set, should a PR create a workspace in each, or ask?
 
 ## 10. References
