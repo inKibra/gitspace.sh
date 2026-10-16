@@ -1,0 +1,157 @@
+name: Publish Default Release
+
+# Promotes one canonical commit to the release every new GitSpace account starts on: native machine builds for all
+# four platforms, then the same-commit cloud image, worker and frontend, published as one coherent default. Existing
+# accounts keep the default they were created with until they launch another release.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Full 40-character commit of develop to promote; empty promotes the commit this run checks out'
+        required: false
+        type: string
+
+concurrency:
+  group: default-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+      release: ${{ steps.commit.outputs.release }}
+    steps:
+      - name: Resolve the commit to promote
+        id: commit
+        env:
+          REQUESTED: ${{ inputs.commit }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          commit="${REQUESTED:-$RUN_SHA}"
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit must be a full 40-character commit"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "release=develop-${commit:0:12}" >> "$GITHUB_OUTPUT"
+
+  native:
+    needs: resolve
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - name: Install Linux native build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils clang cmake libprotobuf-dev libssl-dev pkg-config protobuf-compiler unzip
+      - name: Install macOS native build prerequisites
+        if: runner.os == 'macOS'
+        run: brew install protobuf cmake pkg-config openssl@3
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install the source dependency graph
+        run: bun install --frozen-lockfile
+      - name: Restore verified native source builds
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/gitspace/native
+          key: native-runtime-${{ matrix.target }}-${{ hashFiles('packages/deployment/src/native-runtime.ts', 'packages/deployment/src/executable-manifest.ts') }}
+      - name: Build this platform's machine runtime
+        env:
+          GITSPACE_RELEASE: ${{ needs.resolve.outputs.release }}
+          GITSPACE_BUILD_PLATFORM: ${{ matrix.target }}
+        run: |
+          bun packages/deployment/src/release.ts build \
+            --release "$GITSPACE_RELEASE" \
+            --platform "$GITSPACE_BUILD_PLATFORM" \
+            --out "$RUNNER_TEMP/distribution"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: default-native-${{ matrix.target }}
+          path: ${{ runner.temp }}/distribution/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    needs: [resolve, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      COMMIT: ${{ needs.resolve.outputs.commit }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.GITSPACE_DISTRIBUTION_BUCKET || 'gitspace-data' }}
+      RELEASES_BUCKET: ${{ vars.GITSPACE_RELEASES_BUCKET || 'gitspace-releases-rebuild-20260913' }}
+      # A detached checkout has no branch for the frontend's source metadata.
+      GITSPACE_SOURCE_BRANCH: develop
+      GITSPACE_SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - uses: docker/setup-buildx-action@v3
+      - name: Install release tooling
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: default-native-*
+          path: ${{ runner.temp }}/native-artifacts
+      - name: Publish the four native machine releases
+        run: |
+          mkdir -p "$RUNNER_TEMP/native"
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            bun packages/deployment/src/release.ts publish --from "$RUNNER_TEMP/native-artifacts/default-native-$platform"
+            mv "$RUNNER_TEMP/native-artifacts/default-native-$platform" "$RUNNER_TEMP/native/$platform"
+          done
+      - name: Authenticate to the image registry
+        env:
+          API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          credentials=$(curl --fail --silent --show-error -X POST \
+            -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+            --data '{"permissions":["push","pull"],"expiration_minutes":60}' \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/containers/registries/registry.cloudflare.com/credentials")
+          username=$(printf '%s' "$credentials" | jq -er '.result.username')
+          password=$(printf '%s' "$credentials" | jq -er '.result.password')
+          echo "::add-mask::$password"
+          printf '%s' "$password" | docker login registry.cloudflare.com --username "$username" --password-stdin
+      - name: Build the image, worker and frontend and publish the default
+        run: |
+          bun packages/deployment/src/default-release-cli.ts build \
+            --commit "$COMMIT" \
+            --image "registry.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/gitspace-onboarding" \
+            --native "$RUNNER_TEMP/native" \
+            --out "$RUNNER_TEMP/default-release" \
+            --publish --bucket "$RELEASES_BUCKET"
+      - name: Remove registry login
+        if: always()
+        run: docker logout registry.cloudflare.com
