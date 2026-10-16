@@ -11,7 +11,7 @@ import {
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
 export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
-const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, thinking: modelRoleThinkingSchema.optional() });
+const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, thinking: modelRoleThinkingSchema.optional(), role: z.string().optional() });
 type Admission = z.infer<typeof admissionSchema>;
 const pinSchema = z.object({ credentialId: z.string(), lastUsedAt: z.number() });
 const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stringify([kind, ...parts])}`;
@@ -91,15 +91,15 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         if (!inherited) await models.refresh({ allowNetwork: true });
         // A configured default is authority, not permission to fall back to a
         // different provider merely because it still has a usable credential.
-        const selected = inherited && !input.selection ? { model: inherited.model, thinking: inherited.thinking }
-          : selection.kind === 'default' || (selection.kind === 'role' && selection.role === 'default') ? await resolveAvailableProfileModel(resolved.profile.settings, models)
+        const selected = inherited && !input.selection ? { model: inherited.model, thinking: inherited.thinking, role: inherited.role }
+          : selection.kind === 'default' || (selection.kind === 'role' && selection.role === 'default') ? { ...await resolveAvailableProfileModel(resolved.profile.settings, models), role: 'default' }
           : await resolveModelSelection(resolved.profile.settings, models, selection);
         admission = admissionSchema.parse({ requestId: input.requestId, conversationId: input.conversationId, profile: resolved.profile, assignmentRevision: resolved.assignmentRevision, selection, ...selected });
         await ctx.storage.put(admissionKey, admission);
       }
       const models = await collection(admission.profile, input.conversationId, false, admission);
       router.register(models);
-      return { provider: admission.model.provider, modelId: admission.model.id, ...(admission.thinking === undefined ? {} : { thinking: admission.thinking }) };
+      return { provider: admission.model.provider, modelId: admission.model.id, ...(admission.thinking === undefined ? {} : { thinking: admission.thinking }), ...(admission.role === undefined ? {} : { role: admission.role }) };
     },
     bindInferenceConversation,
     async describeImages(signal: AbortSignal, messages: readonly Message[]) {

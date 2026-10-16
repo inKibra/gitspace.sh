@@ -78,7 +78,7 @@ describe('published catalog admission data', () => {
     const models = createModels(); models.setProvider(provider);
     const settings = { modelRoles: { default: ['other/floor:high', 'pi/review'], review: ['test/missing:low', '@available'], available: 'test/floor:medium', override: 'pi/review:low' } };
     expect(resolveProfileModel(settings, models)).toEqual({ model: floor, thinking: 'medium' });
-    expect(await resolveModelSelection(settings, models, { kind: 'role', role: 'override' })).toEqual({ model: floor, thinking: 'low' });
+    expect(await resolveModelSelection(settings, models, { kind: 'role', role: 'override' })).toEqual({ model: floor, thinking: 'low', role: 'override' });
     expect(() => resolveProfileModel({ modelRoles: { default: 'pi/review:high', review: '@default:low' } }, models)).toThrow('Circular profile model role');
   });
 });

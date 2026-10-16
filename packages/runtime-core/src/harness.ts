@@ -6,7 +6,7 @@ import { BROWSER_TOOL_NAME, createRuntimeTools, runtimeToolParameters, type Tool
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
-import { createBackgroundAgentTask } from './background-agents.js';
+import { createBackgroundAgentTask, createSubagentReplyExtension } from './background-agents.js';
 import { admitRuntimeCodemodeTool, createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
 import { ruleGenerationRegistry } from './rule-generations.js';
 import { createJobTask, createProcessExitTask, type JobServices } from './jobs.js';
@@ -18,7 +18,8 @@ import { ConversationLifecycleDoc, createConversationLifecycle, type Conversatio
 import { bindCronGeneration } from './cron.js';
 import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls';
 import type { ModelRoleSelector } from '@gitspace/protocol/inference';
-export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking'] };
+/** `role` is the profile role the model came from, when it came from one. */
+export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking']; role?: string };
 export type RuntimeHarnessOptions = {
   identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
   storage: Storage;
@@ -122,6 +123,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   registry.install(extension);
   registry.install(sessionControlsExtension);
   registry.install(childExtension);
+  registry.install(createSubagentReplyExtension(deliver));
   const harness = await Harness.open(options.storage, { models: options.models, registry: ruleGenerationRegistry(registry), settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name), followUpMode: 'one-at-a-time' }, onReport: options.onReport }, BACKGROUND_CONTEXT);
   const modelTools = (model?: ModelRef) => tools.filter(tool => tool.name !== ((!model || options.editTool(model) === 'edit') ? 'apply_patch' : 'edit'));
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { ...(options.model ? { model: options.model } : {}), tools: modelTools(options.model) } });

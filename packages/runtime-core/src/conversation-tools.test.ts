@@ -8,7 +8,7 @@ import { createModels, createAssistantMessageEventStream, type Models, type Mode
 import { AgentDefinitionSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime';
 import { createConversationTools } from './conversation-tools.js';
 import { createConversationLifecycle, type ConversationLifecycle } from './conversation-lifecycle.js';
-import { createBackgroundAgentTask } from './background-agents.js';
+import { createBackgroundAgentTask, createSubagentReplyExtension } from './background-agents.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { SessionControlsDoc, createSessionControls, parseCloudAgentDefinition, sessionControlsExtension } from './session-controls.js';
 import { PlanDoc, WorkspaceDoc } from './documents.js';
@@ -27,6 +27,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const tools = ['read', 'write', 'agents'].map(name => defineTool({ name, description: name, parameters: Type.Object({}), async execute() { return { content: [{ type: 'text' as const, text: name }] }; } }));
   registry.install(defineExtension({ name: 'proof.agents', tasks: [Owner, backgroundAgentTask], tools }));
   registry.install(sessionControlsExtension);
+  registry.install(createSubagentReplyExtension(async event => (await ready.promise).deliver(event)));
   const seen: string[] = [];
   const requests: Array<{ model: string; reasoning: NonNullable<Parameters<Models['streamSimple']>[2]>['reasoning'] }> = [];
   const backgroundReceived = Promise.withResolvers<void>();
@@ -48,7 +49,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   };
   const admitInference: RuntimeHarnessOptions['admitInference'] = async ({ selection }) => {
     const selected = await resolveModelSelection(settings, models, selection ?? { kind: 'default' });
-    return { provider: selected.model.provider, modelId: selected.model.id, thinking: selected.thinking };
+    return { provider: selected.model.provider, modelId: selected.model.id, thinking: selected.thinking, ...(selected.role ? { role: selected.role } : {}) };
   };
   const configureModel = async (id: ConversationId, selected: ModelRef) => { const child = await harness.conversation(id, context); if (!child) throw new Error('Missing child'); const metadata = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child; await child.configure({ model: { provider: selected.provider, modelId: selected.modelId }, tools: metadata ? tools.filter(tool => metadata.tools.includes(tool.name)) : tools }, context); };
   const lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, wake: async () => {} }); ready.resolve(lifecycle);
@@ -209,10 +210,11 @@ test('role and file children independently resolve selection, persona, thinking 
     expect((await role.child.agent(context)).thinkingLevel).toBe('medium');
     expect((await file.child.agent(context)).model?.modelId).toBe('file-model');
     expect((await file.child.agent(context)).thinkingLevel).toBe('low');
-    expect(f.requests.map(value => value.reasoning)).toEqual(['medium', 'low']);
+    // The parent's own requests (it wakes to read each child's reply) are not part of this contract.
+    expect(f.requests.filter(value => value.model !== 'parent-only-model').map(value => value.reasoning)).toEqual(['medium', 'low']);
     expect((await file.child.agent(context)).tools.map(tool => tool.name)).toEqual(['read', 'agents']);
     expect((await role.child.agent(context)).tools.map(tool => tool.name)).not.toContain('write');
-    expect(f.seen.join('\n')).not.toContain('PRIVATE PARENT PERSONA');
+    expect(f.seen.filter(entry => !entry.includes('"model":"parent-only-model"')).join('\n')).not.toContain('PRIVATE PARENT PERSONA');
     expect((await file.child.agent(context)).instructions).toContain('Only the saved reviewer persona.');
     for (const child of [role.child, file.child]) {
       const controls = await f.harness.snapshot(SessionControlsDoc, child.id, context);
@@ -235,6 +237,9 @@ test('shipped agents and workers take their roles unless a role is named', async
     expect((await tester.child.agent(context)).model?.modelId).toBe('default-model');
     expect((await worker.child.agent(context)).model?.modelId).toBe('default-model');
     expect((await named.child.agent(context)).model?.modelId).toBe('role-model');
+    // The role shown for a child is the one its model came from, not the head of its chain.
+    expect((await f.harness.snapshot(AgentDefinitionContextDoc, tester.child.id, context))?.child?.role).toBe('default');
+    expect((await f.harness.snapshot(AgentDefinitionContextDoc, named.child.id, context))?.child?.role).toBe('reviewer');
     expect((await f.harness.snapshot(AgentDefinitionContextDoc, tester.child.id, context))?.child?.tools).toEqual(expect.arrayContaining(['bash', 'proc', 'mcp_discover', 'mcp_invoke']));
     expect((await f.harness.snapshot(AgentDefinitionContextDoc, worker.child.id, context))?.child?.tools).not.toContain('bash');
     await expect(f.call({ op: 'spawn', agent: 'tester', role: 'tast', task: 'Typo' })).rejects.toThrow('tast is not defined');
@@ -263,6 +268,8 @@ test('children address parent and siblings by name or id and reject unrelated co
     await second.child.waitForIdle(context);
     await f.call({ op: 'send', to: 'parent', message: 'Parent result' }, 'to-parent', String(first.child.id));
     await f.root.waitForIdle(context);
+    // Queued events reach an idle parent one wake at a time (the alarm in production); drive the wakes here.
+    for (let attempt = 0; attempt < 5 && !f.seen.join('\n').includes('Parent result'); attempt++) { await f.lifecycle.recover(); await f.root.waitForIdle(context); }
     expect(f.seen.join('\n')).toContain('Message from First');
     expect(f.seen.join('\n')).toContain('Named sibling message');
     expect(f.seen.join('\n')).toContain('Parent result');
@@ -277,7 +284,17 @@ test('background agent completion uses its durable address and wakes the idle pa
     await f.spawned({ op: 'spawn', role: 'review', name: 'BackgroundReviewer', task: 'Inspect', background: true });
     await f.backgroundReceived;
     await f.root.waitForIdle(context);
-    expect(f.seen.join('\n')).toContain('Background agent BackgroundReviewer settled');
+    expect(f.seen.join('\n')).toContain('BackgroundReviewer replied:\\nComplete.');
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+}, 5000);
+
+test('agents wait returns a foreground child\'s final answer', async () => {
+  const f = await fixture();
+  try {
+    await f.spawned({ op: 'spawn', role: 'review', name: 'ForegroundReviewer', task: 'Inspect' });
+    const waited = await f.call({ op: 'wait', timeoutMs: 2000 });
+    const text = waited.content.find(part => part.type === 'text');
+    expect(text?.type === 'text' ? JSON.parse(text.text) : null).toMatchObject({ kind: 'agent-message', sender: { name: 'ForegroundReviewer' }, text: 'ForegroundReviewer replied:\nComplete.' });
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 }, 5000);
 
@@ -345,7 +362,7 @@ test('file alternatives retain only the selected suffix and explicit frontmatter
   const f = await fixture('spawns', files);
   try {
     for (const agent of ['suffixed', 'override', 'default']) await f.spawned({ op: 'spawn', agent, task: 'Inspect' });
-    expect(f.requests).toEqual([
+    expect(f.requests.filter(value => value.model !== 'parent-only-model')).toEqual([
       { model: 'file-model', reasoning: 'high' }, { model: 'role-model', reasoning: 'low' }, { model: 'default-model', reasoning: 'high' },
     ]);
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }

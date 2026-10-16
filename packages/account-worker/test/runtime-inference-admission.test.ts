@@ -66,13 +66,13 @@ describe('durable inference selection intent', () => {
     expect(second).toBeDefined();
     profile = { ...profile, settings: { 'modelRoles.default': `openai/${first.id}:high`, 'modelRoles.fast': [`other/${first.id}:high`, 'pi/selected'], 'modelRoles.selected': `openai/${first.id}:low` } };
     const admitted = await runtime.admitInference({ conversationId: 'conversation', requestId: 'first', selection: { kind: 'role', role: 'fast' } });
-    expect(admitted).toEqual({ provider: 'openai', modelId: first.id, thinking: 'low' });
+    expect(admitted).toEqual({ provider: 'openai', modelId: first.id, thinking: 'low', role: 'fast' });
     expect((await runtime.session.catalog()).roles.find(role => role.id === 'fast')).toMatchObject({ provider: 'openai', model: first.id, thinking: 'low' });
     await runtime.bindInferenceConversation('conversation', new AbortController().signal, [], ['first'], { fastMode: false });
     profile = { ...profile, revision: 2, settings: { 'modelRoles.default': `openai/${second.id}:high`, 'modelRoles.fast': `openai/${second.id}:medium` } };
     assignmentRevision = 2;
     const next = await runtime.admitInference({ conversationId: 'conversation', requestId: 'second', selection: { kind: 'role', role: 'fast' } });
-    expect(next).toEqual({ provider: 'openai', modelId: second.id, thinking: 'medium' });
+    expect(next).toEqual({ provider: 'openai', modelId: second.id, thinking: 'medium', role: 'fast' });
     expect(await runtime.admitInference({ conversationId: 'child', requestId: 'child', parentConversationId: 'conversation' })).toEqual(admitted);
     expect(await runtime.admitInference({ conversationId: 'conversation', requestId: 'first' })).toEqual(admitted);
     await expect(runtime.admitInference({ conversationId: 'conversation', requestId: 'removed', selection: { kind: 'explicit', provider: 'openai', modelId: 'removed' } })).rejects.toThrow('openai/removed is not available');
@@ -114,7 +114,7 @@ describe('durable inference selection intent', () => {
     accounts.push({ id: 'fresh', provider: 'openai', type: 'oauth', revision: 1, expiresAt: Date.now() + 3600000, identity: null });
     const supported = (await runtime.session.catalog()).models.find(model => model.provider === 'openai')!;
     profile = { ...profile, revision: 2, settings: { modelRoles: { default: `openai/${supported.id}:medium` } } };
-    expect(await runtime.admitInference({ conversationId: 'conversation', requestId: 'reselected' })).toEqual({ provider: 'openai', modelId: supported.id, thinking: 'medium' });
+    expect(await runtime.admitInference({ conversationId: 'conversation', requestId: 'reselected' })).toEqual({ provider: 'openai', modelId: supported.id, thinking: 'medium', role: 'default' });
     expect(resolveCredential).not.toHaveBeenCalled();
   });
 

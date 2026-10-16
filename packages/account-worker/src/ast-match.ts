@@ -1,3 +1,4 @@
+/// <reference path="./wasm-modules.d.ts" />
 import { Language, Parser } from 'web-tree-sitter';
 import * as astGrep from '@ast-grep/wasm/wasm_bg.js';
 import astGrepModule from '@ast-grep/wasm/wasm_bg.wasm';

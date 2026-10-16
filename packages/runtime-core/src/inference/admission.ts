@@ -237,7 +237,8 @@ export async function resolveAvailableProfileModel(settings: InferenceProfile['s
 
 /** Selection is intent; only an admission turns it into an immutable model identity. A role chain takes its first
  * role the profile sets (an unset chain ends at Default); a set role whose model is unavailable fails, never substitutes. */
-export async function resolveModelSelection(settings: InferenceProfile['settings'], models: Models, selection: ModelSelectionIntent): Promise<ResolvedProfileModel> {
+/** `role` is the role the model came from (none for an explicit model). */
+export async function resolveModelSelection(settings: InferenceProfile['settings'], models: Models, selection: ModelSelectionIntent): Promise<ResolvedProfileModel & { role?: string }> {
   const available = await models.getAvailable();
   if (selection.kind === 'explicit') {
     const model = available.find(model => model.provider === selection.provider && model.id === selection.modelId);
@@ -249,7 +250,8 @@ export async function resolveModelSelection(settings: InferenceProfile['settings
   const unknown = chain.find(role => !configured.includes(role) && !BUILT_IN_MODEL_ROLES.some(builtIn => builtIn === role));
   if (unknown) throw new Error(`Inference role ${unknown} is not defined in this profile`);
   const snapshot: Models = { ...models, getModels: provider => available.filter(model => provider === undefined || model.provider === provider) };
-  return resolveProfileModel(settings, snapshot, chain.find(role => configured.includes(role)) ?? 'default');
+  const role = chain.find(candidate => configured.includes(candidate)) ?? 'default';
+  return { ...resolveProfileModel(settings, snapshot, role), role };
 }
 
 export function profileModelRoles(settings: InferenceProfile['settings']): string[] {
