@@ -229,4 +229,4 @@ GitSpace should consume both through the same workspace-level concepts (a worksp
 
 - Cua: https://spaces.cua.ai/, `cua.ai/docs` pages `spaces/guides/use-from-an-agent`, `spaces/reference/{cloud,teleport}`, `cua-driver`, `cua-sdk/concepts/how-sandboxes-work`, `cua-sdk/reference/spaces/{create,streams}`, `cua-sdk/reference/spacesd/media`, `cua-cli/guides/mcp-server`; npm `@trycua/cua` 0.2.0 (MIT), `@trycua/cua-driver` 0.32.0 (MIT); GitHub `trycua/cua`.
 - `docs/PI-RUNTIME-DESIGN.md`: Workspace DO, tasks, machine routing, placement, QA queue, type system.
-- Aperture draft (Inkibra, 2026-10-02): grants, control lease, takeover, credential realms.
+- Aperture: `docs/APERTURE-DESIGN.md` (plan) and `docs/APERTURE-DRAFT.md` (original draft, 2026-10-02): grants, control lease, takeover, credential realms.

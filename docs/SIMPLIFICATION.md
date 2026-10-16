@@ -197,7 +197,7 @@ Every item is verified the way the user works, in the browser, before it is repo
 
 **Later.** Machine CLI (`gitspace status`, `setup`, `sync`, `env --`).
 
-**Parked.** Cloud browser (until Inkibra Aperture): its CDP socket keeps the workspace object awake while a browser is open.
+**Parked.** Cloud browser: its CDP socket keeps the workspace object awake while a browser is open. Planned in `docs/APERTURE-DESIGN.md` (B0): one `BrowserSessionDO` per cloud session holds the socket.
 
 ## Needs a decision
 
