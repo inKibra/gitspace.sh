@@ -180,11 +180,11 @@ Every item is verified the way the user works, in the browser, before it is repo
 **Batch 6 — inference.**
 1. Done (`0a4ce0c0`). Claude fast mode sends requests without the Claude Code identity. Fast serving replaced the request's fetch and skipped the Claude Code shaping; it now goes through it. Live: Anthropic answered "Usage credits are required for fast mode" (the subscription has none), not an identity refusal.
 2. Done (`e90c283b`). Provider errors in plain words with the next step, not raw JSON.
-3. OpenAI usage on the Inference page (port omp's ChatGPT usage reader; check the stored provider id). The ChatGPT sign-in is stored as Pi's `openai`, not `openai-codex`; both now read ChatGPT usage, and accounts are labelled by email (`c0d3585f`, `8c37cffc`). Live usage read still reports unavailable; the failure reason is now shown (`e8c2556f`) and needs a look.
+3. Done, usage dropped (`381e2c44`, `ac199d06`). The ChatGPT sign-in is Pi's `openai` flow, a token for `api.openai.com/v1`. Its account is labelled by the ID token's email (pi-ai patch; userinfo answers only `sub`, the access token names no one). Plan usage cannot be read from the cloud: chatgpt.com's usage endpoint answers Cloudflare egress with a 403 block page, the token carries no ChatGPT account id, and API replies carry no limit headers or limit events. The card says usage is not supported.
 
 **Batch 7 — cleanup.** Done. Old snapshot refs (Golconda ~1,108, PR 101 4): the per-revision capture refs (`refs/gitspace/spaces/*/checkpoints/<n>`, from before captures moved to one `snapshot` ref) deleted in the six repositories Darktop can reach: Golconda 1,113 → 4 refs, PR 101 9 → 5. `saved-transcript-*` in the worker: deleted with `SavedTranscriptIndexDO` (migration `account-v3`; the platform now sends delete-class migrations, `dd483892`, `b7fcd780`). Failing tests: the three Artifacts tests mocked reads the code no longer makes; runtime-core used vitest-only helpers under bun; account-worker now 513/513. The `artifacts-live-protocol` Node test needs `node` on PATH.
 
-**Batch 8 — small UI bugs.** Golconda's mode switcher; Deedible Info's context meter at 264%; empty `system` messages in Validator and PR 101; ~925 "client disconnected" errors on Validator. Golconda is the project's base space: it has no phase by design and its runtime now reports `code`, so it is not plan-locked. Deedible Info's meter reads 686,635 of 1,000,000 tokens (69%) for claude-opus-5-5; the 264% came from a 200k window the catalog no longer gives that model. The empty system messages are each turn's system-prompt record; transcripts now skip them (`973c25d1`). The disconnect errors were not seen in a 90 s tail (one canceled request); finding them needs the source of the 925 count.
+**Batch 8 — small UI bugs.** Golconda's mode switcher; Deedible Info's context meter at 264%; empty `system` messages in Validator and PR 101; ~925 "client disconnected" errors on Validator. Golconda is the project's base space: it has no phase by design and its runtime now reports `code`, so it is not plan-locked. Deedible Info's meter reads 686,635 of 1,000,000 tokens (69%) for claude-opus-5-5; the 264% came from a 200k window the catalog no longer gives that model. The empty system messages are each turn's system-prompt record; transcripts now skip them (`973c25d1`; Validator and PR 101 checked in the browser). The disconnect errors were not seen in a 90 s tail (one canceled request); finding them needs the source of the 925 count.
 
 **Later.** Machine CLI (`gitspace status`, `setup`, `sync`, `env --`).
 
@@ -192,6 +192,12 @@ Every item is verified the way the user works, in the browser, before it is repo
 
 ## Needs a decision
 
-- Usage report: `wrangler secret put CF_ANALYTICS_TOKEN`, then deploy the platform worker.
-- Idle checkouts stay until the machine is detached — confirm.
-- Old Cloudflare workers (`gitspace-api`, `-auth`, `-platform`, `-sandbox-worker`, `-docs`, relay spikes, `gitspace-relays`): punted.
+- Closing a workspace: once its agent has run, a workspace reads Waiting (blue) for good; gray means no conversation yet. Waiting should mean work the user is doing, so a workspace needs a way back to gray that also releases its machine caches.
+
+## Decided
+
+- Usage report: secret `CF_ANALYTICS_TOKEN` (account token "Account Analytics Read") set on `gitspace-platform-rebuild-20260913`.
+- Idle checkouts stay on a machine until its caches are released or the machine is detached.
+- Old Cloudflare workers: `gitspace-api` and the two relay spikes (with `alpha`/`beta-relay-spike.gssh.dev`) deleted. Still live, kept: `gitspace-auth-rebuild-20260913` (serves `gitspace.sh`, `api.gitspace.sh`), `gitspace-docs` (`gitspace.sh/docs*`), `gitspace-platform` (the platform's `CREDITS` and `TENANT_CONTROL` objects), `gitspace-sandbox-worker` (`COMPUTE`), `gitspace-auth` (tenant assets' `ACCOUNTS`, `INVITES`). `gitspace-relays` was already gone.
+- Test accounts `signup-test-1014`–`1017` suspended through the operator console (their hosts answer 423).
+- Projects: Delete is offered for active projects too; the confirmation names every workspace deleted with it (`cd1b95c7`).
