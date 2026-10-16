@@ -72,17 +72,20 @@ async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: st
         build.onResolve({ filter: new RegExp(`^(?:${builtinModules.filter(name => !name.startsWith('node:')).join('|')})$`, 'u') }, args => ({
           path: `node:${args.path}`, external: true,
         }));
+        // Each imported .wasm file is uploaded as a precompiled module named by its file name. Bun keeps an external's
+        // original specifier, so a package's .wasm is reached through a one-line module beside it that imports `./name`.
         build.onResolve({ filter: /\.wasm$/u }, async args => {
+          if (!args.path.startsWith('.')) return { path: Bun.resolveSync(args.path, dirname(args.importer)), namespace: 'worker-wasm' };
           const source = resolve(dirname(args.importer), args.path);
           const content = new Uint8Array(await Bun.file(source).arrayBuffer());
-          const name = basename(args.path);
-          if (args.path !== name && args.path !== `./${name}`) throw new Error(`Worker WASM imports must use a sibling module name: ${args.path}`);
+          const name = basename(source);
           const previous = modules.get(name);
           if (previous && !Buffer.from(previous.content).equals(content)) throw new Error(`Conflicting worker WASM module name: ${name}`);
           modules.set(name, { name, type: 'wasm', content });
           await Bun.write(join(outDir, name), content);
           return { path: `./${name}`, external: true };
         });
+        build.onLoad({ filter: /.*/u, namespace: 'worker-wasm' }, args => ({ contents: `export { default } from ${JSON.stringify(`./${basename(args.path)}`)};`, resolveDir: dirname(args.path), loader: 'js' }));
       },
     }],
   });

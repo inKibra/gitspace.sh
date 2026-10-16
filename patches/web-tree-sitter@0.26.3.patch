@@ -1,0 +1,54 @@
+diff --git a/debug/web-tree-sitter.js b/debug/web-tree-sitter.js
+index 47d9aacc857e04fea741845fcd862d164ead9308..bb912d4afe7b6b1bef74847dc55d8bb952fee85c 100644
+--- a/debug/web-tree-sitter.js
++++ b/debug/web-tree-sitter.js
+@@ -1481,7 +1481,8 @@ var Language = class _Language {
+    */
+   static async load(input) {
+     let binary2;
+-    if (input instanceof Uint8Array) {
++    // GitSpace: a Worker cannot compile bytes at runtime; accept a module compiled at upload.
++    if (input instanceof Uint8Array || input instanceof WebAssembly.Module) {
+       binary2 = input;
+     } else if (globalThis.process?.versions.node) {
+       const fs2 = await import("fs/promises");
+diff --git a/web-tree-sitter.d.cts b/web-tree-sitter.d.cts
+index 2c342e7d15a8c2cc0ba56502ff2826b255407614..b9d799d310933b6ed97740d7c298abd7f3acb1e6 100644
+--- a/web-tree-sitter.d.cts
++++ b/web-tree-sitter.d.cts
+@@ -314,7 +314,7 @@ declare module 'web-tree-sitter' {
+ 		 * Load a language from a WebAssembly module.
+ 		 * The module can be provided as a path to a file or as a buffer.
+ 		 */
+-		static load(input: string | Uint8Array): Promise<Language>;
++		static load(input: string | Uint8Array | WebAssembly.Module): Promise<Language>;
+ 	}
+ 	/** A tree that represents the syntactic structure of a source code file. */
+ 	export class Tree {
+diff --git a/web-tree-sitter.d.ts b/web-tree-sitter.d.ts
+index 7adacefdfcd1370af367cac02b3f6a7d08454802..b4ae2984a035d9cf5c3b50677d09b11b299ab0d7 100644
+--- a/web-tree-sitter.d.ts
++++ b/web-tree-sitter.d.ts
+@@ -314,7 +314,7 @@ declare module 'web-tree-sitter' {
+ 		 * Load a language from a WebAssembly module.
+ 		 * The module can be provided as a path to a file or as a buffer.
+ 		 */
+-		static load(input: string | Uint8Array): Promise<Language>;
++		static load(input: string | Uint8Array | WebAssembly.Module): Promise<Language>;
+ 	}
+ 	/** A tree that represents the syntactic structure of a source code file. */
+ 	export class Tree {
+diff --git a/web-tree-sitter.js b/web-tree-sitter.js
+index 449545cbe28eabba64252ea5097a7d8f0a686ba8..3219c819888972d1332a460f648675d84adb3ec3 100644
+--- a/web-tree-sitter.js
++++ b/web-tree-sitter.js
+@@ -1481,7 +1481,8 @@ var Language = class _Language {
+    */
+   static async load(input) {
+     let binary2;
+-    if (input instanceof Uint8Array) {
++    // GitSpace: a Worker cannot compile bytes at runtime; accept a module compiled at upload.
++    if (input instanceof Uint8Array || input instanceof WebAssembly.Module) {
+       binary2 = input;
+     } else if (globalThis.process?.versions.node) {
+       const fs2 = await import("fs/promises");

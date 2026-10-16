@@ -73,7 +73,7 @@ async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return completed(input, { url, mediaType, size: bytes.byteLength }); }
   return page(resource ? selectResourceText(text, resource.selector) : text);
 }
-const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, checkpoint_code: true, merge: true, delegate_export: true, rule_match_ast: true };
+const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, checkpoint_code: true, merge: true, delegate_export: true };
 machineTools.browser = true;
 /** Exact search is ripgrep on a machine checkout; the cloud answers code_search from its index instead. */
 const GREP_REQUIRES_MACHINE = 'grep runs on an attached machine; use code_search, or attach a machine';

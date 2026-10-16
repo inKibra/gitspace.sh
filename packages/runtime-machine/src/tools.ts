@@ -152,28 +152,6 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
       if (result.exitCode > 1) throw new Error(result.output);
       return text(result.output);
     }
-    case 'rule_match_ast': {
-      const args = z.object({ content: z.string().optional(), paths: z.array(z.string()).min(1), patterns: z.array(z.string()).min(1) }).parse(dispatch.args);
-      const languages: Record<string, string> = { '.ts': 'typescript', '.tsx': 'tsx', '.js': 'javascript', '.jsx': 'jsx', '.mjs': 'javascript', '.cjs': 'javascript', '.py': 'python', '.go': 'go', '.rs': 'rust', '.java': 'java', '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.cc': 'cpp', '.cs': 'csharp', '.rb': 'ruby', '.sh': 'bash', '.json': 'json', '.html': 'html', '.css': 'css', '.yml': 'yaml', '.yaml': 'yaml' };
-      const directory = args.content === undefined ? null : await mkdtemp(join(tmpdir(), 'gitspace-rule-'));
-      try {
-        for (const path of args.paths) {
-          const language = languages[extname(path).toLowerCase()];
-          if (!language) continue;
-          let input = await checkoutPath(local.rootPath, path);
-          if (directory !== null) {
-            input = join(directory, `source${extname(path)}`);
-            await writeFile(input, args.content!, { mode: 0o600 });
-          }
-          for (const pattern of args.patterns) {
-            const result = await command('ast-grep', ['run', '--json', '--lang', language, '--pattern', pattern, input]);
-            if (result.exitCode > 1) { console.warn(`Unsupported AST rule pattern for ${language}`, result.output); continue; }
-            if (result.exitCode === 0 && z.array(z.unknown()).parse(JSON.parse(result.output)).length > 0) return text('{"matched":true}');
-          }
-        }
-        return text('{"matched":false}');
-      } finally { if (directory !== null) await rm(directory, { recursive: true, force: true }); }
-    }
     case 'ast_edit': {
       if (!options.journal) throw new Error('AST proposals require durable executor storage');
       const args = RuntimeAstEditArgumentsSchema.parse(dispatch.args);

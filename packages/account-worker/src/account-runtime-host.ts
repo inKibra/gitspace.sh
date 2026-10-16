@@ -7,6 +7,7 @@ import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } 
 import { createCloudRuntimeInference } from './runtime-inference.js';
 import { z } from 'zod';
 import { parseRuntimeSettings, type CloudProjectSummary } from '@gitspace/protocol';
+import { matchAstPatterns } from './ast-match.js';
 import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
@@ -119,14 +120,8 @@ export async function createAccountWorkspaceRuntime(
       return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length), readSourceCheckpoint(ctx.storage));
     },
     settings,
-    retainedRules: createRuntimeRuleServices({ code, repository, ref, judge, async matchAst(conversationId, content, paths, patterns) {
-      const requestId = `rules:${crypto.randomUUID()}`;
-      const result = await services.tools.invoke({ tool: 'rule_match_ast', args: { content, paths, patterns }, conversationId, taskId: requestId, requestId, attemptId: requestId, replay: 'safe', signal: AbortSignal.timeout(30_000) });
-      if (result.status !== 'completed') return false;
-      const text = result.content.find(item => item.type === 'text');
-      if (!text || text.type !== 'text') throw new Error('AST rule matching omitted its result');
-      return z.object({ matched: z.boolean() }).parse(JSON.parse(text.text)).matched;
-    } }),
+    // Rule AST conditions match in this Worker, so they apply with or without an attached machine.
+    retainedRules: createRuntimeRuleServices({ code, repository, ref, judge, matchAst: (_conversationId, content, paths, patterns) => matchAstPatterns(content, paths, patterns) }),
     ...services,
     browser: services.browser,
     storage: ctx.storage,

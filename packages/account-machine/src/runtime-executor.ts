@@ -366,7 +366,7 @@ export async function createMachineExecutor(options: {
       browser_control: (dispatch, local, signal) => browser.execute(dispatch, local, signal),
     },
   });
-  const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'checkpoint', 'sync_machine', ...Object.keys(options.operations ?? {})];
+  const baseCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'ast_edit', 'ast_resolve', 'checkpoint', 'sync_machine', ...Object.keys(options.operations ?? {})];
   const browserCapabilities = (): string[] => options.browser?.enabled === true ? ['browser', 'browser_control', 'browser.headless'] : [];
   let stopped = false;
   /** Per attachment: the observation last accepted by the cloud, the settle timer of a pending change, and the one

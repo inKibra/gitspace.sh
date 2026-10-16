@@ -78,7 +78,8 @@
     "ghostty-web@0.4.0": "patches/ghostty-web@0.4.0.patch",
     "result-rpc@0.5.0": "packages/protocol/patches/result-rpc@0.5.0.patch",
     "rregex@1.13.1": "patches/rregex@1.13.1.patch",
-    "@earendil-works/pi-ai@1.0.0": "patches/@earendil-works%2Fpi-ai@1.0.0.patch"
+    "@earendil-works/pi-ai@1.0.0": "patches/@earendil-works%2Fpi-ai@1.0.0.patch",
+    "web-tree-sitter@0.26.3": "patches/web-tree-sitter@0.26.3.patch"
   },
   "overrides": {
     "@earendil-works/pi-ai": "1.0.0",

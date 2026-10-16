@@ -6,7 +6,7 @@ import { z } from 'zod';
 export const CheckoutSourceFactsSchema = z.object({ commit: z.string(), remote: z.string(), requiresFiltersOrSubmodules: z.boolean() });
 export type CheckoutSourceFacts = z.infer<typeof CheckoutSourceFactsSchema>;
 
-export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'rule_match_ast', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser', 'sync_machine'];
+export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser', 'sync_machine'];
 
 /** Invoked behind canonical project/workspace and enrolled-machine authorization. */
 export class RuntimeAttachmentController {

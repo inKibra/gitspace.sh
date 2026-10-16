@@ -2,7 +2,9 @@
   "name": "@gitspace/account-worker",
   "version": "0.0.0",
   "private": true,
-  "gitspace": { "inferenceVersion": 1 },
+  "gitspace": {
+    "inferenceVersion": 1
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -14,28 +16,31 @@
     "deploy:dry": "wrangler deploy --dry-run --config wrangler.jsonc"
   },
   "dependencies": {
-    "@gitspace/account-machine": "workspace:*",
-    "fflate": "0.8.3",
+    "@ast-grep/wasm": "0.51.0",
     "@composio/core": "0.18.0",
     "@earendil-works/chord": "1.0.0",
+    "@gitspace/account-machine": "workspace:*",
     "@gitspace/blocks": "workspace:*",
+    "@gitspace/catalog": "workspace:*",
     "@gitspace/mcp-server": "workspace:*",
     "@gitspace/protocol": "workspace:*",
     "@gitspace/protocol-agent": "workspace:*",
     "@gitspace/protocol-environment": "workspace:*",
-    "@gitspace/protocol-workspace": "workspace:*",
-    "@gitspace/protocol-sync": "workspace:*",
     "@gitspace/protocol-runtime": "workspace:*",
+    "@gitspace/protocol-sync": "workspace:*",
+    "@gitspace/protocol-workspace": "workspace:*",
     "@gitspace/provider-auth": "workspace:*",
-    "@gitspace/catalog": "workspace:*",
     "@gitspace/runtime-core": "workspace:*",
     "@gitspace/runtime-machine": "workspace:*",
     "@gitspace/runtime-workspace-do": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.30.1",
     "@noble/curves": "^2.2.0",
     "better-result": "3.0.1",
-    "@modelcontextprotocol/sdk": "1.30.1",
     "devalue": "5.8.2",
+    "fflate": "0.8.3",
     "result-rpc": "0.5.0",
+    "tree-sitter-typescript": "0.23.2",
+    "web-tree-sitter": "0.26.3",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },

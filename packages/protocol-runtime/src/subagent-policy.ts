@@ -8,7 +8,6 @@ export const SUBAGENT_TOOLS = [...SUBAGENT_READONLY_TOOLS, 'bash', 'proc', 'mcp_
 export function isSubagentTool(name: string): boolean { return SUBAGENT_TOOLS.some(tool => tool === name); }
 /** `tools` is the child's own list. Children never spawn or stop agents and only use the headless browser. */
 export function isSubagentToolCallAllowed(name: string, args: unknown, tools: readonly string[]): boolean {
-  if (name === 'rule_match_ast') return true;
   if (!tools.includes(name) || !isSubagentTool(name)) return false;
   if (name === 'browser') {
     const parsed = RuntimeBrowserArgumentsSchema.safeParse(args);
