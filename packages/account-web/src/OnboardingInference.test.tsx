@@ -14,7 +14,7 @@ vi.mock('./rpc-client.js', () => ({ rpcClient: {} }));
 const stamp = '2026-10-09T00:00:00.000Z';
 const settings: UserSettings = { version: 1, revision: 1, onboardingComplete: false, profile: { displayName: 'Brad', handle: 'brad' }, git: { authorName: '', authorEmail: '' }, defaults: { machineId: null, enterAction: 'queue', appearance: 'system' }, updatedAt: stamp, updatedBy: 'browser' };
 const schema = inferenceSettingMetadata.map(({ value, description, options, ...item }) => ({ ...item, valueJson: JSON.stringify(value), description: description ?? null, options: options ?? [] }));
-const claude: AvailableModel = { provider: 'anthropic', id: 'claude-sonnet', name: 'Claude Sonnet', contextWindow: 200000 };
+const claude: AvailableModel = { provider: 'anthropic', id: 'claude-sonnet', name: 'Claude Sonnet', contextWindow: 200000, images: true };
 const connected: ProviderView = { id: 'anthropic', credentialProvider: 'anthropic', name: 'Anthropic', available: true, loginable: true, supportsOAuth: true, supportsApiKey: true, authKind: 'oauth', hasAuth: true, source: null, accounts: [], hasUsage: false };
 const noop = async (): Promise<void> => undefined;
 const unused = async (): Promise<never> => { throw new Error('Not used by the onboarding inference step'); };

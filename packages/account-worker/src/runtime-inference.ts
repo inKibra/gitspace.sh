@@ -1,10 +1,11 @@
 import { z } from 'zod';
+import type { Message } from '@earendil-works/pi-ai';
 import { MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
   createVaultModels, createRunModelsRouter, createDurableModelsStore,
-  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, modelEditTool, generateProfileImage, runProfileModelHelper,
+  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, modelEditTool, generateProfileImage, runProfileModelHelper, describeImagesForModel,
   type CredentialPins, type VaultModels,
 } from '@gitspace/runtime-core/inference';
 
@@ -101,6 +102,15 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
       return { provider: admission.model.provider, modelId: admission.model.id, ...(admission.thinking === undefined ? {} : { thinking: admission.thinking }) };
     },
     bindInferenceConversation,
+    async describeImages(signal: AbortSignal, messages: readonly Message[]) {
+      const scope = scopes.get(signal);
+      const model = scope?.models.getModel(scope.admission.model.provider, scope.admission.model.id);
+      if (!scope || !model) return undefined;
+      return describeImagesForModel({ model, settings: scope.admission.profile.settings, models: scope.models, messages, signal, cache: {
+        read: hash => ctx.storage.get<string>(key('image-description', hash)),
+        write: (hash, description) => ctx.storage.put(key('image-description', hash), description),
+      } });
+    },
     async generateImage(input: { args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']> {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
       const models = await collection(admission.profile, input.conversationId, false, admission);

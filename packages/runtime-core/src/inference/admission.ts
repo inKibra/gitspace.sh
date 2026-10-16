@@ -163,18 +163,19 @@ export function listCloudModels(settings: InferenceProfile['settings'], authenti
   return providers.filter(provider => authenticated.has(provider.id)).flatMap(provider => {
     const models = provider.getModels();
     const visible = provider.filterModels?.(models, undefined) ?? models;
-    return visible.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow }));
+    return visible.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, images: model.input.includes('image') }));
   });
 }
 
 export type ResolvedProfileModel = { model: Model<Api>; thinking: ModelRoleSelector['thinking'] };
 
-/** Resolve profile roles and model patterns against the admitted registry only. */
-export function resolveProfileModel(settings: InferenceProfile['settings'], models: Models, role = 'default'): ResolvedProfileModel {
+/** Model patterns and `pi/role` aliases of one profile, resolved against the admitted registry only. */
+function profileSelectors(settings: InferenceProfile['settings'], models: Models) {
   const effective = applyInferenceSettings({}, inferenceSettingsSchema.parse(settings));
   const selection = z.object({
     modelRoles: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
     enabledModels: z.array(z.string()).optional(),
+    visionFallback: z.string().optional(),
   }).parse(effective);
   const matches = (pattern: string, model: Model<Api>): boolean => {
     const escaped = pattern.replace(/[.+?^${}()|[\]\\]/gu, '\\$&').replace(/\*/gu, '.*');
@@ -201,10 +202,27 @@ export function resolveProfileModel(settings: InferenceProfile['settings'], mode
     }
     return undefined;
   };
+  return { selection, candidates, resolve };
+}
+
+/** Resolve profile roles and model patterns against the admitted registry only. */
+export function resolveProfileModel(settings: InferenceProfile['settings'], models: Models, role = 'default'): ResolvedProfileModel {
+  const { selection, candidates, resolve } = profileSelectors(settings, models);
   const configured = selection.modelRoles?.[role] ?? selection.modelRoles?.default;
   const selected = configured ? resolve(configured) : candidates[0] ? { model: candidates[0], thinking: null } : undefined;
   if (!selected) throw new Error(`Inference profile has no admitted model for role ${role}`);
   return selected;
+}
+
+/** The profile's Vision fallback, used only to describe images for a model that cannot read them; never a role. */
+export async function resolveVisionFallback(settings: InferenceProfile['settings'], models: Models): Promise<ResolvedProfileModel | null> {
+  const available = await models.getAvailable();
+  const { selection, resolve } = profileSelectors(settings, { ...models, getModels: provider => available.filter(model => provider === undefined || model.provider === provider) });
+  if (!selection.visionFallback) return null;
+  const resolved = resolve(selection.visionFallback);
+  if (!resolved) throw new Error(`Vision fallback ${selection.visionFallback} is not available in this inference profile`);
+  if (!resolved.model.input.includes('image')) throw new Error(`Vision fallback ${resolved.model.provider}/${resolved.model.id} cannot read images`);
+  return resolved;
 }
 
 /** Availability is resolved before defaults so unauthenticated providers never win. */

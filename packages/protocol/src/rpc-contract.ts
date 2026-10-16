@@ -1184,7 +1184,7 @@ export const providerUsageContract = gitspaceRpc
   .output(ProviderUsageCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
-export const AvailableModelCodec = wire.object({ provider: wire.string, id: wire.string, name: wire.string, contextWindow: wire.nullable(wire.number) });
+export const AvailableModelCodec = wire.object({ provider: wire.string, id: wire.string, name: wire.string, contextWindow: wire.nullable(wire.number), images: wire.boolean });
 export type AvailableModel = InputOf<typeof AvailableModelCodec>;
 /** Models the machine can run right now (authenticated providers only). */
 export const DeviceViewCodec = wire.object({

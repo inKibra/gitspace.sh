@@ -13,7 +13,7 @@ describe('requestedSettingsSection', () => {
 });
 
 it('recognizes Bedrock model revisions and separates only supported effort suffixes', () => {
-  const model = { provider: 'amazon-bedrock', id: 'anthropic.claude-v1:0', name: 'Claude', contextWindow: 200000 };
+  const model = { provider: 'amazon-bedrock', id: 'anthropic.claude-v1:0', name: 'Claude', contextWindow: 200000, images: true };
   const selector = `${model.provider}/${model.id}`;
   expect(parseRoleModel(selector, [model])).toEqual({ modelKey: selector, thinking: 'auto', known: true });
   expect(parseRoleModel(`${selector}:medium`, [model])).toEqual({ modelKey: selector, thinking: 'medium', known: true });

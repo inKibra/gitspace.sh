@@ -234,6 +234,8 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
 export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], modelsReady = false, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
   const rolesItem = runtimeSettings.find((item) => item.path === 'modelRoles');
   const roles = rolesItem ? parseValue(rolesItem) as Record<string, string> : {};
+  const visionItem = runtimeSettings.find((item) => item.path === 'visionFallback');
+  const vision = visionItem ? String(parseValue(visionItem) ?? '') : '';
   // A role added here shows once named and is stored when a model is chosen for it.
   const [addedRoles, setAddedRoles] = useState<readonly string[]>([]);
   const [newRole, setNewRole] = useState('');
@@ -264,7 +266,10 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
           <Button variant="secondary" size="compact" disabled={saving || !rolesItem || !newRoleName || newRoleError !== null} onClick={() => { setAddedRoles((current) => [...current, newRoleName]); setNewRole(''); }}>Add role</Button>
         </SettingRow>
       </SettingRows>
-      <SettingRowsEditor items={runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && !item.credential)} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} />
+      {visionItem ? <SettingRows><SettingRow title="Vision fallback" description="Describes images for a model that cannot read them. Not offered as a role.">
+        <RoleModelPicker role="vision" label="Vision fallback" value={vision} models={models.filter((model) => model.images)} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(visionItem.path, value))} />
+      </SettingRow></SettingRows> : null}
+      <SettingRowsEditor items={runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && item.path !== 'visionFallback' && !item.credential)} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} />
     </Group>;
   } else if (tab === 'Providers') {
     content = <>

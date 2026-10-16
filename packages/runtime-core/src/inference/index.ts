@@ -18,6 +18,7 @@ export * from './models-store.js';
 export * from './run-models.js';
 export * from './helpers.js';
 export * from './published-catalog.js';
+export * from './vision.js';
 
 export type VaultModelsOptions = {
   profileId: string;

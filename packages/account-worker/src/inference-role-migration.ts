@@ -6,7 +6,8 @@ function renamedRoleAlias(value: RuntimeSettingValue): RuntimeSettingValue {
   if (typeof value === 'string') return value.replace(/^(pi\/|@)(slow|smol)(?=$|:)/u, (_match, prefix: string, role: string) => `${prefix}${RENAMED_MODEL_ROLES[role]}`);
   return Array.isArray(value) ? value.map(renamedRoleAlias) : value;
 }
-/** Drops settings no profile owns any more and renames Thinking/Fast roles; an explicitly set new name wins. */
+/** Drops settings no profile owns any more, renames Thinking/Fast roles (an explicitly set new name wins) and moves the
+ * OMP `vision` role to the Vision fallback setting. */
 export function migratedRoleSettings(settings: Record<string, RuntimeSettingValue>): Record<string, RuntimeSettingValue> {
   const migrated: Record<string, RuntimeSettingValue> = {};
   const renamed: Array<[string, RuntimeSettingValue]> = [];
@@ -24,5 +25,13 @@ export function migratedRoleSettings(settings: Record<string, RuntimeSettingValu
     migrated[path] = renamedRoleAlias(value);
   }
   for (const [path, value] of renamed) migrated[path] ??= value;
+  const roles = migrated.modelRoles;
+  const vision = migrated['modelRoles.vision'] ?? (roles !== null && typeof roles === 'object' && !Array.isArray(roles) ? roles.vision : undefined);
+  if (vision !== undefined) {
+    delete migrated['modelRoles.vision'];
+    if (roles !== null && typeof roles === 'object' && !Array.isArray(roles)) { const { vision: _moved, ...others } = roles; migrated.modelRoles = others; }
+    const selector = Array.isArray(vision) ? vision.find(item => typeof item === 'string' && !item.startsWith('pi/')) : vision;
+    if (typeof selector === 'string' && selector && !selector.startsWith('pi/')) migrated.visionFallback ??= selector;
+  }
   return migrated;
 }

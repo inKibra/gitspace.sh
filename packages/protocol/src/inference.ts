@@ -32,7 +32,7 @@ const namedEntryMaps: Record<string, true> = {
 };
 
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
-  modelRoles: 'Models', enabledModels: 'Models', providers: 'Providers',
+  modelRoles: 'Models', enabledModels: 'Models', visionFallback: 'Models', providers: 'Providers',
 };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
@@ -129,6 +129,7 @@ export function applyInferenceSettings(config: Record<string, unknown>, settings
 export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'modelRoles', tab: 'Models', label: 'Model roles', kind: 'record', value: {}, defaultJson: '{}', credential: false },
   { path: 'enabledModels', tab: 'Models', label: 'Enabled models', kind: 'array', value: [], defaultJson: '[]', credential: false },
+  { path: 'visionFallback', tab: 'Models', label: 'Vision fallback', kind: 'string', value: '', defaultJson: '""', credential: false, description: 'Describes images for a model that cannot read them. Not offered as a role.' },
   { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },
 ];
 

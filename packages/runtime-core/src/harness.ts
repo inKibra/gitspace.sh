@@ -1,6 +1,7 @@
 import { Harness, createRegistry, defineExtension, hook, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessOptions, type ModelRef, type Storage, type ConversationId, type Cursor } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord';
+import type { Message } from '@earendil-works/pi-ai';
 import { BROWSER_TOOL_NAME, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
@@ -36,6 +37,8 @@ export type RuntimeHarnessOptions = {
   onReport(error: unknown): void;
   admitInference(input: { conversationId: string; requestId: string; parentConversationId?: string; selection?: ModelSelectionIntent }): Promise<InferenceModelAdmission>;
   bindInferenceConversation(conversationId: string, signal: AbortSignal, submissionIds: readonly string[], requestIds: readonly string[], flags: { fastMode: boolean }): Promise<void>;
+  /** After binding: images rewritten as Vision fallback descriptions when the bound model cannot read them. */
+  describeImages?(signal: AbortSignal, messages: readonly Message[]): Promise<Message[] | undefined>;
 };
 export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const lifecycleReady = Promise.withResolvers<ConversationLifecycle>();
@@ -81,8 +84,9 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     await options.bindInferenceConversation(String(runtime.conversationId), context.abortSignal, ids.map(String), ids.flatMap(id => { const request = requests.get(String(id)); return request === undefined ? [] : [request]; }), { fastMode: controls?.fastMode ?? false });
     // Anthropic rejects an error tool result with no content; older entries recorded failures as empty or blank text.
     const empty = (message: (typeof input.messages)[number]) => message.role === 'toolResult' && message.isError && !message.content.some(item => item.type !== 'text' || item.text.trim() !== '');
-    if (!input.messages.some(empty)) return undefined;
-    return { messages: input.messages.map(message => empty(message) ? { ...message, content: [{ type: 'text' as const, text: '(no output)' }] } : message) };
+    const repaired = input.messages.some(empty) ? input.messages.map(message => empty(message) ? { ...message, content: [{ type: 'text' as const, text: '(no output)' }] } : message) : undefined;
+    const described = await options.describeImages?.(context.abortSignal, repaired ?? input.messages);
+    return described || repaired ? { messages: described ?? repaired! } : undefined;
   } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Compaction requires an invocation abort signal');
