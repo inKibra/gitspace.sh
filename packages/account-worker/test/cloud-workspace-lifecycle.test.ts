@@ -406,12 +406,16 @@ describe('cloud workspace lifecycle with no machines', () => {
     // A freshly opened runtime has no live task: its main agent waits for the user.
     expect(published).toEqual({ primaryColor: 'blue', agents: { green: 0, blue: 1, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } });
     expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, status: published }] } });
+    // The project agent's report before any message: nothing waited on, no model admitted, no checkpoint yet.
+    const report = await space.workspaceReport();
+    expect(report).toMatchObject({ summary: published, phase: 'plan', waitingOn: null, failure: null, lastReply: null, model: null, code: null });
     await runInDurableObject(space, async (_instance, state) => {
       // The published snapshot is gone; only the stored summary remains, and the project is unreachable.
       state.storage.sql.exec("DELETE FROM runtime_replica WHERE kind='snapshot'");
       const local = new SpaceAuthorityDO(state, { ...env, PROJECT_AUTHORITY: new Proxy(env.PROJECT_AUTHORITY, { get() { throw new Error('ProjectAuthority was consulted'); } }) });
       await state.blockConcurrencyWhile(async () => {});
       expect(local.listingState().status).toEqual(published);
+      expect(local.workspaceReport()).toEqual(report);
       // A summary an older release derived from conversation flags is not shown until the runtime publishes again.
       state.storage.sql.exec('UPDATE workspace_status SET summary=? WHERE id=1', JSON.stringify({ primaryColor: 'green', agents: { green: 1, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } }));
       expect(local.listingState().status).toBeNull();

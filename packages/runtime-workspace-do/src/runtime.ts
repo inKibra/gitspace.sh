@@ -21,11 +21,11 @@ import type { WorkspaceDraftSave, WorkspaceDraftSaveResult } from '@gitspace/pro
 import { CloudFileStore } from './cloud-files.js';
 import { CodeSearchIndex, type CodeSearchSource } from './cloud-search-index.js';
 import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifacts.js';
-import type { GitLfsConfirmedObject, GitLfsStore, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import type { GitLfsConfirmedObject, GitLfsStore, WorkspaceReport, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat } from './transcript.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, status: WorkspaceStatusSummary): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 /** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. A sync capture
  * uploads the machine's changes. */
@@ -285,7 +285,20 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops });
     const encodedEvent = JSON.stringify(event);
     replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
-    options.published?.(next, status.summary);
+    const rootId = String(runtime.root.id);
+    const root = conversationViews.get(rootId);
+    const [agent, controls] = await Promise.all([runtime.root.agent(BACKGROUND_CONTEXT), harness.snapshot(SessionControlsDoc, runtime.root.id, BACKGROUND_CONTEXT)]);
+    const waiting = (questions?.items ?? []).find(item => item.conversationId === rootId && item.answer === null);
+    const reply = root?.messages.findLast(message => message.role === 'assistant' && message.content.length > 0)?.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n') ?? null;
+    options.published?.(next, {
+      summary: status.summary, phase: workspace?.phase ?? null,
+      waitingOn: waiting ? { kind: waiting.kind, prompt: waiting.prompt.slice(0, 200) } : null,
+      failure: root?.failure ?? null,
+      lastReply: reply ? reply.slice(0, 280) : null,
+      lastActivityAt: views.flatMap(view => view.messages.map(message => message.createdAt)).sort().at(-1) ?? null,
+      model: agent.model ? { role: controls?.role ?? null, provider: agent.model.provider, id: agent.model.modelId } : null,
+      code: committedCode ? { branch: committedCode.branch ?? null, headCommit: committedCode.headCommit ?? null, uncommitted: committedCode.worktreeCommit !== committedCode.headCommit } : null,
+    });
     snapshot = next;
   }
   function publish() {

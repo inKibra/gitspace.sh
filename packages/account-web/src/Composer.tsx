@@ -213,6 +213,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       <span role="alert" className="text-destructive">{inference.loading ? 'Loading inference profile…' : inference.error ?? 'The project’s inference assignment is unavailable. Refresh before sending.'}<Button variant="ghost" size="compact" disabled={inference.loading} onClick={() => void inference.refresh()}>Refresh profiles</Button></span>
     </div> : null}
     {invalidModel ? <p role="status" className="text-caption text-muted-foreground">The selected model {selectedModelKey} is no longer available. The next run will use an authorized fallback and record the model change in the conversation.</p> : null}
+    {controls && !controls.selectionReadOnly && !controls.value.model && controls.value.models.length > 0 ? <p role="status" className="text-caption text-destructive">No model: {controls.value.roleLabel ?? 'the Default role'} has none in this inference profile. Pick a model before sending.</p> : null}
     {controls ? <PlanSteps controls={controls} /> : null}
     {controls?.onReadHistory && showHistory ? <SessionTreeExplorer key={controls.value.sessionId} historyAnchorId={controls.value.historyAnchorId} onReadHistory={controls.onReadHistory} onNavigate={controls.onNavigateTree} onClose={() => setShowHistory(false)} /> : null}
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}

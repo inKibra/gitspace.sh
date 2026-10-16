@@ -12,7 +12,8 @@ import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
 import { setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
-import { readSourceCheckpoint, readWorkspaceMetadata, storeWorkspaceStatus } from './workspace-metadata.js';
+import { readProjectWatch, readSourceCheckpoint, readWorkspaceMetadata, storeWorkspaceReport, storeWorkspaceStatus, writeProjectWatch, type ProjectWatch } from './workspace-metadata.js';
+import type { WorkspaceReport } from '@gitspace/protocol-workspace';
 import { notifyMachines } from './machine-notices.js';
 import { notifyBrowsers } from './live-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
@@ -97,9 +98,17 @@ export async function createAccountWorkspaceRuntime(
     ...inference,
     workspacePhase,
     async setWorkspacePhase(phase) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase); },
-    published: (snapshot, status) => {
+    published: (snapshot, report) => {
+      const status = report.summary;
       // The sidebar's row: sent to every tab only when the status changed.
       if (storeWorkspaceStatus(ctx.storage, status)) ctx.waitUntil(env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
+      storeWorkspaceReport(ctx.storage, report);
+      const watch = readProjectWatch(ctx.storage);
+      if (watch && status.primaryColor !== watch.color) {
+        writeProjectWatch(ctx.storage, watch.name, status.primaryColor);
+        const line = projectNotice(watch, report);
+        if (line) ctx.waitUntil(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeProjectNotice({ projectId: identity.projectId, workspaceId: identity.projectId }, line).catch((error: unknown) => console.error('Project notice was not sent', { workspaceId: identity.workspaceId, error })));
+      }
       ctx.waitUntil(notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
     },
     snapshotChanged: machineIds => {
@@ -137,6 +146,20 @@ export async function createAccountWorkspaceRuntime(
   });
   ctx.waitUntil(runtime.wake());
   return runtime;
+}
+
+/** The line a watched workspace sends its project conversation when its status color changes, or null for a change
+ * nobody needs to hear (work starting). "Finished" counts only after work, so starting a workspace never announces it. */
+export function projectNotice(watch: ProjectWatch, report: WorkspaceReport): string | null {
+  const name = `Workspace ${watch.name}`;
+  switch (report.summary.primaryColor) {
+    case 'red': return `${name} failed: ${report.failure ?? 'open it to see why'}`;
+    case 'orange': return report.waitingOn?.kind === 'approval' ? `${name} needs approval: ${report.waitingOn.prompt}` : `${name} has a sync conflict.`;
+    case 'blue':
+      if (watch.color !== 'green') return null;
+      return report.waitingOn?.kind === 'ask' ? `${name} asked: ${report.waitingOn.prompt}` : `${name} finished its turn${report.lastReply ? `: ${report.lastReply}` : '.'}`;
+    case 'green': case 'dim': return null;
+  }
 }
 
 /** Every machine executes through the tenant relay tunnel; a missing tunnel fails at once. */

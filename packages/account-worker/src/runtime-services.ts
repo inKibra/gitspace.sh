@@ -26,6 +26,7 @@ import { RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@g
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { executorCapabilities } from './runtime-attachments.js';
+import { compareCloudHistory, readCloudBaseTip } from './cloud-stack-status.js';
 import type { FleetMachineDefinition } from './fleet-catalog.js';
 import { QuestionsDoc } from '@gitspace/runtime-core';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
@@ -589,12 +590,35 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           }
           case 'list': return completed(input, await authority.listWorkspaces());
           case 'operations': return completed(input, await authority.listOperations());
+          case 'status': {
+            // Stored reports only: no workspace runtime opens and no agent is woken to answer.
+            const listed = (await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting' && (args.workspaceId === undefined || workspace.id === args.workspaceId));
+            if (args.workspaceId !== undefined && listed.length === 0) throw new Error(`Workspace ${args.workspaceId} is not in this project`);
+            const rows = await Promise.all(listed.map(async workspace => ({ id: workspace.id, name: workspace.name, branch: workspace.branch, lifecycle: workspace.lifecycle,
+              report: await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.id}`).workspaceReport() })));
+            const [row] = rows;
+            if (args.workspaceId === undefined || !row) return completed(input, rows);
+            // One workspace also gets its position against the project base, walked in cloud history.
+            const project = await authority.getProject();
+            const head = row.report?.code?.headCommit ?? null;
+            const tip = project && head ? await readCloudBaseTip(env, env.ACCOUNT_ID, identity.projectId, project.baseBranch) : null;
+            if (!project || !head || !tip) return completed(input, { ...row, base: null });
+            const child = { head, repositories: [artifactsWorkspaceRepository(row.id)] };
+            const code = new ArtifactsCodeStore(env.ARTIFACTS);
+            try {
+              const [behind, ahead] = await Promise.all([compareCloudHistory(code, tip, child), compareCloudHistory(code, child, tip)]);
+              return completed(input, { ...row, base: { branch: project.baseBranch, ahead: ahead.leftAhead, behind: behind.leftAhead } });
+            } catch (error) {
+              return completed(input, { ...row, base: { branch: project.baseBranch, error: error instanceof Error ? error.message : String(error) } });
+            }
+          }
           case 'start': {
             // Only the project agent starts workspaces; workspaces starting each other could loop without a person.
             if (identity.workspaceId !== baseWorkspaceId) throw new Error('Only the project agent (the project\'s base workspace) can start other workspaces');
             const target = await authority.getWorkspace(args.workspaceId);
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
             if (target.lifecycle !== 'active') throw new Error(`Workspace ${target.name} is ${target.lifecycle}; only an active workspace can be started`);
+            await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).watchFromProject(target.name);
             // The attempt names the request, so a retried call delivers the instruction once.
             const accepted = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).runtimeSubmit({
               projectId: identity.projectId, workspaceId: target.id, requestId: `start:${input.attemptId}`, text: `Instruction from the project agent:\n\n${args.instruction}`,

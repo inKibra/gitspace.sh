@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { WorkspacePhaseSchema } from './relations.js';
 
 export const WorkspaceStatusColorSchema = z.enum(['dim', 'green', 'blue', 'orange', 'red']);
 export type WorkspaceStatusColor = z.infer<typeof WorkspaceStatusColorSchema>;
@@ -26,3 +27,22 @@ export const emptyWorkspaceStatus: WorkspaceStatusSummary = {
   machines: { attached: 0, online: 0, ready: 0 },
   sync: { conflicts: 0, problems: 0 },
 };
+
+/** What a project agent reads about another workspace without opening it: the summary plus what the workspace waits on,
+ * its latest reply, its model and its code, stored by the workspace each time its runtime publishes. */
+export const WorkspaceReportSchema = z.object({
+  summary: WorkspaceStatusSummarySchema,
+  phase: WorkspacePhaseSchema.nullable(),
+  /** The main conversation's oldest unanswered question or approval, its prompt cut to 200 characters. */
+  waitingOn: z.object({ kind: z.enum(['ask', 'approval']), prompt: z.string() }).nullable(),
+  /** The main conversation's failure, when its last model request failed. */
+  failure: z.string().nullable(),
+  /** The main conversation's latest assistant text, cut to 280 characters. */
+  lastReply: z.string().nullable(),
+  lastActivityAt: z.string().datetime().nullable(),
+  /** The admitted model of the main conversation; null before its first message. */
+  model: z.object({ role: z.string().nullable(), provider: z.string(), id: z.string() }).nullable(),
+  /** Branch head of the cloud working copy, and whether it has uncommitted changes. */
+  code: z.object({ branch: z.string().nullable(), headCommit: z.string().nullable(), uncommitted: z.boolean() }).nullable(),
+});
+export type WorkspaceReport = z.infer<typeof WorkspaceReportSchema>;

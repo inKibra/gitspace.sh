@@ -65,7 +65,7 @@ export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof Ru
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
   if (name === 'service') return args.op === 'list' || args.op === 'logs';
-  if (name.startsWith('space_') || name === 'environment') return ['get', 'current', 'list', 'operations', 'describe', 'read', 'readCode', 'listScopes', 'listPromotions', 'runLog', 'log'].includes(String(args.method));
+  if (name.startsWith('space_') || name === 'environment') return ['get', 'current', 'list', 'operations', 'status', 'describe', 'read', 'readCode', 'listScopes', 'listPromotions', 'runLog', 'log'].includes(String(args.method));
   return false;
 }
 export const RuntimeWorkspaceStatusArgumentsSchema = z.object({}).strict();

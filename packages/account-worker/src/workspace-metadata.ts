@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { cloudWorkspaceDefinitionSchema, projectLifecycleSchema, workspaceLifecycleSchema, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle } from '@gitspace/protocol';
 import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { WorkspaceStatusSummarySchema, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { WorkspaceReportSchema, WorkspaceStatusColorSchema, WorkspaceStatusSummarySchema, type WorkspaceReport, type WorkspaceStatusColor, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 
 /** What a workspace object knows about itself: its identity, lifecycle, branch and phase, and the project lifecycle its
  * write policy needs. Runtime access is decided from this record alone; the project authority is read once to seed it. */
@@ -25,6 +25,8 @@ export function createWorkspaceMetadataTables(storage: DurableObjectStorage): vo
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_metadata(id INTEGER PRIMARY KEY CHECK (id = 1), record TEXT NOT NULL)');
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_status(id INTEGER PRIMARY KEY CHECK (id = 1), summary TEXT NOT NULL)');
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_source_checkpoint(id INTEGER PRIMARY KEY CHECK (id = 1), checkpoint TEXT NOT NULL)');
+  storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_report(id INTEGER PRIMARY KEY CHECK (id = 1), report TEXT NOT NULL)');
+  storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_project_watch(id INTEGER PRIMARY KEY CHECK (id = 1), record TEXT NOT NULL)');
 }
 
 /** A workspace created from another workspace starts from that workspace's whole checkpoint, uncommitted edits included. */
@@ -95,4 +97,29 @@ export function readWorkspaceStatus(storage: DurableObjectStorage): WorkspaceSta
   const row = storage.sql.exec<{ summary: string }>('SELECT summary FROM workspace_status WHERE id=1').toArray()[0];
   const stored = row ? WorkspaceStatusSummarySchema.safeParse(JSON.parse(row.summary)) : null;
   return stored?.success ? stored.data : null;
+}
+
+/** The report the runtime published last, for project agents reading this workspace without opening it. */
+export function storeWorkspaceReport(storage: DurableObjectStorage, report: WorkspaceReport): void {
+  storage.sql.exec('INSERT INTO workspace_report(id,report) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET report=excluded.report', JSON.stringify(report));
+}
+
+export function readWorkspaceReport(storage: DurableObjectStorage): WorkspaceReport | null {
+  const row = storage.sql.exec<{ report: string }>('SELECT report FROM workspace_report WHERE id=1').toArray()[0];
+  const stored = row ? WorkspaceReportSchema.safeParse(JSON.parse(row.report)) : null;
+  return stored?.success ? stored.data : null;
+}
+
+const ProjectWatchSchema = z.object({ name: z.string(), color: WorkspaceStatusColorSchema });
+/** A workspace the project agent started tells the project conversation when its status color changes; `color` is the
+ * last one it told, so each state is announced once. */
+export type ProjectWatch = z.infer<typeof ProjectWatchSchema>;
+
+export function writeProjectWatch(storage: DurableObjectStorage, name: string, color: WorkspaceStatusColor): void {
+  storage.sql.exec('INSERT INTO workspace_project_watch(id,record) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record', JSON.stringify({ name, color }));
+}
+
+export function readProjectWatch(storage: DurableObjectStorage): ProjectWatch | null {
+  const row = storage.sql.exec<{ record: string }>('SELECT record FROM workspace_project_watch WHERE id=1').toArray()[0];
+  return row ? ProjectWatchSchema.parse(JSON.parse(row.record)) : null;
 }

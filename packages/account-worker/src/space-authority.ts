@@ -23,10 +23,10 @@ import { CheckoutSourceFactsSchema, RuntimeAttachmentController, executorCapabil
 import { notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
 import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environment.js';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
-import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceStatus, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
+import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceReport, readWorkspaceStatus, writeProjectWatch, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
 import { z } from 'zod';
 import { normalizeRemoteRepositoryUrl, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle, type WorkspaceLifecycle } from '@gitspace/protocol';
-import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type EnvironmentFailure, type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleState } from '@gitspace/protocol-environment';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
@@ -146,6 +146,24 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
    * published, read without opening the runtime (null before its first publication under this release). */
   listingState(): { placement: SpaceAuthorityRecord | null; status: WorkspaceStatusSummary | null } {
     return { placement: this.get(), status: readWorkspaceStatus(this.ctx.storage) };
+  }
+
+  /** The report this workspace's runtime published last, read without opening it; null before its first publication. */
+  workspaceReport(): WorkspaceReport | null {
+    return readWorkspaceReport(this.ctx.storage);
+  }
+
+  /** The project agent started this workspace: from now on each status change it should hear reaches the project
+   * conversation, starting from the color it has now. */
+  watchFromProject(name: string): void {
+    writeProjectWatch(this.ctx.storage, name, readWorkspaceStatus(this.ctx.storage)?.primaryColor ?? 'dim');
+  }
+
+  /** Base workspace only: a line in the project conversation that does not start a turn. */
+  async runtimeProjectNotice(raw: unknown, text: string): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    if (String(identity.workspaceId) !== String(identity.projectId)) throw new Error('Project notices go to the project base workspace');
+    await (await this.getRuntime(identity)).notice(text);
   }
 
   /** This workspace's metadata. One that predates workspaces holding their own reads its project once to seed it;

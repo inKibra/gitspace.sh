@@ -106,6 +106,15 @@ export async function compareCloudHistory(code: HistoryReader, left: Tip, right:
  */
 const StackComparisonSchema = z.object({ mergeBase: z.string().nullable(), parentAhead: z.number(), parentMerged: z.enum(['merged', 'not-merged', 'unknown']) });
 
+/** The project's base tip: the base workspace's checkpoint head, or the imported base branch before it has one. */
+export async function readCloudBaseTip(env: Env, userId: string, projectId: string, baseBranch: string): Promise<Tip | null> {
+  const saved = await env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`).runtimeCodeCheckpoint(RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }));
+  if (saved) return saved.headCommit === null ? null : { head: saved.headCommit, repositories: [artifactsWorkspaceRepository(projectId)] };
+  const repository = artifactsProjectRepository(projectId);
+  const head = await new ArtifactsCodeStore(env.ARTIFACTS).resolveRef(repository, `refs/heads/${baseBranch}`);
+  return head === null ? null : { head, repositories: [repository] };
+}
+
 export async function readCloudStackStatus(env: Env, userId: string, projectId: string, workspaceId: string): Promise<StackStatus | null> {
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
   const [project, workspaces, relations] = await Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations()]);
@@ -117,14 +126,7 @@ export async function readCloudStackStatus(env: Env, userId: string, projectId: 
   if (!parent) return { parentId: null, parentBranch: null, baseBranch, mergeBase: null, parentAhead: 0, parentMerged: 'unknown', instruction: null };
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   const checkpoint = (id: string) => env.SPACE_AUTHORITY.getByName(`${userId}:${id}`).runtimeRepositoryCheckpoint(RuntimeIdentitySchema.parse({ projectId, workspaceId: id }));
-  const baseTip = async (): Promise<Tip | null> => {
-    const saved = await env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`).runtimeCodeCheckpoint(RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }));
-    if (saved) return saved.headCommit === null ? null : { head: saved.headCommit, repositories: [artifactsWorkspaceRepository(projectId)] };
-    const repository = artifactsProjectRepository(projectId);
-    const head = await code.resolveRef(repository, `refs/heads/${baseBranch}`);
-    return head === null ? null : { head, repositories: [repository] };
-  };
-  const [child, parentCheckpoint, base] = await Promise.all([checkpoint(workspaceId), checkpoint(parent.id), baseTip()]);
+  const [child, parentCheckpoint, base] = await Promise.all([checkpoint(workspaceId), checkpoint(parent.id), readCloudBaseTip(env, userId, projectId, baseBranch)]);
   const parentTip = parentCheckpoint.headCommit === null ? null : { head: parentCheckpoint.headCommit, repositories: [artifactsWorkspaceRepository(parent.id)] };
   // The comparison depends only on these commits and branches, so it is computed once per change of any of them.
   const source = JSON.stringify([child.headCommit, parentTip?.head ?? null, base?.head ?? null, parent.branch, baseBranch]);
