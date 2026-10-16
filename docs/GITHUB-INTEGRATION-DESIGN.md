@@ -69,6 +69,7 @@ Rules (from `docs/SIMPLIFICATION.md`): a delivery is recorded once and becomes o
   - any other note becomes a PR comment that quotes the guide passage, with file references as permalinks at the PR's commit;
   - each posted comment carries a hidden marker (`<!-- gitspace-guide v1 guide=<id> section=<id> -->`).
 - **Read-back:** the App's webhook delivers the comment like any other; the marker files it as a thread on the matching guide section, attributed to the reader's GitHub account, where the workspace agent can answer or act. Comments people write directly on GitHub (no marker) still reach the workspace through the normal PR events.
+- **After merge or archive:** the viewer stays up read-only: the guide and its threads remain visible under the same access rules, and new comments are closed (the comment controls say why). Reopening the PR or restoring the workspace reopens comments.
 - **What GitSpace keeps:** the reader's GitHub token lives only in their viewer session (expiring, encrypted cookie), never in the tenant's vault. GitSpace never accepts a comment that GitHub did not accept: identity, permissions and moderation stay with GitHub.
 
 ## 7. Behind the remote
@@ -92,8 +93,7 @@ Rules (from `docs/SIMPLIFICATION.md`): a delivery is recorded once and becomes o
 ## 9. Open questions
 
 1. Should a tenant be able to turn on `contents: write` per project, or only for the whole App?
-2. Should the viewer stay available after the PR merges or the workspace is archived, and for how long?
-3. When two projects in one tenant share a repository and no default is set, should a PR create a workspace in each, or ask?
+2. When two projects in one tenant share a repository and no default is set, should a PR create a workspace in each, or ask?
 
 ## 10. References
 
