@@ -1175,7 +1175,18 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     onArchiveProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.archive({ projectId, expectedRevision })); },
     onRestoreProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.restore({ projectId, expectedRevision })); },
     onSetProjectBaseBranch: async (projectId, expectedRevision, baseBranch) => { await mutate(rpcClient.project.setBaseBranch({ projectId, expectedRevision, baseBranch })); },
-    onDeleteProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.delete({ projectId, expectedRevision })); },
+    onDeleteProject: async (projectId, expectedRevision) => {
+      const project = account.projects.find((candidate) => candidate.id === projectId);
+      const workspaces = account.directory[projectId]?.workspaces ?? [];
+      const named = workspaces.length === 0 ? 'It has no workspaces.'
+        : `Its ${workspaces.length === 1 ? 'workspace is' : `${workspaces.length} workspaces are`} deleted with it: ${workspaces.map((workspace) => workspace.name).join(', ')}.`;
+      if (!window.confirm(`Delete project ${project?.name ?? projectId}? ${named} Their conversations, files and cloud records are removed. This cannot be undone.`)) return;
+      // Only a running workspace can hold machine LFS files the cloud has not received.
+      for (const workspace of workspaces) {
+        if (workspace.definition?.lifecycle === 'active' && !await confirmLeaving(await inspectTarget(workspace.id))) return;
+      }
+      await mutate(rpcClient.project.delete({ projectId, expectedRevision }));
+    },
     onDeleteWorkspace: async (workspaceId) => {
       const listed = account.projects.flatMap((project) => account.directory[project.id]?.workspaces ?? []).find((workspace) => workspace.id === workspaceId);
       if (!window.confirm(`Delete ${listed?.name ?? workspaceId}? Its conversations, files and cloud records are removed. This cannot be undone.`)) return;
