@@ -422,7 +422,8 @@ function AccountFrame({ children }: { children: ReactNode }) {
   const retainedProjects = useRetainedQueryValue(projects, 'account-projects');
   const projectValues = useMemo(() => retainedProjects ?? [], [retainedProjects]);
   const { directory, acceptRuntime } = useWorkspaceProjection(projectValues);
-  const live = route === 'agent' && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === workspaceId ? runtimeSidebar : null;
+  // A link naming the project's own id as its workspace opens the base space, which the shell selects as null.
+  const live = route === 'agent' && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === (workspaceId === projectId ? null : workspaceId) ? runtimeSidebar : null;
   const sidebarProjects: SidebarProject[] = projectValues.map((project) => ({
     id: project.id, name: project.name, lifecycle: project.lifecycle,
     ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [],
