@@ -69,8 +69,9 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       await conversation.submit({ type: 'write', entry: { kind: 'gitspace.queue-resumed', data: { submission: String(queued.id) } } }, context);
       await options.wake();
     }
+    // An event reaches the conversation once: as input here, or through agents wait (consumed), never both.
     for (const pending of state?.events ?? []) {
-      if (pending.delivered) continue;
+      if (pending.delivered || pending.consumed) continue;
       if ((await harness.snapshot(LiveDoc, conversation.id, context))?.run !== undefined) { await options.wake(); return; }
       const event = pending.event;
       await admit(event.requestId);
@@ -144,7 +145,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
           const next = await conversation.commit(async tx => {
             const state = await tx.doc(ConversationLifecycleDoc, conversation.id);
             if (state.stopped) return { kind: 'stopped' as const };
-            const pending = state.events.find(item => !item.consumed);
+            const pending = state.events.find(item => !item.consumed && !item.delivered);
             if (!pending) return null;
             pending.consumed = true;
             return ConversationEventSchema.parse(pending.event);
