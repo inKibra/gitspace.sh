@@ -195,6 +195,12 @@ Every item is verified the way the user works, in the browser, before it is repo
 6. Open, found while verifying: the first message in a new workspace times out ("Cloud session control" and "Send message: The request timed out") on three of three new workspaces; the message usually lands, a resend queues a duplicate. Cause not investigated.
 7. Open: the Tester on the logged-in Chrome relay needs the relay check changed in the cloud and in the installed Chrome extension (a reinstall). Reading `.omp/` stays until inkibra core moves `.omp/agents/Tester.md` and `.omp/rules/*` to `.agents/`.
 
+**Found in Deedible Info (2026-10-16).** Its project agent created four workspaces from `staging` in codemode with `space.create(...)`, copied from its migrated eval history: `space is not defined`.
+1. Codemode names its globals (`tools`, `mcp`, `completion`, `judge`, `display`), shows `tools.space_workspace(...)` in its description and skill, and a ReferenceError says which tools replaced `space`.
+2. `space_workspace create` from branch `staging` failed with `Git discovery failed (401)`: a ref the project repository lacked was fetched from the origin without credentials, and `Deedible/Info` is private. A 401/403/404 now imports the ref through a machine holding the project's base checkout (`import_ref`: fetch from the checkout's `origin` with the machine's git identity into a private ref, publish to `project-<id>`, never touching HEAD or branches); with none ready the error says what to do.
+3. Its fallback, `sourceKind: base` with `sourceRef: staging`, silently started from the base branch (`infra/keys`). A base source with a different ref is now refused.
+4. `space_workspace start` (project agent only): sends a workspace's agent an instruction, once per call, so created workspaces start without the user opening each. The started agent attaches its own machine under "agents may attach"; plan approval still applies.
+
 **Batch 10 — releases from canonical.** Releases since the cutover were built by a workaround script from a workspace checkout (`fc88e4a "Initialize project"` plus copied files), so release ids name no `develop` commit; that workspace's project has since been deleted.
 1. **Launch from canonical:** Settings → Source → launch `develop` at a commit of `github.com/inKibra/gitspace.sh`; the release is recorded under the real commit. Clean builds only.
 2. **Launch from the GitSpace project's base space**, not only its workspaces (`AppSidebar.tsx:198` limits launch to `kind === 'workspace'`).

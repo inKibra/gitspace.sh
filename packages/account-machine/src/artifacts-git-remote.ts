@@ -43,11 +43,11 @@ export function artifactsPublicationRejection(error: unknown): ArtifactsReposito
   return null;
 }
 
-/** The remote branch already names other history; publication never moves it. */
-export class ArtifactsBranchDivergedError extends ArtifactsGitError {
-  constructor(readonly branch: string, readonly remoteCommit: string, readonly commit: string) {
-    super('branch', `Remote branch ${branch} is at ${remoteCommit}, not ${commit}; refusing to overwrite it`);
-    this.name = 'ArtifactsBranchDivergedError';
+/** The remote ref already names other history; publication never moves it. */
+export class ArtifactsRefDivergedError extends ArtifactsGitError {
+  constructor(readonly ref: string, readonly remoteCommit: string, readonly commit: string) {
+    super('ref', `Remote ref ${ref} is at ${remoteCommit}, not ${commit}; refusing to overwrite it`);
+    this.name = 'ArtifactsRefDivergedError';
   }
 }
 
@@ -125,24 +125,25 @@ export class ArtifactsGitRemote {
     });
   }
 
-  /** Publishes a new branch from its tip only (a shallow boundary at the tip): older history, and any oversized
-   * file in it, stays on the origin. Never moves an existing remote branch: equal is a no-op, any other commit is refused. */
-  async publishBranch(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; branch: string; commit: string }): Promise<void> {
-    if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new ArtifactsGitError('branch', 'Invalid branch commit');
-    const ref = `refs/heads/${input.branch}`;
-    await git(input.repositoryPath, ['check-ref-format', ref]);
+  /** Publishes a new branch, tag or pull request head (`refs/heads/*`, `refs/tags/*`, `refs/pull/<n>/head`) from its
+   * tip only (a shallow boundary at the tip): older history, and any oversized file in it, stays on the origin. Never
+   * moves an existing remote ref: equal is a no-op, any other commit is refused. */
+  async publishRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string; commit: string }): Promise<void> {
+    if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new ArtifactsGitError('ref', 'Invalid ref commit');
+    if (!/^refs\/(?:heads|tags)\/./u.test(input.ref) && !/^refs\/pull\/[1-9][0-9]*\/head$/u.test(input.ref)) throw new ArtifactsGitError('ref', `Unsupported ref ${input.ref}`);
+    await git(input.repositoryPath, ['check-ref-format', input.ref]);
     await git(input.repositoryPath, ['cat-file', '-e', `${input.commit}^{commit}`]);
     await withShallowBoundary(input.commit, async shallow => {
       await checkCurrentLayers(input.repositoryPath, input.commit, null, shallow);
       // Even read credentials may create the remote repository: check first.
       const probe = await this.auth(input.binding, 'read');
-      const advertised = await git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, ref], probe.environment);
-      // ls-remote patterns match ref suffixes; only the exact branch counts.
-      const current = advertised.split('\n').map(line => line.split('\t')).find(([, name]) => name === ref)?.[0];
+      const advertised = await git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, input.ref], probe.environment);
+      // ls-remote patterns match ref suffixes; only the exact ref counts.
+      const current = advertised.split('\n').map(line => line.split('\t')).find(([, name]) => name === input.ref)?.[0];
       if (current === input.commit) return;
-      if (current !== undefined) throw new ArtifactsBranchDivergedError(input.branch, current, input.commit);
+      if (current !== undefined) throw new ArtifactsRefDivergedError(input.ref, current, input.commit);
       const auth = await this.auth(input.binding, 'write');
-      await git(input.repositoryPath, [...PUSH, auth.remote, `${input.commit}:${ref}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' });
+      await git(input.repositoryPath, [...PUSH, auth.remote, `${input.commit}:${input.ref}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' });
     });
   }
 

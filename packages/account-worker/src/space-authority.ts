@@ -15,6 +15,7 @@ import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema } from '@gitspace/protocol-runtime/services';
 import { RuntimeSyncRequestInputSchema, RuntimeSyncRequestResultSchema, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime/tool-arguments';
 import { runtimeServiceControl } from './runtime-service-control.js';
+import { importRefThroughBaseMachine } from './runtime-ref-import.js';
 import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
@@ -657,6 +658,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeServices(raw: unknown) {
     const input = RuntimeServiceInputSchema.parse(raw);
     return runtimeServiceControl(await this.getRuntime(input), input);
+  }
+  /** Base workspace only: one origin ref imported through a machine holding the base checkout; returns its commit. */
+  async runtimeImportRef(raw: unknown, ref: string): Promise<string> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    return importRefThroughBaseMachine(await this.getRuntime(identity), identity, ref);
   }
   /** A person's sync action runs the `sync` tool once per request id as a call of the main conversation. */
   async runtimeSync(raw: unknown): Promise<RuntimeSyncRequestResult> {

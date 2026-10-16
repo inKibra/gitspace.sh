@@ -155,3 +155,9 @@ export const RuntimeEnvironmentArgumentsSchema = z.discriminatedUnion('method', 
   LifecycleMutationSchema.options[2].omit({ op: true, value: true }).extend({ method: z.literal('deleteValue'), scope: z.enum(['project', 'workspace']) }),
   z.object({ method: z.literal('cancelRun'), runId: path }),
 ]);
+/** `import_ref` runs on a machine holding the project's base checkout: it fetches one origin ref with the machine's own git
+ * credentials and publishes it to the project's cloud repository, for origins the cloud cannot read. */
+export const RuntimeImportRefArgumentsSchema = z.object({
+  ref: z.string().max(512).regex(/^refs\/(?:(?:heads|tags)\/[^\0\s]+|pull\/[1-9][0-9]*\/head)$/u),
+}).strict();
+export const RuntimeImportRefResultSchema = z.object({ ref: z.string(), commit: z.string().regex(/^[0-9a-f]{40}$/u) }).strict();

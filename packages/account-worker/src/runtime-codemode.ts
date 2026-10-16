@@ -108,7 +108,7 @@ export default class Sandbox extends WorkerEntrypoint { async execute(capability
   const mcp = Object.freeze(Object.fromEntries(['list','search','describe','call'].map(method => [method, args => unwrap(capability.mcp(method, args ?? {}))])));
   const cancelled = capability.cancelled().then(reason => { throw new Error(reason); });
   try { const value = await Promise.race([run(tools, args => unwrap(capability.model('completion', args)), args => unwrap(capability.model('judge', args)), mcp, display), cancelled]); const body = JSON.stringify({ ok: true, value: value ?? null, output }); if (new TextEncoder().encode(body).length > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); return body; }
-  catch (error) { return JSON.stringify({ ok: false, error: String(error instanceof Error ? error.message : error).slice(0, 4096) }); }
+  catch (error) { const text = String(error instanceof Error ? error.message : error); return JSON.stringify({ ok: false, error: (error instanceof ReferenceError ? text + '. Codemode globals are tools, mcp, completion, judge and display; call any tool as tools.<name>(args), for example await tools.space_workspace({ method: "create", ... }).' : text).slice(0, 4096) }); }
 } }`,
         }, globalOutbound: null, limits: { cpuMs: 1000, subRequests: MAX_CALLS } });
         type SandboxEntrypoint = WorkerEntrypoint & { execute(capability: Capabilities): Promise<string> };

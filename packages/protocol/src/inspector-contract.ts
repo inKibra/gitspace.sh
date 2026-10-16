@@ -671,7 +671,10 @@ export const RuntimeWorkspaceMutationArgumentsSchema = z.discriminatedUnion('met
   RuntimeDispatchSelectionSchema.extend({ method: z.enum(['open', 'restore']), workspaceId: z.string().min(1).optional(), expectedGeneration: z.number().int().nonnegative() }).strict(),
   RuntimeDispatchSelectionSchema.extend({ method: z.literal('setRelations'), workspaceId: z.string().min(1).optional(), expectedRevision: z.number().int().nonnegative(), dependsOn: z.array(z.string()), relatedTo: z.array(z.string()), stackedOn: z.string().nullable() }).strict(),
 ]);
+/** The project agent sends another workspace's main agent an instruction, as its first message or a later one. */
+export const RuntimeWorkspaceStartArgumentsSchema = z.object({ method: z.literal('start'), workspaceId: z.string().min(1), instruction: z.string().trim().min(1).max(32_768) }).strict();
 export const RuntimeWorkspaceArgumentsSchema = z.union([
   z.object({ method: z.enum(['get', 'current', 'list', 'operations']), workspaceId: z.string().min(1).optional() }).strict(),
+  RuntimeWorkspaceStartArgumentsSchema,
   RuntimeWorkspaceMutationArgumentsSchema,
 ]);

@@ -43,6 +43,8 @@ const SPACE_CHAIN = gitSpaceSkill('space-chain', 'Discover and manage workspaces
 Use typed workspace tools:
 - \`space_workspace({ args: { method: 'current' } })\` inspects this workspace; method list returns project workspace definitions.
 - \`space_workspace({ args: { method: 'create', name, branch, phase, sourceKind, sourceRef, dependsOn, goal, workflow, rubric } })\` creates a workspace and optional initial instructions. Omit optional fields rather than passing undefined. All drafts validate before creation. Check ready: a later authority failure returns ready:false, the created identity, completed writes, and an error. Reconcile that workspace rather than recreating it. Phase defaults to plan; explicit phases still enforce dependency ceilings.
+- \`space_workspace({ args: { method: 'start', workspaceId, instruction } })\` (project agent only) sends that workspace's agent an instruction as its next message, so workspaces you create start working without the user opening each. The started agent attaches its own machine with \`machines\` when it needs one, under the same "agents may attach" rule; a workspace in plan still proposes its plan for the user's approval. A retried call delivers the instruction once.
+- A branch, tag or pull request the project repository does not hold yet is imported from the origin on creation; for a private origin that runs through a machine holding the project's base workspace, so one must be online.
 - \`space_phase({ args: { phase: 'code' } })\` changes this workspace at its current revision. \`space_workspace\` method setRelations accepts expectedRevision, dependsOn, relatedTo, and stackedOn.
 - Lifecycle methods open and restore take expectedGeneration; restore also takes expectedRevision. Use the latest authority values, never invented generations.
 
@@ -135,14 +137,15 @@ Treat pre/setup/select/remove configuration as migration work, not executable al
 
 Explain persistence before handoff: checkpoints preserve tracked changes and non-ignored untracked files, not ignored .env files, node_modules, machine packages, or arbitrary home-directory files. Rebuild local state on materialization. Keep durable data in explicit remote resources. Preparation failure must not block access to the workspace; failed dematerialization or checkpointing must not delete its checkout.`);
 const INTEGRATION_CODE_MODE = gitSpaceSkill('integration-code-mode', 'Discover and compose project-granted MCP tools from executable JavaScript.', `
-Use \`codemode({ args: { code: '...' } })\`. A fresh cloud Worker isolate exposes grant-scoped MCP calls alongside completion and judge:
+Use \`codemode({ args: { code: '...' } })\`. A fresh cloud Worker isolate exposes this conversation's tools, grant-scoped MCP calls, completion and judge:
 
+- \`tools.<name>(args)\` calls any tool this agent has, GitSpace tools included, with the same arguments as a direct call: \`await tools.space_workspace({ method: 'create', name, branch, sourceKind, sourceRef })\`, \`await tools.space_goal({ method: 'get' })\`, \`await tools.read({ path })\`. codemode and agents are not callable from inside codemode.
 - \`mcp.list()\`
 - \`mcp.search({ query, limit? })\`
 - \`mcp.describe({ name })\`
 - \`mcp.call({ name, args })\`
 
-Search before guessing names. Describe unfamiliar tools before calling them. Compose loops, filtering, joins, pagination, and bounded aggregation in one codemode execution so intermediate results stay out of model context. An empty grant set produces an empty catalog. Provider and MCP credentials are never exposed. The removed eval tool and space JavaScript namespace are not available.`);
+Search before guessing names. Describe unfamiliar tools before calling them. Compose loops, filtering, joins, pagination, and bounded aggregation in one codemode execution so intermediate results stay out of model context. An empty grant set produces an empty catalog. Provider and MCP credentials are never exposed. There is no \`space\` object: older conversations used \`space.create(...)\` and similar in a removed eval tool; call \`tools.space_workspace\`, \`tools.space_goal\` and the other space_* tools instead.`);
 
 
 export const DEFAULT_SKILLS: Readonly<Record<string, string>> = {

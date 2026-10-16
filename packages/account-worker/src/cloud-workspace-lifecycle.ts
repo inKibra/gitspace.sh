@@ -4,7 +4,7 @@ import { cloudResourceId, normalizeRemoteRepositoryUrl } from '@gitspace/protoco
 import type { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import type { RuntimeGitCheckpoint, RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, GitDiscoveryError, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { ensureProjectCodeRepository } from './account-runtime-host.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
@@ -128,6 +128,24 @@ async function runOperation<T>(authority: ProjectAuthority, input: { projectId: 
   }
 }
 
+/** A ref the project repository lacks, brought in from the origin: fetched directly when the origin is public, otherwise
+ * through a machine holding the project's base checkout, which reads the origin with its own git credentials. Either
+ * way the commit is read back from the project repository. Null when the project has no origin. */
+async function importOriginRef(env: Env, userId: string, code: ArtifactsCodeStore, project: CloudProjectSummary, ref: string): Promise<string | null> {
+  if (!project.repositoryReference) return null;
+  const origin = normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/'));
+  try {
+    return await code.importSourceRef(project.id, origin, ref);
+  } catch (error) {
+    if (!(error instanceof GitDiscoveryError) || !error.needsCredentials) throw error;
+  }
+  await env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`).runtimeImportRef({ projectId: project.id, workspaceId: project.id }, ref);
+  const repository = artifactsProjectRepository(project.id);
+  const commit = ref.startsWith('refs/heads/') ? await code.resolveRef(repository, ref) : await code.resolveAdvertisedRef(repository, ref);
+  if (commit === null) throw new Error(`${ref} was imported but the project repository does not hold it`);
+  return commit;
+}
+
 /** The commit a new workspace starts from, read from the cloud repositories only. */
 async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore, project: CloudProjectSummary, sourceWorkspace: CloudWorkspaceDefinition | null, input: Pick<CloudWorkspaceRequest, 'sourceKind' | 'sourceRef'>): Promise<ResolvedSource> {
   if (sourceWorkspace) {
@@ -148,6 +166,9 @@ async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore,
   await ensureProjectCodeRepository(code, project);
   switch (input.sourceKind) {
     case 'base': {
+      // The base source has no ref of its own; a different one is a request for another source, never silently dropped.
+      const requested = input.sourceRef.trim().replace(/^(?:refs\/heads\/|refs\/remotes\/origin\/|origin\/)/u, '');
+      if (requested && requested !== project.baseBranch) throw new Error(`sourceKind base starts from the project base branch ${project.baseBranch}; to start from ${input.sourceRef}, use sourceKind branch with sourceRef ${requested}`);
       const commit = await code.resolveRef(repository, project.baseBranch === 'HEAD' ? 'HEAD' : `refs/heads/${project.baseBranch}`);
       if (commit === null && await code.resolveRef(repository, 'HEAD') !== null) throw new Error(`Base branch ${project.baseBranch} does not exist in the project repository`);
       return { sourceRef: project.baseBranch, sourceCommit: commit, repository, checkpoint: null };
@@ -156,8 +177,7 @@ async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore,
       // The cloud repository is the project's origin: `origin/` and remote-tracking forms name its branches.
       const branch = input.sourceRef.replace(/^(?:refs\/heads\/|refs\/remotes\/origin\/|origin\/)/u, '');
       if (!isSupportedBranchName(branch)) throw new Error(`${input.sourceRef} is not a branch of the project repository`);
-      const commit = await code.resolveRef(repository, `refs/heads/${branch}`)
-        ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/heads/${branch}`) : null);
+      const commit = await code.resolveRef(repository, `refs/heads/${branch}`) ?? await importOriginRef(env, userId, code, project, `refs/heads/${branch}`);
       if (commit === null) throw new Error(`Branch ${branch} does not exist in the project repository`);
       return { sourceRef: branch, sourceCommit: commit, repository, checkpoint: null };
     }
@@ -169,15 +189,13 @@ async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore,
     case 'tag': {
       const tag = input.sourceRef.replace(/^refs\/tags\//u, '');
       if (!isSupportedBranchName(tag)) throw new Error(`${input.sourceRef} is not a valid tag name`);
-      const commit = await code.resolveAdvertisedRef(repository, `refs/tags/${tag}`)
-        ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/tags/${tag}`) : null);
+      const commit = await code.resolveAdvertisedRef(repository, `refs/tags/${tag}`) ?? await importOriginRef(env, userId, code, project, `refs/tags/${tag}`);
       if (commit === null) throw new Error(`Tag ${tag} does not exist in the project repository`);
       return { sourceRef: tag, sourceCommit: commit, repository, checkpoint: null };
     }
     case 'pull-request': {
       if (!/^[1-9][0-9]*$/u.test(input.sourceRef)) throw new Error('Pull request source must be a positive pull request number');
-      const commit = await code.resolveAdvertisedRef(repository, `refs/pull/${input.sourceRef}/head`)
-        ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/pull/${input.sourceRef}/head`) : null);
+      const commit = await code.resolveAdvertisedRef(repository, `refs/pull/${input.sourceRef}/head`) ?? await importOriginRef(env, userId, code, project, `refs/pull/${input.sourceRef}/head`);
       if (commit === null) throw new Error(`Pull request #${input.sourceRef} has no head in the project repository`);
       return { sourceRef: input.sourceRef, sourceCommit: commit, repository, checkpoint: null };
     }

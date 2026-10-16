@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ArtifactsBranchDivergedError, ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError, verifyArtifactsGitUpload } from '../src/artifacts-git-remote.js';
+import { ArtifactsRefDivergedError, ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError, verifyArtifactsGitUpload } from '../src/artifacts-git-remote.js';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint } from '../src/git-checkpoint.js';
 import { acquireCheckout } from '../../runtime-machine/src/artifactfs.js';
 
@@ -27,7 +27,7 @@ function fixture() {
   } });
   const checkpointRef = 'refs/gitspace/checkpoints/test';
   const publish = (headCommit: string | null = git(root, 'rev-parse', 'HEAD')) => publication.publishCheckpoint({ repositoryPath: root, binding: { projectId: 'test', repository: 'test' }, checkpointRef, headCommit, remoteHead: null });
-  const publishBranch = (commit: string) => publication.publishBranch({ repositoryPath: root, binding: { projectId: 'test', repository: 'project-test' }, branch: 'main', commit });
+  const publishBranch = (commit: string) => publication.publishRef({ repositoryPath: root, binding: { projectId: 'test', repository: 'project-test' }, ref: 'refs/heads/main', commit });
   return { root, remote, checkpointRef, publication, publish, publishBranch, scopes };
 }
 function rejectPushes(remote: string) {
@@ -54,8 +54,8 @@ it('refuses to move a remote branch that holds different history', async () => {
   writeFileSync(join(f.root, 'file'), 'local'); git(f.root, 'commit', '-am', 'local');
   const local = git(f.root, 'rev-parse', 'HEAD');
   const refused = f.publishBranch(local);
-  await expect(refused).rejects.toBeInstanceOf(ArtifactsBranchDivergedError);
-  await expect(refused).rejects.toMatchObject({ branch: 'main', remoteCommit: base, commit: local });
+  await expect(refused).rejects.toBeInstanceOf(ArtifactsRefDivergedError);
+  await expect(refused).rejects.toMatchObject({ ref: 'refs/heads/main', remoteCommit: base, commit: local });
   expect(git(f.remote, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(`refs/heads/main ${base}`);
   expect(f.scopes).toEqual(['read']);
 });

@@ -4,7 +4,7 @@ import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, si
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
-import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, GitDiscoveryError } from '@gitspace/runtime-workspace-do';
 import { createBrowserClient } from 'result-rpc/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Result } from 'better-result';
@@ -205,9 +205,26 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await create({ sourceKind: 'workspace', sourceRef: 'nobody' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Source workspace nobody does not exist') } } });
     expect(await create({ dependsOn: ['nobody'] })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Dependency workspace nobody does not exist') } } });
     expect(await create({ projectId: 'missing-project' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/project-not-found' } });
+    // A ref with the base source names another source; it is refused rather than silently started from the base.
+    expect(await create({ sourceKind: 'base', sourceRef: 'staging' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('use sourceKind branch with sourceRef staging') } } });
     expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree')).toEqual([]);
     expect(await create({ sourceKind: 'branch', sourceRef: 'refs/remotes/origin/main' })).toMatchObject({ status: 'ok', value: { workspace: { branch: 'refused' } } });
     expect(await create({ name: 'From commit', branch: 'from-commit', sourceKind: 'commit', sourceRef: commit('1') })).toMatchObject({ status: 'ok' });
+    expect(await create({ name: 'Base by name', branch: 'base-by-name', sourceKind: 'base', sourceRef: 'origin/main' })).toMatchObject({ status: 'ok' });
+  });
+
+  it('imports a branch a private origin refuses through a machine holding the base checkout, and says so when none is ready', async () => {
+    const { client, project, authority } = await cloudProject('Private branches', 'https://github.com/Deedible/Private.git');
+    const importRef = vi.spyOn(ArtifactsCodeStore.prototype, 'importSourceRef').mockRejectedValue(new GitDiscoveryError(401));
+    try {
+      const created = await client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' });
+      expect(created).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('The project repository is private') } } });
+      expect(importRef).toHaveBeenCalledWith(project.id, 'https://github.com/Deedible/Private.git', 'refs/heads/staging');
+      expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree')).toEqual([]);
+      // Any other refusal is the origin's answer, not a reason to involve a machine.
+      importRef.mockRejectedValue(new GitDiscoveryError(500));
+      expect(await client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Git discovery failed (500)') } } });
+    } finally { importRef.mockRestore(); }
   });
 
   it('imports missing public branches for workspace sources and base switches without refreshing cached refs', async () => {

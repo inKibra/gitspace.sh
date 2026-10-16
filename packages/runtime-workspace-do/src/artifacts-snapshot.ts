@@ -11,6 +11,11 @@ export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?
 export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; /** Edit-history message for the tool change; absent for merges and system snapshots. */ message?: string; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean };
 export interface ArtifactsFetch { (input: string, init?: RequestInit): Promise<Response> }
 export class ArtifactsSnapshotError extends TaggedError('ArtifactsSnapshotError')<{ operation: string; message: string; certainty: 'not-published' | 'unknown' }> {}
+/** An origin refused ref discovery; 401/403/404 from a credential-free request mean it needs credentials GitSpace does not hold. */
+export class GitDiscoveryError extends Error {
+  constructor(readonly status: number) { super(`Git discovery failed (${status})`); }
+  get needsCredentials(): boolean { return this.status === 401 || this.status === 403 || this.status === 404; }
+}
 
 export function validateSnapshotPath(path: string): void {
   if (!path || path.length > 4096 || path.split('/').length > 128 || path.includes('\\') || path.includes('\0') || path.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')) throw new Error('Invalid repository-relative path');
@@ -95,7 +100,7 @@ export async function readShallowCommits(input: { remote: string; token: string 
 async function readGitDiscovery(remote: URL, headers: Record<string, string>, request: ArtifactsFetch) {
   const signal = AbortSignal.timeout(15_000);
   const advertised = await request(`${remote.href.replace(/\/$/u, '')}/info/refs?service=git-upload-pack`, { headers, signal, redirect: 'manual' });
-  if (!advertised.ok) throw new Error(`Git discovery failed (${advertised.status})`);
+  if (!advertised.ok) throw new GitDiscoveryError(advertised.status);
   if (!advertised.body) throw new Error('Git discovery returned no advertisement');
   return packets(await collectBytes(streamBytes(advertised.body, signal), 64 * 1024)).filter(line => !line.startsWith('#'));
 }
@@ -122,7 +127,7 @@ async function readGitAdvertisement(input: { remote: string; token: string | nul
       method: 'POST', headers: { ...headers, 'Git-Protocol': 'version=2', 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
       body, signal, redirect: 'manual',
     });
-    if (!response.ok) throw new Error(`Git discovery failed (${response.status})`);
+    if (!response.ok) throw new GitDiscoveryError(response.status);
     if (!response.body) throw new Error('Git discovery returned no advertisement');
     lines = packets(await collectBytes(streamBytes(response.body, signal), 64 * 1024));
   }

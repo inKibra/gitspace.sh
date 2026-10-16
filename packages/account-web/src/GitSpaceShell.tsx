@@ -490,7 +490,7 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'p
   return <Dialog open={projectId !== null} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
     <DialogContent>
       <DialogHeader><DialogTitle>Create from source</DialogTitle><DialogDescription>Start a workspace from a branch, pull request, tag, commit, or another workspace.</DialogDescription></DialogHeader>
-      <form id="create-workspace-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); if (projectId && !pending) void onSubmit({ projectId, name: form.name, branch: form.branch, phase, sourceKind, sourceRef: form.sourceRef, dependsOn: dependsOn.filter((id) => id !== source?.id) }); }}>
+      <form id="create-workspace-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); if (projectId && !pending) void onSubmit({ projectId, name: form.name, branch: form.branch, phase, sourceKind, sourceRef: sourceKind === 'base' ? '' : form.sourceRef, dependsOn: dependsOn.filter((id) => id !== source?.id) }); }}>
         <InputGroup>
           <InputField index={0} label="Name" value={form.name} onChange={set('name')} required autoFocus />
           <InputField index={1} label="Branch" placeholder="feature/my-change" value={form.branch} onChange={set('branch')} required />

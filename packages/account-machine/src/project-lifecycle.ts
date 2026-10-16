@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
 import { readGitCheckpointHead } from './git-checkpoint.js';
-import { ArtifactsBranchDivergedError, type ArtifactsGitRemote } from './artifacts-git-remote.js';
+import { ArtifactsRefDivergedError, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 
 async function runGit(args: string[], cwd: string | undefined, environment: Record<string, string>): Promise<string> {
   const child = Bun.spawn(['git', ...args], {
@@ -51,7 +51,7 @@ export interface SeedProjectRepositoryInput {
   scratchRoot: string;
   /** SSH environment for the account's shared git identity. */
   gitEnvironment: Record<string, string>;
-  projectRepository: Pick<ArtifactsGitRemote, 'publishBranch'>;
+  projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>;
 }
 
 /**
@@ -73,9 +73,9 @@ export async function seedProjectRepository(input: SeedProjectRepositoryInput): 
     const { headCommit } = await readGitCheckpointHead(repositoryPath);
     if (headCommit === null) return { baseBranch, commit: null };
     try {
-      await input.projectRepository.publishBranch({ binding: { projectId: input.projectId, repository: `project-${input.projectId}` }, repositoryPath, branch: baseBranch, commit: headCommit });
+      await input.projectRepository.publishRef({ binding: { projectId: input.projectId, repository: `project-${input.projectId}` }, repositoryPath, ref: `refs/heads/${baseBranch}`, commit: headCommit });
     } catch (error) {
-      if (!(error instanceof ArtifactsBranchDivergedError)) throw error;
+      if (!(error instanceof ArtifactsRefDivergedError)) throw error;
       console.warn('[gitspace-project] project repository already holds other base history; keeping it', input.projectId, error.message);
     }
     return { baseBranch, commit: headCommit };

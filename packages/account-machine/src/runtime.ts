@@ -130,18 +130,17 @@ export async function startMachineRuntime() {
   const gitRemote = new ArtifactsGitRemote({
     credentials: (binding, scope) => cloudRuntime.call('runtime.repository.credentials', { ...binding, scope }, repositoryCredentialsSchema),
   });
+  /** The checkout's own `origin` with this machine's git identity: what LFS and ref imports fetch through. */
+  const originEnvironment = async (repositoryPath: string) => {
+    const origin = Bun.spawn(['git', 'remote', 'get-url', 'origin'], { cwd: repositoryPath, stdout: 'pipe', stderr: 'pipe' });
+    const [code, url, error] = await Promise.all([origin.exited, new Response(origin.stdout).text(), new Response(origin.stderr).text()]);
+    if (code !== 0) throw new Error(`The checkout's origin is unavailable: ${error}`);
+    return gitIdentity.gitEnvironment(url.trim());
+  };
   const lfsOrigin = async (projectId: string) => {
     const project = await authority.getProject(projectId);
     if (!project) throw new Error('LFS project is unavailable');
-    return {
-      canonicalOrigin: project.repositoryReference,
-      originEnvironment: async (repositoryPath: string) => {
-        const origin = Bun.spawn(['git', 'remote', 'get-url', 'origin'], { cwd: repositoryPath, stdout: 'pipe', stderr: 'pipe' });
-        const [code, url, error] = await Promise.all([origin.exited, new Response(origin.stdout).text(), new Response(origin.stderr).text()]);
-        if (code !== 0) throw new Error(`LFS origin is unavailable: ${error}`);
-        return gitIdentity.gitEnvironment(url.trim());
-      },
-    };
+    return { canonicalOrigin: project.repositoryReference, originEnvironment };
   };
   const lfs: MachineGitLfsAccess = {
     read: async projectId => {
@@ -333,7 +332,7 @@ export async function startMachineRuntime() {
       await environments.prepareAttachment(local, signal, progress);
     },
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
-    operations: machineOperationalTools({ environments, services: serviceManager, authority, mcp }),
+    operations: machineOperationalTools({ environments, services: serviceManager, authority, mcp, projectRepository: gitRemote, originEnvironment }),
     commitSnapshot: async (local, checkpoint, previousWorktreeCommit) => {
       const accepted = await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
         projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,

@@ -128,6 +128,14 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
       const timedOut = await execute('const waiting = Promise.withResolvers(); setTimeout(waiting.resolve, 10000); await waiting.promise;', 50);
       expect(timedOut.error, timedOut.text).toBe(true);
       expect(timedOut.text).toContain('time limit');
+      // Conversations migrated from the removed eval tool call a `space` object; the error names the tools that replaced it.
+      const legacy = await execute('return await space.create({ name: "x" });');
+      expect(legacy.error).toBe(true);
+      expect(legacy.text).toContain('tools.space_workspace');
+      // Only the project agent starts other workspaces; this fixture runs in a workspace.
+      const started = await invoke('space_workspace', { method: 'start', workspaceId: 'sibling', instruction: 'Begin.' });
+      expect(started.status).toBe('failed');
+      expect(text(started)).toContain('Only the project agent');
       const child = await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT);
       const denied = await services.tools.invoke({ tool: 'codemode', args: { code: 'return 1' }, conversationId: String(child), taskId: 'subagent', requestId: 'subagent', attemptId: 'subagent', replay: 'unsafe' });
       expect(denied.status).toBe('failed');

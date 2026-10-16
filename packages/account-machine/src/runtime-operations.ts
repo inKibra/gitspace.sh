@@ -8,12 +8,34 @@ import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/servic
 import { createHash } from 'node:crypto';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { MachineMcpCoordinator } from './local-mcp.js';
-import { RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeImportRefArgumentsSchema } from '@gitspace/protocol-runtime';
+import type { ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { workspaceProcessVisible } from './workspace-process.js';
 
 
-export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator }): Record<string, ExecutorOperationHandler> {
+async function runGit(cwd: string, args: string[], environment: Record<string, string>, signal: AbortSignal): Promise<string> {
+  const child = Bun.spawn(['git', ...args], { cwd, env: { ...Bun.env, ...environment, GIT_TERMINAL_PROMPT: '0' }, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', signal });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  if (code !== 0) throw new Error(`git ${args[0]} failed: ${stderr.trim() || `exited with ${code}`}`);
+  return stdout.trim();
+}
+
+export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator; projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>; originEnvironment: (repositoryPath: string) => Promise<Record<string, string>> }): Record<string, ExecutorOperationHandler> {
   return {
+    // Fetches into a private ref and publishes from there: the base checkout's HEAD, index and branches never change.
+    import_ref: async (dispatch, local, signal) => {
+      if (String(dispatch.workspaceId) !== String(dispatch.projectId)) throw new Error('Refs are imported through the project base checkout');
+      const { ref } = RuntimeImportRefArgumentsSchema.parse(dispatch.args);
+      const owned = `refs/gitspace/import/${createHash('sha256').update(dispatch.attemptId).digest('hex').slice(0, 32)}`;
+      await runGit(local.rootPath, ['fetch', '--no-tags', '--refmap=', '--no-write-fetch-head', 'origin', `+${ref}:${owned}`], { ...await options.originEnvironment(local.rootPath), GIT_LFS_SKIP_SMUDGE: '1' }, signal);
+      try {
+        const commit = await runGit(local.rootPath, ['rev-parse', '--verify', `${owned}^{commit}`], {}, signal);
+        await options.projectRepository.publishRef({ binding: { projectId: dispatch.projectId, repository: `project-${dispatch.projectId}` }, repositoryPath: local.rootPath, ref, commit });
+        return [{ type: 'text', text: JSON.stringify({ ref, commit }) }];
+      } finally {
+        await runGit(local.rootPath, ['update-ref', '-d', owned], {}, AbortSignal.timeout(10_000)).catch(() => undefined);
+      }
+    },
     mcp_discover: async (dispatch, local, signal) => {
       const workspace = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId);
       if (!workspace) throw new Error('MCP workspace is no longer registered');
