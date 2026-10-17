@@ -31,7 +31,7 @@ Each GitSpace account (tenant) creates its own GitHub App from GitSpace in one c
 - **Installation records** (tenant storage): installation id, account (user or org), repository selection, permissions granted, who installed it, when.
 - **Upgrading:** GitSpace lists features with the permissions each needs and whether the App has them. Changing an existing App's permissions happens on the App's GitHub settings page (GitSpace links there); each installation then accepts the new permissions on GitHub. **[unverified]** whether an App's permissions can be updated through the API rather than the settings page.
 
-Default permissions: `metadata: read`, `contents: read`, `pull_requests: write`, `issues: write`, `checks: write`, `statuses: write`. `contents: write` (pushing branches) is an upgrade the tenant turns on. Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `issues`, `push`, `check_suite`, `installation`, `installation_repositories`.
+Default permissions: `metadata: read`, `contents: write`, `pull_requests: write`, `issues: write`, `checks: write`, `statuses: write`. `contents: write` is a default (decided 2026-10-17) because the account's SSH key already pushes the same branches; it lets the account push, merge and tag without a machine. Each call requests an installation token narrowed to its one repository and the permissions it needs, and GitSpace pushes only a workspace's own branch and merges the user approved; GitHub branch rules still apply. Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `issues`, `push`, `check_suite`, `installation`, `installation_repositories`.
 
 ## 4. Routing inside a tenant
 
