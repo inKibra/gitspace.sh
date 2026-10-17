@@ -22,6 +22,7 @@ Each GitSpace account (tenant) creates its own GitHub App from GitSpace in one c
 ## 3. Creating and installing the App
 
 - **Create:** Settings → GitHub → **Create GitHub App** runs GitHub's App manifest flow. GitSpace fills in the name (`GitSpace <handle>`), the webhook URL (`https://<tenant-host>/github/webhook`), the callback and setup URLs, the permissions and events for the features the tenant turned on, and **public** installability. GitHub returns the App id, private key, webhook secret and client credentials; they go into the tenant's vault.
+- **Owner:** the App belongs to the tenant owner's personal GitHub account by default (decided 2026-10-17); the create screen also offers an organization they administer. One personal App installs into every organization the tenant works in, each organization's admin approving the install once; GitHub can transfer the App to an organization later.
 - **Public, but only GitSpace-started installs count.** A public App can be installed on any account, which is what lets one App serve your personal repositories and every organization (Deedible, Golconda, Inkibra) across all your projects. To keep strangers from pointing your App at their repositories:
   - every install starts from GitSpace with a signed, expiring `state`;
   - the setup callback records the installation only when the `state` verifies;
