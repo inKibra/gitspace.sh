@@ -145,6 +145,10 @@ jobs:
           echo "::add-mask::$password"
           printf '%s' "$password" | docker login registry.cloudflare.com --username "$username" --password-stdin
       - name: Build the image, worker and frontend and publish the default
+        # The releases bucket has its own key (R2 object read/write on that bucket only); the distribution key cannot reach it.
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.RELEASES_R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_R2_SECRET_ACCESS_KEY }}
         run: |
           bun packages/deployment/src/default-release-cli.ts build \
             --commit "$COMMIT" \
