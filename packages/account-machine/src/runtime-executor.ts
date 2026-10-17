@@ -523,6 +523,12 @@ export async function createMachineExecutor(options: {
         submoduleEnvironment: (path: string) => options.originEnvironment({ ...grant, rootPath: path }),
       } : null,
       prerequisites: async (prepared, prepareSignal, acquired) => {
+        // A checkout acquired here holds only its source: snapshots journaled for an earlier directory at this path
+        // (an acquisition that failed part way) describe files and refs that are gone, and would keep it from restoring.
+        if (acquired) {
+          abandonCapture(key);
+          snapshots.query('DELETE FROM snapshots WHERE attachment=?').run(key);
+        }
         const durable = snapshotRow(key);
         if (!durable?.committed && !durable?.pending) {
           let base = await readGitCacheBase(prepared.rootPath);
