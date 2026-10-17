@@ -66,7 +66,7 @@ export function machineOperationalTools(options: { environments: Pick<WorkspaceE
         z.object({ op: z.enum(['logs', 'cancel']), attemptId: z.string().min(1), lines: z.number().int().positive().max(10_000).optional(), head: z.boolean().optional(), cursor: z.number().int().nonnegative().optional() }).strict(),
       ]).parse(dispatch.args);
       if ('command' in args) {
-        const result = await runSupervisorCommand({ application: '/bin/bash', args: ['-c', args.command], cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, env: await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()), attemptId: dispatch.attemptId, sequence: 0, deadlineAt: dispatch.deadlineAt, signal });
+        const result = await runSupervisorCommand({ application: '/bin/bash', args: ['-c', args.command], cwd: args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, env: await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()), attemptId: dispatch.attemptId, sequence: 0, deadlineAt: dispatch.deadlineAt, signal, ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }) });
         return [{ type: 'text', text: JSON.stringify(result) }];
       }
       const client = await daemonClientForProject(local.rootPath);

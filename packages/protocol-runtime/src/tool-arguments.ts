@@ -12,7 +12,8 @@ const message = z.string().trim().min(1).max(500).optional();
 export const RuntimeWriteArgumentsSchema = z.object({ path, content: z.string(), message });
 export const RuntimeEditArgumentsSchema = z.object({ path, edits: z.array(z.object({ oldText: z.string().min(1), newText: z.string() })).min(1), message });
 export const ApplyPatchArgumentsSchema = z.object({ patch: z.string().min(1), message });
-export const RuntimeBashCommandArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ command: path, cwd: path.optional(), background: z.boolean().optional() }).strict();
+/** `timeoutMs` stops the command's process tree after that long and returns its output with exit code 124. */
+export const RuntimeBashCommandArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ command: path, cwd: path.optional(), background: z.boolean().optional(), timeoutMs: z.number().int().positive().max(30 * 60_000).optional() }).strict();
 export const RuntimeBashControlArgumentsSchema = z.discriminatedUnion('op', [
   z.strictObject({ op: z.literal('list') }),
   z.strictObject({ op: z.enum(['status', 'cancel']), job: RuntimeJobHandleSchema }),

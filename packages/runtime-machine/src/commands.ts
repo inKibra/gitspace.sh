@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { daemonClientForProject } from '@gitspace/supervisor';
 
 /** `project` names the supervisor that owns the process (the checkout root); it defaults to `cwd`. */
-export type ExecutorCommand = { application: string; args: string[]; cwd: string; project?: string; attemptId: string; sequence: number; deadlineAt: string; signal: AbortSignal; env?: Record<string, string> };
+/** `timeoutMs` is the command's own limit: reaching it stops the process tree and returns the output with exit code 124,
+ * where the dispatch deadline or cancellation fails the command. */
+export type ExecutorCommand = { application: string; args: string[]; cwd: string; project?: string; attemptId: string; sequence: number; deadlineAt: string; signal: AbortSignal; env?: Record<string, string>; timeoutMs?: number };
 export type ExecutorCommandResult = { exitCode: number; output: string };
 export type RunExecutorCommand = (command: ExecutorCommand) => Promise<ExecutorCommandResult>;
 
@@ -21,7 +23,9 @@ export function inheritedCommandEnvironment(): Record<string, string> {
 export const runSupervisorCommand: RunExecutorCommand = async command => {
   const client = await daemonClientForProject(command.project ?? command.cwd);
   const name = `exec-${createHash('sha256').update(`${command.attemptId}:${command.sequence}`).digest('hex').slice(0, 40)}`;
-  const remaining = () => Math.max(1, Math.min(2_147_483_647, Date.parse(command.deadlineAt) - Date.now()));
+  const deadline = Date.parse(command.deadlineAt);
+  const limit = command.timeoutMs === undefined ? deadline : Math.min(deadline, Date.now() + command.timeoutMs);
+  const remaining = () => Math.max(1, Math.min(2_147_483_647, limit - Date.now()));
   if (command.signal.aborted || Date.parse(command.deadlineAt) <= Date.now()) throw new Error('Command canceled or deadline expired before launch');
   await client.request({ op: 'start', owner: command.attemptId, spec: { name, application: command.application, args: command.args, cwd: command.cwd, inheritEnv: false, env: { ...inheritedCommandEnvironment(), ...command.env }, pty: false, restart: 'no', persist: true, detached: false } });
   let abortStop: Promise<unknown> | undefined;
@@ -33,6 +37,11 @@ export const runSupervisorCommand: RunExecutorCommand = async command => {
     if (waited.op !== 'wait') throw new Error('Supervisor returned an invalid wait response');
     if (waited.timedOut || command.signal.aborted) {
       await (abortStop ?? client.request({ op: 'stop', name, timeoutMs: 5000 }));
+      if (waited.timedOut && !command.signal.aborted && limit < deadline) {
+        const logs = await client.request({ op: 'logs', name, lines: 10000, head: false });
+        if (logs.op !== 'logs') throw new Error('Supervisor returned an invalid logs response');
+        return { exitCode: 124, output: `${logs.text}${logs.text.endsWith('\n') || !logs.text ? '' : '\n'}[timed out after ${command.timeoutMs} ms; process tree stopped]\n` };
+      }
       throw new Error(waited.timedOut ? 'Command deadline exceeded; process tree stopped' : 'Command canceled; process tree stopped');
     }
     if (waited.daemon.exitCode === null) throw new Error(waited.daemon.failure ?? 'Process exited without an exit code');
