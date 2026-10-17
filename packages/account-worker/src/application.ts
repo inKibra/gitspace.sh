@@ -1663,7 +1663,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       try {
         const credential = await upstreamOAuth(provider).login({
           signal: running.abort.signal,
-          notify: event => { append(upstreamLoginEvent(event)); },
+          notify: event => { const shown = upstreamLoginEvent(event); if (shown) append(shown); },
           prompt: prompt => {
             const { promise, resolve, reject } = Promise.withResolvers<string>();
             const cancel = () => reject(new Error('Login prompt was cancelled'));

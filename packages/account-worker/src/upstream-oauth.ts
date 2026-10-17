@@ -72,17 +72,26 @@ export async function upstreamRequestAuth(provider: UpstreamOAuthProvider, crede
   return upstreamOAuth(provider).toAuth(upstreamCredential(credential));
 }
 
-/** Pi's interaction events in the shape the sign-in dialog already renders. */
-export function upstreamLoginEvent(event: AuthEvent): ProviderLoginEvent {
+const LOOPBACK_HOSTS: Record<string, true> = { '127.0.0.1': true, localhost: true, '[::1]': true };
+
+/** Pi's interaction events in the shape the sign-in dialog already renders, or null for one that does not apply here.
+ * Pi's flows are written for a local CLI, where the provider's redirect to a loopback address reaches a callback server
+ * on the same computer. Sign-in runs in the cloud, where that redirect only ever reaches the person's browser: pasting
+ * its address is the one way to finish, so Pi's attempt to listen (and its note when the port is busy) is dropped. */
+export function upstreamLoginEvent(event: AuthEvent): ProviderLoginEvent | null {
   switch (event.type) {
     case 'auth_url': {
       // Pi names itself on OpenAI's consent screen; the hint is display-only and outside PKCE and state.
       const url = new URL(event.url);
       if (url.searchParams.has('agent_name_hint')) url.searchParams.set('agent_name_hint', 'GitSpace');
-      return { type: 'auth', url: url.toString(), launchUrl: url.toString(), instructions: event.instructions ?? 'Complete sign-in in your browser' };
+      const redirect = URL.parse(url.searchParams.get('redirect_uri') ?? '');
+      const instructions = redirect && Object.hasOwn(LOOPBACK_HOSTS, redirect.hostname)
+        ? 'After you approve, your browser opens a 127.0.0.1 page that does not load. That is expected: copy that page\'s address and paste it below.'
+        : event.instructions ?? 'Complete sign-in in your browser';
+      return { type: 'auth', url: url.toString(), launchUrl: url.toString(), instructions };
     }
     case 'device_code': return { type: 'auth', url: event.verificationUri, launchUrl: event.verificationUri, instructions: `Enter code ${event.userCode}` };
-    case 'info': return { type: 'progress', message: event.message };
+    case 'info': return event.message.startsWith('Could not listen on http://127.0.0.1') ? null : { type: 'progress', message: event.message };
     case 'progress': return { type: 'progress', message: event.message };
   }
 }
@@ -90,7 +99,7 @@ export function upstreamLoginEvent(event: AuthEvent): ProviderLoginEvent {
 /** Browsers in HTTPS-First mode show a loopback callback as https://; providers registered the http:// address. */
 export function loopbackCallback(value: string): string {
   const url = URL.parse(value.trim());
-  if (!url || url.protocol !== 'https:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return value;
+  if (!url || url.protocol !== 'https:' || !Object.hasOwn(LOOPBACK_HOSTS, url.hostname)) return value;
   url.protocol = 'http:';
   return url.toString();
 }
