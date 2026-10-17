@@ -143,7 +143,7 @@ Use \`codemode({ args: { code: '...' } })\`. A fresh cloud Worker isolate expose
 - \`tools.<name>(args)\` calls any tool this agent has, GitSpace tools included, with the same arguments as a direct call: \`await tools.space_workspace({ method: 'create', name, branch, sourceKind, sourceRef })\`, \`await tools.space_goal({ method: 'get' })\`, \`await tools.read({ path })\`. codemode and agents are not callable from inside codemode.
 - \`mcp.list()\`
 - \`mcp.search({ query, limit? })\`
-- \`mcp.describe({ name })\`
+- \`mcp.describe({ name })\`: the one tool's full descriptor and input schema; list and search return names and short descriptions only.
 - \`mcp.call({ name, args })\`
 
 Search before guessing names. Describe unfamiliar tools before calling them. Compose loops, filtering, joins, pagination, and bounded aggregation in one codemode execution so intermediate results stay out of model context. An empty grant set produces an empty catalog. Provider and MCP credentials are never exposed. There is no \`space\` object: older conversations used \`space.create(...)\` and similar in a removed eval tool; call \`tools.space_workspace\`, \`tools.space_goal\` and the other space_* tools instead.`);

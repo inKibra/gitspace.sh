@@ -90,7 +90,10 @@ export function createCloudCodemode(options: Options) {
             const content = z.array(RuntimeContentSchema).parse(await invoke(tool, args));
             const text = content.find(item => item.type === 'text');
             if (!text || text.type !== 'text') throw new Error('MCP tool omitted its result');
-            return RuntimeJsonSchema.parse(JSON.parse(text.text));
+            let parsed: unknown;
+            // Tool results are cut at 50 KB; a cut result is unreadable JSON, not missing access.
+            try { parsed = JSON.parse(text.text); } catch { throw new Error(`MCP ${tool} returned more than the 50 KB tool result limit and arrived cut off; request less (one tool, fewer fields, a page)`); }
+            return RuntimeJsonSchema.parse(parsed);
           }));
         }
       }

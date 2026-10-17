@@ -133,7 +133,19 @@ export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string() });
 export const RuntimeRewindArgumentsSchema = z.object({ checkpoint: z.string(), report: z.string() });
 export const RuntimeDelegateExportArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ commit: z.string().regex(/^[a-f0-9]{40,64}$/u) });
 export const RuntimeMcpInvokeArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ connectionId: path, name: path, arguments: z.record(z.string(), RuntimeJsonSchema).optional() }).strict();
-export const RuntimeMcpDiscoverArgumentsSchema = z.union([z.object({}).strict(), RuntimeDispatchSelectionSchema.extend({ connectionId: path }).strict()]);
+export const RuntimeMcpDiscoverArgumentsSchema = z.union([z.object({}).strict(), RuntimeDispatchSelectionSchema.extend({ connectionId: path, name: path.optional() }).strict()]);
+const MCP_LISTED_DESCRIPTION_CHARACTERS = 300;
+/** What `mcp_discover` returns for one connection: its tools by name and short description, or, asked for one tool by
+ * name, that tool's full descriptor (input schema included). Toolkits such as Composio's Notion run far past the 50 KB
+ * tool result limit when every input schema is inlined, which cut the listing short and broke codemode's JSON. */
+export function discoveredMcpTools(tools: ReadonlyArray<{ name: string; description?: unknown }>, name: string | undefined): unknown {
+  if (name !== undefined) {
+    const tool = tools.find(candidate => candidate.name === name);
+    if (!tool) throw new Error(`MCP tool ${name} is not exposed by this connection`);
+    return tool;
+  }
+  return tools.map(tool => ({ name: tool.name, description: typeof tool.description === 'string' ? tool.description.slice(0, MCP_LISTED_DESCRIPTION_CHARACTERS) : null }));
+}
 export const RuntimeGenerateImageArgumentsSchema = z.object({ prompt: path, model: path.optional(), images: z.array(RuntimeContentSchema.options[1]).optional() }).strict();
 export const RuntimeSpacePhaseArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ phase: z.enum(['plan', 'code', 'review', 'ship']) });
 export const RuntimeSpaceArtifactsArgumentsSchema = z.discriminatedUnion('method', [

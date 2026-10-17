@@ -3,7 +3,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker-provider.js';
 import { z } from 'zod';
-import { RuntimeMcpDiscoverArgumentsSchema, RuntimeMcpInvokeArgumentsSchema, RuntimeJsonSchema } from '@gitspace/protocol-runtime';
+import { RuntimeMcpDiscoverArgumentsSchema, RuntimeMcpInvokeArgumentsSchema, RuntimeJsonSchema, discoveredMcpTools } from '@gitspace/protocol-runtime';
 import type { UserMcpConnectionsDO } from './local-mcp.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
 import type { CredentialVaultDO } from './application.js';
@@ -84,7 +84,7 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
         cursor = page.nextCursor;
       } while (cursor);
       await observe('ready', null);
-      if (invocation === null) return redacted(tools.map(tool => ({ ...tool, connectionId: connection.id, connectionLabel: connection.label })), secrets);
+      if (invocation === null) return redacted(discoveredMcpTools(tools.map(tool => ({ ...tool, connectionId: connection.id, connectionLabel: connection.label })), args.name), secrets);
       if (!tools.some(tool => tool.name === invocation.name)) throw new Error('MCP tool is not exposed by the granted connection');
       const latest = await admitted(connection.id);
       if (JSON.stringify(latest.connection.transport) !== JSON.stringify(connection.transport)) throw new Error('MCP configuration changed before invocation');
@@ -136,6 +136,7 @@ export async function invokeMcpNamespace(
   const matches = descriptors.filter(tool => tool.qualifiedName === args.name || tool.name === args.name);
   if (matches.length !== 1) throw new Error(matches.length ? 'MCP tool name is ambiguous; use connectionId.toolName' : 'MCP tool is not available in this workspace');
   const selected = matches[0]!;
-  if (method === 'describe') return selected;
+  // Listings carry names and short descriptions; one tool's full descriptor, input schema included, is discovered by name.
+  if (method === 'describe') return { ...z.record(z.string(), RuntimeJsonSchema).parse(await execute('mcp_discover', { connectionId: selected.connectionId, name: selected.name })), connectionId: selected.connectionId, qualifiedName: selected.qualifiedName };
   return execute('mcp_invoke', { connectionId: selected.connectionId, name: selected.name, arguments: args.args ?? {} });
 }

@@ -8,7 +8,7 @@ import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/servic
 import { createHash } from 'node:crypto';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { MachineMcpCoordinator } from './local-mcp.js';
-import { RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeImportRefArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeImportRefArgumentsSchema, RuntimeMcpDiscoverArgumentsSchema, discoveredMcpTools } from '@gitspace/protocol-runtime';
 import type { ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { workspaceProcessVisible } from './workspace-process.js';
 
@@ -40,7 +40,9 @@ export function machineOperationalTools(options: { environments: Pick<WorkspaceE
       const workspace = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId);
       if (!workspace) throw new Error('MCP workspace is no longer registered');
       const result = await options.mcp.execute({ projectId: dispatch.projectId, workspaceId: workspace.kind === 'base' ? null : workspace.id, workspacePath: local.rootPath, operation: 'discover', args: dispatch.args, signal });
-      return [{ type: 'text', text: JSON.stringify(result) }];
+      const requested = RuntimeMcpDiscoverArgumentsSchema.parse(dispatch.args);
+      const tools = z.array(z.object({ name: z.string() }).passthrough()).parse(result);
+      return [{ type: 'text', text: JSON.stringify(discoveredMcpTools(tools, 'name' in requested ? requested.name : undefined)) }];
     },
     mcp_invoke: async (dispatch, local, signal) => {
       const workspace = (await options.authority.listProjectWorkspaces(dispatch.projectId)).find(workspace => workspace.id === dispatch.workspaceId);
