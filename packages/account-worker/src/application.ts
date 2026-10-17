@@ -86,6 +86,8 @@ import {
 } from '@gitspace/protocol/deployment';
 import { refreshCredential, ProviderRefreshError, type StoredOAuthCredential } from './providers.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
+import { githubRequest, importGitHubAppPrivateKey, signGitHubAppJwt, verifyGitHubSignature } from './github-api.js';
+import { githubRoute } from './github-app.js';
 import { ProjectSecretsDO } from './project-secrets.js';
 import {
   InspectorConflictError,
@@ -110,6 +112,7 @@ export * from './local-mcp.js';
 export * from './composio-plugins.js';
 export * from './hosted-route-registry.js';
 export * from './account-state.js';
+export * from './github-app.js';
 export { TenantReleasesDO } from './tenant-releases.js';
 import type { TenantReleasesDO } from './tenant-releases.js';
 import { SpaceAuthorityDO } from './space-authority.js';
@@ -319,6 +322,23 @@ interface ProviderSecretRow extends Record<string, SqlStorageValue> {
   revision: number;
   updated_at: string;
 }
+interface GitHubAppSecretRow extends Record<string, SqlStorageValue> {
+  app_id: number;
+  sealed_private_key: string;
+  sealed_webhook_secret: string;
+  sealed_client_secret: string;
+  revision: number;
+}
+interface GitHubAppSecrets {
+  appId: number;
+  privateKey: string;
+  webhookSecret: string;
+  clientSecret: string;
+}
+/** Sealing context: binds each secret to its App, field and revision, so no sealed value can be replayed into another. */
+function githubSecretContext(appId: number, field: 'private-key' | 'webhook-secret' | 'client-secret', revision: number): string {
+  return `github-app:${appId}:${field}\n${revision}`;
+}
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
@@ -458,6 +478,15 @@ export class CredentialVaultDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS provider_secrets (
           provider TEXT PRIMARY KEY,
           sealed_json TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS github_app_secrets (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          app_id INTEGER NOT NULL,
+          sealed_private_key TEXT NOT NULL,
+          sealed_webhook_secret TEXT NOT NULL,
+          sealed_client_secret TEXT NOT NULL,
           revision INTEGER NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -1250,6 +1279,75 @@ export class CredentialVaultDO extends DurableObject<Env> {
 
   deleteProviderSecret(provider: 'composio'): { deleted: boolean } {
     return { deleted: this.ctx.storage.sql.exec('DELETE FROM provider_secrets WHERE provider = ?', provider).rowsWritten === 1 };
+  }
+
+  /** The App's secrets from its manifest conversion, sealed; the private key never leaves the vault. */
+  async putGitHubApp(input: GitHubAppSecrets): Promise<void> {
+    await importGitHubAppPrivateKey(input.privateKey);
+    if (!input.webhookSecret || !input.clientSecret) throw new Error('GitHub sent incomplete App credentials');
+    await this.storeGitHubApp(input, this.githubAppRow()?.revision ?? 0);
+  }
+
+  /** A ten-minute App JWT signed with the stored key; callers exchange it with GitHub, never the key itself. */
+  async githubAppJwt(): Promise<string> {
+    const secrets = await this.openGitHubApp();
+    return signGitHubAppJwt(await importGitHubAppPrivateKey(secrets.privateKey), secrets.appId);
+  }
+
+  /** False without an App, so a tenant that never created one accepts no deliveries. */
+  async verifyGitHubWebhook(body: Uint8Array<ArrayBuffer>, signature: string): Promise<boolean> {
+    if (!this.githubAppRow()) return false;
+    return verifyGitHubSignature((await this.openGitHubApp()).webhookSecret, body, signature);
+  }
+
+  /** Switches to a key generated on GitHub only once GitHub accepts a JWT it signed and names this same App. */
+  async rotateGitHubAppKey(privateKey: string): Promise<void> {
+    const revision = this.githubAppRow()?.revision ?? 0;
+    const current = await this.openGitHubApp();
+    const token = await signGitHubAppJwt(await importGitHubAppPrivateKey(privateKey), current.appId);
+    const app = await githubRequest('/app', { token, schema: z.object({ id: z.number() }) }).catch((error: unknown) => {
+      throw new Error(`GitHub did not accept this private key, so the current key stays. ${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (app.id !== current.appId) throw new Error('This private key belongs to a different GitHub App, so the current key stays');
+    await this.storeGitHubApp({ ...current, privateKey }, revision);
+  }
+
+  private githubAppRow(): GitHubAppSecretRow | undefined {
+    return this.ctx.storage.sql.exec<GitHubAppSecretRow>(
+      'SELECT app_id, sealed_private_key, sealed_webhook_secret, sealed_client_secret, revision FROM github_app_secrets WHERE id = 1',
+    ).toArray()[0];
+  }
+
+  private async openGitHubApp(): Promise<GitHubAppSecrets> {
+    const config = this.config();
+    const row = this.githubAppRow();
+    if (!config || !row) throw new Error('This account has no GitHub App');
+    const vaultKey = credentialProtocolBase64.decode(config.vault_key);
+    const [privateKey, webhookSecret, clientSecret] = await Promise.all([
+      openVaultText(row.sealed_private_key, vaultKey, githubSecretContext(row.app_id, 'private-key', row.revision)),
+      openVaultText(row.sealed_webhook_secret, vaultKey, githubSecretContext(row.app_id, 'webhook-secret', row.revision)),
+      openVaultText(row.sealed_client_secret, vaultKey, githubSecretContext(row.app_id, 'client-secret', row.revision)),
+    ]);
+    return { appId: row.app_id, privateKey, webhookSecret, clientSecret };
+  }
+
+  /** Seals all three under the next revision; the write happens only if no other write landed while sealing. */
+  private async storeGitHubApp(secrets: GitHubAppSecrets, expectedRevision: number): Promise<void> {
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    const revision = expectedRevision + 1;
+    const vaultKey = credentialProtocolBase64.decode(config.vault_key);
+    const [privateKey, webhookSecret, clientSecret] = await Promise.all([
+      sealVaultText(secrets.privateKey.trim(), vaultKey, githubSecretContext(secrets.appId, 'private-key', revision)),
+      sealVaultText(secrets.webhookSecret, vaultKey, githubSecretContext(secrets.appId, 'webhook-secret', revision)),
+      sealVaultText(secrets.clientSecret, vaultKey, githubSecretContext(secrets.appId, 'client-secret', revision)),
+    ]);
+    if ((this.githubAppRow()?.revision ?? 0) !== expectedRevision) throw new Error('The GitHub App credentials changed meanwhile; try again');
+    this.ctx.storage.sql.exec(`
+      INSERT INTO github_app_secrets(id, app_id, sealed_private_key, sealed_webhook_secret, sealed_client_secret, revision, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET app_id=excluded.app_id, sealed_private_key=excluded.sealed_private_key, sealed_webhook_secret=excluded.sealed_webhook_secret,
+        sealed_client_secret=excluded.sealed_client_secret, revision=excluded.revision, updated_at=excluded.updated_at
+    `, secrets.appId, privateKey, webhookSecret, clientSecret, revision, new Date().toISOString());
   }
 
   async putCredential(input: { id: string; credential: StoredOAuthCredential }): Promise<CredentialVaultResult<{ id: string; revision: number }>> {
@@ -3184,6 +3282,11 @@ const worker = {
       } catch (error) {
         return Response.json({ status: 'error', error: { code: 'INVALID_DEVICE_ENROLLMENT', message: error instanceof Error ? error.message : 'Invalid enrollment' } }, { status: 400, headers: cors });
       }
+    }
+    // GitHub reaches these without a GitSpace credential: webhooks carry the App's signature, callbacks a one-time state.
+    if (url.pathname.startsWith('/github/')) {
+      const github = await githubRoute(request, env, url);
+      if (github) return github;
     }
     if (url.pathname === '/v1/mcp/composio/callback' && request.method === 'GET') {
       const principalId = url.searchParams.get('principal') ?? '';

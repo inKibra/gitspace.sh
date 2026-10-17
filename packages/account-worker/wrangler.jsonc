@@ -78,6 +78,10 @@
       {
         "name": "ACCOUNT_STATE",
         "class_name": "AccountStateDO"
+      },
+      {
+        "name": "GITHUB_APP",
+        "class_name": "GitHubAppDO"
       }
     ]
   },
@@ -120,6 +124,10 @@
     {
       "tag": "account-v3-drop-saved-transcripts",
       "deleted_classes": ["SavedTranscriptIndexDO"]
+    },
+    {
+      "tag": "account-v4-github-app",
+      "new_sqlite_classes": ["GitHubAppDO"]
     }
   ],
   "vars": {

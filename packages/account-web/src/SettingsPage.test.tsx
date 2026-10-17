@@ -9,6 +9,7 @@ describe('requestedSettingsSection', () => {
     expect(requestedSettingsSection('?section=runtime')).toEqual({ section: 'runtime' });
     expect(requestedSettingsSection('?section=runtime-providers')).not.toEqual({ section: 'runtime-providers' });
     expect(requestedSettingsSection('?section=source')).toEqual({ section: 'source' });
+    expect(requestedSettingsSection('?section=github&github=installed')).toEqual({ section: 'github' });
   });
 });
 

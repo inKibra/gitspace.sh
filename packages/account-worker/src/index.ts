@@ -49,7 +49,7 @@ import { AccountBrowserRelay, browserRelayArchive } from './browser-relay.js';
 import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
 export {
-  AccountStateDO, CredentialVaultDO, FleetCatalogDO, HostedRouteRegistryDO,
+  AccountStateDO, CredentialVaultDO, FleetCatalogDO, GitHubAppDO, HostedRouteRegistryDO,
   ProjectAuthorityDO, ProjectCronsDO, ProjectSecretsDO, SpaceAuthorityDO,
   SpaceContextDO, TenantReleasesDO, UserMcpConnectionsDO, UserProjectIndexDO,
   UserSettingsDO, UserSkillsDO, UserStorageDO,

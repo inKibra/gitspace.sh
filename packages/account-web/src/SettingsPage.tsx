@@ -6,6 +6,8 @@ import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import type { ApiClientDraft } from './device.js';
 import type { McpAccessView } from '@gitspace/protocol/mcp-access';
+import type { GitHubAppManifestForm, GitHubAppOwner, GitHubAppView, GitHubInstallationView, GitHubState } from '@gitspace/protocol/github';
+import { GitHubLoginSchema } from '@gitspace/protocol/github';
 import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { rpcClient } from './rpc-client.js';
@@ -45,7 +47,7 @@ import {
   TabsSubtlePanel,
   useShape,
 } from '@gitspace/ui';
-import { ArrowLeft, Check, CpuChip01, GitBranch01, Globe02, Key01, Monitor01, Rocket02, Server01, Settings02, Terminal, User01, Zap } from '@untitledui/icons';
+import { ArrowLeft, Check, CpuChip01, GitBranch01, GitPullRequest, Globe02, Key01, Monitor01, Rocket02, Server01, Settings02, Terminal, User01, Zap } from '@untitledui/icons';
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
@@ -56,7 +58,7 @@ import { navigateProductUrl } from './routes.js';
 import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBrowserDialog.js';
 
 // Onboarding embeds the same Default profile surface used by Inference.
-type Section = 'profile' | 'runtime' | 'runtime-providers' | 'git' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
+type Section = 'profile' | 'runtime' | 'runtime-providers' | 'git' | 'github' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
 const SETTINGS_TABS = ['Models', 'Providers', 'Advanced'] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 export interface SettingsMachineView { id: string; label: string; state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error'; kind: 'physical' | 'sandbox'; provider: 'physical' | 'cloudflare-sandbox'; notes: string; desiredState: 'online' | 'offline' | 'removed'; lifecycleRevision: number; operationId: string | null; error: string | null; agentsMayAttach?: boolean }
@@ -122,11 +124,19 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   onRevertDeployment: () => Promise<void>;
   /** Read the canonical branch head now; status otherwise shows the stored one. */
   onCheckCanonical: () => Promise<void>;
+  /** The tenant's GitHub App, its installations and latest deliveries; null until read. */
+  github: GitHubState | null;
+  /** The manifest form that creates the App on GitHub under `owner`. */
+  onStartGitHubApp: (owner: GitHubAppOwner) => Promise<GitHubAppManifestForm>;
+  /** Resolves to the App's GitHub install page, carrying a one-time state. */
+  onStartGitHubInstall: () => Promise<string>;
+  /** Store a private key generated on GitHub; rejects with GitHub's reason when it does not accept it. */
+  onRotateGitHubKey: (privateKey: string) => Promise<void>;
   saving: boolean;
   error: string | null;
 }
 
-const ICONS = { user: glyph(User01), bot: glyph(Zap), cpu: glyph(CpuChip01), git: glyph(GitBranch01), server: glyph(Server01), monitor: glyph(Monitor01), globe: glyph(Globe02), settings: glyph(Settings02), key: glyph(Key01), rocket: glyph(Rocket02) };
+const ICONS = { user: glyph(User01), bot: glyph(Zap), cpu: glyph(CpuChip01), git: glyph(GitBranch01), github: glyph(GitPullRequest), server: glyph(Server01), monitor: glyph(Monitor01), globe: glyph(Globe02), settings: glyph(Settings02), key: glyph(Key01), rocket: glyph(Rocket02) };
 
 // ── Composition helpers ──
 // A settings list is an inline, outlined, separated CardGroup; each row is a
@@ -910,6 +920,196 @@ export function SourceSettings({ deployment, onRevertDeployment, onCheckCanonica
       : <EmptyState icon={icon(Rocket02, 20)} title="No releases yet" description="Launch GitSpace from a workspace of the GitSpace project to build one." />}</Group>
   </>;
 }
+
+/** GitHub's manifest flow starts with a real browser POST; GitHub shows its create page, then redirects back to GitSpace. */
+export function submitGitHubManifest({ action, manifest }: GitHubAppManifestForm): void {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = action;
+  form.hidden = true;
+  const field = document.createElement('input');
+  field.type = 'hidden';
+  field.name = 'manifest';
+  field.value = manifest;
+  form.append(field);
+  // Browsers navigate only for forms connected to the document.
+  document.body.append(form);
+  form.submit();
+}
+const GITHUB_CALLBACK_OUTCOMES: Record<string, string> = {
+  created: 'GitHub App created',
+  installed: 'Installed',
+  requested: 'Install requested: an organization owner must approve it on GitHub',
+  updated: 'Installation updated',
+};
+/** The outcome GitHub's callbacks leave in the Settings URL. */
+function githubCallbackOutcome(search: string): { error: boolean; text: string } | null {
+  const params = new URLSearchParams(search);
+  const outcome = params.get('github');
+  if (params.get('section') !== 'github' || outcome === null) return null;
+  if (outcome === 'error') return { error: true, text: params.get('message') || 'GitHub did not finish the request.' };
+  return Object.hasOwn(GITHUB_CALLBACK_OUTCOMES, outcome) ? { error: false, text: GITHUB_CALLBACK_OUTCOMES[outcome] } : null;
+}
+function githubAppSettingsUrl(app: GitHubAppView): string {
+  return app.owner.kind === 'organization' ? `https://github.com/organizations/${app.owner.login}/settings/apps/${app.slug}` : `https://github.com/settings/apps/${app.slug}`;
+}
+function GitHubAppCreate({ onStartGitHubApp }: Pick<SettingsPageProps, 'onStartGitHubApp'>) {
+  const [kind, setKind] = useState<GitHubAppOwner['kind']>('user');
+  const [login, setLogin] = useState('');
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const organization = GitHubLoginSchema.safeParse(login.trim());
+  const owner: GitHubAppOwner | null = kind === 'user' ? { kind: 'user' } : organization.success ? { kind: 'organization', login: organization.data } : null;
+  const create = async () => {
+    if (!owner) return;
+    setPending(true);
+    setError(null);
+    try {
+      submitGitHubManifest(await onStartGitHubApp(owner));
+    } catch (cause) {
+      setError(rpcErrorMessage(cause, 'Create GitHub App'));
+    } finally {
+      setPending(false);
+    }
+  };
+  return <Group title="Create your GitHub App">
+    <SettingRows>
+      <SettingRow title="Owner" description="GitHub creates the App under this account; GitSpace keeps its private key and secrets in your account vault.">
+        <Select value={kind} onValueChange={(value) => setKind(value === 'organization' ? 'organization' : 'user')}><SelectTrigger aria-label="GitHub App owner" />{selectOptions([{ value: 'user', label: 'My GitHub account' }, { value: 'organization', label: 'An organization I administer' }])}</Select>
+      </SettingRow>
+      {kind === 'organization' ? <SettingRow title="Organization" description="Its GitHub login, as in github.com/login. Only its administrators can create Apps for it.">
+        <InputGroup className="w-64"><InputField index={0} label="Organization login" labelHidden value={login} placeholder="organization" autoComplete="off" onChange={setLogin} error={login.trim() && !organization.success ? 'Not a GitHub login' : undefined} /></InputGroup>
+      </SettingRow> : null}
+      <SettingRow title="GitHub App" description="GitHub opens its create page, where you confirm the App's name, then returns here.">
+        <Button variant="primary" size="compact" loading={pending} disabled={!owner} onClick={() => void create()}>Create GitHub App</Button>
+      </SettingRow>
+    </SettingRows>
+    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+  </Group>;
+}
+function GitHubKeyDialog({ open, onOpenChange, app, onRotate, onRotated }: { open: boolean; onOpenChange: (open: boolean) => void; app: GitHubAppView; onRotate: (privateKey: string) => Promise<void>; onRotated: () => void }) {
+  const shape = useShape();
+  const [privateKey, setPrivateKey] = useState('');
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    setPending(true);
+    setError(null);
+    try {
+      await onRotate(privateKey);
+      setPrivateKey('');
+      onRotated();
+      onOpenChange(false);
+    } catch (cause) {
+      setError(rpcErrorMessage(cause, 'Replace private key'));
+    } finally {
+      setPending(false);
+    }
+  };
+  return <Dialog open={open} onOpenChange={onOpenChange}>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Replace private key</DialogTitle>
+        <DialogDescription>Generate a new private key on <a href={githubAppSettingsUrl(app)} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">the App's GitHub settings page</a>, upload it here, then delete the old key there. GitSpace switches only after GitHub accepts the new key.</DialogDescription>
+      </DialogHeader>
+      <form id="github-key-form" className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+        <input type="file" accept=".pem" aria-label="Private key file" className="text-caption text-foreground" onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          if (file) void file.text().then(setPrivateKey, () => setError('The file could not be read.'));
+        }} />
+        {/* FLUID-GAP: multi-line PEM input (no textarea in the registry) */}
+        <textarea aria-label="Private key" rows={6} spellCheck={false} autoComplete="off" placeholder="-----BEGIN RSA PRIVATE KEY-----" value={privateKey} className={`${shape.input} w-full border border-border bg-surface-2 p-2 font-mono text-caption text-foreground`} onChange={(event) => setPrivateKey(event.currentTarget.value)} />
+        {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+      </form>
+      <DialogFooter>
+        <Button variant="secondary" type="button" onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button variant="primary" type="submit" form="github-key-form" loading={pending} disabled={!privateKey.trim()}>Replace key</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>;
+}
+function GitHubAppSummary({ app, onStartGitHubInstall, onRotateGitHubKey }: { app: GitHubAppView } & Pick<SettingsPageProps, 'onStartGitHubInstall' | 'onRotateGitHubKey'>) {
+  const [installing, setInstalling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [rotating, setRotating] = useState(false);
+  const [rotated, setRotated] = useState(false);
+  const install = async () => {
+    setInstalling(true);
+    setError(null);
+    try {
+      window.location.assign(await onStartGitHubInstall());
+    } catch (cause) {
+      setError(rpcErrorMessage(cause, 'Install GitHub App'));
+    } finally {
+      setInstalling(false);
+    }
+  };
+  return <Group title="GitHub App">
+    <SettingRows>
+      <Card size="compact">
+        <CardMedia icon={ICONS.github} />
+        <CardHeader>
+          <CardTitle><a href={app.htmlUrl} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">{app.name}</a></CardTitle>
+          <CardDescription>Owned by {app.owner.kind === 'organization' ? 'organization' : 'account'} <span className="font-mono">{app.owner.login}</span> · created {new Date(app.createdAt).toLocaleString()}</CardDescription>
+        </CardHeader>
+        <CardFooter><Button variant="primary" size="compact" loading={installing} onClick={() => void install()}>Install on GitHub</Button></CardFooter>
+      </Card>
+      <SettingRow title="Private key" description={`Updated ${new Date(app.keyUpdatedAt).toLocaleString()}. GitSpace signs as the App with it.`}>
+        <Button variant="secondary" size="compact" onClick={() => { setRotated(false); setRotating(true); }}>Replace private key</Button>
+      </SettingRow>
+    </SettingRows>
+    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+    {rotated ? <p role="status" className="text-caption text-foreground">Private key replaced. Delete the old key on <a href={githubAppSettingsUrl(app)} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">GitHub</a>.</p> : null}
+    <GitHubKeyDialog open={rotating} onOpenChange={setRotating} app={app} onRotate={onRotateGitHubKey} onRotated={() => setRotated(true)} />
+  </Group>;
+}
+function GitHubInstallationRow({ installation, index }: { installation: GitHubInstallationView; index?: number }) {
+  const permissions = Object.entries(installation.permissions).sort(([left], [right]) => left.localeCompare(right)).map(([name, level]) => `${name}:${level}`).join(' ');
+  return <Card size="compact" index={index}>
+    <CardMedia icon={ICONS.github} />
+    <CardHeader>
+      <CardTitle>{installation.account.login}<Badge color="gray">{installation.account.kind === 'organization' ? 'Organization' : 'User'}</Badge></CardTitle>
+      <CardDescription>{installation.repositorySelection === 'all' ? 'All repositories' : 'Selected repositories'}{installation.repositories.length ? <>: <span className="font-mono">{installation.repositories.join(', ')}</span></> : null}</CardDescription>
+      <p className="text-caption text-muted-foreground">{installation.projects.length ? `Linked projects: ${installation.projects.map((project) => project.name).join(', ')}` : 'No GitSpace project uses these repositories yet.'}</p>
+      {permissions ? <p className="font-mono text-caption text-muted-foreground">{permissions}</p> : null}
+    </CardHeader>
+    <CardFooter><Badge color="green">Installed {new Date(installation.installedAt).toLocaleDateString()}</Badge></CardFooter>
+  </Card>;
+}
+export function GitHubSettings({ github, onStartGitHubApp, onStartGitHubInstall, onRotateGitHubKey }: Pick<SettingsPageProps, 'github' | 'onStartGitHubApp' | 'onStartGitHubInstall' | 'onRotateGitHubKey'>) {
+  const shape = useShape();
+  const [callback] = useState(() => typeof window === 'undefined' ? null : githubCallbackOutcome(window.location.search));
+  // The outcome shows once: a reload or a later visit must not repeat it.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('github')) return;
+    url.searchParams.delete('github');
+    url.searchParams.delete('message');
+    navigateProductUrl(url, 'replace');
+  }, []);
+  const banner = callback ? <p role={callback.error ? 'alert' : 'status'} className={`${shape.container} bg-surface-2 px-3 py-2 text-body shadow-surface-1 ${callback.error ? 'text-destructive' : 'text-foreground'}`}>{callback.text}</p> : null;
+  if (!github) return <>{banner}<Group title="GitHub App"><EmptyState icon={icon(GitPullRequest, 20)} title="Loading GitHub…" description="Asking GitSpace Cloud for your GitHub App." /></Group></>;
+  if (!github.app) return <>{banner}<GitHubAppCreate onStartGitHubApp={onStartGitHubApp} /></>;
+  const installed = github.installations.length > 0 || github.pendingRequests.length > 0;
+  return <>
+    {banner}
+    <GitHubAppSummary app={github.app} onStartGitHubInstall={onStartGitHubInstall} onRotateGitHubKey={onRotateGitHubKey} />
+    <Group title="Installations">{installed
+      ? <SettingRows>
+        {github.installations.map((installation) => <GitHubInstallationRow key={installation.id} installation={installation} />)}
+        {github.pendingRequests.map((request, index) => <SettingRow key={`${request.requestedAt}:${index}`} title="Install requested" description={`Waiting for an organization owner to approve the install on GitHub. Requested ${new Date(request.requestedAt).toLocaleString()}.`}><Badge color="amber">Pending</Badge></SettingRow>)}
+      </SettingRows>
+      : <EmptyState icon={icon(GitPullRequest, 20)} title="Not installed yet" description="Install the App on GitHub and choose its repositories. GitSpace projects whose remote is one of them link automatically." />}</Group>
+    <Group title="Recent webhook deliveries">{github.deliveries.length
+      ? <SettingRows>{github.deliveries.map((delivery) => <Card size="compact" key={delivery.id}>
+        <CardHeader>
+          <CardTitle><span className="font-mono">{delivery.event}{delivery.action ? `.${delivery.action}` : ''}</span></CardTitle>
+          <CardDescription><span className="tabular-nums">{new Date(delivery.receivedAt).toLocaleString()}</span> · {delivery.repository ?? 'no repository'} · {delivery.outcome}</CardDescription>
+        </CardHeader>
+      </Card>)}</SettingRows>
+      : <EmptyState title="No deliveries yet" description="GitHub sends webhook events here once the App is installed." />}</Group>
+  </>;
+}
 function DefaultsSettings({ settings, machines, onChange }: Pick<SettingsPageProps, 'settings' | 'machines' | 'onChange'>) {
   const update = (value: Partial<UserSettings['defaults']>) => onChange(replace(settings, 'defaults', { ...settings.defaults, ...value }));
   return <>
@@ -923,6 +1123,7 @@ const sectionInfo: Array<{ id: Section; label: string; icon: (typeof ICONS)[keyo
   { id: 'runtime', label: 'Runtime', icon: ICONS.bot, kicker: 'Runtime', title: 'Shared Advanced settings', description: 'Shared runtime configuration for every inference profile. Manage Models, Agents, and Providers under Navigate → Inference.' },
   { id: 'runtime-providers', label: 'Inference', icon: ICONS.cpu, kicker: 'Default inference', title: 'Set up Default inference', description: 'Connect providers and configure the Default profile. The same profile is available under Navigate → Inference after setup.' },
   { id: 'git', label: 'Git', icon: ICONS.git, kicker: 'Git', title: 'Shared Git identity', description: 'One GitSpace SSH identity and commit attribution shared by your enrolled machines.' },
+  { id: 'github', label: 'GitHub', icon: ICONS.github, kicker: 'GitHub', title: 'Your GitHub App', description: 'An App of your own that GitHub installs on your repositories; it links your projects and sends their webhooks here.' },
   { id: 'machines', label: 'Machines', icon: ICONS.server, kicker: 'Machines', title: 'Machines', description: 'Live fleet state and placement notes from GitSpace Cloud.' },
   { id: 'connections', label: 'Connections', icon: ICONS.key, kicker: 'Connections', title: 'Connections', description: 'Plugin providers, browser control, and enrolled devices for this account and machine.' },
   { id: 'hostnames', label: 'Domains', icon: ICONS.globe, kicker: 'Domains', title: 'Hostname', description: 'Your globally reserved GitSpace namespace.' },
@@ -944,6 +1145,7 @@ function SettingsContent({ section, ...props }: { section: Section } & SettingsP
   if (section === 'runtime') return <RuntimeSettingsEditor {...props} sections={['Advanced']} tab="Advanced" />;
   if (section === 'runtime-providers') return <>{props.inferenceSetup}</>;
   if (section === 'git') return <GitSettings {...props} />;
+  if (section === 'github') return <GitHubSettings {...props} />;
   if (section === 'machines') return <MachineSettings {...props} />;
   if (section === 'connections') return <ConnectionsSettings {...props} />;
   if (section === 'hostnames') return <HostnameSettings settings={props.settings} />;

@@ -43,8 +43,9 @@ import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadInspectorContent, loadInspectorResource } from './resource-content.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectChanges } from './SynchronizationProvider.js';
-import { liveTicks } from './live-notices.js';
+import { liveTicks, useLiveChanges } from './live-notices.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
+import type { GitHubAppManifestForm, GitHubAppOwner } from '@gitspace/protocol/github';
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
 import { useRuntimeInspectorState } from './useRuntimeInspectorState.js';
 import { RuntimeServices } from './RuntimeServices.js';
@@ -602,6 +603,13 @@ function GitSpaceProduct() {
   const composioSetupValue = useRetainedQueryValue(composioSetupQuery, 'composio-setup');
   const putComposioSetup = useResultMutation(rpcClient.mcp.composio.setup.put);
   const deleteComposioSetup = useResultMutation(rpcClient.mcp.composio.setup.delete);
+  // Settings → GitHub; the worker announces every App, installation and delivery change on this key.
+  const githubQuery = useResultQuery(rpcClient.github.state, {}, { enabled: route === 'settings' });
+  const githubValue = useRetainedQueryValue(githubQuery, 'github');
+  useEventRefresh(useLiveChanges(accountLiveKey('github')), () => githubQuery.refetch(), route === 'settings');
+  const startGitHubApp = useResultMutation(rpcClient.github.app.start);
+  const startGitHubInstall = useResultMutation(rpcClient.github.install.start);
+  const rotateGitHubKey = useResultMutation(rpcClient.github.app.rotateKey);
   const [browserRelayValue, setBrowserRelayValue] = useState<RuntimeAccountBrowserRelayStatus | null>(null);
   const [browserRelayError, setBrowserRelayError] = useState<string | null>(null);
   const refreshBrowserRelay = async () => {
@@ -800,6 +808,21 @@ function GitSpaceProduct() {
     }
     await settingsDeploymentQuery.refetch();
   };
+  const createGitHubApp = async (owner: GitHubAppOwner): Promise<GitHubAppManifestForm> => {
+    const result = await startGitHubApp.mutateAsync({ owner });
+    if (result.status === 'error') throw result.error;
+    return result.value;
+  };
+  const installGitHubApp = async (): Promise<string> => {
+    const result = await startGitHubInstall.mutateAsync({});
+    if (result.status === 'error') throw result.error;
+    return result.value.url;
+  };
+  const replaceGitHubKey = async (privateKey: string): Promise<void> => {
+    const result = await rotateGitHubKey.mutateAsync({ privateKey });
+    if (result.status === 'error') throw result.error;
+    await githubQuery.refetch();
+  };
   const completeOnboarding = async (next: UserSettings): Promise<void> => {
     setSettingsError(null);
     try {
@@ -956,7 +979,7 @@ function GitSpaceProduct() {
   }
   const reads = [
     ['Account settings', settingsQuery], ['Runtime settings', runtimeQuery], ['Git identity', gitIdentityQuery], ['Machines', machinesQuery],
-    ['Devices', devicesQuery], ['Source', settingsDeploymentQuery], ['Composio setup', composioSetupQuery],
+    ['Devices', devicesQuery], ['Source', settingsDeploymentQuery], ['Composio setup', composioSetupQuery], ['GitHub', githubQuery],
     ['Projects', productProjectsQuery], ['Models', modelsQuery],
     ['Cloud images', cloudImagesQuery], ['Cloud image default', imageDefaultQuery],
   ] as const;
@@ -995,6 +1018,10 @@ function GitSpaceProduct() {
     deployment={settingsDeploymentValue ?? null}
     onRevertDeployment={revertToChannel}
     onCheckCanonical={checkCanonical}
+    github={githubValue ?? null}
+    onStartGitHubApp={createGitHubApp}
+    onStartGitHubInstall={installGitHubApp}
+    onRotateGitHubKey={replaceGitHubKey}
     devices={devicesValue ?? null}
     onRevokeDevice={revokeDeviceAndRefresh}
     onSignOut={signOutThisBrowser}

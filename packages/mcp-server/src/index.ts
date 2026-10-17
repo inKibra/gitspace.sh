@@ -32,10 +32,11 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
   transcripts: { path: 'inspector.transcriptPage', description: 'Read a bounded page of cloud conversation rows using an Inspector context. Percent-encode the input for gitspace_inspector_transcript_page and preserve the returned generation when paging. Use transcript-content for a shortened row.' },
   'transcript-content': { path: 'inspector.transcriptContent', description: 'Retrieve full cloud conversation row content using an Inspector context. Percent-encode the input for gitspace_inspector_transcript_content with the same generation and rowId, starting at offset 0 and following nextOffset until null.' },
 };
-// Human authorization and protected terminal bytes are browser-only.
+// Human authorization, protected terminal bytes and GitHub App credentials (manifest and install forms whose state the
+// browser callback consumes, private key upload) are browser-only.
 const excluded = (path: string) => path.startsWith('providers.login.') || [
   'mcp.composio.authorize', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
-  'inspector.guide.setApproval',
+  'inspector.guide.setApproval', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
 ].includes(path);
 const agentSessionCommands = [
   'control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'messages', 'persist', 'handoff', 'resume', 'stop',

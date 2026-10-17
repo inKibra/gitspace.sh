@@ -76,6 +76,7 @@ import {
   ProjectMcpGrantViewCodec,
 } from './mcp-contract.js';
 import { MachineDiscardConfirmationCodec, MachineDiscardRequiredCodec } from './machine-discard.js';
+import { GitHubAppManifestFormCodec, GitHubAppOwnerCodec, GitHubStateCodec } from './github.js';
 
 export const rpcErrors = defineErrors('gitspace', {
   machineDiscardRequired: { data: MachineDiscardRequiredCodec, httpStatus: 409 },
@@ -931,6 +932,38 @@ export const getMcpConnectionStatusContract = gitspaceRpc
   .output(McpConnectionViewCodec)
   .errors({ McpNotFound: rpcErrors.mcpNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
+
+/** The tenant's GitHub App, its installations and its latest webhook deliveries. */
+export const githubStateContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({}))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** The manifest form that creates the tenant's App on GitHub; its one-time state is consumed by the creation callback. */
+export const githubAppStartContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ owner: GitHubAppOwnerCodec }))
+  .output(GitHubAppManifestFormCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** The App's GitHub install page, carrying a one-time state the setup callback must present. */
+export const githubInstallStartContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({}))
+  .output(wire.object({ url: wire.string }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Replace the App's private key with one generated on GitHub; it is stored only after GitHub accepts it. */
+export const githubAppRotateKeyContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ privateKey: wire.string }))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
 
 export const getComposioSetupContract = gitspaceRpc
   .procedure()
@@ -2059,6 +2092,11 @@ export const gitspaceContract = gitspaceRpc.contract({
     runPhase: runWorkspaceEnvironmentPhaseContract,
     cancelRun: cancelWorkspaceEnvironmentRunContract,
     runLog: getWorkspaceEnvironmentRunLogContract,
+  },
+  github: {
+    state: githubStateContract,
+    app: { start: githubAppStartContract, rotateKey: githubAppRotateKeyContract },
+    install: { start: githubInstallStartContract },
   },
   mcp: {
     connections: {

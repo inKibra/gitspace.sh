@@ -31,7 +31,16 @@ Each GitSpace account (tenant) creates its own GitHub App from GitSpace in one c
 - **Installation records** (tenant storage): installation id, account (user or org), repository selection, permissions granted, who installed it, when.
 - **Upgrading:** GitSpace lists features with the permissions each needs and whether the App has them. Changing an existing App's permissions happens on the App's GitHub settings page (GitSpace links there); each installation then accepts the new permissions on GitHub. **[unverified]** whether an App's permissions can be updated through the API rather than the settings page.
 
-Default permissions: `metadata: read`, `contents: write`, `pull_requests: write`, `issues: write`, `checks: write`, `statuses: write`. `contents: write` is a default (decided 2026-10-17) because the account's SSH key already pushes the same branches; it lets the account push, merge and tag without a machine. Each call requests an installation token narrowed to its one repository and the permissions it needs, and GitSpace pushes only a workspace's own branch and merges the user approved; GitHub branch rules still apply. Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `issues`, `push`, `check_suite`, `installation`, `installation_repositories`.
+Default permissions: `metadata: read`, `contents: write`, `workflows: write`, `pull_requests: write`, `issues: write`, `checks: write`, `statuses: write`. `contents: write` and `workflows: write` are defaults (decided 2026-10-17) because the account's SSH key already pushes the same branches, workflow files included; it lets the account push, merge and tag without a machine. Each call requests an installation token narrowed to its one repository and the permissions it needs, and GitSpace pushes only a workspace's own branch and merges the user approved; GitHub branch rules still apply. Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `issues`, `push`, `check_suite`, `installation`, `installation_repositories`.
+
+### Decisions for G0 (2026-10-17)
+
+- **First install:** the inKibra organization, with **selected repositories** (each organization chooses its repositories; GitHub can widen it later).
+- **One path per repository:** a repository an installation covers uses installation tokens for imports, fetches and pushes; the account SSH key remains only for repositories no installation reaches (other organizations, other hosts). Never one, then the other.
+- **Projects link themselves:** when an installation covers a repository that projects already use, they link to it, each with a project notice.
+- **Webhooks in G0** are verified, recorded once and listed; nothing acts on them until G2. The App subscribes to every planned event from the start, so later phases ask for no new approval.
+- **Name:** `GitSpace <handle>`, public, plain description.
+- **Key rotation in G0:** GitHub creates App private keys only on the App's settings page, so rotation is: generate a key there, upload it to GitSpace, which verifies it against GitHub before switching; the old key is then deleted on GitHub.
 
 ## 4. Routing inside a tenant
 

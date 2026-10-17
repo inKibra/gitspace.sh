@@ -38,6 +38,7 @@ import { environmentCloudProcedures } from './account-environment-rpc.js';
 import { configurationCloudProcedures } from './account-configuration-rpc.js';
 import { runtimeCloudProcedures } from './account-runtime-rpc.js';
 import { providerCloudProcedures } from './account-provider-rpc.js';
+import { githubCloudProcedures } from './account-github-rpc.js';
 import { createCloudProject, readCloudSpaceView } from './cloud-project.js';
 import { readCloudStackStatus } from './cloud-stack-status.js';
 import { workspaceLifecycleCloudProcedures } from './account-workspace-rpc.js';
@@ -421,6 +422,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, ...lifecycle.project },
     space: { view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, deployment: { status: deploymentStatus, checkCanonical: deploymentCheckCanonical, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
+    github: githubCloudProcedures(env, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
     inspector: inspectorCloudProcedures(env, userId, currentDevice),
     environment: { ...environmentCloudProcedures(env, userId, deviceId, currentDevice, () => requireAdministration('lifecycle.control')), state: environmentState },

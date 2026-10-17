@@ -18,6 +18,7 @@ interface Env {
   TENANT_RELEASES: DurableObjectNamespace<import('./src/index').TenantReleasesDO>;
   HOSTED_ROUTES: DurableObjectNamespace<import('./src/index').HostedRouteRegistryDO>;
   ACCOUNT_STATE: DurableObjectNamespace<import('./src/index').AccountStateDO>;
+  GITHUB_APP: DurableObjectNamespace<import('./src/index').GitHubAppDO>;
   DATA: R2Bucket;
   BLOBS: R2Bucket;
   ARTIFACTS: Artifacts;
