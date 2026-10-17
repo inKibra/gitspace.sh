@@ -122,7 +122,6 @@ export async function startMachineRuntime() {
     authority,
     (userSettings) => gitIdentity.apply(userSettings),
   );
-  await settings.start();
   const existingMachine = (await authority.listMachineDefinitions()).find((machine) => machine.id === machineId);
   const browserEnabled = existingMachine?.kind === 'physical' && existingMachine.provider === 'physical';
   const browserRelay = new BrowserRelaySupervisor({
@@ -339,6 +338,9 @@ export async function startMachineRuntime() {
       return accepted.checkpoint;
     },
   });
+  // After the journal is restored: checkouts that survived a restart get the account's Git identity and origin access
+  // (a new release may configure them differently, e.g. a repository that became reachable through the GitHub App).
+  await settings.start();
 
   let stopping = false;
   const stop = async (): Promise<void> => {
