@@ -219,10 +219,17 @@ export async function startMachineRuntime() {
       setTimeout(() => receiveMachineNotices([{ topics: [retry] }], noticeTargets), Math.min(60_000, 1000 * 2 ** attempt));
     },
   };
-  // A launch this machine was building in an earlier process has no builder now; settle it before this process can
-  // start one. A failure is logged: the account then shows that launch until it is discarded.
-  await authority.launcherStarted({ runningSha: machineReleaseSha, startedAt: processStartedAt })
-    .catch((error: unknown) => console.error('[gitspace-deploy] launcher start was not reported', error));
+  // A launch this machine was building in an earlier process has no builder now: report this process's start so the
+  // account settles it. Right after a release the account may still answer with the previous version, so a failed
+  // report is retried with the notice backoff for about ten minutes; the start time keeps a retry from ending a launch
+  // this process began meanwhile.
+  const reportLauncherStart = (attempt: number): void => {
+    void authority.launcherStarted({ runningSha: machineReleaseSha, startedAt: processStartedAt }).catch((error: unknown) => {
+      console.error('[gitspace-deploy] launcher start was not reported', error);
+      if (attempt < 12) setTimeout(() => reportLauncherStart(attempt + 1), Math.min(60_000, 1000 * 2 ** (attempt + 1)));
+    });
+  };
+  reportLauncherStart(0);
   // Account-owned releases build from this executor's ready canonical cache.
   const launcher = new DeploymentLauncher({
     attachments: () => executorRuntime?.journal.attachments() ?? [],
