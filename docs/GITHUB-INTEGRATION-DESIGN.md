@@ -103,7 +103,7 @@ The tenant sets the default for its projects. A repository can require author mo
 
 | ID | Milestone | Exit criteria |
 |---|---|---|
-| **G0** | App creation and install | Manifest flow creates `GitSpace <handle>`; keys in the vault; installs started from GitSpace are recorded; an install GitSpace did not start is uninstalled; webhooks verified and recorded once. |
+| **G0** (shipped 2026-10-17, `8ac88a49`) | App creation and install | Manifest flow creates `GitSpace <handle>`; keys in the vault; installs started from GitSpace are recorded; an install GitSpace did not start is uninstalled; webhooks verified and recorded once. |
 | **G1** | Remote tracking | Remote heads from `info/refs` with installation tokens; push webhooks update them; behind markers on projects and workspaces; **Update base**. |
 | **G2** | PR review automation | PR opened → review workspace → Reviewer → Change Guide check, updated on new pushes; `@gitspace-<handle>` comments reach the workspace agent. |
 | **G3** | Write-back and sharing | Review threads both ways, status checks, per-project write-back switch; Change Guide viewer link on the PR; sign in with GitHub to comment, posted as the reader and read back into guide threads; private repositories require sign-in and repository access. |
