@@ -342,6 +342,7 @@ export async function startMachineRuntime() {
     },
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
     operations: machineOperationalTools({ environments, services: serviceManager, authority, mcp, projectRepository: gitRemote, originEnvironment: checkout => gitIdentity.originEnvironment(checkout) }),
+    originEnvironment: checkout => gitIdentity.originEnvironment(checkout),
     commitSnapshot: async (local, checkpoint, previousWorktreeCommit) => {
       const accepted = await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
         projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,

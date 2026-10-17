@@ -47,6 +47,8 @@ export async function createMachineExecutor(options: {
   browser?: Pick<MachineBrowserOptions, 'enabled' | 'services'>;
   commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null): Promise<GitIntermediateCheckpoint>;
   prepareAttachment(local: LocalAttachment, signal: AbortSignal, progress: (step: RuntimeCacheObservation['setup'][number]) => Promise<void>): Promise<void>;
+  /** How Git reaches remotes other than Artifacts from a checkout (its origin, its submodules). */
+  originEnvironment(checkout: LocalAttachment): Promise<Record<string, string>>;
   artifactFsBinary?: string;
   checkpointClock?: GitWorktreeClock;
   checkpointEvents?: GitWorktreeEvents;
@@ -519,6 +521,7 @@ export async function createMachineExecutor(options: {
           await hydrateGitLfs(path, [source.commit], sourceCheckpoint?.lfs, await lfs?.read(grant));
           await checkoutGitLfs(path, source.commit);
         },
+        submoduleEnvironment: (path: string) => options.originEnvironment({ ...grant, rootPath: path }),
       } : null,
       prerequisites: async (prepared, prepareSignal) => {
         const durable = snapshotRow(key);

@@ -1,8 +1,11 @@
-import { access, mkdir, readFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
 
 export type CheckoutSource = { remote: string; ref: string; commit: string };
+/** Kept in `.git` while a Git checkout is being acquired and until it is on its branch: a directory still carrying it
+ * never became a checkout, so it holds nothing of anyone's and is acquired again. */
+export const CHECKOUT_ACQUIRING_MARKER = 'gitspace-acquiring';
 export type ArtifactFsHost = {
   binary?: string;
   root: string;
@@ -38,6 +41,9 @@ export async function acquireCheckout(input: {
   host: ArtifactFsHost;
   signal: AbortSignal;
   hydrateLfs(directory: string): Promise<void>;
+  /** Submodules come from their own remotes (often GitHub over SSH), not Artifacts: they need the machine's origin
+   * access, which the Artifacts credential environment does not carry. */
+  submoduleEnvironment(directory: string): Promise<Record<string, string>>;
 }): Promise<{ mode: 'artifactfs' | 'git'; directory: string; commit: string }> {
   const command = (binary: string, args: string[], env: Record<string, string>, cwd?: string) => execute(binary, args, env, cwd, input.signal);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(input.name)) throw new Error('Invalid checkout identity');
@@ -50,6 +56,7 @@ export async function acquireCheckout(input: {
   if (!input.host.binary || /^[0-9a-f]{40}$/u.test(input.source.ref) || input.requiresFiltersOrSubmodules || !await artifactFsAvailable(input.host.binary)) {
     await mkdir(input.directory, { recursive: true });
     await command('git', ['init', input.directory], env);
+    await writeFile(join(input.directory, '.git', CHECKOUT_ACQUIRING_MARKER), '');
     await command('git', ['config', 'remote.origin.url', input.source.remote], env, input.directory);
     await command('git', ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'], env, input.directory);
     await command('git', ['fetch', '--update-shallow', '--no-tags', input.source.remote, input.source.ref], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
@@ -58,7 +65,7 @@ export async function acquireCheckout(input: {
     const branch = input.source.ref.startsWith('refs/heads/') ? input.source.ref.slice('refs/heads/'.length) : input.source.ref;
     await command('git', input.fixed || /^[0-9a-f]{40}$/u.test(input.source.ref) ? ['checkout', '--detach', input.source.commit] : ['checkout', '-b', branch, input.source.commit], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
     await input.hydrateLfs(input.directory);
-    if (input.requiresFiltersOrSubmodules) await command('git', ['submodule', 'update', '--init', '--recursive'], env, input.directory);
+    if (input.requiresFiltersOrSubmodules) await command('git', ['submodule', 'update', '--init', '--recursive'], await input.submoduleEnvironment(input.directory), input.directory);
     input.signal.throwIfAborted();
     return { mode: 'git', directory: input.directory, commit: acquired };
   }
