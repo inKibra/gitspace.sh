@@ -197,7 +197,9 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       title: child ? child.name : record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`,
       failure: latest?.role === 'assistant' && latest.stopReason === 'error' ? providerErrorText(latest.errorMessage ?? 'The model request failed') : null,
       subagent: child ? { conversationId: String(record.id), ...child } : null,
-      messages: entries.flatMap(entry => (entry.model ?? []).map((message, index) => ({ id: `${entry.id}:${index}`, role: message.role === 'toolResult' ? 'tool' as const : message.role, content: typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }))),
+      // The snapshot paints the conversation until its transcript page loads, which draws tool results from stored rows.
+      // Carrying them here made a busy workspace's snapshot pass the 1 MB response limit, failing every watch.
+      messages: entries.flatMap(entry => (entry.model ?? []).flatMap<RuntimeSnapshot['conversations'][number]['messages'][number]>((message, index) => message.role === 'toolResult' ? [] : [{ id: `${entry.id}:${index}`, role: message.role, content: typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text', text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }])),
     };
   }
   async function refreshConversations(): Promise<void> {

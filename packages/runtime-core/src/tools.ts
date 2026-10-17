@@ -41,6 +41,37 @@ const spaceSchemas = {
   space_review: z.union([list.extend(review), describe, createReviewThreadInputSchema.omit(owned).extend({ method: z.literal('create'), ...review }), appendReviewMessageInputSchema.omit(owned).extend({ method: z.literal('append'), ...review }), resolveReviewThreadInputSchema.omit(owned).extend({ method: z.literal('resolve'), ...review })]),
   space_workspace: RuntimeWorkspaceArgumentsSchema,
 };
+type ArgumentIssue = z.core.$ZodIssue;
+const SELECTORS = ['method', 'op'];
+/** A tool's arguments, or an error a model can act on. A union reports every variant's problems; a call that names its
+ * method or op hears only that variant's, a call naming none hears which it must choose, and an unknown one the choices. */
+export function parseToolArguments<S extends z.ZodType>(tool: string, schema: S, input: unknown): z.output<S> {
+  const parsed = schema.safeParse(input);
+  if (parsed.success) return parsed.data;
+  const fields = input !== null && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const key = SELECTORS.find(name => typeof Reflect.get(fields, name) === 'string');
+  const selected = key === undefined ? '' : ` ${key} ${String(Reflect.get(fields, key))}`;
+  // A literal or enum names its values; a nested discriminated union names its options.
+  const choices = (variants: ArgumentIssue[][], field: string) => [...new Set(variants.flatMap(list => list.flatMap(issue => {
+    if (issue.path.length !== 1 || issue.path[0] !== field) return [];
+    if (issue.code === 'invalid_value') return issue.values.map(String);
+    const options: unknown = Reflect.get(issue, 'options');
+    return issue.code === 'invalid_union' && Array.isArray(options) ? options.map(String) : [];
+  })))];
+  const narrow = (issue: ArgumentIssue): string[] => {
+    if (issue.code !== 'invalid_union' || issue.path.length > 0) return [`${issue.path.map(String).join('.') || 'arguments'}: ${issue.message}`];
+    if (key === undefined) {
+      const field = SELECTORS.find(name => choices(issue.errors, name).length > 0);
+      return field ? [`${field}: required, one of ${choices(issue.errors, field).join(', ')}`] : issue.errors.flat().flatMap(narrow);
+    }
+    const matching = issue.errors.filter(list => !list.some(item => item.path.length === 1 && item.path[0] === key));
+    if (matching.length === 0) return [`${key}: unknown value, expected one of ${choices(issue.errors, key).join(', ')}`];
+    // Several variants can share a method (by source kind, say): the closest one names the fewest problems.
+    return matching.reduce((closest, list) => list.length < closest.length ? list : closest).flatMap(narrow);
+  };
+  throw new Error(`Invalid ${tool}${selected} arguments:\n${[...new Set(parsed.error.issues.flatMap(narrow))].map(line => `- ${line}`).join('\n')}`);
+}
+
 // Wording adapted from installed OMP 18.2.11; unsupported OMP selectors and operations are not advertised.
 const contract = <S extends z.ZodType>(schema: S, description: string) => ({ schema, description });
 const contracts = {
@@ -138,11 +169,11 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     // JSON Schema is derived from the parser owner, without pretending it has a static TypeBox type.
     parameters: runtimeToolParameters(contract.schema),
     // Preserve the owner parser's rejection semantics instead of generic model-argument coercion.
-    prepareArguments: input => contract.schema.parse(input),
+    prepareArguments: input => parseToolArguments(name, contract.schema, input),
     // A round that changes files runs its calls in the order the model wrote them, so a later read sees the write.
     executionMode: ['write', 'edit', 'apply_patch'].includes(name) ? 'sequential' : 'parallel', replay: ['read', 'grep', 'code_search', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'bash'].includes(name) ? 'safe' : 'unsafe',
     async execute(input, api, context) {
-      const args = RuntimeJsonSchema.parse(contract.schema.parse(input));
+      const args = RuntimeJsonSchema.parse(parseToolArguments(name, contract.schema, input));
       const safe = Arguments.runtimeOperationIsReadOnly(name, args);
       const child = (await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child;
       if (child && !isSubagentToolCallAllowed(name, args, child.tools)) throw new Error(`Subagent ${child.name} cannot use ${name} this way`);

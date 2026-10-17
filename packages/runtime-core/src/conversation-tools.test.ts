@@ -284,7 +284,7 @@ test('background agent completion uses its durable address and wakes the idle pa
     await f.spawned({ op: 'spawn', role: 'review', name: 'BackgroundReviewer', task: 'Inspect', background: true });
     await f.backgroundReceived;
     await f.root.waitForIdle(context);
-    expect(f.seen.join('\n')).toContain('BackgroundReviewer replied:\\nComplete.');
+    expect(f.seen.join('\n')).toMatch(/source=\\"BackgroundReviewer \([^)]+\)\\">\\nComplete\.\\n<\/gitspace-event>/);
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 }, 5000);
 
@@ -296,7 +296,7 @@ test('a foreground child\'s answer reaches an idle parent once', async () => {
     // An idle parent gets the answer as a message (in a turn, agents wait returns it instead), and only once.
     expect(f.seen.join('\n').split('kind=\\"agent-message\\" source=\\"ForegroundReviewer').length - 1).toBeGreaterThanOrEqual(1);
     const latest = f.seen.at(-1)!;
-    expect(latest.split('ForegroundReviewer replied:\\nComplete.').length - 1).toBe(1);
+    expect(latest.match(/source=\\"ForegroundReviewer \([^)]+\)\\">\\nComplete\.\\n<\/gitspace-event>/g)).toHaveLength(1);
     const waited = await f.call({ op: 'wait', timeoutMs: 50 });
     const text = waited.content.find(part => part.type === 'text');
     expect(text?.type === 'text' ? JSON.parse(text.text) : null).toEqual({ kind: 'timeout' });

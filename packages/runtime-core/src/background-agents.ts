@@ -37,7 +37,8 @@ export function createSubagentReplyExtension(deliver: ConversationLifecycle['del
     const text = answer.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim();
     const limit = 20_000;
     await deliver({ conversationId: child.parentId, requestId: `agent-reply:${String(api.taskId)}`, kind: 'agent-message', sender: { id: String(api.conversationId), name: child.name },
-      text: `${child.name} replied:\n${text.length > limit ? `${text.slice(0, limit)}\n(truncated; read its history for the rest)` : text || '(no text)'}` });
+      // The event's source names the child, so its text is the reply alone.
+      text: text.length > limit ? `${text.slice(0, limit)}\n(truncated; read its history for the rest)` : text || '(no text)' });
     return undefined;
   } })] });
 }

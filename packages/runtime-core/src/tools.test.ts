@@ -8,7 +8,8 @@ import { createModels, createAssistantMessageEventStream, getCurrentTools, type 
 import { RuntimeBrowserApprovalCardSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema } from '@gitspace/protocol-runtime';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
-import { createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
+import { createRuntimeTools, parseToolArguments, runtimeToolParameters, type ToolServices } from './tools.js';
+import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { DurableJobsDoc, createJobTask, createJobTool, type JobServices } from './jobs.js';
 import { RuntimeBashArgumentsSchema } from '@gitspace/protocol-runtime/tool-arguments';
 
@@ -372,3 +373,17 @@ test('a round that writes runs its calls in the order the model wrote them, so a
     expect(order).toEqual(['start write', 'end write', 'start read', 'end read']);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 5000);
+
+test('a rejected tool call names only the problems of the method it asked for, or the methods it can ask for', () => {
+  const reject = (input: unknown) => { try { parseToolArguments('space_workspace', RuntimeWorkspaceArgumentsSchema, input); } catch (error) { return error instanceof Error ? error.message : String(error); } throw new Error('accepted'); };
+  // The live call: create without branch or sourceRef, plus a key create does not take.
+  const create = reject({ method: 'create', name: 'notice-probe', sourceKind: 'base', bogus: true });
+  expect(create).toContain('Invalid space_workspace method create arguments');
+  expect(create).toMatch(/branch: /);
+  expect(create).toMatch(/sourceRef: /);
+  expect(create).toContain('bogus');
+  expect(create).not.toMatch(/"get"|workspaceId|instruction/);
+  expect(reject({ method: 'launch' })).toMatch(/method: unknown value, expected one of .*status, start, create, open/);
+  expect(reject({ name: 'x' })).toMatch(/method: required, one of .*start, create, open, restore, setRelations$/);
+  expect(parseToolArguments('space_workspace', RuntimeWorkspaceArgumentsSchema, { method: 'status' })).toEqual({ method: 'status' });
+});
