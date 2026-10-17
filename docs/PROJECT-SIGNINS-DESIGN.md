@@ -32,9 +32,9 @@ Consumers today are machine commands (`aws`, `terraform`, `infra/with-aws`). Wit
 
 **Follow-up: a cloud AWS tool.** AWS APIs are signed HTTPS, so a tool could call them from the Worker with the project session: read CloudWatch logs, list and read S3 objects, check resources and deployment state, from a plan-phase workspace or a cron with no machine attached. It needs its own permission design (which services and actions, read-only by default). The session lives in the tenant vault, so the tool needs no change to sign-ins.
 
-## 4. OIDC federation (alternative to stored sessions)
+## 4. Trusted workloads: OIDC federation (alternative to stored sessions)
 
-Instead of a person's session, the tenant becomes an OIDC identity provider and clouds trust it, as they trust GitHub Actions:
+Instead of a person's session, the tenant becomes an OIDC identity provider and clouds trust it, as they trust GitHub Actions; this is workload identity federation, the mechanism behind "trusted workloads" and npm/PyPI trusted publishing:
 
 - The tenant publishes `https://<tenant-host>/.well-known/openid-configuration` and its JWKS; the signing key lives in the tenant vault.
 - When a command needs credentials, the account mints a short-lived JWT (`iss` = tenant host, `aud` = the cloud's audience such as `sts.amazonaws.com`, `sub` naming project, workspace and phase) and exchanges it: AWS `AssumeRoleWithWebIdentity`, GCP workload identity federation, Azure federated credentials.
@@ -56,4 +56,4 @@ Federation removes logins entirely where the user can change the cloud account's
 2. **S1:** generic capture from an interactive script.
 3. **S2:** device-code adapters (Identity Center, gcloud, Azure).
 4. **Follow-up:** cloud AWS tool (§3).
-5. **Spike:** OIDC issuer per tenant and one AWS role trusting it (§4).
+5. **Spike:** trusted workloads, an OIDC issuer per tenant and one AWS role trusting it (§4).
