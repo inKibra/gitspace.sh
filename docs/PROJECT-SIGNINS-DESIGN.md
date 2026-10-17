@@ -48,12 +48,41 @@ Instead of a person's session, the tenant becomes an OIDC identity provider and 
 | Scoping | Whole project | Per project, workspace or phase in the trust policy |
 | Needs cloud admin rights | No | Yes, once (identity provider and role) |
 
+### Setting it up
+
+In the cloud account, once, by someone with IAM admin rights:
+
+1. **Register the tenant as an identity provider:** IAM → Identity providers → OpenID Connect, URL `https://<tenant-host>`, audience `sts.amazonaws.com` (`aws iam create-open-id-connect-provider --url https://<tenant-host> --client-id-list sts.amazonaws.com`).
+2. **Create a role that trusts it**, conditioned on the token:
+   ```json
+   {
+     "Effect": "Allow",
+     "Principal": { "Federated": "arn:aws:iam::<account>:oidc-provider/<tenant-host>" },
+     "Action": "sts:AssumeRoleWithWebIdentity",
+     "Condition": {
+       "StringEquals": { "<tenant-host>:aud": "sts.amazonaws.com" },
+       "StringLike":   { "<tenant-host>:sub": "project:<project-id>:*" }
+     }
+   }
+   ```
+   and attach the role's permissions. A production role narrows `sub`, for example to `…:phase:ship`.
+3. **Give GitSpace the role ARN** in project settings: a named cloud role (`dev`), its ARN, and the workspaces or phases that may use it.
+
+In GitSpace:
+
+- **Issuer:** each tenant serves `/.well-known/openid-configuration` and its JWKS; the signing key is in the tenant vault.
+- **Credential helper:** machines get a profile per project role, `credential_process = gitspace aws-credentials dev`, so `aws --profile dev`, terraform and the SDKs work and refresh on their own.
+- **Exchange:** the machine asks the account for `dev` for its workspace; the account checks the workspace may use it, signs a five-minute token (`sub = project:…:workspace:…:phase:…`, `aud = sts.amazonaws.com`), calls `AssumeRoleWithWebIdentity` (which needs no AWS credentials) and returns the temporary credentials.
+- **One-click connect:** Project settings → **Connect AWS account** opens a CloudFormation quick-create link whose template makes the provider and the role with this project's conditions; the user approves the stack and its output (the role ARN) returns to GitSpace.
+
 Federation removes logins entirely where the user can change the cloud account's trust settings; sign-ins remain for accounts they cannot. Whoever controls the tenant can then assume the role, so the trust policy's `sub` conditions carry the security boundary. **[unverified]** AWS fetching the JWKS from a tenant host behind Cloudflare, and the thumbprint the AWS identity-provider API still asks for.
 
 ## 5. Order
 
-1. **S0:** sign-in records, injection into machine commands, AWS MFA form, expiry notices.
+Sign-ins (S0–S2) come after the GitHub App and before Aperture; trusted workloads come after Aperture (`docs/ROADMAP.md`).
+
+1. **S0:** sign-in records, injection into machine commands, AWS MFA form, expiry notices; the shared credential framework the other adapters and the GitHub App's installation tokens use.
 2. **S1:** generic capture from an interactive script.
 3. **S2:** device-code adapters (Identity Center, gcloud, Azure).
 4. **Follow-up:** cloud AWS tool (§3).
-5. **Spike:** trusted workloads, an OIDC issuer per tenant and one AWS role trusting it (§4).
+5. **After Aperture:** trusted workloads, an OIDC issuer per tenant, the credential helper and one-click AWS connect (§4), starting with a spike against one AWS role.
