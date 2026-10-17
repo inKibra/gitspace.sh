@@ -153,6 +153,17 @@ describe('tenant releases', () => {
     expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toEqual(next);
   });
 
+  it('records a launch finished when its release is applied, without the launching machine reporting it', async () => {
+    const { control } = await tenant();
+    const input = stageInput('self-launch');
+    await control('deploy.stage', input);
+    // The building machine's last report before it is replaced by the release it launches.
+    const launching = { launchId: crypto.randomUUID(), source: { kind: 'workspace', workspaceId: 'workspace-a' }, targets: ['frontend'], sha: input.sha, phase: 'launch', message: 'launching into frontend', status: 'running', error: null, startedAt: '2026-10-09T10:00:00.000Z', updatedAt: '2026-10-09T10:01:00.000Z' };
+    await control('deploy.launchProgress', launching);
+    await control('deploy.launch', { sha: input.sha, targets: ['frontend'] });
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ launchId: launching.launchId, phase: 'launched', status: 'succeeded', message: 'worker=skipped machine=skipped frontend=applied', error: null });
+  });
+
   it('rejects retired OMP staging, activation, and acknowledgements without changing the release', async () => {
     const { control } = await tenant();
     const input = stageInput('retired-target');

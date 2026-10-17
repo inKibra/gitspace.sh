@@ -173,6 +173,17 @@ export class TenantReleasesDO extends DurableObject<Env> {
     );
   }
 
+  /** The launch's outcome, recorded where its release is applied: a machine that builds and launches its own release is
+   * replaced by it, sometimes before this launch call answers, and could then never report the launch finished. */
+  finishLaunch(record: ReleaseRecord, targets: ReleaseTarget[]): void {
+    const launch = this.latestLaunch();
+    if (!launch || launch.sha !== record.sha || launch.status !== 'running') return;
+    const failed = (targets.includes('worker') && record.status.worker === 'failed') || (targets.includes('frontend') && record.status.frontend === 'failed');
+    const message = failed ? record.error ?? 'Release activation failed' : `worker=${record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} frontend=${record.status.frontend}`;
+    const finished = launchProgressSchema.parse({ ...launch, phase: failed ? 'failed' : 'launched', message, status: failed ? 'failed' : 'succeeded', error: failed ? message : null, updatedAt: new Date().toISOString() });
+    this.ctx.storage.sql.exec('UPDATE latest_launch SET record_json = ? WHERE id = 1', JSON.stringify(finished));
+  }
+
   private latestLaunch(): LaunchProgress | null {
     const row = this.ctx.storage.sql.exec<{ record_json: string }>('SELECT record_json FROM latest_launch WHERE id = 1').toArray()[0];
     return row ? launchProgressSchema.parse(JSON.parse(row.record_json)) : null;

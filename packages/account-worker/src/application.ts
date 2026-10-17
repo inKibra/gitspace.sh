@@ -2096,7 +2096,7 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
   const releases = tenantReleases(env, userId);
   const launched = await releases.launch(input);
   if (!launched) throw new ReleaseNotFoundError(input.sha);
-  if (launched.record.status.worker !== 'pending') return launched;
+  if (launched.record.status.worker !== 'pending') { await releases.finishLaunch(launched.record, input.targets); return launched; }
   const worker = launched.record.artifacts.worker;
   const metadata = launched.record.worker;
   let outcome: { status: ReleaseStatus; error: string | null };
@@ -2106,8 +2106,9 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
   } catch (error) {
     outcome = { status: 'failed', error: error instanceof Error ? error.message : 'Worker deployment failed' };
   }
-  const record = await releases.setWorkerStatus(input.sha, outcome.status, outcome.error);
-  return { ...launched, record: record ?? launched.record };
+  const record = await releases.setWorkerStatus(input.sha, outcome.status, outcome.error) ?? launched.record;
+  await releases.finishLaunch(record, input.targets);
+  return { ...launched, record };
 }
 
 const FRONTEND_CONTENT_TYPES: Record<string, string> = {
