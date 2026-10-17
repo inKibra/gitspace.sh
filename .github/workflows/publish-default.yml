@@ -104,9 +104,11 @@ jobs:
     env:
       COMMIT: ${{ needs.resolve.outputs.commit }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ vars.GITSPACE_DISTRIBUTION_BUCKET || 'gitspace-data' }}
+      # The default and the native machine objects it names live in the platform's releases bucket, reached with a key
+      # scoped to that bucket's objects.
+      R2_ACCESS_KEY_ID: ${{ secrets.RELEASES_R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.GITSPACE_RELEASES_BUCKET || 'gitspace-releases-rebuild-20260913' }}
       RELEASES_BUCKET: ${{ vars.GITSPACE_RELEASES_BUCKET || 'gitspace-releases-rebuild-20260913' }}
       # A detached checkout has no branch for the frontend's source metadata.
       GITSPACE_SOURCE_BRANCH: develop
@@ -145,10 +147,6 @@ jobs:
           echo "::add-mask::$password"
           printf '%s' "$password" | docker login registry.cloudflare.com --username "$username" --password-stdin
       - name: Build the image, worker and frontend and publish the default
-        # The releases bucket has its own key (R2 object read/write on that bucket only); the distribution key cannot reach it.
-        env:
-          R2_ACCESS_KEY_ID: ${{ secrets.RELEASES_R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_R2_SECRET_ACCESS_KEY }}
         run: |
           bun packages/deployment/src/default-release-cli.ts build \
             --commit "$COMMIT" \
