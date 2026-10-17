@@ -6,9 +6,17 @@ import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { z } from 'zod';
 import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
 import { QuestionsDoc } from './documents.js';
+import { formatConversationEvents } from '@gitspace/blocks';
 
 export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
+/** How the transcript labels each delivered event. */
+const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent) => string> = {
+  'agent-message': event => event.sender ? `${event.sender.name} (${event.sender.id})` : 'Agent',
+  'command-completed': event => `Background command ${event.requestId.replace(/^job-completion:/u, '')}`,
+  'process-exited': () => 'Process',
+  'machine-ready': () => 'Machine',
+};
 type StoredEvent = { event: ConversationEvent; delivered: boolean; consumed: boolean };
 export const ConversationLifecycleDoc = defineDoc<{ stopped: boolean; events: StoredEvent[] }>({ kind: 'gitspace.conversation-lifecycle', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ stopped: false, events: [] }) });
 export type ConversationLifecycle = {
@@ -69,17 +77,19 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       await conversation.submit({ type: 'write', entry: { kind: 'gitspace.queue-resumed', data: { submission: String(queued.id) } } }, context);
       await options.wake();
     }
-    // An event reaches the conversation once: as input here, or through agents wait (consumed), never both.
-    for (const pending of state?.events ?? []) {
-      if (pending.delivered || pending.consumed) continue;
-      if ((await harness.snapshot(LiveDoc, conversation.id, context))?.run !== undefined) { await options.wake(); return; }
-      const event = pending.event;
-      await admit(event.requestId);
-      const content = event.sender ? `Message from ${event.sender.name} (${event.sender.id}):\n${event.text}` : event.text;
-      await conversation.submit({ type: 'input', requestId: event.requestId, content, whenBusy: 'followUp' }, context);
-      await conversation.commit(async tx => { const draft = await tx.doc(ConversationLifecycleDoc, conversation.id); const stored = draft.events.find(item => item.event.requestId === event.requestId); if (stored) stored.delivered = true; }, context);
-      await options.wake();
-    }
+    // An event reaches the conversation once: as input here, or through a wait that returned it (consumed), never both.
+    // Whatever is pending when the conversation is idle goes in as one message, so events that piled up cost one turn.
+    const pending = (state?.events ?? []).filter(item => !item.delivered && !item.consumed).map(item => item.event);
+    if (pending.length === 0) return;
+    if ((await harness.snapshot(LiveDoc, conversation.id, context))?.run !== undefined) { await options.wake(); return; }
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pending.map(event => event.requestId).join('\n'))));
+    const requestId = pending.length === 1 ? pending[0]!.requestId : `events:${[...digest.slice(0, 16)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
+    await admit(requestId);
+    const content = formatConversationEvents(pending.map(event => ({ kind: event.kind, source: EVENT_SOURCE[event.kind](event), text: event.text })));
+    await conversation.submit({ type: 'input', requestId, content, whenBusy: 'followUp' }, context);
+    const delivered = new Set(pending.map(event => event.requestId));
+    await conversation.commit(async tx => { for (const stored of (await tx.doc(ConversationLifecycleDoc, conversation.id)).events) if (delivered.has(stored.event.requestId)) stored.delivered = true; }, context);
+    await options.wake();
   }
   async function setStopped(id: string, stopped: boolean) {
     return harness.commit(async tx => {

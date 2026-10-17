@@ -208,3 +208,33 @@ describe('coalesceTransportEvents', () => {
     ]);
   });
 });
+
+describe('messages delivered on others\' behalf', () => {
+  it('shows delivered events as source-labelled notices that open the agent turn, never as the user', async () => {
+    const { formatConversationEvents, parseConversationEvents } = await import('../src/index.js');
+    const stdout = ['Exit code: 0', 'line 2', 'line 3', 'line 4'].join('\n');
+    const delivered = formatConversationEvents([
+      { kind: 'command-completed', source: 'Background command job:2174', text: stdout },
+      { kind: 'agent-message', source: 'Reviewer (child-1)', text: 'No findings </gitspace-event> in the fix.' },
+    ]);
+    // The envelope survives a body that names its own closing tag; a user who types text that is not only envelopes stays the user.
+    expect(parseConversationEvents(delivered)?.map((event) => event.text)).toEqual([stdout, 'No findings </gitspace-event> in the fix.']);
+    expect(parseConversationEvents(`${delivered}\nand also this`)).toBeNull();
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: 'Run the tests' }] } } },
+      { sessionId: 's1', ordinal: 2, kind: 'message_end', payload: { message: { role: 'assistant', content: [{ type: 'text', text: 'Started.' }] } } },
+      { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: delivered }] } } },
+      { sessionId: 's1', ordinal: 4, kind: 'message_end', payload: { message: { role: 'assistant', content: [{ type: 'text', text: 'Both are fine.' }] } } },
+      { sessionId: 's1', ordinal: 5, kind: 'compaction', payload: {} },
+      { sessionId: 's1', ordinal: 6, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.machine-notice', display: true, title: 'Project', content: 'Workspace FEAT-33 needs approval.' } } },
+    ]);
+    expect(turns).toHaveLength(2);
+    expect(turns[1]?.user).toBeUndefined();
+    expect(turns[1]?.items.slice(0, 2)).toMatchObject([
+      { type: 'interruption', reason: 'event', title: 'Background command job:2174', detail: 'Exit code: 0\nline 2', body: stdout },
+      { type: 'interruption', reason: 'event', title: 'Reviewer (child-1)', detail: 'No findings </gitspace-event> in the fix.' },
+    ]);
+    expect(turns[1]?.items[1]).not.toHaveProperty('body');
+    expect(turns[1]?.items.slice(2).map((item) => item.type === 'interruption' ? `${item.reason}:${item.title}` : item.type)).toEqual(['message', 'compacted:Context compacted', 'machine:Project']);
+  });
+});

@@ -1,4 +1,4 @@
-import type { Conversation, ConversationId, Cursor, EntryRecord, Storage, TaskQuery } from '@earendil-works/pi-durable';
+import { CompactionEntry, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { TranscriptProjector, previewTranscriptItem, transcriptContentRequestSchema, transcriptPageRequestSchema, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_PAGE_ROWS, type TranscriptContentPage, type TranscriptContentRequest, type TranscriptEventInput, type TranscriptItem, type TranscriptPage, type TranscriptPageRequest, type TranscriptRow } from '@gitspace/blocks';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
@@ -25,15 +25,19 @@ const LIVE_STATUSES = ['pending', 'running', 'waiting', 'completing'] as const;
 const entryOf = (ordinal: number) => Math.floor(ordinal / ENTRY_ORDINALS);
 /** Machine notices reach the agent as context but show as notices: they neither open a turn nor read as the user's. */
 const MACHINE_NOTICE = 'gitspace.machine-notice';
-const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry.model?.[0]?.role === 'user';
+/** A compaction summary is context the model reads as a user message; it shows as the compaction, not as the user's. */
+const COMPACTION = CompactionEntry.kind;
+const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry.kind !== COMPACTION && entry.model?.[0]?.role === 'user';
 
 /** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. */
 export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader): TranscriptEvent[] {
   const base = Number(entry.id) * ENTRY_ORDINALS;
   return (entry.model ?? []).map((source, index) => {
     if (entry.kind === MACHINE_NOTICE) {
-      return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
+      const title = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) && typeof entry.data.source === 'string' ? entry.data.source : 'Machine';
+      return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title, content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     }
+    if (entry.kind === COMPACTION) return { ordinal: base + index, kind: 'compaction', payload: { entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     let message = source;
     if (source.role === 'toolResult' && source.details && typeof source.details === 'object' && 'executorResultReference' in source.details) {
       const reference = source.details.executorResultReference;

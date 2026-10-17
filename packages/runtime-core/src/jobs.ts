@@ -5,6 +5,7 @@ import { RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, R
 import { z } from 'zod';
 import { DaemonResponseSchema } from '@gitspace/supervisor/protocol';
 import type { OperationalServices } from './tasks.js';
+import { ConversationLifecycleDoc } from './conversation-lifecycle.js';
 
 export type JobServices = OperationalServices & {
   deliverConversationEvent(input: { conversationId: string; requestId: string; kind: 'command-completed' | 'process-exited'; text: string; payload?: JsonValue }): Promise<void>;
@@ -241,6 +242,14 @@ export function createJobTool(services: JobServices) {
     const record = records.find(record => JSON.stringify(record.acceptance.job) === JSON.stringify(args.job));
     if (!record) throw new Error('Job handle does not belong to this conversation');
     const stored = storedObservation(record.observation, record.acceptance.job);
+    // A finished job the agent reads here is its answer: the completion message would only repeat it as a later turn.
+    const consumeCompletion = async (observation: RuntimeJobObservation) => {
+      if (observation.status !== 'terminal' && observation.status !== 'not-started') return;
+      await api.commit(async tx => {
+        const pending = (await tx.doc(ConversationLifecycleDoc, api.conversationId)).events.find(item => item.event.requestId === `job-completion:${observation.job.jobId}`);
+        if (pending && !pending.delivered) pending.consumed = true;
+      }, context);
+    };
     if (args.op === 'logs') return services.controlJob({ attemptId: record.attemptId, op: 'logs', lines: args.lines, head: args.head, cursor: args.cursor });
     if (args.op === 'cancel' && stored.status !== 'terminal' && stored.status !== 'not-started') {
       const observation = RuntimeJobObservationSchema.parse({ status: 'waiting', job: record.acceptance.job, reason: 'reconciliation', observedAt: new Date().toISOString() });
@@ -265,9 +274,11 @@ export function createJobTool(services: JobServices) {
         observe(watch.value);
         watch.start(async value => { observe(value); });
         await awaitWithContext(Promise.race([settled.promise, watch.closed.then(end => { if (end.reason === 'listener_error') throw end.error; if (end.reason !== 'stopped') throw new Error(`Command observation ${end.reason}`); })]), context);
+        await consumeCompletion(observation);
         return observation;
       } finally { clearTimeout(timer); await watch.stop(); }
     }
+    await consumeCompletion(stored);
     return stored;
   };
 }

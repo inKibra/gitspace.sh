@@ -163,7 +163,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   async runtimeProjectNotice(raw: unknown, text: string): Promise<void> {
     const identity = RuntimeIdentitySchema.parse(raw);
     if (String(identity.workspaceId) !== String(identity.projectId)) throw new Error('Project notices go to the project base workspace');
-    await (await this.getRuntime(identity)).notice(text);
+    await (await this.getRuntime(identity)).notice(text, undefined, 'Project');
   }
 
   /** This workspace's metadata. One that predates workspaces holding their own reads its project once to seed it;

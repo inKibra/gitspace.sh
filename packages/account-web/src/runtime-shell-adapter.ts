@@ -1,4 +1,4 @@
-import type { MessageBlock, MessageImage, SideAgentBlock, TurnBlock } from '@gitspace/blocks';
+import { parseConversationEvents, type MessageBlock, type MessageImage, type SideAgentBlock, type TurnBlock } from '@gitspace/blocks';
 import type { InspectorView } from '@gitspace/protocol';
 import type { SpaceViewCodec } from '@gitspace/protocol/rpc-contract';
 import type { InputOf } from 'result-rpc';
@@ -42,10 +42,15 @@ export function runtimeSubagentRecords(snapshot: RuntimeSnapshot) {
   return document === undefined ? [] : runtimeAgentsDocumentSchema.parse(document);
 }
 
+/** A delivered message's events as one readable line each; any other text as it is. */
+function readableText(text: string): string {
+  return parseConversationEvents(text)?.map(event => `${event.source}: ${event.text}`).join('\n') ?? text;
+}
+
 function runtimeMessages(conversation: RuntimeSnapshot['conversations'][number]): MessageBlock[] {
   return conversation.messages.flatMap<MessageBlock>(message => message.role === 'user' || message.role === 'assistant' ? [{
     id: message.id, type: 'message', role: message.role,
-    text: message.content.flatMap(content => content.type === 'text' ? [content.text] : []).join(''),
+    text: readableText(message.content.flatMap(content => content.type === 'text' ? [content.text] : []).join('')),
     images: message.content.flatMap<MessageImage>(content => content.type === 'image' && (content.mimeType === 'image/png' || content.mimeType === 'image/jpeg' || content.mimeType === 'image/webp') ? [{ data: content.data, mimeType: content.mimeType }] : []),
   }] : []);
 }
@@ -73,7 +78,13 @@ export function runtimeTurns(snapshot: RuntimeSnapshot, conversationId: string |
   for (const message of conversation?.messages ?? []) {
     if (message.role !== 'user' && message.role !== 'assistant') continue;
     const block: MessageBlock = { id: message.id, type: 'message', role: message.role, text: message.content.flatMap(content => content.type === 'text' ? [content.text] : []).join(''), images: message.content.flatMap<MessageImage>(content => content.type === 'image' && (content.mimeType === 'image/png' || content.mimeType === 'image/jpeg' || content.mimeType === 'image/webp') ? [{ data: content.data, mimeType: content.mimeType }] : []) };
-    if (message.role === 'user' || !turns.length) turns.push({ id: `turn:${message.id}`, type: 'turn', status: 'done', startedAt: message.createdAt, items: [], sideAgents: [], ...(message.role === 'user' ? { user: block } : {}) });
+    // Messages delivered for subagents, jobs, processes and machines open the agent's turn as notices, not as the user's.
+    const events = message.role === 'user' && block.images?.length === 0 ? parseConversationEvents(block.text) : null;
+    if (message.role === 'user' || !turns.length) turns.push({ id: `turn:${message.id}`, type: 'turn', status: 'done', startedAt: message.createdAt, items: [], sideAgents: [], ...(message.role === 'user' && !events ? { user: block } : {}) });
+    if (events) {
+      const notices: TurnBlock['items'] = events.map((event, index) => ({ id: `${message.id}:event:${index}`, type: 'interruption', reason: 'event', title: event.source, detail: event.text }));
+      turns.at(-1)!.items.push(...notices);
+    }
     if (message.role === 'assistant') turns.at(-1)!.items.push(block);
   }
   if (turns.length) { turns.at(-1)!.sideAgents = runtimeSubagents(snapshot); turns.at(-1)!.status = conversation?.status === 'running' || conversation?.status === 'waiting' ? 'running' : conversation?.status === 'failed' ? 'error' : 'done'; }

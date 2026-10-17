@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { formatConversationEvents } from '@gitspace/blocks';
 import { emptyWorkspaceStatus as idle, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gitspace/protocol/project-authority';
 import { runtimeScope, runtimeSubagents, runtimeTurns } from './runtime-shell-adapter.js';
@@ -86,15 +87,17 @@ describe('runtime to existing shell adapter', () => {
     expect(baseOpen.workspaces[0]?.status).toEqual(waiting);
   });
 
-  it('shows incoming sender-labelled messages before a child has answered', () => {
+  it('shows incoming sender-labelled messages before a child has answered, as notices rather than the user\'s words', () => {
     const snapshot = fixture();
-    const incoming = 'Message from Parent (root):\nPlease review the changed contract.';
+    const incoming = formatConversationEvents([{ kind: 'agent-message', source: 'Parent (root)', text: 'Please review the changed contract.' }]);
+    const readable = 'Parent (root): Please review the changed contract.';
     snapshot.conversations.push({ id: 'child', parentId: 'root', title: 'Security review', status: 'waiting', messages: [{ id: 'incoming', role: 'user', createdAt: stamp, content: [{ type: 'text', text: incoming }] }] });
-    expect(runtimeSubagents(snapshot)[0]?.summary).toBe(incoming);
-    expect(runtimeTurns(snapshot, 'child')[0]?.user?.text).toBe(incoming);
+    expect(runtimeSubagents(snapshot)[0]?.summary).toBe(readable);
+    expect(runtimeTurns(snapshot, 'child')[0]?.user).toBeUndefined();
+    expect(runtimeTurns(snapshot, 'child')[0]?.items[0]).toMatchObject({ type: 'interruption', reason: 'event', title: 'Parent (root)', detail: 'Please review the changed contract.' });
     snapshot.conversations[1]?.messages.push({ id: 'answer', role: 'assistant', createdAt: stamp, content: [{ type: 'text', text: 'Review complete.' }] });
     expect(runtimeSubagents(snapshot)[0]?.summary).toBe('Review complete.');
-    expect(runtimeSubagents(snapshot)[0]?.messages?.[0]?.text).toBe(incoming);
+    expect(runtimeSubagents(snapshot)[0]?.messages?.[0]?.text).toBe(readable);
   });
 
   it('uses the spawn address, then definition name, then role instead of a generic child title', () => {

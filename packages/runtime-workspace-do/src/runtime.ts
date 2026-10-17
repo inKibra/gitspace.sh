@@ -57,7 +57,8 @@ export type WorkspaceRuntime = {
   noticeWhenReady(input: { attachmentId: string; generation: number; conversationId: string; label: string }): void;
   /** A line in the main conversation about the workspace's machines, read by the agent on its next turn; it does not
    * start one. A `key` posts it at most once. */
-  notice(text: string, key?: string): Promise<void>;
+  /** A line in the main conversation that does not start a turn; `source` labels it (default Machine). */
+  notice(text: string, key?: string, source?: string): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
   /** A human request run once per request id as a tool call of the main conversation: MCP discovery, a sync action,
    * or an environment run dispatched to the cache machine its arguments name. */
@@ -101,14 +102,14 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     }).catch(options.onReport));
     options.snapshotChanged?.(attachments.list().filter(item => item.state !== 'detached' && item.machineId !== source).map(item => item.machineId));
   }
-  async function notice(text: string, key?: string) {
+  async function notice(text: string, key?: string, source = 'Machine') {
     await harness.commit(async tx => {
       if (key) {
         const seen = await tx.doc(CacheNoticesDoc);
         if (seen.seen[key]) return;
         seen.seen[key] = true;
       }
-      await tx.appendEntry(runtime.root.id, { kind: 'gitspace.machine-notice', model: [{ role: 'user', content: text, timestamp: Date.now() }] });
+      await tx.appendEntry(runtime.root.id, { kind: 'gitspace.machine-notice', data: { source }, model: [{ role: 'user', content: text, timestamp: Date.now() }] });
     }, BACKGROUND_CONTEXT);
     publish(); await line;
   }

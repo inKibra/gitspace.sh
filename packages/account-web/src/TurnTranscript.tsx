@@ -153,11 +153,12 @@ function Execution({ block, state, onStateChange, renderHistory }: { block: Exec
 
 const PERMISSION_BADGE: Record<string, 'green' | 'red' | 'amber' | 'gray'> = { pending: 'amber', 'allowed-once': 'green', 'allowed-always': 'green', denied: 'red' };
 
-function Notice({ icon, title, detail, badge }: { icon: ReactNode; title: string; detail?: string; badge?: ReactNode }) {
+function Notice({ icon, title, detail, body, badge }: { icon: ReactNode; title: string; detail?: string; body?: string; badge?: ReactNode }) {
   const shape = useShape();
   return <div className={`${shape.container} flex min-w-0 items-start gap-3 bg-surface-3 px-3 py-2.5 shadow-surface-1`}>
     <span className="mt-0.5 shrink-0 text-muted-foreground">{icon}</span>
-    <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><span className="block text-body text-foreground">{title}</span>{detail ? <span className="block whitespace-pre-line text-caption text-muted-foreground">{detail}</span> : null}</span>
+    <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><span className="block text-body text-foreground">{title}</span>{detail ? <span className="block whitespace-pre-line text-caption text-muted-foreground">{detail}</span> : null}
+      {body ? <details className="mt-1 text-caption"><summary className="cursor-pointer text-muted-foreground">Show full message</summary><pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-caption text-muted-foreground">{body}</pre></details> : null}</span>
     {badge}
   </div>;
 }
@@ -292,7 +293,7 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
         <ThinkingStepsContent>{item.items.map((todo, index) => <ThinkingStep key={index} label={todo.text} status={todo.state === 'active' ? 'active' : 'complete'} icon={todo.state === 'done' ? 'check' : todo.state === 'blocked' ? 'lock' : todo.state === 'active' ? 'loader' : 'circle'} isLast={index === item.items.length - 1} />)}</ThinkingStepsContent>
       </ThinkingSteps>;
     case 'interruption':
-      return <Notice icon={<AlertCircle width={16} height={16} strokeWidth={1.5} />} title={item.title} detail={item.detail} badge={item.recovered ? <Badge variant="dot" color="green">recovered</Badge> : item.reason === 'machine' ? undefined : <Badge variant="dot" color="red">{item.reason}</Badge>} />;
+      return <Notice icon={<AlertCircle width={16} height={16} strokeWidth={1.5} />} title={item.title} detail={item.detail} body={item.body} badge={item.recovered ? <Badge variant="dot" color="green">recovered</Badge> : item.reason === 'machine' || item.reason === 'event' ? undefined : <Badge variant="dot" color="red">{item.reason}</Badge>} />;
     case 'preview':
       return <Notice icon={<Link03 width={16} height={16} strokeWidth={1.5} />} title={item.label} detail={`${item.serviceName} · ${item.status}`} badge={item.route ? <Button variant="tertiary" size="compact" asChild><a href={item.route}>Open preview</a></Button> : undefined} />;
     case 'reference':

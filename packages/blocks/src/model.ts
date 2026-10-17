@@ -80,9 +80,13 @@ export const todoBlockSchema = base.extend({
 
 export const interruptionBlockSchema = base.extend({
   type: z.literal('interruption'),
-  reason: z.enum(['aborted', 'compacted', 'replaced', 'connection-lost', 'rule', 'machine']),
+  /** `event`: a subagent's reply, a finished background command, an exited process or a ready machine, delivered to the
+   * agent on someone else's behalf; `machine` also carries GitSpace's own notices to the agent. */
+  reason: z.enum(['aborted', 'compacted', 'replaced', 'connection-lost', 'rule', 'machine', 'event']),
   title: z.string(),
   detail: z.string().optional(),
+  /** The whole message when `detail` shows only its start. */
+  body: z.string().optional(),
   recovered: z.boolean().optional(),
 });
 

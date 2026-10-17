@@ -54,7 +54,7 @@ test('idle event delivery wakes inference with visible durable sender labels and
     await f.lifecycle.deliver(event);
     await f.root.waitForIdle(context);
     expect(f.seen).toHaveLength(1);
-    expect(f.seen[0]).toContain('Message from Reviewer (child-1)');
+    expect(f.seen[0]).toContain('source=\\"Reviewer (child-1)\\"');
     const entries = await f.root.entries({}, 100, undefined, context);
     expect(entries.items.filter(entry => entry.kind === 'gitspace.agent-message').map(entry => entry.data)).toEqual([{ requestId: 'message-1', text: 'Boundary checked', sender: { id: 'child-1', name: 'Reviewer' } }]);
     expect(f.wakeCount()).toBe(1);
@@ -74,6 +74,27 @@ test('events delivered during a run that ends without an answer reach the agent 
     await until(() => f.seen.length === 2);
     expect(f.seen[1]).toContain('Background command job:2 completed');
     await f.root.abort(context);
+  } finally { await f.harness.close(context); }
+}, 5000);
+
+test('events that pile up while the agent is busy reach it together as one message', async () => {
+  const f = await fixture(new MemoryStorage(), true);
+  try {
+    const first: ConversationEvent = { conversationId: String(f.root.id), requestId: 'job-1', kind: 'command-completed', text: 'job:1 completed' };
+    await f.lifecycle.deliver(first);
+    await until(() => f.seen.length === 1);
+    await f.lifecycle.deliver({ ...first, requestId: 'job-2', text: 'job:2 completed' });
+    await f.lifecycle.deliver({ conversationId: String(f.root.id), requestId: 'reply-1', kind: 'agent-message', sender: { id: 'child-1', name: 'Reviewer' }, text: 'No findings' });
+    await f.root.abort(context);
+    await f.root.waitForIdle(context);
+    await f.lifecycle.recover();
+    await until(() => f.seen.length === 2);
+    expect(f.seen[1]).toContain('job:2 completed');
+    expect(f.seen[1]).toContain('source=\\"Reviewer (child-1)\\"');
+    await f.root.abort(context);
+    await f.root.waitForIdle(context);
+    await f.lifecycle.recover();
+    expect(f.seen).toHaveLength(2);
   } finally { await f.harness.close(context); }
 }, 5000);
 
@@ -127,7 +148,7 @@ test('Stop aborts three actual running child conversations and persists the latc
     await reopened.lifecycle.recover();
     await reopened.harness.waitForIdle(context);
     expect(reopened.seen.join('\n')).toContain('Background command finished after Stop');
-    expect(reopened.seen.join('\n')).toContain('Message from One');
+    expect(reopened.seen.join('\n')).toContain('source=\\"One');
     expect(reopened.seen.join('\n')).toContain('Queued child followup');
     for (const id of children) expect((await reopened.harness.snapshot(ConversationLifecycleDoc, id, context))?.stopped).toBe(false);
   } finally { await reopened.harness.close(context); }

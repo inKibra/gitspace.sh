@@ -36,7 +36,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const models: Models = { ...createModels(), getModels: provider => available.filter(model => provider === undefined || model.provider === provider), getAvailable: async () => available, getModel: (_provider, id) => ({ ...model, id }), streamSimple(selected, input, options) {
     seen.push(JSON.stringify({ model: selected.id, system: input.systemPrompt, messages: input.messages }));
     requests.push({ model: selected.id, reasoning: options?.reasoning });
-    if (JSON.stringify(input.messages).includes('Message from BackgroundReviewer')) backgroundReceived.resolve();
+    if (JSON.stringify(input.messages).includes('source=\\"BackgroundReviewer')) backgroundReceived.resolve();
     const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: selected.id, stopReason: 'stop', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(reply); return stream;
   } };
@@ -270,7 +270,7 @@ test('children address parent and siblings by name or id and reject unrelated co
     await f.root.waitForIdle(context);
     // Queued events reach an idle parent one wake at a time (the alarm in production); drive the wakes here.
     for (let attempt = 0; attempt < 5 && !f.seen.join('\n').includes('Parent result'); attempt++) { await f.lifecycle.recover(); await f.root.waitForIdle(context); }
-    expect(f.seen.join('\n')).toContain('Message from First');
+    expect(f.seen.join('\n')).toContain('source=\\"First');
     expect(f.seen.join('\n')).toContain('Named sibling message');
     expect(f.seen.join('\n')).toContain('Parent result');
     const stranger = await f.harness.createConversation({ ownership: { kind: 'ownerless' } }, context);
@@ -294,7 +294,7 @@ test('a foreground child\'s answer reaches an idle parent once', async () => {
     await f.spawned({ op: 'spawn', role: 'review', name: 'ForegroundReviewer', task: 'Inspect' });
     await f.root.waitForIdle(context);
     // An idle parent gets the answer as a message (in a turn, agents wait returns it instead), and only once.
-    expect(f.seen.join('\n').split('Message from ForegroundReviewer').length - 1).toBeGreaterThanOrEqual(1);
+    expect(f.seen.join('\n').split('kind=\\"agent-message\\" source=\\"ForegroundReviewer').length - 1).toBeGreaterThanOrEqual(1);
     const latest = f.seen.at(-1)!;
     expect(latest.split('ForegroundReviewer replied:\\nComplete.').length - 1).toBe(1);
     const waited = await f.call({ op: 'wait', timeoutMs: 50 });

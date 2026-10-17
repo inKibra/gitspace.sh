@@ -2,6 +2,7 @@ import { providerErrorText } from './provider-error.js';
 import type { AskBlock, MessageImage, RichContentBlock, ToolCallBlock, TransportBlock, TurnBlock } from './model.js';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
+import { parseConversationEvents } from './conversation-events.js';
 
 export interface TranscriptEventInput {
   sessionId: string;
@@ -389,6 +390,18 @@ export class TranscriptProjector {
         const text = contentText(message.content);
         const images = contentImages(message.content);
         if (!text && images.length === 0) return;
+        // Messages delivered for subagents, jobs, processes and machines start the agent's turn but are not the user's.
+        const events = images.length === 0 ? parseConversationEvents(text) : null;
+        if (events) {
+          if (this.#current?.hasContent) this.#commit('done');
+          const turn = this.#ensureTurn(event);
+          events.forEach((note, index) => {
+            const lines = note.text.split('\n');
+            const detail = lines.slice(0, 2).join('\n').slice(0, 240);
+            this.#write({ id: `${turn.id}:event:${event.ordinal}:${index}`, type: 'interruption', reason: 'event', title: note.source, detail, ...(detail.length < note.text.length ? { body: note.text } : {}) });
+          });
+          return;
+        }
         // Saved transcripts omit turn markers: the next user opens a new turn.
         if (this.#current?.hasContent) this.#commit('done');
         const turn = this.#ensureTurn(event);
@@ -397,7 +410,7 @@ export class TranscriptProjector {
       }
       const turn = this.#ensureTurn(event);
       if (message.role === 'custom' && message.customType === 'gitspace.machine-notice' && message.display === true) {
-        this.#write({ id: `${turn.id}:machine:${event.ordinal}`, type: 'interruption', reason: 'machine', title: 'Machine', detail: contentText(message.content) });
+        this.#write({ id: `${turn.id}:machine:${event.ordinal}`, type: 'interruption', reason: 'machine', title: typeof message.title === 'string' ? message.title : 'Machine', detail: contentText(message.content) });
         return;
       }
       if (message.role === 'custom' && message.customType === 'gitspace-instructions-changed' && message.display === true) {

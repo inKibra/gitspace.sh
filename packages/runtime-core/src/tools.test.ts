@@ -1,4 +1,5 @@
 import { expect, test } from 'vitest';
+import { ConversationLifecycleDoc } from './conversation-lifecycle.js';
 import { z } from 'zod';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
@@ -239,11 +240,14 @@ for (const mode of ['settled', 'timeout', 'cancelled'] as const) test(`bash wait
       expect(finished).toBe(false);
       if (mode === 'settled') await api.commit(async tx => {
         (await tx.doc(DurableJobsDoc, api.conversationId)).records.command.observation = RuntimeJobObservationSchema.parse({ status: 'not-started', job: acceptance.job, reason: 'cancelled', completedAt: new Date().toISOString() });
+        // The job task delivers its completion as it settles; the wait that returns it makes that message redundant.
+        (await tx.doc(ConversationLifecycleDoc, api.conversationId)).events.push({ event: { conversationId: String(api.conversationId), requestId: 'job-completion:waiting-command', kind: 'command-completed', text: 'did not start' }, delivered: false, consumed: false });
       }, context);
       if (mode === 'cancelled') {
         controller.abort(interrupted);
         await expect(pending).rejects.toThrow('Cancelled bounded command wait');
       } else expect(RuntimeJobObservationSchema.parse(await pending).status).toBe(mode === 'settled' ? 'not-started' : 'accepted');
+      if (mode === 'settled') expect((await api.snapshot(ConversationLifecycleDoc, api.conversationId, context))?.events).toMatchObject([{ consumed: true, delivered: false }]);
       return { content: [{ type: 'text', text: mode }] };
     },
   });
