@@ -1,5 +1,5 @@
+import { timeoutSignal } from './timeout-signal.js';
 import { mkdir, chmod } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -268,7 +268,7 @@ export async function createMachineExecutor(options: {
         trustedKey = options.cloud.call('runtime.browser.authority', {
           projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, machineId: options.machineId,
           attachmentId: dispatch.attachmentId, generation: dispatch.generation,
-        }, RuntimeBrowserPublicKeySchema, AbortSignal.any([stopping.signal, AbortSignal.timeout(10_000)]))
+        }, RuntimeBrowserPublicKeySchema, AbortSignal.any([stopping.signal, timeoutSignal(10_000, 'The cloud did not send the browser authority key within 10 seconds')]))
           .then(result => crypto.subtle.importKey('raw', browserUnbase64(result.publicKey), 'Ed25519', false, ['verify']));
         trustedBrowserKeys.set(keyId, trustedKey);
         void trustedKey.catch(() => { if (trustedBrowserKeys.get(keyId) === trustedKey) trustedBrowserKeys.delete(keyId); });
@@ -399,7 +399,7 @@ export async function createMachineExecutor(options: {
     const { activeExecutions, materializedCommit: _materialized, ...fields } = observation;
     const observed = await options.cloud.call('runtime.heartbeat', RuntimeHeartbeatInputSchema.parse({
       ...fields, executionObservation: { activeExecutions, observedAt: new Date().toISOString(), materializedCommit },
-    }), RuntimeAttachmentReadyResultSchema, AbortSignal.any([stopping.signal, AbortSignal.timeout(15_000)]));
+    }), RuntimeAttachmentReadyResultSchema, AbortSignal.any([stopping.signal, timeoutSignal(15_000, 'The cloud did not confirm the checkout was ready within 15 seconds')]));
     entry.sent = fingerprint;
     const current = journal.attachment(attachmentId);
     if (current?.attachment.generation !== local.attachment.generation) return;
@@ -497,7 +497,7 @@ export async function createMachineExecutor(options: {
     const canonicalPath = canonicalPathOf(attachment);
     const source = assignment.source;
     const sourceCheckpoint = source?.checkpoint ?? assignment.checkpoint;
-    const signal = AbortSignal.any([stopping.signal, AbortSignal.timeout(30 * 60_000)]);
+    const signal = AbortSignal.any([stopping.signal, timeoutSignal(30 * 60_000, 'Preparing the checkout took longer than 30 minutes')]);
     const deadlineAt = new Date(Date.now() + 30 * 60_000).toISOString();
     const grant: LocalAttachment = { ...assignment.grant, rootPath: canonicalPath, prerequisitesComplete: false };
     const env = source?.remote ? credentialHelper.environment(grant, source.remote) : {};

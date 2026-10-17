@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 import { hydrateGitLfs } from '../src/git-lfs.js';
+import * as timeouts from '../src/timeout-signal.js';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -77,7 +78,7 @@ it('removes the partial cache file when the source fails after a chunk', async (
 
 it('cancels a stalled body on abort and removes the in-progress temporary file', async () => {
   const abort = new AbortController();
-  const timeout = spyOn(AbortSignal, 'timeout').mockReturnValue(abort.signal);
+  const timeout = spyOn(timeouts, 'timeoutSignal').mockReturnValue(abort.signal);
   const stalled = Promise.withResolvers<void>();
   let pulls = 0, cancelled = false;
   const f = fixture(new ReadableStream<Uint8Array>({

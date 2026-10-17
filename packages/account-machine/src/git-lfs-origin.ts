@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { confirmGitLfsObjects, downloadGitLfsObject, type GitLfsConfirmedObject, type GitLfsObject } from '@gitspace/protocol-workspace';
 import { createHash } from 'node:crypto';
 import { originLfsInventory } from './git-lfs-inventory.js';
+import { timeoutSignal } from './timeout-signal.js';
 
 type Git = (root: string, args: string[], env?: Record<string, string>, input?: string | Uint8Array) => Promise<Uint8Array>;
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes).trim();
@@ -48,7 +49,8 @@ export async function downloadQueryObject(root: string, endpoint: string, object
   const url = new URL(endpoint);
   const headers = new Headers();
   await endpointHeaders(root, url, headers, git, environment);
-  const bytes = await downloadGitLfsObject({ endpoint: url.href, object, headers, signal: AbortSignal.timeout(10_000) });
+  // Videos and archives are tens of megabytes: allow at least 1 MB/s, never less than 30 seconds.
+  const bytes = await downloadGitLfsObject({ endpoint: url.href, object, headers, signal: timeoutSignal(Math.max(30_000, object.size / 1_000), `Downloading Git LFS object ${object.oid} (${object.size} bytes) from the origin took too long`) });
   if (!bytes) throw new Error('Origin LFS download unavailable');
   return bytes;
 }
@@ -119,7 +121,7 @@ export async function originConfirmation(root: string, head: string | null, git:
     const operation = (confirmations.get(root) ?? Promise.resolve()).then(async () => {
       const inventory = await originLfsInventory(root, identity, git);
       const missing = objects.filter(object => inventory.attempted.get(object.oid)?.size !== object.size);
-      const fresh = await confirmGitLfsObjects({ endpoint: endpoint.href, objects: missing, headers, signal: AbortSignal.timeout(10_000) });
+      const fresh = await confirmGitLfsObjects({ endpoint: endpoint.href, objects: missing, headers, signal: timeoutSignal(30_000, `The origin's Git LFS server did not confirm ${missing.length} objects within 30 seconds`) });
       for (const object of missing) inventory.attempted.set(object.oid, object);
       for (const object of fresh) inventory.confirmed.set(object.oid, object);
       if (missing.length) await inventory.save();
