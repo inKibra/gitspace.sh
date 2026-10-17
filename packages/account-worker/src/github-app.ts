@@ -2,12 +2,13 @@ import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import {
-  GitHubAppOwnerSchema, GitHubLoginSchema, GitHubRepositoryNameSchema, GitHubStateSchema,
-  type GitHubAppManifestForm, type GitHubAppOwner, type GitHubState,
+  GitHubAppOwnerSchema, GitHubLoginSchema, GitHubRepositoryNameSchema, GitHubStateSchema, githubRepositoryOf,
+  type GitHubAppManifestForm, type GitHubAppOwner, type GitHubRepositoryAccess, type GitHubRepositoryToken, type GitHubState,
 } from '@gitspace/protocol/github';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { GitHubApiError, base64url, githubRequest } from './github-api.js';
 import { notifyBrowsers } from './live-notices.js';
+import { notifyMachines } from './machine-notices.js';
 
 const STATE_TTL_MS = 15 * 60_000;
 /** How long an installation GitSpace did not start may stay: its setup callback can still claim it meanwhile. */
@@ -25,7 +26,6 @@ const DEFAULT_PERMISSIONS: Record<string, 'read' | 'write'> = {
 /** Installation events reach every App without subscribing, so they are not listed. */
 const DEFAULT_EVENTS = ['pull_request', 'issue_comment', 'pull_request_review_comment', 'issues', 'push', 'check_suite'];
 /** GitHub remotes as projects record them: https, scp-style SSH and ssh:// URLs, with or without `.git`. */
-const GITHUB_REMOTE = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/iu;
 
 const GitHubAccountPayloadSchema = z.object({ login: GitHubLoginSchema, type: z.string() });
 const ManifestConversionSchema = z.object({
@@ -55,7 +55,13 @@ const DeliveryPayloadSchema = z.object({
   action: z.string().max(100).optional(),
   installation: z.object({ id: z.number().int().positive() }).optional(),
   repository: z.object({ full_name: z.string().max(200) }).optional(),
+  /** `push`: the pushed ref, its new head, and whether the push deleted it. */
+  ref: z.string().max(1_024).optional(),
+  after: z.string().max(100).optional(),
+  deleted: z.boolean().optional(),
 });
+/** A commit id as a push reports a branch's new head. */
+const PushedHeadSchema = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u);
 type DeliveryPayload = z.infer<typeof DeliveryPayloadSchema>;
 const SetupActionSchema = z.enum(['install', 'update', 'request']);
 type SetupAction = z.infer<typeof SetupActionSchema>;
@@ -360,7 +366,7 @@ export class GitHubAppDO extends DurableObject<Env> {
     if (inserted.length === 0) return;
     let outcome: string;
     try {
-      outcome = payload ? await this.deliver(event, payload.action ?? null, installationId) : 'dropped: unreadable payload';
+      outcome = payload ? await this.deliver(event, payload) : 'dropped: unreadable payload';
     } catch (error) {
       outcome = `failed: ${error instanceof Error ? error.message : String(error)}`;
       console.error(JSON.stringify({ event: 'github_delivery_failed', deliveryId, githubEvent: event, message: outcome }));
@@ -393,6 +399,28 @@ export class GitHubAppDO extends DurableObject<Env> {
     await this.armAlarm();
   }
 
+  /** The installation covering a repository (`owner/name`, any case), or null. A covered repository is reached only
+   * with installation tokens; the account SSH key serves only repositories no installation covers. */
+  coverage(repository: string): number | null {
+    return this.ctx.storage.sql.exec<{ installation_id: number }>(
+      'SELECT installation_id FROM installation_repositories WHERE lower(full_name) = lower(?) ORDER BY installation_id LIMIT 1', repository,
+    ).toArray()[0]?.installation_id ?? null;
+  }
+
+  /** A token for one covered repository, narrowed to it and to reading or writing its contents (and workflow files). */
+  async repositoryToken(repository: string, access: GitHubRepositoryAccess): Promise<GitHubRepositoryToken> {
+    const installationId = this.coverage(repository);
+    if (installationId === null) throw new Error(`No GitHub App installation covers ${repository}`);
+    const jwt = await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).githubAppJwt();
+    const name = repository.slice(repository.indexOf('/') + 1);
+    const permissions: Record<string, string> = access === 'write' ? { contents: 'write', workflows: 'write', metadata: 'read' } : { contents: 'read', metadata: 'read' };
+    const issued = await githubRequest(`/app/installations/${installationId}/access_tokens`, {
+      method: 'POST', token: jwt, body: { repositories: [name], permissions },
+      schema: z.object({ token: z.string().min(1), expires_at: z.string().datetime() }),
+    });
+    return { token: issued.token, expiresAt: issued.expires_at };
+  }
+
   /** Stores a key generated on GitHub once the vault confirmed GitHub accepts it for this App. */
   async rotateKey(privateKey: string): Promise<GitHubState> {
     if (!this.app()) throw new Error('This account has no GitHub App');
@@ -402,7 +430,9 @@ export class GitHubAppDO extends DurableObject<Env> {
     return this.state();
   }
 
-  private async deliver(event: string, action: string | null, installationId: number | null): Promise<string> {
+  private async deliver(event: string, payload: DeliveryPayload): Promise<string> {
+    const action = payload.action ?? null;
+    const installationId = payload.installation?.id ?? null;
     if (installationId === null) return 'recorded';
     const claimed = this.installation(installationId) !== undefined;
     const unclaimed = this.ctx.storage.sql.exec('SELECT 1 FROM unclaimed_installations WHERE installation_id = ?', installationId).toArray().length > 0;
@@ -420,6 +450,7 @@ export class GitHubAppDO extends DurableObject<Env> {
       return 'installation removed';
     }
     if (!claimed) return 'recorded: installation not started from GitSpace';
+    if (event === 'push') return this.recordPush(payload);
     if (event === 'installation_repositories') {
       await this.syncInstallation(installationId, false);
       return 'repositories refreshed';
@@ -429,6 +460,23 @@ export class GitHubAppDO extends DurableObject<Env> {
       return 'installation refreshed';
     }
     return event === 'installation' && action === 'suspend' ? 'installation suspended on GitHub' : 'recorded';
+  }
+
+  /** A push to a branch moves that branch's origin head in every project whose remote is the repository (several may
+   * share one); a push to any other ref is only recorded. */
+  private async recordPush(payload: DeliveryPayload): Promise<string> {
+    const branch = payload.ref?.startsWith('refs/heads/') ? payload.ref.slice('refs/heads/'.length) : '';
+    const repository = payload.repository?.full_name.toLowerCase();
+    if (!branch || !repository) return 'recorded';
+    const pushed = PushedHeadSchema.safeParse(payload.after);
+    if (!payload.deleted && !pushed.success) return 'dropped: push without a head commit';
+    const head = payload.deleted || !pushed.success ? null : pushed.data;
+    const projects = (await this.repositoryProjects()).filter((project) => project.repository === repository);
+    const results = await Promise.allSettled(projects.map((project) =>
+      this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${project.id}`).recordRemoteHeads([{ branch, head }])));
+    const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : []);
+    const moved = `${branch} → ${head === null ? 'deleted' : head.slice(0, 7)} for ${projects.length} ${projects.length === 1 ? 'project' : 'projects'}`;
+    return failures.length === 0 ? moved : `${moved}; ${failures.length} failed: ${failures[0]}`;
   }
 
   /** Reads the installation and its repositories from GitHub and stores them. `claim` records a new installation;
@@ -478,8 +526,8 @@ export class GitHubAppDO extends DurableObject<Env> {
   private async repositoryProjects(): Promise<RepositoryProject[]> {
     const projects = await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active');
     return projects.flatMap((project) => {
-      const match = project.repositoryReference === null ? null : GITHUB_REMOTE.exec(project.repositoryReference.trim());
-      return match?.[1] ? [{ id: project.id, name: project.name, repository: match[1].toLowerCase() }] : [];
+      const repository = project.repositoryReference === null ? null : githubRepositoryOf(project.repositoryReference);
+      return repository ? [{ id: project.id, name: project.name, repository: repository.toLowerCase() }] : [];
     });
   }
 
@@ -515,6 +563,8 @@ export class GitHubAppDO extends DurableObject<Env> {
       this.ctx.waitUntil(this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).runtimeProjectNotice({ projectId, workspaceId: projectId }, text)
         .catch((error: unknown) => console.error('GitHub link notice was not sent', { projectId, error })));
     }
+    // Machines re-apply each checkout's origin route (installation tokens or the SSH key) as they do Git settings.
+    if (notices.length > 0) this.ctx.waitUntil(notifyMachines(this.env, 'all', ['settings']));
   }
 
   private app(): AppRow | undefined {

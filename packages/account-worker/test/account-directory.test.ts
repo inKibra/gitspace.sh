@@ -14,8 +14,8 @@ import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
 afterEach(() => vi.restoreAllMocks());
 
 const timestamp = '2026-09-01T00:00:00.000Z';
-const project: CloudProjectSummary = { id: 'directory-project', name: 'Directory', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, archivedAt: null, updatedAt: timestamp, role: null, source: null };
-const workspace: CloudWorkspaceDefinition = { id: 'directory-space', projectId: project.id, kind: 'worktree', name: 'Directory space', branch: 'feature', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, revision: 1, archivedAt: null, createdAt: timestamp, updatedAt: timestamp };
+const project: CloudProjectSummary = { id: 'directory-project', name: 'Directory', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, remote: null, archivedAt: null, updatedAt: timestamp, role: null, source: null };
+const workspace: CloudWorkspaceDefinition = { id: 'directory-space', projectId: project.id, kind: 'worktree', name: 'Directory space', branch: 'feature', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, revision: 1, remote: null, archivedAt: null, createdAt: timestamp, updatedAt: timestamp };
 const source: DirectorySource = { source: 'project', project, workspaces: [workspace] };
 const machine = { id: 'machine-a', label: 'Machine A', state: 'online' as const, desiredState: 'online' as const, kind: 'physical' as const, provider: 'physical' as const, rpcEndpoint: '/rpc', notes: '', lifecycleRevision: 1, operationId: null, error: null };
 

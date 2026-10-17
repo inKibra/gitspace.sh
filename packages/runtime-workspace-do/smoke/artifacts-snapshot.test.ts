@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import git from 'isomorphic-git';
 import fs from 'node:fs';
-import { readAdvertisedRefs, writeArtifactsSnapshot, type ArtifactsFetch, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
+import { readAdvertisedRefs, writeArtifactsSnapshot, type ArtifactsFetch, type GitHttpAuth, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
 import { ArtifactsCodeStore } from '../src/artifacts.js';
 import { planSnapshotMerge } from '../src/artifacts-merge.js';
 
@@ -800,16 +800,16 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/pull/9/head', value: pullHead });
     await git.annotatedTag({ fs, dir: source.dir, ref: 'release-v2', object: tagHead, tagger: author, message: 'release\n' });
     const tagObject = await git.resolveRef({ fs, dir: source.dir, ref: 'refs/tags/release-v2' });
-    const advertisedTag = await readAdvertisedRefs({ remote: 'https://source.invalid/repo.git', token: null, refPrefix: 'refs/tags/release-v2' });
+    const advertisedTag = await readAdvertisedRefs({ remote: 'https://source.invalid/repo.git', auth: null, refPrefix: 'refs/tags/release-v2' });
     expect(advertisedTag.get('refs/tags/release-v2')).toBe(tagObject);
     expect(advertisedTag.get('refs/tags/release-v2^{}')).toBe(tagHead);
-    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/develop')).toBe(head);
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/develop', null)).toBe(head);
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(head);
-    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/tags/release-v2')).toBe(tagHead);
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/tags/release-v2', null)).toBe(tagHead);
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/tags/release-v2' })).toBe(tagObject);
     expect((await git.readTag({ fs, dir: target.dir, oid: tagObject })).tag.object).toBe(tagHead);
     expect((await git.readCommit({ fs, dir: target.dir, oid: tagHead })).commit.parent).toEqual([head]);
-    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/pull/9/head')).toBe(pullHead);
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/pull/9/head', null)).toBe(pullHead);
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/pull/9/head' })).toBe(pullHead);
     expect((await git.readCommit({ fs, dir: target.dir, oid: pullHead })).commit.parent).toEqual([head]);
     expect(new TextDecoder().decode((await git.readBlob({ fs, dir: target.dir, oid: head, filepath: 'new-script' })).blob)).toBe('new public ref content');
@@ -820,15 +820,15 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/develop', value: next, force: true });
     const fetched = originRequests;
     originAvailable = false;
-    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/develop')).toBe(head);
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/develop', null)).toBe(head);
     expect(originRequests).toBe(fetched);
     originAvailable = true;
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/missing-longer', value: head });
-    await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/missing')).rejects.toThrow('not advertised by the public origin');
+    await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/missing', null)).rejects.toThrow('not advertised by the public origin');
     expect(await git.listBranches({ fs, dir: target.dir })).not.toContain('missing');
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/racing', value: next });
     concurrentBranch = 'refs/heads/racing';
-    await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', concurrentBranch)).rejects.toThrow('ref has advanced');
+    await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', concurrentBranch, null)).rejects.toThrow('ref has advanced');
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/racing' })).toBe(target.previous.worktreeCommit);
     await code.copyCommit('source', 'target', 'refs/heads/develop', next, head);
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/develop' })).toBe(next);
@@ -840,7 +840,7 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     await git.writeRef({ fs, dir: target.dir, ref: 'refs/heads/main', value: privateHead, force: true });
     const unshared = await git.writeCommit({ fs, dir: source.dir, commit: { tree, parent: [next], author, committer: author, message: 'unshared commit\n' } });
     await git.writeRef({ fs, dir: source.dir, ref: 'refs/heads/no-common-have', value: unshared });
-    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/no-common-have')).toBe(unshared);
+    expect(await code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/no-common-have', null)).toBe(unshared);
     expect(await git.resolveRef({ fs, dir: target.dir, ref: 'refs/heads/no-common-have' })).toBe(unshared);
     expect((await git.readCommit({ fs, dir: target.dir, oid: unshared })).commit.parent).toEqual([next]);
     const integrity = Bun.spawnSync(['git', '-C', target.dir, 'fsck', '--strict', '--no-dangling']);
@@ -848,11 +848,91 @@ for (const protocolVersion of [0, 2] as const) test(`cloud transfer imports publ
     if (protocolVersion === 0) {
       await addUnrelatedRefs();
       const before = originRequests;
-      await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/missing')).rejects.toThrow('Byte stream exceeds size limit');
+      await expect(code.importSourceRef('test', 'https://source.invalid/repo.git', 'refs/heads/missing', null)).rejects.toThrow('Byte stream exceeds size limit');
       expect(originRequests).toBe(before + 1);
       expect(await git.listBranches({ fs, dir: target.dir })).not.toContain('missing');
     }
   } finally { request.mockRestore(); await source.close(); await target.close(); }
+}, 15_000);
+
+for (const protocolVersion of [0, 2] as const) test(`a covered origin's base branch streams into a new project repository with Basic credentials on every origin request over Git v${protocolVersion}`, async () => {
+  const origin = await fixture();
+  const root = await mkdtemp(join(tmpdir(), 'covered-import-'));
+  const project = join(root, 'project.git');
+  expect(Bun.spawnSync(['git', 'init', '--bare', '--initial-branch=main', project]).exitCode).toBe(0);
+  const basic = `Basic ${btoa('x-access-token:ghs_installation')}`;
+  const originRequests: string[] = [];
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    const headers = new Headers(init?.headers);
+    const dir = url.hostname === 'github.invalid' ? origin.dir : url.hostname === 'artifacts.invalid' ? project : null;
+    if (!dir) throw new Error('Unexpected network destination');
+    if (dir === origin.dir) originRequests.push(`${url.pathname.split('/').at(-1)} ${headers.get('authorization')}`);
+    else expect(headers.get('authorization')).toBe('Bearer secret');
+    const advertise = url.pathname.endsWith('/info/refs');
+    const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
+    const child = Bun.spawn(['git', '-c', 'core.bare=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), dir], {
+      stdin: advertise ? 'ignore' : new Response(init?.body).body, stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, GIT_PROTOCOL: protocolVersion === 2 ? headers.get('git-protocol') ?? 'version=0' : 'version=0' },
+    });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    const error = await new Response(child.stderr).text();
+    if (await child.exited !== 0) throw new Error(error);
+    return new Response(advertise && service === 'upload-pack' ? new Blob(['001e# service=git-upload-pack\n0000', bytes]) : bytes);
+  }, { preconnect: fetch.preconnect }));
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected provider operation'); };
+  const info: ArtifactsRepoInfo = { id: 'project-covered', name: 'project-covered', description: null, defaultBranch: 'main', createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false, remote: 'https://artifacts.invalid/project.git' };
+  const created: string[] = [];
+  const readCommit = async (oid: string): Promise<ArtifactsCommitMetadata | null> => {
+    try {
+      const value = (await git.readCommit({ fs, gitdir: project, oid })).commit;
+      return { hash: oid, treeHash: value.tree, parents: value.parent, message: value.message, author: value.author, committer: value.committer, authoredAt: value.author.timestamp, committedAt: value.committer.timestamp };
+    } catch (error) { if (error instanceof git.Errors.NotFoundError) return null; throw error; }
+  };
+  const repo: ArtifactsRepo = {
+    [Symbol.dispose]() {}, listTokens: unsupported, readFile: unsupported, fork: unsupported, readBlob: unsupported, readTree: unsupported,
+    info: async () => info,
+    createToken: async () => ({ id: 'lease', plaintext: 'secret', scope: 'write', expiresAt: '' }),
+    revokeToken: async () => true,
+    readCommit,
+    log: async options => {
+      const result = Bun.spawnSync(['git', '--git-dir', project, 'rev-list', `--max-count=${options?.limit ?? 1}`, `${options?.ref ?? 'HEAD'}^{commit}`]);
+      if (result.exitCode !== 0) return [];
+      return (await Promise.all(new TextDecoder().decode(result.stdout).trim().split('\n').map(readCommit))).filter(commit => commit !== null);
+    },
+  };
+  const code = new ArtifactsCodeStore({
+    list: async () => ({ repos: created.length ? [info] : [], total: created.length }),
+    get: async () => repo,
+    create: async (name, options) => { created.push(`${name} ${options?.setDefaultBranch}`); return { ...info, token: 'initial', tokenExpiresAt: '' }; },
+    import: unsupported, delete: unsupported,
+  });
+  const credentials = async (): Promise<GitHttpAuth> => ({ kind: 'basic', username: 'x-access-token', password: 'ghs_installation' });
+  const remote = 'https://github.invalid/acme/app.git';
+  try {
+    const base = await git.resolveRef({ fs, dir: origin.dir, ref: 'refs/heads/main' });
+    const head = await git.writeCommit({ fs, dir: origin.dir, commit: { tree: origin.tree, parent: [base], author, committer: author, message: 'covered head\n' } });
+    await git.writeRef({ fs, dir: origin.dir, ref: 'refs/heads/main', value: head, force: true });
+    expect(await code.importProject('covered', { url: remote, branch: 'main' }, credentials)).toEqual(info);
+    expect(created).toEqual(['project-covered main']);
+    expect(await git.resolveRef({ fs, gitdir: project, ref: 'refs/heads/main' })).toBe(head);
+    expect(Bun.spawnSync(['git', '--git-dir', project, 'fsck', '--strict', '--no-dangling']).exitCode).toBe(0);
+    // Discovery and the pack request both carry the installation token; nothing reaches the origin anonymously.
+    expect(originRequests).toContain(`refs ${basic}`);
+    expect(originRequests).toContain(`git-upload-pack ${basic}`);
+    expect(originRequests.every(entry => entry.endsWith(` ${basic}`))).toBe(true);
+
+    // Origin heads arrive under the tracking ref; the project's branch never moves while fetching.
+    const later = await git.writeCommit({ fs, dir: origin.dir, commit: { tree: origin.tree, parent: [head], author, committer: author, message: 'later\n' } });
+    await git.writeRef({ fs, dir: origin.dir, ref: 'refs/heads/main', value: later, force: true });
+    expect(await code.fetchOriginBranch('covered', remote, 'main', credentials)).toBe(later);
+    const latest = await git.writeCommit({ fs, dir: origin.dir, commit: { tree: origin.tree, parent: [later], author, committer: author, message: 'latest\n' } });
+    await git.writeRef({ fs, dir: origin.dir, ref: 'refs/heads/main', value: latest, force: true });
+    expect(await code.fetchOriginBranch('covered', remote, 'main', credentials)).toBe(latest);
+    expect(await git.resolveRef({ fs, gitdir: project, ref: 'refs/gitspace/origin/heads/main' })).toBe(latest);
+    expect(await git.resolveRef({ fs, gitdir: project, ref: 'refs/heads/main' })).toBe(head);
+    expect(originRequests.every(entry => entry.endsWith(` ${basic}`))).toBe(true);
+  } finally { request.mockRestore(); await origin.close(); await rm(root, { recursive: true, force: true }); }
 }, 15_000);
 
 for (const protocolVersion of [0, 2] as const) test(`copies a shallow checkpoint graph over Git v${protocolVersion}, edits it in cloud, and cold-clones the unchanged HEAD boundary`, async () => {

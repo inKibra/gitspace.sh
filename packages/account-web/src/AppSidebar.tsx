@@ -4,7 +4,7 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeLfsHeldBack, useLfsTransition } from './LfsTransition.js';
 import { navigateProductUrl, setProductRoute } from './routes.js';
 import type { DeploymentStatusView } from '@gitspace/protocol';
-import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
+import type { CloudWorkspaceDefinition, RemoteBranchState } from '@gitspace/protocol/project-authority';
 import type { IconComponentProps } from '@gitspace/ui';
 import {
   DropdownContent,
@@ -35,7 +35,7 @@ import {
   WorkspaceTile,
   type IconComponent,
 } from '@gitspace/ui';
-import { Archive, Calendar, ChevronRight, Columns03, DotsHorizontal, FolderClosed, FolderPlus, HardDrive, Inbox01, Key01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01 } from '@untitledui/icons';
+import { Archive, ArrowDown, Calendar, ChevronRight, Columns03, DotsHorizontal, FolderClosed, FolderPlus, HardDrive, Inbox01, Key01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01 } from '@untitledui/icons';
 import { createContext, useContext, useState, type Dispatch, type SetStateAction } from 'react';
 import { glyph } from './glyph.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
@@ -130,6 +130,8 @@ export interface SidebarProject {
   id: string;
   name: string;
   lifecycle?: ProjectLifecycleView['lifecycle'];
+  /** The base branch on the origin; null until first checked. */
+  remote?: RemoteBranchState | null;
   base?: ProjectAgentView;
   baseSummary?: SidebarSpaceSummary;
   workspaces: SidebarWorkspace[];
@@ -228,6 +230,11 @@ function LaunchedGlyph() {
   return <span className="ml-1 inline-flex shrink-0 items-center text-muted-foreground" title="GitSpace has a selected release from this workspace" aria-label="GitSpace has a selected release from this workspace"><Rocket02 width={12} height={12} strokeWidth={1.5} /></span>;
 }
 
+/** The origin has commits this branch's copy lacks; quiet beside the name, apart from the status dot and badges. */
+function BehindOriginGlyph({ branch }: { branch: string | null }) {
+  return <span className="ml-1 inline-flex shrink-0 items-center text-muted-foreground" role="img" title={branch ? `Behind origin/${branch}` : 'Behind origin'} aria-label="Behind origin"><ArrowDown width={12} height={12} strokeWidth={1.5} /></span>;
+}
+
 /**
  * Source pill: what this machine runs, or the launch phase while one is in
  * flight. Failures stick until the next launch replaces the track.
@@ -286,13 +293,13 @@ function ProjectRows({ project, collapsed, onCollapse, selected, machines, deplo
     const released = summary?.holder.kind === 'released';
     const suffix = released && !summary?.closedAt;
     return <SpaceSummaryContext.Provider key={workspace.id} value={summary}><SidebarMenuSubItem>
-      <SidebarMenuSubButton className={released ? 'text-muted-foreground' : undefined} render={<button type="button" onClick={() => onSelectWorkspace(workspace)} />} isActive={selected?.projectId === workspace.projectId && selected.workspaceId === workspace.id} icon={SpaceStatusGlyph} title={`${workspace.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${suffix ? ' · released' : ''}`} aria-description={summary?.detail ?? undefined}>{workspace.name}{launchedFrom(deployment, workspace.id) ? <LaunchedGlyph /> : null}{suffix ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuSubButton>
+      <SidebarMenuSubButton className={released ? 'text-muted-foreground' : undefined} render={<button type="button" onClick={() => onSelectWorkspace(workspace)} />} isActive={selected?.projectId === workspace.projectId && selected.workspaceId === workspace.id} icon={SpaceStatusGlyph} title={`${workspace.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${suffix ? ' · released' : ''}`} aria-description={summary?.detail ?? undefined}>{workspace.name}{workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={workspace.branch} /> : null}{launchedFrom(deployment, workspace.id) ? <LaunchedGlyph /> : null}{suffix ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuSubButton>
       <SidebarMenuActions showOnHover><SpaceMenu space={workspace} kind="workspace" runtime={runtime} summary={summary} machines={machines} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onMove={onMove} /></SidebarMenuActions>
     </SidebarMenuSubItem></SpaceSummaryContext.Provider>;
   };
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
-      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
+      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
     </SpaceSummaryContext.Provider>
     {running ? <SidebarMenuBadge title={`${running} ${running === 1 ? 'workspace' : 'workspaces'} last reported working`}>{running}</SidebarMenuBadge> : null}
     <SidebarMenuActions showOnHover={open}>

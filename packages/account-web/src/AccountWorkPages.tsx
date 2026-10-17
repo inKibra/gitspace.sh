@@ -1,4 +1,5 @@
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { rpcClient } from './rpc-client.js';
 import { Badge, Button, Card, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Select, SelectContent, SelectItem, SelectTrigger, TabsSubtle, TabsSubtleItem, Tooltip } from '@gitspace/ui';
 import { Archive, Plus, RefreshCcw01, Trash01, XClose } from '@untitledui/icons';
 import { useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -112,7 +113,7 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
   useLayoutEffect(() => {
     accountSidebar?.({
       view, selected: null, machines: [],
-      projects: projects.map((project) => ({ id: project.id, name: project.name, lifecycle: project.lifecycle, ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [] })),
+      projects: projects.map((project) => ({ id: project.id, name: project.name, lifecycle: project.lifecycle, remote: project.remote, ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [] })),
       onView: (next) => navigateProductUrl(setProductRoute(new URL(window.location.href), next)),
       onSelectProject: (id) => current.current.onOpenProject(id),
       onSelectWorkspace: (workspace) => current.current.onOpenWorkspace(workspace.projectId, workspace.id),
@@ -281,6 +282,7 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
               {project.role !== 'gitspace-source' && project.lifecycle !== 'deleting' && onDeleteProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onDeleteProject(project.id, project.revision))} leadingIcon={glyph(Trash01)}>Delete</Button> : null}
             </div>
           </div>
+          <ProjectOrigin project={project} />
           <CardGroup orientation="inline" border="outlined" separated>
             {open.map((workspace, index) => <Card key={workspace.id} index={index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
               <CardHeader>
@@ -329,6 +331,32 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
     {onCreateProject ? <CreateProjectDialog open={projectDialog} onOpenChange={(open) => { setProjectDialog(open); if (!open) setError(null); }} pending={pending} error={projectDialog ? error : null} onSubmit={(input) => run(() => onCreateProject(input), () => setProjectDialog(false))} /> : null}
     {onCreateWorkspace ? <CreateWorkspaceDialog key={workspaceDialog ?? 'closed'} projectId={workspaceDialog} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setWorkspaceDialog(null); setError(null); } }} pending={pending} error={workspaceDialog ? error : null} onSubmit={(input) => run(() => onCreateWorkspace(input), () => setWorkspaceDialog(null))} /> : null}
   </PageCanvas>;
+}
+
+/** The base branch against its origin: whether GitSpace's copy is behind, when the origin was last checked, Update base
+ * and Check origin. Results arrive through the project list like any other project change. */
+function ProjectOrigin({ project }: { project: ProjectLifecycleView }) {
+  const [pending, setPending] = useState<'update' | 'check' | null>(null);
+  const pendingRef = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  if (project.repositoryReference === null || project.lifecycle === 'deleting') return null;
+  const remote = project.remote;
+  const run = async (action: 'update' | 'check') => {
+    if (pendingRef.current) return;
+    pendingRef.current = true; setPending(action); setError(null);
+    try {
+      const result = action === 'update' ? await rpcClient.project.updateBase({ projectId: project.id }) : await rpcClient.project.remote.refresh({ projectId: project.id });
+      if (result.status === 'error') throw result.error;
+    } catch (failure) { setError(rpcErrorMessage(failure, action === 'update' ? 'Update base' : 'Check origin')); }
+    finally { pendingRef.current = false; setPending(null); }
+  };
+  return <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
+    {remote?.behind ? <Badge size="compact" color="amber">Behind origin</Badge> : null}
+    <span>{remote === null ? 'Origin not checked yet' : remote.head === null ? `origin/${project.baseBranch} does not exist · checked ${new Date(remote.checkedAt).toLocaleString()}` : `origin/${project.baseBranch} checked ${new Date(remote.checkedAt).toLocaleString()}`}</span>
+    {remote?.behind && project.lifecycle === 'active' && project.role !== 'gitspace-source' ? <Button variant="secondary" size="compact" loading={pending === 'update'} disabled={pending !== null} onClick={() => void run('update')}>Update base</Button> : null}
+    <Button variant="ghost" size="compact" loading={pending === 'check'} disabled={pending !== null} onClick={() => void run('check')} leadingIcon={glyph(RefreshCcw01)}>Check origin</Button>
+    {error ? <p role="alert" className="w-full text-caption text-destructive">{error}</p> : null}
+  </div>;
 }
 
 function ProjectBaseBranchSettings({ project, onSetBaseBranch }: { project: ProjectLifecycleView; onSetBaseBranch?: AccountWorkPagesProps['actions']['onSetProjectBaseBranch'] }) {

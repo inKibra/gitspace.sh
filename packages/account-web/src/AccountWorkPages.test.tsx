@@ -19,16 +19,18 @@ vi.mock('./browser-relay-client.js', () => ({
   })),
   updateProjectBrowserSettings: vi.fn(),
 }));
+const rpc = vi.hoisted(() => ({ updateBase: vi.fn(), refresh: vi.fn() }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh } } } }));
 
 const stamp = '2026-09-12T00:00:00.000Z';
 const projects: ProjectLifecycleView[] = [
-  { id: 'alpha', name: 'Alpha', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 4, archivedAt: null, updatedAt: new Date(stamp) },
-  { id: 'beta', name: 'Beta', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 7, archivedAt: null, updatedAt: new Date(stamp) },
+  { id: 'alpha', name: 'Alpha', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 4, remote: null, archivedAt: null, updatedAt: new Date(stamp) },
+  { id: 'beta', name: 'Beta', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 7, remote: null, archivedAt: null, updatedAt: new Date(stamp) },
 ];
 function saved(id: string, projectId: string, phase: CloudWorkspaceDefinition['phase'], options: Partial<SidebarWorkspace> = {}): SidebarWorkspace {
   return {
     id, projectId, name: id, branch: `feature/${id}`, closedAt: null,
-    definition: { id, projectId, name: id, branch: `feature/${id}`, phase, kind: 'worktree', sourceKind: 'base', sourceRef: '', sourceCommit: null, lifecycle: 'active', goalId: null, revision: 1, archivedAt: null, createdAt: stamp, updatedAt: stamp },
+    definition: { id, projectId, name: id, branch: `feature/${id}`, phase, kind: 'worktree', sourceKind: 'base', sourceRef: '', sourceCommit: null, lifecycle: 'active', goalId: null, revision: 1, remote: null, archivedAt: null, createdAt: stamp, updatedAt: stamp },
     summary: { holder: { kind: 'unknown' }, closedAt: null, freshness: 'unknown', detail: 'Holder is offline' },
     ...options,
   };
@@ -150,6 +152,22 @@ it('keeps archived projects out of the active list and restores the chosen archi
   expect(container.querySelector('[aria-label="Open alpha-work"]')).toBeNull();
   await act(() => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Restore')!.click());
   expect(restore).toHaveBeenCalledWith('beta', 7);
+});
+
+it('offers Update base only for a project behind its origin and reports the refusal it gets', async () => {
+  const checkedAt = '2026-10-17T12:00:00.000Z';
+  const tracked: ProjectLifecycleView[] = [
+    { ...projects[0]!, repositoryReference: 'git@github.com:inKibra/alpha.git', remote: { head: 'a'.repeat(40), checkedAt, behind: true } },
+    { ...projects[1]!, repositoryReference: 'git@github.com:inKibra/beta.git', remote: { head: 'b'.repeat(40), checkedAt, behind: false } },
+  ];
+  rpc.updateBase.mockResolvedValueOnce({ status: 'error', error: new Error('Commit or discard the base workspace changes first') });
+  await render('projects', {}, tracked);
+  expect(container.textContent?.match(/Behind origin/gu)).toHaveLength(1);
+  const update = [...container.querySelectorAll('button')].filter((button) => button.textContent === 'Update base');
+  expect(update).toHaveLength(1);
+  await act(async () => { update[0]!.click(); });
+  expect(rpc.updateBase).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha' });
+  await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toBe('Commit or discard the base workspace changes first'));
 });
 
 it('changes a project base branch from Settings at its current revision and keeps the built-in source read-only', async () => {

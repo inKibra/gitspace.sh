@@ -1,9 +1,15 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
-import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, publishSnapshotPack, readCommitPack, readAdvertisedRefs, readShallowCommits, validateSnapshotPath, writeArtifactsSnapshot, type WriteSnapshotInput } from './artifacts-snapshot.js';
+import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, readAdvertisedRefs, readShallowCommits, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
-import type { GitCommitPack, RuntimeGitCheckpoint } from './artifacts-snapshot.js';
+import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
+
+/** How an origin is read: null for a public origin read without credentials, or the credentials of a covered one,
+ * requested only once the origin is actually contacted (issuing them costs a request of their own). */
+export type OriginCredentials = (() => Promise<GitHttpAuth>) | null;
+/** Artifacts write leases outlive a streamed transfer's request. */
+const TRANSFER_LEASE_SECONDS = 900;
 
 const commitSchema = z.string().regex(/^[0-9a-f]{40}$/u);
 const repositorySchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u);
@@ -134,7 +140,7 @@ export class ArtifactsCodeStore {
     const createCheckpointRef = async (target: string) => {
       const info = await repo.info();
       const token = await repo.createToken('write', 60);
-      try { await publishRef({ remote: info.remote, token: token.plaintext, ref: checkpointRef, previous: null, commit: target }); }
+      try { await publishRef({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext }, ref: checkpointRef, previous: null, commit: target }); }
       catch (error) { if (await this.resolveRef(repository, checkpointRef) !== target) throw error; }
       finally { await repo.revokeToken(token.id); }
     };
@@ -184,7 +190,10 @@ export class ArtifactsCodeStore {
       return await repo.info();
     } finally { await disposeArtifactsRepository(repo); }
   }
-  async importProject(projectId: string, source: { url: string; branch?: string }) {
+  /** The project repository with its origin's history. Artifacts' native import reads a public origin and cannot send
+   * credentials, so a covered origin's repository is created empty and its base branch streamed in over authenticated
+   * smart HTTP; an empty repository whose branch never landed (an interrupted import) is filled the same way. */
+  async importProject(projectId: string, source: { url: string; branch?: string }, credentials: OriginCredentials) {
     const name = artifactsProjectRepository(projectId);
     const existing = await this.find(name);
     if (existing) {
@@ -194,11 +203,18 @@ export class ArtifactsCodeStore {
       const base = source.branch === undefined || source.branch === 'HEAD' ? 'HEAD' : `refs/heads/${source.branch}`;
       // An explicitly migrated unborn base is complete without a branch, not a pending machine seed.
       const migratedUnborn = source.branch !== undefined && existing.description?.startsWith(`GitSpace legacy-migrated unborn project ${projectId} (${source.branch}) from sha256:`);
-      if (!migratedUnborn && await this.resolveRef(name, base) === null && (base === 'HEAD' || await this.resolveRef(name, 'HEAD') === null)) throw new ProjectImportRequiresMachineError('pending');
+      if (!migratedUnborn && await this.resolveRef(name, base) === null && (base === 'HEAD' || await this.resolveRef(name, 'HEAD') === null)) {
+        if (credentials === null) throw new ProjectImportRequiresMachineError('pending');
+        await this.importCoveredProject(projectId, source, credentials, true);
+      }
       return this.info(name);
     }
     const url = new URL(source.url);
     if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Project import requires a credential-free HTTPS origin');
+    if (credentials !== null) {
+      await this.importCoveredProject(projectId, source, credentials, false);
+      return this.info(name);
+    }
     const created = await this.binding.import({ source, target: { name } }).catch((error: unknown) => {
       const refusal = ArtifactsImportRefusalSchema.safeParse(error);
       throw refusal.success ? new ProjectImportRequiresMachineError(IMPORT_REFUSAL_REASONS[refusal.data.code]) : error;
@@ -208,6 +224,48 @@ export class ArtifactsCodeStore {
     try {
       await repo.revokeToken(created.token);
       return await repo.info();
+    } finally { await disposeArtifactsRepository(repo); }
+  }
+
+  /** A covered origin's base branch streamed into the project repository, created first unless it `exists`. The
+   * branch is created only from absent, so an interrupted import resumes and a concurrent one cannot overwrite it. */
+  private async importCoveredProject(projectId: string, source: { url: string; branch?: string }, credentials: () => Promise<GitHttpAuth>, exists: boolean) {
+    if (source.branch === undefined || !isSupportedBranchName(source.branch)) throw new Error('A covered origin is imported by its base branch name');
+    const name = artifactsProjectRepository(projectId);
+    const ref = `refs/heads/${source.branch}`;
+    const auth = await credentials();
+    const commit = (await readAdvertisedRefs({ remote: source.url, auth, refPrefix: ref })).get(ref);
+    if (!commit) throw new Error(`The origin has no branch ${source.branch}`);
+    if (!exists) {
+      const created = await this.binding.create(name, { setDefaultBranch: source.branch, readOnly: false, description: `GitSpace authenticated import of project ${projectId} (${source.branch})` })
+        .catch((error: unknown) => {
+          // A concurrent first open created it; the branch transfer below is replayable.
+          if (ArtifactsAlreadyExistsSchema.safeParse(error).success) return null;
+          throw error;
+        });
+      if (created) {
+        const repo = await this.binding.get(name);
+        try { await repo.revokeToken(created.token); }
+        finally { await disposeArtifactsRepository(repo); }
+      }
+    }
+    await this.fetchIntoRepository(name, { remote: source.url, auth }, ref, commit, null);
+  }
+
+  /** Streams `commit` from an origin into a repository ref, negotiating with the repository's recent history qualified
+   * by its shallow boundaries: a machine seed may deliberately omit old history while retaining the original base
+   * commit ID. The ref moves only from `previous` (null: absent), or from whatever it holds for `replace`. */
+  private async fetchIntoRepository(repository: string, origin: { remote: string; auth: GitHttpAuth | null }, ref: string, commit: string, previous: string | null | 'replace'): Promise<void> {
+    const repo = await this.binding.get(repositorySchema.parse(repository));
+    try {
+      const haves = (await repo.log({ limit: 32 })).map(entry => entry.hash);
+      const [info, token] = await Promise.all([repo.info(), repo.createToken('write', TRANSFER_LEASE_SECONDS)]);
+      const auth: GitHttpAuth = { kind: 'bearer', token: token.plaintext };
+      try {
+        const shallow = await readShallowCommits({ remote: info.remote, auth });
+        const from = previous === 'replace' ? (await readAdvertisedRefs({ remote: info.remote, auth, refPrefix: ref })).get(ref) ?? null : previous;
+        await transferCommit({ source: origin, destination: { remote: info.remote, auth }, ref, previous: from, commit, haves, shallow });
+      } finally { await repo.revokeToken(token.id); }
     } finally { await disposeArtifactsRepository(repo); }
   }
 
@@ -291,7 +349,7 @@ export class ArtifactsCodeStore {
     try {
       if (!await repo.readCommit(commit)) throw new Error(`Commit ${commit} is not in repository ${repository}`);
       const [info, token] = await Promise.all([repo.info(), repo.createToken('write', 60)]);
-      try { await publishRef({ remote: info.remote, token: token.plaintext, ref: `refs/heads/${branch}`, previous: current, commit }); }
+      try { await publishRef({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext }, ref: `refs/heads/${branch}`, previous: current, commit }); }
       finally { await repo.revokeToken(token.id); }
     } finally { await disposeArtifactsRepository(repo); }
   }
@@ -303,21 +361,21 @@ export class ArtifactsCodeStore {
     const target = await this.binding.get(repositorySchema.parse(destination));
     try {
       const info = await target.info();
-      const token = await target.createToken('write', 60);
+      const token = await target.createToken('write', TRANSFER_LEASE_SECONDS);
+      const auth: GitHttpAuth = { kind: 'bearer', token: token.plaintext };
       try {
         if (await target.readCommit(commit)) {
-          await publishRef({ remote: info.remote, token: token.plaintext, ref, previous, commit });
+          await publishRef({ remote: info.remote, auth, ref, previous, commit });
         } else {
           const origin = await this.binding.get(repositorySchema.parse(source));
           try {
             if (!await origin.readCommit(commit)) throw new Error(`Commit ${commit} is not in repository ${source}`);
             const sourceInfo = await origin.info();
-            const readToken = await origin.createToken('read', 60);
+            const readToken = await origin.createToken('read', TRANSFER_LEASE_SECONDS);
             try {
               const haves = (await target.log({ ...(previous === null ? {} : { ref: previous }), limit: 32 })).map(entry => entry.hash);
-              const shallow = await readShallowCommits({ remote: info.remote, token: token.plaintext });
-              const transfer = await readCommitPack({ remote: sourceInfo.remote, token: readToken.plaintext, commit, haves, shallow });
-              await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: previous ?? '0'.repeat(40), commit, ...transfer });
+              const shallow = await readShallowCommits({ remote: info.remote, auth });
+              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, haves, shallow });
             } finally { await origin.revokeToken(readToken.id); }
           } finally { await disposeArtifactsRepository(origin); }
         }
@@ -325,9 +383,9 @@ export class ArtifactsCodeStore {
     } finally { await disposeArtifactsRepository(target); }
   }
 
-  /** Fetch a public origin ref omitted by the initial import. Keep its objects and exact ref in
-   * Artifacts so creation retries no longer depend on the origin. Origin redirects are refused. */
-  async importSourceRef(projectId: string, url: string, ref: string): Promise<string> {
+  /** Fetch an origin ref omitted by the initial import. Keep its objects and exact ref in Artifacts so creation retries
+   * no longer depend on the origin. Origin redirects are refused. */
+  async importSourceRef(projectId: string, url: string, ref: string, credentials: OriginCredentials): Promise<string> {
     const origin = new URL(url);
     if (origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash) throw new Error('Source import requires a credential-free HTTPS repository root without redirects');
     const branch = ref.startsWith('refs/heads/') && isSupportedBranchName(ref.slice('refs/heads/'.length));
@@ -335,29 +393,30 @@ export class ArtifactsCodeStore {
     const repository = artifactsProjectRepository(projectId);
     const existing = branch ? await this.resolveRef(repository, ref) : await this.resolveAdvertisedRef(repository, ref);
     if (existing !== null) return existing;
-    const advertised = await readAdvertisedRefs({ remote: origin.href, token: null, refPrefix: ref });
+    const auth = credentials === null ? null : await credentials();
+    const advertised = await readAdvertisedRefs({ remote: origin.href, auth, refPrefix: ref });
     const object = advertised.get(ref);
-    if (!object) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
-    const repo = await this.binding.get(repository);
-    try {
-      // Qualify negotiation haves with the project's shallow boundaries: a machine seed
-      // may deliberately omit old history while retaining the original base commit ID.
-      const haves = (await repo.log({ limit: 32 })).map(entry => entry.hash);
-      const info = await repo.info();
-      const readToken = await repo.createToken('read', 60);
-      let transfer: GitCommitPack;
-      try {
-        const shallow = await readShallowCommits({ remote: info.remote, token: readToken.plaintext });
-        transfer = await readCommitPack({ remote: origin.href, token: null, commit: object, haves, shallow });
-      } finally { await repo.revokeToken(readToken.id); }
-      const token = await repo.createToken('write', 60);
-      try {
-        await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref, previous: '0'.repeat(40), commit: object, ...transfer });
-      } finally { await repo.revokeToken(token.id); }
-    } finally { await disposeArtifactsRepository(repo); }
+    if (!object) throw new Error(`Source ref ${ref} is not advertised by the ${auth === null ? 'public ' : ''}origin`);
+    await this.fetchIntoRepository(repository, { remote: origin.href, auth }, ref, object, null);
     const commit = branch ? await this.resolveRef(repository, ref) : await this.resolveAdvertisedRef(repository, ref);
     if (!commit) throw new Error(`Imported source ref ${ref} does not resolve to a commit`);
     return commit;
+  }
+
+  /** The origin's current head of `branch`, with its objects in the project repository. Fetched objects are held by
+   * `refs/gitspace/origin/heads/<branch>`, so the project's own branch never moves here: the caller decides whether
+   * the new head fast-forwards it. */
+  async fetchOriginBranch(projectId: string, url: string, branch: string, credentials: OriginCredentials): Promise<string> {
+    const origin = new URL(url);
+    if (origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash) throw new Error('Origin reads require a credential-free HTTPS repository root without redirects');
+    if (!isSupportedBranchName(branch)) throw new Error('Unsupported origin branch');
+    const repository = artifactsProjectRepository(projectId);
+    const ref = `refs/heads/${branch}`;
+    const auth = credentials === null ? null : await credentials();
+    const head = (await readAdvertisedRefs({ remote: origin.href, auth, refPrefix: ref })).get(ref);
+    if (!head) throw new Error(`The origin has no branch ${branch}`);
+    if (await this.readCommit(repository, head) === null) await this.fetchIntoRepository(repository, { remote: origin.href, auth }, `refs/gitspace/origin/heads/${branch}`, head, 'replace');
+    return head;
   }
 
   /** Resolve imported tags and PR heads from advertised refs, peeling annotated tags through the binding. */
@@ -367,7 +426,7 @@ export class ArtifactsCodeStore {
     try {
       const [info, token] = await Promise.all([repo.info(), repo.createToken('read', 60)]);
       try {
-        const refs = await readAdvertisedRefs({ remote: info.remote, token: token.plaintext });
+        const refs = await readAdvertisedRefs({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext } });
         const peeled = refs.get(`${ref}^{}`);
         if (peeled) return peeled;
         const value = refs.get(ref);

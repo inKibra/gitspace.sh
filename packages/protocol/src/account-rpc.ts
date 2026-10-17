@@ -173,6 +173,8 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'project.archive': 'cloud',
   'project.restore': 'cloud',
   'project.setBaseBranch': 'cloud',
+  'project.updateBase': 'cloud',
+  'project.remote.refresh': 'cloud',
   'project.delete': 'cloud',
   'space.view': 'cloud',
   'workspace.create': 'cloud',

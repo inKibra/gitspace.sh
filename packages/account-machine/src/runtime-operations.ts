@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor';
-import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, runSupervisorCommand, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
+import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, runSupervisorCommand, type ExecutorOperationHandler, type LocalAttachment } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
 import { cacheServiceOperation } from './cache-services.js';
@@ -20,14 +20,14 @@ async function runGit(cwd: string, args: string[], environment: Record<string, s
   return stdout.trim();
 }
 
-export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator; projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>; originEnvironment: (repositoryPath: string) => Promise<Record<string, string>> }): Record<string, ExecutorOperationHandler> {
+export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator; projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>; originEnvironment: (checkout: LocalAttachment) => Promise<Record<string, string>> }): Record<string, ExecutorOperationHandler> {
   return {
     // Fetches into a private ref and publishes from there: the base checkout's HEAD, index and branches never change.
     import_ref: async (dispatch, local, signal) => {
       if (String(dispatch.workspaceId) !== String(dispatch.projectId)) throw new Error('Refs are imported through the project base checkout');
       const { ref } = RuntimeImportRefArgumentsSchema.parse(dispatch.args);
       const owned = `refs/gitspace/import/${createHash('sha256').update(dispatch.attemptId).digest('hex').slice(0, 32)}`;
-      await runGit(local.rootPath, ['fetch', '--no-tags', '--refmap=', '--no-write-fetch-head', 'origin', `+${ref}:${owned}`], { ...await options.originEnvironment(local.rootPath), GIT_LFS_SKIP_SMUDGE: '1' }, signal);
+      await runGit(local.rootPath, ['fetch', '--no-tags', '--refmap=', '--no-write-fetch-head', 'origin', `+${ref}:${owned}`], { ...await options.originEnvironment(local), GIT_LFS_SKIP_SMUDGE: '1' }, signal);
       try {
         const commit = await runGit(local.rootPath, ['rev-parse', '--verify', `${owned}^{commit}`], {}, signal);
         await options.projectRepository.publishRef({ binding: { projectId: dispatch.projectId, repository: `project-${dispatch.projectId}` }, repositoryPath: local.rootPath, ref, commit });

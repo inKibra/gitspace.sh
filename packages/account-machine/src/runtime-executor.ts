@@ -100,7 +100,7 @@ export async function createMachineExecutor(options: {
   const install = async (local: LocalAttachment, previous: GitIntermediateCheckpoint, checkpoint: GitIntermediateCheckpoint, incoming = false) => {
     await options.gitRemote.fetchCheckpoint({ binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` }, repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit });
     if (incoming && await gitCheckpointIncludes(local.rootPath, previous, checkpoint)) return false;
-    await applyGitCacheCheckpoint({ repositoryPath: local.rootPath, previous, checkpoint, lfs: await lfs?.read(local.attachment.projectId) });
+    await applyGitCacheCheckpoint({ repositoryPath: local.rootPath, previous, checkpoint, lfs: await lfs?.read(local) });
     return true;
   };
   const capture = async (local: LocalAttachment): Promise<GitIntermediateCheckpoint | null> => {
@@ -116,7 +116,7 @@ export async function createMachineExecutor(options: {
         repositoryPath: local.rootPath,
         spaceId: local.attachment.workspaceId,
         captureId: `cache-${createHash('sha256').update(`${options.machineId}:${key}`).digest('hex')}`,
-        lfs: lfs && (publicationId => lfs.publish(local.attachment.projectId, publicationId)),
+        lfs: lfs && (publicationId => lfs.publish(local, publicationId)),
         // One full second of stable dirty-path metadata coalesces editor bursts.
         settleWindowMs: 1000,
         clock: options.checkpointClock,
@@ -316,7 +316,7 @@ export async function createMachineExecutor(options: {
     stopFollowing(local);
     abandonCapture(key);
     const checkpointRef = `refs/gitspace/backups/${options.machineId}/${Date.now()}`;
-    const publication = await lfs?.publish(local.attachment.projectId, checkpointRef);
+    const publication = await lfs?.publish(local, checkpointRef);
     // A published backup keeps its LFS pin; the cloud releases it when the backup is pruned.
     let published = false;
     try {
@@ -331,7 +331,7 @@ export async function createMachineExecutor(options: {
       published = true;
       const backup = { checkpointRef, commit: snapshot.worktreeCommit, base: base.worktreeCommit };
       try {
-        await resetGitWorktree({ repositoryPath: local.rootPath, current: snapshot, base, lfs: await lfs?.read(local.attachment.projectId) });
+        await resetGitWorktree({ repositoryPath: local.rootPath, current: snapshot, base, lfs: await lfs?.read(local) });
       } catch (error) {
         // The backup exists in the cloud either way; report it so it is recorded.
         return reply(RuntimeSyncMachineDiscardSchema.parse({ discarded: [], backup, machineId: options.machineId, error: message(error) }));
@@ -516,7 +516,7 @@ export async function createMachineExecutor(options: {
               if (result.exitCode !== 0) throw new Error(result.output);
             }
           }
-          await hydrateGitLfs(path, [source.commit], sourceCheckpoint?.lfs, await lfs?.read(attachment.projectId));
+          await hydrateGitLfs(path, [source.commit], sourceCheckpoint?.lfs, await lfs?.read(grant));
           await checkoutGitLfs(path, source.commit);
         },
       } : null,
@@ -525,14 +525,14 @@ export async function createMachineExecutor(options: {
         if (!durable?.committed && !durable?.pending) {
           let base = await readGitCacheBase(prepared.rootPath);
           if (!base && sourceCheckpoint && !existed) {
-            await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: sourceCheckpoint, branch: attachment.checkout.branch, lfs: await lfs?.read(attachment.projectId) });
+            await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: sourceCheckpoint, branch: attachment.checkout.branch, lfs: await lfs?.read(prepared) });
             base = sourceCheckpoint;
           }
           if (!base && assignment.checkpoint) {
             const captureId = `admission-${createHash('sha256').update(attachment.attachmentId).digest('hex')}`;
             const revision = Date.now();
             // Admission only compares trees; its publication pins nothing beyond the comparison.
-            const publication = await lfs?.publish(attachment.projectId, spaceGitCheckpointRef(captureId, revision));
+            const publication = await lfs?.publish(prepared, spaceGitCheckpointRef(captureId, revision));
             const observed = await createGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, spaceId: attachment.workspaceId, captureId, revision, lfs: publication })
               .finally(async () => { await publication?.releasePublication?.(); });
             const cloud = assignment.checkpoint;

@@ -4,7 +4,7 @@ import type { PendingAskAnswer, SessionControlView } from '@gitspace/protocol';
 import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { SessionControlView as RuntimeSessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
-import type { WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
+import type { RemoteBranchState, WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
 import {
   Badge,
   Button,
@@ -84,6 +84,8 @@ export interface ProjectLifecycleView {
   role: 'gitspace-source' | null;
   source: { release: string | null; branch: string | null; commit: string | null } | null;
   revision: number;
+  /** The base branch on the origin; null until first checked. */
+  remote: RemoteBranchState | null;
   archivedAt: Date | null;
   updatedAt: Date;
 }
@@ -613,9 +615,13 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     ? (workspace.kind === 'project' ? directoryProject?.baseSummary : directoryProject?.workspaces.find((space) => space.id === workspace.id)?.summary)
       ?? { holder: { kind: 'unknown' as const }, closedAt: null, freshness: 'unknown' as const }
     : fallbackSummary);
+  // The base space shows its project's base branch against the origin; a workspace its own branch.
+  const remote = workspace.kind === 'project'
+    ? (accountDirectory?.projects ?? projects)?.find((item) => item.id === workspace.projectId)?.remote
+    : directoryProject?.workspaces.find((space) => space.id === workspace.id)?.definition?.remote;
   const sidebarProjects = useMemo<SidebarProject[]>(() => {
     if (accountSidebar) return [];
-    const byProject = new Map<string, SidebarProject>((projects ?? []).map((item) => [item.id, { id: item.id, name: item.name, lifecycle: item.lifecycle, workspaces: [] }]));
+    const byProject = new Map<string, SidebarProject>((projects ?? []).map((item) => [item.id, { id: item.id, name: item.name, lifecycle: item.lifecycle, remote: item.remote, workspaces: [] }]));
     byProject.set(baseSpace.projectId, { ...byProject.get(baseSpace.projectId), id: baseSpace.projectId, name: baseSpace.projectName, base: baseSpace, ...(workspace.id === baseSpace.id ? { baseSummary: selectedSummary } : {}), workspaces: [] });
     for (const item of workspaces) {
       const entry: SidebarProject = byProject.get(item.projectId) ?? { id: item.projectId, name: item.projectName, workspaces: [] };
@@ -658,6 +664,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
         <div className="flex items-center gap-1">
             {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); }, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
             <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><WorkspaceStatusDot space={selectedSummary} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)}{profileChange ? ` · ${profileChange}` : ''}</span></span>
+            {remote?.behind ? <Tooltip content={`origin/${workspace.branch} has commits this ${workspace.kind === 'project' ? 'project' : 'workspace'} lacks · checked ${new Date(remote.checkedAt).toLocaleString()}`} side="bottom"><Badge size="compact" color="amber">Behind origin/{workspace.branch}</Badge></Tooltip> : null}
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}

@@ -3,6 +3,9 @@ import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
+import type { RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
+import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { refreshProjectRemote } from '../src/project-remote.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { network } from './network.js';
 
@@ -130,6 +133,47 @@ async function installState(): Promise<string> {
   const { url } = await github().startInstall();
   expect(url).toMatch(/^https:\/\/github\.com\/apps\/gitspace-test\/installations\/new\?state=[A-Za-z0-9_-]{43}$/u);
   return new URL(url).searchParams.get('state') ?? '';
+}
+
+/** Artifacts history: each repository serves only the commits it holds, along their first-parent chain, and the refs
+ * set on it. */
+function artifactsHistory() {
+  const commits = new Map<string, { parents: string[]; committedAt: number; repositories: Set<string> }>();
+  const refs = new Map<string, string>();
+  const identity = { name: 'Fixture', email: 'fixture@example.invalid' };
+  const metadata = (hash: string, entry: { parents: string[]; committedAt: number }): ArtifactsCommitMetadata => ({ hash, treeHash: hash, message: hash, author: identity, committer: identity, parents: entry.parents, authoredAt: entry.committedAt, committedAt: entry.committedAt });
+  vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (repository, ref) => refs.get(`${repository} ${ref}`) ?? null);
+  vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (repository, hash) => {
+    const entry = commits.get(hash);
+    return entry?.repositories.has(repository) ? metadata(hash, entry) : null;
+  });
+  vi.spyOn(ArtifactsCodeStore.prototype, 'log').mockImplementation(async (repository, start, limit = 50) => {
+    const page: ArtifactsCommitMetadata[] = [];
+    for (let hash: string | undefined = start; hash !== undefined && page.length < limit;) {
+      const entry = commits.get(hash);
+      if (!entry?.repositories.has(repository)) break;
+      page.push(metadata(hash, entry));
+      hash = entry.parents[0];
+    }
+    return page;
+  });
+  return {
+    commit(parents: string[], ...repositories: string[]) {
+      const hash = (commits.size + 1).toString(16).padStart(40, '0');
+      commits.set(hash, { parents, committedAt: commits.size + 1, repositories: new Set(repositories) });
+      return hash;
+    },
+    ref(repository: string, ref: string, hash: string) { refs.set(`${repository} ${ref}`, hash); },
+  };
+}
+
+/** A cloud workspace's committed checkout, as its runtime stores it. */
+async function seedCheckpoint(workspaceId: string, branch: string, head: string): Promise<void> {
+  const checkpoint: RuntimeGitCheckpoint = { checkpointRef: `refs/gitspace/spaces/${workspaceId}/checkpoints`, headCommit: head, branch, indexCommit: head, trackedWorktreeCommit: head, worktreeCommit: head, indexTree: 'e'.repeat(40), worktreeTree: 'e'.repeat(40) };
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`), (_instance, state) => {
+    state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
+    state.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
+  });
 }
 
 describe('GitHub App', () => {
@@ -292,5 +336,92 @@ describe('GitHub App', () => {
     // The webhook secret survives the key change.
     const body = JSON.stringify({ zen: 'Keep it logically awesome.' });
     expect((await deliver('ping', 'after-rotation', body, await signature(body))).status).toBe(202);
+  });
+
+  it('moves a pushed branch in every project using the repository, behind only where GitSpace lacks the head', async () => {
+    const key = await rsaKey('pkcs1');
+    await createApp(key);
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    const stale = await project('Pantry', 'git@github.com:inKibra/Pantry.git');
+    const current = await project('Pantry mirror', 'https://github.com/inkibra/pantry');
+    const other = await project('Elsewhere', 'https://github.com/someone/else.git');
+    installationApi(key, 91, 'inKibra', { names: ['inKibra/pantry'] });
+    expect(outcome(await setupCallback(91, 'install', await installState())).get('github')).toBe('installed');
+    const authority = (id: string) => env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${id}`);
+    const workspaceId = `space-${crypto.randomUUID()}`;
+    await authority(stale.id).putWorkspace({ id: workspaceId, projectId: stale.id, kind: 'worktree', name: 'Feature', branch: 'feature', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    const history = artifactsHistory();
+    const root = history.commit([], `project-${stale.id}`, `project-${current.id}`);
+    const pushed = history.commit([root], `project-${current.id}`);
+    const ahead = history.commit([pushed], `project-${current.id}`);
+    history.ref(`project-${stale.id}`, 'refs/heads/main', root);
+    history.ref(`project-${current.id}`, 'refs/heads/main', ahead);
+    const feature = history.commit([root], `workspace-${workspaceId}`);
+    await seedCheckpoint(workspaceId, 'feature', feature);
+    const push = async (deliveryId: string, change: { ref: string; after: string; deleted: boolean }) => {
+      const body = JSON.stringify({ installation: { id: 91 }, repository: { full_name: 'inKibra/pantry' }, ...change });
+      expect((await deliver('push', deliveryId, body, await signature(body))).status).toBe(202);
+      return (await github().state()).deliveries.find((delivery) => delivery.id === deliveryId)?.outcome;
+    };
+
+    expect(await push('push-main', { ref: 'refs/heads/main', after: pushed, deleted: false })).toBe(`main → ${pushed.slice(0, 7)} for 2 projects`);
+    // The origin is ahead of one project's copy; the other's copy already contains the pushed head.
+    expect((await authority(stale.id).getProject())?.remote).toMatchObject({ head: pushed, behind: true });
+    expect((await authority(current.id).getProject())?.remote).toMatchObject({ head: pushed, behind: false });
+    expect((await authority(other.id).getProject())?.remote).toBeNull();
+    const listed = await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).list();
+    expect(listed.find((entry) => entry.id === stale.id)?.remote).toMatchObject({ head: pushed, behind: true });
+    expect(listed.find((entry) => entry.id === current.id)?.remote).toMatchObject({ head: pushed, behind: false });
+
+    // GitHub redelivering the same delivery changes nothing, not even when the origin was checked.
+    const recorded = (await authority(stale.id).getProject())?.remote;
+    await push('push-main', { ref: 'refs/heads/main', after: pushed, deleted: false });
+    expect((await authority(stale.id).getProject())?.remote).toEqual(recorded);
+
+    // The workspace on the pushed branch compares its own checkout.
+    expect(await push('push-feature', { ref: 'refs/heads/feature', after: feature, deleted: false })).toBe(`feature → ${feature.slice(0, 7)} for 2 projects`);
+    expect((await authority(stale.id).getWorkspace(workspaceId))?.remote).toMatchObject({ head: feature, behind: false });
+    const elsewhere = history.commit([feature]);
+    await push('push-feature-again', { ref: 'refs/heads/feature', after: elsewhere, deleted: false });
+    expect((await authority(stale.id).getWorkspace(workspaceId))?.remote).toMatchObject({ head: elsewhere, behind: true });
+    expect(await push('delete-feature', { ref: 'refs/heads/feature', after: '0'.repeat(40), deleted: true })).toBe('feature → deleted for 2 projects');
+    expect((await authority(stale.id).getWorkspace(workspaceId))?.remote).toMatchObject({ head: null, behind: false });
+    expect((await authority(stale.id).getProject())?.remote).toEqual(recorded);
+
+    expect(await push('push-tag', { ref: 'refs/tags/v1', after: pushed, deleted: false })).toBe('recorded');
+    expect((await authority(current.id).getProject())?.remote?.head).toBe(pushed);
+  });
+
+  it('checks a covered origin only with an installation token, recording tracked branches it lacks as absent', async () => {
+    const key = await rsaKey('pkcs1');
+    await createApp(key);
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    const pantry = await project('Pantry', 'git@github.com:inKibra/Pantry.git');
+    installationApi(key, 91, 'inKibra', { names: ['inKibra/pantry'] });
+    expect(outcome(await setupCallback(91, 'install', await installState())).get('github')).toBe('installed');
+    const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${pantry.id}`);
+    const gone = `space-${crypto.randomUUID()}`;
+    await authority.putWorkspace({ id: gone, projectId: pantry.id, kind: 'worktree', name: 'Gone', branch: 'gone', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    artifactsHistory();
+    const main = 'c'.repeat(40);
+    const packet = (line: string) => (line.length + 4).toString(16).padStart(4, '0') + line;
+    const authorizations: Array<string | null> = [];
+    network.use(http.get('https://github.com/inKibra/Pantry.git/info/refs', ({ request }) => {
+      authorizations.push(request.headers.get('authorization'));
+      return new HttpResponse(packet('# service=git-upload-pack\n') + '0000' + packet(`${main} refs/heads/main\n`) + packet(`${'d'.repeat(40)} refs/heads/unrelated\n`) + '0000');
+    }));
+
+    await refreshProjectRemote(env, env.ACCOUNT_ID, pantry.id);
+    expect(authorizations).toEqual([`Basic ${btoa('x-access-token:installation-token-91')}`]);
+    expect((await authority.getProject())?.remote).toMatchObject({ head: main, behind: true });
+    expect((await authority.getWorkspace(gone))?.remote).toMatchObject({ head: null, behind: false });
+
+    // A project without a remote has no origin to read.
+    const localId = crypto.randomUUID();
+    const local = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${localId}`);
+    await local.bootstrap({ id: localId, name: 'Local', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+    await refreshProjectRemote(env, env.ACCOUNT_ID, localId);
+    expect((await local.getProject())?.remote).toBeNull();
+    expect(authorizations).toHaveLength(1);
   });
 });

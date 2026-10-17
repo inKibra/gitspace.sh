@@ -1,4 +1,4 @@
-import type { StackStatus } from '@gitspace/protocol';
+import type { CloudWorkspaceDefinition, StackStatus } from '@gitspace/protocol';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
@@ -98,6 +98,18 @@ export async function compareCloudHistory(code: HistoryReader, left: Tip, right:
   };
 }
 
+/** How a branch at `commit` relates to `tip`: it already holds `tip` (equal or descended), fast-forwards to it, or has
+ * `ahead` commits `tip` lacks (null when cloud history is too shallow to tell, which never counts as a fast-forward). */
+export type ForwardPosition = { kind: 'holds' | 'forward' } | { kind: 'diverged'; ahead: number | null };
+export async function forwardPosition(code: HistoryReader, repositories: readonly string[], commit: string, tip: string): Promise<ForwardPosition> {
+  if (commit === tip) return { kind: 'holds' };
+  const comparison = await compareCloudHistory(code, { head: commit, repositories }, { head: tip, repositories });
+  // Reaching `tip` from `commit` proves containment even where older history is missing.
+  if (comparison.bases.includes(tip)) return { kind: 'holds' };
+  if (comparison.leftAhead === 0) return { kind: 'forward' };
+  return { kind: 'diverged', ahead: comparison.leftAhead };
+}
+
 /**
  * A stacked workspace's position against its `stackedOn` parent, from cloud checkpoints and Artifacts history:
  * what `git merge-base`, `git rev-list --count HEAD..parent` and `git merge-base --is-ancestor parent base`
@@ -106,13 +118,47 @@ export async function compareCloudHistory(code: HistoryReader, left: Tip, right:
  */
 const StackComparisonSchema = z.object({ mergeBase: z.string().nullable(), parentAhead: z.number(), parentMerged: z.enum(['merged', 'not-merged', 'unknown']) });
 
+/** The project repository's copy of a branch: what Update base moves and new workspaces start from. */
+export async function readProjectBranchTip(env: Env, projectId: string, branch: string): Promise<Tip | null> {
+  const repository = artifactsProjectRepository(projectId);
+  const head = await new ArtifactsCodeStore(env.ARTIFACTS).resolveRef(repository, `refs/heads/${branch}`);
+  return head === null ? null : { head, repositories: [repository] };
+}
+
 /** The project's base tip: the base workspace's checkpoint head, or the imported base branch before it has one. */
 export async function readCloudBaseTip(env: Env, userId: string, projectId: string, baseBranch: string): Promise<Tip | null> {
   const saved = await env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`).runtimeCodeCheckpoint(RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }));
   if (saved) return saved.headCommit === null ? null : { head: saved.headCommit, repositories: [artifactsWorkspaceRepository(projectId)] };
-  const repository = artifactsProjectRepository(projectId);
-  const head = await new ArtifactsCodeStore(env.ARTIFACTS).resolveRef(repository, `refs/heads/${baseBranch}`);
-  return head === null ? null : { head, repositories: [repository] };
+  return readProjectBranchTip(env, projectId, baseBranch);
+}
+
+/**
+ * Whether the origin's head of a branch is missing from GitSpace's copy: the project repository's base branch
+ * (`workspace` null), else the workspace's committed checkpoint or, before it has one, the commit it was created from.
+ * A commit no local repository holds is missing, and so is one only shallow history could reach: neither is proven
+ * contained.
+ */
+export async function behindOrigin(env: Env, userId: string, projectId: string, branch: string, workspace: Pick<CloudWorkspaceDefinition, 'id' | 'sourceCommit'> | null, head: string): Promise<boolean> {
+  let tip: Tip | null;
+  if (workspace === null) tip = await readProjectBranchTip(env, projectId, branch);
+  else {
+    const saved = await env.SPACE_AUTHORITY.getByName(`${userId}:${workspace.id}`).runtimeCodeCheckpoint(RuntimeIdentitySchema.parse({ projectId, workspaceId: workspace.id }));
+    // Commit ids are content addresses: ancestors the workspace forked from may be read from the project repository.
+    const repositories = [artifactsWorkspaceRepository(workspace.id), artifactsProjectRepository(projectId)];
+    const checkout = saved ? saved.headCommit : workspace.sourceCommit;
+    tip = checkout === null ? null : { head: checkout, repositories };
+  }
+  if (tip === null) return true;
+  const local = tip;
+  if (local.head === head) return false;
+  const code = new ArtifactsCodeStore(env.ARTIFACTS);
+  // The walk requires both commits; a commit no local repository holds is not contained.
+  const held = async (hash: string) => {
+    for (const repository of local.repositories) if (await code.readCommit(repository, hash)) return true;
+    return false;
+  };
+  if (!await held(head) || !await held(local.head)) return true;
+  return (await forwardPosition(code, local.repositories, local.head, head)).kind !== 'holds';
 }
 
 export async function readCloudStackStatus(env: Env, userId: string, projectId: string, workspaceId: string): Promise<StackStatus | null> {

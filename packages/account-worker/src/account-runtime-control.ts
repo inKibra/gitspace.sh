@@ -4,10 +4,12 @@ import { RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema } 
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeCacheAttachmentRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
-import { RuntimeRepositoryCredentialsInputSchema, type RuntimeRepositoryCredentialsInput } from '@gitspace/protocol-runtime/machine-controls';
+import { RuntimeAttachmentLeaseSchema, RuntimeGitHubTokenInputSchema, RuntimeRepositoryCredentialsInputSchema, type RuntimeRepositoryCredentialsInput } from '@gitspace/protocol-runtime/machine-controls';
+import type { GitHubRepositoryToken, MachineOriginAccess } from '@gitspace/protocol/github';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 import { requireWorkspaceAccess } from './runtime-access.js';
 import { ensureRuntimeCodeRepository } from './account-runtime-host.js';
+import { originAccess } from './origin-access.js';
 
 /** Only a machine attached to the project's base workspace may seed `project-<projectId>`. The repository
  * is created empty (no import, no initial commit): the machine publishes the base branch's history. */
@@ -15,7 +17,7 @@ async function projectRepositoryCredentials(env: Env, userId: string, machine: s
   if (userId !== env.ACCOUNT_ID) throw new Error('Repository lease belongs to a different account');
   const base = RuntimeIdentitySchema.parse({ projectId: input.projectId, workspaceId: input.projectId });
   const access = await requireWorkspaceAccess(env, userId, base, input.scope === 'write');
-  // Seeding the project repository is the one machine operation that reads the project itself.
+  // Seeding the project repository reads the project itself; workspace leases need only the workspace.
   const project = await env.PROJECT_AUTHORITY.getByName(`${userId}:${input.projectId}`).getProject();
   if (!project) throw new Error('Runtime project is unavailable');
   if (project.repositoryReference === null) throw new Error('Only imported projects are seeded from a machine');
@@ -25,6 +27,28 @@ async function projectRepositoryCredentials(env: Env, userId: string, machine: s
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   await code.ensureMachineSeedTarget(project.id, project.baseBranch);
   return code.credentials(artifactsProjectRepository(project.id), input.scope);
+}
+
+/** How this machine's checkout reaches its project's origin, and the installation tokens it uses there. Authorized like
+ * a checkout's repository lease: this machine's current attachment at its generation, never a detached one; pushing
+ * (`write`) needs a ready one. An origin no installation covers is the account SSH key's, and gets no token. */
+async function checkoutOrigin(env: Env, userId: string, machine: string, operation: 'runtime.repository.originAccess' | 'runtime.repository.githubToken', payload: Record<string, unknown>): Promise<MachineOriginAccess | GitHubRepositoryToken> {
+  if (userId !== env.ACCOUNT_ID) throw new Error('Origin access belongs to a different account');
+  const token = operation === 'runtime.repository.githubToken' ? RuntimeGitHubTokenInputSchema.parse(payload) : null;
+  const input = token ?? RuntimeAttachmentLeaseSchema.parse(payload);
+  if (input.machineId !== machine) throw new Error('Origin access target does not match the authenticated machine');
+  const write = token?.access === 'write';
+  const access = await requireWorkspaceAccess(env, userId, input, write);
+  const attachment = (await access.authority.runtimeAttachments(input))
+    .find(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation);
+  if (!attachment || attachment.state === 'detached') throw new Error('Origin access requires a current assigned checkout');
+  if (write && attachment.state !== 'ready') throw new Error('This attachment cannot push to its origin');
+  const project = await env.PROJECT_AUTHORITY.getByName(`${userId}:${input.projectId}`).getProject();
+  if (!project) throw new Error('Runtime project is unavailable');
+  const origin = project.repositoryReference === null ? null : await originAccess(env, project.repositoryReference);
+  if (!token) return origin?.kind === 'github-app' ? { kind: 'github-app', repository: origin.repository } : { kind: 'ssh' };
+  if (origin?.kind !== 'github-app') throw new Error('No GitHub App installation covers this project origin');
+  return env.GITHUB_APP.getByName(env.ACCOUNT_ID).repositoryToken(origin.repository, token.access);
 }
 
 /** Called after authorizeControl verifies the signed envelope and operation-specific capability. */
@@ -78,6 +102,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     await ensureRuntimeCodeRepository(env, userId, identity);
     return new ArtifactsCodeStore(env.ARTIFACTS).credentials(repository, input.scope);
   }
+  if (operation === 'runtime.repository.originAccess' || operation === 'runtime.repository.githubToken') return checkoutOrigin(env, userId, machine, operation, payload);
   const identity = RuntimeIdentitySchema.parse(payload);
   const access = await requireWorkspaceAccess(env, userId, identity, operation !== 'runtime.snapshot');
   if (operation === 'runtime.attachment.cache.request') {

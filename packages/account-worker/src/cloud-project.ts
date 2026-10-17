@@ -1,6 +1,8 @@
 import { cloudResourceId, normalizeRemoteRepositoryUrl, type CloudProjectOperation, type CloudProjectSummary, type CloudWorkspaceDefinition } from '@gitspace/protocol';
 import type { SpaceView } from '@gitspace/protocol/rpc-contract';
 import { emptyRelations, emptyStack, emptyWorkspaceStatus, validateStack } from '@gitspace/protocol-workspace';
+import { gitAuthorizationHeaders } from '@gitspace/runtime-workspace-do';
+import { originAccess } from './origin-access.js';
 
 /** A public remote names its default branch within this window, or the import asks for the branch. */
 const DEFAULT_BRANCH_PROBE_MS = 15_000;
@@ -8,14 +10,19 @@ const DEFAULT_BRANCH_PROBE_MS = 15_000;
 const REF_ADVERTISEMENT_LIMIT = 64 * 1024;
 
 /**
- * The default branch a public smart-HTTP remote advertises (`symref=HEAD:refs/heads/<branch>`), or null when the
- * remote is private, unreachable, or an SSH host other than GitHub.
+ * The default branch a smart-HTTP remote advertises (`symref=HEAD:refs/heads/<branch>`), or null when the remote is
+ * unreadable (private and uncovered, unreachable, or an SSH host other than GitHub). Coverage is resolved before any
+ * request: a repository an installation covers is asked only with its installation token, never anonymously.
  */
-export async function remoteDefaultBranch(repository: string): Promise<string | null> {
-  const github = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+\/[^/]+?)(?:\.git)?\/?$/iu.exec(repository);
-  const base = github ? `https://github.com/${github[1]}.git` : /^https?:\/\//iu.test(repository) ? repository.replace(/\/+$/u, '') : null;
-  if (!base) return null;
-  const response = await fetch(`${base}/info/refs?service=git-upload-pack`, { signal: AbortSignal.timeout(DEFAULT_BRANCH_PROBE_MS) }).catch(() => null);
+export async function remoteDefaultBranch(env: Env, repository: string): Promise<string | null> {
+  const access = await originAccess(env, repository);
+  if (!/^https?:\/\//iu.test(access.remote)) return null;
+  const auth = access.kind === 'github-app' ? await access.auth('read') : null;
+  const response = await fetch(`${access.remote.replace(/\/+$/u, '')}/info/refs?service=git-upload-pack`, {
+    headers: gitAuthorizationHeaders(auth), signal: AbortSignal.timeout(DEFAULT_BRANCH_PROBE_MS),
+    // The installation token never follows a redirect to another host.
+    redirect: auth === null ? 'follow' : 'manual',
+  }).catch(() => null);
   if (!response?.ok || !response.body) {
     await response?.body?.cancel();
     return null;
@@ -48,7 +55,7 @@ export async function createCloudProject(env: Env, userId: string, input: { name
   const name = input.name.trim();
   if (!name || name.length > 160) throw new Error('Enter a project name of at most 160 characters.');
   const repositoryReference = input.repositoryUrl?.trim() ? normalizeRemoteRepositoryUrl(input.repositoryUrl) : null;
-  const baseBranch = input.baseBranch?.trim() || (repositoryReference ? await remoteDefaultBranch(repositoryReference) : 'main');
+  const baseBranch = input.baseBranch?.trim() || (repositoryReference ? await remoteDefaultBranch(env, repositoryReference) : 'main');
   if (!baseBranch) throw new Error("GitSpace can't read this repository's default branch, so it may be private. Enter its base branch to import it.");
   if (baseBranch.startsWith('-') || /[\s\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Enter a valid base branch name.');
   const projectId = cloudResourceId(name);

@@ -81,6 +81,8 @@ export const controlOperationSchema = z.enum([
   'runtime.detach',
   'runtime.heartbeat',
   'runtime.repository.credentials',
+  'runtime.repository.originAccess',
+  'runtime.repository.githubToken',
   'runtime.browser.authority',
   'runtime.snapshot',
   'runtime.submit',

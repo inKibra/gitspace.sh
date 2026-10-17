@@ -1,10 +1,11 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant, type ControlOperation } from '@gitspace/protocol';
-import { RuntimeAttachInputSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachInputSchema, RuntimeAttachmentReadyInputSchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore, type AttachmentServices } from '@gitspace/runtime-workspace-do';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
+import { GitHubAppDO } from '../src/github-app.js';
 import { tenantRootPrivateKey } from './setup.js';
 
 const projectId = 'repository-project';
@@ -117,5 +118,82 @@ describe('signed repository credential authority', () => {
     expect(read.status, await read.text()).toBe(200);
     const write = await f.request({ ...binding, scope: 'write' }, 'unassigned');
     expect(write.status, await write.text()).toBe(200);
+  });
+});
+
+describe('signed checkout origin access', () => {
+  const installationToken = { token: 'ghs_test-installation-token', expiresAt: '2099-01-01T00:00:00.000Z' };
+  async function originFixture(repositoryReference: string, capabilities: Array<'storage.access' | 'space.control'> = ['storage.access']) {
+    const f = await fixture(capabilities, repositoryReference);
+    const [attachment] = await f.authority.runtimeAttachments({ projectId, workspaceId });
+    if (!attachment) throw new Error('The fixture attached no checkout');
+    const tokens = vi.spyOn(GitHubAppDO.prototype, 'repositoryToken').mockResolvedValue(installationToken);
+    // The App's installation covers Owner/Repo; GitHub itself is never called.
+    await runInDurableObject(env.GITHUB_APP.getByName(env.ACCOUNT_ID), (_instance, state) => {
+      state.storage.sql.exec('INSERT OR IGNORE INTO installation_repositories(installation_id, full_name) VALUES (?, ?)', 7, 'Owner/Repo');
+    });
+    const lease = { machineId: 'assigned', attachmentId: attachment.attachmentId, generation: 1 };
+    const token = (access: 'read' | 'write', payload: Record<string, unknown> = {}, machineId = 'assigned') => f.request({ ...lease, access, ...payload }, machineId, 'runtime.repository.githubToken');
+    const store = (run: (attachments: AttachmentStore) => unknown) => runInDurableObject(f.authority, async (_instance, state) => { run(new AttachmentStore(state.storage, services)); });
+    return { ...f, attachment, lease, tokens, token, store, origin: (payload: Record<string, unknown> = {}) => f.request({ ...lease, ...payload }, 'assigned', 'runtime.repository.originAccess') };
+  }
+
+  it('routes a covered origin, in any address form, through installation tokens', async () => {
+    const f = await originFixture('git@github.com:owner/repo.git');
+    const route = await f.origin();
+    expect(route.headers.get('cache-control')).toBe('private, no-store');
+    expect(await route.json()).toEqual({ status: 'ok', value: { kind: 'github-app', repository: 'owner/repo' } });
+    // Same checkout authorization as a repository lease: a foreign generation learns nothing.
+    expect((await f.origin({ generation: 0 })).status).toBe(400);
+  });
+
+  it('answers an uncovered GitHub origin with the SSH route and refuses it any token', async () => {
+    const f = await originFixture('https://github.com/someone/else.git');
+    expect(await (await f.origin()).json()).toEqual({ status: 'ok', value: { kind: 'ssh' } });
+    const refused = await f.token('read');
+    expect({ status: refused.status, body: await refused.json() }).toMatchObject({ status: 400, body: { status: 'error' } });
+    expect(f.tokens).not.toHaveBeenCalled();
+  });
+
+  it('issues tokens only to this machine\'s current checkout, and push tokens only once it is ready', async () => {
+    const f = await originFixture('https://github.com/Owner/Repo');
+    const read = await f.token('read');
+    expect(read.headers.get('cache-control')).toBe('private, no-store');
+    expect(await read.json()).toEqual({ status: 'ok', value: installationToken });
+    expect(f.tokens).toHaveBeenLastCalledWith('Owner/Repo', 'read');
+    // Still attaching: it may fetch, never push.
+    expect((await f.token('write')).status).toBe(400);
+
+    for (const [payload, machineId] of [
+      [{ generation: 2 }, 'assigned'],
+      [{ generation: 0 }, 'assigned'],
+      [{ attachmentId: 'another-attachment' }, 'assigned'],
+      [{ projectId: 'foreign-project' }, 'assigned'],
+      [{ machineId: 'unassigned' }, 'assigned'],
+      [{}, 'unassigned'],
+      [{ machineId: 'unassigned' }, 'unassigned'],
+    ] satisfies Array<[Record<string, unknown>, string]>) {
+      const refused = await f.token('read', payload, machineId);
+      expect({ payload, machineId, status: refused.status }).toEqual({ payload, machineId, status: 400 });
+    }
+    // An unregistered machine is not authenticated at all.
+    expect((await f.token('read', {}, 'stranger')).status).toBe(401);
+    expect(f.tokens).toHaveBeenCalledTimes(1);
+
+    await f.store(attachments => attachments.ready(RuntimeAttachmentReadyInputSchema.parse({ projectId, workspaceId, ...f.lease, commit: 'a'.repeat(40), prerequisitesComplete: true, capabilities: [] })));
+    expect(await (await f.token('write')).json()).toEqual({ status: 'ok', value: installationToken });
+    expect(f.tokens).toHaveBeenLastCalledWith('Owner/Repo', 'write');
+
+    await f.store(attachments => attachments.detach(f.attachment));
+    expect((await f.token('read')).status).toBe(400);
+    expect((await f.origin()).status).toBe(400);
+    expect(f.tokens).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses a device that may not read repository storage', async () => {
+    const f = await originFixture('https://github.com/Owner/Repo', ['space.control']);
+    expect((await f.token('read')).status).toBe(401);
+    expect((await f.origin()).status).toBe(401);
+    expect(f.tokens).not.toHaveBeenCalled();
   });
 });

@@ -18,3 +18,6 @@ export const RuntimeRepositoryCredentialsInputSchema = z.object({
     || (input.repository === `project-${input.projectId}` && input.workspaceId === undefined && input.attachmentId === undefined), 'A project repository lease names only its own project');
 export type RuntimeRepositoryCredentialsInput = z.infer<typeof RuntimeRepositoryCredentialsInputSchema>;
 export const RuntimeRepositoryCredentialsSchema = z.object({ remote: z.url(), plaintext: z.string().min(1), expiresAt: z.iso.datetime() });
+/** An installation token for the checkout's covered origin. Git's credential protocol does not say whether it fetches
+ * or pushes, so a ready checkout asks for `write` and any other for `read`. */
+export const RuntimeGitHubTokenInputSchema = RuntimeAttachmentLeaseSchema.extend({ access: z.enum(['read', 'write']) });

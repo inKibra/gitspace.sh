@@ -11,10 +11,29 @@ export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?
 export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; /** Edit-history message for the tool change; absent for merges and system snapshots. */ message?: string; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean };
 export interface ArtifactsFetch { (input: string, init?: RequestInit): Promise<Response> }
 export class ArtifactsSnapshotError extends TaggedError('ArtifactsSnapshotError')<{ operation: string; message: string; certainty: 'not-published' | 'unknown' }> {}
+/** Credentials for Git over HTTPS: Artifacts takes a bearer token; GitHub takes an installation token as Basic
+ * `x-access-token:<token>`. Null reads a public remote. */
+export type GitHttpAuth = { kind: 'bearer'; token: string } | { kind: 'basic'; username: string; password: string };
+
 /** An origin refused ref discovery; 401/403/404 from a credential-free request mean it needs credentials GitSpace does not hold. */
 export class GitDiscoveryError extends Error {
   constructor(readonly status: number) { super(`Git discovery failed (${status})`); }
   get needsCredentials(): boolean { return this.status === 401 || this.status === 403 || this.status === 404; }
+}
+
+/** Credentials travel only in headers, on every request of a transfer; never in the remote URL, which must be a
+ * plain HTTPS repository root. */
+function gitRemote(url: string): URL {
+  const remote = new URL(url);
+  if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid Artifacts Git remote');
+  return remote;
+}
+/** The request headers carrying Git HTTP credentials; none for a public remote. */
+export function gitAuthorizationHeaders(auth: GitHttpAuth | null): Record<string, string> {
+  if (auth === null) return {};
+  if (auth.kind === 'bearer') return { Authorization: `Bearer ${auth.token}` };
+  // RFC 7617: the user-pass is UTF-8 octets; btoa encodes one octet per character.
+  return { Authorization: `Basic ${btoa(String.fromCharCode(...encoder.encode(`${auth.username}:${auth.password}`)))}` };
 }
 
 export function validateSnapshotPath(path: string): void {
@@ -43,11 +62,18 @@ function packets(bytes: Uint8Array): string[] {
   return result;
 }
 
-/** Only newly written objects are packed. Existing objects remain on the server. */
-export async function publishSnapshotPack(input: { remote: string; token: string; ref: string; previous: string; commit: string; pack: Uint8Array; shallow?: readonly string[]; signal?: AbortSignal; onPublicationState?: (certainty: ArtifactsSnapshotError['certainty']) => void }, request: ArtifactsFetch = fetch): Promise<void> {
-  const remote = new URL(input.remote);
-  if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid Artifacts Git remote');
-  const headers = { Authorization: `Bearer ${input.token}` };
+function concatBytes(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { bytes.set(part, offset); offset += part.length; }
+  return bytes;
+}
+
+/** Only newly written objects are packed. Existing objects remain on the server. A streamed pack (a transfer from
+ * another repository) is sent as it arrives, never held. */
+export async function publishSnapshotPack(input: { remote: string; auth: GitHttpAuth; ref: string; previous: string; commit: string; pack: Uint8Array | ReadableStream<Uint8Array>; shallow?: readonly string[]; signal?: AbortSignal; onPublicationState?: (certainty: ArtifactsSnapshotError['certainty']) => void }, request: ArtifactsFetch = fetch): Promise<void> {
+  const remote = gitRemote(input.remote);
+  const headers = gitAuthorizationHeaders(input.auth);
   const base = remote.href.replace(/\/$/u, '');
   const advertised = await request(`${base}/info/refs?service=git-receive-pack`, { headers, signal: input.signal, redirect: 'manual' });
   if (!advertised.ok) throw new Error(`Git discovery failed (${advertised.status})`);
@@ -65,11 +91,10 @@ export async function publishSnapshotPack(input: { remote: string; token: string
   if (!capabilities.includes('report-status')) throw new Error('Git server does not support report-status');
   const shallow = [...new Set(input.shallow)];
   if (shallow.some(oid => !/^[0-9a-f]{40}$/u.test(oid))) throw new Error('Invalid Git shallow boundary');
-  const commands = [...shallow.map(oid => packet(`shallow ${oid}\n`)), packet(`${old} ${input.commit} ${input.ref}\0report-status\n`), encoder.encode('0000')];
-  const body = new Uint8Array(commands.reduce((size, part) => size + part.length, 0) + input.pack.length);
-  let offset = 0;
-  for (const command of commands) { body.set(command, offset); offset += command.length; }
-  body.set(input.pack, offset);
+  const commands = concatBytes([...shallow.map(oid => packet(`shallow ${oid}\n`)), packet(`${old} ${input.commit} ${input.ref}\0report-status\n`), encoder.encode('0000')]);
+  const body = input.pack instanceof Uint8Array
+    ? concatBytes([commands, input.pack])
+    : input.pack.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({ start(controller) { controller.enqueue(commands); } }));
   input.signal?.throwIfAborted();
   input.onPublicationState?.('unknown');
   const response = await request(`${base}/git-receive-pack`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/x-git-receive-pack-request', Accept: 'application/x-git-receive-pack-result' }, body, signal: input.signal, redirect: 'manual' });
@@ -80,20 +105,20 @@ export async function publishSnapshotPack(input: { remote: string; token: string
 }
 
 /** A ref update whose commit the repository already holds sends a pack with no objects. */
-export async function publishRef(input: { remote: string; token: string; ref: string; previous: string | null; commit: string }, request: ArtifactsFetch = fetch): Promise<void> {
+export async function publishRef(input: { remote: string; auth: GitHttpAuth; ref: string; previous: string | null; commit: string }, request: ArtifactsFetch = fetch): Promise<void> {
   const header = new Uint8Array([...encoder.encode('PACK'), 0, 0, 0, 2, 0, 0, 0, 0]);
   const pack = new Uint8Array(header.length + 20);
   pack.set(header); pack.set(new Uint8Array(await crypto.subtle.digest('SHA-1', header)), header.length);
-  await publishSnapshotPack({ remote: input.remote, token: input.token, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack }, request);
+  await publishSnapshotPack({ remote: input.remote, auth: input.auth, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack }, request);
 }
 
 /** Advertised refs, optionally narrowed by protocol v2 ls-refs; peeled tags use `<tag>^{}`. */
-export async function readAdvertisedRefs(input: { remote: string; token: string | null; refPrefix?: string }, request: ArtifactsFetch = fetch): Promise<Map<string, string>> {
+export async function readAdvertisedRefs(input: { remote: string; auth: GitHttpAuth | null; refPrefix?: string }, request: ArtifactsFetch = fetch): Promise<Map<string, string>> {
   return (await readGitAdvertisement(input, request)).refs;
 }
 
 /** The v0 advertisement carries the repository's shallow boundaries, including those outside HEAD. */
-export async function readShallowCommits(input: { remote: string; token: string | null }, request: ArtifactsFetch = fetch): Promise<string[]> {
+export async function readShallowCommits(input: { remote: string; auth: GitHttpAuth | null }, request: ArtifactsFetch = fetch): Promise<string[]> {
   return (await readGitAdvertisement(input, request)).shallow;
 }
 
@@ -105,12 +130,11 @@ async function readGitDiscovery(remote: URL, headers: Record<string, string>, re
   return packets(await collectBytes(streamBytes(advertised.body, signal), 64 * 1024)).filter(line => !line.startsWith('#'));
 }
 
-async function readGitAdvertisement(input: { remote: string; token: string | null; refPrefix?: string }, request: ArtifactsFetch) {
-  const remote = new URL(input.remote);
-  if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid Artifacts Git remote');
+async function readGitAdvertisement(input: { remote: string; auth: GitHttpAuth | null; refPrefix?: string }, request: ArtifactsFetch) {
+  const remote = gitRemote(input.remote);
   if (input.refPrefix !== undefined && (!input.refPrefix || /[\0\r\n]/u.test(input.refPrefix))) throw new Error('Invalid Git ref prefix');
   const base = remote.href.replace(/\/$/u, '');
-  const headers: Record<string, string> = input.token === null ? {} : { Authorization: `Bearer ${input.token}` };
+  const headers = gitAuthorizationHeaders(input.auth);
   if (input.refPrefix !== undefined) headers['Git-Protocol'] = 'version=2';
   const signal = AbortSignal.timeout(15_000);
   let lines = await readGitDiscovery(remote, headers, request);
@@ -120,12 +144,9 @@ async function readGitAdvertisement(input: { remote: string; token: string | nul
     const parts = [packet('command=ls-refs\n'), encoder.encode('0001'), packet('peel\n')];
     if (input.refPrefix !== undefined) parts.push(packet(`ref-prefix ${input.refPrefix}\n`));
     parts.push(encoder.encode('0000'));
-    const body = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
-    let offset = 0;
-    for (const part of parts) { body.set(part, offset); offset += part.length; }
     const response = await request(`${base}/git-upload-pack`, {
       method: 'POST', headers: { ...headers, 'Git-Protocol': 'version=2', 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
-      body, signal, redirect: 'manual',
+      body: concatBytes(parts), signal, redirect: 'manual',
     });
     if (!response.ok) throw new GitDiscoveryError(response.status);
     if (!response.body) throw new Error('Git discovery returned no advertisement');
@@ -149,20 +170,146 @@ async function readGitAdvertisement(input: { remote: string; token: string | nul
   return { refs, shallow };
 }
 
-export type GitCommitPack = { pack: Uint8Array; shallow: string[] };
+const PACK_SIGNATURE = encoder.encode('PACK');
 
-/** Transfer the reachable graph without thin packs. Destination shallow boundaries qualify its
- * haves; source shallow boundaries travel with the pack so a copy never invents complete ancestry.
- * No credentials follow redirects, and a failed download has no destination-side effect. */
-export async function readCommitPack(input: { remote: string; token: string | null; commit: string; haves?: readonly string[]; shallow?: readonly string[] }, request: ArtifactsFetch = fetch): Promise<GitCommitPack> {
-  const remote = new URL(input.remote);
-  if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Invalid Artifacts Git remote');
+/** A response body read packet by packet as it arrives, buffering only what the next packet needs. */
+class PacketReader {
+  private buffered: Uint8Array = new Uint8Array(0);
+  constructor(private readonly chunks: AsyncGenerator<Uint8Array>) {}
+
+  /** The next `size` bytes without consuming them, or null when the body ends first. */
+  async peek(size: number): Promise<Uint8Array | null> {
+    while (this.buffered.length < size) {
+      const next = await this.chunks.next();
+      if (next.done) return null;
+      this.buffered = this.buffered.length ? concatBytes([this.buffered, next.value]) : next.value;
+    }
+    return this.buffered.subarray(0, size);
+  }
+
+  /** The next packet's declared length (0 flush, 1 delimiter, 2 response end) and its payload. */
+  async packet(): Promise<{ size: number; payload: Uint8Array }> {
+    const prefix = await this.peek(4);
+    if (prefix === null || !/^[0-9a-f]{4}$/u.test(decoder.decode(prefix))) throw new Error('Git fetch did not return a complete pack');
+    const size = Number.parseInt(decoder.decode(prefix), 16);
+    if (size === 3) throw new Error('Git fetch did not return a complete pack');
+    const end = Math.max(size, 4);
+    if (await this.peek(end) === null) throw new Error('Git fetch did not return a complete pack');
+    const payload = this.buffered.subarray(4, end);
+    this.buffered = this.buffered.subarray(end);
+    return { size, payload };
+  }
+
+  /** Buffered bytes, then the body's chunks as they arrive; null at its end. A v0 pack is not packetized. */
+  async raw(): Promise<Uint8Array | null> {
+    if (this.buffered.length) {
+      const chunk = this.buffered;
+      this.buffered = new Uint8Array(0);
+      return chunk;
+    }
+    const next = await this.chunks.next();
+    return next.done ? null : next.value;
+  }
+}
+
+/** v2 carries shallow-info separately and always sidebands its packfile. We send done,
+ * so acknowledgments are omitted; no URI, wanted-ref, or sideband-all section was requested. */
+async function readVersion2Preamble(reader: PacketReader, boundaries: Set<string>): Promise<void> {
+  let section: 'header' | 'shallow-info' = 'header';
+  for (;;) {
+    const { size, payload } = await reader.packet();
+    if (size === 1 && section === 'shallow-info') { section = 'header'; continue; }
+    if (size < 5) throw new Error('Incomplete Git v2 fetch response');
+    const line = decoder.decode(payload);
+    if (section === 'shallow-info') {
+      const boundary = /^(shallow|unshallow) ([0-9a-f]{40})\n?$/u.exec(line);
+      if (!boundary) throw new Error('Invalid Git shallow-info');
+      if (boundary[1] === 'shallow') boundaries.add(boundary[2]!);
+      else if (!boundaries.delete(boundary[2]!)) throw new Error('Unexpected Git unshallow boundary');
+      continue;
+    }
+    if (line === 'packfile\n') return;
+    if (line !== 'shallow-info\n') throw new Error('Unexpected Git v2 fetch section');
+    section = 'shallow-info';
+  }
+}
+
+/** No side-band or multi_ack: only shallow metadata, its flush, and plain ACK/NAK packets can precede the raw pack. */
+async function readVersion0Preamble(reader: PacketReader, boundaries: Set<string>, haves: Set<string>): Promise<void> {
+  let acknowledgments = 0;
+  for (;;) {
+    const next = await reader.peek(4);
+    if (next !== null && PACK_SIGNATURE.every((byte, index) => next[index] === byte)) break;
+    const { size, payload } = await reader.packet();
+    if (size === 0) continue;
+    if (size < 8 || size > 55) throw new Error('Git fetch did not return a complete pack');
+    const line = decoder.decode(payload);
+    const boundary = /^(shallow|unshallow) ([0-9a-f]{40})\n?$/u.exec(line);
+    if (boundary) {
+      if (boundary[1] === 'shallow') boundaries.add(boundary[2]!);
+      else boundaries.delete(boundary[2]!);
+    } else if (++acknowledgments > haves.size + 1 || (line !== 'NAK\n' && (!/^ACK [0-9a-f]{40}\n$/u.test(line) || !haves.has(line.slice(4, -1))))) {
+      throw new Error('Git fetch did not return a complete pack');
+    }
+  }
+  if (acknowledgments === 0) throw new Error('Git fetch did not return a complete pack');
+}
+
+/** The pack bytes alone, demultiplexed from the v2 sideband or passed through from v0, as they arrive. A pack that
+ * does not start with its signature or ends before its header fails the stream, and with it any push reading it. */
+function packStream(reader: PacketReader, chunks: AsyncGenerator<Uint8Array>, version2: boolean): ReadableStream<Uint8Array> {
+  let received = 0;
+  const next = async (): Promise<Uint8Array | null> => {
+    if (!version2) return reader.raw();
+    for (;;) {
+      const { size, payload } = await reader.packet();
+      if (size === 0) {
+        // The flush ends the packfile section; only a response-end packet may follow it.
+        if (await reader.peek(1) !== null && ((await reader.packet()).size !== 2 || await reader.peek(1) !== null)) throw new Error('Incomplete Git v2 fetch response');
+        return null;
+      }
+      if (size < 5) throw new Error('Incomplete Git v2 fetch response');
+      if (payload[0] === 1) return payload.subarray(1);
+      if (payload[0] === 3) throw new Error(`Git fetch failed: ${decoder.decode(payload.subarray(1))}`);
+      if (payload[0] !== 2) throw new Error('Invalid Git pack sideband');
+    }
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        for (;;) {
+          const chunk = await next();
+          if (chunk === null) {
+            if (received < 12) throw new Error('Git fetch did not return a complete pack');
+            controller.close();
+            return;
+          }
+          for (let index = 0; received + index < PACK_SIGNATURE.length && index < chunk.length; index++) {
+            if (chunk[index] !== PACK_SIGNATURE[received + index]) throw new Error('Git fetch did not return a complete pack');
+          }
+          received += chunk.length;
+          if (!chunk.length) continue;
+          controller.enqueue(chunk);
+          return;
+        }
+      } catch (error) {
+        await chunks.return(undefined);
+        throw error;
+      }
+    },
+    async cancel() { await chunks.return(undefined); },
+  });
+}
+
+/** Requests the reachable graph of `commit` without thin packs. Destination shallow boundaries qualify its haves; the
+ * source's shallow boundaries precede its pack, so they are known before the first pack byte is forwarded. */
+async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null; commit: string; haves: readonly string[]; shallow: readonly string[]; signal: AbortSignal }, request: ArtifactsFetch): Promise<{ shallow: string[]; pack: ReadableStream<Uint8Array> }> {
+  const remote = gitRemote(input.remote);
   if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new Error('Invalid Git commit');
   const haves = new Set(input.haves);
   const shallow = new Set(input.shallow);
   if (haves.size > 32 || [...haves, ...shallow].some(oid => !/^[0-9a-f]{40}$/u.test(oid))) throw new Error('Invalid Git negotiation commits');
-  const headers: Record<string, string> = { ...(input.token === null ? {} : { Authorization: `Bearer ${input.token}` }), 'Git-Protocol': 'version=2' };
-  const discovery = await readGitDiscovery(remote, headers, request);
+  const discovery = await readGitDiscovery(remote, { ...gitAuthorizationHeaders(input.auth), 'Git-Protocol': 'version=2' }, request);
   const version2 = discovery[0]?.trimEnd() === 'version 2';
   const boundaries = new Set(shallow);
   if (version2) {
@@ -172,7 +319,6 @@ export async function readCommitPack(input: { remote: string; token: string | nu
     if (shallow.size && !features.includes('shallow')) throw new Error('Git server does not support shallow fetch');
   } else {
     // A v0-only origin must fit the existing discovery bound; never retry unbounded.
-    delete headers['Git-Protocol'];
     for (const line of discovery) {
       const boundary = /^shallow ([0-9a-f]{40})\n?$/u.exec(line);
       if (boundary) boundaries.add(boundary[1]!);
@@ -181,83 +327,41 @@ export async function readCommitPack(input: { remote: string; token: string | nu
   const parts = version2
     ? [packet('command=fetch\n'), encoder.encode('0001'), packet('no-progress\n'), packet(`want ${input.commit}\n`), ...[...shallow].map(oid => packet(`shallow ${oid}\n`)), ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n'), encoder.encode('0000')]
     : [packet(`want ${input.commit}${boundaries.size ? ' shallow' : ''}\n`), ...[...shallow].map(oid => packet(`shallow ${oid}\n`)), encoder.encode('0000'), ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n')];
-  const body = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
-  let offset = 0;
-  for (const part of parts) { body.set(part, offset); offset += part.length; }
-  const signal = AbortSignal.timeout(15_000);
   const response = await request(`${remote.href.replace(/\/$/u, '')}/git-upload-pack`, {
-    method: 'POST', headers: { ...headers, 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
-    body, signal, redirect: 'manual',
+    method: 'POST', headers: { ...gitAuthorizationHeaders(input.auth), ...(version2 ? { 'Git-Protocol': 'version=2' } : {}), 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
+    body: concatBytes(parts), signal: input.signal, redirect: 'manual',
   });
   if (!response.ok) throw new Error(`Git fetch failed (${response.status})`);
   if (!response.body) throw new Error('Git fetch returned no pack');
-  const bytes = await collectBytes(streamBytes(response.body, signal), 40 * 1024 * 1024);
-  if (version2) return readVersion2CommitPack(bytes, boundaries);
-  // No side-band or multi_ack: only shallow metadata, its flush, and plain ACK/NAK
-  // packets can precede the raw pack. Bound packet work by the already bounded response.
-  let packOffset = 0;
-  let acknowledgments = 0;
-  while (decoder.decode(bytes.subarray(packOffset, packOffset + 4)) !== 'PACK') {
-    const prefix = decoder.decode(bytes.subarray(packOffset, packOffset + 4));
-    if (!/^[0-9a-f]{4}$/u.test(prefix)) throw new Error('Git fetch did not return a complete pack');
-    const size = Number.parseInt(prefix, 16);
-    if (size === 0) { packOffset += 4; continue; }
-    if (size < 8 || size > 55 || packOffset + size > bytes.length) throw new Error('Git fetch did not return a complete pack');
-    const line = decoder.decode(bytes.subarray(packOffset + 4, packOffset + size));
-    const boundary = /^(shallow|unshallow) ([0-9a-f]{40})\n?$/u.exec(line);
-    if (boundary) {
-      if (boundary[1] === 'shallow') boundaries.add(boundary[2]!);
-      else boundaries.delete(boundary[2]!);
-    } else {
-      if (++acknowledgments > haves.size + 1 || (line !== 'NAK\n' && (!/^ACK [0-9a-f]{40}\n$/u.test(line) || !haves.has(line.slice(4, -1))))) throw new Error('Git fetch did not return a complete pack');
-    }
-    packOffset += size;
+  const chunks = streamBytes(response.body, input.signal);
+  const reader = new PacketReader(chunks);
+  try {
+    if (version2) await readVersion2Preamble(reader, boundaries);
+    else await readVersion0Preamble(reader, boundaries, haves);
+  } catch (error) {
+    await chunks.return(undefined);
+    throw error;
   }
-  if (acknowledgments === 0) throw new Error('Git fetch did not return a complete pack');
-  return { pack: bytes.subarray(packOffset), shallow: [...boundaries] };
+  return { shallow: [...boundaries], pack: packStream(reader, chunks, version2) };
 }
 
-/** v2 carries shallow-info separately and always sidebands its packfile. We send done,
- * so acknowledgments are omitted; no URI, wanted-ref, or sideband-all section was requested. */
-function readVersion2CommitPack(bytes: Uint8Array, boundaries: Set<string>): GitCommitPack {
-  let section: 'header' | 'shallow-info' | 'packfile' | 'done' = 'header';
-  const chunks: Uint8Array[] = [];
-  let packSize = 0;
-  for (let offset = 0; offset < bytes.length;) {
-    const prefix = decoder.decode(bytes.subarray(offset, offset + 4));
-    if (!/^[0-9a-f]{4}$/u.test(prefix)) throw new Error('Invalid Git v2 fetch packet');
-    const size = Number.parseInt(prefix, 16);
-    offset += 4;
-    if (size === 1 && section === 'shallow-info') { section = 'header'; continue; }
-    if (size === 0 && section === 'packfile') { section = 'done'; continue; }
-    if (size === 2 && section === 'done' && offset === bytes.length) continue;
-    if (size < 5 || offset + size - 4 > bytes.length || section === 'done') throw new Error('Incomplete Git v2 fetch response');
-    const payload = bytes.subarray(offset, offset + size - 4);
-    offset += size - 4;
-    if (section === 'packfile') {
-      if (payload[0] === 1) { const chunk = payload.subarray(1); chunks.push(chunk); packSize += chunk.length; }
-      else if (payload[0] === 3) throw new Error(`Git fetch failed: ${decoder.decode(payload.subarray(1))}`);
-      else if (payload[0] !== 2) throw new Error('Invalid Git pack sideband');
-      continue;
-    }
-    const line = decoder.decode(payload);
-    if (section === 'header') {
-      if (line === 'shallow-info\n') section = 'shallow-info';
-      else if (line === 'packfile\n') section = 'packfile';
-      else throw new Error('Unexpected Git v2 fetch section');
-    } else {
-      const boundary = /^(shallow|unshallow) ([0-9a-f]{40})\n?$/u.exec(line);
-      if (!boundary) throw new Error('Invalid Git shallow-info');
-      if (boundary[1] === 'shallow') boundaries.add(boundary[2]!);
-      else if (!boundaries.delete(boundary[2]!)) throw new Error('Unexpected Git unshallow boundary');
-    }
+/** Wall time for one streamed transfer: no pack is held, so a repository's size bounds only how long it takes. */
+const TRANSFER_TIMEOUT_MS = 10 * 60_000;
+
+/** Copies the graph of `commit` into a destination ref, streaming the source's upload-pack response straight into the
+ * destination's receive-pack request: no pack is held in memory, so a history larger than a Worker's memory still
+ * transfers. The ref moves only from `previous` (null: absent). Source shallow boundaries travel with the pack so a
+ * copy never invents complete ancestry. No credentials follow redirects, and an interrupted download fails the push
+ * (receive-pack verifies the pack before moving the ref), so it has no destination-side effect. */
+export async function transferCommit(input: { source: { remote: string; auth: GitHttpAuth | null }; destination: { remote: string; auth: GitHttpAuth }; ref: string; previous: string | null; commit: string; haves?: readonly string[]; shallow?: readonly string[] }, request: ArtifactsFetch = fetch): Promise<void> {
+  const signal = AbortSignal.timeout(TRANSFER_TIMEOUT_MS);
+  const opened = await openCommitPack({ ...input.source, commit: input.commit, haves: input.haves ?? [], shallow: input.shallow ?? [], signal }, request);
+  try {
+    await publishSnapshotPack({ ...input.destination, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack: opened.pack, shallow: opened.shallow, signal }, request);
+  } finally {
+    // A push that never read the pack (its ref already held the commit, or discovery failed) releases the source.
+    await opened.pack.cancel().catch(() => undefined);
   }
-  if (section !== 'done' || packSize < 12) throw new Error('Git fetch did not return a complete pack');
-  const pack = new Uint8Array(packSize);
-  let offset = 0;
-  for (const chunk of chunks) { pack.set(chunk, offset); offset += chunk.length; }
-  if (decoder.decode(pack.subarray(0, 4)) !== 'PACK') throw new Error('Git fetch did not return a complete pack');
-  return { pack, shallow: [...boundaries] };
 }
 
 /** Deterministic root objects make interrupted initialization safely replayable. */
@@ -276,7 +380,7 @@ export async function initializeArtifactsRepository(repo: Pick<ArtifactsRepo, 'i
   if (!packed.packfile) throw new Error('Git pack writer returned no pack');
   const info = await repo.info();
   const token = await repo.createToken('write', 60);
-  try { await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref: checkpointRef, previous: zero, commit: worktreeCommit, pack: packed.packfile }, request); }
+  try { await publishSnapshotPack({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext }, ref: checkpointRef, previous: zero, commit: worktreeCommit, pack: packed.packfile }, request); }
   finally { await repo.revokeToken(token.id); }
   return { indexCommit, trackedWorktreeCommit, worktreeCommit, tree };
 }
@@ -427,7 +531,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     const checkpointRef = workspaceRefs.includes(previous.checkpointRef) ? previous.checkpointRef : workspaceRefs[0]!;
     const info = await repo.info();
     const token = await repo.createToken('write', 60);
-    try { await publishSnapshotPack({ remote: info.remote, token: token.plaintext, ref: checkpointRef, previous: previous.worktreeCommit, commit: worktreeCommit, pack: packed.packfile, signal: input.signal, onPublicationState: state => { certainty = state; } }, request); }
+    try { await publishSnapshotPack({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext }, ref: checkpointRef, previous: previous.worktreeCommit, commit: worktreeCommit, pack: packed.packfile, signal: input.signal, onPublicationState: state => { certainty = state; } }, request); }
     finally { await repo.revokeToken(token.id); }
     return RuntimeGitCheckpointSchema.parse({ ...(input.machine ?? previous), checkpointRef, indexCommit, indexTree, trackedWorktreeCommit, worktreeCommit, worktreeTree, conflicts });
   }, catch: error => new ArtifactsSnapshotError({ operation: 'writeSnapshot', certainty, message: error instanceof Error ? error.message : String(error) }) });

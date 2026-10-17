@@ -11,6 +11,7 @@ import { Result } from 'better-result';
 import { tenantRootPrivateKey } from './setup.js';
 import { createAccountWorkspaceRuntime } from '../src/account-runtime-host.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
+import { GitHubAppDO } from '../src/github-app.js';
 import { UserProjectIndexDO } from '../src/project-authority.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { PlanDoc, QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
@@ -58,6 +59,23 @@ function cloudArtifacts() {
   // An opened runtime indexes its snapshot for code_search; these source trees are empty.
   vi.spyOn(ArtifactsCodeStore.prototype, 'reader').mockImplementation(() => ({ readTree: async () => [], readBlob: async () => null, readCommit: async () => null, log: async () => [], close: async () => {} }));
   return { refs, forks, deleted, setBranch, copyCommit };
+}
+
+/** Commit graphs the cloud compares, readable from any repository: each commit's parents, newer digits committed later. */
+function cloudHistory(graph: Record<string, string[]>) {
+  const metadata = (hash: string): ArtifactsCommitMetadata => ({ hash, treeHash: commit('9'), parents: graph[hash] ?? [], message: 'history', author: { name: 'a', email: 'a@test' }, committer: { name: 'a', email: 'a@test' }, authoredAt: 0, committedAt: Number.parseInt(hash.slice(0, 1), 16) });
+  vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (_name, hash) => hash in graph ? metadata(hash) : null);
+  vi.spyOn(ArtifactsCodeStore.prototype, 'log').mockImplementation(async (_name, hash, limit = 50) => {
+    const entries: ArtifactsCommitMetadata[] = [];
+    for (let current = graph[hash] ? hash : undefined; current !== undefined && entries.length < limit; current = graph[current]?.[0]) entries.push(metadata(current));
+    return entries;
+  });
+}
+
+/** An installation of the account's GitHub App covers every repository; its tokens read only that one. */
+function coveredRepositories() {
+  vi.spyOn(GitHubAppDO.prototype, 'coverage').mockReturnValue(91);
+  return vi.spyOn(GitHubAppDO.prototype, 'repositoryToken').mockImplementation(async (repository, access) => ({ token: `ghs_${access}_${repository}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }));
 }
 
 async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.write']) {
@@ -219,12 +237,30 @@ describe('cloud workspace lifecycle with no machines', () => {
     try {
       const created = await client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' });
       expect(created).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('The project repository is private') } } });
-      expect(importRef).toHaveBeenCalledWith(project.id, 'https://github.com/Deedible/Private.git', 'refs/heads/staging');
+      expect(importRef).toHaveBeenCalledWith(project.id, 'https://github.com/Deedible/Private.git', 'refs/heads/staging', null);
       expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree')).toEqual([]);
       // Any other refusal is the origin's answer, not a reason to involve a machine.
       importRef.mockRejectedValue(new GitDiscoveryError(500));
       expect(await client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Git discovery failed (500)') } } });
     } finally { importRef.mockRestore(); }
+  });
+
+  it('reads a covered origin only with an installation token and never asks a machine when it refuses', async () => {
+    const { client, project, authority } = await cloudProject('Covered branches', 'git@github.com:acme/private.git');
+    const tokens = coveredRepositories();
+    const credentials: Array<unknown> = [];
+    const importRef = vi.spyOn(ArtifactsCodeStore.prototype, 'importSourceRef').mockImplementation(async (_projectId, _url, _ref, read) => {
+      credentials.push(await read?.());
+      throw new GitDiscoveryError(404);
+    });
+    const machine = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeImportRef');
+    const created = await client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' });
+    expect(created).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Git discovery failed (404)') } } });
+    expect(importRef).toHaveBeenCalledWith(project.id, 'https://github.com/acme/private.git', 'refs/heads/staging', expect.any(Function));
+    expect(credentials).toEqual([{ kind: 'basic', username: 'x-access-token', password: 'ghs_read_acme/private' }]);
+    expect(tokens).toHaveBeenCalledWith('acme/private', 'read');
+    expect(machine).not.toHaveBeenCalled();
+    expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree')).toEqual([]);
   });
 
   it('imports missing public branches for workspace sources and base switches without refreshing cached refs', async () => {
@@ -588,5 +624,76 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await client.project.archive({ projectId: gitspace.id, expectedRevision: gitspace.revision })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('cannot be archived') } } });
     expect(await client.project.delete({ projectId: gitspace.id, expectedRevision: gitspace.revision })).toMatchObject({ status: 'error' });
     expect((await index.list()).some(entry => entry.id === gitspace.id)).toBe(true);
+  });
+
+  it('updates the base from a covered origin: the project copy fast-forwards and the clean idle base checkout follows', async () => {
+    const { userId, client, project, artifacts, authority } = await cloudProject('Update base', 'https://github.com/acme/app.git');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
+    coveredRepositories();
+    cloudHistory({ [commit('1')]: [], [commit('2')]: [commit('1')] });
+    const read: Array<unknown> = [];
+    vi.spyOn(ArtifactsCodeStore.prototype, 'fetchOriginBranch').mockImplementation(async (projectId, url, branch, credentials) => {
+      read.push([url, branch, await credentials?.()]);
+      artifacts.refs.set(`project-${projectId} refs/gitspace/origin/heads/${branch}`, commit('2'));
+      return commit('2');
+    });
+    const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'ok' });
+    expect(read).toEqual([['https://github.com/acme/app.git', 'main', { kind: 'basic', username: 'x-access-token', password: 'ghs_read_acme/app' }]]);
+    expect(artifacts.refs.get(`project-${project.id} refs/heads/main`)).toBe(commit('2'));
+    expect(artifacts.refs.get(`workspace-${project.id} refs/heads/main`)).toBe(commit('2'));
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('2'), indexCommit: commit('2'), worktreeCommit: commit('2') });
+    expect(notices.mock.calls.map(call => call[1])).toEqual(['Base branch main updated to 2222222 from origin.']);
+    expect((await authority.getProject())?.remote).toMatchObject({ head: commit('2'), behind: false });
+    expect((await authority.listOperations()).find(operation => operation.kind === 'project.updateBase')).toMatchObject({ state: 'succeeded' });
+
+    // Nothing new on origin: the copy and the checkout already hold its head, and nothing moves.
+    const copies = artifacts.copyCommit.mock.calls.length;
+    expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'ok' });
+    expect(artifacts.copyCommit.mock.calls.length).toBe(copies);
+    expect(notices.mock.calls.at(-1)?.[1]).toBe("Base branch main already holds origin's 2222222.");
+  });
+
+  it('refuses to move a project copy holding commits the origin lacks', async () => {
+    const { userId, client, project, artifacts, authority } = await cloudProject('Diverged base', 'https://github.com/acme/app.git');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    await space.runtimeRepositoryCheckpoint(identity);
+    cloudHistory({ [commit('1')]: [], [commit('3')]: [] });
+    vi.spyOn(ArtifactsCodeStore.prototype, 'fetchOriginBranch').mockImplementation(async (projectId, _url, branch) => {
+      artifacts.refs.set(`project-${projectId} refs/gitspace/origin/heads/${branch}`, commit('3'));
+      return commit('3');
+    });
+    const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining("The project's main has 1 commit that origin's main (3333333) lacks") } } });
+    expect(artifacts.refs.get(`project-${project.id} refs/heads/main`)).toBe(commit('1'));
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ headCommit: commit('1') });
+    expect(notices).not.toHaveBeenCalled();
+    expect((await authority.listOperations()).find(operation => operation.kind === 'project.updateBase')).toMatchObject({ state: 'failed' });
+  });
+
+  it('updates the project copy but leaves a dirty base workspace for later, saying so', async () => {
+    const { userId, client, project, artifacts } = await cloudProject('Busy base', 'https://github.com/acme/app.git');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    const clean = await space.runtimeRepositoryCheckpoint(identity);
+    const dirty = { ...clean, worktreeTree: commit('4'), worktreeCommit: commit('6') };
+    await runInDurableObject(space, (_instance, state) => {
+      state.storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', JSON.stringify(dirty));
+    });
+    cloudHistory({ [commit('1')]: [], [commit('2')]: [commit('1')] });
+    vi.spyOn(ArtifactsCodeStore.prototype, 'fetchOriginBranch').mockImplementation(async (projectId, _url, branch) => {
+      artifacts.refs.set(`project-${projectId} refs/gitspace/origin/heads/${branch}`, commit('2'));
+      return commit('2');
+    });
+    const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    const result = await client.project.updateBase({ projectId: project.id });
+    expect(result).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Base branch main updated to 2222222 from origin. The base workspace was left for later') } } });
+    expect(result).toMatchObject({ error: { data: { message: expect.stringContaining('uncommitted changes') } } });
+    expect(artifacts.refs.get(`project-${project.id} refs/heads/main`)).toBe(commit('2'));
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toEqual(dirty);
+    expect(notices.mock.calls.map(call => call[1])).toEqual([expect.stringContaining('The base workspace was left for later')]);
   });
 });

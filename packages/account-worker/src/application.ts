@@ -2166,7 +2166,7 @@ export async function revertTenantRelease(env: Env, userId: string): Promise<Dep
  * it; status serves the stored head. */
 export async function checkCanonicalHead(env: Env, userId: string): Promise<DeploymentStatus> {
   const ref = `refs/heads/${GITSPACE_CANONICAL_BRANCH}`;
-  const commit = (await readAdvertisedRefs({ remote: GITSPACE_SOURCE_REPOSITORY, token: null, refPrefix: ref })).get(ref);
+  const commit = (await readAdvertisedRefs({ remote: GITSPACE_SOURCE_REPOSITORY, auth: null, refPrefix: ref })).get(ref);
   if (!commit) throw new Error(`${GITSPACE_SOURCE_REPOSITORY} has no ${GITSPACE_CANONICAL_BRANCH} branch`);
   await tenantReleases(env, userId).recordCanonicalHead({ repository: GITSPACE_SOURCE_REPOSITORY, branch: GITSPACE_CANONICAL_BRANCH, commit, checkedAt: new Date().toISOString() });
   return readTenantDeployment(env, userId);
@@ -3318,7 +3318,7 @@ const worker = {
           return Response.json({ status: 'error', error: { code: 'MACHINE_FLEET_CONTROL_DENIED', message: 'A machine credential may only report its own machine.' } }, { status: 403, headers: { 'cache-control': 'no-store' } });
         }
         const capability = body.operation === 'secrets.materialize' ? 'credential.access'
-          : body.operation === 'runtime.repository.credentials' || body.operation.startsWith('settings.') ? 'storage.access'
+          : body.operation.startsWith('runtime.repository.') || body.operation.startsWith('settings.') ? 'storage.access'
           : body.operation.startsWith('runtime.')
             || body.operation.startsWith('catalog.')
             || body.operation.startsWith('mcp.')

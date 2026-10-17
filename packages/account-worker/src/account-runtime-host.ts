@@ -17,11 +17,18 @@ import type { WorkspaceReport } from '@gitspace/protocol-workspace';
 import { notifyMachines } from './machine-notices.js';
 import { notifyBrowsers } from './live-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
+import { originAccess, originReadCredentials } from './origin-access.js';
+import { remoteDefaultBranch } from './cloud-project.js';
 
-/** The project repository every workspace forks: a scratch repository with an initial commit, or the imported origin with its history. */
-export async function ensureProjectCodeRepository(code: ArtifactsCodeStore, project: Pick<CloudProjectSummary, 'id' | 'repositoryReference' | 'baseBranch'>) {
+/** The project repository every workspace forks: a scratch repository with an initial commit, or the origin's history,
+ * imported natively from a public origin or streamed with installation-token reads from a covered one. */
+export async function ensureProjectCodeRepository(env: Env, code: ArtifactsCodeStore, project: Pick<CloudProjectSummary, 'id' | 'repositoryReference' | 'baseBranch'>) {
   if (project.repositoryReference === null) return code.ensureEmptyProject(project.id, project.baseBranch);
-  return code.importProject(project.id, { url: project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/'), branch: project.baseBranch });
+  const access = await originAccess(env, project.repositoryReference);
+  // A covered import is read by branch name: an unresolved base ('HEAD') is the origin's default branch.
+  const branch = access.kind === 'github-app' && project.baseBranch === 'HEAD' ? await remoteDefaultBranch(env, project.repositoryReference) : project.baseBranch;
+  if (branch === null) throw new Error(`GitSpace can't read the default branch of ${access.remote}`);
+  return code.importProject(project.id, { url: access.remote, branch }, originReadCredentials(access));
 }
 
 /** Repository identities and origins come only from canonical project metadata. */
@@ -32,7 +39,7 @@ export async function ensureRuntimeCodeRepository(env: Env, userId: string, iden
   if (!project || project.id !== identity.projectId) throw new Error('Project is unavailable');
   if (identity.workspaceId !== project.id && !await authority.getWorkspace(identity.workspaceId)) throw new Error('Workspace is not owned by this project');
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
-  await ensureProjectCodeRepository(code, project);
+  await ensureProjectCodeRepository(env, code, project);
   return code.forkWorkspace(project.id, identity.workspaceId);
 }
 

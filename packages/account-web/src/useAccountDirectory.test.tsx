@@ -44,7 +44,7 @@ const waiting = { ...working, primaryColor: 'blue' as const, agents: { green: 0,
 
 function fixture(): Fixture {
   const projects = [{ id: 'a', name: 'Alpha', lifecycle: 'active' as const }, { id: 'b', name: 'Beta', lifecycle: 'active' as const }];
-  const savedMetadata = { sourceKind: 'base' as const, sourceRef: 'main', sourceCommit: null, lifecycle: 'active' as const, goalId: null, revision: 1, archivedAt: null, createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z' };
+  const savedMetadata = { sourceKind: 'base' as const, sourceRef: 'main', sourceCommit: null, lifecycle: 'active' as const, goalId: null, revision: 1, remote: null, archivedAt: null, createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z' };
   const definitions = (id: string): CloudWorkspaceDefinition[] => [
     { ...savedMetadata, id, projectId: id, kind: 'base', name: id, branch: 'main', phase: null },
     { ...savedMetadata, id: `${id}-work`, projectId: id, kind: 'worktree', name: `${id === 'a' ? 'Alpha' : 'Beta'} work`, branch: 'feature', phase: id === 'a' ? 'code' : 'review' },
@@ -65,7 +65,7 @@ function fixture(): Fixture {
   const cloud = new Set<string>();
   const revisions = { a: 1, b: 1 };
   const snapshot = (): AccountDirectorySnapshot => structuredClone({
-    projects: projects.map((project) => ({ ...project, repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 1, archivedAt: null, updatedAt: savedMetadata.updatedAt })),
+    projects: projects.map((project) => ({ ...project, repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 1, remote: null, archivedAt: null, updatedAt: savedMetadata.updatedAt })),
     workspaces: [...saved.a, ...saved.b].map((space) => ({ ...space, cloudRuntime: cloud.has(space.id) })), placements,
     machines: machines.map((machine) => ({ ...machine, rpcEndpoint: `/machine/${machine.id}/rpc`, kind: 'physical', notes: '', provider: 'physical', lifecycleRevision: 1, operationId: null, error: null })),
     projectRevisions: revisions,

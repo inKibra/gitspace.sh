@@ -25,10 +25,12 @@ import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environ
 import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceReport, readWorkspaceStatus, writeProjectWatch, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
 import { z } from 'zod';
-import { normalizeRemoteRepositoryUrl, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle, type WorkspaceLifecycle } from '@gitspace/protocol';
+import type { CloudProjectSummary, CloudWorkspaceDefinition, ProjectLifecycle, WorkspaceLifecycle } from '@gitspace/protocol';
 import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type EnvironmentFailure, type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleState } from '@gitspace/protocol-environment';
+import { forwardPosition } from './cloud-stack-status.js';
+import { originAccess, originReadCredentials } from './origin-access.js';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
 /** A legacy LFS retention that keeps failing stays pending (its objects stay retained) and stops retrying here. */
 const PORTABLE_LFS_MAX_ATTEMPTS = 12;
@@ -37,6 +39,18 @@ type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 /** How long a machine stays offline before its workspaces' conversations are told. */
 const OFFLINE_NOTICE_MS = 60_000;
 const OfflineMachinesSchema = z.record(z.string(), z.object({ since: z.number(), told: z.boolean() }));
+
+/** Whether a base checkout at `commit` already holds the project's `tip` (true) or fast-forwards to it (false). One with
+ * commits the tip lacks is never moved there: those commits would leave its branch. */
+async function baseCheckoutHolds(code: ArtifactsCodeStore, repositories: readonly string[], commit: string, tip: string): Promise<boolean> {
+  const position = await forwardPosition(code, repositories, commit, tip);
+  if (position.kind === 'diverged') {
+    throw new Error(position.ahead === null
+      ? `GitSpace cannot tell whether the base workspace holds commits that ${tip.slice(0, 7)} lacks, so it was not moved`
+      : `The base workspace has ${position.ahead} ${position.ahead === 1 ? 'commit' : 'commits'} that ${tip.slice(0, 7)} lacks, so it was not moved; push them to origin first`);
+  }
+  return position.kind === 'holds';
+}
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: LiveChanges;
@@ -319,7 +333,9 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   /** The base checkout, its Git refs and the project's branch change in one run of the checkout's queue: cloud edits
    * and cache publications wait for it rather than being refused. Every step is repeatable, so a failed change is
-   * reported and running it again finishes it. Dirty state, agents and live caches are rejected first. */
+   * reported and running it again finishes it. Dirty state, agents and live caches are rejected first. The current
+   * branch refreshes the checkout instead: after Update base moved the project's copy forward, a checkout behind it
+   * fast-forwards to it, one already holding it is left untouched, and one with commits the copy lacks never moves. */
   async runtimeSetBaseBranch(raw: unknown, expectedRevision: number, branch: string): Promise<CloudProjectSummary> {
     const identity = RuntimeIdentitySchema.parse(raw);
     if (!isSupportedBranchName(branch)) throw new Error('Invalid base branch');
@@ -329,20 +345,29 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const project = await authority.getProject();
     if (!project) throw new Error('Project is unavailable');
     if (project.role === 'gitspace-source') throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
-    if (project.baseBranch === branch) return this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(project);
-    if (project.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
+    const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
+    const repository = artifactsWorkspaceRepository(identity.workspaceId);
+    const source = artifactsProjectRepository(project.id);
+    // Commit IDs are content addresses: the checkout's repository and the project's together hold both graphs.
+    const repositories = [repository, source];
+    const refresh = project.baseBranch === branch;
+    const action = refresh ? 'moving it forward' : 'changing its branch';
+    if (refresh) {
+      // A base workspace with no committed checkout yet has nothing to move; its project repository may not exist yet.
+      const committed = (await readCurrentCheckpoint(this.ctx.storage))?.headCommit;
+      const tip = committed ? await code.resolveRef(source, `refs/heads/${branch}`) : null;
+      if (!committed || tip === null || await baseCheckoutHolds(code, repositories, committed, tip)) return this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(project);
+    } else if (project.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
     if (project.lifecycle !== 'active') throw new Error('Project must be active to change its base branch');
     authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
     const runtime = await this.loadRuntime(identity);
     const snapshot = await runtime.snapshot();
-    if (snapshot.conversations.some(conversation => conversation.status === 'running' || conversation.status === 'waiting')) throw new Error('Stop the base workspace agent before changing its branch');
-    if (runtime.attachments.list().some(attachment => attachment.state !== 'detached')) throw new Error('Detach base workspace caches before changing its branch');
-    const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
-    const repository = artifactsWorkspaceRepository(identity.workspaceId);
-    const source = artifactsProjectRepository(project.id);
-    await ensureProjectCodeRepository(code, project);
+    if (snapshot.conversations.some(conversation => conversation.status === 'running' || conversation.status === 'waiting')) throw new Error(`Stop the base workspace agent before ${action}`);
+    if (runtime.attachments.list().some(attachment => attachment.state !== 'detached')) throw new Error(`Detach base workspace caches before ${action}`);
+    await ensureProjectCodeRepository(this.env, code, project);
+    const reference = project.repositoryReference;
     const head = await code.resolveRef(source, `refs/heads/${branch}`)
-      ?? (project.repositoryReference ? await code.importSourceRef(project.id, normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/')), `refs/heads/${branch}`) : null);
+      ?? (reference === null ? null : await originAccess(this.env, reference).then(access => code.importSourceRef(project.id, access.remote, `refs/heads/${branch}`, originReadCredentials(access))));
     if (!head) throw new Error(`Branch ${branch} does not exist in the project repository`);
     const metadata = await code.readCommit(source, head);
     if (!metadata) throw new Error('Base branch commit is unavailable');
@@ -358,11 +383,14 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         // A change that already switched the checkout and failed later finishes from there.
         if (current.worktreeCommit === target.worktreeCommit) return;
         const currentHead = current.headCommit ? await code.readCommit(repository, current.headCommit) : null;
-        if (!currentHead || current.indexTree !== currentHead.treeHash || current.worktreeTree !== currentHead.treeHash || current.conflicts?.length || current.lfs?.heldBack.length) throw new Error('Base workspace has uncommitted changes; commit or discard them before changing its branch');
+        if (!currentHead || current.indexTree !== currentHead.treeHash || current.worktreeTree !== currentHead.treeHash || current.conflicts?.length || current.lfs?.heldBack.length) throw new Error(`Base workspace has uncommitted changes; commit or discard them before ${action}`);
+        if (refresh && current.headCommit && await baseCheckoutHolds(code, repositories, current.headCommit, head)) throw new Error(`The base workspace moved past ${head.slice(0, 7)} during the update`);
       },
       prepare: async current => {
         previous = current;
         previousBranchTip = await code.resolveRef(repository, `refs/heads/${branch}`);
+        // The workspace's branch never loses commits it holds beyond its checkout either.
+        if (refresh && previousBranchTip !== null && previousBranchTip !== current.headCommit && await baseCheckoutHolds(code, repositories, previousBranchTip, head)) throw new Error(`The base workspace's ${branch} already holds ${head.slice(0, 7)}`);
       },
       publish: async () => {
         if (!previous) throw new Error('Base branch change has no prepared checkout');
@@ -601,8 +629,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     if (!summary || !metadata) throw new Error('Committed environment workspace is unavailable');
     const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
     try {
-      if (summary.repositoryReference === null) await code.ensureEmptyProject(summary.id, summary.baseBranch);
-      else await code.importProject(summary.id, { url: summary.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/'), branch: summary.baseBranch });
+      await ensureProjectCodeRepository(this.env, code, summary);
       await code.forkWorkspace(summary.id, identity.workspaceId);
       const { origins } = await committedBrowserOrigins({
         code, repository: artifactsWorkspaceRepository(identity.workspaceId), branch: metadata.branch,

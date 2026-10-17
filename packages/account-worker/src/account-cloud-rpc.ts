@@ -18,7 +18,7 @@ import {
   getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
   ensureGitSpaceProjectContract,
   spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentRevertContract, deploymentCheckCanonicalContract,
-  environmentStateContract, recordIncidentContract,
+  environmentStateContract, recordIncidentContract, refreshProjectRemoteContract,
 } from '@gitspace/protocol/rpc-contract';
 import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract } from '@gitspace/protocol/rpc-contract';
 import { stackStatusContract } from '@gitspace/protocol/rpc-contract';
@@ -41,6 +41,7 @@ import { providerCloudProcedures } from './account-provider-rpc.js';
 import { githubCloudProcedures } from './account-github-rpc.js';
 import { createCloudProject, readCloudSpaceView } from './cloud-project.js';
 import { readCloudStackStatus } from './cloud-stack-status.js';
+import { refreshProjectRemote } from './project-remote.js';
 import { workspaceLifecycleCloudProcedures } from './account-workspace-rpc.js';
 
 const MAX_REQUEST_BYTES = 512 * 1024;
@@ -287,6 +288,13 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       });
     } catch (error) { return err(errors.OperationFailed({ operation: 'create project', message: message(error) })); }
   });
+  const refreshRemote = server.implement(refreshProjectRemoteContract).handler(async ({ input, errors }) => {
+    try {
+      if (!(await projectIndex.list()).some((project) => project.id === input.projectId)) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      await refreshProjectRemote(env, userId, input.projectId);
+      return ok({});
+    } catch (error) { return err(errors.OperationFailed({ operation: 'check the origin', message: message(error) })); }
+  });
   const spaceView = server.implement(spaceViewContract).handler(async ({ input, errors }) => {
     try {
       if (!(await projectIndex.list()).some((project) => project.id === input.projectId)) return err(errors.ProjectNotFound({ projectId: input.projectId }));
@@ -419,7 +427,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, state: settingsState },
-    machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, ...lifecycle.project },
+    machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, remote: { refresh: refreshRemote }, ...lifecycle.project },
     space: { view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, deployment: { status: deploymentStatus, checkCanonical: deploymentCheckCanonical, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
     github: githubCloudProcedures(env, requireAdministration),

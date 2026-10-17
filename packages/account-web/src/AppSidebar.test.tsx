@@ -1,6 +1,7 @@
 import { SidebarProvider } from '@gitspace/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { verticalSliceFixture } from './App.js';
 import { AppSidebar, type AppSidebarProps, type SidebarDeploymentProps } from './AppSidebar.js';
 
@@ -128,5 +129,21 @@ describe('AppSidebar selected status', () => {
     expect(html).toContain('title="Base · Waiting"');
     expect(html).not.toContain('Status unavailable');
     expect(html).not.toContain('Cloudflare 1234');
+  });
+
+  it('marks the projects and workspaces whose origin is ahead of their copy, apart from their status', () => {
+    const checkedAt = '2026-10-17T12:00:00.000Z';
+    const definition = (id: string, behind: boolean): CloudWorkspaceDefinition => ({
+      id, projectId: 'tracked', kind: 'worktree', name: id, branch: `feature/${id}`, phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null,
+      lifecycle: 'active', goalId: null, revision: 1, remote: { head: 'a'.repeat(40), checkedAt, behind }, archivedAt: null, createdAt: checkedAt, updatedAt: checkedAt,
+    });
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} deployment={null} projects={[
+      { id: 'tracked', name: 'Tracked', lifecycle: 'active', remote: { head: 'b'.repeat(40), checkedAt, behind: true },
+        workspaces: ['ahead', 'current'].map((id) => ({ id, projectId: 'tracked', name: id, branch: `feature/${id}`, closedAt: null, definition: definition(id, id === 'ahead') })) },
+      { id: 'current', name: 'Current', lifecycle: 'active', remote: { head: 'c'.repeat(40), checkedAt, behind: false }, workspaces: [] },
+    ]} /></SidebarProvider>);
+    expect(html.match(/aria-label="Behind origin"/gu)).toHaveLength(2);
+    expect(html).toContain('title="Behind origin/feature/ahead"');
+    expect(html).not.toContain('title="Behind origin/feature/current"');
   });
 });

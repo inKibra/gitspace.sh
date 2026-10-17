@@ -99,6 +99,15 @@ export const gitSpaceSourceProvenanceSchema = z.object({
 });
 export type GitSpaceSourceProvenance = z.infer<typeof gitSpaceSourceProvenanceSchema>;
 
+/** What the origin last reported for one branch. `head` null: the branch does not exist there. `behind`: the origin's
+ * head is missing from GitSpace's copy (the project repository's base branch, or a workspace's checkout). */
+export const remoteBranchStateSchema = z.object({
+  head: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u).nullable(),
+  checkedAt: z.string().datetime(),
+  behind: z.boolean(),
+});
+export type RemoteBranchState = z.infer<typeof remoteBranchStateSchema>;
+
 export const cloudProjectSummarySchema = z.object({
   id: z.string().min(1).max(160),
   name: z.string().min(1).max(160),
@@ -108,6 +117,8 @@ export const cloudProjectSummarySchema = z.object({
   role: z.literal(GITSPACE_SOURCE_PROJECT_ROLE).nullable().default(null),
   source: gitSpaceSourceProvenanceSchema.nullable().default(null),
   revision: z.number().int().positive(),
+  /** The base branch on the origin; null until first checked. Stored rows from before tracking decode as null. */
+  remote: remoteBranchStateSchema.nullable().default(null),
   archivedAt: z.string().datetime().nullable(),
   updatedAt: z.string().datetime(),
 });
@@ -126,6 +137,8 @@ export const cloudWorkspaceDefinitionSchema = z.object({
   lifecycle: workspaceLifecycleSchema,
   goalId: z.string().min(1).max(160).nullable(),
   revision: z.number().int().positive(),
+  /** This workspace's branch on the origin; null until first checked. */
+  remote: remoteBranchStateSchema.nullable().default(null),
   archivedAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

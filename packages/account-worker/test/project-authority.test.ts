@@ -1,10 +1,13 @@
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID } from '@gitspace/protocol';
+import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID, type CloudProjectSummary } from '@gitspace/protocol';
+import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { ProjectAuthorityDO, UserProjectIndexDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
+
+afterEach(() => { vi.restoreAllMocks(); });
 
 const projectEnv = env as typeof env & {
   PROJECT_AUTHORITY: DurableObjectNamespace<ProjectAuthorityDO>;
@@ -339,6 +342,33 @@ describe('ProjectAuthorityDO', () => {
     expect(tombstone).toMatchObject({ id: project.id, lifecycle: 'deleting', revision: 2 });
     expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listWorkspaces())).toEqual([]);
   });
+
+  it('adds origin tracking to a project and workspaces stored before it, and forgets the state of a branch left behind', async () => {
+    const stub = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:pre-tracking`);
+    const project = await stub.bootstrap({ id: 'pre-tracking', name: 'Pre-tracking', repositoryReference: 'https://github.com/someone/pre.git', baseBranch: 'main', createdBy: 'user' });
+    await stub.putWorkspace({ id: 'pre-tracking-work', projectId: project.id, kind: 'worktree', name: 'Work', branch: 'work', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await runInDurableObject(stub, async (_authority, state) => {
+      for (const table of ['project', 'workspaces']) for (const column of ['remote_head', 'remote_checked_at', 'remote_behind']) state.storage.sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      const restarted = new ProjectAuthorityDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      expect(restarted.getProject()).toMatchObject({ id: project.id, name: 'Pre-tracking', baseBranch: 'main', remote: null });
+      expect(restarted.getWorkspace('pre-tracking-work')).toMatchObject({ name: 'Work', branch: 'work', remote: null });
+    });
+
+    // Nothing local holds the origin's head, so the project is behind; the absent branch is not.
+    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockResolvedValue(null);
+    const active = await stub.setProjectLifecycle(project.revision, 'active');
+    const head = 'a'.repeat(40);
+    await stub.recordRemoteHeads([{ branch: 'main', head }, { branch: 'work', head: null }]);
+    expect((await stub.getProject())?.remote).toMatchObject({ head, behind: true });
+    expect((await stub.getWorkspace('pre-tracking-work'))?.remote).toMatchObject({ head: null, behind: false });
+    expect((await stub.getProject())?.revision).toBe(active.revision);
+
+    const work = await stub.getWorkspace('pre-tracking-work');
+    if (!work) throw new Error('Workspace is missing');
+    expect((await stub.putWorkspace({ ...work, branch: 'renamed', expectedRevision: work.revision })).remote).toBeNull();
+    expect((await stub.setBaseBranch(active.revision, 'develop', 'b'.repeat(40))).remote).toBeNull();
+  });
 });
 
 describe('UserProjectIndexDO', () => {
@@ -356,7 +386,7 @@ describe('UserProjectIndexDO', () => {
     await adopted.put({
       id: 'existing-checkout', name: 'My renamed source', lifecycle: 'active',
       repositoryReference: 'git@github.com:inKibra/gitspace.sh.git', baseBranch: 'my-source',
-      role: null, source: null, revision: 3, archivedAt: null, updatedAt: new Date(0).toISOString(),
+      role: null, source: null, revision: 3, remote: null, archivedAt: null, updatedAt: new Date(0).toISOString(),
     });
     const repaired = await adopted.ensureGitSpaceProject(source);
     expect(repaired).toMatchObject({ id: 'existing-checkout', name: 'My renamed source', role: 'gitspace-source', lifecycle: 'active', baseBranch: 'my-source' });
@@ -401,6 +431,7 @@ describe('UserProjectIndexDO', () => {
       role: null,
       source: null,
       revision: 2,
+      remote: null,
       archivedAt: null,
       updatedAt: new Date().toISOString(),
     }));
@@ -409,5 +440,19 @@ describe('UserProjectIndexDO', () => {
       .toMatchObject([{ id: 'project-a', lifecycle: 'active' }]);
     expect(await runInDurableObject(stub, (index: UserProjectIndexDO) => index.locateWorkspace('workspace-a')))
       .toBe('project-a');
+  });
+
+  it('keeps the later origin check of one project revision, whichever summary arrives last', async () => {
+    const index = projectEnv.USER_PROJECTS.getByName('origin-checks');
+    const summary: CloudProjectSummary = {
+      id: 'checked', name: 'Checked', lifecycle: 'active', repositoryReference: 'https://github.com/someone/checked.git', baseBranch: 'main',
+      role: null, source: null, revision: 2, remote: null, archivedAt: null, updatedAt: new Date().toISOString(),
+    };
+    const later = { head: 'b'.repeat(40), checkedAt: '2026-10-17T12:05:00.000Z', behind: true };
+    await index.put({ ...summary, remote: later });
+    expect((await index.put({ ...summary, remote: { head: 'a'.repeat(40), checkedAt: '2026-10-17T12:00:00.000Z', behind: false } })).remote).toEqual(later);
+    expect((await index.put({ ...summary, remote: null })).remote).toEqual(later);
+    // A newer revision carries the whole project, origin state included: a new base branch has none yet.
+    expect((await index.put({ ...summary, baseBranch: 'develop', revision: 3 })).remote).toBeNull();
   });
 });

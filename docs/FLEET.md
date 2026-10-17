@@ -536,8 +536,17 @@ before execution; there is no silent legacy alias.
   into active OMP sessions, and retain the last cache for offline startup.
 - **Git identity**: the user fleet owns one generated Ed25519 SSH identity in
   canonical cloud storage. Each enrolled machine materializes the same key with
-  `0600` permissions. GitSpace repositories receive its `core.sshCommand` plus
-  the shared author name/email; existing non-GitSpace repositories are untouched.
+  `0600` permissions. GitSpace checkouts receive the shared author name/email
+  and the route to their project origin the account decides
+  (`runtime.repository.originAccess`): a repository an installation of the
+  account's GitHub App covers keeps an HTTPS origin and a `https://github.com`
+  credential helper carrying only the checkout's attachment and generation,
+  which asks the account for a fresh installation token
+  (`runtime.repository.githubToken`, `write` once the checkout is ready) on
+  every fetch, push and LFS request and stores nothing; any other origin gets
+  the key's `core.sshCommand` and the HTTPS-to-SSH GitHub rewrite. A coverage
+  change sends machines the `settings` notice, which re-applies both. Existing
+  non-GitSpace repositories are untouched.
 - Physical/self-hosted machines join through the 1.x machine enrollment path.
   Every fleet definition carries a provider ID (`physical` or
   `cloudflare-sandbox`) in addition to presentation kind and shared notes. The

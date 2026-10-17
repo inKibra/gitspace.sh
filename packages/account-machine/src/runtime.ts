@@ -33,6 +33,7 @@ import { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { z } from 'zod';
 import { createMachineExecutor, type MachineExecutorRuntime } from './runtime-executor.js';
 import { machineOperationalTools } from './runtime-operations.js';
+import { createGitHubCredentialHelper } from './github-credential-helper.js';
 import { RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 
@@ -91,11 +92,15 @@ export async function startMachineRuntime() {
     use: async spaceId => { if (executorRuntime) await executorRuntime.useWorkspace(spaceId); },
     changed: async () => { await executorRuntime?.sync(); },
   };
+  // Every checkout this machine holds, so a covered origin's credential helper answers only for a live grant.
+  const machineCheckouts = () => executorRuntime?.journal.attachments() ?? [];
+  const github = await createGitHubCredentialHelper(join(environmentRoot, 'github-credentials'), cloudRuntime, machineCheckouts);
   const gitIdentity = new SharedGitIdentityCoordinator(
     authority,
     environmentRoot,
-    // Checkouts commit as the account (agents run `git commit` there).
-    () => (executorRuntime?.journal.attachments() ?? []).filter(local => local.attachment.state !== 'detached').map(local => local.rootPath),
+    // Checkouts commit as the account (agents run `git commit` there) and reach their origin the way the account decides.
+    () => machineCheckouts().filter(local => local.attachment.state !== 'detached'),
+    github,
   );
   await gitIdentity.start();
   await installDefaultGitSpaceSkills(join(environmentRoot, 'agent'));
@@ -130,27 +135,20 @@ export async function startMachineRuntime() {
   const gitRemote = new ArtifactsGitRemote({
     credentials: (binding, scope) => cloudRuntime.call('runtime.repository.credentials', { ...binding, scope }, repositoryCredentialsSchema),
   });
-  /** The checkout's own `origin` with this machine's git identity: what LFS and ref imports fetch through. */
-  const originEnvironment = async (repositoryPath: string) => {
-    const origin = Bun.spawn(['git', 'remote', 'get-url', 'origin'], { cwd: repositoryPath, stdout: 'pipe', stderr: 'pipe' });
-    const [code, url, error] = await Promise.all([origin.exited, new Response(origin.stdout).text(), new Response(origin.stderr).text()]);
-    if (code !== 0) throw new Error(`The checkout's origin is unavailable: ${error}`);
-    return gitIdentity.gitEnvironment(url.trim());
-  };
-  const lfsOrigin = async (projectId: string) => {
-    const project = await authority.getProject(projectId);
+  const lfsOrigin = async (checkout: LocalAttachment) => {
+    const project = await authority.getProject(checkout.attachment.projectId);
     if (!project) throw new Error('LFS project is unavailable');
-    return { canonicalOrigin: project.repositoryReference, originEnvironment };
+    return { canonicalOrigin: project.repositoryReference, originEnvironment: () => gitIdentity.originEnvironment(checkout) };
   };
   const lfs: MachineGitLfsAccess = {
-    read: async projectId => {
-      const origin = await lfsOrigin(projectId);
-      const store = await createCloudGitLfsStore({ projectId, blobs: checkpointBlobs, encryptionKey, controlOptions });
+    read: async checkout => {
+      const origin = await lfsOrigin(checkout);
+      const store = await createCloudGitLfsStore({ projectId: checkout.attachment.projectId, blobs: checkpointBlobs, encryptionKey, controlOptions });
       return { ...origin, store };
     },
-    publish: async (projectId, publicationId) => {
-      const origin = await lfsOrigin(projectId);
-      const store = await createCloudGitLfsPublisher({ projectId, publicationId, blobs: checkpointBlobs, encryptionKey, controlOptions });
+    publish: async (checkout, publicationId) => {
+      const origin = await lfsOrigin(checkout);
+      const store = await createCloudGitLfsPublisher({ projectId: checkout.attachment.projectId, publicationId, blobs: checkpointBlobs, encryptionKey, controlOptions });
       return {
         ...origin, store,
         releasePublication: () => store.releasePublication(),
@@ -328,11 +326,11 @@ export async function startMachineRuntime() {
       serviceForward: serviceAccess.forward,
     } },
     prepareAttachment: async (local, signal, progress) => {
-      await gitIdentity.apply(await settings.getUserSettings(), [local.rootPath]);
+      await gitIdentity.apply(await settings.getUserSettings(), [local]);
       await environments.prepareAttachment(local, signal, progress);
     },
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
-    operations: machineOperationalTools({ environments, services: serviceManager, authority, mcp, projectRepository: gitRemote, originEnvironment }),
+    operations: machineOperationalTools({ environments, services: serviceManager, authority, mcp, projectRepository: gitRemote, originEnvironment: checkout => gitIdentity.originEnvironment(checkout) }),
     commitSnapshot: async (local, checkpoint, previousWorktreeCommit) => {
       const accepted = await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
         projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
@@ -360,6 +358,7 @@ export async function startMachineRuntime() {
     releases.stop();
     await serviceManager.dispose();
     await executorRuntime?.close();
+    await github.close();
     await http.stop();
   };
   const shutdown = (): void => {

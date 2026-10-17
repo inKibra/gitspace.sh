@@ -1,6 +1,6 @@
 import type { CloudProjectOperation, CloudProjectSummary, CloudWorkspaceDefinition, GitSpaceRpcContext } from '@gitspace/protocol';
 import {
-  archiveProjectContract, restoreProjectContract, setProjectBaseBranchContract, deleteProjectContract,
+  archiveProjectContract, restoreProjectContract, setProjectBaseBranchContract, updateProjectBaseContract, deleteProjectContract,
   createWorkspaceContract, retryCreateWorkspaceContract, archiveWorkspaceContract, restoreWorkspaceContract, deleteWorkspaceContract,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
@@ -8,7 +8,7 @@ import { serverRpc } from 'result-rpc/server';
 import { readCloudSpaceView } from './cloud-project.js';
 import {
   archiveCloudProject, archiveCloudWorkspace, CloudLifecycleTargetMissing, createCloudWorkspace, deleteCloudProject, deleteCloudWorkspace,
-  restoreCloudProject, restoreCloudWorkspace, retryCloudWorkspaceCreation, setCloudProjectBaseBranch,
+  restoreCloudProject, restoreCloudWorkspace, retryCloudWorkspaceCreation, setCloudProjectBaseBranch, updateCloudProjectBase,
 } from './cloud-workspace-lifecycle.js';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -90,6 +90,15 @@ export function workspaceLifecycleCloudProcedures(env: Env, userId: string) {
       return err(errors.OperationFailed({ operation: 'set project base branch', message: message(error) }));
     }
   });
+  const updateBase = server.implement(updateProjectBaseContract).handler(async ({ input, errors }) => {
+    try {
+      await updateCloudProjectBase(env, userId, input.projectId);
+      return ok({});
+    } catch (error) {
+      if (error instanceof CloudLifecycleTargetMissing) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      return err(errors.OperationFailed({ operation: 'update project base', message: message(error) }));
+    }
+  });
   const deleteProject = server.implement(deleteProjectContract).handler(async ({ input, errors }) => {
     try {
       await deleteCloudProject(env, userId, input.projectId, input.expectedRevision);
@@ -100,7 +109,7 @@ export function workspaceLifecycleCloudProcedures(env: Env, userId: string) {
     }
   });
   return {
-    project: { archive: archiveProject, restore: restoreProject, setBaseBranch, delete: deleteProject },
+    project: { archive: archiveProject, restore: restoreProject, setBaseBranch, updateBase, delete: deleteProject },
     workspace: { create, retryCreate, archive: archiveWorkspace, restore: restoreWorkspace, delete: deleteWorkspace },
   };
 }

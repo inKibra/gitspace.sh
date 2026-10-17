@@ -3,7 +3,15 @@ import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { GitIdentityDocument, UserSettings } from '@gitspace/protocol';
+import type { LocalAttachment } from '@gitspace/runtime-machine';
 import { CloudSpaceAuthorityError } from './cloud-space-authority.js';
+import type { GitHubCheckoutAccess } from './github-credential-helper.js';
+
+const SSH_REWRITE = 'url.git@github.com:.insteadOf';
+/** A covered checkout's only credential helper for github.com, asked per repository path. An empty value first drops
+ * the helpers configured before it: a keychain or `gh` helper would answer with someone's own token, or store this one. */
+const GITHUB_HELPER = 'credential.https://github.com.helper';
+const GITHUB_HTTP_PATH = 'credential.https://github.com.useHttpPath';
 
 export interface GitIdentityCloud {
   getGitIdentity(): Promise<GitIdentityDocument | null>;
@@ -45,19 +53,48 @@ async function git(args: string[]): Promise<{ code: number; stdout: string; stde
   return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-/** Writes one config key, skipping when the value already matches. Retries the
- *  `.git/config.lock` collision git raises when another writer (a workspace
+/** Runs one `git config` write, retrying the `.git/config.lock` collision git raises when another writer (a workspace
  *  agent, the machine's own concurrent apply, a stale lock) is mid-write. */
+async function writeConfig(repository: string, args: string[]): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    const result = await git(['-C', repository, 'config', ...args]);
+    // 5: `--unset-all` found nothing to remove.
+    if (result.code === 0 || (result.code === 5 && args[0] === '--unset-all')) return;
+    const locked = /could not lock config file/u.test(result.stderr);
+    if (!locked || attempt >= 5) throw new Error(result.stderr || `git config ${args.join(' ')} failed in ${repository}`);
+    await Bun.sleep(50 * 2 ** attempt);
+  }
+}
+
+/** Writes one config key, skipping when the value already matches. */
 async function setConfig(repository: string, key: string, value: string): Promise<void> {
   const current = await git(['-C', repository, 'config', '--get', key]);
   if (current.code === 0 && current.stdout === value) return;
-  for (let attempt = 0; ; attempt += 1) {
-    const result = await git(['-C', repository, 'config', key, value]);
-    if (result.code === 0) return;
-    const locked = /could not lock config file/u.test(result.stderr);
-    if (!locked || attempt >= 5) throw new Error(result.stderr || `git config ${key} failed in ${repository}`);
-    await Bun.sleep(50 * 2 ** attempt);
+  await writeConfig(repository, [key, value]);
+}
+
+/** Writes every value of a multi-valued key in the checkout's own config in order, skipping when they already match. */
+async function setConfigValues(repository: string, key: string, values: readonly string[]): Promise<void> {
+  const current = await git(['-C', repository, 'config', '--local', '--null', '--get-all', key]);
+  if (current.code === 0 && current.stdout.split('\0').slice(0, -1).join('\0') === values.join('\0')) return;
+  await unsetConfig(repository, key);
+  for (const value of values) await writeConfig(repository, ['--add', key, value]);
+}
+
+async function unsetConfig(repository: string, key: string): Promise<void> {
+  if ((await git(['-C', repository, 'config', '--local', '--get-all', key])).code !== 0) return;
+  await writeConfig(repository, ['--unset-all', key]);
+}
+
+/** `GIT_CONFIG_*` entries after those the process already carries; callers spread `process.env` first and keep them. */
+function configEnvironment(entries: ReadonlyArray<readonly [string, string]>): Record<string, string> {
+  const count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
+  const environment: Record<string, string> = { GIT_CONFIG_COUNT: String(count + entries.length) };
+  for (const [index, [key, value]] of entries.entries()) {
+    environment[`GIT_CONFIG_KEY_${count + index}`] = key;
+    environment[`GIT_CONFIG_VALUE_${count + index}`] = value;
   }
+  return environment;
 }
 
 export class SharedGitIdentityCoordinator {
@@ -69,7 +106,8 @@ export class SharedGitIdentityCoordinator {
   constructor(
     private readonly cloud: GitIdentityCloud,
     private readonly root: string,
-    private readonly repositories: () => string[],
+    private readonly checkouts: () => readonly LocalAttachment[],
+    private readonly github: GitHubCheckoutAccess,
   ) {
     const directory = join(root, 'git-identity');
     this.privateKeyPath = join(directory, 'id_ed25519');
@@ -104,13 +142,27 @@ export class SharedGitIdentityCoordinator {
   gitEnvironment(repositoryUrl: string): Record<string, string> {
     if (!this.identity) throw new Error('Shared Git identity is not initialized');
     const environment: Record<string, string> = { GIT_SSH_COMMAND: this.sshCommand(), GIT_TERMINAL_PROMPT: '0' };
-    if (repositoryUrl.startsWith('https://github.com/')) {
-      const count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
-      environment.GIT_CONFIG_COUNT = String(count + 1);
-      environment[`GIT_CONFIG_KEY_${count}`] = 'url.git@github.com:.insteadOf';
-      environment[`GIT_CONFIG_VALUE_${count}`] = 'https://github.com/';
+    return repositoryUrl.startsWith('https://github.com/') ? { ...environment, ...configEnvironment([[SSH_REWRITE, 'https://github.com/']]) } : environment;
+  }
+
+  /** What a transient fetch through the checkout's `origin` (ref imports, LFS) runs with. A covered origin: HTTPS with
+   *  only the checkout's installation-token helper, scp-style and ssh:// GitHub addresses rewritten to HTTPS, no SSH
+   *  command, so LFS authenticates with git credentials rather than `git-lfs-authenticate`. Any other origin: the
+   *  account SSH key. Never one, then the other. */
+  async originEnvironment(checkout: LocalAttachment): Promise<Record<string, string>> {
+    const access = await this.github.access(checkout.attachment);
+    if (access.kind === 'ssh') {
+      const origin = await git(['-C', checkout.rootPath, 'remote', 'get-url', 'origin']);
+      if (origin.code !== 0) throw new Error(`The checkout's origin is unavailable: ${origin.stderr}`);
+      return this.gitEnvironment(origin.stdout);
     }
-    return environment;
+    return {
+      GIT_TERMINAL_PROMPT: '0',
+      ...configEnvironment([
+        [GITHUB_HELPER, ''], [GITHUB_HELPER, this.github.helper(checkout.attachment)], [GITHUB_HTTP_PATH, 'true'],
+        ['url.https://github.com/.insteadOf', 'git@github.com:'], ['url.https://github.com/.insteadOf', 'ssh://git@github.com/'],
+      ]),
+    };
   }
 
   private sshCommand(): string {
@@ -121,21 +173,36 @@ export class SharedGitIdentityCoordinator {
 
   private applying: Promise<void> = Promise.resolve();
 
-  /** Applies the identity to every project repository. Calls are serialized:
+  /** Applies the identity and each checkout's origin route to every checkout. Calls are serialized:
    *  startup, a settings save, and a cloud settings event can all arrive
    *  together, and two `git config` writers on one repo collide on its lock. */
-  apply(settings: UserSettings, repositories?: readonly string[]): Promise<void> {
-    const run = this.applying.then(() => this.applyNow(settings, repositories ?? this.repositories()));
+  apply(settings: UserSettings, checkouts?: readonly LocalAttachment[]): Promise<void> {
+    const run = this.applying.then(() => this.applyNow(settings, checkouts ?? this.checkouts()));
     this.applying = run.catch(() => undefined);
     return run;
   }
 
-  private async applyNow(settings: UserSettings, repositories: readonly string[]): Promise<void> {
+  private async applyNow(settings: UserSettings, checkouts: readonly LocalAttachment[]): Promise<void> {
     if (!this.identity) throw new Error('Shared Git identity is not initialized');
     const sshCommand = this.sshCommand();
-    for (const repository of repositories) {
-      await setConfig(repository, 'core.sshCommand', sshCommand);
-      await setConfig(repository, 'url.git@github.com:.insteadOf', 'https://github.com/');
+    for (const checkout of checkouts) {
+      const repository = checkout.rootPath;
+      const access = await this.github.access(checkout.attachment);
+      if (access.kind === 'github-app') {
+        // Agents' plain fetch, push and LFS reach a covered origin over HTTPS with installation tokens only.
+        await unsetConfig(repository, 'core.sshCommand');
+        await unsetConfig(repository, SSH_REWRITE);
+        const origin = await git(['-C', repository, 'config', '--local', '--get', 'remote.origin.url']);
+        const url = `https://github.com/${access.repository}.git`;
+        if (origin.code === 0 && origin.stdout !== url) await writeConfig(repository, ['remote.origin.url', url]);
+        await setConfigValues(repository, GITHUB_HELPER, ['', this.github.helper(checkout.attachment)]);
+        await setConfig(repository, GITHUB_HTTP_PATH, 'true');
+      } else {
+        await unsetConfig(repository, GITHUB_HELPER);
+        await unsetConfig(repository, GITHUB_HTTP_PATH);
+        await setConfig(repository, 'core.sshCommand', sshCommand);
+        await setConfig(repository, SSH_REWRITE, 'https://github.com/');
+      }
       if (settings.git.authorName) await setConfig(repository, 'user.name', settings.git.authorName);
       if (settings.git.authorEmail) await setConfig(repository, 'user.email', settings.git.authorEmail);
     }

@@ -28,7 +28,7 @@ test('receive-pack atomically rejects a ref advanced after discovery', async () 
       await process.exited;
       return new Response(bytes);
     };
-    await expect(publishSnapshotPack({ remote: 'https://fixture.invalid/repo.git', token: 'fixture', ref, previous: base, commit: second, pack: packfile }, request)).rejects.toThrow('Git push rejected');
+    await expect(publishSnapshotPack({ remote: 'https://fixture.invalid/repo.git', auth: { kind: 'bearer', token: 'fixture' }, ref, previous: base, commit: second, pack: packfile }, request)).rejects.toThrow('Git push rejected');
     expect(await git.resolveRef({ fs, dir, ref })).toBe(first);
   } finally { await rm(dir, { force: true, recursive: true }); }
 });

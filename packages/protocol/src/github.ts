@@ -5,6 +5,25 @@ import { wire } from './json-wire.js';
 export const GitHubLoginSchema = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u);
 /** A repository GitHub names `owner/name`. */
 export const GitHubRepositoryNameSchema = z.string().regex(/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/u);
+const GITHUB_REMOTE = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/iu;
+/** The `owner/name` of a project remote on GitHub (HTTPS, scp-style SSH or ssh:// form), or null for any other remote. */
+export function githubRepositoryOf(reference: string): string | null {
+  const match = GITHUB_REMOTE.exec(reference.trim())?.[1];
+  return match !== undefined && GitHubRepositoryNameSchema.safeParse(match).success ? match : null;
+}
+/** Reading fetches and imports; writing pushes branches, workflow files included. */
+export type GitHubRepositoryAccess = 'read' | 'write';
+/** A short-lived installation token narrowed to one repository. */
+export const GitHubRepositoryTokenSchema = z.object({ token: z.string().min(1), expiresAt: z.string().datetime() });
+export type GitHubRepositoryToken = z.infer<typeof GitHubRepositoryTokenSchema>;
+/** How a machine checkout reaches its project's origin: a repository an installation of the account's GitHub App
+ * covers only over HTTPS with installation tokens, any other origin with the account SSH key. */
+export const MachineOriginAccessSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('github-app'), repository: GitHubRepositoryNameSchema }),
+  z.object({ kind: z.literal('ssh') }),
+]);
+export type MachineOriginAccess = z.infer<typeof MachineOriginAccessSchema>;
+
 export const GitHubAccountSchema = z.object({ login: GitHubLoginSchema, kind: z.enum(['user', 'organization']) });
 
 /** Who owns the tenant's App: the signed-in person's account by default, or an organization they administer. */

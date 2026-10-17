@@ -36,6 +36,7 @@ import { PluginsPage } from './PluginsPage.js';
 import { ProjectSecretsPage, type ProjectSecretsProps } from './ProjectSecretsPage.js';
 import { ProjectCronsPage, type ProjectCronTargetOption } from './ProjectCronsPage.js';
 import { AccountDirectoryContext, useWorkspaceProjection } from './useAccountDirectory.js';
+import { useOriginCheck } from './useOriginCheck.js';
 import { invalidatesRead, useRetainedRead, useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { useRepositoryTree } from './useRepositoryTree.js';
@@ -426,7 +427,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
   // A link naming the project's own id as its workspace opens the base space, which the shell selects as null.
   const live = route === 'agent' && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === (workspaceId === projectId ? null : workspaceId) ? runtimeSidebar : null;
   const sidebarProjects: SidebarProject[] = projectValues.map((project) => ({
-    id: project.id, name: project.name, lifecycle: project.lifecycle,
+    id: project.id, name: project.name, lifecycle: project.lifecycle, remote: project.remote,
     ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [],
   }));
   const frameView = route === 'agent' && !projectId ? 'projects' : route;
@@ -504,6 +505,7 @@ function LiveWorkspace(props: LiveWorkspaceProps) {
   const workspaceId = location.searchParams.get('workspace');
   const projectValues = useRetainedQueryValue(projects, 'projects');
   const account = useContext(AccountDirectoryContext);
+  useOriginCheck(projectValues?.find((project) => project.id === projectId) ?? null);
   if (!projectId) return <AccountWork view="projects" />;
   if (!projectValues && projects.state === 'failure') return <PageCanvas><EmptyState title="Project directory unavailable" description={rpcErrorMessage(projects.error, 'Load project directory')} action={<Button variant="ghost" onClick={() => void projects.refetch()}>Retry</Button>} /></PageCanvas>;
   if (!projectValues) return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Loading projects…" description="Reading your account without starting a machine." /></PageCanvas>;

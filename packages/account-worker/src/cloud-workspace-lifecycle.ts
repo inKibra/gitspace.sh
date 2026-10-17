@@ -1,11 +1,14 @@
 import type { z } from 'zod';
 import type { CloudProjectOperation, CloudProjectSummary, CloudWorkspaceDefinition } from '@gitspace/protocol';
-import { cloudResourceId, normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
+import { cloudResourceId } from '@gitspace/protocol';
+import { GITSPACE_SOURCE_PROJECT_ROLE } from '@gitspace/protocol/project-authority';
 import type { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import type { RuntimeGitCheckpoint, RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
 import { ArtifactsCodeStore, GitDiscoveryError, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { ensureProjectCodeRepository } from './account-runtime-host.js';
+import { forwardPosition, type ForwardPosition } from './cloud-stack-status.js';
+import { originAccess, originReadCredentials } from './origin-access.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 
@@ -128,14 +131,17 @@ async function runOperation<T>(authority: ProjectAuthority, input: { projectId: 
   }
 }
 
-/** A ref the project repository lacks, brought in from the origin: fetched directly when the origin is public, otherwise
- * through a machine holding the project's base checkout, which reads the origin with its own git credentials. Either
- * way the commit is read back from the project repository. Null when the project has no origin. */
+/** A ref the project repository lacks, brought in from the origin: read with an installation token when an installation
+ * covers the origin, read anonymously when it is public, and only for a public origin that refuses (a private one the
+ * App does not cover) through a machine holding the project's base checkout, which reads the origin with its own git
+ * credentials. A covered origin never falls back to a machine. Either way the commit is read back from the project
+ * repository. Null when the project has no origin. */
 async function importOriginRef(env: Env, userId: string, code: ArtifactsCodeStore, project: CloudProjectSummary, ref: string): Promise<string | null> {
   if (!project.repositoryReference) return null;
-  const origin = normalizeRemoteRepositoryUrl(project.repositoryReference.replace(/^git@github\.com:/u, 'https://github.com/'));
+  const access = await originAccess(env, project.repositoryReference);
+  if (access.kind === 'github-app') return code.importSourceRef(project.id, access.remote, ref, originReadCredentials(access));
   try {
-    return await code.importSourceRef(project.id, origin, ref);
+    return await code.importSourceRef(project.id, access.remote, ref, null);
   } catch (error) {
     if (!(error instanceof GitDiscoveryError) || !error.needsCredentials) throw error;
   }
@@ -163,7 +169,7 @@ async function resolveSource(env: Env, userId: string, code: ArtifactsCodeStore,
     return { sourceRef: sourceWorkspace.id, sourceCommit: headCommit, repository: sourceRepository, checkpoint };
   }
   const repository = artifactsProjectRepository(project.id);
-  await ensureProjectCodeRepository(code, project);
+  await ensureProjectCodeRepository(env, code, project);
   switch (input.sourceKind) {
     case 'base': {
       // The base source has no ref of its own; a different one is a request for another source, never silently dropped.
@@ -284,7 +290,7 @@ export async function retryCloudWorkspaceCreation(env: Env, userId: string, work
   let source: ResolvedSource;
   if (definition.sourceCommit === null || sourceWorkspace) source = await resolveSource(env, userId, code, project, sourceWorkspace, definition);
   else {
-    await ensureProjectCodeRepository(code, project);
+    await ensureProjectCodeRepository(env, code, project);
     source = { sourceRef: definition.sourceRef, sourceCommit: definition.sourceCommit, repository: artifactsProjectRepository(project.id), checkpoint: null };
   }
   const provisioning = await authority.putWorkspace(revise(definition, { lifecycle: 'provisioning', sourceCommit: source.sourceCommit }));
@@ -379,6 +385,48 @@ export async function setCloudProjectBaseBranch(env: Env, userId: string, projec
   if (!isSupportedBranchName(baseBranch)) throw new Error(`${baseBranch} is not a valid branch name`);
   return runOperation(authority, { projectId, workspaceId: null, kind: 'project.setBaseBranch', labels: ['Switch clean base checkout and project branch'] },
     () => env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`).runtimeSetBaseBranch({ projectId, workspaceId: projectId }, expectedRevision, baseBranch));
+}
+
+/** Update base: the project's copy of its base branch moves to the origin's head only as a fast-forward (a copy with
+ * commits the origin lacks is refused), then the clean idle base checkout follows through the base-branch change's
+ * same-branch refresh. A busy or dirty base workspace is left for later: the copy stays updated, the operation fails
+ * saying so, and running Update base again moves it. One project notice reports the outcome. */
+export async function updateCloudProjectBase(env: Env, userId: string, projectId: string): Promise<void> {
+  const authority = await requireProject(env, userId, projectId);
+  const project = await requireActiveProject(authority, projectId);
+  if (project.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
+  const reference = project.repositoryReference;
+  if (reference === null) throw new Error(`Project ${project.name} has no origin to update its base from`);
+  const branch = project.baseBranch;
+  if (!isSupportedBranchName(branch)) throw new Error(`Base branch ${branch} cannot be read from the origin by name`);
+  const identity = { projectId, workspaceId: projectId };
+  const space = env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`);
+  await runOperation(authority, { projectId, workspaceId: null, kind: 'project.updateBase', labels: ['Fast-forward the project base branch from origin', 'Move the clean base checkout'] }, async advance => {
+    const code = new ArtifactsCodeStore(env.ARTIFACTS);
+    await ensureProjectCodeRepository(env, code, project);
+    const repository = artifactsProjectRepository(projectId);
+    const ref = `refs/heads/${branch}`;
+    const previous = await code.resolveRef(repository, ref);
+    const access = await originAccess(env, reference);
+    const head = await code.fetchOriginBranch(projectId, access.remote, branch, originReadCredentials(access));
+    const position: ForwardPosition = previous === null ? { kind: 'forward' } : await forwardPosition(code, [repository], previous, head);
+    if (position.kind === 'diverged') {
+      throw new Error(position.ahead === null
+        ? `GitSpace cannot tell whether origin's ${branch} (${head.slice(0, 7)}) fast-forwards the project's copy: its cloud history is incomplete, so it was not moved.`
+        : `The project's ${branch} has ${position.ahead} ${position.ahead === 1 ? 'commit' : 'commits'} that origin's ${branch} (${head.slice(0, 7)}) lacks, so it was not moved: GitSpace only fast-forwards it. Push those commits to origin, then update again.`);
+    }
+    if (position.kind === 'forward') await code.copyCommit(repository, repository, ref, head, previous);
+    await advance();
+    let left: string | null = null;
+    try { await space.runtimeSetBaseBranch(identity, project.revision, branch); }
+    catch (error) { left = failureMessage(error); }
+    // The origin head was read just now: record it, which recomputes what is behind it against the moved copy.
+    await authority.recordRemoteHeads([{ branch, head }]);
+    const outcome = position.kind === 'forward' ? `Base branch ${branch} updated to ${head.slice(0, 7)} from origin.` : `Base branch ${branch} already holds origin's ${head.slice(0, 7)}.`;
+    const text = left === null ? outcome : `${outcome} The base workspace was left for later: ${left}`;
+    await space.runtimeProjectNotice(identity, text);
+    if (left !== null) throw new Error(text);
+  });
 }
 
 /** Permanently deletes a project in any state with every workspace's runtime state and repository, then its directory entry. */

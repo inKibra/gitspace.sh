@@ -173,6 +173,8 @@ export const ProjectLifecycleViewCodec = wire.object({
   role: wire.nullable(wire.literal('gitspace-source')),
   source: wire.nullable(wire.object({ release: wire.nullable(wire.string), branch: wire.nullable(wire.string), commit: wire.nullable(wire.string) })),
   revision: wire.number,
+  /** The base branch on the origin (`head` null: absent there); null until first checked. */
+  remote: wire.nullable(wire.object({ head: wire.nullable(wire.string), checkedAt: wire.string, behind: wire.boolean })),
   archivedAt: wire.nullable(wire.date),
   updatedAt: wire.date,
 });
@@ -639,6 +641,22 @@ export const setProjectBaseBranchContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, expectedRevision: wire.number, baseBranch: wire.string }))
   .output(ProjectLifecycleViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Read the project's base branch and its workspaces' branches on the origin now, as a push webhook would report them. */
+export const refreshProjectRemoteContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string }))
+  .output(wire.object({}))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Bring the project's copy of its base branch, and its clean idle base workspace, up to the origin's base branch. */
+export const updateProjectBaseContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string }))
+  .output(wire.object({}))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
@@ -2199,6 +2217,8 @@ export const gitspaceContract = gitspaceRpc.contract({
     archive: archiveProjectContract,
     restore: restoreProjectContract,
     setBaseBranch: setProjectBaseBranchContract,
+    updateBase: updateProjectBaseContract,
+    remote: { refresh: refreshProjectRemoteContract },
     delete: deleteProjectContract,
   },
   space: {

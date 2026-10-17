@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { streamBytes, GitLfsRestoredSchema, parseGitLfsPointer, type GitLfsObject, type GitLfsRestored, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
+import type { LocalAttachment } from '@gitspace/runtime-machine';
 import { downloadQueryObject, hydrationEndpoint, originConfirmation } from './git-lfs-origin.js';
 import { committedLfsInventory } from './git-lfs-inventory.js';
 import { cachedLfsObject, installLfsObject, verifiedLfsSource } from './git-lfs-cache.js';
@@ -11,7 +12,8 @@ import { cachedLfsObject, installLfsObject, verifiedLfsSource } from './git-lfs-
 /** Read-only access: restores and hydration can neither pin nor upload. */
 export type MachineGitLfs = {
   store: Pick<GitLfsStore, 'has' | 'get'>;
-  originEnvironment(repositoryPath: string): Promise<Record<string, string>>;
+  /** How the checkout this access was opened for reaches its origin: installation tokens or the account SSH key. */
+  originEnvironment(): Promise<Record<string, string>>;
   canonicalOrigin?: string | null;
 };
 /** Capture access bound to one durable publication identity; its pins hold uploaded and protected objects until released. */
@@ -19,10 +21,10 @@ export type MachineGitLfsPublication = Omit<MachineGitLfs, 'store'> & {
   store: GitLfsStore;
   releasePublication?(): Promise<void>;
 };
-/** Reads need only the project; protecting or uploading requires an explicit publication identity. */
+/** Reads need only the checkout; protecting or uploading requires an explicit publication identity. */
 export type MachineGitLfsAccess = {
-  read(projectId: string): Promise<MachineGitLfs>;
-  publish(projectId: string, publicationId: string): Promise<MachineGitLfsPublication>;
+  read(checkout: LocalAttachment): Promise<MachineGitLfs>;
+  publish(checkout: LocalAttachment, publicationId: string): Promise<MachineGitLfsPublication>;
 };
 async function git(root: string, args: string[], env: Record<string, string> = {}, input?: string | Uint8Array): Promise<Uint8Array> {
   const child = Bun.spawn(['git', ...args], { cwd: root, env: { ...Bun.env, ...env }, stdin: input === undefined ? 'ignore' : typeof input === 'string' ? new Blob([input]) : input, stdout: 'pipe', stderr: 'pipe' });
@@ -87,7 +89,7 @@ export async function captureGitLfs(root: string, head: string | null, authority
   const snapshot: GitLfsSnapshot = { objects: [], heldBack: [] };
   const headEntries = head ? await tree(root, head) : new Map<string, Entry>();
   const history = await committedLfsInventory(root, head, git, readGitLfsPointers);
-  const confirm = await originConfirmation(root, head, git, access?.canonicalOrigin === null ? {} : await access?.originEnvironment(root) ?? {}, access);
+  const confirm = await originConfirmation(root, head, git, access?.canonicalOrigin === null ? {} : await access?.originEnvironment() ?? {}, access);
   const origin = new Map((await confirm([...history.values()])).map(object => [object.oid, object]));
   const unconfirmed = [...history.values()].filter(object => !origin.has(object.oid));
   const protectedObjects = unconfirmed.length && access?.store.protect ? new Map((await access.store.protect(unconfirmed)).map(object => [object.oid, object.size])) : undefined;
@@ -181,7 +183,7 @@ export async function hydrateGitLfs(root: string, refs: string[], snapshot: GitL
       const gitDirectory = text(await git(root, ['rev-parse', '--absolute-git-dir'])).trim();
       const source = sources.get(object.oid);
       const location = source?.source === 'origin' ? source.location : undefined;
-      const environment = await access?.originEnvironment(root) ?? {};
+      const environment = await access?.originEnvironment() ?? {};
       const endpoint = location ? await hydrationEndpoint(root, ref, location.endpoint, git, environment) : undefined;
       const route = location ? ['-c', `remote.origin.url=${location.origin}`, '-c', `lfs.url=${endpoint}`] : [];
       const sourceBytes = endpoint && new URL(endpoint).search

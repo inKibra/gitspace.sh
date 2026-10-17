@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Result } from 'better-result';
-import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance } from '@gitspace/protocol';
+import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, remoteBranchStateSchema, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance, type RemoteBranchState } from '@gitspace/protocol';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 import type {
   ArtifactCopyRecord,
@@ -36,9 +36,29 @@ import { WorkspaceDomainError, WorkspaceRelationsSchema, resolveWorkspaceRelatio
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
+import { behindOrigin } from './cloud-stack-status.js';
 import { z } from 'zod';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
+const RemoteHeadsSchema = z.array(z.object({ branch: z.string().min(1).max(512), head: remoteBranchStateSchema.shape.head })).max(1_000);
+/** Origin-tracking columns on `project`, `workspaces` and `user_projects`; null until the branch is first checked. */
+const REMOTE_COLUMNS: Record<string, string> = { remote_head: 'TEXT', remote_checked_at: 'TEXT', remote_behind: 'INTEGER' };
+
+/** One-time: adds the origin-tracking columns a table created before tracking lacks. */
+function addRemoteColumns(storage: DurableObjectStorage, table: 'project' | 'workspaces' | 'user_projects'): void {
+  const present = new Set(storage.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(column => column.name));
+  for (const [name, type] of Object.entries(REMOTE_COLUMNS)) if (!present.has(name)) storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+}
+
+interface RemoteColumns {
+  remote_head: string | null;
+  remote_checked_at: string | null;
+  remote_behind: number | null;
+}
+
+function remoteState(row: RemoteColumns): RemoteBranchState | null {
+  return row.remote_checked_at === null ? null : { head: row.remote_head, checkedAt: row.remote_checked_at, behind: row.remote_behind === 1 };
+}
 
 
 /** The admitted device and generation; any change to that grant ends the socket. */
@@ -66,7 +86,7 @@ function liveKeyHash(key: LiveKey): number {
   return hash;
 }
 
-interface ProjectIndexRow extends Record<string, SqlStorageValue> {
+interface ProjectIndexRow extends Record<string, SqlStorageValue>, RemoteColumns {
   project_id: string;
   name: string;
   lifecycle: ProjectLifecycle;
@@ -79,7 +99,7 @@ interface ProjectIndexRow extends Record<string, SqlStorageValue> {
   source_json: string | null;
 }
 
-interface WorkspaceRow extends Record<string, SqlStorageValue> {
+interface WorkspaceRow extends Record<string, SqlStorageValue>, RemoteColumns {
   workspace_id: string;
   project_id: string;
   kind: CloudWorkspaceDefinition['kind'];
@@ -208,6 +228,7 @@ function projectSummary(row: ProjectIndexRow): CloudProjectSummary {
     role: row.role ?? null,
     source: row.source_json ? JSON.parse(row.source_json) as GitSpaceSourceProvenance : null,
     revision: row.revision,
+    remote: remoteState(row),
     archivedAt: row.archived_at,
     updatedAt: row.updated_at,
   };
@@ -227,6 +248,7 @@ function workspaceDefinition(row: WorkspaceRow): CloudWorkspaceDefinition {
     lifecycle: row.lifecycle,
     goalId: row.goal_id,
     revision: row.revision,
+    remote: remoteState(row),
     archivedAt: row.archived_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -353,6 +375,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
         try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
+      addRemoteColumns(this.ctx.storage, 'user_projects');
       this.ctx.storage.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS user_project_role ON user_projects(role) WHERE role IS NOT NULL');
       // One-time: the directory was once a stored change log replayed by cursor, redelivered by alarm.
       this.ctx.storage.sql.exec('DROP TABLE IF EXISTS app_changes; DROP TABLE IF EXISTS app_change_heads');
@@ -627,6 +650,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
       role: GITSPACE_SOURCE_PROJECT_ROLE,
       source: existing ? { ...source, branch: existing.baseBranch, commit: null } : source,
       revision: (existing?.revision ?? 0) + 1,
+      remote: existing?.remote ?? null,
       archivedAt: null,
       updatedAt: new Date().toISOString(),
     });
@@ -641,8 +665,10 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     if ((existing?.role === GITSPACE_SOURCE_PROJECT_ROLE || input.role === GITSPACE_SOURCE_PROJECT_ROLE)
       && input.lifecycle !== 'active' && input.lifecycle !== 'cloud-only') throw new Error('The built-in GitSpace project cannot be archived or deleted');
     const updatedAt = new Date().toISOString();
+    // An origin check does not revise the project, so of two summaries at one revision the later check wins.
+    const laterRemote = 'excluded.revision>user_projects.revision OR excluded.remote_checked_at>=COALESCE(user_projects.remote_checked_at,\'\')';
     this.ctx.storage.sql.exec(
-      `INSERT INTO user_projects(project_id,name,lifecycle,repository_reference,base_branch,revision,archived_at,updated_at,role,source_json) VALUES(?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO user_projects(project_id,name,lifecycle,repository_reference,base_branch,revision,archived_at,updated_at,role,source_json,remote_head,remote_checked_at,remote_behind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(project_id) DO UPDATE SET
          name=excluded.name,
          lifecycle=excluded.lifecycle,
@@ -652,7 +678,10 @@ export class UserProjectIndexDO extends DurableObject<Env> {
          archived_at=excluded.archived_at,
          updated_at=excluded.updated_at,
          role=COALESCE(user_projects.role,excluded.role),
-         source_json=COALESCE(excluded.source_json,user_projects.source_json)
+         source_json=COALESCE(excluded.source_json,user_projects.source_json),
+         remote_head=CASE WHEN ${laterRemote} THEN excluded.remote_head ELSE user_projects.remote_head END,
+         remote_checked_at=CASE WHEN ${laterRemote} THEN excluded.remote_checked_at ELSE user_projects.remote_checked_at END,
+         remote_behind=CASE WHEN ${laterRemote} THEN excluded.remote_behind ELSE user_projects.remote_behind END
        WHERE excluded.revision >= user_projects.revision`,
       input.id,
       input.name,
@@ -664,6 +693,9 @@ export class UserProjectIndexDO extends DurableObject<Env> {
       updatedAt,
       input.role ?? null,
       input.source ? JSON.stringify(input.source) : null,
+      input.remote?.head ?? null,
+      input.remote?.checkedAt ?? null,
+      input.remote ? Number(input.remote.behind) : null,
     );
     const row = this.ctx.storage.sql.exec<ProjectIndexRow>(
       'SELECT * FROM user_projects WHERE project_id=?',
@@ -908,6 +940,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       }
       try { this.ctx.storage.sql.exec('ALTER TABLE workspaces ADD COLUMN source_commit TEXT'); }
       catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
+      addRemoteColumns(this.ctx.storage, 'project');
+      addRemoteColumns(this.ctx.storage, 'workspaces');
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN project_space_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN workspaces_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS deleted_workspaces(workspace_id TEXT PRIMARY KEY)');
@@ -1038,6 +1072,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     } else if (current.role === GITSPACE_SOURCE_PROJECT_ROLE && current.revision >= input.revision) {
       return current;
     }
+    // The origin state recorded for an old base branch says nothing about a new one.
+    if (current && current.baseBranch !== input.baseBranch) this.ctx.storage.sql.exec('UPDATE project SET remote_head=NULL,remote_checked_at=NULL,remote_behind=NULL');
     this.ctx.storage.sql.exec(
       'UPDATE project SET role=?,source_json=?,base_branch=?,lifecycle=?,revision=?,archived_at=NULL,updated_at=?',
       GITSPACE_SOURCE_PROJECT_ROLE, JSON.stringify(input.source), input.baseBranch,
@@ -1061,10 +1097,57 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid base branch');
       if (!/^[0-9a-f]{40}$/u.test(sourceCommit)) throw new Error('Invalid base branch commit');
       const now = new Date().toISOString();
+      // The origin state recorded for the old base branch says nothing about the new one.
+      if (current.baseBranch !== baseBranch) {
+        this.ctx.storage.sql.exec('UPDATE project SET remote_head=NULL,remote_checked_at=NULL,remote_behind=NULL');
+        this.ctx.storage.sql.exec("UPDATE workspaces SET remote_head=NULL,remote_checked_at=NULL,remote_behind=NULL WHERE workspace_id=? AND kind='base'", current.id);
+      }
       this.ctx.storage.sql.exec("UPDATE workspaces SET branch=?,source_ref=CASE WHEN source_kind='base' THEN ? ELSE source_ref END,source_commit=?,revision=revision+1,updated_at=? WHERE workspace_id=? AND kind='base'", baseBranch, baseBranch, sourceCommit, now, current.id);
       this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,revision=revision+1,updated_at=?', baseBranch, now);
       return this.requireProject();
     });
+  }
+
+  /** Origin updates run one at a time, in arrival order: each reads histories between its read and its commit. */
+  private remoteUpdates: Promise<unknown> = Promise.resolve();
+
+  /**
+   * The origin's heads of some branches, as a push webhook or a check of the origin read them (`head` null: the branch
+   * is absent there). The project takes its base branch's head and every workspace on a listed branch takes its own,
+   * each checked now and marked behind when GitSpace's copy lacks it. Committed with a project notice and mirrored into
+   * the account's project list.
+   */
+  recordRemoteHeads(heads: Array<{ branch: string; head: string | null }>): Promise<CloudProjectSummary> {
+    const reported = new Map(RemoteHeadsSchema.parse(heads).map(({ branch, head }) => [branch, head]));
+    const checkedAt = new Date().toISOString();
+    const update = this.remoteUpdates.then(async () => {
+      const project = this.requireProject();
+      if (project.lifecycle === 'deleting') return project;
+      const targets = [
+        { workspace: null, branch: project.baseBranch },
+        ...this.listWorkspaces().filter((workspace) => workspace.lifecycle !== 'deleting').map((workspace) => ({ workspace, branch: workspace.branch })),
+      ].flatMap((target) => {
+        const head = reported.get(target.branch);
+        return head === undefined ? [] : [{ ...target, head }];
+      });
+      if (targets.length === 0) return project;
+      const states = await Promise.all(targets.map(async ({ workspace, branch, head }) => ({
+        workspace, branch, head, behind: head !== null && await behindOrigin(this.env, this.env.ACCOUNT_ID, project.id, branch, workspace, head),
+      })));
+      const updated = this.commit('project', null, () => {
+        // A branch renamed while histories were read keeps its state cleared.
+        for (const { workspace, branch, head, behind } of states) {
+          if (workspace === null) this.ctx.storage.sql.exec('UPDATE project SET remote_head=?,remote_checked_at=?,remote_behind=? WHERE base_branch=?', head, checkedAt, Number(behind), branch);
+          else this.ctx.storage.sql.exec('UPDATE workspaces SET remote_head=?,remote_checked_at=?,remote_behind=? WHERE workspace_id=? AND branch=?', head, checkedAt, Number(behind), workspace.id, branch);
+        }
+        return this.requireProject();
+      });
+      await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(updated);
+      return updated;
+    });
+    // A failed update fails its caller only; the next one still runs.
+    this.remoteUpdates = update.catch(() => undefined);
+    return update;
   }
 
   getProject(): CloudProjectSummary | null {
@@ -1231,7 +1314,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  putWorkspace(input: Omit<CloudWorkspaceDefinition, 'revision' | 'createdAt' | 'updatedAt' | 'archivedAt'> & {
+  /** Origin state is not an input: only `recordRemoteHeads` sets it, and a branch change clears it. */
+  putWorkspace(input: Omit<CloudWorkspaceDefinition, 'revision' | 'createdAt' | 'updatedAt' | 'archivedAt' | 'remote'> & {
     expectedRevision: number;
   }): CloudWorkspaceDefinition {
     return this.commit('workspace', input.id, () => {
@@ -1270,7 +1354,10 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
          goal_id=excluded.goal_id,
          revision=excluded.revision,
          archived_at=excluded.archived_at,
-         updated_at=excluded.updated_at`,
+         updated_at=excluded.updated_at,
+         remote_head=CASE WHEN workspaces.branch=excluded.branch THEN workspaces.remote_head END,
+         remote_checked_at=CASE WHEN workspaces.branch=excluded.branch THEN workspaces.remote_checked_at END,
+         remote_behind=CASE WHEN workspaces.branch=excluded.branch THEN workspaces.remote_behind END`,
       input.id,
       input.projectId,
       input.kind,
