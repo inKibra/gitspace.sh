@@ -56,6 +56,15 @@ Rules (from `docs/SIMPLIFICATION.md`): a delivery is recorded once and becomes o
 
 ## 6. Write-back to GitHub
 
+### Who authors pushes and pull requests
+
+Two modes (decided 2026-10-17):
+
+- **Bot (default):** the installation token pushes and opens the pull request as the App's bot; the body names who asked ("Requested by @bradleat via GitSpace"). Commits keep their own author and committer. The requester can approve, since GitHub ignores only the author's own approval.
+- **Author:** GitSpace acts with the requester's GitHub user token (the same App's "Sign in with GitHub", needed for G3 comments anyway; the refresh token is kept per person in the vault). Pushes and the pull request are the requester's, shown "via GitSpace"; someone else must approve.
+
+The tenant sets the default for its projects. A repository can require author mode for every tenant by committing `.gitspace/github.json` with `{ "pullRequests": "author" }`: the policy goes through the team's own review and binds everyone's GitSpace. GitHub's rules cannot express this: "require approval of the most recent reviewable push" excludes only the last pusher, which in bot mode is the bot. Author mode arrives with the GitHub sign-in in G3; until then every pull request uses bot mode. **[unverified]** whether an App's own review counts toward required approvals; GitSpace never approves its own pull requests either way.
+
 - **Change Guide:** a check run whose summary is the guide (Markdown; GitHub limits the summary to about 65 KB, so long guides link to the full version), updated in place when the guide changes. A PR comment is the alternative for repositories where checks are noisy.
 - **Review threads:** posted as review comments on the exact lines; resolving on either side resolves both.
 - **Status:** a commit status or check showing "GitSpace: reviewing / ready / needs you".
