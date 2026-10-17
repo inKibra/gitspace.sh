@@ -432,7 +432,10 @@ export async function createMachineExecutor(options: {
     const local = stored?.attachment.generation === generation ? stored : null;
     const operation = error instanceof AttachmentOperationFailure ? error.operation : 'sync';
     const failure: RuntimeAttachmentFailure = { operation, message: message(error).slice(0, 2000), at: new Date().toISOString() };
-    console.error('[runtime-attachments]', attachmentId, operation, failure.message);
+    // The stack of the innermost cause says which step failed; the recorded message alone often cannot (a timeout).
+    let cause: unknown = error;
+    while (cause instanceof Error && cause.cause instanceof Error) cause = cause.cause;
+    console.error('[runtime-attachments]', attachmentId, operation, failure.message, cause instanceof Error && cause.stack ? `\n${cause.stack}` : '');
     const failed = { ...(local ?? assigned), attachment: { ...(local ?? assigned).attachment, failure } };
     if (local) journal.installAttachment(failed);
     observe(failed);
