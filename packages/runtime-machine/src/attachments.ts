@@ -68,9 +68,10 @@ export async function prepareMachineAttachment(journal: ExecutorJournal, options
     if (!options.source) throw new Error('The cloud did not send a source for this workspace checkout');
     await acquireCheckout({ name: basename(rootPath), directory: rootPath, source: options.source.repository, fixed: true, requiresFiltersOrSubmodules: options.source.requiresFiltersOrSubmodules, host: { ...options.source.host, root: dirname(rootPath) }, signal: options.signal, hydrateLfs: options.source.hydrateLfs, submoduleEnvironment: options.source.submoduleEnvironment });
     await run(['checkout', '-B', attachment.checkout.branch]);
-    await rm(join(rootPath, '.git', CHECKOUT_ACQUIRING_MARKER), { force: true });
   }
   await options.prerequisites(local, options.signal, !exists);
+  // Only now is the checkout what its workspace holds: until here a failure leaves the marker and the next attach acquires again.
+  if (!exists) await rm(join(rootPath, '.git', CHECKOUT_ACQUIRING_MARKER), { force: true });
   const ready: LocalAttachment = { ...local, prerequisitesComplete: true, attachment: { ...(journal.attachment(attachment.attachmentId)?.attachment ?? attachment), state: 'ready', updatedAt: new Date().toISOString() } };
   journal.installAttachment(ready);
   return ready;

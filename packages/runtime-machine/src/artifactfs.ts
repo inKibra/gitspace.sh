@@ -3,8 +3,8 @@ import { constants } from 'node:fs';
 import { join } from 'node:path';
 
 export type CheckoutSource = { remote: string; ref: string; commit: string };
-/** Kept in `.git` while a Git checkout is being acquired and until it is on its branch: a directory still carrying it
- * never became a checkout, so it holds nothing of anyone's and is acquired again. */
+/** Kept in `.git` from the start of a Git acquisition until the checkout is prepared (on its branch, at its workspace's
+ * cloud version): a directory still carrying it never became a checkout, holds nothing of anyone's, and is acquired again. */
 export const CHECKOUT_ACQUIRING_MARKER = 'gitspace-acquiring';
 export type ArtifactFsHost = {
   binary?: string;
