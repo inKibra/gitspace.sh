@@ -3,6 +3,8 @@ import {
   canonicalHeadSchema,
   deploymentStatusSchema,
   launchProgressSchema,
+  launcherStartedInputSchema,
+  type LauncherStartedInput,
   releaseRecordSchema,
   releaseStatusSchema,
   releaseTargetSchema,
@@ -195,6 +197,34 @@ export class TenantReleasesDO extends DurableObject<Env> {
     if (!record) return;
     if (record.status.worker === 'pending') { record.status.worker = 'applied'; record.error = null; this.saveRecord(record); }
     this.finishLaunch(record, launch.targets);
+  }
+
+  /** The machine building the running launch started a new process, so nothing builds that launch any more. Coming
+   * back on the release it was launching means the launch call went through (a Worker launch is also certified by the
+   * new Worker); any other restart interrupted it. Only reports older than the new process count, so a launch that
+   * process has already begun is never ended here. */
+  launcherStarted(machineId: string, value: LauncherStartedInput): void {
+    const input = launcherStartedInputSchema.parse(value);
+    const row = this.ctx.storage.sql.exec<{ machine_id: string; record_json: string }>('SELECT machine_id, record_json FROM latest_launch WHERE id = 1').toArray()[0];
+    if (!row || row.machine_id !== machineId) return;
+    const launch = launchProgressSchema.parse(JSON.parse(row.record_json));
+    if (launch.status !== 'running' || launch.updatedAt >= input.startedAt) return;
+    const record = launch.sha === null ? null : this.findRelease(launch.sha);
+    if (record && launch.sha === input.runningSha && launch.phase === 'launch') { this.finishLaunch(record, launch.targets); return; }
+    this.endLaunch(launch, `Interrupted: the building machine restarted during ${launch.phase}.`);
+  }
+
+  /** A running launch nobody will finish (its machine is gone) stops blocking launches; a later report from its
+   * machine still replaces this. */
+  discardLaunch(launchId: string): void {
+    const launch = this.latestLaunch();
+    if (launch?.launchId !== launchId || launch.status !== 'running') return;
+    this.endLaunch(launch, 'Discarded: no machine was reporting this launch.');
+  }
+
+  private endLaunch(launch: LaunchProgress, message: string): void {
+    const ended = launchProgressSchema.parse({ ...launch, phase: 'failed', message, status: 'failed', error: message, updatedAt: new Date().toISOString() });
+    this.ctx.storage.sql.exec('UPDATE latest_launch SET record_json = ? WHERE id = 1', JSON.stringify(ended));
   }
 
   private latestLaunch(): LaunchProgress | null {

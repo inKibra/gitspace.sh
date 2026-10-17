@@ -56,6 +56,7 @@ function signingKey(): Uint8Array {
 }
 
 export async function startMachineRuntime() {
+  const processStartedAt = new Date().toISOString();
   const nativeRoot = process.env.GITSPACE_MACHINE_RUNTIME_PATH ?? import.meta.dir;
   const packaged = Boolean(process.env.GITSPACE_MACHINE_RUNTIME_PATH) || await Bun.file(join(nativeRoot, 'machine-native.json')).exists();
   process.env.GITSPACE_SUPERVISOR_WORKER_ENTRY = packaged ? join(nativeRoot, 'machine-worker.js') : join(import.meta.dir, 'terminal-worker.ts');
@@ -218,6 +219,10 @@ export async function startMachineRuntime() {
       setTimeout(() => receiveMachineNotices([{ topics: [retry] }], noticeTargets), Math.min(60_000, 1000 * 2 ** attempt));
     },
   };
+  // A launch this machine was building in an earlier process has no builder now; settle it before this process can
+  // start one. A failure is logged: the account then shows that launch until it is discarded.
+  await authority.launcherStarted({ runningSha: machineReleaseSha, startedAt: processStartedAt })
+    .catch((error: unknown) => console.error('[gitspace-deploy] launcher start was not reported', error));
   // Account-owned releases build from this executor's ready canonical cache.
   const launcher = new DeploymentLauncher({
     attachments: () => executorRuntime?.journal.attachments() ?? [],

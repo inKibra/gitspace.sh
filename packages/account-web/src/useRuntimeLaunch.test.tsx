@@ -16,7 +16,7 @@ const refresh = vi.fn();
 const reload = vi.fn();
 function View({ status }: { status: DeploymentStatusView }) {
   state = useRuntimeLaunch(status, refresh, reload);
-  return <>{state.launch ? <LaunchSheet launch={state.launch} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.start(state.launch!.source, 'builder', state.launch!.targets)} /> : null}{state.revertProgress ? <RevertSheet progress={state.revertProgress} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.revert().catch(() => {})} /> : null}{state.mark ? <LaunchedBanner mark={state.mark} onRevert={() => state.revert().catch(() => {})} onDismiss={state.dismiss} /> : null}</>;
+  return <>{state.launch ? <LaunchSheet launch={state.launch} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.start(state.launch!.source, 'builder', state.launch!.targets)} onDiscard={() => state.discard(state.launch!.launchId)} /> : null}{state.revertProgress ? <RevertSheet progress={state.revertProgress} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.revert().catch(() => {})} /> : null}{state.mark ? <LaunchedBanner mark={state.mark} onRevert={() => state.revert().catch(() => {})} onDismiss={state.dismiss} /> : null}</>;
 }
 function initial(): DeploymentStatusView {
   const value = structuredClone(deploymentStatusFixture);

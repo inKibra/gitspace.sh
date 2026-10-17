@@ -152,6 +152,8 @@ export interface LaunchSheetProps {
   onOpenChange(open: boolean): void;
   /** Re-launch the same workspace and targets after a failure. */
   onRetry(): void | Promise<void>;
+  /** End a running launch nothing will finish, because its building machine is gone. */
+  onDiscard(): Promise<void>;
 }
 
 /**
@@ -159,8 +161,9 @@ export interface LaunchSheetProps {
  * always renders a full-viewport backdrop and centres the panel with an
  * inline transform, so it cannot sit in a corner while the app stays usable.
  */
-export function LaunchSheet({ launch, open, onOpenChange, onRetry }: LaunchSheetProps) {
+export function LaunchSheet({ launch, open, onOpenChange, onRetry, onDiscard }: LaunchSheetProps) {
   const shape = useShape();
+  const [discardError, setDiscardError] = useState<string | null>(null);
   if (!open) return null;
   const steps = launchSteps(launch);
   const settled = launch.status === 'succeeded' && (!launch.targets.includes('machine') || launch.log.some((entry) => entry.phase === 'reload'));
@@ -186,6 +189,11 @@ export function LaunchSheet({ launch, open, onOpenChange, onRetry }: LaunchSheet
         </span> : null}
       </li>)}
     </ol>
+    {launch.status === 'running' ? <footer className="flex flex-col gap-2">
+      <p className="text-caption text-muted-foreground">A launch whose machine restarts ends on its own. If that machine is gone for good, discard the launch to start another.</p>
+      {discardError ? <p role="alert" className="text-caption text-destructive">{discardError}</p> : null}
+      <span className="flex justify-end"><Button variant="ghost" size="compact" onClick={() => { setDiscardError(null); onDiscard().catch((error: unknown) => setDiscardError(rpcErrorMessage(error, 'Discard launch'))); }}>Discard launch</Button></span>
+    </footer> : null}
     {launch.status === 'failed' ? <footer className="flex flex-col gap-2">
       <p role="alert" className="text-caption text-destructive">{launch.error ?? 'The launch did not finish.'}</p>
       <span className="flex justify-end gap-2">

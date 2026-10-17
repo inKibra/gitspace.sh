@@ -16,6 +16,8 @@ export interface RuntimeLaunch {
   dismiss(): void;
   start(source: LaunchSourceView, machineId: string, targets: readonly ReleaseTarget[]): Promise<void>;
   revert(): Promise<void>;
+  /** Stop following a running launch whose building machine is gone; a later report from that machine still wins. */
+  discard(launchId: string): Promise<void>;
 }
 
 /** Follow accepted launch progress through the machine swap; never infer build success from a disconnect. */
@@ -147,6 +149,11 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
     // The activation deadline, not transport availability, settles this attempt.
     try { await refreshRef.current(); } catch {}
   };
+  const discard = async (launchId: string) => {
+    const result = await rpcClient.deployment.discardLaunch({ launchId });
+    if (result.status === 'error') throw result.error;
+    await refreshRef.current();
+  };
   const dismiss = () => { window.sessionStorage.removeItem(LAUNCHED_STORAGE_KEY); setMark(null); };
-  return { launch, revertProgress, open, setOpen, mark, dismiss, start, revert };
+  return { launch, revertProgress, open, setOpen, mark, dismiss, start, revert, discard };
 }

@@ -122,6 +122,7 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": true
   },
+  "deployment.discardLaunch": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   "deployment.revert": {
     "readOnlyHint": false,
     "destructiveHint": true,

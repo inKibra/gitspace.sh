@@ -64,6 +64,7 @@ export const controlOperationSchema = z.enum([
   'deploy.status',
   'deploy.launchProgress',
   'deploy.machineApplied',
+  'deploy.launcherStarted',
   'deploy.machineChannelApplied',
   'deploy.machineProtocol',
   'artifacts.key.get',

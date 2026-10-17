@@ -17,7 +17,7 @@ import {
   listProjectsContract, listDevicesContract, revokeDeviceContract,
   getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
   ensureGitSpaceProjectContract,
-  spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentRevertContract, deploymentCheckCanonicalContract,
+  spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentDiscardLaunchContract, deploymentRevertContract, deploymentCheckCanonicalContract,
   environmentStateContract, recordIncidentContract, refreshProjectRemoteContract,
 } from '@gitspace/protocol/rpc-contract';
 import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract } from '@gitspace/protocol/rpc-contract';
@@ -28,7 +28,7 @@ import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js';
-import { controlFleetMachine, provisionManagedSandbox, readTenantDeployment, revertTenantRelease, checkCanonicalHead, type CredentialVaultDO } from './application.js';
+import { controlFleetMachine, provisionManagedSandbox, readTenantDeployment, revertTenantRelease, checkCanonicalHead, discardTenantLaunch, type CredentialVaultDO } from './application.js';
 import type { DeploymentStatus } from '@gitspace/protocol/deployment';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { UserSettingsDO } from './user-settings.js';
@@ -271,6 +271,10 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     try { return ok(deploymentView(await checkCanonicalHead(env, userId))); }
     catch (error) { return err(errors.OperationFailed({ operation: 'check canonical source', message: message(error) })); }
   });
+  const deploymentDiscardLaunch = server.implement(deploymentDiscardLaunchContract).handler(async ({ input, errors }) => {
+    try { return ok(deploymentView(await discardTenantLaunch(env, userId, input.launchId))); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'discard launch', message: message(error) })); }
+  });
   const deploymentRevert = server.implement(deploymentRevertContract).handler(async ({ errors }) => {
     try { return ok(deploymentView(await revertTenantRelease(env, userId))); }
     catch (error) { return err(errors.OperationFailed({ operation: 'revert release', message: message(error) })); }
@@ -429,7 +433,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, state: settingsState },
     machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, remote: { refresh: refreshRemote }, ...lifecycle.project },
     space: { view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
-    devices: { list: devices, revoke }, deployment: { status: deploymentStatus, checkCanonical: deploymentCheckCanonical, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
+    devices: { list: devices, revoke }, deployment: { status: deploymentStatus, checkCanonical: deploymentCheckCanonical, discardLaunch: deploymentDiscardLaunch, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
     github: githubCloudProcedures(env, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
     inspector: inspectorCloudProcedures(env, userId, currentDevice),

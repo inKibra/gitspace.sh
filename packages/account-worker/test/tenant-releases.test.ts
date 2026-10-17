@@ -181,6 +181,44 @@ describe('tenant releases', () => {
     expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ launchId: launching.launchId, phase: 'launched', status: 'succeeded', message: 'worker=applied machine=skipped frontend=applied' });
   });
 
+  it('a launch left running is ended by its building machine restarting, and only by that', async () => {
+    const { userId, control } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    const input = stageInput('restart-settles');
+    await control('deploy.stage', input);
+    const base = { source: { kind: 'workspace', workspaceId: 'workspace-a' }, targets: ['frontend', 'machine'], sha: input.sha, status: 'running', error: null, startedAt: '2026-10-09T10:00:00.000Z', updatedAt: '2026-10-09T10:01:00.000Z' };
+    const status = async () => deploymentStatusSchema.parse(await control('deploy.status', {})).launch;
+
+    // Died during the build: another machine's restart and a process that started before the last report change nothing.
+    const building = { ...base, launchId: crypto.randomUUID(), phase: 'build', message: 'building frontend' };
+    await control('deploy.launchProgress', building);
+    await releases.launcherStarted('machine-b', { runningSha: null, startedAt: '2026-10-09T10:05:00.000Z' });
+    await releases.launcherStarted('machine-a', { runningSha: null, startedAt: '2026-10-09T10:00:30.000Z' });
+    expect(await status()).toMatchObject({ status: 'running', phase: 'build' });
+    await releases.launcherStarted('machine-a', { runningSha: null, startedAt: '2026-10-09T10:05:00.000Z' });
+    expect(await status()).toMatchObject({ launchId: building.launchId, status: 'failed', error: 'Interrupted: the building machine restarted during build.' });
+
+    // Replaced by the release it was launching: the launch went through.
+    const launching = { ...base, launchId: crypto.randomUUID(), phase: 'launch', message: 'launching into frontend, machine' };
+    await control('deploy.launchProgress', launching);
+    await releases.launch({ sha: input.sha, targets: ['frontend', 'machine'] });
+    await releases.launcherStarted('machine-a', { runningSha: input.sha, startedAt: '2026-10-09T10:05:00.000Z' });
+    expect(await status()).toMatchObject({ launchId: launching.launchId, status: 'succeeded', phase: 'launched' });
+  });
+
+  it('discarding ends only the running launch it names, and the machine\'s next report still wins', async () => {
+    const { userId, control } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    const running = { launchId: crypto.randomUUID(), source: { kind: 'workspace', workspaceId: 'workspace-a' }, targets: ['frontend'], sha: null, phase: 'install', message: 'installing', status: 'running', error: null, startedAt: '2026-10-09T10:00:00.000Z', updatedAt: '2026-10-09T10:01:00.000Z' };
+    await control('deploy.launchProgress', running);
+    await releases.discardLaunch(crypto.randomUUID());
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ status: 'running' });
+    await releases.discardLaunch(running.launchId);
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ status: 'failed', error: 'Discarded: no machine was reporting this launch.' });
+    await control('deploy.launchProgress', { ...running, phase: 'build', message: 'building frontend', updatedAt: new Date(Date.now() + 60_000).toISOString() });
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ status: 'running', phase: 'build' });
+  });
+
   it('rejects retired OMP staging, activation, and acknowledgements without changing the release', async () => {
     const { control } = await tenant();
     const input = stageInput('retired-target');

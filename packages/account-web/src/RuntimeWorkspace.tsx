@@ -184,7 +184,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     />
     {launchRequest?.source.kind === 'workspace' ? <LaunchMachineDialog key={launchRequest.source.workspaceId} projectId={props.projectId} workspaceId={launchRequest.source.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog commit={launchRequest.source.commit} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
-    {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => setLaunchRequest({ source: launch.launch!.source, targets: launch.launch!.targets })} /> : null}
+    {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => setLaunchRequest({ source: launch.launch!.source, targets: launch.launch!.targets })} onDiscard={() => launch.discard(launch.launch!.launchId)} /> : null}
     {launch.revertProgress ? <RevertSheet progress={launch.revertProgress} open={launch.open} onOpenChange={launch.setOpen} onRetry={() => perform(launch.revert)} /> : null}
   </>;
 }

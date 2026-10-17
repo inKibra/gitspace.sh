@@ -1,4 +1,4 @@
-import { machineExecutionAdmissionSchema, type LaunchProgress, type machineProtocolInputSchema, type MachineExecutionAdmission } from '@gitspace/protocol/deployment';
+import { machineExecutionAdmissionSchema, type LaunchProgress, type LauncherStartedInput, type machineProtocolInputSchema, type MachineExecutionAdmission } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
 import { collectBytes, streamBytes, WorkspaceDomainError, WorkspaceFailureSchema } from '@gitspace/protocol-workspace';
 import {
@@ -441,6 +441,11 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
 
   async reportLaunchProgress(progress: LaunchProgress): Promise<void> {
     await this.call('deploy.launchProgress', progress);
+  }
+
+  /** This process builds nothing yet: a launch it left running before `startedAt` is finished or interrupted. */
+  async launcherStarted(input: LauncherStartedInput): Promise<void> {
+    await this.call('deploy.launcherStarted', input);
   }
 
   async machineProtocol(input: z.input<typeof machineProtocolInputSchema>): Promise<MachineExecutionAdmission> {

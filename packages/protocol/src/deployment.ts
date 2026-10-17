@@ -241,6 +241,10 @@ export const machineExecutionAdmissionSchema = z.object({
 export type MachineExecutionAdmission = z.infer<typeof machineExecutionAdmissionSchema>;
 
 /** The latest launch, reported phase by phase by the machine that builds it and kept by the account. */
+/** A machine process started: any launch it was building and last reported before `startedAt` has no builder now. */
+export const launcherStartedInputSchema = z.object({ runningSha: z.string().min(1).max(160).nullable(), startedAt: z.string().datetime() });
+export type LauncherStartedInput = z.infer<typeof launcherStartedInputSchema>;
+
 export const launchProgressSchema = z.object({
   launchId: z.string().uuid(),
   source: launchSourceSchema,

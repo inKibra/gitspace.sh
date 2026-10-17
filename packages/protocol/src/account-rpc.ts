@@ -66,6 +66,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'deployment.launch': 'machine',
   'deployment.checkCanonical': 'cloud',
   'deployment.revert': 'cloud',
+  'deployment.discardLaunch': 'cloud',
   'secrets.list': 'cloud',
   'secrets.put': 'cloud',
   'secrets.delete': 'cloud',

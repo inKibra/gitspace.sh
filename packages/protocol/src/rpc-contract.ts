@@ -1976,6 +1976,14 @@ export const deploymentCheckCanonicalContract = gitspaceRpc
   .output(DeploymentStatusWireCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+/** Stop following a running launch that nothing will finish (its building machine is gone); a later report from that
+ * machine still wins. */
+export const deploymentDiscardLaunchContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ launchId: wire.string }))
+  .output(DeploymentStatusWireCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
 export const deploymentRevertContract = gitspaceRpc
   .procedure()
   .input(wire.object({}))
@@ -2089,7 +2097,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     models: listAvailableModelsContract,
   },
   devices: { list: listDevicesContract, revoke: revokeDeviceContract },
-  deployment: { status: deploymentStatusContract, launch: deploymentLaunchContract, checkCanonical: deploymentCheckCanonicalContract, revert: deploymentRevertContract },
+  deployment: { status: deploymentStatusContract, launch: deploymentLaunchContract, checkCanonical: deploymentCheckCanonicalContract, discardLaunch: deploymentDiscardLaunchContract, revert: deploymentRevertContract },
   secrets: {
     list: listProjectSecretsContract,
     put: putProjectSecretContract,

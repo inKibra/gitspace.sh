@@ -39,18 +39,20 @@ describe('launchSteps', () => {
 describe('LaunchSheet', () => {
   it('renders the phases with one failed phase, the error, and retry', () => {
     const failed: LaunchTrack = { ...launchTrackFixture, status: 'failed', error: 'bun build failed: machine.ts(3,1): syntax error', log: [...launchTrackFixture.log, { phase: 'failed', message: 'bun build failed: machine.ts(3,1): syntax error', at: '2026-08-30T10:05:40.000Z' }] };
-    const html = renderToStaticMarkup(<LaunchSheet launch={failed} open onOpenChange={() => undefined} onRetry={() => undefined} />);
+    const html = renderToStaticMarkup(<LaunchSheet launch={failed} open onOpenChange={() => undefined} onRetry={() => undefined} onDiscard={async () => undefined} />);
     expect(states(failed)).toEqual(['done', 'failed', 'pending', 'pending', 'pending', 'pending', 'pending']);
     expect(launchSteps(failed)[1]!.detail).toBe(failed.error);
     expect(html).toContain(failed.error);
     expect(html).toContain('role="alert"');
     expect(html).toContain('>Retry</span>');
+    expect(html).not.toContain('Discard launch');
   });
 
-  it('renders nothing when closed and no retry while running', () => {
-    expect(renderToStaticMarkup(<LaunchSheet launch={launchTrackFixture} open={false} onOpenChange={() => undefined} onRetry={() => undefined} />)).toBe('');
-    const html = renderToStaticMarkup(<LaunchSheet launch={launchTrackFixture} open onOpenChange={() => undefined} onRetry={() => undefined} />);
+  it('renders nothing when closed, and offers discard instead of retry while running', () => {
+    expect(renderToStaticMarkup(<LaunchSheet launch={launchTrackFixture} open={false} onOpenChange={() => undefined} onRetry={() => undefined} onDiscard={async () => undefined} />)).toBe('');
+    const html = renderToStaticMarkup(<LaunchSheet launch={launchTrackFixture} open onOpenChange={() => undefined} onRetry={() => undefined} onDiscard={async () => undefined} />);
     expect(html).not.toContain('>Retry</span>');
+    expect(html).toContain('Discard launch');
   });
 });
 

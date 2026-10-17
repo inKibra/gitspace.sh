@@ -78,6 +78,7 @@ import {
   stageReleaseInputSchema,
   machineProtocolInputSchema,
   launchProgressSchema,
+  launcherStartedInputSchema,
   WORKER_VERSION_HEADER,
   GITSPACE_CANONICAL_BRANCH,
   type DeploymentStatus,
@@ -2164,6 +2165,10 @@ export async function revertTenantRelease(env: Env, userId: string): Promise<Dep
 }
 /** Reads the canonical branch head from the public canonical repository (one ref advertisement, no clone) and stores
  * it; status serves the stored head. */
+export async function discardTenantLaunch(env: Env, userId: string, launchId: string): Promise<DeploymentStatus> {
+  await tenantReleases(env, userId).discardLaunch(launchId);
+  return readTenantDeployment(env, userId);
+}
 export async function checkCanonicalHead(env: Env, userId: string): Promise<DeploymentStatus> {
   const ref = `refs/heads/${GITSPACE_CANONICAL_BRANCH}`;
   const commit = (await readAdvertisedRefs({ remote: GITSPACE_SOURCE_REPOSITORY, auth: null, refPrefix: ref })).get(ref);
@@ -3383,6 +3388,10 @@ const worker = {
               if (value === null) throw new ReleaseNotFoundError(input.sha);
               break;
             }
+            case 'deploy.launcherStarted':
+              await releases.launcherStarted(body.machineId, launcherStartedInputSchema.parse(body.payload));
+              value = null;
+              break;
             case 'deploy.machineChannelApplied':
               await releases.machineChannelApplied(body.machineId, machineChannelAppliedInputSchema.parse(body.payload));
               value = null;
