@@ -21,7 +21,9 @@ export type AttachmentPreparation = {
   canonicalPath: string;
   deadlineAt: string;
   signal: AbortSignal;
-  prerequisites: (local: LocalAttachment, signal: AbortSignal) => Promise<void>;
+  /** `acquired`: this preparation created the checkout (a new one, or one an unfinished acquisition left), so it holds
+   * only its source. */
+  prerequisites: (local: LocalAttachment, signal: AbortSignal, acquired: boolean) => Promise<void>;
 };
 
 /** A Git checkout whose acquisition did not finish: it still carries the marker, or (left by a version without the
@@ -68,7 +70,7 @@ export async function prepareMachineAttachment(journal: ExecutorJournal, options
     await run(['checkout', '-B', attachment.checkout.branch]);
     await rm(join(rootPath, '.git', CHECKOUT_ACQUIRING_MARKER), { force: true });
   }
-  await options.prerequisites(local, options.signal);
+  await options.prerequisites(local, options.signal, !exists);
   const ready: LocalAttachment = { ...local, prerequisitesComplete: true, attachment: { ...(journal.attachment(attachment.attachmentId)?.attachment ?? attachment), state: 'ready', updatedAt: new Date().toISOString() } };
   journal.installAttachment(ready);
   return ready;

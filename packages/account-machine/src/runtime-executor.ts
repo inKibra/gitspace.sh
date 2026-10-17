@@ -492,7 +492,6 @@ export async function createMachineExecutor(options: {
       return;
     }
     const canonicalPath = canonicalPathOf(attachment);
-    const existed = existsSync(canonicalPath);
     const source = assignment.source;
     const sourceCheckpoint = source?.checkpoint ?? assignment.checkpoint;
     const signal = AbortSignal.any([stopping.signal, AbortSignal.timeout(30 * 60_000)]);
@@ -523,11 +522,11 @@ export async function createMachineExecutor(options: {
         },
         submoduleEnvironment: (path: string) => options.originEnvironment({ ...grant, rootPath: path }),
       } : null,
-      prerequisites: async (prepared, prepareSignal) => {
+      prerequisites: async (prepared, prepareSignal, acquired) => {
         const durable = snapshotRow(key);
         if (!durable?.committed && !durable?.pending) {
           let base = await readGitCacheBase(prepared.rootPath);
-          if (!base && sourceCheckpoint && !existed) {
+          if (!base && sourceCheckpoint && acquired) {
             await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: sourceCheckpoint, branch: attachment.checkout.branch, lfs: await lfs?.read(prepared) });
             base = sourceCheckpoint;
           }
