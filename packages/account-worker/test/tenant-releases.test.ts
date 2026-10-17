@@ -164,6 +164,23 @@ describe('tenant releases', () => {
     expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ launchId: launching.launchId, phase: 'launched', status: 'succeeded', message: 'worker=skipped machine=skipped frontend=applied', error: null });
   });
 
+  it('a Worker launch is finished by the version it launched, whose old version may never answer the launch call', async () => {
+    const { userId, control } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    const input = stageInput('worker-self-launch');
+    await control('deploy.stage', input);
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
+    await env.CREDENTIALS.getByName(userId).ensureInference();
+    const launching = { launchId: crypto.randomUUID(), source: { kind: 'workspace', workspaceId: 'workspace-a' }, targets: ['worker', 'frontend'], sha: input.sha, phase: 'launch', message: 'launching into worker, frontend', status: 'running', error: null, startedAt: '2026-10-09T10:00:00.000Z', updatedAt: '2026-10-09T10:01:00.000Z' };
+    await control('deploy.launchProgress', launching);
+    // The launch call deploys the Worker and is cut off before it records anything.
+    await releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] });
+    await releases.certifyOwnLaunch('some-other-version');
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ status: 'running', phase: 'launch' });
+    await releases.certifyOwnLaunch(input.sha);
+    expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ launchId: launching.launchId, phase: 'launched', status: 'succeeded', message: 'worker=applied machine=skipped frontend=applied' });
+  });
+
   it('rejects retired OMP staging, activation, and acknowledgements without changing the release', async () => {
     const { control } = await tenant();
     const input = stageInput('retired-target');

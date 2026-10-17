@@ -148,6 +148,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
       );
     `);
     migrateReleaseSources(ctx.storage);
+    this.certifyOwnLaunch(WORKER_VERSION ?? null);
   }
 
   /** The canonical branch head this account last read; status serves it and never reaches the canonical repository. */
@@ -182,6 +183,18 @@ export class TenantReleasesDO extends DurableObject<Env> {
     const message = failed ? record.error ?? 'Release activation failed' : `worker=${record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} frontend=${record.status.frontend}`;
     const finished = launchProgressSchema.parse({ ...launch, phase: failed ? 'failed' : 'launched', message, status: failed ? 'failed' : 'succeeded', error: failed ? message : null, updatedAt: new Date().toISOString() });
     this.ctx.storage.sql.exec('UPDATE latest_launch SET record_json = ? WHERE id = 1', JSON.stringify(finished));
+  }
+
+  /** A launch that deploys the Worker replaces the code serving it, so the old version may never answer the launch
+   * call (its object is reset mid-request). The new version, starting here, is proof the Worker was applied: a launch
+   * still running for this very sha is recorded applied and finished. Public for the test that starts a version. */
+  certifyOwnLaunch(version: string | null): void {
+    const launch = this.latestLaunch();
+    if (version === null || launch?.status !== 'running' || launch.sha !== version || !launch.targets.includes('worker')) return;
+    const record = this.findRelease(version);
+    if (!record) return;
+    if (record.status.worker === 'pending') { record.status.worker = 'applied'; record.error = null; this.saveRecord(record); }
+    this.finishLaunch(record, launch.targets);
   }
 
   private latestLaunch(): LaunchProgress | null {
