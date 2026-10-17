@@ -118,20 +118,35 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     catch (error) { options.onReport(error); await options.schedule(Date.now() + 5_000); }
   }
   let definitionFiles: { commit: string; files: Array<{ path: string; content: string }> } | undefined;
+  // Definitions live in two fixed directories. Reading just those trees keeps the first message of a large repository
+  // from walking every directory of its snapshot (one tree read each) before it is admitted.
   const loadAgentDefinitions: NonNullable<SessionControlServices['loadAgentDefinitions']> = async () => {
     const checkpoint = await cloudFiles.initializeSnapshot();
     if (!checkpoint) return [];
     if (definitionFiles?.commit === checkpoint.worktreeCommit) return definitionFiles.files;
-    const repository = artifactsWorkspaceRepository(options.identity.workspaceId);
-    const paths = (await options.code.listSnapshotPaths(repository, checkpoint.worktreeTree)).filter(path => /^(?:\.omp|\.agents)\/agents\/[A-Za-z0-9._-]+\.md$/u.test(path)).sort();
-    const files = await Promise.all(paths.map(async path => {
-      const blob = await options.code.readFile(repository, checkpoint.worktreeCommit, path);
-      if (!blob) throw new Error(`Committed agent definition is missing: ${path}`);
-      if (blob.size > 262144) throw new Error(`Agent definition exceeds 256 KiB: ${path}`);
-      return { path, content: await blob.text() };
-    }));
-    definitionFiles = { commit: checkpoint.worktreeCommit, files };
-    return files;
+    const reader = options.code.reader(artifactsWorkspaceRepository(options.identity.workspaceId));
+    try {
+      const root = await reader.readTree(checkpoint.worktreeTree);
+      if (!root) throw new Error(`Missing snapshot tree ${checkpoint.worktreeTree}`);
+      const directory = async (parent: string, child: string) => {
+        const outer = root.find(entry => entry.name === parent && entry.type === 'tree');
+        const inner = outer ? (await reader.readTree(outer.hash))?.find(entry => entry.name === child && entry.type === 'tree') : undefined;
+        return { path: `${parent}/${child}`, entries: inner ? await reader.readTree(inner.hash) ?? [] : [] };
+      };
+      const listed = await Promise.all([directory('.agents', 'agents'), directory('.omp', 'agents')]);
+      const files = await Promise.all(listed.flatMap(({ path: directoryPath, entries }) => entries
+        .filter(entry => (entry.type === 'blob' || entry.type === 'exec') && /^[A-Za-z0-9._-]+\.md$/u.test(entry.name))
+        .map(async entry => {
+          const path = `${directoryPath}/${entry.name}`;
+          const blob = await reader.readBlob(entry.hash);
+          if (!blob) throw new Error(`Committed agent definition is missing: ${path}`);
+          if (blob.size > 262144) throw new Error(`Agent definition exceeds 256 KiB: ${path}`);
+          return { path, content: await blob.text() };
+        })));
+      files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+      definitionFiles = { commit: checkpoint.worktreeCommit, files };
+      return files;
+    } finally { await reader.close(); }
   };
   const history = createSessionHistory(options.storage, storage);
   const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference });

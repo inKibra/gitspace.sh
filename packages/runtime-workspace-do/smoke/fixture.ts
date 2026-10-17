@@ -19,6 +19,12 @@ function check(value: unknown, message: string): asserts value { if (!value) thr
 const receiptText = 'full durable receipt '.repeat(1000);
 const repositoryDefinition = '---\nname: Repository Scout\nmodel: pi/scout\ntools: read, grep\n---\nInspect the committed workspace source.';
 const definitionCheckpoint = { checkpointRef: 'refs/gitspace/spaces/smoke/checkpoints', branch: 'main', headCommit: '1'.repeat(40), indexCommit: '2'.repeat(40), trackedWorktreeCommit: '3'.repeat(40), worktreeCommit: '4'.repeat(40), indexTree: '5'.repeat(40), worktreeTree: '6'.repeat(40) };
+const entry = (name: string, hash: string, type: ArtifactsTreeEntry['type']): ArtifactsTreeEntry => ({ name, hash, mode: type === 'tree' ? '40000' : '100644', type });
+const definitionTrees = new Map<string, ArtifactsTreeEntry[]>([
+  [definitionCheckpoint.worktreeTree, [entry('.agents', 'a'.repeat(40), 'tree'), entry('README.md', 'd'.repeat(40), 'blob')]],
+  ['a'.repeat(40), [entry('agents', 'b'.repeat(40), 'tree')]],
+  ['b'.repeat(40), [entry('repository.md', 'c'.repeat(40), 'blob')]],
+]);
 const stream: StreamFunction = (_model, context) => {
   const result = createAssistantMessageEventStream();
   const last = context.messages.findLast(message => message.role !== 'system');
@@ -48,7 +54,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
     this.operations = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => ctx.storage.setAlarm(timestamp) };
     this.runtime = createWorkspaceRuntime({
       storage: ctx.storage, identity, models, model: modelRef,
-      code: { readFile: async (_repository, _commit, path) => path === '.agents/agents/repository.md' ? new Blob([repositoryDefinition]) : null, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], reader: () => ({ readTree: async () => [], readBlob: unsupported, close: async () => {} }) },
+      code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], reader: () => ({ readTree: async oid => definitionTrees.get(oid) ?? null, readBlob: async oid => oid === 'c'.repeat(40) ? new Blob([repositoryDefinition]) : null, close: async () => {} }) },
       initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported, preflight: async () => {} },
