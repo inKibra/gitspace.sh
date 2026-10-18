@@ -165,10 +165,15 @@ export class CloudFileStore {
     const saved = this.storage.sql.exec<{ input: string; pending: string | null; checkpoint: string | null }>('SELECT input,pending,checkpoint FROM runtime_machine_publications WHERE id=?', id).toArray()[0];
     if (saved && saved.input !== identity) throw new Error('Machine snapshot publication identity changed');
     if (saved?.checkpoint) { await this.flushRetention(); return RuntimeGitCheckpointSchema.parse(JSON.parse(saved.checkpoint)); }
+    const stored = saved?.pending ? MachinePendingSchema.parse(JSON.parse(saved.pending)) : null;
+    const current = await this.snapshot();
+    // A cloud version accepted after a stored plan was made proves the plan never landed: every write moves the
+    // checkpoint ref from the recorded version, so the cloud's write would have been refused had this one moved it.
+    // Resuming it would fail on the moved ref forever; it is planned again against the current version.
+    const stale = stored !== null && (stored.current ? checkpointIdentity(stored.current) : null) !== (current ? checkpointIdentity(current) : null);
     let pending: z.infer<typeof MachinePendingSchema>;
-    if (saved?.pending) pending = MachinePendingSchema.parse(JSON.parse(saved.pending));
+    if (stored && !stale) pending = stored;
     else {
-      const current = await this.snapshot();
       const row = previous ? this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_commits WHERE commit_id=?', previous).toArray()[0] : undefined;
       const base = previous === current?.worktreeCommit ? current : row ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)) : null;
       if (current && (!previous || !base)) throw new Error('Snapshot publication has an unknown predecessor');
@@ -178,7 +183,7 @@ export class CloudFileStore {
         authorize?.();
         const latest = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
         if ((latest ? checkpointIdentity(RuntimeGitCheckpointSchema.parse(JSON.parse(latest.checkpoint))) : null) !== (current ? checkpointIdentity(current) : null)) throw new Error('Canonical snapshot changed before machine publication');
-        this.storage.sql.exec('INSERT INTO runtime_machine_publications(id,input,pending) VALUES(?,?,?)', id, identity, JSON.stringify(pending));
+        this.storage.sql.exec('INSERT OR REPLACE INTO runtime_machine_publications(id,input,pending) VALUES(?,?,?)', id, identity, JSON.stringify(pending));
       });
     }
     try { await this.storage.sync(); return await this.finishMachine(id, pending); }

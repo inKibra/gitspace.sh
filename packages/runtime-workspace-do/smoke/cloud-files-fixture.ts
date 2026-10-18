@@ -51,9 +51,14 @@ export class CloudFilesProof extends DurableObject {
     };
     const code = {
       listSnapshotPaths: async () => [...files.keys()].sort(),
-      mergeSnapshot: async (input: { machine: typeof checkpoint; base: typeof checkpoint }) => {
+      mergeSnapshot: async (input: { machine: typeof checkpoint; base: typeof checkpoint; previous: typeof checkpoint }) => {
         observedMergeBase = input.base;
         if (failPush) return Result.err(new ArtifactsSnapshotError({ operation: 'mergeSnapshot', message: 'lost merge response', certainty: 'unknown' }));
+        // Like the provider's checkpoint ref: a write must start from the version the cloud last accepted.
+        const recorded = this.ctx.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
+        if (recorded && RuntimeGitCheckpointSchema.parse(JSON.parse(recorded.checkpoint)).worktreeCommit !== input.previous.worktreeCommit) {
+          return Result.err(new ArtifactsSnapshotError({ operation: 'writeSnapshot', message: 'Snapshot conflict: checkpoint ref has advanced', certainty: 'not-published' }));
+        }
         return Result.ok(mergedCheckpoint ?? input.machine);
       },
       readFile: async (_repository: string, commit: string, path: string) => {
@@ -350,6 +355,21 @@ export class CloudFilesProof extends DurableObject {
     ]);
     assert.deepEqual(concurrentPublications.map(value => value.worktreeCommit), [parallelA.worktreeCommit, parallelB.worktreeCommit]);
     assert.equal((await store.snapshot())?.worktreeCommit, parallelB.worktreeCommit);
+    // A machine publication whose response was lost, then a cloud write: the stored plan is stale, so the machine's
+    // retry merges onto the newer cloud version instead of resuming the old plan forever.
+    const beforeStranded = await store.snapshot(); assert(beforeStranded);
+    const stranded = { ...beforeStranded, worktreeCommit: 'a4'.repeat(20) };
+    failPush = true;
+    await assert.rejects(store.commitMachine(stranded, beforeStranded.worktreeCommit, 'machine'));
+    failPush = false;
+    store = open();
+    assert.equal((await invoke('write', { path: 'after-stranded.txt', content: 'the cloud moved on' })).status, 'completed');
+    const movedOn = await store.snapshot(); assert(movedOn && movedOn.worktreeCommit !== beforeStranded.worktreeCommit);
+    mergedCheckpoint = { ...movedOn, worktreeCommit: 'a5'.repeat(20) };
+    assert.deepEqual(await store.commitMachine(stranded, beforeStranded.worktreeCommit, 'machine'), mergedCheckpoint);
+    assert.deepEqual(observedMergeBase, beforeStranded);
+    assert.equal((await store.snapshot())?.worktreeCommit, mergedCheckpoint.worktreeCommit);
+    mergedCheckpoint = undefined;
     headAttributes.set('.gitattributes', '[[:alpha:]].bin filter=lfs\n');
     const unsupportedPattern = await invoke('write', { path: 'a.bin', content: 'must not bypass LFS policy' });
     assert.equal(unsupportedPattern.status, 'failed');

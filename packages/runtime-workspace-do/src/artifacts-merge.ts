@@ -168,6 +168,19 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
     const content = await text(entry);
     return content !== null && hasSnapshotConflictMarkers(content);
   };
+  // Conflict markers come from merges in the working copy, so a machine's change is read for them only where it differs
+  // from the machine's own HEAD: a pull's committed files are the repository's content (null: no HEAD, read all).
+  let uncommittedPaths: Promise<Set<string> | null> | undefined;
+  const uncommitted = () => uncommittedPaths ??= (async () => {
+    if (!machine.headCommit) return null;
+    const head = await repo.readCommit(machine.headCommit);
+    if (!head) throw new Error('Missing machine HEAD commit');
+    return new Set((await changedSnapshotEntries(repo, head.treeHash, machine.worktreeTree)).map(change => change.path));
+  })();
+  const machineHasMarkers = async (path: string, entry: Entry | undefined) => {
+    const local = await uncommitted();
+    return (!local || local.has(path)) && entryHasMarkers(entry);
+  };
   /** A worktree path's markers after this publication: added when present, a recorded conflict resolved when gone. */
   const updateMarkers = (path: string, marked: boolean) => {
     if (path === 'HEAD') return;
@@ -178,6 +191,11 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
     const [original, current, incoming] = await Promise.all([inventory(baseTree), inventory(cloudTree), inventory(machineTree)]);
     const mutations: SnapshotMutation[] = [];
     const paths = new Set([...original.keys(), ...current.keys(), ...incoming.keys()]);
+    // Cloud paths that can collide with a path above or below them: changed in the cloud, or still on the machine.
+    const occupied = new Set([...current.keys()].filter(other => !(same(original.get(other), current.get(other)) && !incoming.has(other))));
+    const occupiedDirectories = new Set<string>();
+    for (const other of occupied) for (let slash = other.indexOf('/'); slash !== -1; slash = other.indexOf('/', slash + 1)) occupiedDirectories.add(other.slice(0, slash));
+    const structuralAt = (path: string) => occupiedDirectories.has(path) || path.split('/').slice(0, -1).some((_, index, parts) => occupied.has(parts.slice(0, index + 1).join('/')));
     const reserve = (path: string, entry: Entry) => {
       let target = `${path}.gitspace-machine-${machine.worktreeCommit.slice(0, 12)}`;
       while (paths.has(target)) target += '-copy';
@@ -190,8 +208,8 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
         continue;
       }
       if (same(b, c)) { if (worktree) updateMarkers(path, await entryHasMarkers(c)); continue; }
-      const structural = [...current.keys()].some(other => other !== path && (other.startsWith(`${path}/`) || path.startsWith(`${other}/`)) && !(same(original.get(other), current.get(other)) && !incoming.has(other)));
-      if (same(a, b) && !structural) { mutations.push({ path, content: null, ...(c ?? {}) }); if (worktree) updateMarkers(path, await entryHasMarkers(c)); continue; }
+      const structural = structuralAt(path);
+      if (same(a, b) && !structural) { mutations.push({ path, content: null, ...(c ?? {}) }); if (worktree) updateMarkers(path, await machineHasMarkers(path, c)); continue; }
       const [before, ours, theirs] = await Promise.all([text(a), text(b), text(c)]);
       if (!structural && before !== null && ours !== null && theirs !== null && b && c && (b.mode === c.mode || a?.mode === b.mode || a?.mode === c.mode)) {
         const merged = mergeSnapshotText(before, ours, theirs);
@@ -213,17 +231,12 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
   const merged = { ...machine, headCommit: headChanged && cloud.headCommit === base.headCommit ? machine.headCommit : cloud.headCommit, branch: branchChanged && cloud.branch === base.branch ? machine.branch : cloud.branch, ...(cloud.lfs || machine.lfs ? { lfs: { objects: [...objects.values()], heldBack: [...heldBack.values()] } } : {}) };
   // The cloud has not changed since the machine's base: every path takes the machine's version, so its trees are the
   // result as they stand. A fast-forward of thousands of files in a large repository otherwise walked every tree of
-  // three versions and rebuilt them. Conflict markers come from merges in the working copy, so only changed files
-  // that differ from the machine's own HEAD are read: a pull's committed files are the repository's content.
+  // three versions and rebuilt them.
   if (!options.forcePublication && base.worktreeCommit === cloud.worktreeCommit && base.headCommit === cloud.headCommit && base.branch === cloud.branch) {
-    const [tracked, head] = await Promise.all([repo.readCommit(machine.trackedWorktreeCommit), machine.headCommit ? repo.readCommit(machine.headCommit) : null]);
+    const tracked = await repo.readCommit(machine.trackedWorktreeCommit);
     if (!tracked) throw new Error('Missing tracked merge snapshot');
-    if (machine.headCommit && !head) throw new Error('Missing machine HEAD commit');
-    const [changes, uncommitted] = await Promise.all([
-      changedSnapshotEntries(repo, base.worktreeTree, machine.worktreeTree),
-      head ? changedSnapshotEntries(repo, head.treeHash, machine.worktreeTree).then(local => new Set(local.map(change => change.path))) : null,
-    ]);
-    await eachLimited(changes, READ_CONCURRENCY, async change => updateMarkers(change.path, (!uncommitted || uncommitted.has(change.path)) && await entryHasMarkers(change.after)));
+    const changes = await changedSnapshotEntries(repo, base.worktreeTree, machine.worktreeTree);
+    await eachLimited(changes, READ_CONCURRENCY, async change => updateMarkers(change.path, await machineHasMarkers(change.path, change.after)));
     for (const path of resolved) conflicts.delete(path);
     for (const path of introduced) conflicts.add(path);
     return { forcePublication: false, mutations: [], conflicts: [...conflicts].sort(), adopt: { worktreeTree: machine.worktreeTree, indexTree: machine.indexTree, trackedTree: tracked.treeHash }, machine: merged };
