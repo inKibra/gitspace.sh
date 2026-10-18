@@ -24,6 +24,11 @@ const finished = (run: Running) => run.stored.daemon.state === 'exited' || run.s
 
 export class ProcessSupervisor {
   private readonly runs = new Map<string, Running>();
+
+  /** Whether any supervised process has not exited or failed: such a process (a terminal, a service) keeps its broker. */
+  hasLiveProcesses(): boolean {
+    return [...this.runs.values()].some(run => !finished(run));
+  }
   private readonly completions = new Map<string, Extract<DaemonResponse, { op: 'describe' }>>();
   private closing = false;
   private readonly privatePipes = new Set<string>();

@@ -1,9 +1,14 @@
 import { createServer } from 'node:net';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DaemonRequestSchema, ProcessIdentitySchema, SupervisorRequestError } from './protocol.js';
 import { getDaemonRuntimeDir, processIdentity, sameProcess } from './process-identity.js';
 import { ProcessSupervisor } from './supervisor.js';
+
+/** A broker with nothing to supervise and no requests for this long exits; the next caller starts one again. */
+const IDLE_EXIT_MS = 10 * 60_000;
+const IDLE_CHECK_MS = 60_000;
 
 export async function startDaemonBrokerFromEnvironment(): Promise<void> {
   const project = process.env.GITSPACE_SUPERVISOR_PROJECT;
@@ -26,6 +31,7 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
   await rm(socketPath, { force: true });
   const supervisor = new ProcessSupervisor(root);
   await supervisor.recover();
+  let lastRequestAt = Date.now();
   const server = createServer(socket => {
     let pending = '';
     const controller = new AbortController();
@@ -33,6 +39,7 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
     socket.on('error', () => controller.abort());
     socket.setEncoding('utf8');
     socket.on('data', (data: string) => {
+      lastRequestAt = Date.now();
       pending += data;
       if (pending.length > 16 * 1024 * 1024) { socket.destroy(new Error('Supervisor request too large')); return; }
       const newline = pending.indexOf('\n');
@@ -64,5 +71,15 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
   };
   process.on('SIGTERM', () => { void stop(); });
   process.on('SIGINT', () => { void stop(); });
-  server.once('close', () => { void Promise.all([rm(socketPath, { force: true }), rm(lock, { recursive: true, force: true })]); });
+  // Brokers are per project directory and outlive their callers: one whose directory is gone (a deleted checkout, a
+  // test's temporary project) or that sat idle with nothing alive would otherwise run forever. Thousands of them
+  // exhausted a machine's process slots.
+  const idle = setInterval(() => {
+    if (stopping) return;
+    if (!existsSync(project) || (Date.now() - lastRequestAt > IDLE_EXIT_MS && !supervisor.hasLiveProcesses())) void stop();
+  }, IDLE_CHECK_MS);
+  server.once('close', () => {
+    clearInterval(idle);
+    void Promise.all([rm(socketPath, { force: true }), rm(lock, { recursive: true, force: true })]);
+  });
 }
