@@ -49,7 +49,12 @@ function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
   };
   return {
     readTree: oid => read('readTree', oid, () => repo.readTree(oid)),
-    readBlob: oid => read('readBlob', oid, () => repo.readBlob(oid)),
+    // A blob's bytes arrive when it is read, not when the call returns: they are read here, inside the paced and
+    // retried call, so a failure reading them is retried and names the blob.
+    readBlob: oid => read('readBlob', oid, async () => {
+      const blob = await repo.readBlob(oid);
+      return blob && new Blob([await blob.arrayBuffer()]);
+    }),
     readCommit: oid => read('readCommit', oid, () => repo.readCommit(oid)),
     info: () => repo.info(),
     createToken: (scope, ttl) => repo.createToken(scope, ttl),
