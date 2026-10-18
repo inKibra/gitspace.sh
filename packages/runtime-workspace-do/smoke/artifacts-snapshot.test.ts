@@ -367,6 +367,34 @@ test('repository operations support proxy handles without disposal and release w
   } finally { await f.close(); }
 });
 
+test('a listing survives transient Artifacts read failures with at most 16 reads in flight', async () => {
+  const f = await fixture();
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  try {
+    const leaf = await git.writeBlob({ fs, dir: f.dir, blob: text.encode('leaf\n') });
+    const directories = await Promise.all(Array.from({ length: 20 }, (_, index) => git.writeTree({ fs, dir: f.dir, tree: [{ path: `file-${index}`, mode: '100644', type: 'blob', oid: leaf }] })));
+    const tree = await git.writeTree({ fs, dir: f.dir, tree: directories.map((oid, index) => ({ path: `dir-${String(index).padStart(2, '0')}`, mode: '040000', type: 'tree' as const, oid })) });
+    const failed = new Set<string>();
+    let inFlight = 0, peak = 0;
+    const repo: ArtifactsRepo = {
+      ...f.repo, listTokens: unsupported, readFile: unsupported, fork: unsupported,
+      async readTree(oid: string) {
+        inFlight++; peak = Math.max(peak, inFlight);
+        try {
+          // Every directory's first read fails the way Artifacts occasionally does.
+          if (!failed.has(oid)) { failed.add(oid); throw new Error('ArtifactsError: An internal error occurred.'); }
+          return await f.repo.readTree(oid);
+        } finally { inFlight--; }
+      },
+    };
+    const code = new ArtifactsCodeStore({ get: async () => repo, create: unsupported, import: unsupported, delete: unsupported, list: unsupported });
+    const paths = await code.listSnapshotPaths('fixture', tree);
+    expect(paths).toHaveLength(20);
+    expect(paths[0]).toBe('dir-00/file-0');
+    expect(peak).toBeLessThanOrEqual(16);
+  } finally { await f.close(); }
+});
+
 test('scratch recovery never seeds a missing branch when actual default HEAD has history', async () => {
   const f = await fixture('trunk');
   const metadata = { ...await f.repo.info(), name: 'project-scratch', description: 'GitSpace scratch project scratch (main)' };

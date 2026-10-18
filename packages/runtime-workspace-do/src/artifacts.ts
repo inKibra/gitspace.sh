@@ -19,6 +19,43 @@ export async function disposeArtifactsRepository(repo: ArtifactsRepo): Promise<v
   await repo[Symbol.dispose]?.();
 }
 
+/** Reads of one repository: at most this many in flight across every walk of a merge or listing. */
+const REPOSITORY_READS = 16;
+/** A merge of a large repository makes thousands of reads; Artifacts fails an occasional one with "An internal error
+ * occurred.", and one such failure otherwise failed the whole publication on every retry. Each read is tried this
+ * many times before its error stands. */
+const READ_ATTEMPTS = 3;
+type RepositoryReads = Pick<ArtifactsRepo, 'readTree' | 'readBlob' | 'readCommit' | 'info' | 'createToken' | 'revokeToken'>;
+/** The repository handle as merges and listings use it: reads paced and retried, writes passed through. */
+function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  const read = async <T>(call: () => Promise<T>): Promise<T> => {
+    if (active >= REPOSITORY_READS) await new Promise<void>(resolve => waiting.push(resolve));
+    active++;
+    try {
+      for (let attempt = 1; ; attempt++) {
+        try { return await call(); }
+        catch (error) {
+          if (attempt >= READ_ATTEMPTS) throw error;
+          await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+        }
+      }
+    } finally {
+      active--;
+      waiting.shift()?.();
+    }
+  };
+  return {
+    readTree: oid => read(() => repo.readTree(oid)),
+    readBlob: oid => read(() => repo.readBlob(oid)),
+    readCommit: oid => read(() => repo.readCommit(oid)),
+    info: () => repo.info(),
+    createToken: (scope, ttl) => repo.createToken(scope, ttl),
+    revokeToken: id => repo.revokeToken(id),
+  };
+}
+
 /** Deterministic identities make interrupted create/import/fork operations recoverable. */
 export function artifactsProjectRepository(projectId: string): string {
   return repositorySchema.parse(`project-${projectId}`);
@@ -79,15 +116,16 @@ export class ArtifactsCodeStore {
     if (opened.isErr()) return opened;
     const repo = opened.value;
     try {
-      const plan = await Result.tryPromise({ try: () => planSnapshotMerge(repo, input.base, input.previous, input.machine, input), catch: error => new ArtifactsSnapshotError({ operation: 'planSnapshotMerge', certainty: 'not-published', message: String(error) }) });
+      const paced = pacedRepository(repo);
+      const plan = await Result.tryPromise({ try: () => planSnapshotMerge(paced, input.base, input.previous, input.machine, input), catch: error => new ArtifactsSnapshotError({ operation: 'planSnapshotMerge', certainty: 'not-published', message: String(error) }) });
       if (plan.isErr()) return plan;
-      return await writeArtifactsSnapshot(repo, { ...input, ...plan.value });
+      return await writeArtifactsSnapshot(paced, { ...input, ...plan.value });
     } finally { await disposeArtifactsRepository(repo); }
   }
 
   async listSnapshotPaths(repository: string, tree: string): Promise<string[]> {
     const repo = await this.binding.get(repositorySchema.parse(repository));
-    try { return [...(await snapshotEntries(repo, tree)).keys()].sort(); }
+    try { return [...(await snapshotEntries(pacedRepository(repo), tree)).keys()].sort(); }
     finally { await disposeArtifactsRepository(repo); }
   }
 
