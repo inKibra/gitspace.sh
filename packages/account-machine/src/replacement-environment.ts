@@ -405,11 +405,23 @@ class MachineHost implements MachineReplacementHost {
         running.process.kill('SIGTERM');
         running.stopping = true;
       }
-      const exitCode = await Promise.race([
+      const graceful = await Promise.race([
+        running.process.exited.then(exitCode => ({ exitCode })),
+        new Promise<null>(resolve => { deadline = setTimeout(() => resolve(null), 120_000); }),
+      ]);
+      clearTimeout(deadline);
+      // A retired generation that does not drain in time (an attach still downloading) serves nothing: keeping it
+      // alive would leave the machine offline with no successor allowed to start. It is killed; its work resumes there.
+      if (graceful === null) {
+        console.error(JSON.stringify({
+          event: 'native_replacement', machineId: this.options.machineId, operation: 'stop',
+          generation: generation.hash, mode, stage: 'shutdown', outcome: 'escalated', reason: 'graceful shutdown exceeded 120000ms',
+        }));
+        running.process.kill('SIGKILL');
+      }
+      const exitCode = graceful !== null ? graceful.exitCode : await Promise.race([
         running.process.exited,
-        new Promise<never>((_resolve, reject) => {
-          deadline = setTimeout(() => reject(new Error('Graceful shutdown did not finish within 120000ms; the generation remains fenced and no replacement may start')), 120_000);
-        }),
+        new Promise<never>((_resolve, reject) => { deadline = setTimeout(() => reject(new Error('The generation survived SIGKILL for 10000ms')), 10_000); }),
       ]);
       console.info(JSON.stringify({
         event: 'native_replacement', machineId: this.options.machineId, operation: 'stop',

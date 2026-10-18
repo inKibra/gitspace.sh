@@ -272,8 +272,16 @@ export async function requestMachineUpdate(candidate: MachineSelection, hostUrl:
 async function waitDead(pid: number, timeout = 150_000): Promise<void> {
   const deadline = performance.now() + timeout;
   while (alive(pid)) {
-    if (performance.now() > deadline) throw new Error(`Process ${pid} did not drain; replacement remains fenced`);
+    if (performance.now() > deadline) throw new Error(`Process ${pid} did not exit within ${timeout} ms`);
     await Bun.sleep(100);
+  }
+}
+/** Candidate hosts always lead their own process group: killing it reaps every potential database writer. */
+function killProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
   }
 }
 async function stopHost(root: string, pid: number, machinePid?: number, failed = false): Promise<void> {
@@ -291,24 +299,15 @@ async function stopHost(root: string, pid: number, machinePid?: number, failed =
     await waitDead(pid, failed ? 10_000 : 150_000);
     if (machinePid && alive(machinePid)) process.kill(machinePid, 'SIGTERM');
     if (machinePid) await waitDead(machinePid, failed ? 10_000 : 150_000);
-    if (failed) {
-      try {
-        process.kill(-pid, 'SIGKILL');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-      }
-    }
+    if (failed) killProcessGroup(pid);
   } catch (error) {
-    if (!failed) throw error;
-    // Candidate hosts always lead their own process group. Reap every potential DB writer before restore.
-    try {
-      process.kill(-pid, 'SIGKILL');
-    } catch (killError) {
-      if ((killError as NodeJS.ErrnoException).code !== 'ESRCH') throw killError;
-    }
+    // A host that does not drain in time is already retired: it serves nothing, and keeping it alive would leave the
+    // machine offline with no successor allowed to start. Killing it releases what it holds; the update then proceeds.
+    console.error(JSON.stringify({ event: 'machine_update_stop_escalated', hostPid: pid, machinePid: machinePid ?? null, reason: error instanceof Error ? error.message : String(error) }));
+    killProcessGroup(pid);
     if (machinePid && alive(machinePid)) process.kill(machinePid, 'SIGKILL');
-    await waitDead(pid);
-    if (machinePid) await waitDead(machinePid);
+    await waitDead(pid, 10_000);
+    if (machinePid) await waitDead(machinePid, 10_000);
   }
   const child = children.get(pid);
   if (child && child.exitCode === null && child.signalCode === null) {

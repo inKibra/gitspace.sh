@@ -53,9 +53,17 @@ if (previousMachine && alive(previousMachine.pid)) {
   if (!retired.ok || ((await retired.json()) as { stopMode?: string }).stopMode !== 'replace')
     throw new Error('Orphan machine did not acknowledge retained ownership');
   process.kill(previousMachine.pid, 'SIGTERM');
-  const deadline = performance.now() + 150_000;
+  // A retired machine that does not drain serves nothing; leaving it alive would keep this machine offline. It is
+  // killed after its grace period, and startup continues once it is gone.
+  let deadline = performance.now() + 150_000;
+  let killed = false;
   while (alive(previousMachine.pid)) {
-    if (performance.now() > deadline) throw new Error('Orphan machine did not drain; startup remains fenced');
+    if (performance.now() > deadline) {
+      if (killed) throw new Error('Orphan machine survived SIGKILL; startup cannot take over its workspaces');
+      process.kill(previousMachine.pid, 'SIGKILL');
+      killed = true;
+      deadline = performance.now() + 10_000;
+    }
     await Bun.sleep(100);
   }
 }

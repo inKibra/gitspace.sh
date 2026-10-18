@@ -34,6 +34,8 @@ const failedDuring = (operation: RuntimeAttachmentFailure['operation']) => (erro
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** An observation change waits this long, so a burst of commands or setup steps costs one report. */
 const OBSERVATION_SETTLE_MS = 1_000;
+/** How long closing waits for in-flight work, well inside the 120 s a replacement allows a generation to stop. */
+const CLOSE_GRACE_MS = 30_000;
 
 /** Nothing here polls the cloud: `sync` reads the machine's assignments (startup, every relay connection, every
  * `assignments` notice) and `refreshWorkspace` reads one workspace's cloud version (every `workspace.snapshot` notice). */
@@ -447,6 +449,11 @@ export async function createMachineExecutor(options: {
     journal.installAttachment(cleared);
     observe(cleared);
   };
+  /** A ready checkout is materialized: an earlier attempt's materialize failure (perhaps from an earlier process) no
+   * longer describes it. Clearing it cannot wait for the whole assignment run, which goes on to sync. */
+  const clearMaterializeFailure = (attachment: RuntimeAttachment) => {
+    if (journal.attachment(attachment.attachmentId)?.attachment.failure?.operation === 'materialize') clearFailure(attachment);
+  };
   /** Stops sync and commands for an attachment the cloud released. The checkout stays on disk. */
   const release = async (local: LocalAttachment) => {
     stopFollowing(local);
@@ -491,6 +498,7 @@ export async function createMachineExecutor(options: {
         if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no synced version to report'));
         local = await announceReady(local, commit, stopping.signal);
       }
+      if (local.attachment.state === 'ready') clearMaterializeFailure(local.attachment);
       if (local.attachment.state === 'ready') await keepSyncing(local, assignment.checkpoint).catch(failedDuring('sync'));
       return;
     }
@@ -568,6 +576,7 @@ export async function createMachineExecutor(options: {
     if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no version to report'));
     const live = saveCache(local, { ...cacheFor(journal.attachment(attachment.attachmentId) ?? local), state: 'live' });
     const ready = await announceReady(live, commit, signal);
+    clearMaterializeFailure(ready.attachment);
     if (setupFailure !== null) recordFailure(ready, new AttachmentOperationFailure('setup', setupFailure));
     if (ready.attachment.state === 'ready') await keepSyncing(ready).catch(failedDuring('sync'));
   };
@@ -664,7 +673,13 @@ export async function createMachineExecutor(options: {
       for (const entry of watchers.values()) entry.close();
       for (const entry of observations.values()) entry.settling?.();
       try {
-        await Promise.allSettled([reading, ...reports, ...[...lanes.values()].map(lane => lane.idle), ...reconciling.values(), ...[...captures.values()].map(capture => capture.settle())]);
+        // Everything in flight resumes in the next process (an unfinished checkout keeps its acquiring marker, a pending
+        // capture is journaled), so it gets a bounded wait: a large LFS download in an attach must not hold this
+        // generation past its replacement's deadline.
+        await Promise.race([
+          Promise.allSettled([reading, ...reports, ...[...lanes.values()].map(lane => lane.idle), ...reconciling.values(), ...[...captures.values()].map(capture => capture.settle())]),
+          Bun.sleep(CLOSE_GRACE_MS),
+        ]);
         await browser.close();
       } finally {
         await credentialHelper.close();

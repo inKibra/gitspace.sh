@@ -131,7 +131,7 @@ for (const category of ['drain', 'successor', 'handoff', 'lock'] as const) {
       `);
       if (timeout) {
         const message = {
-          drain: 'did not drain; replacement remains fenced',
+          drain: 'did not exit within 150000 ms',
           successor: 'Complete successor host failed readiness',
           handoff: 'Updater handoff was not durably acknowledged',
           lock: 'Another update process owns this machine',
@@ -186,8 +186,9 @@ for (const category of ['owner', 'orphan'] as const) {
       if (timeout) {
         expect(result.error).toContain(category === 'owner'
           ? 'Complete-host launch was not durably authorized'
-          : 'Orphan machine did not drain; startup remains fenced');
-        const budget = category === 'owner' ? 30_000 : 150_000;
+          : 'Orphan machine survived SIGKILL');
+        // An orphan gets 150 s to drain, then SIGKILL and 10 s to exit.
+        const budget = category === 'owner' ? 30_000 : 160_000;
         expect(result.elapsed).toBeGreaterThan(budget);
         expect(result.elapsed).toBeLessThanOrEqual(budget + 10_001);
       } else {

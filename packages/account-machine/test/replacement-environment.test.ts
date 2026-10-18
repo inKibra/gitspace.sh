@@ -523,7 +523,7 @@ describe('replacement environment host routes', () => {
     await environment.publishCodeVersion(hash);
   });
 
-  it('keeps a predecessor alive and fenced when graceful shutdown times out', async () => {
+  it('kills a retired predecessor that ignores SIGTERM past its grace, then starts the successor', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-native-shutdown-'));
     roots.push(root);
     const environment = new ReplacementEnvironment({
@@ -552,15 +552,17 @@ describe('replacement environment host routes', () => {
         return Reflect.apply(target, receiver, args);
       },
     }));
+    let successor = 0;
     try {
-      await expect(environment.deploy({ artifacts: [artifact], releaseSha: 'next', revision: 'next', dirty: false })).rejects.toThrow();
-      expect(process.kill(pid, 0)).toBe(true);
-      expect(Number(await readFile(join(root, 'pid'), 'utf8'))).toBe(pid);
-      expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: 'previous' });
-      await expect(environment.publishCodeVersion(hash)).rejects.toThrow();
+      await environment.deploy({ artifacts: [artifact], releaseSha: 'next', revision: 'next', dirty: false });
+      successor = Number(await readFile(join(root, 'pid'), 'utf8'));
+      // The predecessor is gone, so nothing is left fenced: the machine runs the successor.
+      expect(() => process.kill(pid, 0)).toThrow();
+      expect(successor).not.toBe(pid);
+      expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: 'next' });
     } finally {
       deadline.mockRestore();
-      process.kill(pid, 'SIGKILL');
+      for (const live of [pid, successor]) { try { if (live) process.kill(live, 'SIGKILL'); } catch { /* already gone */ } }
     }
   });
 
