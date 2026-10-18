@@ -21,13 +21,15 @@ export async function disposeArtifactsRepository(repo: ArtifactsRepo): Promise<v
 
 /** Reads of one repository: at most this many in flight across every walk of a merge or listing. */
 const REPOSITORY_READS = 16;
-/** A merge of a large repository makes thousands of reads; Artifacts fails an occasional one with "An internal error
- * occurred.", and one such failure otherwise failed the whole publication on every retry. Each read is tried this
- * many times before its error stands. */
-const READ_ATTEMPTS = 3;
+/** A merge of a large repository makes thousands of reads; under that load Artifacts fails some with "An internal
+ * error occurred.", and one such failure otherwise failed the whole publication on every retry. Each read is tried
+ * this many times, waiting 250 ms, 0.5 s, 1 s and 2 s between tries, before its error stands. */
+const READ_ATTEMPTS = 5;
 type RepositoryReads = Pick<ArtifactsRepo, 'readTree' | 'readBlob' | 'readCommit' | 'info' | 'createToken' | 'revokeToken'>;
-/** The repository handle as merges and listings use it: reads paced and retried, writes passed through. */
+/** The repository handle as merges and listings use it: reads paced and retried, each tree read once (the versions a
+ * merge compares share most of their directories), writes passed through. */
 function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
+  const trees = new Map<string, Promise<ArtifactsTreeEntry[] | null>>();
   let active = 0;
   const waiting: Array<() => void> = [];
   const read = async <T>(operation: string, oid: string, call: () => Promise<T>): Promise<T> => {
@@ -39,7 +41,7 @@ function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
         catch (error) {
           // The provider's message names neither the call nor the object.
           if (attempt >= READ_ATTEMPTS) throw new Error(`${operation} ${oid}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-          await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+          await new Promise(resolve => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
         }
       }
     } finally {
@@ -48,7 +50,15 @@ function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
     }
   };
   return {
-    readTree: oid => read('readTree', oid, () => repo.readTree(oid)),
+    readTree: oid => {
+      let entries = trees.get(oid);
+      if (!entries) {
+        entries = read('readTree', oid, () => repo.readTree(oid));
+        trees.set(oid, entries);
+        void entries.catch(() => trees.delete(oid));
+      }
+      return entries;
+    },
     // A blob's bytes arrive when it is read, not when the call returns: they are read here, inside the paced and
     // retried call, so a failure reading them is retried and names the blob.
     readBlob: oid => read('readBlob', oid, async () => {
