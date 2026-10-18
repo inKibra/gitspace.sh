@@ -26,6 +26,20 @@ const REPOSITORY_READS = 16;
  * this many times, waiting 250 ms, 0.5 s, 1 s and 2 s between tries, before its error stands. */
 const READ_ATTEMPTS = 5;
 type RepositoryReads = Pick<ArtifactsRepo, 'readTree' | 'readBlob' | 'readCommit' | 'info' | 'createToken' | 'revokeToken'>;
+/** One Artifacts read, tried up to READ_ATTEMPTS times; the error that stands names the call and the object, since the
+ * provider's own message names neither. */
+async function attemptRead<T>(operation: string, oid: string, call: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await call(); }
+    catch (error) {
+      if (attempt >= READ_ATTEMPTS) throw new Error(`${operation} ${oid}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      await new Promise(resolve => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
+    }
+  }
+}
+/** A blob's bytes arrive when it is read, not when the call returns; reading them inside the attempt retries and names
+ * a failure to fetch them. */
+const loadedBlob = async (blob: Blob | null) => blob && new Blob([await blob.arrayBuffer()]);
 /** The repository handle as merges and listings use it: reads paced and retried, each tree read once (the versions a
  * merge compares share most of their directories), writes passed through. */
 function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
@@ -35,16 +49,8 @@ function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
   const read = async <T>(operation: string, oid: string, call: () => Promise<T>): Promise<T> => {
     if (active >= REPOSITORY_READS) await new Promise<void>(resolve => waiting.push(resolve));
     active++;
-    try {
-      for (let attempt = 1; ; attempt++) {
-        try { return await call(); }
-        catch (error) {
-          // The provider's message names neither the call nor the object.
-          if (attempt >= READ_ATTEMPTS) throw new Error(`${operation} ${oid}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-          await new Promise(resolve => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
-        }
-      }
-    } finally {
+    try { return await attemptRead(operation, oid, call); }
+    finally {
       active--;
       waiting.shift()?.();
     }
@@ -59,12 +65,7 @@ function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
       }
       return entries;
     },
-    // A blob's bytes arrive when it is read, not when the call returns: they are read here, inside the paced and
-    // retried call, so a failure reading them is retried and names the blob.
-    readBlob: oid => read('readBlob', oid, async () => {
-      const blob = await repo.readBlob(oid);
-      return blob && new Blob([await blob.arrayBuffer()]);
-    }),
+    readBlob: oid => read('readBlob', oid, async () => loadedBlob(await repo.readBlob(oid))),
     readCommit: oid => read('readCommit', oid, () => repo.readCommit(oid)),
     info: () => repo.info(),
     createToken: (scope, ttl) => repo.createToken(scope, ttl),
@@ -515,20 +516,20 @@ export class ArtifactsCodeStore {
     commitSchema.parse(commit);
     validateSnapshotPath(path);
     const repo = await this.binding.get(repositorySchema.parse(repository));
-    try { return await repo.readFile({ ref: commit, path }); }
+    try { return await attemptRead('readFile', `${commit}:${path}`, async () => loadedBlob(await repo.readFile({ ref: commit, path }))); }
     finally { await disposeArtifactsRepository(repo); }
   }
 
   /** Raw Git blob bytes, including LFS pointers; never implies LFS payload hydration. */
   async readBlob(repository: string, oid: string): Promise<Blob | null> {
     const repo = await this.binding.get(repositorySchema.parse(repository));
-    try { return await repo.readBlob(commitSchema.parse(oid)); }
+    try { return await attemptRead('readBlob', oid, async () => loadedBlob(await repo.readBlob(commitSchema.parse(oid)))); }
     finally { await disposeArtifactsRepository(repo); }
   }
 
   async readCommit(repository: string, commit: string) {
     const repo = await this.binding.get(repositorySchema.parse(repository));
-    try { return await repo.readCommit(commitSchema.parse(commit)); }
+    try { return await attemptRead('readCommit', commit, () => repo.readCommit(commitSchema.parse(commit))); }
     finally { await disposeArtifactsRepository(repo); }
   }
 
@@ -545,7 +546,7 @@ export class ArtifactsCodeStore {
 
   async readTree(repository: string, tree: string) {
     const repo = await this.binding.get(repositorySchema.parse(repository));
-    try { return await repo.readTree(commitSchema.parse(tree)); }
+    try { return await attemptRead('readTree', tree, () => repo.readTree(commitSchema.parse(tree))); }
     finally { await disposeArtifactsRepository(repo); }
   }
 

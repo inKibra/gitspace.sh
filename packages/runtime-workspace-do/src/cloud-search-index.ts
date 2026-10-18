@@ -117,7 +117,9 @@ export class CodeSearchIndex {
   /** A drive in flight holds this lease; one whose reads wedged loses it, and a later alarm drives instead. */
   private leaseUntil = 0;
   private ignores: { generation: number; rules: SearchIgnoreRules } | undefined;
-  private reported: string | undefined;
+  /** Whether the current run of failures has been reported: each failure carries a fresh provider reference, so a
+   * report per distinct message became one every 30 seconds. */
+  private reported = false;
   private readonly blobFailures = new Map<number, number>();
 
   constructor(private readonly options: { storage: CodeSearchStorage; source: CodeSearchSource; repository: string; snapshots: CodeSearchSnapshots; schedule(timestamp: number): Promise<void>; report(error: unknown): void; log?(event: CodeSearchEvent): void; limits?: Partial<CodeSearchLimits> }) {
@@ -171,12 +173,13 @@ export class CodeSearchIndex {
         const message = error instanceof Error ? error.message : String(error);
         this.options.storage.sql.exec('UPDATE code_search_state SET failure=? WHERE singleton=1', message);
         this.log({ event: 'code_search_step_failed', repository: this.options.repository, message, stepMs: Date.now() - started, ...this.progress() });
-        // The workspace QA record gets each distinct failure once; the log line is written every time.
-        if (message !== this.reported) { this.reported = message; this.options.report(error); }
+        // The workspace QA record gets a run of failures once, when it starts; the log line is written every time.
+        if (!this.reported) { this.reported = true; this.options.report(error); }
         await this.options.schedule(Date.now() + 30_000);
         return;
       }
-      if (!step) { this.reported = undefined; return; }
+      this.reported = false;
+      if (!step) return;
       this.options.storage.sql.exec('UPDATE code_search_state SET failure=NULL WHERE singleton=1 AND failure IS NOT NULL');
       this.log({ event: 'code_search_progress', repository: this.options.repository, phase: step.phase, items: step.items, stepMs: Date.now() - started, ...this.progress() });
       if (Date.now() >= deadline) { await this.options.schedule(Date.now()); return; }

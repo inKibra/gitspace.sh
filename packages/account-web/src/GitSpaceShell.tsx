@@ -160,6 +160,8 @@ export interface GitSpaceShellProps {
   onRetryControls?: () => void;
   onRetryAgent?: () => Promise<void>;
   onSetWorkspacePhase?: (workspaceId: string, phase: WorkspaceView['phase']) => void | Promise<void>;
+  /** Fast-forwards the project's base branch from origin (Update base); offered on the project's Behind marker. */
+  onUpdateBase?: () => Promise<void>;
   onSetWorkspaceRelations?: (workspaceId: string, relations: WorkspaceView['relations']) => void | Promise<void>;
   sendPending?: boolean;
   sendError?: string;
@@ -274,6 +276,17 @@ export function WorkspaceStatusDot({ space }: { space: SpaceStatusView }) {
 }
 
 // ── Page scaffolding shared by the wide views ──
+/** The origin has commits this branch lacks. On a project it is also the way to catch up: Update base fast-forwards the
+ * project's copy, and the marker clears when the project list reports it current. */
+function BehindOrigin({ branch, kind, checkedAt, onUpdate }: { branch: string; kind: 'project' | 'workspace'; checkedAt: string; onUpdate?: () => Promise<void> }) {
+  const [pending, setPending] = useState(false);
+  const explanation = `origin/${branch} has commits this ${kind} lacks · checked ${new Date(checkedAt).toLocaleString()}`;
+  if (!onUpdate) return <Tooltip content={explanation} side="bottom"><Badge size="compact" color="amber">Behind origin/{branch}</Badge></Tooltip>;
+  return <Tooltip content={`${explanation} · Update base fast-forwards it`} side="bottom">
+    <Button variant="secondary" size="compact" loading={pending} disabled={pending} onClick={() => { setPending(true); void onUpdate().finally(() => setPending(false)); }}>Behind origin/{branch} · Update</Button>
+  </Tooltip>;
+}
+
 export function PageHeader({ kicker, title, description, actions }: { kicker?: ReactNode; title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
   return <header className="flex items-end justify-between gap-6 pb-6">
     <div className="flex min-w-0 flex-col gap-1">
@@ -573,7 +586,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -664,7 +677,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
         <div className="flex items-center gap-1">
             {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); }, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
             <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><WorkspaceStatusDot space={selectedSummary} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)}{profileChange ? ` · ${profileChange}` : ''}</span></span>
-            {remote?.behind ? <Tooltip content={`origin/${workspace.branch} has commits this ${workspace.kind === 'project' ? 'project' : 'workspace'} lacks · checked ${new Date(remote.checkedAt).toLocaleString()}`} side="bottom"><Badge size="compact" color="amber">Behind origin/{workspace.branch}</Badge></Tooltip> : null}
+            {remote?.behind ? <BehindOrigin branch={workspace.branch} kind={workspace.kind} checkedAt={remote.checkedAt} onUpdate={workspace.kind === 'project' ? onUpdateBase : undefined} /> : null}
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}

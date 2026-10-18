@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { resourceLinkHref } from '@gitspace/protocol/resource-uri';
 import { verticalSliceFixture } from './App.js';
-import { GitSpaceShell, pendingProfileChange, workspaceStatusColor, workspaceStatusLabel, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
+import { GitSpaceShell, pendingProfileChange, workspaceStatusColor, workspaceStatusLabel, type GitSpaceShellProps, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceView } from './GitSpaceShell.js';
 import { OverviewView } from './inspector/index.js';
 
 
@@ -35,6 +35,19 @@ describe('GitSpaceShell', () => {
     expect(workspaceStatusColor({ ...cloud, status: idle })).toBe('dim');
     expect(workspaceStatusLabel({ ...cloud, status: undefined, freshness: 'unknown' })).toBe('Cloud workspace');
     expect(workspaceStatusColor({ ...cloud, status: undefined, freshness: 'unknown' })).toBe('dim');
+  });
+
+  it('offers Update base on a behind project and only explains a behind workspace', () => {
+    const checkedAt = '2026-10-18T12:00:00.000Z';
+    const remote = { head: 'a'.repeat(40), checkedAt, behind: true };
+    const project: ProjectAgentView = { ...verticalSliceFixture.workspace, kind: 'project', phase: null, id: verticalSliceFixture.workspace.projectId };
+    const projects: ProjectLifecycleView[] = [{ id: project.projectId, name: 'Project', lifecycle: 'active', repositoryReference: 'https://github.com/example/project.git', baseBranch: project.branch, role: null, source: null, revision: 1, remote, archivedAt: null, updatedAt: new Date(checkedAt) }];
+    const behindProject = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} workspace={project} projects={projects} onUpdateBase={async () => undefined} />);
+    expect(behindProject).toContain(`Behind origin/${project.branch} · Update`);
+    expect(behindProject).toContain('<button');
+    const withoutAction = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} workspace={project} projects={projects} />);
+    expect(withoutAction).toContain(`Behind origin/${project.branch}`);
+    expect(withoutAction).not.toContain('· Update');
   });
 
   it('mentions the inference profile only while the next turn would use a different one', () => {

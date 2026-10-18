@@ -810,9 +810,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const before = visible(previous);
     const attachment = runtime.attachments.observe(input);
     if (visible(attachment) !== before) runtime.publish();
-    // What the machine reports going wrong reaches the conversation once, when it first appears.
+    // What the machine reports going wrong reaches the conversation once, when it first appears. Sync is announced when
+    // it starts failing, not each time the failure's text changes: a provider error carries a fresh reference on every
+    // retry, which posted a notice per retry.
     const failedSetup = (attachment.cache?.setup ?? []).filter(step => step.state === 'failed' && !previous?.cache?.setup.some(prior => prior.phase === step.phase && prior.state === 'failed' && prior.runId === step.runId));
-    const syncProblem = attachment.cache?.syncProblem && attachment.cache.syncProblem !== previous?.cache?.syncProblem ? attachment.cache.syncProblem : null;
+    const syncProblem = attachment.cache?.syncProblem && !previous?.cache?.syncProblem ? attachment.cache.syncProblem : null;
     if (failedSetup.length || syncProblem) {
       const label = await this.machineLabel(input.machineId);
       for (const step of failedSetup) await runtime.notice(`Setup on ${label} failed at ${step.phase}${step.error ? `: ${step.error}` : ''}. Commands that need it wait until setup runs again.`);

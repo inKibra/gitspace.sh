@@ -948,6 +948,16 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_relations(workspace_id TEXT PRIMARY KEY,relations_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS stack_comparisons(workspace_id TEXT PRIMARY KEY,source TEXT NOT NULL,result_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('DROP TABLE IF EXISTS lfs_origin_confirmations');
+      // One-time: a workspace runtime reported every retry of a failing step as a QA item, each with a fresh provider
+      // reference, about 5,500 in one project. Those reports (unattributed, no tool, the provider's internal-error text)
+      // are removed; every workspace snapshot carried them.
+      if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_retry_reports_purged'").toArray().length) {
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec(`DELETE FROM project_events WHERE entity='qa' AND json_extract(payload_json,'$.item.title') LIKE 'internal error; reference = %'
+            AND json_extract(payload_json,'$.item.tool') IS NULL AND json_extract(payload_json,'$.item.model')='unattributed'`);
+          this.ctx.storage.sql.exec('CREATE TABLE qa_retry_reports_purged(done INTEGER)');
+        });
+      }
       if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length && await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
     });
   }

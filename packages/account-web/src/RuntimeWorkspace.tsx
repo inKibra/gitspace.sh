@@ -161,6 +161,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
       onSetWorkspacePhase={async (_id, phase) => { await perform(async () => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }); }}
+      onUpdateBase={inspection.project.role === 'gitspace-source' ? undefined : () => perform(async () => {
+        const result = await rpcClient.project.updateBase({ projectId: inspection.project.id });
+        if (result.status === 'error') throw result.error;
+      })}
       onSetWorkspaceRelations={relationsEditable ? setRelations : undefined}
       deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', onLaunch: workspaceId => setLaunchRequest({ source: { kind: 'workspace', workspaceId }, targets: RELEASE_TARGETS }), onLaunchCanonical: () => perform(async () => {
         const checked = await rpcClient.deployment.checkCanonical({});

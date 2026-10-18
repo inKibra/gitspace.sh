@@ -113,9 +113,17 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     }, BACKGROUND_CONTEXT);
     publish(); await line;
   }
+  /** Each failure carries a fresh provider reference, so reporting every retry filled the project's QA list (and with
+   * it every workspace's snapshot) at the retry rate. A run of failures is reported once, when it starts. */
+  const failureRun = () => {
+    let failing = false;
+    return { failed(error: unknown) { if (!failing) { failing = true; options.onReport(error); } }, succeeded() { failing = false; } };
+  };
+  const retention = failureRun();
+  const publishing = failureRun();
   async function flushCloudRetention() {
-    try { await cloudFiles.flushRetention(); }
-    catch (error) { options.onReport(error); await options.schedule(Date.now() + 5_000); }
+    try { await cloudFiles.flushRetention(); retention.succeeded(); }
+    catch (error) { retention.failed(error); await options.schedule(Date.now() + 5_000); }
   }
   let definitionFiles: { commit: string; files: Array<{ path: string; content: string }> } | undefined;
   // Definitions live in two fixed directories. Reading just those trees keeps the first message of a large repository
@@ -324,12 +332,13 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     // queue its successor; readers await a finite captured publication, not future work.
     if (publicationPending) return;
     publicationPending = true;
-    const publication = line.catch(error => { options.onReport(error); }).then(async () => {
+    const next = line.catch(error => { publishing.failed(error); }).then(async () => {
       publicationPending = false;
       await rebuild();
+      publishing.succeeded();
     });
-    line = publication;
-    options.waitUntil(publication);
+    line = next;
+    options.waitUntil(next);
   }
   harness.subscribeCommits(publication => {
     for (const change of publication.changes) {
