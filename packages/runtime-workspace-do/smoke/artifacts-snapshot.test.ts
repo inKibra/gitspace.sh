@@ -640,14 +640,18 @@ test('ordinary marker scanning reads only the changed blob in a large tree', asy
   } finally { await f.close(); }
 });
 
-test('a machine fast-forward over an unchanged cloud publishes the machine trees, reading only changed directories', async () => {
+test('a machine fast-forward over an unchanged cloud publishes the machine trees, reading only changed directories and uncommitted files', async () => {
   const f = await fixture();
   try {
     const blob = (value: string) => git.writeBlob({ fs, dir: f.dir, blob: text.encode(value) });
     const files = async (count: number, value: string) => Promise.all(Array.from({ length: count }, async (_, index) => ({ path: `file-${index}`, mode: '100644', type: 'blob' as const, oid: await blob(`${value} ${index}\n`) })));
     const untouched = await git.writeTree({ fs, dir: f.dir, tree: await files(200, 'untouched') });
     const before = await git.writeTree({ fs, dir: f.dir, tree: await files(20, 'before') });
-    const after = await git.writeTree({ fs, dir: f.dir, tree: [...await files(20, 'after'), { path: 'marked', mode: '100644', type: 'blob', oid: await blob('<<<<<<< cloud\nours\n=======\ntheirs\n>>>>>>> machine\n') }] });
+    const pulled = await files(20, 'after');
+    // A pull brings the twenty committed files; the marked file is a local merge result, not yet committed.
+    const committed = await git.writeTree({ fs, dir: f.dir, tree: pulled });
+    const marked = await blob('<<<<<<< cloud\nours\n=======\ntheirs\n>>>>>>> machine\n');
+    const after = await git.writeTree({ fs, dir: f.dir, tree: [...pulled, { path: 'marked', mode: '100644', type: 'blob', oid: marked }] });
     const root = async (changed: string, extra: Array<{ path: string; mode: string; type: 'blob'; oid: string }>) => git.writeTree({ fs, dir: f.dir, tree: [{ path: 'stable', mode: '040000', type: 'tree', oid: untouched }, { path: 'moving', mode: '040000', type: 'tree', oid: changed }, ...extra] });
     const baseTree = await root(before, [{ path: 'conflicted', mode: '100644', type: 'blob', oid: await blob('<<<<<<< cloud\nold\n') }]);
     const machineTree = await root(after, []);
@@ -655,15 +659,18 @@ test('a machine fast-forward over an unchanged cloud publishes the machine trees
     const baseCommit = await commit(baseTree, [f.previous.worktreeCommit]);
     const base: RuntimeGitCheckpoint = { ...f.previous, worktreeCommit: baseCommit, trackedWorktreeCommit: baseCommit, worktreeTree: baseTree, indexTree: baseTree, conflicts: ['conflicted'] };
     await git.writeRef({ fs, dir: f.dir, ref: base.checkpointRef, value: baseCommit, force: true });
-    const machineCommit = await commit(machineTree, [baseCommit]);
-    const machine: RuntimeGitCheckpoint = { ...base, checkpointRef: 'refs/gitspace/machines/cache/snapshot', worktreeCommit: machineCommit, trackedWorktreeCommit: machineCommit, worktreeTree: machineTree, indexTree: machineTree, indexCommit: machineCommit, headCommit: machineCommit };
+    const headCommit = await commit(await root(committed, []), [baseCommit]);
+    const machineCommit = await commit(machineTree, [headCommit]);
+    const machine: RuntimeGitCheckpoint = { ...base, checkpointRef: 'refs/gitspace/machines/cache/snapshot', worktreeCommit: machineCommit, trackedWorktreeCommit: machineCommit, worktreeTree: machineTree, indexTree: machineTree, indexCommit: machineCommit, headCommit };
     f.fetched.length = 0;
-    const plan = await planSnapshotMerge(f.repo, base, base, machine);
+    const reads: string[] = [];
+    const plan = await planSnapshotMerge({ ...f.repo, readBlob: async (oid: string) => { reads.push(oid); return f.repo.readBlob(oid); } }, base, base, machine);
     expect(f.fetched).not.toContain(untouched);
+    expect(reads).toEqual([marked]);
     const accepted = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: base, ...plan }, f.request);
     if (accepted.isErr()) throw accepted.error;
     expect(f.fetched).not.toContain(untouched);
-    expect(accepted.value).toMatchObject({ worktreeTree: machineTree, indexTree: machineTree, headCommit: machineCommit, checkpointRef: base.checkpointRef, conflicts: ['moving/marked'] });
+    expect(accepted.value).toMatchObject({ worktreeTree: machineTree, indexTree: machineTree, headCommit, checkpointRef: base.checkpointRef, conflicts: ['moving/marked'] });
     expect(await git.resolveRef({ fs, dir: f.dir, ref: base.checkpointRef })).toBe(accepted.value.worktreeCommit);
     expect((await git.readCommit({ fs, dir: f.dir, oid: accepted.value.trackedWorktreeCommit })).commit.tree).toBe(machineTree);
   } finally { await f.close(); }

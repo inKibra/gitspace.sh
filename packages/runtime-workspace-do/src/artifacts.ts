@@ -75,11 +75,11 @@ export class ArtifactsCodeStore {
   }
 
   async mergeSnapshot(input: { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; base: RuntimeGitCheckpoint; machine: RuntimeGitCheckpoint; forcePublication?: boolean }) {
-    const opened = await Result.tryPromise({ try: () => this.binding.get(repositorySchema.parse(input.repository)), catch: error => new ArtifactsSnapshotError({ operation: 'mergeSnapshot', certainty: 'not-published', message: String(error) }) });
+    const opened = await Result.tryPromise({ try: () => this.binding.get(repositorySchema.parse(input.repository)), catch: error => new ArtifactsSnapshotError({ operation: 'openRepository', certainty: 'not-published', message: String(error) }) });
     if (opened.isErr()) return opened;
     const repo = opened.value;
     try {
-      const plan = await Result.tryPromise({ try: () => planSnapshotMerge(repo, input.base, input.previous, input.machine, input), catch: error => new ArtifactsSnapshotError({ operation: 'mergeSnapshot', certainty: 'not-published', message: String(error) }) });
+      const plan = await Result.tryPromise({ try: () => planSnapshotMerge(repo, input.base, input.previous, input.machine, input), catch: error => new ArtifactsSnapshotError({ operation: 'planSnapshotMerge', certainty: 'not-published', message: String(error) }) });
       if (plan.isErr()) return plan;
       return await writeArtifactsSnapshot(repo, { ...input, ...plan.value });
     } finally { await disposeArtifactsRepository(repo); }

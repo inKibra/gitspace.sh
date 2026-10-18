@@ -217,9 +217,15 @@ export class CloudFileStore {
   private async finishMachine(id: string, pending: z.infer<typeof MachinePendingSchema>): Promise<Checkpoint> {
     const { checkpoint, previous, current, base, machineId } = pending;
     const merged = await this.code.mergeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous: current ?? checkpoint, base: base ?? checkpoint, machine: checkpoint, forcePublication: current === null });
-    if (merged.isErr()) throw merged.error.certainty === 'not-published' ? new MachinePublicationRejected({ attemptId: `machine:${id}`, message: merged.error.message }) : new CloudPublicationUncertain({ attemptId: `machine:${id}`, message: merged.error.message });
+    // The step is named in the message: the provider's own errors ("An internal error occurred.") do not say which call failed.
+    if (merged.isErr()) {
+      const message = `${merged.error.operation}: ${merged.error.message}`;
+      throw merged.error.certainty === 'not-published' ? new MachinePublicationRejected({ attemptId: `machine:${id}`, message }) : new CloudPublicationUncertain({ attemptId: `machine:${id}`, message });
+    }
     const accepted = merged.value;
-    const paths = await this.code.listSnapshotPaths(artifactsWorkspaceRepository(this.workspaceId), accepted.worktreeTree);
+    const paths = await this.code.listSnapshotPaths(artifactsWorkspaceRepository(this.workspaceId), accepted.worktreeTree).catch((error: unknown) => {
+      throw new Error(`listSnapshotPaths: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    });
     this.storage.transactionSync(() => {
       if (current && !this.storage.sql.exec('SELECT commit_id FROM runtime_code_commits WHERE commit_id=?', current.worktreeCommit).toArray().length) this.recordCommit(current, null);
       if (accepted.worktreeCommit !== current?.worktreeCommit) this.recordCommit(accepted, current?.worktreeCommit ?? previous);

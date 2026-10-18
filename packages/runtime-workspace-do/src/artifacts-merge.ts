@@ -212,13 +212,18 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
   const heldBack = new Map([...cloud.lfs?.heldBack ?? [], ...machine.lfs?.heldBack ?? []].map(entry => [entry.path, entry]));
   const merged = { ...machine, headCommit: headChanged && cloud.headCommit === base.headCommit ? machine.headCommit : cloud.headCommit, branch: branchChanged && cloud.branch === base.branch ? machine.branch : cloud.branch, ...(cloud.lfs || machine.lfs ? { lfs: { objects: [...objects.values()], heldBack: [...heldBack.values()] } } : {}) };
   // The cloud has not changed since the machine's base: every path takes the machine's version, so its trees are the
-  // result as they stand. Only the changed paths are read, for conflict markers; a fast-forward of thousands of files
-  // in a large repository otherwise walked every tree of three versions and rebuilt them.
+  // result as they stand. A fast-forward of thousands of files in a large repository otherwise walked every tree of
+  // three versions and rebuilt them. Conflict markers come from merges in the working copy, so only changed files
+  // that differ from the machine's own HEAD are read: a pull's committed files are the repository's content.
   if (!options.forcePublication && base.worktreeCommit === cloud.worktreeCommit && base.headCommit === cloud.headCommit && base.branch === cloud.branch) {
-    const tracked = await repo.readCommit(machine.trackedWorktreeCommit);
+    const [tracked, head] = await Promise.all([repo.readCommit(machine.trackedWorktreeCommit), machine.headCommit ? repo.readCommit(machine.headCommit) : null]);
     if (!tracked) throw new Error('Missing tracked merge snapshot');
-    const changes = await changedSnapshotEntries(repo, base.worktreeTree, machine.worktreeTree);
-    await eachLimited(changes, READ_CONCURRENCY, async change => updateMarkers(change.path, await entryHasMarkers(change.after)));
+    if (machine.headCommit && !head) throw new Error('Missing machine HEAD commit');
+    const [changes, uncommitted] = await Promise.all([
+      changedSnapshotEntries(repo, base.worktreeTree, machine.worktreeTree),
+      head ? changedSnapshotEntries(repo, head.treeHash, machine.worktreeTree).then(local => new Set(local.map(change => change.path))) : null,
+    ]);
+    await eachLimited(changes, READ_CONCURRENCY, async change => updateMarkers(change.path, (!uncommitted || uncommitted.has(change.path)) && await entryHasMarkers(change.after)));
     for (const path of resolved) conflicts.delete(path);
     for (const path of introduced) conflicts.add(path);
     return { forcePublication: false, mutations: [], conflicts: [...conflicts].sort(), adopt: { worktreeTree: machine.worktreeTree, indexTree: machine.indexTree, trackedTree: tracked.treeHash }, machine: merged };
