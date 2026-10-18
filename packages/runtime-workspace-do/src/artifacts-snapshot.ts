@@ -88,7 +88,7 @@ export async function publishSnapshotPack(input: { remote: string; auth: GitHttp
     if (ref === input.ref && oid && /^[0-9a-f]{40}$/u.test(oid)) old = oid;
   }
   if (old === input.commit) { input.onPublicationState?.('unknown'); return; }
-  if (old !== zero && old !== input.previous) throw new Error('Snapshot conflict: checkpoint ref has advanced');
+  if (old !== zero && old !== input.previous) throw new Error(`Snapshot conflict: checkpoint ref has advanced (${input.ref} is at ${old}; this write starts from ${input.previous} and publishes ${input.commit})`);
   if (!capabilities.includes('report-status')) throw new Error('Git server does not support report-status');
   const shallow = [...new Set(input.shallow)];
   if (shallow.some(oid => !/^[0-9a-f]{40}$/u.test(oid))) throw new Error('Invalid Git shallow boundary');
