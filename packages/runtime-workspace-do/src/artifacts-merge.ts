@@ -4,20 +4,70 @@ import { parseGitLfsPointer } from '@gitspace/protocol-workspace';
 type Reader = Pick<ArtifactsRepo, 'readTree' | 'readBlob' | 'readCommit'>;
 type Entry = { oid: string; mode: string; type: 'blob' | 'commit' };
 const same = (a: Entry | undefined, b: Entry | undefined) => a?.oid === b?.oid && a?.mode === b?.mode && a?.type === b?.type;
+/** Artifacts calls in flight at once while walking a tree: a large repository has thousands of directories, and one
+ * call at a time made each walk take minutes. */
+const READ_CONCURRENCY = 16;
+/** Runs `run` over `items` with at most `limit` in flight. */
+async function eachLimited<T>(items: readonly T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) await run(items[next++]!);
+  }));
+}
+const fileEntry = (entry: ArtifactsTreeEntry): Entry => ({ oid: entry.hash, mode: entry.mode, type: entry.type === 'gitlink' ? 'commit' : 'blob' });
+/** Walks one depth of directories at a time, reading each depth's directories concurrently. Git trees are content
+ * addressed, so a cycle can only come from a corrupt repository; it shows as unbounded depth. */
+async function walkTrees<T extends { depth: number }>(roots: T[], visit: (item: T) => Promise<T[]>): Promise<void> {
+  let level = roots;
+  while (level.length) {
+    if (level[0]!.depth > 128) throw new Error('Invalid snapshot tree depth');
+    const next: T[] = [];
+    await eachLimited(level, READ_CONCURRENCY, async item => { next.push(...await visit(item)); });
+    level = next;
+  }
+}
 export async function snapshotEntries(repo: Pick<Reader, 'readTree'>, tree: string): Promise<Map<string, Entry>> {
-  const entries = new Map<string, Entry>();
-  const walk = async (oid: string, prefix: string, ancestors: Set<string>) => {
-    if (ancestors.has(oid) || ancestors.size > 128) throw new Error('Invalid snapshot tree depth');
+  const found: Array<[string, Entry]> = [];
+  await walkTrees([{ oid: tree, prefix: '', depth: 0 }], async ({ oid, prefix, depth }) => {
     const children = await repo.readTree(oid);
     if (!children) throw new Error(`Missing snapshot tree ${oid}`);
+    const subtrees = [];
     for (const entry of children) {
       const path = prefix + entry.name;
-      if (entry.type === 'tree') await walk(entry.hash, `${path}/`, new Set([...ancestors, oid]));
-      else entries.set(path, { oid: entry.hash, mode: entry.mode, type: entry.type === 'gitlink' ? 'commit' : 'blob' });
+      if (entry.type === 'tree') subtrees.push({ oid: entry.hash, prefix: `${path}/`, depth: depth + 1 });
+      else found.push([path, fileEntry(entry)]);
     }
+    return subtrees;
+  });
+  // Paths are unique within a tree; sorting keeps the inventory independent of read completion order.
+  return new Map(found.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+}
+type TreeDiffItem = { before?: string; after?: string; prefix: string; depth: number };
+/** The file paths that differ between two trees, reading only directories whose hashes differ. */
+export async function changedSnapshotEntries(repo: Pick<Reader, 'readTree'>, before: string, after: string): Promise<Array<{ path: string; before?: Entry; after?: Entry }>> {
+  const changes: Array<{ path: string; before?: Entry; after?: Entry }> = [];
+  const read = async (oid: string | undefined) => {
+    if (!oid) return new Map<string, ArtifactsTreeEntry>();
+    const children = await repo.readTree(oid);
+    if (!children) throw new Error(`Missing snapshot tree ${oid}`);
+    return new Map(children.map(entry => [entry.name, entry]));
   };
-  await walk(tree, '', new Set());
-  return entries;
+  const root: TreeDiffItem = { before, after, prefix: '', depth: 0 };
+  await walkTrees([root], async item => {
+    const [left, right] = await Promise.all([read(item.before), read(item.after)]);
+    const subtrees: TreeDiffItem[] = [];
+    for (const name of new Set([...left.keys(), ...right.keys()])) {
+      const a = left.get(name), b = right.get(name);
+      if (a && b && a.hash === b.hash && a.mode === b.mode && a.type === b.type) continue;
+      const path = item.prefix + name;
+      const beforeTree = a?.type === 'tree' ? a.hash : undefined, afterTree = b?.type === 'tree' ? b.hash : undefined;
+      if (beforeTree || afterTree) subtrees.push({ before: beforeTree, after: afterTree, prefix: `${path}/`, depth: item.depth + 1 });
+      const beforeFile = a && a.type !== 'tree' ? fileEntry(a) : undefined, afterFile = b && b.type !== 'tree' ? fileEntry(b) : undefined;
+      if (beforeFile || afterFile) changes.push({ path, ...(beforeFile ? { before: beforeFile } : {}), ...(afterFile ? { after: afterFile } : {}) });
+    }
+    return subtrees;
+  });
+  return changes;
 }
 
 type Hunk = { start: number; end: number; lines: string[] };
@@ -118,6 +168,12 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
     const content = await text(entry);
     return content !== null && hasSnapshotConflictMarkers(content);
   };
+  /** A worktree path's markers after this publication: added when present, a recorded conflict resolved when gone. */
+  const updateMarkers = (path: string, marked: boolean) => {
+    if (path === 'HEAD') return;
+    if (marked) introduced.add(path);
+    else if (conflicts.has(path)) resolved.add(path);
+  };
   const layer = async (baseTree: string, cloudTree: string, machineTree: string, worktree = false): Promise<SnapshotMutation[]> => {
     const [original, current, incoming] = await Promise.all([inventory(baseTree), inventory(cloudTree), inventory(machineTree)]);
     const mutations: SnapshotMutation[] = [];
@@ -126,11 +182,6 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
       let target = `${path}.gitspace-machine-${machine.worktreeCommit.slice(0, 12)}`;
       while (paths.has(target)) target += '-copy';
       paths.add(target); mutations.push({ path: target, content: null, ...entry });
-    };
-    const updateMarkers = (path: string, marked: boolean) => {
-      if (!worktree || path === 'HEAD') return;
-      if (marked) introduced.add(path);
-      else if (conflicts.has(path)) resolved.add(path);
     };
     for (const path of [...paths].sort()) {
       const a = original.get(path), b = current.get(path), c = incoming.get(path);
@@ -146,7 +197,7 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
         const merged = mergeSnapshotText(before, ours, theirs);
         mutations.push({ path, content: new TextEncoder().encode(merged.text), mode: a?.mode === b.mode ? c.mode : b.mode });
         if (merged.conflict) introduced.add(path);
-        else updateMarkers(path, hasSnapshotConflictMarkers(merged.text));
+        else if (worktree) updateMarkers(path, hasSnapshotConflictMarkers(merged.text));
       } else {
         introduced.add(path);
         // Keep cloud at its path; preserve the incoming object under a collision-free sibling.
@@ -156,6 +207,22 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
     }
     return mutations;
   };
+  const headChanged = machine.headCommit !== base.headCommit, branchChanged = machine.branch !== base.branch;
+  const objects = new Map([...cloud.lfs?.objects ?? [], ...machine.lfs?.objects ?? []].map(object => [object.oid, object]));
+  const heldBack = new Map([...cloud.lfs?.heldBack ?? [], ...machine.lfs?.heldBack ?? []].map(entry => [entry.path, entry]));
+  const merged = { ...machine, headCommit: headChanged && cloud.headCommit === base.headCommit ? machine.headCommit : cloud.headCommit, branch: branchChanged && cloud.branch === base.branch ? machine.branch : cloud.branch, ...(cloud.lfs || machine.lfs ? { lfs: { objects: [...objects.values()], heldBack: [...heldBack.values()] } } : {}) };
+  // The cloud has not changed since the machine's base: every path takes the machine's version, so its trees are the
+  // result as they stand. Only the changed paths are read, for conflict markers; a fast-forward of thousands of files
+  // in a large repository otherwise walked every tree of three versions and rebuilt them.
+  if (!options.forcePublication && base.worktreeCommit === cloud.worktreeCommit && base.headCommit === cloud.headCommit && base.branch === cloud.branch) {
+    const tracked = await repo.readCommit(machine.trackedWorktreeCommit);
+    if (!tracked) throw new Error('Missing tracked merge snapshot');
+    const changes = await changedSnapshotEntries(repo, base.worktreeTree, machine.worktreeTree);
+    await eachLimited(changes, READ_CONCURRENCY, async change => updateMarkers(change.path, await entryHasMarkers(change.after)));
+    for (const path of resolved) conflicts.delete(path);
+    for (const path of introduced) conflicts.add(path);
+    return { forcePublication: false, mutations: [], conflicts: [...conflicts].sort(), adopt: { worktreeTree: machine.worktreeTree, indexTree: machine.indexTree, trackedTree: tracked.treeHash }, machine: merged };
+  }
   const trackedTrees = await Promise.all([base, cloud, machine].map(checkpoint => repo.readCommit(checkpoint.trackedWorktreeCommit)));
   if (!trackedTrees[0] || !trackedTrees[1] || !trackedTrees[2]) throw new Error('Missing tracked merge snapshot');
   const mutations = await layer(base.worktreeTree, cloud.worktreeTree, machine.worktreeTree, true);
@@ -163,9 +230,6 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
   const trackedMutations = await layer(trackedTrees[0].treeHash, trackedTrees[1].treeHash, trackedTrees[2].treeHash);
   for (const path of resolved) conflicts.delete(path);
   for (const path of introduced) conflicts.add(path);
-  const headChanged = machine.headCommit !== base.headCommit, branchChanged = machine.branch !== base.branch;
   if (headChanged && cloud.headCommit !== base.headCommit && cloud.headCommit !== machine.headCommit) conflicts.add('HEAD');
-  const objects = new Map([...cloud.lfs?.objects ?? [], ...machine.lfs?.objects ?? []].map(object => [object.oid, object]));
-  const heldBack = new Map([...cloud.lfs?.heldBack ?? [], ...machine.lfs?.heldBack ?? []].map(entry => [entry.path, entry]));
-  return { forcePublication: options.forcePublication === true, mutations, indexMutations, trackedMutations, conflicts: [...conflicts].sort(), machine: { ...machine, headCommit: headChanged && cloud.headCommit === base.headCommit ? machine.headCommit : cloud.headCommit, branch: branchChanged && cloud.branch === base.branch ? machine.branch : cloud.branch, ...(cloud.lfs || machine.lfs ? { lfs: { objects: [...objects.values()], heldBack: [...heldBack.values()] } } : {}) } };
+  return { forcePublication: options.forcePublication === true, mutations, indexMutations, trackedMutations, conflicts: [...conflicts].sort(), machine: merged };
 }

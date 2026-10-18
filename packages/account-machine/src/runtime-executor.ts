@@ -170,7 +170,9 @@ export async function createMachineExecutor(options: {
       if (operation === 'sync' || operation === 'publish') clearFailure(local.attachment);
       return checkpoint;
     } catch (error) {
-      if (artifactsPublicationRejection(error)) recordFailure(journal.attachment(local.attachment.attachmentId) ?? local, new AttachmentOperationFailure('publish', error));
+      // Every failure is the checkout's problem until a capture succeeds, not only a rejection: an internal error or a
+      // timeout that repeats forever otherwise reached only this machine's log while the status said all was sent.
+      if (!stopping.signal.aborted) recordFailure(journal.attachment(local.attachment.attachmentId) ?? local, new AttachmentOperationFailure('publish', error));
       throw error;
     }
   };
