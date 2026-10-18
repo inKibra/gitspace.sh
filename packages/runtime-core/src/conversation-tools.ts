@@ -8,9 +8,9 @@ import { SessionControlsDoc, definitionRoleChain, parseCloudAgentDefinition, res
 import { BackgroundAgentsDoc, type BackgroundAgentTask } from './background-agents.js';
 import { AgentDefinitionContextDoc, type SubagentMetadata } from './subagent-state.js';
 import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
-import { modelRoleThinkingSchema } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, modelRoleThinkingSchema } from '@gitspace/protocol/inference';
 const Anchors = defineDoc<{ entries: Record<string, string>; children: Record<string, string> }>({ kind: 'gitspace.context-anchors', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ entries: {}, children: {} }) });
-export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask; refreshDefinitions?(target: Conversation): Promise<void> } & Pick<SessionControlServices, 'admitInference' | 'configureModel'>;
+export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask; refreshDefinitions?(target: Conversation): Promise<void> } & Pick<SessionControlServices, 'admitInference' | 'configureModel' | 'catalog'>;
 export function createConversationTools(options: ConversationToolOptions) {
   const { harness, storage } = options;
   const context = BACKGROUND_CONTEXT;
@@ -63,6 +63,11 @@ export function createConversationTools(options: ConversationToolOptions) {
         const thinking = previous ? previous.thinking : modelRoleThinkingSchema.parse(parsed?.thinking ?? definition?.thinking ?? null);
         const narrowedTools = parsed?.toolsSpecified ? parsed.tools : [...SUBAGENT_READONLY_TOOLS];
         const tools = previous?.tools ?? (narrowedTools.includes('agents') ? narrowedTools : [...narrowedTools, 'agents']);
+        // Checked before the child exists: a failed admission after creation would leave an empty child holding its name.
+        if (!previous && args.role) {
+          const roles = [...new Set([...BUILT_IN_MODEL_ROLES, ...(await options.catalog()).roles.map(role => role.id)])];
+          if (!roles.includes(args.role)) throw new Error(`Model role ${args.role} is not defined in this profile; its roles are ${roles.join(', ')}`);
+        }
         const name = previous?.name ?? args.name ?? `${definition?.name ?? 'worker'}-${input.attemptId}`;
         if (name === 'parent') throw new Error('The parent address is reserved');
         const childId = await target.commit(async tx => {

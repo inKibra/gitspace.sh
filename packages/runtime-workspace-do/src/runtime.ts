@@ -150,7 +150,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   };
   const history = createSessionHistory(options.storage, storage);
   const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference });
-  const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, refreshDefinitions: controls.loadDefinitions });
+  const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
   const cron = createCronRuntime({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { await options.schedule(Date.now() + 1000); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
   const drafts = new WorkspaceDraftStore({

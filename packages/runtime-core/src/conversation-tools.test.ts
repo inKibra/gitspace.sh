@@ -43,17 +43,17 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const harness = await Harness.open(storage, { registry, models, settings: { extensions: registry.snapshot().installed(), compaction: { enabled: false } } }, context);
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: 'parent-only-model' }, thinkingLevel: 'max', instructions: 'PRIVATE PARENT PERSONA', tools } });
   await root.commit(async tx => { const state = await tx.doc(SessionControlsDoc, root.id); state.definitions = files ? [] : [definition]; state.fastMode = true; state.role = 'parent'; state.selection = { kind: 'explicit', provider: 'test', modelId: 'parent-only-model' }; }, context);
-  const catalog = async () => {
-    const role = resolveProfileModel(settings, models, 'review');
-    return { models: available.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })), roles: [{ id: 'review', label: 'Reviewer role', provider: role.model.provider, model: role.model.id, thinking: role.thinking, current: false }] };
-  };
+  const catalog = async () => ({
+    models: available.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })),
+    roles: ['review', 'reviewer'].map(id => { const role = resolveProfileModel(settings, models, id); return { id, label: id === 'review' ? 'Reviewer role' : id, provider: role.model.provider, model: role.model.id, thinking: role.thinking, current: false }; }),
+  });
   const admitInference: RuntimeHarnessOptions['admitInference'] = async ({ selection }) => {
     const selected = await resolveModelSelection(settings, models, selection ?? { kind: 'default' });
     return { provider: selected.model.provider, modelId: selected.model.id, thinking: selected.thinking, ...(selected.role ? { role: selected.role } : {}) };
   };
   const configureModel = async (id: ConversationId, selected: ModelRef) => { const child = await harness.conversation(id, context); if (!child) throw new Error('Missing child'); const metadata = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child; await child.configure({ model: { provider: selected.provider, modelId: selected.modelId }, tools: metadata ? tools.filter(tool => metadata.tools.includes(tool.name)) : tools }, context); };
   const lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, wake: async () => {} }); ready.resolve(lifecycle);
-  const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, refreshDefinitions: target => controls.loadDefinitions(target) });
+  const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog, refreshDefinitions: target => controls.loadDefinitions(target) });
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };
   const controls = createSessionControls({
@@ -242,7 +242,12 @@ test('shipped agents and workers take their roles unless a role is named', async
     expect((await f.harness.snapshot(AgentDefinitionContextDoc, named.child.id, context))?.child?.role).toBe('reviewer');
     expect((await f.harness.snapshot(AgentDefinitionContextDoc, tester.child.id, context))?.child?.tools).toEqual(expect.arrayContaining(['bash', 'proc', 'mcp_discover', 'mcp_invoke']));
     expect((await f.harness.snapshot(AgentDefinitionContextDoc, worker.child.id, context))?.child?.tools).not.toContain('bash');
-    await expect(f.call({ op: 'spawn', agent: 'tester', role: 'tast', task: 'Typo' })).rejects.toThrow('tast is not defined');
+    // An unknown role fails before the child exists, naming the roles; its name stays free for the corrected spawn.
+    await expect(f.call({ op: 'spawn', agent: 'tester', role: 'Default', name: 'Judge', task: 'Typo' })).rejects.toThrow('Model role Default is not defined in this profile; its roles are default, deep, fast, taste, review, reviewer');
+    const corrected = await f.spawned({ op: 'spawn', agent: 'tester', role: 'default', name: 'Judge', task: 'Judge the layout' });
+    expect(corrected.output.name).toBe('Judge');
+    const children = await Promise.all((await f.storage.scanConversations({}, 100, undefined, context)).items.map(record => f.harness.snapshot(AgentDefinitionContextDoc, record.id, context)));
+    expect(children.filter(state => state?.child?.name === 'Judge')).toHaveLength(1);
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 });
 

@@ -248,7 +248,7 @@ export async function resolveModelSelection(settings: InferenceProfile['settings
   const configured = profileModelRoles(settings);
   const chain = selection.kind === 'role' ? [selection.role, ...(selection.fallback ?? [])] : ['default'];
   const unknown = chain.find(role => !configured.includes(role) && !BUILT_IN_MODEL_ROLES.some(builtIn => builtIn === role));
-  if (unknown) throw new Error(`Inference role ${unknown} is not defined in this profile`);
+  if (unknown) throw new Error(`Inference role ${unknown} is not defined in this profile; its roles are ${[...new Set([...BUILT_IN_MODEL_ROLES, ...configured])].join(', ')}`);
   const snapshot: Models = { ...models, getModels: provider => available.filter(model => provider === undefined || model.provider === provider) };
   const role = chain.find(candidate => configured.includes(candidate)) ?? 'default';
   return { ...resolveProfileModel(settings, snapshot, role), role };
