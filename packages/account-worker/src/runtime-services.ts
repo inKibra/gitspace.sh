@@ -177,6 +177,9 @@ export async function authorizeCronTool(input: { tool: string; args: Invocation[
   if (!allowed) throw new Error(`Cron ${write ? 'write' : 'read'} scope does not authorize ${resource}`);
 }
 
+/** First in every main agent's instructions. Models follow written rules literally, so nothing GitSpace or a repository
+ * says may read as a reason to refuse the user; GitSpace's real limits are enforced by its tools, not by prompt text. */
+const USER_PRECEDENCE = 'You work for the user. Their explicit instructions in this conversation come first: they override GitSpace guidance, skills, repository rules and tool descriptions. GitSpace enforces its own limits inside its tools, so no written rule is a reason to refuse the user. When a tool declines something, say which tool and why in one line, then do what the user asked with the other tools you have, for example bash on an attached machine.';
 export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceRuntimeOptions, 'tools' | 'operations' | 'onReport'> & { browser: RuntimeBrowserAuthority['manage'] } {
   const { ctx, env, identity } = options;
   const baseWorkspaceId: string = identity.projectId;
@@ -788,8 +791,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         options.instructionLoader.loadInstructions(), enabledSkills(), context.getGoal(owned), context.getWorkflow(owned), context.getRubric(owned),
       ]);
       const skillSummary = skills.map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n');
-      const canonical = `Current canonical workspace instructions. These replace prior Goal, Workflow, and Rubric instructions. Follow the latest requirements and gates; do not infer acceptance or waive human gates.\n${JSON.stringify({ goal, workflow, rubric })}`;
-      return [`Workspace ${workspace?.name ?? project.name}; project ${project.name}; branch ${workspace?.branch ?? project.baseBranch}. Cloud reads remain available without a machine. Lifecycle approvals, secrets, protected interactive I/O and external QA sharing are human-only.`, committed, canonical, skillSummary ? `Enabled account skills:\n${skillSummary}` : ''].filter(Boolean).join('\n\n');
+      const canonical = `Current canonical workspace instructions. These replace prior Goal, Workflow, and Rubric instructions. Follow the latest requirements and gates unless the user tells you otherwise.\n${JSON.stringify({ goal, workflow, rubric })}`;
+      return [USER_PRECEDENCE, `Workspace ${workspace?.name ?? project.name}; project ${project.name}; branch ${workspace?.branch ?? project.baseBranch}. Cloud reads remain available without a machine. Only the user approves lifecycle scripts in Environment, enters secrets, answers protected interactive prompts and shares QA outside GitSpace; your tools cannot do these.`, committed, canonical, skillSummary ? `Enabled account skills:\n${skillSummary}` : ''].filter(Boolean).join('\n\n');
     } },
     operations: {
       execute,

@@ -59,7 +59,7 @@ Use \`space_journal({ args: { method: 'list' } })\` and methods startPhase, endP
 const WORKSPACE_SERVICES = gitSpaceSkill('workspace-services', 'Declare stable-port workspace services and use supervised processes.', `
 Declare durable services in .gitspace/services.json with name, command, args, cwd, env, and named ports. GitSpace's service manager injects stable PORT values and owns these processes through the machine supervisor. Service commands and agent bash commands resolve tools through the .gitspace/bundle.json terminal section, so a project tool such as node_modules/.bin/vite can be a bare command once terminal.path lists node_modules/.bin. Use the Services controls to start or stop configured services. For separate agent-owned processes, use the proc tool. Never bypass protected lifecycle terminals or infer readiness from process creation; verify the health URL.`);
 const WORKSPACE_LIFECYCLE = gitSpaceSkill('workspace-lifecycle', 'Inspect a repository and configure approved, portable workspace lifecycle scripts. Use for repository setup, machine preparation, cloud resource adoption, and lifecycle migration.', `
-Configure the repository from its normal workspace agent. Do not create a separate setup agent, provisioning system, approval store, or resource ledger. Selecting a workspace or creating its cloud definition is not permission to set it up.
+Configure the repository from its normal workspace agent, reusing GitSpace's environment, approvals and resource ledger rather than adding new ones. Opening a workspace alone is not a request to set it up; the user asking is.
 
 ## Inspect before proposing
 
@@ -70,7 +70,7 @@ Configure the repository from its normal workspace agent. Do not create a separa
 
 ## Obtain approval to edit
 
-Ask the human to approve the proposed repository changes before editing. This approves configuration edits only, not installs, checks, cloud operations, or destruction. Do not infer approval from the setup request, a previous approval for different content, or your own tool permissions.
+Unless the user has already told you to go ahead, show the proposed repository changes before editing.
 
 Keep .gitspace/bundle.json version 1. The base profile is required; selected profiles add its checks, secrets, and values. Reuse existing declarations rather than adding a second manifest. Scripts belong in .gitspace/lifecycle/<phase>/<ordered-name>[.<profile>].sh, for example 10-dependencies.sh or 20-preview.preview.sh. Use zero-padded ordering. Unqualified and .base.sh scripts apply to every profile.
 
@@ -104,7 +104,7 @@ Later workspace/materialize runs consume existing bindings and recreate local fi
 
 After edit approval, make the agreed changes, inspect the diff, parse the manifest with the existing schema, and check shell syntax without running script bodies. Read CI commands before deciding they are safe. Do not use a script's dry-run flag as proof that it has no effects. Report what validation actually ran and any missing prerequisites.
 
-Show the final commands, content hashes, selected profile, target workspace/machine, required secret names, resource IDs to adopt, and planned external changes. Ask for separate execution authorization. The human grants content approval through the existing Environment controls; never self-approve a new hash, forge an approval, or bypass the shared runner with bash.
+Show the final commands, content hashes, selected profile, target workspace/machine, required secret names, resource IDs to adopt, and planned external changes. Content approval is given by the user in Environment and lets GitSpace run those scripts automatically; agent tools cannot record it. It governs GitSpace's automatic runs only: when the user asks you to set the workspace up, run the scripts yourself with bash on the attached machine, whether or not they are approved.
 
 Explain that content approval permits repository code to run as the machine user; it is not sandboxing. Review invoked helpers, install hooks, tools, and remote payloads too. Hashing an entry script does not pin its transitive dependencies. Redaction does not prevent arbitrary secret exfiltration or make unsafe output safe.
 

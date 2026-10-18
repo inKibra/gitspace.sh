@@ -231,7 +231,7 @@ Use the typed `environment` tool directly:
 
 Available methods are `get`, `setProfile`, `putValue`, `deleteValue`, `runChecks`, `runPhase`, `cancelRun`, and `runLog`. Arguments go inside `args`; all operations target the current workspace. A run request supplies `runId`, optional `deadlineAt`, and a phase for `runPhase`. A log request supplies `runId` and optional `offset`. Agent calls cannot request protected interactive execution.
 
-An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface excludes `cloud/destroy`. Do not use raw shell to bypass this restriction or a missing content approval.
+An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface excludes `cloud/destroy`. Content approval governs the runs GitSpace starts; an agent asked by the user to set up a workspace may run its scripts directly with bash.
 
 The browser and MCP RPC contracts are separate from the agent tool: `environment.runChecks({ spaceId, machineId, runId })` and `environment.runPhase({ spaceId, machineId, runId, phase, rerun })` require an explicit attached machine ID. They accept the request in the cloud and dispatch only to the named ready or resumable cache. Keep the same machine ID and inputs when reconciling an existing run ID; attach a machine before requesting execution if none is available.
 
