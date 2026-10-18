@@ -30,14 +30,15 @@ type RepositoryReads = Pick<ArtifactsRepo, 'readTree' | 'readBlob' | 'readCommit
 function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
   let active = 0;
   const waiting: Array<() => void> = [];
-  const read = async <T>(call: () => Promise<T>): Promise<T> => {
+  const read = async <T>(operation: string, oid: string, call: () => Promise<T>): Promise<T> => {
     if (active >= REPOSITORY_READS) await new Promise<void>(resolve => waiting.push(resolve));
     active++;
     try {
       for (let attempt = 1; ; attempt++) {
         try { return await call(); }
         catch (error) {
-          if (attempt >= READ_ATTEMPTS) throw error;
+          // The provider's message names neither the call nor the object.
+          if (attempt >= READ_ATTEMPTS) throw new Error(`${operation} ${oid}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
           await new Promise(resolve => setTimeout(resolve, 250 * attempt));
         }
       }
@@ -47,9 +48,9 @@ function pacedRepository(repo: ArtifactsRepo): RepositoryReads {
     }
   };
   return {
-    readTree: oid => read(() => repo.readTree(oid)),
-    readBlob: oid => read(() => repo.readBlob(oid)),
-    readCommit: oid => read(() => repo.readCommit(oid)),
+    readTree: oid => read('readTree', oid, () => repo.readTree(oid)),
+    readBlob: oid => read('readBlob', oid, () => repo.readBlob(oid)),
+    readCommit: oid => read('readCommit', oid, () => repo.readCommit(oid)),
     info: () => repo.info(),
     createToken: (scope, ttl) => repo.createToken(scope, ttl),
     revokeToken: id => repo.revokeToken(id),
