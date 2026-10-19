@@ -7,7 +7,7 @@ import type { TranscriptRow } from '@gitspace/blocks';
 import { createTranscriptReader, transcriptResponse, type WithdrawnNotices } from '../src/transcript.js';
 
 const context = BACKGROUND_CONTEXT;
-const none: WithdrawnNotices = { has: () => false, add: () => {} };
+const none: WithdrawnNotices = { has: () => false, add: () => {}, count: () => 0 };
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 function assistant(content: AssistantMessage['content'], timestamp: number): AssistantMessage {
   return { role: 'assistant', content, api: 'openai-responses', provider: 'openai', model: 'fixture', usage, stopReason: content.some(part => part.type === 'toolCall') ? 'toolUse' : 'stop', timestamp };
@@ -96,7 +96,7 @@ test('withdrawn notices leave the transcript while the other notices stay', asyn
     await notice('Machine Darktop went offline.');
     await turn(root, 1, 1);
     const ids = new Set(flood.map(entry => String(entry.id)));
-    const withdrawn: WithdrawnNotices = { has: id => ids.has(id), add: () => {} };
+    const withdrawn: WithdrawnNotices = { has: id => ids.has(id), add: () => {}, count: () => ids.size };
     const page = await createTranscriptReader(storage, withdrawn).page(root.id, { generation: null, before: null, after: null, around: null });
     const text = JSON.stringify(page.rows);
     expect(text).not.toContain('Sync with Darktop failed');
