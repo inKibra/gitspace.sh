@@ -45,3 +45,45 @@ describe('committed project rules', () => {
     } finally { warning.mockRestore(); }
   });
 });
+
+describe('committed project skills', () => {
+  /** inkibra core's layout: skills live in `skills/`, and `.agents/skills` links to them. */
+  function symlinkedSkills() {
+    const code: ArtifactsCodeStore = Object.create(ArtifactsCodeStore.prototype);
+    const identity = { name: 'Fixture', email: 'fixture@example.invalid' };
+    const files: Record<string, string> = {
+      'skills/frontend/SKILL.md': '---\nname: frontend\ndescription: Frontend conventions\n---\nUse the design system.',
+      'skills/frontend/references/tokens.md': 'Spacing tokens',
+      '.agents/skills/remotion/SKILL.md': '---\ndescription: Remotion rules\n---\nRender carefully.',
+    };
+    const links: Record<string, string> = { 'link-frontend': '../../skills/frontend\n', 'link-docs': '../../docs', 'link-escape': '../../../outside' };
+    const trees: Record<string, ArtifactsTreeEntry[]> = {
+      root: [{ name: '.agents', type: 'tree', hash: 'agents', mode: '40000' }, { name: 'skills', type: 'tree', hash: 'skills', mode: '40000' }],
+      agents: [{ name: 'skills', type: 'tree', hash: 'agent-skills', mode: '40000' }],
+      'agent-skills': [
+        { name: 'frontend', type: 'blob', hash: 'link-frontend', mode: '120000' },
+        { name: 'docs', type: 'blob', hash: 'link-docs', mode: '120000' },
+        { name: 'escape', type: 'blob', hash: 'link-escape', mode: '120000' },
+        { name: 'remotion', type: 'tree', hash: 'remotion', mode: '40000' },
+      ],
+      remotion: [{ name: 'SKILL.md', type: 'blob', hash: 'remotion-skill', mode: '100644' }],
+    };
+    vi.spyOn(code, 'resolveRef').mockResolvedValue('commit');
+    vi.spyOn(code, 'readCommit').mockResolvedValue({ hash: 'commit', treeHash: 'root', message: '', author: identity, committer: identity, parents: [], authoredAt: 0, committedAt: 0 });
+    vi.spyOn(code, 'readTree').mockImplementation(async (_repository, tree) => trees[tree] ?? null);
+    vi.spyOn(code, 'readBlob').mockImplementation(async (_repository, oid) => links[oid] === undefined ? null : new Blob([links[oid]]));
+    vi.spyOn(code, 'readFile').mockImplementation(async (_repository, _commit, path) => files[path] === undefined ? null : new Blob([files[path]]));
+    return createRuntimeInstructionLoader({ code, repository: 'project', ref: async () => 'refs/heads/main' });
+  }
+
+  it('lists and reads a skill whose directory is committed as a symlink, but none that leaves the repository', async () => {
+    const loader = symlinkedSkills();
+    const instructions = await loader.loadInstructions();
+    expect(instructions).toContain('- frontend: Frontend conventions');
+    expect(instructions).toContain('- remotion: Remotion rules');
+    expect(instructions).not.toMatch(/- (docs|escape):/u);
+    expect(await loader.read('skill://frontend')).toContain('Use the design system.');
+    expect(await loader.read('skill://frontend/references/tokens.md')).toBe('Spacing tokens');
+    await expect(loader.read('skill://escape')).rejects.toThrow('Skill not found');
+  });
+});

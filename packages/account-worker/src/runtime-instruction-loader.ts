@@ -2,6 +2,20 @@ import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { parse as parseYaml } from 'yaml';
 import { loadRuntimeRules } from './runtime-instructions.js';
 export type RuntimeInstructionLoader = { loadInstructions(): Promise<string>; read(uri: string): Promise<string> };
+
+/** `link` resolved against the repository directory `directory`, as a checkout resolves a relative symlink; null when it
+ * is absolute or leaves the repository. */
+function resolveLink(directory: string, link: string): string | null {
+  if (link.startsWith('/')) return null;
+  const parts = directory ? directory.split('/') : [];
+  for (const part of link.trim().split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part !== '..') parts.push(part);
+    else if (!parts.pop()) return null;
+  }
+  return parts.length ? parts.join('/') : null;
+}
+
 export function createRuntimeInstructionLoader(options: { code: ArtifactsCodeStore; repository: string; ref(): Promise<string | null> }): RuntimeInstructionLoader {
   async function snapshot() { const ref = await options.ref(); return ref ? options.code.resolveRef(options.repository, ref) : null; }
   async function file(commit: string, path: string) { const blob = await options.code.readFile(options.repository, commit, path); if (!blob) return null; if (blob.size > 262144) throw new Error(`Instruction exceeds 256 KiB: ${path}`); return blob.text(); }
@@ -16,15 +30,26 @@ export function createRuntimeInstructionLoader(options: { code: ArtifactsCodeSto
       if (!tree) throw new Error('Instruction tree unavailable');
       for (const entry of tree) {
         const path = directory.path ? `${directory.path}/${entry.name}` : entry.name;
+        let skillPath: string | null = null;
         if (entry.type === 'tree' && (path === '.agents' || path === '.omp' || path === '.agents/skills' || path === '.omp/skills' || path.startsWith('.agents/skills/') || path.startsWith('.omp/skills/'))) pending.push({ hash: entry.hash, path });
-        else if (entry.type === 'blob' && /^(?:\.agents|\.omp)\/skills\/[^/]+\/SKILL\.md$/u.test(path)) {
-          const content = await file(commit, path);
-          if (content === null) throw new Error('Committed skill unavailable');
-          const front = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(content);
-          const metadata: unknown = front ? parseYaml(front[1]!) : {};
-          const description = metadata && typeof metadata === 'object' && 'description' in metadata && typeof metadata.description === 'string' ? metadata.description : '';
-          result.push({ name: path.split('/').at(-2)!, path, description });
+        else if (entry.type === 'blob' && /^(?:\.agents|\.omp)\/skills\/[^/]+\/SKILL\.md$/u.test(path)) skillPath = path;
+        else if (entry.type === 'blob' && entry.mode === '120000' && /^(?:\.agents|\.omp)\/skills\/[^/]+$/u.test(path)) {
+          // A skill directory committed as a symlink (`.agents/skills/x -> ../../skills/x`) names the directory it points to.
+          const link = await options.code.readBlob(options.repository, entry.hash);
+          const target = link && link.size <= 4096 ? resolveLink(directory.path, await link.text()) : null;
+          if (target) skillPath = `${target}/SKILL.md`;
         }
+        if (skillPath === null) continue;
+        const content = await file(commit, skillPath);
+        // A symlink to a directory without SKILL.md is not a skill; a listed SKILL.md must be readable.
+        if (content === null) {
+          if (skillPath === path) throw new Error('Committed skill unavailable');
+          continue;
+        }
+        const front = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(content);
+        const metadata: unknown = front ? parseYaml(front[1]!) : {};
+        const description = metadata && typeof metadata === 'object' && 'description' in metadata && typeof metadata.description === 'string' ? metadata.description : '';
+        result.push({ name: skillPath === path ? path.split('/').at(-2)! : entry.name, path: skillPath, description });
       }
     }
     return result.sort((a, b) => a.path.localeCompare(b.path)).filter((item, index, all) => all.findIndex(other => other.name === item.name) === index);
