@@ -43,6 +43,22 @@ async function* gitPayload(root: string, args: string[], env: Record<string, str
   }
 }
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+
+export const GIT_LFS_SETUP = 'Install Git LFS (https://git-lfs.com: `sudo apt install git-lfs`, `brew install git-lfs`, or the release binary) and run `git lfs install` once, then run setup again.';
+let gitLfsReady: Promise<void> | undefined;
+/** GitSpace requires Git LFS set up the standard way on every machine: the `git-lfs` binary, and its filter configured by
+ * `git lfs install`, so plain git sees an LFS file's content as its pointer. Only success is remembered: installing it
+ * while the machine runs is picked up by the next setup. */
+export function requireGitLfs(): Promise<void> {
+  gitLfsReady ??= (async () => {
+    const version = Bun.spawn(['git', 'lfs', 'version'], { stdout: 'ignore', stderr: 'ignore' });
+    if (await version.exited !== 0) throw new Error(`Git LFS is not installed on this machine. ${GIT_LFS_SETUP}`);
+    const filter = Bun.spawn(['git', 'config', '--get', 'filter.lfs.process'], { stdout: 'pipe', stderr: 'ignore' });
+    const [code, configured] = await Promise.all([filter.exited, new Response(filter.stdout).text()]);
+    if (code !== 0 || !configured.trim()) throw new Error(`Git LFS is installed but not set up on this machine (\`git lfs install\` has not been run). ${GIT_LFS_SETUP}`);
+  })().catch(error => { gitLfsReady = undefined; throw error; });
+  return gitLfsReady;
+}
 async function blobMatches(root: string, oid: string, object: GitLfsObject): Promise<boolean> {
   const hash = createHash('sha256');
   let size = 0;
@@ -228,6 +244,8 @@ export async function gitLfsWorktreeTree(root: string, ref: string, otherRef: st
 }
 
 export async function checkoutGitLfs(root: string, ref: string, protectedPaths?: readonly string[]): Promise<void> {
+  await requireGitLfs();
+  const written: Array<{ path: string; oid: string }> = [];
   for (const [path, entry] of await tree(root, ref)) {
     if (protectedPaths?.includes(path)) continue;
     if (entry.mode === '120000' || Number(text(await git(root, ['cat-file', '-s', entry.oid]))) > 1024) continue;
@@ -242,7 +260,25 @@ export async function checkoutGitLfs(root: string, ref: string, protectedPaths?:
     const cachedPath = await cached(root, object);
     if (!cachedPath) throw new Error(`Missing Git LFS object ${object.oid} during checkout`);
     await writeFile(resolve(root, path), createReadStream(cachedPath));
+    written.push({ path, oid: entry.oid });
   }
+  await refreshIndexStat(root, written);
+}
+
+/** Writing an LFS payload over its pointer leaves the index's stat for the pointer, and git reports a file whose size
+ * differs from that stat as modified without reading it. Re-adding each path through the LFS filter stores the same
+ * pointer blob with the new stat. Only paths whose index entry is that pointer are touched: a staged change stays. */
+async function refreshIndexStat(root: string, written: readonly { path: string; oid: string }[]): Promise<void> {
+  if (!written.length) return;
+  const indexed = new Map<string, string>();
+  const listing = text(await git(root, ['ls-files', '-s', '-z', '--', ...written.map(file => file.path)]));
+  for (const record of listing.split('\0').filter(Boolean)) {
+    const tab = record.indexOf('\t');
+    const [, oid, stage] = record.slice(0, tab).split(' ');
+    if (oid && stage === '0') indexed.set(record.slice(tab + 1), oid);
+  }
+  const paths = written.filter(file => indexed.get(file.path) === file.oid).map(file => file.path);
+  if (paths.length) await git(root, ['update-index', '-q', '-z', '--stdin'], {}, paths.join('\0') + '\0');
 }
 
 export async function gitLfsRestoreReceipt(root: string, action: 'read' | 'clear' | GitLfsRestored[]): Promise<GitLfsRestored[] | undefined> {

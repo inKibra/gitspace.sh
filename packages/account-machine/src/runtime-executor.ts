@@ -15,7 +15,7 @@ import { spaceGitCheckpointRef } from '@gitspace/protocol-workspace';
 import type { LocalAttachment, ExecutorOperationHandler, ExecutorContent } from '@gitspace/runtime-machine';
 import { createArtifactsCredentialHelper } from './artifacts-credential-helper.js';
 import { daemonClientForProject } from '@gitspace/supervisor';
-import { checkoutGitLfs, gitLfsRestoreReceipt, hydrateGitLfs, type MachineGitLfsAccess } from './git-lfs.js';
+import { checkoutGitLfs, gitLfsRestoreReceipt, hydrateGitLfs, requireGitLfs, type MachineGitLfsAccess } from './git-lfs.js';
 import { gitWorktreeClock, gitWorktreeEvents, watchGitWorktree, type GitWorktreeClock, type GitWorktreeEvents } from './git-worktree-watch.js';
 import { coalesced } from './coalesced.js';
 
@@ -536,6 +536,7 @@ export async function createMachineExecutor(options: {
         submoduleEnvironment: (path: string) => options.originEnvironment({ ...grant, rootPath: path }),
       } : null,
       prerequisites: async (prepared, prepareSignal, acquired) => {
+        await requireGitLfs();
         // A checkout acquired here holds only its source: snapshots journaled for an earlier directory at this path
         // (an acquisition that failed part way) describe files and refs that are gone, and would keep it from restoring.
         if (acquired) {

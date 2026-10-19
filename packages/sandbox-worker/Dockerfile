@@ -11,7 +11,8 @@ RUN GITSPACE_RUNTIME_LAYER_COUNT=16 bun packages/sandbox-worker/scripts/build-ru
 
 FROM docker.io/cloudflare/sandbox:0.12.9
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client binutils && rm -rf /var/lib/apt/lists/*
+# Git LFS is set up the standard way on every machine: installed, and its filter configured for all users.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client binutils git-lfs && rm -rf /var/lib/apt/lists/* && git lfs install --system
 # Each file exists in exactly one layer. Large native libraries get their own
 # layer; the remaining files are packed into 128 MiB groups at build time.
 COPY --from=builder /runtime-layers/00/ /opt/gitspace/

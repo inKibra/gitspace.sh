@@ -134,9 +134,20 @@ async function selectedMachineRoot(runtimeRoot: string): Promise<string> {
   if (selected.version !== 1 || typeof selected.path !== 'string' || selected.path.length === 0) throw new Error('Invalid complete machine selection; your workspace data has not been changed.');
   return selected.path;
 }
+const GIT_LFS_SETUP = 'Install Git LFS (https://git-lfs.com: `sudo apt install git-lfs`, `brew install git-lfs`, or the release binary) and run `git lfs install` once.';
+/** Whether Git LFS is set up the standard way for this user: the binary on PATH and its filter configured. GitSpace
+ * runs its own copy, but `git lfs install` makes the filter required, so git outside GitSpace needs the binary too. */
+function gitLfsStatus(): string | null {
+  if (!Bun.which('git-lfs')) return `Git LFS is not installed. ${GIT_LFS_SETUP}`;
+  const filter = Bun.spawnSync(['git', 'config', '--get', 'filter.lfs.process'], { stdout: 'pipe', stderr: 'ignore' });
+  if (filter.exitCode !== 0 || !filter.stdout.toString().trim()) return `Git LFS is installed but not set up (\`git lfs install\` has not been run). ${GIT_LFS_SETUP}`;
+  return null;
+}
 function requireSystemTools(): void {
   const missing = ['git', 'ssh', 'ssh-agent', 'ssh-add', 'ssh-keygen'].filter(tool => !Bun.which(tool));
   if (missing.length) throw new Error(`Install Git and the OpenSSH client before linking this machine. Missing: ${missing.join(', ')}. Bun and OMP are included by GitSpace.`);
+  const lfs = gitLfsStatus();
+  if (lfs) throw new Error(lfs);
 }
 async function startMachine(): Promise<void> {
   const config = await requireConfig();
@@ -353,6 +364,8 @@ program.command('doctor').description('Check this machine installation and accou
   const config = await loadConfig();
   const checks: Array<[string, 'ok' | 'warn' | 'fail', string]> = [['machine', config ? 'ok' : 'warn', config?.machine.label ?? 'Link from Settings > Machines in your account']];
   for (const tool of ['git', 'ssh', 'ssh-agent', 'ssh-add', 'ssh-keygen']) checks.push([tool, Bun.which(tool) ? 'ok' : 'fail', Bun.which(tool) ?? 'Install Git and the OpenSSH client']);
+  const lfs = gitLfsStatus();
+  checks.push(['git-lfs', lfs ? 'fail' : 'ok', lfs ?? Bun.which('git-lfs') ?? '']);
   try {
     const selection = JSON.parse(await readFile(join(CONFIG_ROOT, 'runtime-selection.json'), 'utf8')) as { path: string };
     const bun = join(selection.path, 'bin/bun');

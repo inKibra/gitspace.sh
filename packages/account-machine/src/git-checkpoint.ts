@@ -125,7 +125,6 @@ export async function createGitIntermediateCheckpoint(input: {
     await lfs.sanitize(temporaryIndex, 'staged');
     const indexTree = (await runGit(input.repositoryPath, ['write-tree'], { env: indexEnvironment })).stdout;
     const indexCommit = await commitTree(input.repositoryPath, indexTree, headCommit, `GitSpace index checkpoint ${input.revision}`);
-    const rawFilters = ['-c', 'filter.lfs.process=', '-c', 'filter.lfs.clean=cat', '-c', 'filter.lfs.required=false'];
     await runGit(input.repositoryPath, [...rawFilters, 'add', '-u', '--', '.'], { env: indexEnvironment });
     await lfs.sanitize(temporaryIndex, 'modified');
     const trackedWorktreeTree = (await runGit(input.repositoryPath, ['write-tree'], { env: indexEnvironment })).stdout;
@@ -266,6 +265,10 @@ export async function mergeGitBackupIntoWorktree(input: { repositoryPath: string
   return { changes, conflicts };
 }
 
+/** GitSpace's snapshots and deltas carry an LFS file's real bytes (`gitLfsWorktreeTree`), so the commands that read or
+ * write them switch off the LFS filter Git LFS's own setup configures; with it, Git would compare and write pointers. */
+const rawFilters = ['-c', 'filter.lfs.process=', '-c', 'filter.lfs.clean=cat', '-c', 'filter.lfs.smudge=cat', '-c', 'filter.lfs.required=false'];
+
 /** Apply only the portable delta. Git checks preimages before writing, so concurrent
  * human edits reject reconciliation rather than being reset out of the checkout. */
 export async function applyGitCacheCheckpoint(input: {
@@ -284,11 +287,11 @@ export async function applyGitCacheCheckpoint(input: {
   ]);
   const patch = (await runGit(repositoryPath, ['diff', '--binary', beforeTree, afterTree, '--', '.', ...protectedPaths.map(path => `:(exclude,literal)${path}`)], { raw: true })).stdout;
   if (patch) {
-    try { await runGit(repositoryPath, ['apply', '--binary', '--whitespace=nowarn', '-'], { input: patch }); }
+    try { await runGit(repositoryPath, [...rawFilters, 'apply', '--binary', '--whitespace=nowarn', '-'], { input: patch }); }
     catch (error) {
       // The worktree update may have completed before a process stopped while
       // updating the index/HEAD. Accept only a verifiably installed delta.
-      try { await runGit(repositoryPath, ['apply', '--reverse', '--check', '-'], { input: patch }); }
+      try { await runGit(repositoryPath, [...rawFilters, 'apply', '--reverse', '--check', '-'], { input: patch }); }
       catch { throw error; }
     }
   }

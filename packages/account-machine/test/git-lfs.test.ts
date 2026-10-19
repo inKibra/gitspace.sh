@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { collectBytes, confirmGitLfsObjects, GitLfsObjectSchema, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, IncrementalGitSnapshots, type GitIntermediateCheckpoint } from '../src/git-checkpoint.js';
-import { restoredGitLfsPaths } from '../src/git-lfs.js';
+import { checkoutGitLfs, hydrateGitLfs, restoredGitLfsPaths } from '../src/git-lfs.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { committedLfsInventory } from '../src/git-lfs-inventory.js';
 const fetchImplementation = (implementation: (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>) => Object.assign(implementation, { preconnect: fetch.preconnect });
@@ -20,8 +20,7 @@ function git(root: string, ...args: string[]) {
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'gitspace-lfs-')); roots.push(root);
   git(root, 'init', '-b', 'main');
-  // Real Git pointer trees and real cache layout; no provider or git-lfs binary is needed.
-  git(root, 'config', 'filter.lfs.process', ''); git(root, 'config', 'filter.lfs.clean', 'cat'); git(root, 'config', 'filter.lfs.smudge', 'cat'); git(root, 'config', 'filter.lfs.required', 'false');
+  // Real Git pointer trees, real cache layout and git-lfs set up as GitSpace requires; no provider is needed.
   writeFileSync(join(root, '.gitattributes'), '*.bin filter=lfs\n');
   const objects = new Map<string, Uint8Array>(); const uploads: string[] = [];
   const store: GitLfsStore = {
@@ -62,6 +61,19 @@ it('applies committed LFS deltas to hydrated caches without replacing later held
   await applyGitCacheCheckpoint({ repositoryPath: target, previous: held, checkpoint: incoming, lfs: f.lfs });
   expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('private newer bytes');
   expect(f.uploads).not.toContain(createHash('sha256').update('private newer bytes').digest('hex'));
+});
+
+it('leaves an acquired checkout\'s LFS payloads unmodified to plain git', async () => {
+  const f = fixture();
+  await f.capture(1);
+  // Acquisition clones without smudging, so the index records each pointer file's size; the payload then replaces it.
+  const target = mkdtempSync(join(tmpdir(), 'gitspace-lfs-status-')); roots.push(target);
+  const clone = Bun.spawnSync(['git', 'clone', '-q', f.root, target], { env: { ...Bun.env, GIT_LFS_SKIP_SMUDGE: '1' } });
+  if (clone.exitCode) throw new Error(clone.stderr.toString());
+  await hydrateGitLfs(target, ['HEAD'], undefined, f.lfs);
+  await checkoutGitLfs(target, 'HEAD');
+  expect(readFileSync(join(target, 'asset.bin'), 'utf8')).toBe('committed bytes');
+  expect(git(target, 'status', '--porcelain')).toBe('');
 });
 
 it('holds edited and staged payloads using HEAD nested attributes without touching local state', async () => {
