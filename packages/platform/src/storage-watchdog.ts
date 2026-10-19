@@ -123,6 +123,8 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
   const usd = periodic.rowsWritten * DURABLE_OBJECT_USD.perRowWritten + periodic.rowsRead * DURABLE_OBJECT_USD.perRowRead
     + requests * DURABLE_OBJECT_USD.perRequest + periodic.activeTime * DURABLE_OBJECT_USD.perActiveMicrosecond;
   const top = day.top[0];
+  // One line per run, so a quiet watchdog can be told from a stopped one.
+  console.log(JSON.stringify({ event: 'storage-watchdog', usdToday: Math.round(usd * 100) / 100, topHourRowsWritten: hour.objects[0]?.sum.rowsWritten ?? 0, topHourObjectId: hour.objects[0]?.dimensions.objectId ?? null }));
   if (usd < WATCHDOG_ALERT_DAILY_USD || !top) return;
   const who = owner(top.dimensions.namespaceId);
   console.error(JSON.stringify({ event: 'storage-watchdog-daily-cost', usd: Math.round(usd * 100) / 100, ...periodic, requests, top: { ...top.dimensions, className: who.className, script: who.script, rowsWritten: top.sum.rowsWritten } }));
