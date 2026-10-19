@@ -186,24 +186,30 @@ export class RuntimeSmoke extends DurableObject<unknown> {
 }
 export class ReplicaSmoke extends DurableObject {
   async fetch(): Promise<Response> {
-    const legacy = JSON.stringify(RuntimeSnapshotSchema.parse({ version: 1, ...identity, cursor: 7, conversations: [], tasks: [], attachments: [], questions: [], documents: {} }));
-    const event = JSON.stringify({ type: 'delta', baseCursor: 6, cursor: 7, ops: [] });
-    this.ctx.storage.sql.exec('CREATE TABLE runtime_projection(id INTEGER PRIMARY KEY,snapshot TEXT NOT NULL)');
-    this.ctx.storage.sql.exec('INSERT INTO runtime_projection VALUES(1,?)', legacy);
-    this.ctx.storage.sql.exec('CREATE TABLE runtime_publications(cursor INTEGER PRIMARY KEY,event TEXT NOT NULL)');
-    this.ctx.storage.sql.exec('INSERT INTO runtime_publications VALUES(7,?)', event);
+    const sql = this.ctx.storage.sql;
+    // A store written by the previous release: snapshot and delta parts at cursor 7, and a draft.
+    sql.exec('CREATE TABLE runtime_replica(kind TEXT NOT NULL,cursor INTEGER NOT NULL,part INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(kind,cursor,part))');
+    const legacy: Array<[string, number, number]> = [['snapshot', 7, 0], ['snapshot', 7, 1], ['event', 6, 0], ['event', 7, 0], ['draft', 3, 0]];
+    for (const [kind, cursor, part] of legacy) sql.exec('INSERT INTO runtime_replica VALUES(?,?,?,?)', kind, cursor, part, '{}');
     const store = createReplicaStore(this.ctx.storage);
-    check(store.snapshot() === legacy && store.events(6)?.[0]?.event === event, 'Replica migration lost committed state or replay');
-    const text = 'x' + '\u{1d11e}'.repeat(1_100_000);
-    const large = JSON.stringify({ ...JSON.parse(legacy), cursor: 8, documents: { text } });
-    store.commit(8, large, JSON.stringify({ text }));
-    check(store.snapshot() === large, 'Large replica or Unicode was corrupted');
+    const kinds = () => sql.exec<{ kind: string }>('SELECT kind FROM runtime_replica ORDER BY kind').toArray().map(row => row.kind);
+    check(store.cursor() === 7 && JSON.stringify(kinds()) === '["draft"]', 'Migration kept snapshot parts or lost the cursor');
+    // A publish stores its cursor only, however large the snapshot and its delta.
+    const delta = (base: number, cursor: number, text = '') => JSON.stringify({ type: 'delta', baseCursor: base, cursor, ops: text ? [['s', ['documents', 'text'], text]] : [] });
+    store.commit(8, delta(7, 8, 'x'.repeat(200_000)));
+    check(store.cursor() === 8 && JSON.stringify(kinds()) === '["draft"]', 'A publish stored more than its cursor');
+    check(store.events(7)?.length === 1, 'A delta was not replayed from memory');
+    store.commit(9, delta(8, 9, 'y'.repeat(1_100_000)));
     check(store.events(7) === null, 'Oversized replay must request a lossless reset');
-    let failed = false;
-    try { store.commit(8, legacy, event); } catch { failed = true; }
-    check(failed && store.snapshot() === large, 'Failed publication did not roll back its projection');
-    check(createReplicaStore(this.ctx.storage).snapshot() === large, 'Reopened chunk store lost its committed projection');
-    return Response.json({ bytes: new TextEncoder().encode(large).byteLength });
+    store.commit(10, null);
+    check(store.events(9)?.length === 0, 'A placeholder publish offered a delta');
+    // Reopened, the cursor holds and no delta survives: readers behind it get a reset.
+    const reopened = createReplicaStore(this.ctx.storage);
+    check(reopened.cursor() === 10 && reopened.events(9)?.length === 0, 'Reopened store lost its cursor or kept deltas');
+    const text = 'x' + '\u{1d11e}'.repeat(1_100_000);
+    reopened.commitDraft(4, text);
+    check(createReplicaStore(this.ctx.storage).draft() === text, 'Large Unicode draft was corrupted');
+    return Response.json({ cursor: reopened.cursor() });
   }
 }
 export default { fetch(request: Request, env: { SMOKE: DurableObjectNamespace<RuntimeSmoke>; REPLICA: DurableObjectNamespace<ReplicaSmoke> }) {

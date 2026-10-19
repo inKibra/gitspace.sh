@@ -42,7 +42,7 @@ try {
     throw new Error(`Runtime did not progress without a manual wake: ${JSON.stringify(last)}`);
   }
   const assistantReplies = (snapshot: RuntimeSnapshot) => snapshot.conversations.flatMap(item => item.messages).filter(message => message.role === 'assistant' && message.content.some(block => block.type === 'text' && block.text.startsWith('fixture reply:'))).length;
-  console.log('PASS large Unicode replica, migration, bounded replay, atomic rollback', await request('/replica-proof'));
+  console.log('PASS replica stores the cursor only: migration, in-memory replay, reset after reopen, large Unicode draft', await request('/replica-proof'));
 
   const events = async (after: number) => z.array(RuntimeWatchEventSchema).parse(await request(`/events?after=${after}`));
   const current = RuntimeSnapshotSchema.parse(await request('/')).cursor;

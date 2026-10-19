@@ -197,12 +197,11 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   options.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attach_notices(attachment_id TEXT NOT NULL, generation INTEGER NOT NULL, conversation_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY(attachment_id, generation, conversation_id))');
   let line = Promise.resolve();
   let publicationPending = false;
-  const stored: unknown = (() => { const current = replica.snapshot(); return current ? JSON.parse(current) : undefined; })();
-  const restored = RuntimeSnapshotSchema.safeParse(stored);
-  // A snapshot stored by an older release that no longer parses is rebuilt from current state at startup (below),
-  // continuing from its cursor so watchers see a newer revision.
-  const storedCursor = typeof stored === 'object' && stored !== null && 'cursor' in stored && typeof stored.cursor === 'number' ? stored.cursor : 0;
-  let snapshot: RuntimeSnapshot = restored.success ? restored.data : RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: storedCursor, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
+  // The snapshot is rebuilt from current state at startup (below), from an empty placeholder at the stored cursor so
+  // watchers see a newer revision. The delta from that placeholder is not offered to readers: a reader at the stored
+  // cursor holds the real snapshot, not the placeholder, so it receives a reset instead.
+  let snapshot: RuntimeSnapshot = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: replica.cursor(), conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
+  let placeholder = true;
   const conversationIds = new Map<string, ConversationId>();
   // Derived snapshot state is cached per conversation/task and refreshed only for records a commit touched, so a
   // rebuild reads O(changed) rows instead of every conversation's 256-entry window and every task on each commit.
@@ -344,8 +343,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     // An unchanged projection publishes nothing: no replica rewrite, no cursor advance, no browser notice.
     if (ops.length === 0) return;
     const event = RuntimeWatchEventSchema.parse({ type: 'delta', baseCursor: snapshot.cursor, cursor: next.cursor, ops });
-    const encodedEvent = JSON.stringify(event);
-    replica.commit(next.cursor, JSON.stringify(next), encodedEvent);
+    replica.commit(next.cursor, placeholder ? null : JSON.stringify(event));
+    placeholder = false;
     const rootId = String(runtime.root.id);
     const root = conversationViews.get(rootId);
     const [agent, controls] = await Promise.all([runtime.root.agent(BACKGROUND_CONTEXT), harness.snapshot(SessionControlsDoc, runtime.root.id, BACKGROUND_CONTEXT)]);

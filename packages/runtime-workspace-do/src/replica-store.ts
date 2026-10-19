@@ -1,33 +1,31 @@
-import { RUNTIME_WATCH_EVENT_LIMIT, RuntimeSnapshotSchema, RuntimeWatchEventSchema, type RuntimeSnapshot, type RuntimeWatchEvent } from '@gitspace/protocol-runtime';
+import { RUNTIME_WATCH_EVENT_LIMIT, RuntimeWatchEventSchema, type RuntimeSnapshot, type RuntimeWatchEvent } from '@gitspace/protocol-runtime';
 
-/** Snapshot and delta payloads may exceed SQLite's per-value limit. */
+/** Draft payloads may exceed SQLite's per-value limit. */
+const PART_CHARS = 16_384;
+/** A replay larger than this is answered with a lossless reset instead. */
+const REPLAY_BYTES = 1_048_576;
+
+/**
+ * What a runtime keeps of its published snapshots. Only the cursor is stored: watchers must see a newer revision after
+ * a restart, and the snapshot itself is derived state the runtime rebuilds when it opens. Deltas are kept in memory,
+ * the newest `RUNTIME_WATCH_EVENT_LIMIT`; a reader behind them, or across a restart, receives a reset carrying the whole
+ * snapshot. A publish therefore writes one row however large the snapshot is (it once rewrote every 16 KB part and
+ * delta on each publish: 360 million rows in an hour on 2026-10-14). The composer draft is stored in parts.
+ */
 export function createReplicaStore(storage: DurableObjectStorage) {
   const sql = storage.sql;
-  function put(kind: 'snapshot' | 'event' | 'draft', cursor: number, payload: string) {
-    let part = 0;
-    for (let offset = 0; offset < payload.length;) {
-      let end = Math.min(payload.length, offset + 16_384);
-      // SQLite encodes each value separately; never split a UTF-16 surrogate pair.
-      const last = payload.charCodeAt(end - 1);
-      if (end < payload.length && last >= 0xd800 && last <= 0xdbff) end--;
-      sql.exec('INSERT INTO runtime_replica(kind,cursor,part,payload) VALUES(?,?,?,?)', kind, cursor, part++, payload.slice(offset, end));
-      offset = end;
-    }
-  }
   storage.transactionSync(() => {
     sql.exec('CREATE TABLE IF NOT EXISTS runtime_replica(kind TEXT NOT NULL,cursor INTEGER NOT NULL,part INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(kind,cursor,part))');
-    const previous = new Set(sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('runtime_projection','runtime_publications')").toArray().map(row => row.name));
-    if (previous.has('runtime_projection')) {
-      for (const row of sql.exec<{ snapshot: string }>('SELECT snapshot FROM runtime_projection WHERE id=1')) {
-        put('snapshot', RuntimeSnapshotSchema.parse(JSON.parse(row.snapshot)).cursor, row.snapshot);
-      }
-      sql.exec('DROP TABLE runtime_projection');
-    }
-    if (previous.has('runtime_publications')) {
-      for (const row of sql.exec<{ cursor: number; event: string }>('SELECT cursor,event FROM runtime_publications ORDER BY cursor')) put('event', row.cursor, row.event);
-      sql.exec('DROP TABLE runtime_publications');
-    }
+    sql.exec('CREATE TABLE IF NOT EXISTS runtime_cursor(singleton INTEGER PRIMARY KEY CHECK(singleton=1),cursor INTEGER NOT NULL)');
+    if (sql.exec('SELECT 1 FROM runtime_cursor').toArray().length) return;
+    // One-time: the cursor of the snapshots and deltas this store used to keep; their parts are deleted.
+    const stored = sql.exec<{ cursor: number | null }>("SELECT MAX(cursor) AS cursor FROM runtime_replica WHERE kind IN ('snapshot','event')").one().cursor ?? 0;
+    sql.exec('INSERT INTO runtime_cursor VALUES(1,?)', stored);
+    sql.exec("DELETE FROM runtime_replica WHERE kind IN ('snapshot','event')");
+    sql.exec('DROP TABLE IF EXISTS runtime_projection');
+    sql.exec('DROP TABLE IF EXISTS runtime_publications');
   });
+  const deltas: { cursor: number; event: string }[] = [];
   return {
     draft(): string | undefined {
       const parts = sql.exec<{ payload: string }>("SELECT payload FROM runtime_replica WHERE kind='draft' ORDER BY part").toArray();
@@ -36,35 +34,32 @@ export function createReplicaStore(storage: DurableObjectStorage) {
     commitDraft(revision: number, payload: string): void {
       storage.transactionSync(() => {
         sql.exec("DELETE FROM runtime_replica WHERE kind='draft'");
-        put('draft', revision, payload);
+        let part = 0;
+        for (let offset = 0; offset < payload.length;) {
+          let end = Math.min(payload.length, offset + PART_CHARS);
+          // SQLite encodes each value separately; never split a UTF-16 surrogate pair.
+          const last = payload.charCodeAt(end - 1);
+          if (end < payload.length && last >= 0xd800 && last <= 0xdbff) end--;
+          sql.exec("INSERT INTO runtime_replica(kind,cursor,part,payload) VALUES('draft',?,?,?)", revision, part++, payload.slice(offset, end));
+          offset = end;
+        }
       });
     },
-    snapshot(): string | undefined {
-      const parts = sql.exec<{ payload: string }>("SELECT payload FROM runtime_replica WHERE kind='snapshot' ORDER BY part").toArray();
-      return parts.length ? parts.map(row => row.payload).join('') : undefined;
+    /** The cursor of the last published snapshot. */
+    cursor(): number {
+      return sql.exec<{ cursor: number }>('SELECT cursor FROM runtime_cursor').one().cursor;
     },
-    commit(cursor: number, snapshot: string, event: string): void {
-      storage.transactionSync(() => {
-        sql.exec("DELETE FROM runtime_replica WHERE kind='snapshot'");
-        put('snapshot', cursor, snapshot);
-        put('event', cursor, event);
-        sql.exec("DELETE FROM runtime_replica WHERE kind='event' AND cursor < ?", Math.max(0, cursor - 256));
-      });
+    /** Records a published snapshot's cursor and, unless null, the delta that reached it. */
+    commit(cursor: number, event: string | null): void {
+      sql.exec('UPDATE runtime_cursor SET cursor=?', cursor);
+      if (event === null) return;
+      deltas.push({ cursor, event });
+      if (deltas.length > RUNTIME_WATCH_EVENT_LIMIT) deltas.shift();
     },
     events(after: number): { event: string }[] | null {
-      const bytes = sql.exec<{ bytes: number }>("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes FROM runtime_replica WHERE kind='event' AND cursor > ?", after).toArray()[0]?.bytes ?? 0;
-      // A reset is lossless and avoids buffering an arbitrarily large replay backlog.
-      if (bytes > 1_048_576) return null;
-      const events: { event: string }[] = [];
-      let cursor: number | undefined;
-      let parts: string[] = [];
-      for (const row of sql.exec<{ cursor: number; payload: string }>("SELECT cursor,payload FROM runtime_replica WHERE kind='event' AND cursor > ? ORDER BY cursor,part", after)) {
-        if (cursor !== undefined && cursor !== row.cursor) { events.push({ event: parts.join('') }); parts = []; }
-        cursor = row.cursor;
-        parts.push(row.payload);
-      }
-      if (parts.length) events.push({ event: parts.join('') });
-      return events;
+      const newer = deltas.filter(delta => delta.cursor > after);
+      if (newer.reduce((bytes, delta) => bytes + delta.event.length, 0) > REPLAY_BYTES) return null;
+      return newer.map(({ event }) => ({ event }));
     },
   };
 }
