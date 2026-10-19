@@ -49,7 +49,7 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
   const integer = new Intl.NumberFormat('en-US');
   const end = new Date(scheduledTime);
   const request = { accountId: env.CF_ACCOUNT_ID, script: 'Durable Objects', analyticsToken: env.CF_ANALYTICS_TOKEN, namespaceToken: env.CF_API_TOKEN };
-  const [hour, day, namespaces] = await Promise.all([
+  const usage = await Promise.all([
     queryAccount({ ...request, window: { start: new Date(scheduledTime - HOUR_MS).toISOString(), end: end.toISOString() } }, `query StorageWatchdogHour($accountTag: string!, $start: Time!, $end: Time!) {
       viewer { accounts(filter: { accountTag: $accountTag }) {
         objects: durableObjectsPeriodicGroups(limit: ${OBJECT_LIMIT}, orderBy: [sum_rowsWritten_DESC], filter: { datetime_geq: $start, datetime_lt: $end }) {
@@ -67,7 +67,12 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
       } }
     }`, {}, daySchema),
     durableObjectNamespaces(env.CF_ACCOUNT_ID, env.CF_API_TOKEN),
-  ]);
+  ]).catch((error: unknown) => {
+    console.error(JSON.stringify({ event: 'storage-watchdog-failed', message: error instanceof Error ? error.message : String(error) }));
+    return null;
+  });
+  if (!usage) return;
+  const [hour, day, namespaces] = usage;
   const tenantPrefix = `${env.DISPATCH_NAMESPACE}-tenant-`;
   const owner = (namespaceId: string): Owner => {
     const namespace = namespaces?.find(item => item.id === namespaceId);
