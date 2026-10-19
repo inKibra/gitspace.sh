@@ -21,6 +21,7 @@ import { cloudImageProviderCall, resolveCloudImage } from './sandbox-rollout.js'
 import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSelectionSchema, type CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
 import { serveArtifactShare } from './account-inspector-data.js';
+import { serveGuideShare } from './guide-shares.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
 import { mcpAccessStatusRequestSchema, mcpAccessChangeRequestSchema, mcpAccessEnableRequestSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
@@ -340,6 +341,9 @@ interface GitHubAppSecrets {
 function githubSecretContext(appId: number, field: 'private-key' | 'webhook-secret' | 'client-secret', revision: number): string {
   return `github-app:${appId}:${field}\n${revision}`;
 }
+/** A shared-guide reader's GitHub session lasts at most this long. */
+const GITHUB_READER_SECONDS = 8 * 60 * 60;
+const githubReaderSessionSchema = z.object({ token: z.string().min(1), login: z.string().min(1), expiresAt: z.number().int() }).strict();
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
@@ -1299,6 +1303,40 @@ export class CredentialVaultDO extends DurableObject<Env> {
   async verifyGitHubWebhook(body: Uint8Array<ArrayBuffer>, signature: string): Promise<boolean> {
     if (!this.githubAppRow()) return false;
     return verifyGitHubSignature((await this.openGitHubApp()).webhookSecret, body, signature);
+  }
+
+  /** Exchanges a reader's GitHub App user-authorization code for their token, sealed with their login and expiry into
+   * the cookie that carries it. The vault keeps nothing. The sealing context binds the cookie to this App. */
+  async sealGitHubReader(clientId: string, code: string, redirectUri: string): Promise<{ sealed: string; expiresAt: number }> {
+    const config = this.config();
+    if (!config) throw new Error('This account has no credential vault');
+    const secrets = await this.openGitHubApp();
+    const response = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST', signal: AbortSignal.timeout(10_000),
+      headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'GitSpace' },
+      body: JSON.stringify({ client_id: clientId, client_secret: secrets.clientSecret, code, redirect_uri: redirectUri }),
+    });
+    const answer = z.object({ access_token: z.string().min(1), expires_in: z.number().int().positive().optional() })
+      .safeParse(await response.json().catch(() => null));
+    if (!response.ok || !answer.success) throw new Error('GitHub did not accept this sign-in. Open the shared link again.');
+    const user = await githubRequest('/user', { token: answer.data.access_token, schema: z.object({ login: z.string().min(1) }) });
+    const expiresAt = Date.now() + Math.min(answer.data.expires_in ?? GITHUB_READER_SECONDS, GITHUB_READER_SECONDS) * 1000;
+    const session = JSON.stringify({ token: answer.data.access_token, login: user.login, expiresAt });
+    return { sealed: await sealVaultText(session, credentialProtocolBase64.decode(config.vault_key), `github-reader:${secrets.appId}`), expiresAt };
+  }
+
+  /** The reader a cookie names, or null when it is malformed, sealed for another App, or expired. */
+  async openGitHubReader(sealed: string): Promise<{ token: string; login: string } | null> {
+    const config = this.config();
+    const row = this.githubAppRow();
+    if (!config || !row) return null;
+    try {
+      const opened = await openVaultText(sealed, credentialProtocolBase64.decode(config.vault_key), `github-reader:${row.app_id}`);
+      const session = githubReaderSessionSchema.parse(JSON.parse(opened));
+      return session.expiresAt > Date.now() ? { token: session.token, login: session.login } : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Switches to a key generated on GitHub only once GitHub accepts a JWT it signed and names this same App. */
@@ -2890,6 +2928,10 @@ const worker = {
       return (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(env.ACCOUNT_ID).fetch(request);
     }
     if (url.pathname.startsWith('/shared-artifacts/')) return serveArtifactShare(request, env);
+    if (url.pathname.startsWith('/v1/shared-guides/')) {
+      const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
+      return denied ?? serveGuideShare(request, env, url);
+    }
 
     const mcpAccessRoute = /^\/v1\/mcp-access\/(status|enable|rotate|disable)$/u.exec(url.pathname);
     if (mcpAccessRoute) {

@@ -7,6 +7,7 @@ import {
 } from '@gitspace/protocol/github';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { GitHubApiError, base64url, githubRequest } from './github-api.js';
+import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
 import { notifyMachines } from './machine-notices.js';
 
@@ -74,6 +75,7 @@ interface AppRow extends Record<string, SqlStorageValue> {
   html_url: string;
   owner_login: string;
   owner_kind: string;
+  client_id: string;
   created_at: number;
   key_updated_at: number;
 }
@@ -141,9 +143,10 @@ async function readWebhookBody(request: Request): Promise<Uint8Array<ArrayBuffer
 /** GitHub's requests to the tenant: signed webhooks and the browser callbacks that end in Settings → GitHub. */
 export async function githubRoute(request: Request, env: Env, url: URL): Promise<Response | null> {
   const route = `${request.method} ${url.pathname}`;
-  if (route !== 'POST /github/webhook' && route !== 'GET /github/app/created' && route !== 'GET /github/installed') return null;
+  if (route !== 'POST /github/webhook' && route !== 'GET /github/app/created' && route !== 'GET /github/installed' && route !== 'GET /github/callback') return null;
   const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
   if (denied) return denied;
+  if (route === 'GET /github/callback') return completeGuideReaderSignIn(request, env, url);
   const github = env.GITHUB_APP.getByName(env.ACCOUNT_ID);
   if (route === 'POST /github/webhook') {
     const event = request.headers.get('x-github-event') ?? '';
@@ -419,6 +422,24 @@ export class GitHubAppDO extends DurableObject<Env> {
       schema: z.object({ token: z.string().min(1), expires_at: z.string().datetime() }),
     });
     return { token: issued.token, expiresAt: issued.expires_at };
+  }
+
+  /** Whether GitHub shows `repository` to everyone; read with the App's token when an installation covers it. */
+  async repositoryIsPublic(repository: string): Promise<boolean> {
+    const token = this.coverage(repository) === null ? undefined : (await this.repositoryToken(repository, 'read')).token;
+    try {
+      return !(await githubRequest(`/repos/${repository}`, { token, schema: z.object({ private: z.boolean() }) })).private;
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 404) throw new Error(`GitHub does not show ${repository} to GitSpace. Install the GitHub App on it first.`);
+      throw error;
+    }
+  }
+
+  /** The App's OAuth client id: a shared guide's reader signs in through the App's user authorization. */
+  readerClientId(): string {
+    const app = this.app();
+    if (!app) throw new Error('This account has no GitHub App, so readers cannot sign in with GitHub');
+    return app.client_id;
   }
 
   /** Stores a key generated on GitHub once the vault confirmed GitHub accepts it for this App. */

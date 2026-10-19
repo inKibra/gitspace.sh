@@ -93,6 +93,7 @@ import { OverviewView, type OverviewViewProps } from './OverviewView.js';
 import { UsageView, type UsageStatus, type InspectorProviderUsageState } from './UsageView.js';
 import { AgentSetupView, type InspectorAgentSetupState } from './AgentSetupView.js';
 import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
+import { GuideShareButton, type GuideShareHandlers } from './GuideShare.js';
 import { ArtifactUploadButton, ArtifactUploadList, useArtifactUploads, type ArtifactUploads } from './ArtifactUploads.js';
 import type { ArtifactUploadClient } from './artifact-upload.js';
 import { syncRepositoryTreePaths } from './repository-tree-paths.js';
@@ -184,6 +185,7 @@ export interface InspectorProps {
   onMarkGuideSectionRead(sectionId: string, revision: number, headCommit: string): Promise<void>;
   onSetGuideApproval(decision: 'pending' | 'approved' | 'changes-requested', note: string | null, revision: number, headCommit: string): Promise<void>;
   onGenerateChangeGuide?(): Promise<void>;
+  guideShares?: GuideShareHandlers;
   onSubmitHumanJudgment?(criterionId: string, verdict: 'pass' | 'fail', summary: string): Promise<void>;
   onStartService?(serviceName: string): Promise<void>;
   onStopService?(serviceName: string): Promise<void>;
@@ -450,7 +452,8 @@ function repositoryPatch(file: RepositoryFileView): string {
   return `diff --git a/${file.path} b/${file.path}\n--- a/${file.path}\n+++ b/${file.path}\n@@ -1,${lines.length} +1,${lines.length} @@\n${lines.map((line) => ` ${line}`).join('\n')}\n`;
 }
 interface ThreadAnnotation { thread: ReviewThreadView }
-function PierreViewer({ path, identities, patch, threads, onSelectThread, onSelectRange }: { path: string; identities: ThreadIdentities; patch: string; threads: readonly ReviewThreadView[]; onSelectThread: (thread: ReviewThreadView) => void; onSelectRange: (selection: ThreadSelection) => void }) {
+/** Without `onSelectRange` the diff is read-only: no line selection starts a thread. */
+function PierreViewer({ path, identities, patch, threads, onSelectThread, onSelectRange }: { path: string; identities: ThreadIdentities; patch: string; threads: readonly ReviewThreadView[]; onSelectThread: (thread: ReviewThreadView) => void; onSelectRange?: (selection: ThreadSelection) => void }) {
   const fileDiff = useMemo(() => parsePatchFiles(patch).flatMap((parsed) => parsed.files)[0] ?? null, [patch]);
   const matches = (thread: ReviewThreadView): boolean => {
     if (thread.anchor.kind !== 'line' || thread.anchor.path !== path) return false;
@@ -459,8 +462,8 @@ function PierreViewer({ path, identities, patch, threads, onSelectThread, onSele
   };
   const annotations: DiffLineAnnotation<ThreadAnnotation>[] = threads.flatMap((thread) => thread.anchor.kind === 'line' && matches(thread) ? [{ side: thread.anchor.side === 'head' ? 'additions' as const : 'deletions' as const, lineNumber: thread.anchor.startLine, metadata: { thread } }] : []);
   const outdatedThreads = threads.filter((thread) => thread.anchor.kind === 'line' && thread.anchor.path === path && !matches(thread));
-  const selectLine = (side: 'base' | 'head', startLine: number, endLine: number): void => onSelectRange({ path, identity: identities[side], side, startLine, endLine });
-  const options = useMemo<FileDiffOptions<ThreadAnnotation>>(() => ({ diffStyle: 'unified', theme: 'github-light', disableFileHeader: true, hunkSeparators: 'line-info', enableHoverUtility: true, enableLineSelection: true, onLineSelectionEnd: (range: SelectedLineRange | null) => { if (!range) return; selectLine(range.side === 'deletions' ? 'base' : 'head', Math.min(range.start, range.end), Math.max(range.start, range.end)); } }), [identities, onSelectRange, path]);
+  const selectLine = (side: 'base' | 'head', startLine: number, endLine: number): void => onSelectRange?.({ path, identity: identities[side], side, startLine, endLine });
+  const options = useMemo<FileDiffOptions<ThreadAnnotation>>(() => ({ diffStyle: 'unified', theme: 'github-light', disableFileHeader: true, hunkSeparators: 'line-info', enableHoverUtility: !!onSelectRange, enableLineSelection: !!onSelectRange, onLineSelectionEnd: (range: SelectedLineRange | null) => { if (!range) return; selectLine(range.side === 'deletions' ? 'base' : 'head', Math.min(range.start, range.end), Math.max(range.start, range.end)); } }), [identities, onSelectRange, path]);
   if (!fileDiff) return <Padded><EmptyState icon={ic(FileCode02, 22)} title="No parseable content" description={`The selected ${path} view did not contain a text patch Pierre can render.`} /></Padded>;
   // FLUID-GAP: diff viewer — @pierre/diffs renders the patch with its own theme.
   return <div className="min-h-0 flex-1 overflow-auto bg-surface-3">{outdatedThreads.length ? <div className="flex flex-wrap items-center gap-2 p-3"><span className="text-caption text-muted-foreground">Comments on other or unverified content:</span>{outdatedThreads.map((thread) => <Button key={thread.id} variant="tertiary" size="compact" type="button" onClick={() => onSelectThread(thread)}>{ic(MessageSquare01, 14)}{thread.anchor.kind === 'line' ? `Lines ${thread.anchor.startLine}–${thread.anchor.endLine}` : 'Thread'}</Button>)}</div> : null}<FileDiff fileDiff={fileDiff} options={options} lineAnnotations={annotations} renderAnnotation={(annotation) => <Button variant="tertiary" size="compact" type="button" onClick={() => onSelectThread(annotation.metadata.thread)}>{ic(MessageSquare01, 14)}<span className="tabular-nums">{annotation.metadata.thread.messages.length}</span></Button>} renderGutterUtility={(getHoveredLine) => <Button variant="tertiary" size="icon-compact" type="button" aria-label="Add line comment" onMouseDown={(event) => { event.preventDefault(); const line = getHoveredLine(); if (line) selectLine(line.side === 'deletions' ? 'base' : 'head', line.lineNumber, line.lineNumber); }}>+</Button>} /></div>;
@@ -771,18 +774,23 @@ function ServicesSurface({ services, onOpenTerminal, onStart, onStop }: {
   </div></ScrollArea>;
 }
 
-function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpened, onGateOpen, onOpenFile, onLoadDiff, onSelectThread, onSelectRange }: {
+/** A workspace reviewer's actions on a guide's exhibits. A shared guide's reader has none: its diffs are read-only. */
+export interface GuideReview {
+  threads: readonly ReviewThreadView[];
+  onOpenFile(path: string): void;
+  onSelectThread(thread: ReviewThreadView): void;
+  onSelectRange(selection: ThreadSelection): void;
+}
+
+function GuideFileDiffBlock({ path, anchorKey, root, baseRef, gateOpened, onGateOpen, onLoadDiff, review }: {
   path: string;
   anchorKey: string;
   root: { current: HTMLDivElement | null };
   baseRef: string;
-  threads: readonly ReviewThreadView[];
   gateOpened: boolean;
   onGateOpen(path: string): void;
-  onOpenFile(path: string): void;
   onLoadDiff(path: string, mode: 'base', baseRef: string): Promise<RepositoryDiffView>;
-  onSelectThread(thread: ReviewThreadView): void;
-  onSelectRange(selection: ThreadSelection): void;
+  review: GuideReview | null;
 }) {
   const shape = useShape();
   const runtimeAvailable = useContext(RuntimeAvailability);
@@ -827,53 +835,49 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpene
   if (!runtimeAvailable) return <div data-guide-anchor={anchorKey} className={`${shape.container} flex flex-col overflow-hidden border border-border`}><Tooltip content={openWorkspaceFirst}><span><Button variant="ghost" size="compact" type="button" disabled className="w-full justify-start">{ic(FileCode02, 14)}<span className="truncate font-mono">{path}</span></Button></span></Tooltip><Placeholder>Saved file reference. {openWorkspaceFirst} to inspect its diff.</Placeholder></div>;
   if (diff && !near) return <div ref={hostRef} data-guide-anchor={anchorKey} style={{ height }} />;
   return <div ref={hostRef} data-guide-anchor={anchorKey} className={`${shape.container} flex flex-col overflow-hidden border border-border`}>
-    <Button variant="ghost" size="compact" type="button" className="w-full justify-start border-b border-border" onClick={() => onOpenFile(path)}>{ic(FileCode02, 14)}<span className="truncate font-mono">{path}</span></Button>
+    {review ? <Button variant="ghost" size="compact" type="button" className="w-full justify-start border-b border-border" onClick={() => review.onOpenFile(path)}>{ic(FileCode02, 14)}<span className="truncate font-mono">{path}</span></Button>
+      : <div className="flex min-h-10 items-center gap-2 border-b border-border px-3 text-body">{ic(FileCode02, 14)}<span className="truncate font-mono">{path}</span></div>}
     {!requested ? <Placeholder>Diff loads when it approaches the reading viewport.</Placeholder>
       : error ? <Placeholder><span className="text-destructive">{error}</span></Placeholder>
         : !diff ? <div className="flex min-h-28 items-center justify-center"><ThinkingIndicator aria-label="Loading diff…" /></div>
           : large && !gateOpened ? <Placeholder><Button variant="secondary" size="compact" type="button" onClick={() => onGateOpen(path)}>Large diff · {(new TextEncoder().encode(diff.patch).byteLength / 1024).toFixed(0)} KB · Click to render</Button></Placeholder>
-            : <PierreViewer path={path} identities={diffIdentities(diff, path)} patch={diff.patch} threads={threads} onSelectThread={onSelectThread} onSelectRange={onSelectRange} />}
+            : <PierreViewer path={path} identities={diffIdentities(diff, path)} patch={diff.patch} threads={review?.threads ?? []} onSelectThread={(thread) => review?.onSelectThread(thread)} onSelectRange={review?.onSelectRange} />}
   </div>;
 }
 
-function GuideWalkthroughSection({ section, index, root, baseRef, done, openedGates, onSectionRef, onToggleDone, onGateOpen, onOpenFile, onLoadDiff, threads, onSelectThread, onSelectRange }: {
+export function GuideWalkthroughSection({ section, index, root, baseRef, done, openedGates, onSectionRef, onToggleDone, onGateOpen, onLoadDiff, review }: {
   section: ChangeGuideView['sections'][number];
   index: number;
   root: { current: HTMLDivElement | null };
   baseRef: string;
   done: boolean;
   openedGates: Set<string>;
-  onSectionRef(index: number, element: HTMLElement | null): void;
+  onSectionRef?(index: number, element: HTMLElement | null): void;
   onToggleDone(): void;
   onGateOpen(path: string): void;
-  onOpenFile(path: string): void;
   onLoadDiff(path: string, mode: 'base', baseRef: string): Promise<RepositoryDiffView>;
-  threads: readonly ReviewThreadView[];
-  onSelectThread(thread: ReviewThreadView): void;
-  onSelectRange(selection: ThreadSelection): void;
+  review: GuideReview | null;
 }) {
-  return <AccordionItem value={section.id} ref={(element) => onSectionRef(index, element)} data-guide-anchor={`s${index}`}>
+  return <AccordionItem value={section.id} ref={(element) => onSectionRef?.(index, element)} data-guide-anchor={`s${index}`}>
     <AccordionTrigger>{`${done ? '✓' : index + 1} · ${section.title}`}</AccordionTrigger>
     <AccordionContent>
       <div className="flex flex-col gap-3 pb-2">
         <div className="flex flex-wrap items-center gap-2"><Badge variant="dot" color={done ? 'green' : 'gray'}>{section.kind}</Badge><span className="text-caption text-muted-foreground tabular-nums">{section.exhibits.length} file{section.exhibits.length === 1 ? '' : 's'}</span><Button variant={done ? 'ghost' : 'secondary'} size="compact" type="button" className="ml-auto" disabled={done} onClick={onToggleDone}>{done ? <>{ic(Check, 14)}Complete</> : 'Mark complete'}</Button></div>
         <div className="flex flex-col gap-2"><GitSpaceMarkdown>{section.explanation}</GitSpaceMarkdown>{section.why ? <GitSpaceMarkdown>{`**Why:** ${section.why}`}</GitSpaceMarkdown> : null}</div>
-        <div className="flex flex-col gap-3">{section.exhibits.length ? section.exhibits.map((exhibit) => <div className="flex flex-col gap-1" key={`${baseRef}:${exhibit.path}`}>{exhibit.slowRead ? <p className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground"><Badge variant="dot" color="amber">slow read</Badge>{exhibit.note || 'Reviewer attention requested.'}</p> : null}<GuideFileDiffBlock path={exhibit.path} anchorKey={`f${index}:${exhibit.path}`} root={root} baseRef={baseRef} threads={threads} gateOpened={openedGates.has(exhibit.path)} onGateOpen={onGateOpen} onOpenFile={onOpenFile} onLoadDiff={onLoadDiff} onSelectThread={onSelectThread} onSelectRange={onSelectRange} /></div>) : <Placeholder>No file exhibits in this section.</Placeholder>}</div>
+        <div className="flex flex-col gap-3">{section.exhibits.length ? section.exhibits.map((exhibit) => <div className="flex flex-col gap-1" key={`${baseRef}:${exhibit.path}`}>{exhibit.slowRead ? <p className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground"><Badge variant="dot" color="amber">slow read</Badge>{exhibit.note || 'Reviewer attention requested.'}</p> : null}<GuideFileDiffBlock path={exhibit.path} anchorKey={`f${index}:${exhibit.path}`} root={root} baseRef={baseRef} gateOpened={openedGates.has(exhibit.path)} onGateOpen={onGateOpen} onLoadDiff={onLoadDiff} review={review} /></div>) : <Placeholder>No file exhibits in this section.</Placeholder>}</div>
       </div>
     </AccordionContent>
   </AccordionItem>;
 }
 
-function ChangeGuideSurface({ guide, reviewerId, threads, onOpenFile, onLoadDiff, onSelectThread, onSelectRange, onMarkRead, onGenerate }: {
+function ChangeGuideSurface({ guide, reviewerId, review, onLoadDiff, onMarkRead, onGenerate, shares }: {
   guide: ChangeGuideView | null;
   reviewerId: string;
-  threads: readonly ReviewThreadView[];
-  onOpenFile(path: string): void;
+  review: GuideReview;
   onLoadDiff(path: string, mode: 'base', baseRef: string): Promise<RepositoryDiffView>;
-  onSelectThread(thread: ReviewThreadView): void;
-  onSelectRange(selection: ThreadSelection): void;
   onMarkRead: InspectorProps['onMarkGuideSectionRead'];
   onGenerate?: InspectorProps['onGenerateChangeGuide'];
+  shares?: GuideShareHandlers;
 }) {
   const viewKey = guide ? `${guide.projectId}:${guide.spaceId}:${guide.revision}` : 'empty';
   const cached = guideViewCache.get(viewKey);
@@ -937,12 +941,12 @@ function ChangeGuideSurface({ guide, reviewerId, threads, onOpenFile, onLoadDiff
   return <div className="flex min-h-0 flex-1 flex-col">
     <header className="flex items-center justify-between gap-2 px-4 pb-2 pt-4">
       <span className="flex min-w-0 flex-col"><Kicker>Change Guide · the PR as a story</Kicker><span className="text-caption text-muted-foreground tabular-nums">{readIds.size} / {guide.sections.length} phases reviewed</span></span>
-      <Badge variant="dot" color={readIds.size === guide.sections.length ? 'green' : 'gray'}>{activeSection.kind}</Badge>
+      <span className="flex items-center gap-2"><Badge variant="dot" color={readIds.size === guide.sections.length ? 'green' : 'gray'}>{activeSection.kind}</Badge>{shares ? <GuideShareButton revision={guide.revision} shares={shares} /> : null}</span>
     </header>
     <ScrollArea ref={(element) => { scrollRef.current = element?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null; }} className="min-h-0 flex-1" viewportClassName="h-full">
       <div className="px-3 pb-6">
         <Accordion type="multiple" value={open} onValueChange={onOpenChange} className="w-full">
-          {guide.sections.map((section, index) => <GuideWalkthroughSection section={section} index={index} root={scrollRef} baseRef={guide.baseRef} done={readIds.has(section.id)} openedGates={openedGates} onSectionRef={(sectionIndex, element) => { sectionRefs.current[sectionIndex] = element; }} onToggleDone={() => { if (!readIds.has(section.id)) settle(onMarkRead(section.id, guide.revision, guide.headCommit)); }} onGateOpen={(path) => setOpenedGates((current) => new Set(current).add(path))} onOpenFile={onOpenFile} onLoadDiff={onLoadDiff} threads={threads} onSelectThread={onSelectThread} onSelectRange={onSelectRange} key={section.id} />)}
+          {guide.sections.map((section, index) => <GuideWalkthroughSection section={section} index={index} root={scrollRef} baseRef={guide.baseRef} done={readIds.has(section.id)} openedGates={openedGates} onSectionRef={(sectionIndex, element) => { sectionRefs.current[sectionIndex] = element; }} onToggleDone={() => { if (!readIds.has(section.id)) settle(onMarkRead(section.id, guide.revision, guide.headCommit)); }} onGateOpen={(path) => setOpenedGates((current) => new Set(current).add(path))} onLoadDiff={onLoadDiff} review={review} key={section.id} />)}
         </Accordion>
       </div>
     </ScrollArea>
@@ -1207,13 +1211,16 @@ export function Inspector(props: InspectorProps) {
       case 'guide': return <><ChangeGuideSurface
         guide={props.overview.changeGuide}
         reviewerId={props.reviewerId}
-        threads={props.threads}
-        onOpenFile={(path) => openFile(path, 'current')}
+        review={{
+          threads: props.threads,
+          onOpenFile: (path) => openFile(path, 'current'),
+          onSelectThread: (thread) => { setActiveThread(thread); setThreadSelection(null); },
+          onSelectRange: (selection) => { setThreadSelection(selection); setActiveThread(null); },
+        }}
         onLoadDiff={(path, mode, baseRef) => props.onLoadRepositoryDiff(path, mode, baseRef)}
-        onSelectThread={(thread) => { setActiveThread(thread); setThreadSelection(null); }}
-        onSelectRange={(selection) => { setThreadSelection(selection); setActiveThread(null); }}
         onMarkRead={props.onMarkGuideSectionRead}
         onGenerate={runtimeAvailable ? props.onGenerateChangeGuide : undefined}
+        shares={props.guideShares}
       />{threadPanel}</>;
       default: return <JournalSurface entries={props.journalEntries} artifactContent={artifactContent} artifactLoad={artifactLoad} artifactErrors={artifactErrors} onLoadArtifact={loadArtifact} onOpenEvidence={openEvidence} />;
     }

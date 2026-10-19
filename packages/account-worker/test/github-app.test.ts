@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
 import type { RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { readInspectorContext } from '../src/account-inspector-data.js';
+import { createGuideShare } from '../src/guide-shares.js';
 import { refreshProjectRemote } from '../src/project-remote.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { network } from './network.js';
@@ -423,5 +425,118 @@ describe('GitHub App', () => {
     await refreshProjectRemote(env, env.ACCOUNT_ID, localId);
     expect((await local.getProject())?.remote).toBeNull();
     expect(authorizations).toHaveLength(1);
+  });
+
+  it('shares a private repository’s guide only with GitHub readers who can read the repository', async () => {
+    const key = await rsaKey('pkcs1');
+    await createApp(key);
+    const pantry = await project('Pantry', 'git@github.com:inKibra/Pantry.git');
+    const open = await project('Open', 'https://github.com/inKibra/open');
+    installationApi(key, 91, 'inKibra', { names: ['inKibra/pantry'] });
+    expect(outcome(await setupCallback(91, 'install', await installState())).get('github')).toBe('installed');
+    const history = artifactsHistory();
+    // Each commit's tree is keyed by the commit itself, as the history fixture reports it; `src/search.ts` changes.
+    const trees: Record<string, ArtifactsTreeEntry[]> = {};
+    const blobs: Record<string, string> = { ['a'.repeat(40)]: 'export const search = null;\n', ['b'.repeat(40)]: 'export const search = (query: string) => query;\n' };
+    const snapshot = (commit: string, blob: string) => {
+      trees[commit] = [{ name: 'src', hash: `${commit}:src`, mode: '40000', type: 'tree' }];
+      trees[`${commit}:src`] = [{ name: 'search.ts', hash: blob, mode: '100644', type: 'blob' }];
+    };
+    vi.spyOn(ArtifactsCodeStore.prototype, 'reader').mockImplementation(function (this: ArtifactsCodeStore, repository: string) {
+      return {
+        readTree: async (oid: string) => trees[oid] ?? null,
+        readBlob: async (oid: string) => blobs[oid] === undefined ? null : new Blob([blobs[oid]]),
+        readCommit: (hash: string) => this.readCommit(repository, hash),
+        log: (start: string, limit?: number) => this.log(repository, start, limit),
+        close: async () => {},
+      };
+    });
+    const repositoryReads: Array<{ repository: string; token: string }> = [];
+    const readers: Record<string, { token: string; login: string }> = { 'code-member': { token: 'user-token-member', login: 'member' }, 'code-outsider': { token: 'user-token-outsider', login: 'outsider' } };
+    network.use(
+      http.get(`${API}/repos/:owner/:name`, ({ params, request }) => {
+        const repository = `${String(params.owner)}/${String(params.name)}`;
+        repositoryReads.push({ repository, token: bearer(request) });
+        if (repository === 'inKibra/open') return HttpResponse.json({ id: 2, private: false });
+        // GitHub shows a private repository only to the installation and to users who can read it.
+        if (bearer(request) === 'installation-token-91' || bearer(request) === 'user-token-member') return HttpResponse.json({ id: 1, private: true });
+        return HttpResponse.json({ message: 'Not Found' }, { status: 404 });
+      }),
+      http.post('https://github.com/login/oauth/access_token', async ({ request }) => {
+        const body = z.object({ client_id: z.string(), client_secret: z.string(), code: z.string(), redirect_uri: z.string() }).parse(await request.json());
+        const reader = readers[body.code];
+        if (body.client_id !== 'Iv1.client' || body.client_secret !== CLIENT_SECRET || body.redirect_uri !== `${env.ACCOUNT_URL}/github/callback` || !reader) {
+          return HttpResponse.json({ error: 'bad_verification_code' });
+        }
+        return HttpResponse.json({ access_token: reader.token, expires_in: 28_800 });
+      }),
+      http.get(`${API}/user`, ({ request }) => HttpResponse.json({ login: Object.values(readers).find((reader) => reader.token === bearer(request))?.login })),
+    );
+    const share = async (projectId: string) => {
+      const workspaceId = `space-${crypto.randomUUID()}`;
+      await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Feature', branch: 'feature', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+      const base = history.commit([], `workspace-${workspaceId}`);
+      const head = history.commit([base], `workspace-${workspaceId}`);
+      snapshot(base, 'a'.repeat(40));
+      snapshot(head, 'b'.repeat(40));
+      history.ref(`workspace-${workspaceId}`, 'main', history.commit([base], `workspace-${workspaceId}`));
+      const source = await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId);
+      await source.context.putChangeGuide({ ...source.identity, expectedRevision: 0, guide: {
+        headCommit: head, baseRef: 'main', title: 'Pantry search', createdBy: 'narrator',
+        sections: [{ id: 'search', title: 'Search', kind: 'behavior', explanation: 'Adds search.', why: '', exhibits: [{ path: 'src/search.ts', blobId: null, note: '', slowRead: false }], requirementIds: [] }],
+      } });
+      return { ...await createGuideShare(env, source, null), base, head, workspaceId };
+    };
+    const read = (url: string, cookie?: string) => SELF.fetch(`${env.ACCOUNT_URL}/v1${url}`, { redirect: 'manual', headers: cookie ? { cookie } : {} });
+    const cookieOf = (response: Response, name: string) => response.headers.getSetCookie().find((value) => value.startsWith(`${name}=`))?.split(';')[0] ?? '';
+    const signIn = async (url: string, code: string) => {
+      const started = await read(`${url}/sign-in`);
+      expect(started.status).toBe(303);
+      const authorize = new URL(started.headers.get('location') ?? '');
+      expect(`${authorize.origin}${authorize.pathname}`).toBe('https://github.com/login/oauth/authorize');
+      expect(authorize.searchParams.get('client_id')).toBe('Iv1.client');
+      const state = authorize.searchParams.get('state') ?? '';
+      const pending = cookieOf(started, '__Host-gitspace-guide-sign-in');
+      // A callback whose state is not the one this browser started is refused.
+      expect((await SELF.fetch(`${env.ACCOUNT_URL}/github/callback?code=${code}&state=forged`, { redirect: 'manual', headers: { cookie: pending } })).status).toBe(400);
+      const returned = await SELF.fetch(`${env.ACCOUNT_URL}/github/callback?code=${code}&state=${state}`, { redirect: 'manual', headers: { cookie: pending } });
+      expect(returned.status).toBe(303);
+      expect(returned.headers.get('location')).toBe(`${env.ACCOUNT_URL}${url}`);
+      return cookieOf(returned, '__Host-gitspace-guide-reader');
+    };
+
+    const shared = await share(pantry.id);
+    expect(shared).toMatchObject({ access: 'github', repository: 'inKibra/Pantry', guideRevision: 1, headCommit: shared.head, expiresAt: null });
+    const anonymous = await read(shared.url);
+    expect(anonymous.status).toBe(401);
+    expect(await anonymous.json()).toEqual({ denied: 'sign-in', repository: 'inKibra/Pantry', signIn: `/v1${shared.url}/sign-in`, login: null });
+
+    const member = await signIn(shared.url, 'code-member');
+    expect(member).not.toContain('user-token-member');
+    const guide = await read(shared.url, member);
+    expect(guide.status).toBe(200);
+    expect(await guide.json()).toMatchObject({ repository: 'inKibra/Pantry', title: 'Pantry search', baseRef: 'main', baseCommit: shared.base, headCommit: shared.head });
+    expect(repositoryReads.filter((entry) => entry.token === 'user-token-member')).toHaveLength(1);
+    const diff = await read(`${shared.url}/diff?path=${encodeURIComponent('src/search.ts')}`, member);
+    expect(diff.status).toBe(200);
+    const patch = z.object({ patch: z.string(), baseCommit: z.string(), headCommit: z.string() }).parse(await diff.json());
+    expect(patch).toMatchObject({ baseCommit: shared.base, headCommit: shared.head });
+    expect(patch.patch).toContain('-export const search = null;\n+export const search = (query: string) => query;');
+    const notExhibit = await read(`${shared.url}/diff?path=${encodeURIComponent('src/other.ts')}`, member);
+    expect(notExhibit.status).toBe(404);
+
+    const outsider = await read(shared.url, await signIn(shared.url, 'code-outsider'));
+    expect(outsider.status).toBe(403);
+    expect(await outsider.json()).toMatchObject({ denied: 'no-access', login: 'outsider' });
+    // A tampered cookie is no session.
+    expect((await read(shared.url, `${member}x`)).status).toBe(401);
+
+    expect(await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${pantry.id}`).revokeGuideShare(shared.id, shared.workspaceId)).toBe(true);
+    expect((await read(shared.url, member)).status).toBe(404);
+
+    // Anyone with the link reads a public repository's guide.
+    const opened = await share(open.id);
+    expect(opened.access).toBe('public');
+    expect((await read(opened.url)).status).toBe(200);
   });
 });

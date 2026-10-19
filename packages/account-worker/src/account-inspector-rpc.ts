@@ -34,6 +34,9 @@ import {
   inspectorPutChangeGuideContract,
   inspectorMarkGuideSectionReadContract,
   inspectorSetGuideApprovalContract,
+  inspectorListGuideSharesContract,
+  inspectorCreateGuideShareContract,
+  inspectorRevokeGuideShareContract,
   inspectorCreateReviewThreadContract,
   inspectorAppendReviewMessageContract,
   inspectorResolveReviewThreadContract,
@@ -56,6 +59,7 @@ import { InspectorCloudArtifacts, InspectorGenerationConflict, InspectorWorkspac
 import { readInspectorTranscriptContent, readInspectorTranscriptPage } from './account-inspector-data.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
+import { createGuideShare, guideShareView } from './guide-shares.js';
 import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, type CloudCheckout } from './cloud-repository.js';
 import type { RepositoryMode } from '@gitspace/protocol/inspector-contract';
 import { canonicalDriveResourceUrl, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
@@ -520,6 +524,35 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       return err(errors.OperationFailed({ operation: 'revoke artifact share', message: error instanceof Error ? error.message : String(error) }));
     }
   });
+  const listGuideShares = server.implement(inspectorListGuideSharesContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok((await source.authority.listGuideShares(source.workspace.id)).map(record => guideShareView(source.project.id, record)));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'list guide shares', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const createGuideShareHandler = server.implement(inspectorCreateGuideShareContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(await createGuideShare(env, await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration), input.expiresAt));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'share Change Guide', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const revokeGuideShare = server.implement(inspectorRevokeGuideShareContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok({ revoked: await source.authority.revokeGuideShare(input.id, source.workspace.id) });
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'revoke guide share', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   // Only a legacy machine-held space without a live holder reaches these handlers without cloud runtime state.
   const legacyRuntimeUnavailable = 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.';
   /** Null for a legacy space without cloud runtime state; otherwise `read` runs against its checkout. */
@@ -631,7 +664,10 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
     workflow: { put: putWorkflow, waiveGate },
     rubric: { put: putRubric, appendJudgment },
     journal: { list: journal, startPhase, endPhase, append: appendJournal },
-    guide: { put: putGuide, analyze: analyzeGuide, submit: submitGuide, markSectionRead, setApproval },
+    guide: {
+      put: putGuide, analyze: analyzeGuide, submit: submitGuide, markSectionRead, setApproval,
+      shares: { list: listGuideShares, create: createGuideShareHandler, revoke: revokeGuideShare },
+    },
     review: { list: threads, create: createThread, reply: replyThread, resolve: resolveThread },
     artifacts: {
       read: readArtifact, readPage: readArtifactPage, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },

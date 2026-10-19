@@ -266,6 +266,22 @@ export function LiveInspector({
         try { return await artifactUpload.commit(uploadId); } finally { await artifactCatalog.refetch(); }
       },
     }}
+    guideShares={{
+      list: async () => {
+        const result = await rpcClient.inspector.guide.shares.list(request);
+        if (result.status === 'error') throw result.error;
+        return result.value;
+      },
+      create: async (expiresAt) => {
+        const result = await rpcClient.inspector.guide.shares.create({ ...request, expiresAt });
+        if (result.status === 'error') throw result.error;
+        return result.value;
+      },
+      revoke: async (id) => {
+        const result = await rpcClient.inspector.guide.shares.revoke({ ...request, id });
+        if (result.status === 'error') throw result.error;
+      },
+    }}
     onLoadRepositoryDiff={async (path, mode, baseRef) => {
       const result = await rpcClient.inspector.repository.diff({ ...request, path, mode, baseRef: baseRef ?? null });
       if (result.status === 'error') throw result.error;

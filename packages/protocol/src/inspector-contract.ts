@@ -361,6 +361,27 @@ export const changeGuideViewSchema = inspectorIdentitySchema.extend({
 }).strict();
 export type ChangeGuideView = z.infer<typeof changeGuideViewSchema>;
 
+/** A shared Change Guide as its public viewer reads it: the guide pinned at one revision, its repository, and the merge
+ * base its diffs compare against. */
+export const sharedGuideSchema = z.object({
+  repository: z.string().trim().min(1).max(512),
+  title: shortTextSchema,
+  baseRef: z.string().trim().min(1).max(512),
+  baseCommit: gitObjectIdSchema,
+  headCommit: gitObjectIdSchema,
+  sections: z.array(changeGuideSectionSchema).max(512),
+  sharedAt: isoDateSchema,
+}).strict();
+export type SharedGuide = z.infer<typeof sharedGuideSchema>;
+/** Why a shared guide is not shown: sign in with GitHub first, or the signed-in reader cannot read the repository. */
+export const sharedGuideDeniedSchema = z.object({
+  denied: z.enum(['sign-in', 'no-access']),
+  repository: z.string(),
+  signIn: z.string().nullable(),
+  login: z.string().nullable(),
+}).strict();
+export type SharedGuideDenied = z.infer<typeof sharedGuideDeniedSchema>;
+
 export const changeGuideDraftSchema = z.object({
   headCommit: gitObjectIdSchema,
   baseRef: z.string().trim().min(1).max(512),

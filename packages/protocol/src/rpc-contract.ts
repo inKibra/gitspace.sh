@@ -1725,6 +1725,29 @@ export const inspectorRevokeArtifactShareContract = gitspaceRpc.procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), id: wire.string }))
   .output(wire.object({ revoked: wire.boolean })).errors(inspectorMutationErrors).mutation();
 
+/** A read-only link to one revision of a workspace's Change Guide. `public`: anyone with the link (a public GitHub
+ * repository); `github`: readers sign in with GitHub and must be able to read `repository`. */
+export const GuideShareViewCodec = wire.object({
+  id: wire.string,
+  url: wire.string,
+  access: wire.enum(['public', 'github']),
+  repository: wire.string,
+  guideRevision: wire.integer({ min: 0 }),
+  headCommit: wire.string,
+  createdAt: wire.string,
+  expiresAt: wire.nullable(wire.string),
+});
+export type GuideShareView = InputOf<typeof GuideShareViewCodec>;
+export const inspectorListGuideSharesContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }) }))
+  .output(wire.array(GuideShareViewCodec)).errors(inspectorReadErrors).query();
+export const inspectorCreateGuideShareContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), expiresAt: wire.nullable(wire.string) }))
+  .output(GuideShareViewCodec).errors(inspectorMutationErrors).mutation();
+export const inspectorRevokeGuideShareContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), id: wire.string }))
+  .output(wire.object({ revoked: wire.boolean })).errors(inspectorMutationErrors).mutation();
+
 /** Finite tree snapshot in bounded chunks. Accept the snapshot only after clean stream completion. */
 export const inspectorRepositoryTreeContract = gitspaceRpc
   .procedure()
@@ -2193,6 +2216,7 @@ export const gitspaceContract = gitspaceRpc.contract({
       submit: inspectorSubmitChangeGuideContract,
       markSectionRead: inspectorMarkGuideSectionReadContract,
       setApproval: inspectorSetGuideApprovalContract,
+      shares: { list: inspectorListGuideSharesContract, create: inspectorCreateGuideShareContract, revoke: inspectorRevokeGuideShareContract },
     },
     review: {
       list: inspectorReviewThreadsContract,

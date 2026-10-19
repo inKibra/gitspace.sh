@@ -37,6 +37,7 @@ import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.j
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
 import { behindOrigin } from './cloud-stack-status.js';
+import { GUIDE_SHARE_MAX_BYTES, guideShareRecordSchema, type GuideShareRecord } from './guide-shares.js';
 import { z } from 'zod';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
@@ -857,6 +858,14 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
           revoked_at TEXT,
           record_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS guide_shares(
+          token TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          expires_at TEXT,
+          revoked_at TEXT,
+          record_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS guide_shares_workspace ON guide_shares(workspace_id);
         CREATE INDEX IF NOT EXISTS artifact_shares_path ON artifact_shares(workspace_id,path);
         CREATE INDEX IF NOT EXISTS project_events_entity ON project_events(entity,offset);
         CREATE INDEX IF NOT EXISTS operations_workspace_kind ON operations(workspace_id,kind,created_at);
@@ -1662,6 +1671,36 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE token=? AND revoked_at IS NULL', new Date().toISOString(), token);
     return true;
     });
+  }
+
+  createGuideShare(record: GuideShareRecord): GuideShareRecord {
+    const parsed = guideShareRecordSchema.parse(record);
+    if (parsed.expiresAt !== null && Date.parse(parsed.expiresAt) <= Date.now()) throw new Error('Choose an expiry in the future');
+    const json = JSON.stringify(parsed);
+    if (json.length > GUIDE_SHARE_MAX_BYTES) throw new Error('This Change Guide is too large to share');
+    return this.commit('guide-share', parsed.workspaceId, () => {
+      this.ctx.storage.sql.exec('INSERT INTO guide_shares VALUES(?,?,?,?,?)', parsed.token, parsed.workspaceId, parsed.expiresAt, null, json);
+      return parsed;
+    });
+  }
+
+  getGuideShare(token: string): GuideShareRecord | null {
+    const row = this.ctx.storage.sql.exec<{ record_json: string }>(
+      'SELECT record_json FROM guide_shares WHERE token=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)', token, new Date().toISOString(),
+    ).toArray()[0];
+    return row ? guideShareRecordSchema.parse(JSON.parse(row.record_json)) : null;
+  }
+
+  listGuideShares(workspaceId: string): GuideShareRecord[] {
+    return this.ctx.storage.sql.exec<{ record_json: string }>(
+      'SELECT record_json FROM guide_shares WHERE workspace_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?) ORDER BY rowid',
+      workspaceId, new Date().toISOString(),
+    ).toArray().map((row) => guideShareRecordSchema.parse(JSON.parse(row.record_json)));
+  }
+
+  revokeGuideShare(token: string, workspaceId: string): boolean {
+    return this.commit('guide-share', workspaceId, () =>
+      this.ctx.storage.sql.exec('UPDATE guide_shares SET revoked_at=? WHERE token=? AND workspace_id=? AND revoked_at IS NULL', new Date().toISOString(), token, workspaceId).rowsWritten > 0);
   }
 
   getArtifactPromotion(id: string): CanonicalArtifactPromotion | null {

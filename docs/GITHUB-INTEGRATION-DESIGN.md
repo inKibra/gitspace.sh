@@ -82,7 +82,7 @@ The tenant sets the default for its projects. A repository can require author mo
 
 ### 6.1 Change Guide viewer and comments from readers
 
-- **Viewing:** on public repositories anyone with the link can read the guide. On private repositories the reader signs in with GitHub and GitSpace checks, with the reader's token, that they can read the repository; a copied link alone shows nothing.
+- **Viewing (shipped):** a workspace's Change Guide has a **Share** action that creates a read-only link pinned to the current guide revision, with an optional expiry; links are listed and revoked in the same dialog (`inspector.guide.shares.*`). The link opens `/shared-guides/<project>/<token>`, which renders the pinned guide and each exhibit's diff between the merge base recorded when the link was made and the guide's head commit. On public repositories anyone with the link can read it. On private repositories the reader signs in with GitHub (the App's user authorization, `GET /github/callback`) and GitSpace checks, with the reader's token on every request, that they can read the repository; a copied link alone shows nothing. Revoking or expiry takes effect on the next request.
 - **Commenting:** readers **sign in with GitHub** (the tenant App's user authorization) and comment on a section, a step or a file range in the guide. GitSpace posts the comment to the PR **as the reader**, through GitHub's API with their user token:
   - a note on a diff range becomes a review comment on those lines;
   - any other note becomes a PR comment that quotes the guide passage, with file references as permalinks at the PR's commit;
@@ -106,7 +106,7 @@ The tenant sets the default for its projects. A repository can require author mo
 | **G0** (shipped 2026-10-17, `8ac88a49`) | App creation and install | Manifest flow creates `GitSpace <handle>`; keys in the vault; installs started from GitSpace are recorded; an install GitSpace did not start is uninstalled; webhooks verified and recorded once. |
 | **G1** (shipped 2026-10-17, `fc9dc34d`, `06979e13`, `d1ec1b97`) | Remote tracking and token access | Remote heads from `info/refs` with installation tokens; push webhooks update them; behind markers on projects and workspaces; **Update base**. |
 | **G2** | PR review automation | PR opened → review workspace → Reviewer → Change Guide check, updated on new pushes; `@gitspace-<handle>` comments reach the workspace agent. |
-| **G3** | Write-back and sharing | Review threads both ways, status checks, per-project write-back switch; Change Guide viewer link on the PR; sign in with GitHub to comment, posted as the reader and read back into guide threads; private repositories require sign-in and repository access. |
+| **G3** | Write-back and sharing | Review threads both ways, status checks, per-project write-back switch; Change Guide viewer link on the PR; sign in with GitHub to comment, posted as the reader and read back into guide threads. Shipped first: the guide share link, with private repositories requiring sign-in and repository access. |
 | **G4** | More triggers | Issues to workspaces, failed checks investigated. |
 
 ## 9. Open questions

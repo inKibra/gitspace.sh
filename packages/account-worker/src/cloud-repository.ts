@@ -30,7 +30,8 @@ export interface CloudCheckout {
   source: InspectorCloudContext;
   generation: number;
   objects: GitObjects;
-  checkpoint: RuntimeGitCheckpoint;
+  /** The checkpoint facts diffs consult; a checkout pinned to two commits has neither. */
+  checkpoint: Pick<RuntimeGitCheckpoint, 'conflicts' | 'lfs'>;
   headCommit: string;
   baseCommit: string;
   /** Null before the workspace's first commit. */
@@ -93,27 +94,29 @@ async function inventory(objects: GitObjects, root: string | null, path: string 
   return new Map([...files].map(([file, { after }]) => [file, after!]));
 }
 
+/** The merge base of `head` and `branch`'s tip in the workspace's cloud repository. */
+async function mergeBaseWith(env: Env, objects: GitObjects, head: string, branch: string): Promise<string> {
+  const repository = objects.repository;
+  const tip = await new ArtifactsCodeStore(env.ARTIFACTS).resolveRef(repository, branch);
+  if (!tip) throw new Error(`Base branch ${branch} is not in this workspace's cloud repository`);
+  return objects.mergeBase(head, tip, async () => {
+    const comparison = await compareCloudHistory(objects.history(), { head, repositories: [repository] }, { head: tip, repositories: [repository] });
+    if (!comparison.complete) throw new Error(`Base comparison with ${branch} is unavailable because cloud history is shallow or incomplete`);
+    const common = comparison.bases[0];
+    if (!common) throw new Error(`No common ancestor with ${branch}`);
+    return common;
+  });
+}
+
 /** Base mode compares against the merge base of HEAD and `baseRef`, the project's base branch unless a caller names one. */
 async function readCloudCheckout(env: Env, userId: string, source: InspectorCloudContext, mode: RepositoryMode, baseRef: string | null, objects: GitObjects): Promise<CloudCheckout> {
   const identity = RuntimeIdentitySchema.parse({ projectId: source.project.id, workspaceId: source.workspace.id });
   const checkpoint = await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).runtimeRepositoryCheckpoint(identity);
   // A just-initialized scratch workspace has no HEAD yet: its initial index commit stands in for it.
   const headCommit = checkpoint.headCommit ?? checkpoint.indexCommit;
-  let baseCommit = headCommit;
-  if (mode === 'base' && source.workspace.kind !== 'base' && checkpoint.headCommit) {
-    const branch = baseRef ?? source.project.baseBranch;
-    const repository = objects.repository;
-    const tip = await new ArtifactsCodeStore(env.ARTIFACTS).resolveRef(repository, branch);
-    if (!tip) throw new Error(`Base branch ${branch} is not in this workspace's cloud repository`);
-    const head = checkpoint.headCommit;
-    baseCommit = await objects.mergeBase(head, tip, async () => {
-      const comparison = await compareCloudHistory(objects.history(), { head, repositories: [repository] }, { head: tip, repositories: [repository] });
-      if (!comparison.complete) throw new Error(`Base comparison with ${branch} is unavailable because cloud history is shallow or incomplete`);
-      const common = comparison.bases[0];
-      if (!common) throw new Error(`No common ancestor with ${branch}`);
-      return common;
-    });
-  }
+  const baseCommit = mode === 'base' && source.workspace.kind !== 'base' && checkpoint.headCommit
+    ? await mergeBaseWith(env, objects, checkpoint.headCommit, baseRef ?? source.project.baseBranch)
+    : headCommit;
   const [head, base] = await Promise.all([
     checkpoint.headCommit === null ? null : objects.commitTree(checkpoint.headCommit),
     mode === 'base' ? objects.commitTree(baseCommit) : null,
@@ -124,14 +127,34 @@ async function readCloudCheckout(env: Env, userId: string, source: InspectorClou
   };
 }
 
+async function withObjects<T>(env: Env, source: InspectorCloudContext, use: (objects: GitObjects) => Promise<T>): Promise<T> {
+  const repository = artifactsWorkspaceRepository(source.workspace.id);
+  const objects = new GitObjects(new ArtifactsCodeStore(env.ARTIFACTS).reader(repository), repository);
+  try { return await use(objects); }
+  finally { await objects.close(); }
+}
+
 /** Runs `read` against the workspace's checkout through one Artifacts handle, released afterwards. */
 export async function withCloudCheckout<T>(
   env: Env, userId: string, source: InspectorCloudContext, mode: RepositoryMode, baseRef: string | null, read: (checkout: CloudCheckout) => Promise<T>,
 ): Promise<T> {
-  const repository = artifactsWorkspaceRepository(source.workspace.id);
-  const objects = new GitObjects(new ArtifactsCodeStore(env.ARTIFACTS).reader(repository), repository);
-  try { return await read(await readCloudCheckout(env, userId, source, mode, baseRef, objects)); }
-  finally { await objects.close(); }
+  return withObjects(env, source, async objects => read(await readCloudCheckout(env, userId, source, mode, baseRef, objects)));
+}
+
+/** The merge base of `head` with `branch` in the workspace's cloud repository; `head` itself for a project's base workspace. */
+export async function cloudMergeBase(env: Env, source: InspectorCloudContext, head: string, branch: string): Promise<string> {
+  if (source.workspace.kind === 'base') return head;
+  return withObjects(env, source, objects => mergeBaseWith(env, objects, head, branch));
+}
+
+/** Runs `read` against two fixed commits of the workspace's cloud repository: base mode compares `baseCommit` with `headCommit`. */
+export async function withPinnedCloudCheckout<T>(
+  env: Env, source: InspectorCloudContext, baseCommit: string, headCommit: string, read: (checkout: CloudCheckout) => Promise<T>,
+): Promise<T> {
+  return withObjects(env, source, async objects => {
+    const [head, base] = await Promise.all([objects.commitTree(headCommit), objects.commitTree(baseCommit)]);
+    return read({ source, generation: source.placement?.generation ?? 0, objects, checkpoint: {}, headCommit, baseCommit, head, index: head, worktree: head, base });
+  });
 }
 
 /** The snapshots each mode compares: the same pair as its machine `git status`/`git diff` counterpart. */

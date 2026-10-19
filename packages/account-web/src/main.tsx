@@ -3,6 +3,7 @@ import { MotionConfig } from 'framer-motion';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { LiveApp } from './LiveApp.js';
+import { SharedGuide } from './SharedGuide.js';
 import { restoreAppearance } from './appearance.js';
 import { observeAppViewport } from './app-viewport.js';
 import '@gitspace/ui/fluid-theme.css';
@@ -24,7 +25,7 @@ createRoot(root).render(
         <SizeProvider defaultSize="default">
           <IconProvider icons={untitledIcons}>
             <TooltipProvider>
-              <LiveApp />
+              {/^\/shared-guides\/[^/]+\/[A-Za-z0-9_-]{43}$/u.test(window.location.pathname) ? <SharedGuide /> : <LiveApp />}
             </TooltipProvider>
           </IconProvider>
         </SizeProvider>

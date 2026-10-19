@@ -689,6 +689,22 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": false,
     "openWorldHint": false
   },
+  "inspector.guide.shares.create": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": false
+  },
+  "inspector.guide.shares.list": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "inspector.guide.shares.revoke": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
   "inspector.guide.setApproval": {
     "readOnlyHint": false,
     "destructiveHint": false,
