@@ -1,4 +1,4 @@
-import { ArtifactsCodeStore, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 import { RuntimeIdentitySchema, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { collectBytes, parseGitLfsPointer } from '@gitspace/protocol-workspace';
 import {
@@ -94,13 +94,29 @@ async function inventory(objects: GitObjects, root: string | null, path: string 
   return new Map([...files].map(([file, { after }]) => [file, after!]));
 }
 
-/** The merge base of `head` and `branch`'s tip in the workspace's cloud repository. */
-async function mergeBaseWith(env: Env, objects: GitObjects, head: string, branch: string): Promise<string> {
-  const repository = objects.repository;
-  const tip = await new ArtifactsCodeStore(env.ARTIFACTS).resolveRef(repository, branch);
-  if (!tip) throw new Error(`Base branch ${branch} is not in this workspace's cloud repository`);
-  return objects.mergeBase(head, tip, async () => {
-    const comparison = await compareCloudHistory(objects.history(), { head, repositories: [repository] }, { head: tip, repositories: [repository] });
+/**
+ * The merge base of `head` and the tip of `branch`. A machine's remote-tracking name (`origin/<name>`) names the same
+ * branch. The branch is read from the workspace's repository, else from the project's copy of origin's branches, and
+ * history is walked across both: a workspace repository holds only the branches it pushed.
+ */
+async function mergeBaseWith(env: Env, objects: GitObjects, projectId: string, head: string, branch: string): Promise<string> {
+  const name = branch.startsWith('origin/') ? branch.slice('origin/'.length) : branch;
+  const store = new ArtifactsCodeStore(env.ARTIFACTS);
+  const repositories = [objects.repository, artifactsProjectRepository(projectId)];
+  let tip: string | null = null;
+  for (const repository of repositories) {
+    tip = await store.resolveRef(repository, name);
+    if (tip) break;
+  }
+  if (!tip) throw new Error(`Base branch ${branch} is in neither this workspace's nor the project's cloud repository`);
+  const workspace = objects.history();
+  const history = {
+    readCommit: (repository: string, commit: string) => repository === objects.repository ? workspace.readCommit(repository, commit) : store.readCommit(repository, commit),
+    log: (repository: string, commit: string, limit?: number) => repository === objects.repository ? workspace.log(repository, commit, limit) : store.log(repository, commit, limit),
+  };
+  const found = tip;
+  return objects.mergeBase(head, found, async () => {
+    const comparison = await compareCloudHistory(history, { head, repositories }, { head: found, repositories });
     if (!comparison.complete) throw new Error(`Base comparison with ${branch} is unavailable because cloud history is shallow or incomplete`);
     const common = comparison.bases[0];
     if (!common) throw new Error(`No common ancestor with ${branch}`);
@@ -115,7 +131,7 @@ async function readCloudCheckout(env: Env, userId: string, source: InspectorClou
   // A just-initialized scratch workspace has no HEAD yet: its initial index commit stands in for it.
   const headCommit = checkpoint.headCommit ?? checkpoint.indexCommit;
   const baseCommit = mode === 'base' && source.workspace.kind !== 'base' && checkpoint.headCommit
-    ? await mergeBaseWith(env, objects, checkpoint.headCommit, baseRef ?? source.project.baseBranch)
+    ? await mergeBaseWith(env, objects, source.project.id, checkpoint.headCommit, baseRef ?? source.project.baseBranch)
     : headCommit;
   const [head, base] = await Promise.all([
     checkpoint.headCommit === null ? null : objects.commitTree(checkpoint.headCommit),
@@ -141,10 +157,10 @@ export async function withCloudCheckout<T>(
   return withObjects(env, source, async objects => read(await readCloudCheckout(env, userId, source, mode, baseRef, objects)));
 }
 
-/** The merge base of `head` with `branch` in the workspace's cloud repository; `head` itself for a project's base workspace. */
+/** The merge base of `head` with `branch` (see `mergeBaseWith`); `head` itself for a project's base workspace. */
 export async function cloudMergeBase(env: Env, source: InspectorCloudContext, head: string, branch: string): Promise<string> {
   if (source.workspace.kind === 'base') return head;
-  return withObjects(env, source, objects => mergeBaseWith(env, objects, head, branch));
+  return withObjects(env, source, objects => mergeBaseWith(env, objects, source.project.id, head, branch));
 }
 
 /** Runs `read` against two fixed commits of the workspace's cloud repository: base mode compares `baseCommit` with `headCommit`. */

@@ -475,14 +475,15 @@ describe('GitHub App', () => {
     const share = async (projectId: string) => {
       const workspaceId = `space-${crypto.randomUUID()}`;
       await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Feature', branch: 'feature', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-      const base = history.commit([], `workspace-${workspaceId}`);
+      // The workspace repository holds only its own branch; origin's `staging` is in the project repository.
+      const base = history.commit([], `workspace-${workspaceId}`, `project-${projectId}`);
       const head = history.commit([base], `workspace-${workspaceId}`);
       snapshot(base, 'a'.repeat(40));
       snapshot(head, 'b'.repeat(40));
-      history.ref(`workspace-${workspaceId}`, 'main', history.commit([base], `workspace-${workspaceId}`));
+      history.ref(`project-${projectId}`, 'staging', history.commit([base], `project-${projectId}`));
       const source = await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId);
       await source.context.putChangeGuide({ ...source.identity, expectedRevision: 0, guide: {
-        headCommit: head, baseRef: 'main', title: 'Pantry search', createdBy: 'narrator',
+        headCommit: head, baseRef: 'origin/staging', title: 'Pantry search', createdBy: 'narrator',
         sections: [{ id: 'search', title: 'Search', kind: 'behavior', explanation: 'Adds search.', why: '', exhibits: [{ path: 'src/search.ts', blobId: null, note: '', slowRead: false }], requirementIds: [] }],
       } });
       return { ...await createGuideShare(env, source, null), base, head, workspaceId };
@@ -515,7 +516,7 @@ describe('GitHub App', () => {
     expect(member).not.toContain('user-token-member');
     const guide = await read(shared.url, member);
     expect(guide.status).toBe(200);
-    expect(await guide.json()).toMatchObject({ repository: 'inKibra/Pantry', title: 'Pantry search', baseRef: 'main', baseCommit: shared.base, headCommit: shared.head });
+    expect(await guide.json()).toMatchObject({ repository: 'inKibra/Pantry', title: 'Pantry search', baseRef: 'origin/staging', baseCommit: shared.base, headCommit: shared.head });
     expect(repositoryReads.filter((entry) => entry.token === 'user-token-member')).toHaveLength(1);
     const diff = await read(`${shared.url}/diff?path=${encodeURIComponent('src/search.ts')}`, member);
     expect(diff.status).toBe(200);
